@@ -1,31 +1,28 @@
 // Lost-placement relay lifecycle (Post-Tour & Application, Task 5).
 //
-// When a placement is LOST, its masked relay thread is moot — close it and free
-// its pool number so the deal that no longer exists can never fan out again. This
-// is invoked as the OPTIONAL `closeRelayForLostPlacement` hook on the ONE status-
-// transition choke point (services/statusTransition.ts), best-effort (a failure
-// there is caught + logged and never fails the transition).
+// When a placement is LOST, its masked relay thread is moot - close it so the
+// deal that no longer exists can never fan out again. The pool number is KEPT
+// (burn-multiplexing: a closed group stays resolvable so a late text intercepts
+// to the sender's 1:1). This is invoked as the OPTIONAL
+// `closeRelayForLostPlacement` hook on the ONE status-transition choke point
+// (services/statusTransition.ts), best-effort (a failure there is caught +
+// logged and never fails the transition).
 //
 // Mirrors the relayGroups close pattern (routes/relayGroups.ts): read the
-// conversation FIRST to capture the pool number, atomically flip status→closed
-// (REMOVE pool_number, conditional on status='open') so an inbound arriving in the
-// window can no longer resolve the thread, THEN release the captured number, and
-// only if THIS call won the close (a concurrent/duplicate close fails the
-// precondition → idempotent no-op, and we skip the release so we never double-
-// quarantine). Finally audit `relay_group_closed`.
+// conversation FIRST, then atomically flip status->closed (conditional on
+// status='open') so a concurrent/duplicate close is an idempotent no-op.
+// Nothing is released. Finally audit `relay_group_closed`.
 //
-// PII (doc §9): the audit payload carries IDs ONLY (reason + placementId) —
-// never a phone number.
+// PII (doc section 9): the audit payload carries IDs ONLY (reason + placementId)
+// - never a phone number.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuditRepo } from '../repos/auditRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { PlacementItem } from '../repos/placementsRepo.js';
-import type { PoolNumbersService } from './poolNumbers.js';
 
 export interface PlacementRelayLifecycleDeps {
   conversationsRepo: ConversationsRepo;
-  poolNumbersService: PoolNumbersService;
   auditRepo: AuditRepo;
   logger?: Logger;
 }
@@ -38,7 +35,7 @@ export interface PlacementRelayLifecycle {
 export function createPlacementRelayLifecycle(
   deps: PlacementRelayLifecycleDeps,
 ): PlacementRelayLifecycle {
-  const { conversationsRepo, poolNumbersService, auditRepo } = deps;
+  const { conversationsRepo, auditRepo } = deps;
   const log = deps.logger ?? defaultLogger;
 
   return {
@@ -56,38 +53,23 @@ export function createPlacementRelayLifecycle(
         );
         return;
       }
-      const oldPoolNumber = conversation.pool_number;
-
-      // Atomic close: status='closed' + REMOVE pool_number, conditional on
-      // status='open'. A concurrent/duplicate close fails the precondition →
-      // idempotent no-op (and we skip the release below so we never double-free).
+      // Atomic close: flip status='closed' conditional on status='open'. A
+      // concurrent/duplicate close fails the precondition -> idempotent no-op.
+      // The pool number is KEPT (burn-multiplexing) - nothing is released.
       try {
-        await conversationsRepo.setRelayStatus(conversationId, 'closed', null, 'open');
+        await conversationsRepo.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           log.info(
             { placementId: placement.placementId, conversationId },
-            'lost relay-close: already closed — idempotent no-op',
+            'lost relay-close: already closed - idempotent no-op',
           );
           return;
         }
         throw err;
       }
 
-      // Release the captured number AFTER the close won — best-effort (the thread
-      // is already closed; a failed release only leaks a number, never a message).
-      if (typeof oldPoolNumber === 'string' && oldPoolNumber.length > 0) {
-        try {
-          await poolNumbersService.release(oldPoolNumber);
-        } catch (err) {
-          log.error(
-            { err, placementId: placement.placementId, conversationId },
-            'lost relay-close: pool number release failed — closed anyway',
-          );
-        }
-      }
-
-      // Audit the closure — IDs only, no phones (doc §9).
+      // Audit the closure - IDs only, no phones (doc section 9).
       await auditRepo.append(`conversations#${conversationId}`, 'relay_group_closed', {
         reason: 'placement_lost',
         placementId: placement.placementId,

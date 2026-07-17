@@ -382,6 +382,13 @@ export function createFakeWorld(): FakeWorld {
       }
       return undefined;
     },
+    async getAllByPoolNumber(poolNumber) {
+      // Multi-match: pool_number is never cleared, so a number accumulates all
+      // its groups (open + closed).
+      return [...conversations.values()].filter(
+        (conv) => conv.pool_number === poolNumber && conv.type === 'relay_group',
+      );
+    },
     async listRelayGroups(status) {
       // Mirrors the real repo: one relay status partition, newest-activity-first.
       // The in-memory walk never pages, so truncated is always false here.
@@ -413,21 +420,25 @@ export function createFakeWorld(): FakeWorld {
       }
       return conv;
     },
-    async setRelayStatus(conversationId, status, poolNumber, expectedStatus) {
+    async setRelayStatus(conversationId, status, expectedCurrent) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setRelayStatus: no conversation ${conversationId}`);
-      // FIX 1: honor the optional conditional flip (concurrent close/reopen
-      // idempotency) — a precondition mismatch throws like the real repo.
-      if (expectedStatus !== undefined && conv.status !== expectedStatus) {
+      // Conditional flip (concurrent close/reopen idempotency) - a precondition
+      // mismatch throws like the real repo. pool_number is NEVER touched now.
+      if (conv.status !== expectedCurrent) {
         throw conditionalCheckFailed(
-          `setRelayStatus: ${conversationId} expected status ${expectedStatus} but was ${conv.status}`,
+          `setRelayStatus: ${conversationId} expected status ${expectedCurrent} but was ${conv.status}`,
         );
       }
       conv.status = status;
       conv.relay_status = `relay_group#${status}`; // lockstep with status (fidelity)
-      if (poolNumber === null) delete conv.pool_number;
-      else conv.pool_number = poolNumber;
       return conv;
+    },
+    async setCloseNagNextAt(conversationId, at) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setCloseNagNextAt: no conversation ${conversationId}`);
+      if (at === null) delete conv.close_nag_next_at;
+      else conv.close_nag_next_at = at;
     },
     async setRelayMemberOptedOut(conversationId, memberKey, entry) {
       const conv = conversations.get(conversationId);

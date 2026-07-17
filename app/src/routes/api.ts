@@ -69,7 +69,7 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { type PushService } from '../services/pushService.js';
-import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
+import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPlacementRelayLifecycle } from '../services/placementRelayLifecycle.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
@@ -359,11 +359,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
-  const poolNumbersForLifecycle =
-    deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const relayLifecycle = createPlacementRelayLifecycle({
     conversationsRepo: conversations,
-    poolNumbersService: poolNumbersForLifecycle,
     auditRepo: audit,
     ...(deps.logger !== undefined && { logger: deps.logger }),
   });

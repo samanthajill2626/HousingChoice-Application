@@ -81,15 +81,30 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect(found).toBeUndefined();
   });
 
-  it('setRelayStatus close clears pool_number → leaves the byPoolNumber GSI', async () => {
+  it('close KEEPS pool_number; getAllByPoolNumber returns open + closed groups on one number', async () => {
     const pool = `+1555041${Math.floor(Math.random() * 9000 + 1000)}`;
-    const created = await conversations.createRelayGroup({
+    // Two groups multiplexed on ONE number (disjoint rosters).
+    const closedGroup = await conversations.createRelayGroup({
       poolNumber: pool,
       members: [{ contactId: 'c1', phone: '+15550100002' }],
     });
-    await conversations.setRelayStatus(created.conversationId, 'closed', null);
-    const found = await conversations.getByPoolNumber(pool);
-    expect(found).toBeUndefined(); // pool_number removed → no longer in the GSI
+    const openGroup = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c2', phone: '+15550100005' }],
+    });
+    // Close one; its pool_number is KEPT (burn-multiplexing - a closed group
+    // stays resolvable so a late text can intercept to the sender's 1:1).
+    await conversations.setRelayStatus(closedGroup.conversationId, 'closed', 'open');
+    const closedAfter = await conversations.getById(closedGroup.conversationId);
+    expect(closedAfter?.status).toBe('closed');
+    expect(closedAfter?.pool_number).toBe(pool); // NEVER cleared now
+
+    // byPoolNumber is a MULTI-match index: BOTH groups come back.
+    const all = await conversations.getAllByPoolNumber(pool);
+    const byId = new Map(all.map((c) => [c.conversationId, c]));
+    expect(all).toHaveLength(2);
+    expect(byId.get(closedGroup.conversationId)?.status).toBe('closed');
+    expect(byId.get(openGroup.conversationId)?.status).toBe('open');
   });
 
   it('addMember/removeMember are idempotent on phone', async () => {
@@ -147,19 +162,19 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect(phones).toEqual(['+15550100020', '+15550100022']); // c2 removed, c3 added
   });
 
-  it('FIX 1: setRelayStatus is conditional on expectedStatus (idempotent concurrent close)', async () => {
+  it('FIX 1: setRelayStatus is conditional on expectedCurrent (idempotent concurrent close)', async () => {
     const pool = `+1555046${Math.floor(Math.random() * 9000 + 1000)}`;
     const created = await conversations.createRelayGroup({
       poolNumber: pool,
       members: [{ contactId: 'c1', phone: '+15550100030' }],
     });
     // First close from 'open' succeeds.
-    await conversations.setRelayStatus(created.conversationId, 'closed', null, 'open');
-    // A second close conditioned on 'open' fails (already closed) — the caller
-    // treats this as an idempotent no-op (no double release).
+    await conversations.setRelayStatus(created.conversationId, 'closed', 'open');
+    // A second close conditioned on 'open' fails (already closed) - the caller
+    // treats this as an idempotent no-op (no double action).
     const { ConditionalCheckFailedException } = await import('@aws-sdk/client-dynamodb');
     await expect(
-      conversations.setRelayStatus(created.conversationId, 'closed', null, 'open'),
+      conversations.setRelayStatus(created.conversationId, 'closed', 'open'),
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 

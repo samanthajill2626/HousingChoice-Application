@@ -145,6 +145,8 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     // Relay groups (M1.7) — unused by the capture service:
     createRelayGroup: async () => conversation,
     getByPoolNumber: async () => undefined,
+    getAllByPoolNumber: async () => [],
+    setCloseNagNextAt: async () => {},
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,

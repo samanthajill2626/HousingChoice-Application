@@ -8,9 +8,10 @@
 //   DELETE /api/conversations/:id/members/:phone  → { members }
 //   PATCH  /api/conversations/:id/close          { closed: boolean }                    → { conversation }
 //
-// Pool numbers: create provisions one (poolNumbers service); closing releases
-// it to quarantine; reopening provisions a fresh one. The intro message is
-// throttle-sent via an immediate relay.intro job (naming everyone connected).
+// Pool numbers: create provisions one (poolNumbers service). Closing KEEPS the
+// number (burn-multiplexing: a closed group stays resolvable so late texts
+// intercept to the sender's 1:1); reopening reuses the same number. The intro
+// message is throttle-sent via an immediate relay.intro job (naming everyone).
 //
 // PII (doc §9): responses carry rosters/numbers to the authenticated client;
 // LOG LINES are IDs/counts only.
@@ -429,79 +430,34 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
 
     let updated: ConversationItem;
     if (body.closed) {
-      // FIX 1 — CLOSE: clear pool_number FIRST (atomic status='closed' + REMOVE
-      // pool_number, conditional on status='open'), THEN release the captured
-      // number. Clearing first means an inbound arriving in the window no
-      // longer resolves via getByPoolNumber() (the sparse byPoolNumber GSI
-      // drops it the instant the attribute is removed), so it can never fan
-      // out a closed thread. The release runs AFTER, and only if THIS call won
-      // the close — a concurrent/duplicate close fails the precondition and we
-      // no-op (idempotent), skipping the release so we never double-quarantine.
-      const oldPoolNumber = conversation.pool_number;
+      // CLOSE: flip status='closed' (conditional on 'open'), KEEPING pool_number
+      // so a late text still resolves the group and intercepts to the sender's
+      // 1:1 (burn-multiplexing). A concurrent/duplicate close fails the
+      // precondition and no-ops (idempotent). The number is NOT released.
       try {
-        updated = await conversations.setRelayStatus(conversationId, 'closed', null, 'open');
+        updated = await conversations.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Already closed (concurrent/duplicate close) — idempotent no-op.
-          log.info({ conversationId }, 'relay close: already closed — idempotent no-op');
+          // Already closed (concurrent/duplicate close) - idempotent no-op.
+          log.info({ conversationId }, 'relay close: already closed - idempotent no-op');
           res.json({ conversation });
           return;
         }
         throw err;
       }
-      if (typeof oldPoolNumber === 'string' && oldPoolNumber.length > 0) {
-        try {
-          await poolNumbers.release(oldPoolNumber);
-        } catch (err) {
-          log.error({ err, conversationId }, 'relay close: pool number release failed — closed anyway');
-        }
-      }
       await audit.append(`conversations#${conversationId}`, 'relay_group_closed', {
         actor,
       });
     } else {
-      // FIX 1 — REOPEN: ALWAYS provision a FRESH number; NEVER reuse the
-      // conversation's stale pool_number (the old one is in quarantine — reusing
-      // it is the collision bug). Then flip status='open' conditional on
-      // status='closed'. If that condition fails (already open / concurrent
-      // reopen), release the freshly-provisioned number back so it never leaks.
-      let poolNumber: string;
+      // REOPEN: the number never left the record (burn-multiplexing), so reopen
+      // is a pure status flip back to 'open' (conditional on 'closed') - nothing
+      // is re-provisioned. A concurrent/duplicate reopen fails the precondition
+      // and no-ops (idempotent).
       try {
-        const provisioned = await poolNumbers.provisionForPlacement(conversationId);
-        poolNumber = provisioned.poolNumber;
-      } catch (err) {
-        // Kill-switch refusal (M1.7): reopen needs a fresh number but live
-        // provisioning is off — refuse cleanly (no purchase). Stable 503 code +
-        // actionable message; audit the refusal (actor + reason, no PII).
-        if (err instanceof RelayProvisioningDisabledError) {
-          log.warn({ err: { name: err.name }, conversationId, actor }, 'relay reopen: number provisioning disabled');
-          await audit.append(`conversations#${conversationId}`, 'relay_provisioning_disabled', {
-            actor,
-            reason: 'reopen',
-          });
-          res
-            .status(503)
-            .json({ error: 'relay_provisioning_disabled', message: err.message });
-          return;
-        }
-        if (err instanceof VoiceCapabilityError) {
-          res.status(503).json({ error: 'pool_number_unavailable' });
-          return;
-        }
-        throw err;
-      }
-      try {
-        updated = await conversations.setRelayStatus(conversationId, 'open', poolNumber, 'closed');
+        updated = await conversations.setRelayStatus(conversationId, 'open', 'closed');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Already open (concurrent/duplicate reopen) — release the number we
-          // just provisioned so it isn't leaked, then idempotent no-op.
-          try {
-            await poolNumbers.release(poolNumber);
-          } catch (releaseErr) {
-            log.error({ err: releaseErr, conversationId }, 'relay reopen: releasing the unused fresh number failed');
-          }
-          log.info({ conversationId }, 'relay reopen: already open — released fresh number, idempotent no-op');
+          log.info({ conversationId }, 'relay reopen: already open - idempotent no-op');
           res.json({ conversation });
           return;
         }

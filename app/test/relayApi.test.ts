@@ -178,35 +178,8 @@ describe('relay-group API (M1.7)', () => {
     expect(refusal?.actorId).toBe(SESSION_USER_ID);
   });
 
-  it('PATCH reopen → 503 relay_provisioning_disabled when the kill-switch is off', async () => {
-    // Create + close with a WORKING pool, then swap to a disabled pool for the
-    // reopen so only the reopen hits the kill-switch.
-    const working = makeFakePoolNumbers();
-    const created = await request(authedHarness(world, working).app)
-      .post('/api/relay-groups')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
-    const id = created.body.conversation.conversationId;
-    await request(authedHarness(world, working).app)
-      .patch(`/api/conversations/${id}/close`)
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ closed: true });
-
-    const disabled = makeDisabledPoolNumbers();
-    const reopened = await request(authedHarness(world, disabled).app)
-      .patch(`/api/conversations/${id}/close`)
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE)
-      .send({ closed: false });
-
-    expect(reopened.status).toBe(503);
-    expect(reopened.body.error).toBe('relay_provisioning_disabled');
-    expect(disabled.provisionAttempts).toBe(1);
-    // The thread stayed closed — the refused reopen never flipped it open.
-    expect((await world.conversationsRepo.getById(id))?.status).toBe('closed');
-  });
+  // (Reopen no longer provisions a number - it reuses the same one - so there is
+  // no reopen kill-switch path to test. Create-time 503 is covered above.)
 
   it('member CRUD: GET roster, POST idempotent add, DELETE idempotent remove', async () => {
     const pool = makeFakePoolNumbers();
@@ -331,7 +304,7 @@ describe('relay-group API (M1.7)', () => {
     expect(world.conversations.get(id)!.relay_opted_out_members?.['c-bob']).toBeUndefined();
   });
 
-  it('PATCH close releases the pool number to quarantine; reopen provisions a fresh one', async () => {
+  it('PATCH close KEEPS the pool number; reopen reuses the SAME number (no re-provision)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     const created = await request(app)
@@ -342,7 +315,7 @@ describe('relay-group API (M1.7)', () => {
     const id = created.body.conversation.conversationId;
     const firstPool = created.body.conversation.pool_number;
 
-    // Close → status closed, pool number released + cleared.
+    // Close -> status closed, pool number KEPT (burn-multiplexing), NOT released.
     const closed = await request(app)
       .patch(`/api/conversations/${id}/close`)
       .set('x-origin-verify', SECRET)
@@ -350,10 +323,10 @@ describe('relay-group API (M1.7)', () => {
       .send({ closed: true });
     expect(closed.status).toBe(200);
     expect(closed.body.conversation.status).toBe('closed');
-    expect(closed.body.conversation.pool_number).toBeUndefined();
-    expect(pool.released).toEqual([firstPool]);
+    expect(closed.body.conversation.pool_number).toBe(firstPool);
+    expect(pool.released).toEqual([]); // nothing released
 
-    // Reopen → a FRESH pool number is provisioned (the old one is quarantined).
+    // Reopen -> the SAME number is reused (nothing re-provisioned).
     const reopened = await request(app)
       .patch(`/api/conversations/${id}/close`)
       .set('x-origin-verify', SECRET)
@@ -361,12 +334,12 @@ describe('relay-group API (M1.7)', () => {
       .send({ closed: false });
     expect(reopened.status).toBe(200);
     expect(reopened.body.conversation.status).toBe('open');
-    expect(reopened.body.conversation.pool_number).toBe(pool.provisioned[1]);
-    expect(reopened.body.conversation.pool_number).not.toBe(firstPool);
+    expect(reopened.body.conversation.pool_number).toBe(firstPool);
+    expect(pool.provisioned).toEqual([firstPool]); // only the create provisioned
   });
 
-  // --- FIX 1: close ordering + close/reopen race -------------------------
-  it('FIX 1: close clears pool_number FIRST → getByPoolNumber(oldPool) is undefined and status=closed', async () => {
+  // --- close/reopen keep the number; close/reopen race stays idempotent ----
+  it('close KEEPS pool_number; getAllByPoolNumber still resolves the closed group (late-text interception)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     const created = await request(app)
@@ -383,15 +356,17 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ closed: true });
 
-    // An inbound arriving in the window can no longer resolve the dead thread.
-    expect(await world.conversationsRepo.getByPoolNumber(oldPool)).toBeUndefined();
+    // A late inbound STILL resolves the (now closed) group so it can intercept
+    // to the sender's 1:1 - pool_number is never cleared.
+    const all = await world.conversationsRepo.getAllByPoolNumber(oldPool);
+    expect(all.map((c) => c.conversationId)).toContain(id);
     const after = await world.conversationsRepo.getById(id);
     expect(after?.status).toBe('closed');
-    expect(after?.pool_number).toBeUndefined();
-    expect(pool.released).toEqual([oldPool]);
+    expect(after?.pool_number).toBe(oldPool);
+    expect(pool.released).toEqual([]); // nothing released
   });
 
-  it('FIX 1: reopen NEVER reuses the quarantined number — a fresh one is provisioned', async () => {
+  it('reopen reuses the SAME number the group already had', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     const created = await request(app)
@@ -413,11 +388,11 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ closed: false });
 
-    expect(reopened.body.conversation.pool_number).not.toBe(oldPool);
-    expect(reopened.body.conversation.pool_number).toBe(pool.provisioned[1]);
+    expect(reopened.body.conversation.pool_number).toBe(oldPool);
+    expect(pool.provisioned).toEqual([oldPool]); // no second provision
   });
 
-  it('FIX 1: closing is idempotent — a second close is a no-op (no double release)', async () => {
+  it('closing is idempotent - a second close is a no-op (no release either way)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = authedHarness(world, pool);
     const created = await request(app)
@@ -426,7 +401,6 @@ describe('relay-group API (M1.7)', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ members: [{ phone: ALICE, name: 'Alice' }] });
     const id = created.body.conversation.conversationId;
-    const oldPool = created.body.conversation.pool_number;
 
     const first = await request(app)
       .patch(`/api/conversations/${id}/close`)
@@ -441,8 +415,8 @@ describe('relay-group API (M1.7)', () => {
       .send({ closed: true });
     expect(second.status).toBe(200);
     expect(second.body.conversation.status).toBe('closed');
-    // Released exactly ONCE (the idempotent second close skipped the release).
-    expect(pool.released).toEqual([oldPool]);
+    // The number is never released (burn-multiplexing keeps it).
+    expect(pool.released).toEqual([]);
   });
 
   // --- FIX 2: relay-aware team send --------------------------------------

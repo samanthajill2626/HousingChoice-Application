@@ -118,6 +118,8 @@ function makeSendFakes(
     },
     createRelayGroup: async () => conversation,
     getByPoolNumber: async () => undefined,
+    getAllByPoolNumber: async () => [],
+    setCloseNagNextAt: async () => {},
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,

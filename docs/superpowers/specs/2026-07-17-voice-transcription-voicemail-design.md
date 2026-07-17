@@ -65,6 +65,10 @@ cannot be turned on with configuration alone:
 10. Schema flexibility: no schema change is expected, but the implementer
     MAY adjust/extend the data model where that is cleaner or more
     maintainable going forward (human's explicit allowance, 2026-07-17).
+11. In-flight visibility: while a transcript has been requested but not
+    yet returned, the conversation window MUST show that fact on the call
+    entry (a "Transcribing..." indicator), driven by a persisted
+    transcript lifecycle status - see 3.8.
 
 ## 3. Slice 1 - Voice Intelligence transcription for founder-bridge calls
 
@@ -136,8 +140,9 @@ New endpoint: `POST /webhooks/twilio/voice/intelligence`.
   2. Resolve CallSid: customer_key when present; else resolve via the
      recording sid against our call entities; unresolvable => 200 + warn
      (not our transcript - e.g. another tool on the same account).
-  3. Status not 'completed' => 200 + info (the reconcile job is the safety
-     net for stuck transcripts).
+  3. Status 'failed' => stamp transcript_status 'failed' (3.7), 200.
+     Any other non-'completed' status => 200 + info (the reconcile job is
+     the safety net for stuck transcripts).
   4. Fetch Sentences (paginate to completion), join into plain text
      (format in 3.5), persist via the existing idempotent
      `setCallTranscript(callSid, text)` - which enforces founder-bridge-only
@@ -156,9 +161,11 @@ Job handler `reconcileVoiceTranscript` ({ callSid, transcriptSid, attempt }):
    - completed => fetch Sentences, join, persist via setCallTranscript
      (same code path as the webhook handler - shared helper).
    - still queued/in-progress => attempt < 3: re-enqueue self with
-     attempt+1, delayed ~10 minutes; attempt >= 3: log a WARN with sids
-     and stop (visible in logs/telemetry; recording remains playable).
-   - failed => log WARN and stop (no transcript for this call).
+     attempt+1, delayed ~10 minutes; attempt >= 3: stamp transcript_status
+     'failed' (3.7), log a WARN with sids and stop (visible in
+     logs/telemetry; recording remains playable).
+   - failed => stamp transcript_status 'failed' (3.7), log WARN and stop
+     (no transcript for this call).
 3. Twilio API errors THROW => standard job redelivery/DLQ.
 
 Whichever leg (webhook or reconcile) runs first wins; the other no-ops on
@@ -196,7 +203,38 @@ not. Keeping it would confuse future developers. The removal migrates:
   intents - masked refusal, never-overwrite, signature required - carry
   over 1:1).
 
-### 3.7 Latency expectations (user-visible; goes in the RUNBOOK too)
+### 3.7 Transcript lifecycle status (drives the in-flight UI indicator)
+
+New persisted field on the call entity: `transcript_status`
+('pending' | 'completed' | 'failed'; ABSENT when no transcript will ever
+be requested - masked calls, VI unconfigured, pre-feature calls).
+This is the one schema addition (allowed per decision 10); client-side
+inference was rejected because the dashboard cannot know whether VI is
+enabled or whether a request failed, and would show a spinner forever.
+
+Transitions (each one emits the SSE update event so the open thread
+reflects it live):
+
+- 'pending': stamped by the recording handler's create leg the moment a
+  transcript WILL be requested (recording persisted, founder-bridge, VI
+  configured) - before the inline create, so the indicator is correct even
+  while the fallback job retries.
+- 'completed': stamped atomically by the setCallTranscript persist
+  (whichever leg wins - webhook or reconcile).
+- 'failed': stamped when the pipeline gives up - VI reports the transcript
+  failed, or reconcile exhausts its attempts with nothing persisted.
+  A later successful persist (e.g. a very late webhook) may still upgrade
+  failed -> completed; completed is terminal.
+
+Dashboard rendering on the call bubble (and voicemail bubble - same
+component), replacing the spot where the collapsible transcript sits:
+
+- pending -> muted "Transcribing..." indicator.
+- completed -> the existing collapsible transcript.
+- failed -> muted "Transcript unavailable".
+- absent -> nothing (exactly today's rendering).
+
+### 3.8 Latency expectations (user-visible; goes in the RUNBOOK too)
 
 - Call entry in dashboard: at RING time (entity persisted on the inbound
   webhook; SSE-live), outcome stamped at hangup.
@@ -204,8 +242,9 @@ not. Keeping it would confuse future developers. The removal migrates:
   our S3 mirror), SSE-live.
 - Transcript visible: typically ~1-2 minutes after hangup (inline create +
   VI processing, which scales with audio length); short voicemails often
-  under a minute. Reconcile safety net means a lost webhook delays a
-  transcript to ~10 minutes, never loses it.
+  under a minute. The gap is bridged by the "Transcribing..." indicator
+  (3.7), so the wait is visible, not confusing. Reconcile safety net means
+  a lost webhook delays a transcript to ~10 minutes, never loses it.
 
 ## 4. Slice 2 - platform voicemail (business line only)
 
@@ -270,10 +309,13 @@ refused before any of this.
 
 ## 5. Data model and dashboard
 
-- No schema change EXPECTED. Uses: the reserved CallOutcome 'voicemail'
-  (becomes real), existing `recording_s3_key` (present => playable),
-  existing `transcript` (present => collapsible, never auto-shown).
-  Per decision 10, the implementer may adjust the model where cleaner.
+- ONE schema addition: `transcript_status` on the call entity (3.7).
+  Otherwise reuse: the reserved CallOutcome 'voicemail' (becomes real),
+  existing `recording_s3_key` (present => playable), existing `transcript`
+  (present => collapsible, never auto-shown - now gated by
+  transcript_status per 3.7's rendering table).
+  Per decision 10, the implementer may adjust the model further where
+  cleaner.
 - Dashboard: the call bubble renders "Voicemail" labeling when
   outcome === 'voicemail' (wherever outcome currently renders: call bubble
   label/chip, contact timeline row, any outcome text map). Play + transcript
@@ -317,9 +359,16 @@ Unit (app):
   400, unknown transcript 200+warn, non-completed 200, completed persists
   joined sentences, masked call refused at persist, redelivery never
   overwrites, API failure 500s.
-- Recording handler create leg: inline create on success enqueues
-  reconcile (no fallback job); inline failure enqueues the fallback job
-  and still acks the callback; VI-unset skips both.
+- Recording handler create leg: stamps transcript_status 'pending' before
+  the create; inline create on success enqueues reconcile (no fallback
+  job); inline failure enqueues the fallback job and still acks the
+  callback; VI-unset skips both and leaves transcript_status absent.
+- transcript_status transitions: pending->completed on persist (either
+  leg), pending->failed on VI-failed / reconcile exhaustion, late persist
+  upgrades failed->completed, completed terminal; SSE emitted on each.
+- Dashboard: pending renders "Transcribing...", failed renders
+  "Transcript unavailable", completed renders the collapsible transcript,
+  absent renders nothing.
 - createVoiceTranscript job: skips (missing/masked/already-transcribed),
   creates with customerKey=callSid, throws on API failure, enqueues
   reconcile.
@@ -339,7 +388,8 @@ E2E (hermetic, VI shapes):
 - Missed business-line call -> caller leaves voicemail -> Voicemail bubble
   with playable recording + transcript; auto-text asserted via /__dev/outbox;
   founder pushes not asserted beyond existing push-test seams.
-- viWebhook:'drop' scenario -> transcript still appears via reconciliation.
+- viWebhook:'drop' scenario -> the bubble shows "Transcribing..." while
+  pending, then the transcript still appears via reconciliation.
 - Masked relay miss unchanged (no voicemail offered).
 
 Gates (profile): npm run typecheck + npm test + timeout 1500 npm run e2e,

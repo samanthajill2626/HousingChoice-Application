@@ -30,8 +30,9 @@
 // Every repo read is a bounded GSI Query (never a Scan): placementDeadlines
 // listDue (one byDueAt query for ALL due deadlines), placements listByStage (per
 // non-terminal stage — attention + derived-stuck), tours listByScheduledRange,
-// listByLastActivity({status:'open'}), and listByType (the unknown/needs_review
-// triage partition). Each fetch is capped and a log.warn fires if a cap is hit
+// listByLastActivity({status:'open'}), listByType (the unknown/needs_review
+// triage partition), and listRelayGroups('open') (byRelayStatus - the D5 relay
+// close-nags). Each fetch is capped and a log.warn fires if a cap is hit
 // (no silent truncation).
 //
 // PII (doc §9): responses carry who/why to the authed client; LOG LINES are
@@ -86,8 +87,27 @@ export interface TodayItem {
   attention?: boolean;
 }
 
+/**
+ * A relay group left open past a terminal event whose recurring 28-day close-nag
+ * is DUE (D5). Surfaced as its own top-level list (not a TodayItem - it drives a
+ * dedicated Close / Keep-open card, not the four grouped queues). poolNumber +
+ * member names/phones are display DATA for the card (same precedent as the relay
+ * opt-out attention item); LOG LINES stay counts/IDs only.
+ */
+export interface RelayCloseNagItem {
+  conversationId: string;
+  poolNumber: string;
+  tag?: string;
+  /** Member display labels: name when known, else the phone (display DATA). */
+  memberNames: string[];
+  ownerType: 'tour' | 'placement' | null;
+  ownerId?: string;
+  nagDueAt: string;
+}
+
 export interface TodayResponse {
   items: TodayItem[];
+  relayCloseNags: RelayCloseNagItem[];
   generatedAt: string;
 }
 
@@ -602,6 +622,45 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
+    // --- relay close-nags: open relay groups whose 28-day close-nag is DUE ----
+    // D5: a group left open past a terminal event recurs on Today every 28 days
+    // until closed. Source = listRelayGroups('open') (byRelayStatus GSI), filtered
+    // to close_nag_next_at <= now. This is a SEPARATE list (its own Close /
+    // Keep-open card), not folded into the four grouped queues. poolNumber +
+    // member names/phones are display DATA on the card (same precedent as the
+    // relay opt-out attention item above); LOGS stay counts/IDs only.
+    const relayCloseNags: RelayCloseNagItem[] = [];
+    {
+      const { items: openGroups, truncated } = await conversations.listRelayGroups('open');
+      if (truncated) {
+        log.warn(
+          { group: 'relay_close_nags' },
+          'today: relay-group list truncated - some due nags may be missing',
+        );
+      }
+      for (const conv of openGroups) {
+        const nagDueAt = conv.close_nag_next_at;
+        // Only groups with a DUE nag (<= now). No nag, or a future nag -> skip.
+        if (typeof nagDueAt !== 'string' || nagDueAt > nowIso) continue;
+        const poolNumber = conv.pool_number;
+        if (typeof poolNumber !== 'string' || poolNumber.length === 0) continue; // defensive
+        const memberNames = (conv.participants ?? []).map(
+          (p) => p.name ?? p.phone ?? p.contactId,
+        );
+        relayCloseNags.push({
+          conversationId: conv.conversationId,
+          poolNumber,
+          ...(typeof conv.placement_tag === 'string' &&
+            conv.placement_tag.length > 0 && { tag: conv.placement_tag }),
+          memberNames,
+          ownerType: conv.owner?.type ?? null,
+          ...(typeof conv.owner?.id === 'string' &&
+            conv.owner.id.length > 0 && { ownerId: conv.owner.id }),
+          nagDueAt,
+        });
+      }
+    }
+
     // --- Deterministic total order, most-urgent first ------------------------
     // needs_you_now: by `at` ascending (overdue/attention=now sort first, then
     // soon-due), tie-break by refId. Same comparator family for the others
@@ -640,11 +699,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         tours_today: toursToday.length,
         unreplied: unreplied.length,
         follow_ups: followUps.length,
+        relay_close_nags: relayCloseNags.length,
       },
       'today queue assembled',
     );
 
-    const body: TodayResponse = { items, generatedAt: nowIso };
+    const body: TodayResponse = { items, relayCloseNags, generatedAt: nowIso };
     res.json(body);
   });
 

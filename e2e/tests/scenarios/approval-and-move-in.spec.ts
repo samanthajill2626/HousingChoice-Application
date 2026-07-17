@@ -21,7 +21,8 @@
 //   - The entry state is reached by REUSING the Post-Tour & Application path: a
 //     convertible tour WITH a masked relay group → convert → walk the application/
 //     RTA ladder to `Awaiting authority approval`. The masked relay group survives
-//     conversion, so the backout deviation can prove it CLOSES on Lost.
+//     conversion, so the backout deviation can prove it STAYS OPEN on Lost (nothing
+//     auto-closes now; closing is a manual ask on the dashboard).
 //   - Team acts through the REAL PlacementDetail "Move to…" picker; four moves are
 //     GATED by a prompt modal (inspection date, inspection outcome, determined
 //     rent, final rent, move-in readiness). Un-gated moves are bare transitions.
@@ -85,8 +86,8 @@ test.afterEach(async ({ page }) => {
 /**
  * Shared precondition: drive the Tours flow through the YES exit gate, which
  * AUTO-CONVERTS into the placement (with a masked relay group carried through,
- * so the backout deviation can prove the relay closes). Returns the cast so
- * each test can diverge. Mirrors the PTA spec's helper.
+ * so the backout deviation can prove the relay STAYS OPEN on Lost). Returns the
+ * cast so each test can diverge. Mirrors the PTA spec's helper.
  */
 async function reachConvertedPlacement(
   flow: Scenario,
@@ -219,7 +220,7 @@ test('happy path: walk EVERY approval → move-in stage in ladder order (no skip
   await flow.expectPropertyOccupied(unit);
 });
 
-test('marked deviation — inspection FAILS at Awaiting inspection → Lost (landlord_lost_inspection, bounce-back, relay closed)', async ({
+test('marked deviation - inspection FAILS at Awaiting inspection -> Lost (landlord_lost_inspection, bounce-back, relay stays open - close is a manual ask)', async ({
   page,
   request,
 }) => {
@@ -248,10 +249,10 @@ test('marked deviation — inspection FAILS at Awaiting inspection → Lost (lan
     category: 'landlord_lost_inspection',
   });
 
-  // Bounce-back: tenant → Searching, property → Available, relay closed.
+  // Bounce-back: tenant -> Searching, property -> Available, the relay STAYS OPEN (nothing auto-closes; closing is a manual ask).
   await flow.expectTenantBackSearching();
   await flow.expectUnitAvailable(unit);
-  await flow.expectRelayClosed();
+  await flow.expectRelayStaysOpenOnLost();
 });
 
 test('marked deviation — landlord REJECTS the determined rent at Awaiting rent acceptance → Lost (landlord_lost_rent, final_rent NOT written)', async ({
@@ -285,13 +286,13 @@ test('marked deviation — landlord REJECTS the determined rent at Awaiting rent
   const { unit: u } = (await uRes.json()) as { unit: { final_rent?: number } };
   expect(u.final_rent).toBeUndefined();
 
-  // Bounce-back + relay closed.
+  // Bounce-back + the relay STAYS OPEN (nothing auto-closes; closing is a manual ask).
   await flow.expectTenantBackSearching();
   await flow.expectUnitAvailable(unit);
-  await flow.expectRelayClosed();
+  await flow.expectRelayStaysOpenOnLost();
 });
 
-test('marked deviation — a party BACKS OUT mid-window (Awaiting HAP contract) → Lost (bounce-back, relay closed)', async ({
+test('marked deviation - a party BACKS OUT mid-window (Awaiting HAP contract) -> Lost (bounce-back, relay stays open - close is a manual ask)', async ({
   page,
   request,
 }) => {
@@ -311,7 +312,7 @@ test('marked deviation — a party BACKS OUT mid-window (Awaiting HAP contract) 
   await flow.expectPlacementLost();
   await flow.expectTenantBackSearching();
   await flow.expectUnitAvailable(unit);
-  await flow.expectRelayClosed();
+  await flow.expectRelayStaysOpenOnLost();
 });
 
 test('LIF non-eligible branch — advances through Complete paperwork with the LIF row absent and no LIF flag on the readiness confirm', async ({

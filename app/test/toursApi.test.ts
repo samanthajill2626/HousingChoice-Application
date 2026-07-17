@@ -1289,31 +1289,28 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
 // resolves in-process and we can assert the pool number used for sends.
 
 /** Minimal fake pool-numbers service: deterministic numbers, no Twilio. */
-function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provisioned: string[] } {
+function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
   let counter = 0;
-  const released: string[] = [];
   const provisioned: string[] = [];
   const rec = (poolNumber: string): PoolNumberItem => ({
     poolNumber,
-    lifecycle_state: 'assigned',
+    lifecycle_state: 'active',
     quarantine_until: '0000-00-00T00:00:00.000Z',
     voice_capable: true,
     sms_capable: true,
     provisioned_at: new Date().toISOString(),
   });
   return {
-    released,
     provisioned,
-    async provisionForPlacement() {
+    async provisionForGroup() {
       counter += 1;
       const poolNumber = `+1555040${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
       return { poolNumber, record: rec(poolNumber), provisioned: true };
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      released.push(poolNumber);
-      return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    async noteGroupClosed() {},
+    async retireEligible() {
+      return [];
     },
   };
 }
@@ -1322,39 +1319,25 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
   let provisionAttempts = 0;
   return {
     get provisionAttempts() { return provisionAttempts; },
-    async provisionForPlacement() {
+    async provisionForGroup() {
       provisionAttempts += 1;
       throw new RelayProvisioningDisabledError('set RELAY_LIVE_PROVISIONING=true after A2P approval');
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: true,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async retireEligible() {
+      return [];
     },
   };
 }
 
 function makeVoiceCapabilityFailingPool(): PoolNumbersService {
   return {
-    async provisionForPlacement() {
+    async provisionForGroup() {
       throw new VoiceCapabilityError('no voice-capable number available');
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: false,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async retireEligible() {
+      return [];
     },
   };
 }

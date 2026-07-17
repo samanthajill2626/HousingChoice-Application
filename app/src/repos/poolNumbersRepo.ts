@@ -1,27 +1,35 @@
-// pool_numbers repo — the lifecycle store for relay-group pool numbers (M1.7).
+// pool_numbers repo - the lifecycle store for relay-group pool numbers (M1.7,
+// burn-multiplexing revision).
 //
-// A pool number moves available → assigned → quarantined → available:
-//   - available   provisioned, free to claim. claim() flips it to assigned.
-//   - assigned    fronting exactly one active relay_group conversation.
-//   - quarantined released (relay closed) but NOT reusable until
-//                 quarantine_until passes — carriers recycle freed numbers and
-//                 a prior conversant might still text it (the
-//                 quarantine-reuse-collision guard). reclaimExpired() flips it
-//                 back to available once the window lapses.
+// A pool number is MULTIPLEXED across many relay groups. Its lifecycle:
+//   - active    in service; hosts any number of groups (concurrently and over
+//               time) whose rosters do not overlap its burn history.
+//   - released  handed back to Twilio after the 180-day retirement grace; the
+//               record (and its burn history) is kept forever as our audit.
+//
+// The invariant is a permanent (number, phone) BURN: `burned_phones` is a
+// DynamoDB string set of every E.164 ever rostered on this number. Assignment
+// is an atomic burn-as-claim (burnClaim): one conditional UpdateItem ADDs the
+// new roster to burned_phones ONLY IF none of them is already present (and the
+// number is active). Two overlapping claims cannot both win - the loser's
+// condition fails. There is no assigned/available exclusivity and no
+// quarantine: closing a group keeps its number.
 //
 // The byLifecycleState GSI (HASH lifecycle_state, RANGE quarantine_until) is
-// queried for findAvailable() and the reclaim sweep. quarantine_until is
-// written on EVERY item (a past-time sentinel for non-quarantined states, the
-// real release deadline once quarantined) so available items still index —
-// see lib/tables.ts for why the GSI is not sparse.
+// queried for listActive() and the retirement sweep. quarantine_until is
+// RETAINED as a fixed past-time sentinel on EVERY item (the quarantine
+// mechanism is gone, but the attr stays as the GSI range key so items still
+// index) - see lib/tables.ts.
 //
-// PII: a phone number is PII (doc §9). Log lifecycle_state + counts only,
-// never the poolNumber itself — these lines are correlated via the pino mixin.
+// PII: a phone number is PII (doc section 9). Log lifecycle_state + counts only,
+// never a poolNumber or a rostered phone - these lines are correlated via the
+// pino mixin.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  type QueryCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
@@ -29,54 +37,63 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-/** Pool-number lifecycle states (doc §5 M1.7 deviation). */
-export type PoolNumberLifecycleState = 'available' | 'assigned' | 'quarantined';
+/** Pool-number lifecycle states (burn-multiplexing revision). */
+export type PoolNumberLifecycleState = 'active' | 'released';
 
 /**
  * Which messaging driver obtained the number (M1.7 kill-switch). A flexible doc
  * field (NOT a key/GSI attr): 'console' numbers are local/test fakes written
  * into the shared dev table; 'twilio' numbers are real purchases. The live
- * twilio path must NEVER reuse a 'console' fake (and vice-versa) — the service
+ * twilio path must NEVER reuse a 'console' fake (and vice-versa) - the service
  * filters reuse by the CURRENT driver.
  */
 export type PoolNumberProvisionedVia = 'console' | 'twilio';
 
-/** Quarantine window before a released number may be reclaimed (30 days). */
-export const QUARANTINE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
+/**
+ * Retirement grace (D7): a number is release-eligible only once its newest
+ * group closed at least this long ago (the late-text interception window).
+ * 180 days.
+ */
+export const RELEASE_GRACE_MS = 180 * 24 * 60 * 60 * 1000;
 
 /**
- * A past-time sentinel written to quarantine_until for non-quarantined items
- * so they still appear in the byLifecycleState GSI (DynamoDB indexes an item
- * only when both key attrs are present). It is never compared against — the
- * reclaim sweep only reads the 'quarantined' partition.
+ * A past-time sentinel written to quarantine_until on EVERY item so it still
+ * appears in the byLifecycleState GSI (DynamoDB indexes an item only when both
+ * key attrs are present). Quarantine is gone; this attr is retained purely as
+ * the GSI range key and is never compared against.
  */
 const NOT_QUARANTINED_SENTINEL = '0000-00-00T00:00:00.000Z';
 
 /**
  * The contractual + commonly read attributes; the item stays a flexible
- * document (only keys/GSI attrs are contractual — lib/tables.ts).
+ * document (only keys/GSI attrs are contractual - lib/tables.ts).
  */
 export interface PoolNumberItem {
   /** E.164 pool number (PK). */
   poolNumber: string;
   /** byLifecycleState GSI HASH. */
   lifecycle_state: PoolNumberLifecycleState;
-  /** byLifecycleState GSI RANGE — real deadline when quarantined, sentinel otherwise. */
+  /** byLifecycleState GSI RANGE - retained sentinel (quarantine is gone). */
   quarantine_until: string;
   voice_capable: boolean;
   sms_capable: boolean;
   /**
    * Driver that obtained this number (M1.7 kill-switch source tag). Flexible
-   * doc field; absent on legacy items (treated as unknown — never reused by the
+   * doc field; absent on legacy items (treated as unknown - never reused by the
    * source-isolation filter).
    */
   provisioned_via?: PoolNumberProvisionedVia;
-  /** The relay_group conversation currently fronted by this number (assigned). */
-  assigned_conversation_id?: string;
+  /**
+   * Every E.164 ever rostered on this number - the permanent burn set (a
+   * DynamoDB string set). Absent on a number created with an empty roster
+   * (DynamoDB forbids empty sets); reads back as a JS Set<string>.
+   */
+  burned_phones?: Set<string> | string[];
+  /** Monotonic max of group-close times on this number (retirement clock). */
+  last_group_closed_at?: string;
   /** Operator placement label carried through provisioning. */
   placement_tag?: string;
   provisioned_at: string;
-  assigned_at?: string;
   released_at?: string;
   [key: string]: unknown;
 }
@@ -85,57 +102,47 @@ export interface CreatePoolNumberInput {
   poolNumber: string;
   voiceCapable: boolean;
   smsCapable: boolean;
-  /** Defaults to 'available'. */
-  lifecycleState?: PoolNumberLifecycleState;
-  /** Source driver tag (M1.7 kill-switch) — 'console' fakes vs 'twilio' real. */
+  /** Source driver tag (M1.7 kill-switch) - 'console' fakes vs 'twilio' real. */
   provisionedVia?: PoolNumberProvisionedVia;
+  /** The first group's roster - seeds burned_phones (may be empty in tests). */
+  burn: string[];
+  /** Operator placement label. */
+  tag?: string;
 }
 
 export interface PoolNumbersRepo {
   get(poolNumber: string): Promise<PoolNumberItem | undefined>;
   /**
-   * Conditionally create a pool-number record (attribute_not_exists guard).
-   * quarantine_until is set to the sentinel so the new (available) item
-   * indexes on byLifecycleState. Returns the stored item.
+   * Create an ACTIVE record with burned_phones seeded from `burn` (the roster
+   * of the first group). attribute_not_exists guard. burned_phones is written
+   * ONLY when the roster is non-empty (DynamoDB forbids empty string sets).
    */
   create(input: CreatePoolNumberInput): Promise<PoolNumberItem>;
+  /** All ACTIVE numbers (paged Query on byLifecycleState 'active'). */
+  listActive(): Promise<PoolNumberItem[]>;
   /**
-   * First 'available' number on the byLifecycleState GSI, or undefined when
-   * the pool is empty. ONE Query (never a Scan). The caller still races to
-   * claim() it — the GSI read is the candidate, claim() is the arbiter.
+   * THE atomic burn-as-claim. ADDs `phones` to burned_phones conditional on the
+   * number being active AND none of them already burned here. Returns the
+   * post-update item (ALL_NEW), or undefined on condition failure (overlap or
+   * not active) OR an empty roster. `tag` (optional) stamps placement_tag.
    */
-  findAvailable(): Promise<PoolNumberItem | undefined>;
-  /**
-   * Race-safe claim: available → assigned, conditional on
-   * lifecycle_state='available'. Returns the post-update item on success;
-   * undefined when the conditional failed (someone else claimed it first /
-   * it is no longer available) so the caller can try the next candidate.
-   */
-  claim(
+  burnClaim(
     poolNumber: string,
-    conversationId: string,
+    phones: string[],
     tag?: string,
   ): Promise<PoolNumberItem | undefined>;
   /**
-   * Point an already-assigned number at its real conversation id (M1.7
-   * create flow): provisionForPlacement claims under a provisional id before
-   * the conversation row exists, then this stamps the real id. Conditional on
-   * the number being 'assigned' (never reassigns an available/quarantined one).
+   * Stamp last_group_closed_at = max(existing, closedAt) - the retirement
+   * clock. Never throws: an older timestamp (or a missing record) is a
+   * swallowed conditional no-op (best-effort caller - the group is already
+   * closed).
    */
-  reassign(poolNumber: string, conversationId: string): Promise<void>;
+  noteGroupClosed(poolNumber: string, closedAt: string): Promise<void>;
   /**
-   * Release a number to quarantine: lifecycle_state='quarantined',
-   * released_at=now, quarantine_until=now+QUARANTINE_WINDOW. Idempotent on the
-   * existence guard. Returns the post-update item.
+   * active -> released (+released_at), conditional on active. Idempotent: a
+   * condition failure (already released / missing) returns undefined.
    */
-  release(poolNumber: string): Promise<PoolNumberItem>;
-  /**
-   * Reclaim sweep: flip quarantined → available for every number whose
-   * quarantine_until <= now (ONE Query on the 'quarantined' partition +
-   * conditional updates). Resets quarantine_until to the sentinel + clears
-   * assignment. Returns the count reclaimed.
-   */
-  reclaimExpired(now: Date): Promise<number>;
+  releaseNumber(poolNumber: string): Promise<PoolNumberItem | undefined>;
 }
 
 export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
@@ -155,11 +162,15 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
       const now = new Date().toISOString();
       const item: PoolNumberItem = {
         poolNumber: input.poolNumber,
-        lifecycle_state: input.lifecycleState ?? 'available',
+        lifecycle_state: 'active',
         quarantine_until: NOT_QUARANTINED_SENTINEL,
         voice_capable: input.voiceCapable,
         sms_capable: input.smsCapable,
         ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
+        // DynamoDB forbids empty string sets - only write burned_phones when the
+        // roster has at least one phone.
+        ...(input.burn.length > 0 && { burned_phones: new Set(input.burn) }),
+        ...(input.tag !== undefined && { placement_tag: input.tag }),
         provisioned_at: now,
       };
       await doc.send(
@@ -169,46 +180,70 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
           ConditionExpression: 'attribute_not_exists(poolNumber)',
         }),
       );
-      log.info({ lifecycleState: item.lifecycle_state }, 'pool number created');
+      log.info(
+        { lifecycleState: item.lifecycle_state, burnCount: input.burn.length },
+        'pool number created',
+      );
       return item;
     },
 
-    async findAvailable() {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          IndexName: 'byLifecycleState',
-          KeyConditionExpression: 'lifecycle_state = :s',
-          ExpressionAttributeValues: { ':s': 'available' },
-          Limit: 1,
-        }),
-      );
-      return (Items as PoolNumberItem[] | undefined)?.[0];
+    async listActive() {
+      // Paged Query on the 'active' partition (the pool is small, but never
+      // truncate silently). quarantine_until (RANGE) is a fixed sentinel, so
+      // items come back in an arbitrary-but-stable order.
+      const items: PoolNumberItem[] = [];
+      let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
+      do {
+        const { Items, LastEvaluatedKey } = await doc.send(
+          new QueryCommand({
+            TableName: table,
+            IndexName: 'byLifecycleState',
+            KeyConditionExpression: 'lifecycle_state = :s',
+            ExpressionAttributeValues: { ':s': 'active' },
+            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+          }),
+        );
+        items.push(...((Items ?? []) as PoolNumberItem[]));
+        exclusiveStartKey = LastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+      return items;
     },
 
-    async claim(poolNumber, conversationId, tag) {
-      const now = new Date().toISOString();
+    async burnClaim(poolNumber, phones, tag) {
+      // Never claim with an empty roster - an unburnable group would silently
+      // match every number (attribute_not_exists(#bp) short-circuits the guard).
+      if (phones.length === 0) return undefined;
+      const names: Record<string, string> = { '#bp': 'burned_phones' };
+      const values: Record<string, unknown> = {
+        ':phones': new Set(phones),
+        ':active': 'active',
+      };
+      if (tag !== undefined) values[':tag'] = tag;
+      const notContains = phones
+        .map((p, i) => {
+          values[`:p${i}`] = p;
+          return `NOT contains(#bp, :p${i})`;
+        })
+        .join(' AND ');
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { poolNumber },
             UpdateExpression:
-              'SET lifecycle_state = :assigned, assigned_conversation_id = :cid, assigned_at = :now' +
-              (tag !== undefined ? ', placement_tag = :tag' : ''),
-            // Race-safe: only an 'available' number can be claimed.
-            ConditionExpression: 'lifecycle_state = :available',
-            ExpressionAttributeValues: {
-              ':assigned': 'assigned',
-              ':available': 'available',
-              ':cid': conversationId,
-              ':now': now,
-              ...(tag !== undefined && { ':tag': tag }),
-            },
+              'ADD #bp :phones' + (tag !== undefined ? ' SET placement_tag = :tag' : ''),
+            // The whole invariant in ONE condition: the number is active AND no
+            // roster phone was ever burned here. attribute_not_exists(#bp)
+            // covers a number created with an empty roster (no set yet). This
+            // is the race-safe claim - never weaken it to a read-then-write.
+            ConditionExpression:
+              `lifecycle_state = :active AND (attribute_not_exists(#bp) OR (${notContains}))`,
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
             ReturnValues: 'ALL_NEW',
           }),
         );
-        log.info({ conversationId }, 'pool number claimed');
+        log.info({ burnCount: phones.length }, 'pool number burn-claimed');
         return Attributes as PoolNumberItem;
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) return undefined;
@@ -216,81 +251,53 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
       }
     },
 
-    async reassign(poolNumber, conversationId) {
-      await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { poolNumber },
-          UpdateExpression: 'SET assigned_conversation_id = :cid',
-          ConditionExpression: 'lifecycle_state = :assigned',
-          ExpressionAttributeValues: { ':cid': conversationId, ':assigned': 'assigned' },
-        }),
-      );
-      log.info({ conversationId }, 'pool number reassigned to conversation');
-    },
-
-    async release(poolNumber) {
-      const now = new Date();
-      const releasedAt = now.toISOString();
-      const quarantineUntil = new Date(now.getTime() + QUARANTINE_WINDOW_MS).toISOString();
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { poolNumber },
-          UpdateExpression:
-            'SET lifecycle_state = :q, released_at = :rel, quarantine_until = :qu REMOVE assigned_conversation_id',
-          ConditionExpression: 'attribute_exists(poolNumber)',
-          ExpressionAttributeValues: {
-            ':q': 'quarantined',
-            ':rel': releasedAt,
-            ':qu': quarantineUntil,
-          },
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      log.info({ quarantineUntil }, 'pool number released to quarantine');
-      return Attributes as PoolNumberItem;
-    },
-
-    async reclaimExpired(now) {
-      const cutoff = now.toISOString();
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          IndexName: 'byLifecycleState',
-          KeyConditionExpression: 'lifecycle_state = :q AND quarantine_until <= :now',
-          ExpressionAttributeValues: { ':q': 'quarantined', ':now': cutoff },
-        }),
-      );
-      const expired = (Items as PoolNumberItem[] | undefined) ?? [];
-      let reclaimed = 0;
-      for (const item of expired) {
-        try {
-          await doc.send(
-            new UpdateCommand({
-              TableName: table,
-              Key: { poolNumber: item.poolNumber },
-              UpdateExpression: 'SET lifecycle_state = :available, quarantine_until = :sentinel',
-              // Re-check state+deadline at write time: a concurrent claim or a
-              // fresh release must not be clobbered (forward-only reclaim).
-              ConditionExpression:
-                'lifecycle_state = :q AND quarantine_until <= :now',
-              ExpressionAttributeValues: {
-                ':available': 'available',
-                ':sentinel': NOT_QUARANTINED_SENTINEL,
-                ':q': 'quarantined',
-                ':now': cutoff,
-              },
-            }),
-          );
-          reclaimed += 1;
-        } catch (err) {
-          if (!(err instanceof ConditionalCheckFailedException)) throw err;
-          // Lost a race — leave it; the next sweep re-evaluates.
-        }
+    async noteGroupClosed(poolNumber, closedAt) {
+      // Monotonic max: only advance last_group_closed_at. Conditioned on the
+      // record existing (so a missing number is never phantom-created) AND the
+      // new timestamp being strictly newer. Both an older timestamp and a
+      // missing record fail the condition and are swallowed - best-effort.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'SET last_group_closed_at = :t',
+            ConditionExpression:
+              'attribute_exists(poolNumber) AND ' +
+              '(attribute_not_exists(last_group_closed_at) OR last_group_closed_at < :t)',
+            ExpressionAttributeValues: { ':t': closedAt },
+          }),
+        );
+        log.info({ noted: true }, 'pool number group-close noted');
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return;
+        throw err;
       }
-      if (reclaimed > 0) log.info({ reclaimed }, 'pool numbers reclaimed from quarantine');
-      return reclaimed;
+    },
+
+    async releaseNumber(poolNumber) {
+      const now = new Date().toISOString();
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'SET lifecycle_state = :released, released_at = :now',
+            ConditionExpression: 'lifecycle_state = :active',
+            ExpressionAttributeValues: {
+              ':released': 'released',
+              ':active': 'active',
+              ':now': now,
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ lifecycleState: 'released' }, 'pool number released to Twilio');
+        return Attributes as PoolNumberItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return undefined;
+        throw err;
+      }
     },
   };
 }

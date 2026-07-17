@@ -433,7 +433,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       // CLOSE: flip status='closed' (conditional on 'open'), KEEPING pool_number
       // so a late text still resolves the group and intercepts to the sender's
       // 1:1 (burn-multiplexing). A concurrent/duplicate close fails the
-      // precondition and no-ops (idempotent). The number is NOT released.
+      // precondition and no-ops (idempotent). The number is NOT released - we
+      // only stamp its retirement clock (noteGroupClosed) for the D7 sweep.
+      const poolNumber = conversation.pool_number;
       try {
         updated = await conversations.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
@@ -444,6 +446,14 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
           return;
         }
         throw err;
+      }
+      // Stamp the retirement clock (best-effort): drives the 180-day D7 sweep.
+      if (typeof poolNumber === 'string' && poolNumber.length > 0) {
+        try {
+          await poolNumbers.noteGroupClosed(poolNumber, new Date().toISOString());
+        } catch (err) {
+          log.error({ err, conversationId }, 'relay close: noteGroupClosed failed - closed anyway');
+        }
       }
       await audit.append(`conversations#${conversationId}`, 'relay_group_closed', {
         actor,

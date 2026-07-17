@@ -184,6 +184,7 @@ function makeSendFakes(
       sid: 'PNfake-sm',
     }),
     setVoiceWebhook: async () => {},
+    releasePhoneNumber: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
   };
 

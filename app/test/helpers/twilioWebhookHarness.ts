@@ -1882,6 +1882,9 @@ export function createFakeWorld(): FakeWorld {
     async setVoiceWebhook() {
       // no-op fake
     },
+    async releasePhoneNumber() {
+      // no-op fake
+    },
     async initiateCall(params) {
       // Voice (M1.9a): record the origination + return a deterministic fake
       // CallSid. The inbound masked bridge answers with TwiML (no initiateCall),

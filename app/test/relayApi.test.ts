@@ -32,38 +32,39 @@ const ALICE = '+15550100001';
 const BOB = '+15550100002';
 const SESSION_USER_ID = 'usr_testva00000000000000000';
 
-/** A fake pool-numbers service: hands out deterministic numbers, tracks releases. */
-function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provisioned: string[] } {
+/** A fake pool-numbers service: hands out deterministic numbers, tracks provisions + close notes. */
+function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[]; closed: string[] } {
   let counter = 0;
-  const released: string[] = [];
   const provisioned: string[] = [];
+  const closed: string[] = [];
   const rec = (poolNumber: string): PoolNumberItem => ({
     poolNumber,
-    lifecycle_state: 'assigned',
+    lifecycle_state: 'active',
     quarantine_until: '0000-00-00T00:00:00.000Z',
     voice_capable: true,
     sms_capable: true,
     provisioned_at: new Date().toISOString(),
   });
   return {
-    released,
     provisioned,
-    async provisionForPlacement() {
+    closed,
+    async provisionForGroup() {
       counter += 1;
       const poolNumber = `+1555030${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
       return { poolNumber, record: rec(poolNumber), provisioned: true };
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      released.push(poolNumber);
-      return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    async noteGroupClosed(poolNumber) {
+      closed.push(poolNumber);
+    },
+    async retireEligible() {
+      return [];
     },
   };
 }
 
 /**
- * A pool service emulating the M1.7 kill-switch OFF: provisionForPlacement
+ * A pool service emulating the M1.7 kill-switch OFF: provisionForGroup
  * always refuses (as the real service does on the deployed twilio driver
  * pre-A2P). NO number is ever handed out — the route must surface 503
  * relay_provisioning_disabled.
@@ -77,20 +78,13 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     get provisionAttempts() {
       return provisionAttempts;
     },
-    async provisionForPlacement() {
+    async provisionForGroup() {
       provisionAttempts += 1;
       throw new RelayProvisioningDisabledError(DISABLED_MESSAGE);
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: true,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async retireEligible() {
+      return [];
     },
   };
 }
@@ -324,7 +318,7 @@ describe('relay-group API (M1.7)', () => {
     expect(closed.status).toBe(200);
     expect(closed.body.conversation.status).toBe('closed');
     expect(closed.body.conversation.pool_number).toBe(firstPool);
-    expect(pool.released).toEqual([]); // nothing released
+    expect(pool.closed).toEqual([firstPool]); // close noted for retirement (not released)
 
     // Reopen -> the SAME number is reused (nothing re-provisioned).
     const reopened = await request(app)
@@ -363,7 +357,7 @@ describe('relay-group API (M1.7)', () => {
     const after = await world.conversationsRepo.getById(id);
     expect(after?.status).toBe('closed');
     expect(after?.pool_number).toBe(oldPool);
-    expect(pool.released).toEqual([]); // nothing released
+    expect(pool.closed).toEqual([oldPool]); // close noted for retirement (not released)
   });
 
   it('reopen reuses the SAME number the group already had', async () => {
@@ -415,8 +409,9 @@ describe('relay-group API (M1.7)', () => {
       .send({ closed: true });
     expect(second.status).toBe(200);
     expect(second.body.conversation.status).toBe('closed');
-    // The number is never released (burn-multiplexing keeps it).
-    expect(pool.released).toEqual([]);
+    // noteGroupClosed fired exactly ONCE - the idempotent second close no-oped
+    // before it (the number is never released; burn-multiplexing keeps it).
+    expect(pool.closed).toHaveLength(1);
   });
 
   // --- FIX 2: relay-aware team send --------------------------------------

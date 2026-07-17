@@ -74,11 +74,14 @@ export async function provisionRelayGroup(
         ? { type: 'placement', id: placementId }
         : { type: null };
 
-  // Provision the pool number first (lazy reclaim → reuse → fresh). The
-  // conversation is created AFTER the number is claimed, under a provisional id,
-  // then the real conversationId is stamped back. Kill-switch / voice-capability
-  // refusals throw here and propagate to the route's 503 mapping.
-  const provisioned = await poolNumbersService.provisionForPlacement('relay-pending', tag);
+  // Provision the pool number first via burn-as-claim on the roster phones (lazy
+  // retirement sweep -> reuse a non-overlapping active number -> buy fresh). The
+  // roster IS the claim, so there is no provisional-id back-stamp. Kill-switch /
+  // voice-capability refusals throw here and propagate to the route's 503 mapping.
+  const provisioned = await poolNumbersService.provisionForGroup(
+    members.map((m) => m.phone),
+    tag,
+  );
   const poolNumber = provisioned.poolNumber;
 
   const conversation = await conversationsRepo.createRelayGroup({
@@ -88,18 +91,6 @@ export async function provisionRelayGroup(
     owner: resolvedOwner,
   });
   mergeContext({ conversationId: conversation.conversationId });
-
-  // Stamp the real conversationId onto the pool number (claimed under the
-  // provisional id above). Best-effort: relay routing keys on pool_number, not
-  // this back-reference — a failure here is operational metadata only.
-  try {
-    await poolNumbersService.assignConversation(poolNumber, conversation.conversationId);
-  } catch (err) {
-    logger.error(
-      { err, conversationId: conversation.conversationId },
-      'relay provision: pool number reassign failed (operational only)',
-    );
-  }
 
   await auditRepo.append(`conversations#${conversation.conversationId}`, 'relay_group_created', {
     actor,

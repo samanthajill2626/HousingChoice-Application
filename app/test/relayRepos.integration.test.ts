@@ -1,6 +1,6 @@
 // M1.7 integration tests against DynamoDB Local — the relay repos' real GSI
 // behavior: the conversations byPoolNumber GSI (sparse; relay routing key) and
-// the pool_numbers byLifecycleState GSI (findAvailable + quarantine reclaim).
+// the pool_numbers byLifecycleState GSI (listActive + atomic burn-as-claim).
 //
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
@@ -14,7 +14,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
-import { createPoolNumbersRepo, QUARANTINE_WINDOW_MS } from '../src/repos/poolNumbersRepo.js';
+import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -314,36 +314,122 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
       voiceCapable: true,
       smsCapable: true,
       provisionedVia: 'twilio',
+      burn: [],
     });
     const stored = await poolNumbers.get(pn);
     expect(stored?.provisioned_via).toBe('twilio'); // flexible doc field, not a key/GSI attr
   });
 
-  it('pool_numbers: findAvailable + claim (race-safe) + quarantine reclaim', async () => {
-    const pn = `+1555043${Math.floor(Math.random() * 9000 + 1000)}`;
-    await poolNumbers.create({ poolNumber: pn, voiceCapable: true, smsCapable: true });
+  // --- pool_numbers burn model (real Sets + conditional-ADD races) -----------
+  const poolPn = (p: string) => `${p}${Math.floor(Math.random() * 9000 + 1000)}`;
 
-    // findAvailable surfaces it; claim flips it to assigned (race-safe).
-    const available = await poolNumbers.findAvailable();
-    expect(available).toBeDefined();
-    const claimed = await poolNumbers.claim(pn, 'conv-x', 'fair');
-    expect(claimed?.lifecycle_state).toBe('assigned');
-    // A second claim of the same number fails (already assigned).
-    const second = await poolNumbers.claim(pn, 'conv-y');
-    expect(second).toBeUndefined();
+  it('create seeds burned_phones from the first roster and lands active', async () => {
+    const pn = poolPn('+1555060');
+    const item = await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001', '+15551110002'],
+    });
+    expect(item.lifecycle_state).toBe('active');
+    const stored = await poolNumbers.get(pn);
+    expect([...(stored!.burned_phones as Set<string>)].sort()).toEqual([
+      '+15551110001', '+15551110002',
+    ]);
+  });
 
-    // Release → quarantined; NOT reclaimed before the window.
-    await poolNumbers.release(pn);
-    const reclaimedEarly = await poolNumbers.reclaimExpired(new Date());
-    const stillQuarantined = await poolNumbers.get(pn);
-    expect(stillQuarantined?.lifecycle_state).toBe('quarantined');
-    expect(reclaimedEarly).toBe(0);
+  it('create with an EMPTY roster writes NO burned_phones (empty sets are forbidden)', async () => {
+    const pn = poolPn('+1555061');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [],
+    });
+    expect((await poolNumbers.get(pn))!.burned_phones).toBeUndefined();
+    // ...and a first burnClaim still succeeds (attribute_not_exists guard).
+    expect(await poolNumbers.burnClaim(pn, ['+15551110020'])).toBeDefined();
+  });
 
-    // After the window → reclaimed back to available.
-    const future = new Date(Date.now() + QUARANTINE_WINDOW_MS + 60_000);
-    const reclaimed = await poolNumbers.reclaimExpired(future);
-    expect(reclaimed).toBeGreaterThanOrEqual(1);
-    const back = await poolNumbers.get(pn);
-    expect(back?.lifecycle_state).toBe('available');
+  it('burnClaim adds a disjoint roster and returns the updated item', async () => {
+    const pn = poolPn('+1555062');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    const claimed = await poolNumbers.burnClaim(pn, ['+15551110003', '+15551110004']);
+    expect(claimed).toBeDefined();
+    expect([...(claimed!.burned_phones as Set<string>)].sort()).toEqual([
+      '+15551110001', '+15551110003', '+15551110004',
+    ]);
+  });
+
+  it('burnClaim REFUSES any overlap - even one phone (atomic: no partial add)', async () => {
+    const pn = poolPn('+1555063');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001', '+15551110002'],
+    });
+    expect(await poolNumbers.burnClaim(pn, ['+15551110009', '+15551110002'])).toBeUndefined();
+    // The non-overlapping phone was NOT partially added.
+    expect([...((await poolNumbers.get(pn))!.burned_phones as Set<string>)]).not.toContain(
+      '+15551110009',
+    );
+  });
+
+  it('burnClaim races: two overlapping claims on one number - exactly one wins', async () => {
+    const pn = poolPn('+1555064');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551119999'],
+    });
+    // True concurrency against DynamoDB Local: both share ...0006. The atomic
+    // conditional ADD lets exactly one commit; the loser's condition fails.
+    const [a, b] = await Promise.all([
+      poolNumbers.burnClaim(pn, ['+15551110005', '+15551110006']),
+      poolNumbers.burnClaim(pn, ['+15551110006', '+15551110007']),
+    ]);
+    expect([a, b].filter(Boolean)).toHaveLength(1);
+  });
+
+  it('burnClaim refuses a released number', async () => {
+    const pn = poolPn('+1555065');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    await poolNumbers.releaseNumber(pn);
+    expect(await poolNumbers.burnClaim(pn, ['+15551119998'])).toBeUndefined();
+  });
+
+  it('noteGroupClosed keeps the max timestamp (monotonic; never regresses)', async () => {
+    const pn = poolPn('+1555066');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    await poolNumbers.noteGroupClosed(pn, '2026-07-01T00:00:00.000Z');
+    await poolNumbers.noteGroupClosed(pn, '2026-06-01T00:00:00.000Z'); // older - must not regress
+    expect((await poolNumbers.get(pn))!.last_group_closed_at).toBe('2026-07-01T00:00:00.000Z');
+  });
+
+  it('releaseNumber flips active->released once; a second call returns undefined', async () => {
+    const pn = poolPn('+1555067');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    expect(await poolNumbers.releaseNumber(pn)).toMatchObject({ lifecycle_state: 'released' });
+    expect(await poolNumbers.releaseNumber(pn)).toBeUndefined();
+  });
+
+  it('listActive excludes released numbers', async () => {
+    const a = poolPn('+1555068');
+    const b = poolPn('+1555069');
+    for (const p of [a, b]) {
+      await poolNumbers.create({
+        poolNumber: p, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+        burn: [`${p}-x`],
+      });
+    }
+    await poolNumbers.releaseNumber(b);
+    const active = (await poolNumbers.listActive()).map((i) => i.poolNumber);
+    expect(active).toContain(a);
+    expect(active).not.toContain(b);
   });
 });

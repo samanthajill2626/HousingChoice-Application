@@ -93,23 +93,27 @@ WT="/w/tmp/<name>"; LEDGER="$WT/.superpowers/sdd/progress.md"; t0=$(date +%s)
 base=$(tail -1 "$LEDGER" 2>/dev/null)   # ignore an already-handled status
 while true; do
   cur=$(tail -1 "$LEDGER" 2>/dev/null)
-  [ "$cur" != "$base" ] && echo "$cur" | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && exit 0
+  [ "$cur" != "$base" ] && echo "$cur" | grep -qE 'STATUS: (DONE|QUESTION|BLOCKED)' && { echo "WATCHDOG: TERMINAL - $cur"; exit 0; }
   newest=$(find "$WT" -path '*/node_modules' -prune -o -type f -newermt '-25 minutes' -print -quit 2>/dev/null)
-  [ -z "$newest" ] && [ $(( $(date +%s) - t0 )) -ge 1500 ] && exit 1
-  [ $(( $(date +%s) - t0 )) -ge 300 ] && exit 2
+  [ -z "$newest" ] && [ $(( $(date +%s) - t0 )) -ge 1500 ] && { echo "WATCHDOG: STALL - worktree quiet >25min"; exit 0; }
+  [ $(( $(date +%s) - t0 )) -ge 300 ] && { echo "WATCHDOG: CHECKPOINT - healthy, 5min elapsed"; exit 0; }
   sleep 30
 done
 ```
 
-Exit 0 = terminal status: read the ledger tail and act (DONE -> review;
-QUESTION -> relay to Cameron via AskUserQuestion, SendMessage the answer
-back, re-arm; BLOCKED -> investigate). Exit 1 = STALL: escalate below, and
-re-arm the watchdog after resolving. Exit 2 = HEALTHY CHECKPOINT (5 min):
-read the ledger tail, give Cameron the one-line status, re-arm. HARD
-GUARANTEE: never more than 5 minutes between status lines to Cameron. The
-checkpoint clock measures time since his LAST status line, so re-arm a
-fresh watchdog at EVERY wake that produces one (TaskStop the stale
-watchdog first - exactly one watchdog per mission at any moment).
+The watchdog ALWAYS exits 0 - the outcome is the echoed `WATCHDOG:` line
+(read it from the task output file on wake), so its notifications never
+masquerade as failures. Branch on the line:
+TERMINAL -> read the ledger tail and act (DONE -> review; QUESTION -> relay
+to Cameron via AskUserQuestion, SendMessage the answer back, re-arm;
+BLOCKED -> investigate). STALL -> escalate below, re-arm after resolving.
+CHECKPOINT -> read the ledger tail, give Cameron the one-line status,
+re-arm. HARD GUARANTEE: never more than 5 minutes between status lines to
+Cameron. The checkpoint clock measures time since his LAST status line, so
+re-arm a fresh watchdog at EVERY wake that produces one (TaskStop the stale
+watchdog first - exactly one watchdog per mission at any moment). Expect
+occasional LEGITIMATE stalls during read-heavy phases (research or
+reviewers thinking = silent worktree) - rung 0 resolves them cheaply.
 
 ## Live mirror (Cameron's window into the orchestrator)
 
@@ -148,10 +152,6 @@ The stall exit is gated on the watchdog's own age (t0) because a re-armed
 watchdog inherits an already-quiet window - without the gate it trips
 instantly right after the nudge/resume it was re-armed behind. Checkpoints
 (5 min) cover the visibility gap while the gate matures.
-
-Watchdog exits surface as "Background command failed" notifications for
-exit 1 AND exit 2 - that is cosmetic (non-zero exit), not an error. Exit 2
-is the HEALTHY heartbeat; read the code, not the word "failed".
 
 ## Child-completion routing (strict dispatch model)
 
@@ -206,6 +206,14 @@ long gate still touches output files; total worktree silence is the signal.
    SendMessage a re-orientation ("your edits are intact; ledger says phase
    X; finish these items"). Re-dispatch fresh ONLY if SendMessage cannot
    revive it - the ledger is the recovery map.
+   The HUNG FOREGROUND CHILD lands here too - it is the one failure mode
+   strict dispatch introduces: a child stuck under a foreground Agent call
+   blocks the orchestrator's turn, so the orchestrator cannot heartbeat or
+   self-rescue (rung 0 shows a stale child .jsonl AND a blocked
+   orchestrator). Recipe: TaskStop the ORCHESTRATOR (takes the hung child
+   subtree with it), then SendMessage-resume it with the diagnosis.
+   Committed work survives; only the hung slice's uncommitted work is at
+   risk - the accepted price of foreground dispatch.
 
 ## Wake narration budget (context discipline)
 

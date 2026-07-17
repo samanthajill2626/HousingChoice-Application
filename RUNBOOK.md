@@ -514,6 +514,51 @@ so a double-started worker cannot double-text. Deterministic e2e/dev seams (herm
 If a ladder seems dead in a deployed env: check the worker service is running (one process runs
 both polls), then look for `… poll error` lines in the worker logs.
 
+### AI extraction (conversation fact extraction)
+
+On every fresh inbound SMS from a tenant/unknown 1:1 conversation, a debounced worker poll runs
+one structured-output LLM call over the recent transcript and applies a guarded write policy to
+the contact (write empty fields with provenance, suggest on conflicts, append secondary facts to
+notes). It is a **durable-row poll** like the two above (state in the new `ai_extraction` table,
+never in process): a third 60-second `setInterval` in the worker, gated on `AI_EXTRACTION_ENABLED`.
+
+**Environment flags** (all in `.env.<env>`, pushed via the [Secrets](#secrets) flow):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `AI_EXTRACTION_ENABLED` | `false` in production, `true` otherwise | Master kill switch. When off, the webhook schedules nothing and the worker starts no poll - the feature is inert. |
+| `EXTRACTION_DRIVER` | `anthropic` in production, `console` otherwise | LLM driver. `anthropic` = real call; `console` = logs a summary and returns nothing (keeps local dev offline); `fake` = deterministic test seam. **`fake` is REFUSED by the prod config validator** (throws at boot). |
+| `AI_EXTRACTION_MODEL` | `claude-opus-4-8` | Model id for the anthropic driver. |
+| `AI_EXTRACTION_DEBOUNCE_MS` | `30000` | Sliding debounce: each inbound text slides the due time out this far, so a burst yields one run. Unparseable/non-positive -> WARN + default. |
+| `ANTHROPIC_API_KEY` | (unset) | Anthropic REST key. Required when `AI_EXTRACTION_ENABLED` and `EXTRACTION_DRIVER=anthropic` in production, or the config fails fast at boot. |
+
+**Manual tick in local dev** (hermetic-LOCAL-only, never reachable in a deployed env):
+`POST /__dev/extraction/tick` runs `runDueExtractions` immediately against a clock advanced past the
+debounce (so you need not wait it out) and responds `{ processed, failed }`. This mirrors the
+`tour-reminders` / `placement-nudges` dev ticks. In-app ticks reach SSE clients; the worker poll's
+`suggestion.updated` emits do not (single-instance seam) - poller-driven changes surface on the
+dashboard's next fetch.
+
+**Owed ops on deploy (in order).** The feature ships **DORMANT** in deployed envs - `AI_EXTRACTION_ENABLED`
+defaults **off** in production, so until these steps run nothing extracts and **nothing breaks** (the
+webhook and worker simply skip the extraction path). To turn it on in an env:
+
+1. **`npm run plan -- <env>` + `npm run apply -- <env>`** for the new `ai_extraction` table (single-key
+   table + 3 sparse GSIs `byDueAt`/`byOwner`/`byPending`; registered in `app/src/lib/tables.ts`,
+   regenerate via `npm run gen:tables`). **Online** op - the table starts empty, no data migration.
+   Apply BEFORE deploying code that reads it (per [schema changes](#dynamodb-schema-changes-apply-before-deploying-code-that-uses-them)).
+2. **`npm install`** - new app-workspace runtime dep `@anthropic-ai/sdk` (pure JS, no arm64 binary).
+   The lockfile carries it; `npm ci --workspace app --omit=dev` picks it up on the image build.
+3. **Push `ANTHROPIC_API_KEY`** via the secrets flow: add it to `.env.<env>`, `npm run secrets:push -- <env>`.
+4. **Set `AI_EXTRACTION_ENABLED=true`** (and confirm `EXTRACTION_DRIVER=anthropic`, `AI_EXTRACTION_MODEL`)
+   in `.env.<env>`, then `npm run secrets:push -- <env>`.
+5. **Deploy** so the app + worker roll and re-hydrate the new env keys (a re-deploy of the current
+   `DEPLOYED_TAG` suffices) - the worker then starts the third poll and the webhook starts scheduling.
+
+Dev applies after merge; **prod rides the M1.11 cutover**. If extraction seems dead in a deployed env:
+confirm `AI_EXTRACTION_ENABLED=true` is hydrated on the box, the `ai_extraction` table exists, and look
+for `extraction poll error` lines in the worker logs.
+
 ### What the health-check gate does
 
 Every deploy (build, `--tag`, `--promote`) runs this gate **on the instance** before declaring success:

@@ -131,6 +131,13 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   (no data migration; values written before the relabel may still read like an
   arrangement, e.g. "Tenant-paid").
 
+- **suggestion (AI)** - a pending-review record the conversation-fact-extraction
+  layer writes when an extracted fact conflicts with, or would advance, existing
+  contact data; it sits in the `ai_extraction` table awaiting a staff **Accept** or
+  **Dismiss** (unlike a directly-written empty-field value, which is applied at once
+  with `<field>_source` provenance). Not a "flag" or "nudge" (those are placement
+  signals - see above).
+
 - **Unit `notes`** — free-form INTERNAL staff notes on a property (the contact
   `notes` counterpart): amenity/quirk facts that are neither utilities nor
   accessibility, e.g. "In-unit washer/dryer", "No dishwasher". Never on the

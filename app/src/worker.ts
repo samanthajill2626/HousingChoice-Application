@@ -165,6 +165,60 @@ runWithContext(bootContext, () => {
   }, 60_000).unref();
 }
 
+// Conversation-fact-extraction poll: same stateless 60s cadence (state is the
+// DynamoDB ai_extraction rows). Gated on config.aiExtractionEnabled - dormant
+// when the feature flag is off (default in deployed envs). Deps built once,
+// lazily imported like the polls above; the driver is selected from config
+// (anthropic in prod / console in dev / fake in e2e). .unref()'d so it never
+// holds the process open on shutdown.
+//
+// SINGLE-INSTANCE SEAM: apply.ts's `suggestion.updated` emit here goes to the
+// WORKER's event bus and never reaches app SSE clients (lib/events.ts) - the
+// dashboard's live path is the in-app dev tick + accept/dismiss; a poll-driven
+// change appears on the next fetch. Intentional for v1 (see jobs/extraction.ts).
+if (config.aiExtractionEnabled) {
+  const { createExtractionRepo } = await import('./repos/extractionRepo.js');
+  const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createMessagesRepo } = await import('./repos/messagesRepo.js');
+  const { createContactsRepo } = await import('./repos/contactsRepo.js');
+  const { createAuditRepo } = await import('./repos/auditRepo.js');
+  const { createExtractionDriver } = await import('./adapters/extraction.js');
+  const { appEvents } = await import('./lib/events.js');
+  const { runDueExtractions } = await import('./jobs/extraction.js');
+
+  const extractionRepo = createExtractionRepo({ logger });
+  const contactsRepo = createContactsRepo({ logger });
+  const extractionDeps = {
+    repo: extractionRepo,
+    conversations: createConversationsRepo({ logger }),
+    messages: createMessagesRepo({ logger }),
+    contacts: contactsRepo,
+    driver: createExtractionDriver({
+      driver: config.extractionDriver,
+      model: config.aiExtractionModel,
+      ...(config.anthropicApiKey !== undefined && { apiKey: config.anthropicApiKey }),
+      ...(config.anthropicApiBaseUrl !== undefined && { apiBaseUrl: config.anthropicApiBaseUrl }),
+    }),
+    applyDeps: {
+      contacts: contactsRepo,
+      extraction: extractionRepo,
+      audit: createAuditRepo({ logger }),
+      events: appEvents,
+      logger,
+      now: () => new Date().toISOString(),
+    },
+    config,
+    logger,
+  };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runDueExtractions(now, extractionDeps).catch((err: unknown) => {
+      logger.error({ err }, 'extraction poll error');
+    });
+  }, 60_000).unref();
+}
+
 // Keep the process alive until a shutdown signal arrives (also covers the
 // local mode where no poll loop is running).
 const keepAlive = setInterval(() => {

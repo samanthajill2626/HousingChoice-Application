@@ -222,6 +222,21 @@ export interface TourUpdatedEvent {
   status: string;
 }
 
+/**
+ * A contact's AI-extraction state changed (conversation-fact-extraction): a
+ * field was auto-written, a pending suggestion was upserted, an auto note was
+ * appended, or a suggestion was accepted/dismissed. The contact page's chips/
+ * badges + the Today "AI suggestions" tile refetch on this. ID-only (never PII).
+ *
+ * SINGLE-INSTANCE seam (lib/events.ts): the extraction POLL runs in the WORKER
+ * process, so a poll-driven emit does NOT reach app SSE clients; the dashboard's
+ * live path is the in-app dev tick (e2e) + accept/dismiss round-trips, and a
+ * poller-driven change surfaces on the next fetch. See jobs/extraction.ts.
+ */
+export interface SuggestionUpdatedEvent {
+  contactId: string;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
@@ -229,6 +244,7 @@ export interface AppEventMap {
   'placement.updated': PlacementUpdatedEvent;
   'scheduled.updated': ScheduledUpdatedEvent;
   'tour.updated': TourUpdatedEvent;
+  'suggestion.updated': SuggestionUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;

@@ -43,6 +43,11 @@ import { createUnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
+import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { createAuditRepo } from '../repos/auditRepo.js';
+import { createExtractionDriver } from '../adapters/extraction.js';
+import { appEvents } from '../lib/events.js';
+import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
  *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
@@ -70,6 +75,9 @@ export interface DevRouterDeps {
   /** Poll deps for POST /__dev/placement-nudges/tick — injected in tests (the
    *  world fakes); defaults to the worker's construction (worker.ts). */
   placementNudgeDeps?: RunDuePlacementNudgesDeps;
+  /** Poll deps for POST /__dev/extraction/tick - injected in tests (the world
+   *  fakes); defaults to the worker's construction (worker.ts). */
+  extractionTickDeps?: ExtractionJobDeps;
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
@@ -295,6 +303,60 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDuePlacementNudges(nowIso, placementNudgeDeps());
     log.info({ now: nowIso }, 'dev placement-nudge tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/extraction/tick - the deterministic e2e seam for the worker's
+  // 60s conversation-fact-extraction poll (worker.ts): one POST runs ONE
+  // runDueExtractions pass instead of waiting for the wall-clock setInterval.
+  // Same triple-gate/hermetic-LOCAL-only construction as the tick seams above.
+  //
+  // The tick clock is pushed to `now + debounce + 1s` so a JUST-scheduled due
+  // item (an inbound text posted by the test moments earlier) is already past
+  // its sliding dueAt - the test need NOT wait out the real debounce window.
+  //
+  // SINGLE-INSTANCE SEAM: because this tick runs IN THE APP PROCESS, apply.ts's
+  // `suggestion.updated` emit DOES reach app SSE clients here (unlike the worker
+  // poll). That is exactly why the dashboard's live v1 path is dev-tick +
+  // accept/dismiss; a worker-poller-driven change surfaces only on next fetch.
+  let extractionTickDeps = deps.extractionTickDeps;
+  const extractionDeps = (): ExtractionJobDeps => {
+    // Built lazily on the first tick - mirrors worker.ts's extraction deps
+    // construction exactly (driver selected from config; the same repo instance
+    // backs both the job and its applyDeps.extraction).
+    if (extractionTickDeps === undefined) {
+      const extractionRepo = createExtractionRepo({ logger: log });
+      const contactsRepo = createContactsRepo({ logger: log });
+      extractionTickDeps = {
+        repo: extractionRepo,
+        conversations: createConversationsRepo({ logger: log }),
+        messages: createMessagesRepo({ logger: log }),
+        contacts: contactsRepo,
+        driver: createExtractionDriver({
+          driver: config.extractionDriver,
+          model: config.aiExtractionModel,
+          ...(config.anthropicApiKey !== undefined && { apiKey: config.anthropicApiKey }),
+          ...(config.anthropicApiBaseUrl !== undefined && { apiBaseUrl: config.anthropicApiBaseUrl }),
+        }),
+        applyDeps: {
+          contacts: contactsRepo,
+          extraction: extractionRepo,
+          audit: createAuditRepo({ logger: log }),
+          events: appEvents,
+          logger: log,
+          now: () => new Date().toISOString(),
+        },
+        config,
+        logger: log,
+      };
+    }
+    return extractionTickDeps;
+  };
+  router.post('/__dev/extraction/tick', json(), async (_req, res) => {
+    // tests need not wait out the debounce - jump the clock past a just-slid dueAt.
+    const nowIso = new Date(Date.now() + config.aiExtractionDebounceMs + 1000).toISOString();
+    const { processed, failed } = await runDueExtractions(nowIso, extractionDeps());
+    log.info({ now: nowIso, processed, failed }, 'dev extraction tick ran');
+    res.status(200).json({ processed, failed });
   });
 
   // POST /__dev/placements/:placementId/deadline-fixture — hermetic e2e-only seam

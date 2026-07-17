@@ -1,0 +1,228 @@
+// Conversation-fact-extraction poll job (T7, spec 4.1/4.2/4.4).
+//
+// runDueExtractions is the stateless poll handler mirroring runDueTourReminders:
+// it queries listDue(now), then for each row CLAIMS it (sliding-debounce guard)
+// BEFORE doing any work. On a won claim it assembles a channel-neutral transcript
+// from stored messages, calls the extraction driver, and applies the result via
+// the guarded apply service. Designed to be called by a setInterval in worker.ts
+// and by the deterministic dev tick (routes/dev.ts).
+//
+// *** SINGLE-INSTANCE SEAM (load-bearing) ***
+// When this poll runs in the WORKER process, apply.ts's `suggestion.updated`
+// emit goes to the worker's in-process event bus and NEVER reaches the app's SSE
+// clients (lib/events.ts single-instance assumption: only the app process serves
+// the SSE stream). So in v1 the dashboard's LIVE update path for suggestions is
+// the in-app dev tick (hermetic e2e) + the accept/dismiss round-trips; a
+// worker-poller-driven change simply appears on the next dashboard fetch. This is
+// intentional for v1 - do NOT try to bridge it here.
+//
+// PII (doc section 9): NEVER log message bodies or phone numbers. Log only
+// conversationId / contactId / counts.
+import type { AppConfig } from '../lib/config.js';
+import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import type { createExtractionRepo, DueExtractionItem } from '../repos/extractionRepo.js';
+import type { ConversationsRepo } from '../repos/conversationsRepo.js';
+import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
+import { contactPhones, PHONE_REF_PREFIX } from '../repos/contactsRepo.js';
+import type { MessageItem, MessagesRepo } from '../repos/messagesRepo.js';
+import type {
+  ExtractionDriver,
+  ExtractionProfileSnapshot,
+  TranscriptUtterance,
+} from '../adapters/extraction.js';
+import { applyExtraction, type ApplyDeps } from '../services/extraction/apply.js';
+
+/** Consecutive failures before an item is PARKED (no further auto-retries). */
+export const MAX_EXTRACTION_ATTEMPTS = 5;
+/** Newest N messages pulled per conversation for the transcript window. */
+export const MAX_TRANSCRIPT_MESSAGES = 50;
+/** Messages older than this are dropped from the transcript window. */
+export const MAX_TRANSCRIPT_AGE_DAYS = 30;
+
+/** Backoff is never longer than one hour. */
+const MAX_BACKOFF_MS = 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
+export interface ExtractionJobDeps {
+  repo: ReturnType<typeof createExtractionRepo>;
+  conversations: Pick<ConversationsRepo, 'getById'>;
+  messages: Pick<MessagesRepo, 'listByConversation'>;
+  contacts: Pick<ContactsRepo, 'getById' | 'findByPhone' | 'update' | 'addPhone'>;
+  driver: ExtractionDriver;
+  /** Built once by the caller (worker.ts / dev tick) and reused per row. */
+  applyDeps: ApplyDeps;
+  config: Pick<AppConfig, 'aiExtractionDebounceMs'>;
+  logger: Logger;
+}
+
+/** Read a string field off the flexible contact document, or undefined. */
+function str(v: unknown): string | undefined {
+  return typeof v === 'string' && v.length > 0 ? v : undefined;
+}
+
+/** Build the ExtractionProfileSnapshot the model reconciles against. */
+function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
+  const profile: ExtractionProfileSnapshot = {
+    contactType: contact.type,
+    phones: contactPhones(contact).map((p) => p.phone),
+  };
+  const status = str(contact.status);
+  if (status !== undefined) profile.status = status;
+  const firstName = str(contact['firstName']);
+  if (firstName !== undefined) profile.firstName = firstName;
+  const lastName = str(contact['lastName']);
+  if (lastName !== undefined) profile.lastName = lastName;
+  if (typeof contact['voucherSize'] === 'number') profile.voucherSize = contact['voucherSize'];
+  const housingAuthority = str(contact['housingAuthority']);
+  if (housingAuthority !== undefined) profile.housingAuthority = housingAuthority;
+  const pets = str(contact['pets']);
+  if (pets !== undefined) profile.pets = pets;
+  const evictions = str(contact['evictions']);
+  if (evictions !== undefined) profile.evictions = evictions;
+  const tenure = str(contact['tenure']);
+  if (tenure !== undefined) profile.tenure = tenure;
+  if (typeof contact.porting === 'boolean') profile.porting = contact.porting;
+  const notes = str(contact['notes']);
+  if (notes !== undefined) profile.notes = notes;
+  return profile;
+}
+
+/** Map a stored message to a channel-neutral transcript utterance. */
+function toUtterance(m: MessageItem): TranscriptUtterance {
+  return {
+    speaker: m.direction === 'inbound' ? 'client' : 'staff',
+    text: m.body ?? '[media]',
+    at: m.created_at,
+    channel: 'sms',
+  };
+}
+
+/**
+ * Process ONE due row end-to-end. Throws on driver/apply failure so the caller
+ * can route it through the backoff/park failure path; returns a discriminator
+ * so the caller can count processed vs nothing-to-do runs.
+ */
+async function processRow(
+  row: DueExtractionItem,
+  nowIso: string,
+  deps: ExtractionJobDeps,
+): Promise<'processed' | 'skipped'> {
+  const { repo, conversations, messages, contacts, driver, applyDeps, logger } = deps;
+  const conversationId = row.conversationId;
+  const cursor = row.cursor ?? '';
+
+  // Claim BEFORE any work: the conditional `dueAt = listedDueAt` guard means a
+  // row that slid forward (a newer inbound re-scheduled it) loses here, so a
+  // debounce burst yields exactly one run at the final dueAt.
+  const listedDueAt = row.dueAt;
+  if (listedDueAt === undefined) return 'skipped'; // defensive; listed rows carry it
+  const claimed = await repo.claim(conversationId, nowIso, listedDueAt);
+  if (!claimed) {
+    logger.debug({ conversationId }, 'extraction claim lost (slid or already claimed) - skipping');
+    return 'skipped';
+  }
+
+  // Resolve the conversation + its 1:1 contact.
+  const conv = await conversations.getById(conversationId);
+  const participant = conv?.participants?.[0];
+  let contact: ContactItem | undefined;
+  if (conv) {
+    if (participant?.contactId) {
+      contact = await contacts.getById(participant.contactId);
+    } else {
+      const phone = participant?.phone ?? conv.participant_phone;
+      if (phone) contact = await contacts.findByPhone(phone);
+    }
+  }
+
+  // Nothing to extract for: a missing conversation/contact, a landlord/team_member
+  // contact, or a bare phone-ref pointer item. Complete with the EXISTING cursor
+  // (never fail forever) so the row leaves the due index.
+  if (
+    !conv ||
+    !contact ||
+    contact.contactId.startsWith(PHONE_REF_PREFIX) ||
+    contact.type === 'landlord' ||
+    contact.type === 'team_member'
+  ) {
+    logger.debug({ conversationId }, 'extraction: nothing to extract (missing/ineligible contact) - completing');
+    await repo.complete(conversationId, cursor, nowIso);
+    return 'skipped';
+  }
+
+  // Transcript window: newest N messages, REVERSED to chronological, with rows
+  // older than MAX_TRANSCRIPT_AGE_DAYS dropped. The window deliberately INCLUDES
+  // messages at/before the cursor for context - the cursor marks progress, not a
+  // hard filter; we only RUN when a client utterance is newer than the cursor.
+  const newestFirst = await messages.listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES });
+  const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
+  const fresh = [...newestFirst].reverse().filter((m) => m.created_at >= cutoff);
+
+  const hasNewClient = fresh.some((m) => m.direction === 'inbound' && m.tsMsgId > cursor);
+  if (!hasNewClient) {
+    logger.debug({ conversationId }, 'extraction: no new client messages since cursor - completing');
+    await repo.complete(conversationId, cursor, nowIso);
+    return 'skipped';
+  }
+
+  const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
+  const transcript = fresh.map(toUtterance);
+
+  const result = await driver.extract({ transcript, profile: toProfile(contact) });
+  await applyExtraction(applyDeps, {
+    contact,
+    conversationId,
+    cursorTsMsgId: newestTsMsgId,
+    result,
+  });
+  await repo.complete(conversationId, newestTsMsgId, nowIso);
+  logger.info({ conversationId }, 'extraction run complete');
+  return 'processed';
+}
+
+/**
+ * The stateless poll handler. Queries all due rows at/before `nowIso` and
+ * processes each in isolation (a per-row error is logged + routed through the
+ * backoff/park failure path, never blocking the rest of the batch).
+ */
+export async function runDueExtractions(
+  nowIso: string,
+  deps: ExtractionJobDeps,
+): Promise<{ processed: number; failed: number }> {
+  const { repo, config, logger } = deps;
+  let processed = 0;
+  let failed = 0;
+
+  const dueRows = await repo.listDue(nowIso);
+  if (dueRows.length === 0) return { processed, failed };
+
+  logger.info({ count: dueRows.length }, 'extraction poll: processing due rows');
+
+  for (const row of dueRows) {
+    try {
+      const outcome = await processRow(row, nowIso, deps);
+      if (outcome === 'processed') processed += 1;
+    } catch (err) {
+      failed += 1;
+      // The driver or apply threw (incl. ExtractionRefusedError). Re-arm with
+      // exponential backoff off the CURRENT attempt count, or PARK once the
+      // next attempt would reach MAX_EXTRACTION_ATTEMPTS. Isolated per row.
+      const attempts = row.attempts ?? 0;
+      const nextDueAt =
+        attempts + 1 >= MAX_EXTRACTION_ATTEMPTS
+          ? null
+          : new Date(
+              Date.parse(nowIso) + Math.min(config.aiExtractionDebounceMs * 2 ** attempts, MAX_BACKOFF_MS),
+            ).toISOString();
+      const message = err instanceof Error ? err.message : String(err);
+      logger.error({ conversationId: row.conversationId, attempts, parked: nextDueAt === null }, 'extraction poll: row failed');
+      try {
+        await repo.fail(row.conversationId, message, nextDueAt);
+      } catch (failErr) {
+        logger.error({ conversationId: row.conversationId, err: failErr }, 'extraction poll: fail() write errored');
+      }
+    }
+  }
+
+  return { processed, failed };
+}

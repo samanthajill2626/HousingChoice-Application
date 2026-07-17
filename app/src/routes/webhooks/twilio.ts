@@ -132,6 +132,19 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
   }
 }
 
+/**
+ * Sort relay groups NEWEST-first by created_at (missing created_at sorts last).
+ * Used to break ties in (To, From) resolution: at most one OPEN group should
+ * match by the burn invariant, but a corrupt-many is disambiguated to the
+ * newest (never a crash), and a sender in several CLOSED groups on one number
+ * routes to the newest for provenance.
+ */
+function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
+  const aC = a.created_at ?? '';
+  const bC = b.created_at ?? '';
+  return aC < bC ? 1 : aC > bC ? -1 : 0;
+}
+
 export interface TwilioWebhookDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -364,7 +377,6 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       deliveryStatus: 'delivered',
       relaySenderKey: senderKey,
       deliveryRecipients: {},
-      ...(isClosed && { receivedOnClosedThread: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -381,8 +393,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
-    // Closed-thread reply: flagged (receivedOnClosedThread above), NEVER fanned
-    // out — the conversation is over; the reply is kept for the record only.
+    // Closed-group defensive guard: the router only reaches this branch on the
+    // unknown-sender fallback (a member's late text is intercepted into the 1:1
+    // before this). Persist for the record, NEVER fan out - the group is over.
     if (isClosed) {
       log.info({ providerSid: MessageSid }, 'relay inbound on a CLOSED thread — persisted, no fan-out');
     } else if (!sender) {
@@ -430,6 +443,105 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   }
 
   // ---------------------------------------------------------------------
+  // Late text on a CLOSED relay group (relay-number-lifecycle, spec 3.1 step
+  // 3): the sender is only on a CLOSED group's roster for this pool number, so
+  // instead of appending to the dead group, deliver the message into their OWN
+  // 1:1 tenant/landlord thread (the public-intake idiom) tagged with
+  // via_closed_group provenance. No fan-out to old members, no auto-reply; the
+  // closed GROUP transcript receives nothing (the 1:1-with-provenance is
+  // strictly more useful and never pollutes group history). STOP/opt-out is NOT
+  // handled here (a lightweight intercept) - the message rides the normal
+  // append path unchanged.
+  // ---------------------------------------------------------------------
+  async function handleClosedGroupInbound(
+    group: ConversationItem,
+    msg: {
+      MessageSid: string;
+      From: string;
+      Body: string | undefined;
+      params: WebhookParams;
+    },
+  ): Promise<void> {
+    const { MessageSid, From, Body } = msg;
+    const mediaUrls = parseInboundMediaUrls(msg.params);
+
+    // Resolve the sender's 1:1 thread exactly as the public-intake path does:
+    // honest conversation typing (only a reviewed contact type yields a typed
+    // thread), then createOrGetByParticipantPhone.
+    const contact = await contacts.findByPhone(From);
+    const conversation = await conversations.createOrGetByParticipantPhone(
+      From,
+      conversationTypeFor(contact),
+    );
+    mergeContext({ conversationId: conversation.conversationId });
+
+    const providerTs = new Date().toISOString();
+    const appended = await messages.append({
+      conversationId: conversation.conversationId,
+      providerSid: MessageSid,
+      providerTs,
+      type: mediaUrls.length > 0 ? 'mms' : 'sms',
+      direction: 'inbound',
+      // Same honesty rule as the 1:1 path: only a reviewed contact type may
+      // claim tenant/landlord authorship; everything else is `unknown`.
+      author:
+        contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown',
+      // Inbound messages are received by definition.
+      deliveryStatus: 'delivered',
+      // Provenance: the pool number this reached only matches From on the CLOSED
+      // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
+      viaClosedGroup: group.conversationId,
+      ...(Body !== undefined && Body.length > 0 && { body: Body }),
+      ...(mediaUrls.length > 0 && { mediaUrls }),
+    });
+
+    // Mirror MMS media on the FIRST delivery only (a redelivery is deduped ->
+    // already mirrored). Best-effort (mirrorInboundMedia never throws).
+    if (!appended.deduped) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: conversation.conversationId,
+        tsMsgId: appended.tsMsgId,
+        params: msg.params,
+      });
+    }
+
+    // Inbox touch + unread + SSE - the minimal 1:1 subset (fresh-append only, so
+    // a redelivery never double-counts/re-emits). Side-effect failures never
+    // crash the webhook.
+    let touched: ConversationItem | undefined;
+    try {
+      if (!appended.deduped) await conversations.incrementUnread(conversation.conversationId);
+      touched = await conversations.touchLastActivity(
+        conversation.conversationId,
+        Body || undefined,
+        providerTs,
+      );
+    } catch (err) {
+      log.error(
+        { err, providerSid: MessageSid },
+        'closed-group late text touchLastActivity/unread failed - message persisted, inbox stale',
+      );
+    }
+    if (!appended.deduped) {
+      events.emit('message.persisted', {
+        conversationId: conversation.conversationId,
+        tsMsgId: appended.tsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+    // PII (doc sec 9): IDs only - never the sender phone. viaGroup = the closed
+    // group's id; conversationId = the 1:1 the text was intercepted into.
+    log.info(
+      { conversationId: conversation.conversationId, viaGroup: group.conversationId },
+      'relay late text on closed group - delivered to 1:1 with provenance',
+    );
+  }
+
+  // ---------------------------------------------------------------------
   // Inbound message webhook — pipeline order per doc §7.1.
   // ---------------------------------------------------------------------
   router.post('/sms', verifySignature, async (req, res) => {
@@ -455,22 +567,65 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
-    if (await conversations.getByPoolNumber(From)) {
+    // Multiplexing: a pool number fronts MANY groups (open + closed), so the
+    // echo guard checks getAllByPoolNumber (any group, open or closed). The
+    // voice-only getByPoolNumber wrapper is no longer used on the SMS path.
+    if ((await conversations.getAllByPoolNumber(From)).length > 0) {
       log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is a pool number) — acknowledged, dropped');
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
 
-    // (1.5) Relay routing (M1.7): if To is one of our pool numbers, this is an
-    // inbound to a relay group — route it to the relay path (fan-out to the
-    // other members), NOT the 1:1 path. The byPoolNumber GSI read is the cheap
-    // lookup (never a scan); "found" means "To is a pool number".
+    // (1.5) Relay routing (relay-number-lifecycle): a pool number now fronts
+    // MANY participant-disjoint groups (concurrently + over time), so inbound
+    // resolves on (To, From) via getAllByPoolNumber (open + closed - pool_number
+    // is never cleared). The byPoolNumber GSI read is still the cheap lookup
+    // (never a scan). Zero groups on To -> fall through to the normal 1:1 path.
     if (To !== undefined && To.length > 0) {
-      const relay = await conversations.getByPoolNumber(To);
-      if (relay) {
-        await handleRelayInbound(relay, { MessageSid, From, To, Body, params });
-        res.type('text/xml').send(EMPTY_TWIML);
-        return;
+      const groups = await conversations.getAllByPoolNumber(To);
+      if (groups.length > 0) {
+        // (a) OPEN group whose roster contains the sender -> today's relay path
+        //     (fan-out, DLR pointers, STOP handling all unchanged). The burn
+        //     invariant guarantees at most one; a corrupt-many routes to the
+        //     newest and logs an error (never crashes the webhook).
+        const openMatches = groups.filter(
+          (g) => g.status === 'open' && (g.participants ?? []).some((m) => m.phone === From),
+        );
+        if (openMatches.length > 1) {
+          log.error(
+            { providerSid: MessageSid, matchCount: openMatches.length },
+            'multiple OPEN relay groups on one pool number match the sender (burn invariant violated) - routing to the newest',
+          );
+        }
+        const openMatch = openMatches.sort(byNewestCreated)[0];
+        if (openMatch) {
+          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
+          return;
+        }
+        // (b) Else a CLOSED group whose roster contains the sender -> deliver
+        //     the late text into the sender's OWN 1:1 thread with provenance
+        //     (newest of several - a person can be in several closed groups on
+        //     one number over the years). No fan-out, no group append.
+        const closedMatch = groups
+          .filter((g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From))
+          .sort(byNewestCreated)[0];
+        if (closedMatch) {
+          await handleClosedGroupInbound(closedMatch, { MessageSid, From, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
+          return;
+        }
+        // (c) Unknown sender texting a pool number: keep today's non-member
+        //     behavior (persist for the record, no fan-out) on the newest OPEN
+        //     group if any, else the newest group overall.
+        const fallback =
+          groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0] ??
+          [...groups].sort(byNewestCreated)[0];
+        if (fallback) {
+          await handleRelayInbound(fallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
+          return;
+        }
       }
     }
 

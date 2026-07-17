@@ -467,6 +467,9 @@ const searchingTenant = {
       { contactId: C_SEARCHING, phone: PHONES.searchingTenant, name: 'Monique Everett' },
       { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
     ],
+    // Burn provenance (W1): the phones this group has burned on its pool number
+    // (same roster union as the pool's burned_phones). A JS Set marshals to SS.
+    ever_member_phones: new Set([PHONES.searchingTenant, '+15550100002']),
     participant_display_name: 'Tour Group - Monique Everett',
     last_message_preview: "Hello! I'm Monique Everett. Looking forward to seeing the place.",
     pool_number: RELAY_POOL_PHONE,
@@ -715,6 +718,8 @@ const touredYesTenant = {
       { contactId: C_TOURED_YES, phone: PHONES.touredYes, name: 'Brianna Whitfield' },
       { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
     ],
+    // Burn provenance (W1): the phones this group has burned (roster union).
+    ever_member_phones: new Set([PHONES.touredYes, '+15550100002']),
     participant_display_name: 'Tour Group - Brianna Whitfield',
     last_message_preview: 'See you at 2pm Saturday!',
     pool_number: RELAY_POOL_TOURED,

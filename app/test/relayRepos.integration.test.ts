@@ -6,7 +6,7 @@
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
 // `npm test` stays green without Docker (`npm run db:start` to run for real).
 import { randomUUID } from 'node:crypto';
-import { QueryCommand } from '@aws-sdk/lib-dynamodb';
+import { QueryCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -123,6 +123,56 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect(removed.participants).toHaveLength(1);
     const removedAgain = await conversations.removeMember(created.conversationId, '+15550100004');
     expect(removedAgain.participants).toHaveLength(1); // idempotent
+  });
+
+  it('W1: ever_member_phones seeds from the roster, EXTENDS on add, and SURVIVES remove', async () => {
+    const pool = `+1555043${Math.floor(Math.random() * 9000 + 1000)}`;
+    const A = '+15550100050';
+    const B = '+15550100051';
+    const C = '+15550100052';
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [
+        { contactId: 'c1', phone: A },
+        { contactId: 'c2', phone: B },
+      ],
+    });
+    // Seeded from the initial roster (a real DynamoDB string set).
+    const seeded = await conversations.getById(created.conversationId);
+    expect([...(seeded!.ever_member_phones as Set<string>)].sort()).toEqual([A, B].sort());
+    // A real add EXTENDS the provenance set.
+    await conversations.addMember(created.conversationId, { contactId: 'c3', phone: C });
+    const afterAdd = await conversations.getById(created.conversationId);
+    expect([...(afterAdd!.ever_member_phones as Set<string>)].sort()).toEqual([A, B, C].sort());
+    // A remove leaves ever_member_phones INTACT (a burn is forever).
+    await conversations.removeMember(created.conversationId, C);
+    const afterRemove = await conversations.getById(created.conversationId);
+    expect([...(afterRemove!.ever_member_phones as Set<string>)]).toContain(C);
+    expect((afterRemove!.participants ?? []).map((p) => p.phone)).not.toContain(C);
+  });
+
+  it('W1: a legacy group (attr absent) INITIALIZES ever_member_phones from the roster on first add', async () => {
+    const pool = `+1555043b${Math.floor(Math.random() * 9000 + 1000)}`;
+    const A = '+15550100060';
+    const B = '+15550100061';
+    const created = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: A }],
+    });
+    // Model a PRE-W1 row: strip the attribute createRelayGroup now seeds.
+    await doc.send(
+      new UpdateCommand({
+        TableName: tableName('conversations', testEnv),
+        Key: { conversationId: created.conversationId },
+        UpdateExpression: 'REMOVE ever_member_phones',
+      }),
+    );
+    expect((await conversations.getById(created.conversationId))!.ever_member_phones).toBeUndefined();
+    // First add on the legacy group: the set is initialized from the post-add
+    // roster {A, B} (the current members' burns belong to this group).
+    await conversations.addMember(created.conversationId, { contactId: 'c2', phone: B });
+    const after = await conversations.getById(created.conversationId);
+    expect([...(after!.ever_member_phones as Set<string>)].sort()).toEqual([A, B].sort());
   });
 
   it('FIX 3: concurrent addMember calls both land (optimistic-concurrency version guard, no silent clobber)', async () => {
@@ -393,8 +443,46 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
       poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
       burn: ['+15551110001'],
     });
+    // W2: release now goes active -> releasing -> released (the fence).
+    await poolNumbers.beginRelease(pn);
     await poolNumbers.releaseNumber(pn);
     expect(await poolNumbers.burnClaim(pn, ['+15551119998'])).toBeUndefined();
+  });
+
+  it('W2: burnClaim REFUSES a number claimed for release (releasing) - the TOCTOU fence', async () => {
+    const pn = poolPn('+1555065b');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    // Claim for release: burnClaim (conditions on active) must now refuse, so no
+    // NEW group can land on a number mid-release.
+    expect(await poolNumbers.beginRelease(pn)).toMatchObject({ lifecycle_state: 'releasing' });
+    expect(await poolNumbers.burnClaim(pn, ['+15551119997'])).toBeUndefined();
+    // Aborting the release returns it to service - burnClaim works again.
+    expect(await poolNumbers.abortRelease(pn)).toMatchObject({ lifecycle_state: 'active' });
+    expect(await poolNumbers.burnClaim(pn, ['+15551119997'])).toBeDefined();
+  });
+
+  it('W2: beginRelease/abortRelease/releaseNumber are conditional on the exact prior state', async () => {
+    const pn = poolPn('+1555065c');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    // releaseNumber straight from active is refused (must claim first).
+    expect(await poolNumbers.releaseNumber(pn)).toBeUndefined();
+    expect((await poolNumbers.get(pn))!.lifecycle_state).toBe('active');
+    // abortRelease from active is refused (nothing to roll back).
+    expect(await poolNumbers.abortRelease(pn)).toBeUndefined();
+    // Claim, then a SECOND claim is refused (already releasing).
+    expect(await poolNumbers.beginRelease(pn)).toMatchObject({ lifecycle_state: 'releasing' });
+    expect(await poolNumbers.beginRelease(pn)).toBeUndefined();
+    // Finalize releasing -> released; a second finalize is refused.
+    expect(await poolNumbers.releaseNumber(pn)).toMatchObject({ lifecycle_state: 'released' });
+    expect(await poolNumbers.releaseNumber(pn)).toBeUndefined();
+    // abortRelease of a released number is refused (not releasing).
+    expect(await poolNumbers.abortRelease(pn)).toBeUndefined();
   });
 
   it('noteGroupClosed keeps the max timestamp (monotonic; never regresses)', async () => {
@@ -428,12 +516,14 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect(warned?.['hasRecord']).toBe(false);
   });
 
-  it('releaseNumber flips active->released once; a second call returns undefined', async () => {
+  it('releaseNumber flips releasing->released once; a second call returns undefined', async () => {
     const pn = poolPn('+1555067');
     await poolNumbers.create({
       poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
       burn: ['+15551110001'],
     });
+    // W2: the finalizer requires the beginRelease claim first (releasing).
+    await poolNumbers.beginRelease(pn);
     expect(await poolNumbers.releaseNumber(pn)).toMatchObject({ lifecycle_state: 'released' });
     expect(await poolNumbers.releaseNumber(pn)).toBeUndefined();
   });
@@ -447,9 +537,21 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
         burn: [`${p}-x`],
       });
     }
+    await poolNumbers.beginRelease(b);
     await poolNumbers.releaseNumber(b);
     const active = (await poolNumbers.listActive()).map((i) => i.poolNumber);
     expect(active).toContain(a);
     expect(active).not.toContain(b);
+  });
+
+  it('W2: listActive also excludes a number mid-release (releasing)', async () => {
+    const pn = poolPn('+1555069b');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: [`${pn}-x`],
+    });
+    await poolNumbers.beginRelease(pn);
+    // A releasing number vanishes from the reuse candidate set instantly.
+    expect((await poolNumbers.listActive()).map((i) => i.poolNumber)).not.toContain(pn);
   });
 });

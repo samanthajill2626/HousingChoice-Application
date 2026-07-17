@@ -74,9 +74,24 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
       const existing = item.last_group_closed_at;
       if (existing === undefined || existing < closedAt) item.last_group_closed_at = closedAt;
     },
-    async releaseNumber(poolNumber) {
+    async beginRelease(poolNumber) {
+      // W2: active -> releasing (the sweep's claim).
       const item = store.get(poolNumber);
       if (!item || item.lifecycle_state !== 'active') return undefined;
+      item.lifecycle_state = 'releasing';
+      return item;
+    },
+    async abortRelease(poolNumber) {
+      // W2: releasing -> active (rollback).
+      const item = store.get(poolNumber);
+      if (!item || item.lifecycle_state !== 'releasing') return undefined;
+      item.lifecycle_state = 'active';
+      return item;
+    },
+    async releaseNumber(poolNumber) {
+      // W2: finalize from RELEASING only (beginRelease must claim first).
+      const item = store.get(poolNumber);
+      if (!item || item.lifecycle_state !== 'releasing') return undefined;
       item.lifecycle_state = 'released';
       item.released_at = new Date().toISOString();
       return item;
@@ -395,7 +410,7 @@ describe('poolNumbersService.retireEligible', () => {
     expect(adapter.released).toEqual([]);
   });
 
-  it('adapter failure on one number: it stays active, error logged, the sweep continues', async () => {
+  it('adapter failure on one number: it ABORTS back to active, error logged, the sweep continues', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
     // First release throws; the second succeeds -> proves the sweep continues.
@@ -415,7 +430,74 @@ describe('poolNumbersService.retireEligible', () => {
 
     const released = await svc.retireEligible();
     expect(released).toEqual(['+1OK']); // only the one that dropped cleanly
-    expect(repo.store.get('+1FAILS')!.lifecycle_state).toBe('active'); // stayed active
+    // W2: the adapter failure ABORTED the release (releasing -> active). If the
+    // abort had NOT run it would be stuck 'releasing'; 'active' proves the roll-back.
+    expect(repo.store.get('+1FAILS')!.lifecycle_state).toBe('active');
     expect(repo.store.get('+1OK')!.lifecycle_state).toBe('released');
+  });
+
+  // --- W2 TOCTOU fence -----------------------------------------------------
+  it('W2 happy path: claims BEFORE dropping at Twilio, finalizes AFTER (active -> releasing -> released)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1WALK', OLD_CLOSE);
+    // Capture the lifecycle_state at the instant the adapter drop runs - it must
+    // already be 'releasing' (claimed by beginRelease), proving no NEW group
+    // could have burned onto it while we hand it back.
+    let stateAtDrop: string | undefined;
+    adapter.releasePhoneNumber = async (pn: string) => {
+      stateAtDrop = repo.store.get(pn)!.lifecycle_state;
+      adapter.released.push(pn);
+    };
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1WALK': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    expect(await svc.retireEligible()).toEqual(['+1WALK']);
+    expect(stateAtDrop).toBe('releasing'); // claimed before the Twilio drop
+    expect(repo.store.get('+1WALK')!.lifecycle_state).toBe('released'); // finalized after
+  });
+
+  it('W2: burnClaim is REFUSED while a number is mid-release (releasing); abort restores it', async () => {
+    const repo = makeFakeRepo();
+    await repo.create({
+      poolNumber: '+1REL', voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: ['+15551110001'],
+    });
+    // beginRelease claims it; burnClaim (conditions on active) now refuses, so no
+    // NEW group can land on a number mid-release.
+    expect(await repo.beginRelease('+1REL')).toMatchObject({ lifecycle_state: 'releasing' });
+    expect(await repo.burnClaim('+1REL', ['+15551119990'])).toBeUndefined();
+    // Aborting the release returns it to service - burnClaim works again.
+    expect(await repo.abortRelease('+1REL')).toMatchObject({ lifecycle_state: 'active' });
+    expect(await repo.burnClaim('+1REL', ['+15551119990'])).toBeDefined();
+  });
+
+  it('W2 re-verify: a group that OPENS between the pre-veto and the claim ABORTS the release (adapter NOT called)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1RACE2', OLD_CLOSE);
+    // Pre-veto (1st read) sees only a closed group; the re-verify (2nd read, after
+    // the claim) sees a newly-OPEN group -> abort, and the adapter is never called.
+    let reads = 0;
+    const conversationsRepo = {
+      async getAllByPoolNumber() {
+        reads += 1;
+        return (reads === 1
+          ? [{ status: 'closed' }]
+          : [{ status: 'closed' }, { status: 'open' }]) as ConversationItem[];
+      },
+    } as unknown as ConversationsRepo;
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo, logger, now: () => NOW,
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    expect(await svc.retireEligible()).toEqual([]);
+    expect(adapter.released).toEqual([]); // never dropped at Twilio
+    expect(repo.store.get('+1RACE2')!.lifecycle_state).toBe('active'); // aborted back to active
+    expect(reads).toBe(2); // pre-veto + the fresh re-verify both ran
   });
 });

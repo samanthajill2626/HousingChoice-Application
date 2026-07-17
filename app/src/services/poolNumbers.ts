@@ -13,9 +13,12 @@
 //       voice webhook.
 //
 // retireEligible(): release every active number with ZERO open groups whose
-// newest group closed more than RELEASE_GRACE_MS ago (drop it at Twilio, then
-// mark released). Gated behind relayNumberReleaseEnabled (off everywhere by
-// default). noteGroupClosed() stamps the retirement clock on close.
+// newest group closed more than RELEASE_GRACE_MS ago. W2 TOCTOU fence per
+// candidate: CLAIM active->releasing (fences burnClaim + reopen), RE-VERIFY zero
+// open groups with a fresh read (abort->active if any), drop at Twilio (abort on
+// failure), then FINALIZE releasing->released. Gated behind
+// relayNumberReleaseEnabled (off everywhere by default). noteGroupClosed()
+// stamps the retirement clock on close.
 //
 // PII: a phone number is PII (doc section 9) - log states/counts/SIDs only.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
@@ -98,6 +101,15 @@ export interface PoolNumbersService {
   /** Stamp a group-close time onto the number (the retirement clock). */
   noteGroupClosed(poolNumber: string, closedAt: string): Promise<void>;
   /**
+   * Burn ONE additional member phone onto an existing group's pool number - the
+   * add-member claim (W1). A thin single-phone repo.burnClaim: returns true when
+   * the burn succeeded (the phone was free on this number), false when it
+   * conflicts (already burned here by another group, so the add must be refused
+   * to keep (To,From) routing unique and block future reuse). Never mutates on a
+   * conflict (atomic conditional ADD).
+   */
+  burnMember(poolNumber: string, phone: string): Promise<boolean>;
+  /**
    * Read the pool record (thin repo.get passthrough). Used by the reopen route
    * (AF-3) to refuse reopening a group onto a number that retirement RELEASED -
    * a pure status flip would otherwise mint a zombie open group on a number we
@@ -141,6 +153,23 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
   // Release-eligibility sweep (D7). Config-gated; returns the numbers released.
   // Defined before the return so the lazy sweep in provisionForGroup can call it
   // without `this`.
+  // Roll a claimed number back to service (releasing -> active). If the abort
+  // ITSELF fails the number is stuck 'releasing' - HARMLESS to routing (an open
+  // group's number is never a candidate; a stuck number just can't be reused or
+  // released until manual attention). Log LOUDLY (RUNBOOK has the operator
+  // remedy). PII: reason/state only, never the number.
+  async function abortRelease(poolNumber: string, reason: string): Promise<void> {
+    const back = await repo.abortRelease(poolNumber);
+    if (back === undefined) {
+      log.error(
+        { reason },
+        'relay retirement: abortRelease FAILED - number stuck in releasing (manual attention needed)',
+      );
+    } else {
+      log.info({ reason }, 'relay retirement: release aborted - number back in service');
+    }
+  }
+
   async function retireEligible(): Promise<string[]> {
     if (!config.relayNumberReleaseEnabled) return [];
     const cutoff = now().getTime() - RELEASE_GRACE_MS;
@@ -149,18 +178,39 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // Must have hosted a group AND that newest close is past the grace window.
       const closedAt = record.last_group_closed_at;
       if (closedAt === undefined || Date.parse(closedAt) > cutoff) continue;
-      // Live veto: never release a number still fronting an OPEN group, and never
-      // release one with zero groups (a fresh unused number caught by timestamps).
+      // Cheap PRE-veto (skip obviously-live numbers without claim/abort churn);
+      // the AUTHORITATIVE veto is the post-claim re-verify below.
       const groups = await conversations.getAllByPoolNumber(record.poolNumber);
       if (groups.length === 0 || groups.some((g) => g.status === 'open')) continue;
-      // Drop it at Twilio FIRST; if that fails the number STAYS active (logged,
-      // sweep continues) so we never mark released a number Twilio still owns.
+
+      // (1) CLAIM active -> releasing (W2 TOCTOU fence). From here burnClaim
+      // refuses this number and listActive skips it, so no NEW group can land
+      // while we hand it back; the reopen guard (lifecycle_state !== 'active')
+      // also refuses a reopen. A lost claim (concurrent state change) -> skip.
+      const claimed = await repo.beginRelease(record.poolNumber);
+      if (claimed === undefined) continue;
+
+      // (2) RE-VERIFY with a FRESH read: a group may have opened between the
+      // pre-veto and the claim. Any open (or now zero groups) -> abort + skip,
+      // and the adapter is NEVER called for it.
+      const fresh = await conversations.getAllByPoolNumber(record.poolNumber);
+      if (fresh.length === 0 || fresh.some((g) => g.status === 'open')) {
+        await abortRelease(record.poolNumber, 'open group found on re-verify');
+        continue;
+      }
+
+      // (3) Drop it at Twilio. On failure ABORT back to active (matches the
+      // existing adapter-failure contract - the number stays fully reusable) and
+      // continue; we never mark released a number Twilio still owns.
       try {
         await adapter.releasePhoneNumber(record.poolNumber);
       } catch (err) {
-        log.error({ err }, 'relay retirement: releasePhoneNumber failed - number stays active');
+        log.error({ err }, 'relay retirement: releasePhoneNumber failed - aborting release');
+        await abortRelease(record.poolNumber, 'adapter release failed');
         continue;
       }
+
+      // (4) FINALIZE releasing -> released.
       const releasedRec = await repo.releaseNumber(record.poolNumber);
       if (releasedRec !== undefined) released.push(record.poolNumber);
     }
@@ -290,6 +340,14 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
 
     async noteGroupClosed(poolNumber, closedAt) {
       await repo.noteGroupClosed(poolNumber, closedAt);
+    },
+
+    async burnMember(poolNumber, phone) {
+      // The add-member claim (W1): burn ONE phone onto this group's number. The
+      // repo's conditional ADD is the atomic arbiter - undefined => the phone is
+      // already burned here (another group's history), so the add is refused.
+      const claimed = await repo.burnClaim(poolNumber, [phone]);
+      return claimed !== undefined;
     },
 
     async getRecord(poolNumber) {

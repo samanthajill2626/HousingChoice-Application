@@ -1361,6 +1361,9 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
       return { poolNumber, record: rec(poolNumber), provisioned: true };
     },
     async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
@@ -1379,6 +1382,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
       throw new RelayProvisioningDisabledError('set RELAY_LIVE_PROVISIONING=true after A2P approval');
     },
     async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
@@ -1394,6 +1400,9 @@ function makeVoiceCapabilityFailingPool(): PoolNumbersService {
       throw new VoiceCapabilityError('no voice-capable number available');
     },
     async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },

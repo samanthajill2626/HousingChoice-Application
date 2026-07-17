@@ -2,10 +2,15 @@
 // burn-multiplexing revision).
 //
 // A pool number is MULTIPLEXED across many relay groups. Its lifecycle:
-//   - active    in service; hosts any number of groups (concurrently and over
-//               time) whose rosters do not overlap its burn history.
-//   - released  handed back to Twilio after the 180-day retirement grace; the
-//               record (and its burn history) is kept forever as our audit.
+//   - active     in service; hosts any number of groups (concurrently and over
+//                time) whose rosters do not overlap its burn history.
+//   - releasing  TRANSITIONAL (W2 TOCTOU fence): the retirement sweep has
+//                claimed this number for release. burnClaim (conditions on
+//                active) refuses it and listActive no longer returns it, so no
+//                NEW group can land while it is handed back to Twilio; the sweep
+//                either finalizes it to released or aborts it back to active.
+//   - released   handed back to Twilio after the 180-day retirement grace; the
+//                record (and its burn history) is kept forever as our audit.
 //
 // The invariant is a permanent (number, phone) BURN: `burned_phones` is a
 // DynamoDB string set of every E.164 ever rostered on this number. Assignment
@@ -37,8 +42,14 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-/** Pool-number lifecycle states (burn-multiplexing revision). */
-export type PoolNumberLifecycleState = 'active' | 'released';
+/**
+ * Pool-number lifecycle states (burn-multiplexing revision). `releasing` is a
+ * transitional state the retirement sweep claims before dropping a number at
+ * Twilio (W2 TOCTOU fence) - byLifecycleState keys on the attribute value, so a
+ * releasing number simply vanishes from the 'active' partition (listActive /
+ * burnClaim) until the sweep finalizes (released) or aborts (active).
+ */
+export type PoolNumberLifecycleState = 'active' | 'releasing' | 'released';
 
 /**
  * Which messaging driver obtained the number (M1.7 kill-switch). A flexible doc
@@ -139,8 +150,25 @@ export interface PoolNumbersRepo {
    */
   noteGroupClosed(poolNumber: string, closedAt: string): Promise<void>;
   /**
-   * active -> released (+released_at), conditional on active. Idempotent: a
-   * condition failure (already released / missing) returns undefined.
+   * W2 TOCTOU fence, step 1: CLAIM a number for release (active -> releasing),
+   * conditional on active. Once releasing, burnClaim refuses it and listActive
+   * skips it, so no NEW group can land while the sweep drops it at Twilio.
+   * Returns the post-update item, or undefined on condition failure (already
+   * releasing/released, or a lost race).
+   */
+  beginRelease(poolNumber: string): Promise<PoolNumberItem | undefined>;
+  /**
+   * W2 TOCTOU fence, ROLLBACK: return a claimed number to service (releasing ->
+   * active), conditional on releasing. Called when the re-verify finds an open
+   * group or the Twilio drop fails - the number stays fully reusable. Returns
+   * the post-update item, or undefined on condition failure (not releasing).
+   */
+  abortRelease(poolNumber: string): Promise<PoolNumberItem | undefined>;
+  /**
+   * W2 TOCTOU fence, FINALIZER: releasing -> released (+released_at), conditional
+   * on releasing (NOT active - beginRelease must claim first). Idempotent: a
+   * condition failure (already released / not releasing / missing) returns
+   * undefined.
    */
   releaseNumber(poolNumber: string): Promise<PoolNumberItem | undefined>;
 }
@@ -295,6 +323,50 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
       }
     },
 
+    async beginRelease(poolNumber) {
+      // W2 fence step 1: atomically claim active -> releasing. The number leaves
+      // the 'active' partition (listActive) and burnClaim refuses it instantly.
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'SET lifecycle_state = :releasing',
+            ConditionExpression: 'lifecycle_state = :active',
+            ExpressionAttributeValues: { ':releasing': 'releasing', ':active': 'active' },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ lifecycleState: 'releasing' }, 'pool number release claimed');
+        return Attributes as PoolNumberItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return undefined;
+        throw err;
+      }
+    },
+
+    async abortRelease(poolNumber) {
+      // W2 fence rollback: releasing -> active. Restores full reusability when a
+      // re-verify finds an open group or the Twilio drop fails.
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'SET lifecycle_state = :active',
+            ConditionExpression: 'lifecycle_state = :releasing',
+            ExpressionAttributeValues: { ':active': 'active', ':releasing': 'releasing' },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ lifecycleState: 'active' }, 'pool number release aborted (back in service)');
+        return Attributes as PoolNumberItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return undefined;
+        throw err;
+      }
+    },
+
     async releaseNumber(poolNumber) {
       const now = new Date().toISOString();
       try {
@@ -303,10 +375,12 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
             TableName: table,
             Key: { poolNumber },
             UpdateExpression: 'SET lifecycle_state = :released, released_at = :now',
-            ConditionExpression: 'lifecycle_state = :active',
+            // W2: finalize from RELEASING (the sweep's beginRelease claim), never
+            // straight from active - so a release cannot skip the fence.
+            ConditionExpression: 'lifecycle_state = :releasing',
             ExpressionAttributeValues: {
               ':released': 'released',
-              ':active': 'active',
+              ':releasing': 'releasing',
               ':now': now,
             },
             ReturnValues: 'ALL_NEW',

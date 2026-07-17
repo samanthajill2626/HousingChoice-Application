@@ -174,6 +174,25 @@ export interface ConversationItem {
    * on close. Absent until the first deferral. Relay groups only.
    */
   close_nag_next_at?: string;
+  /**
+   * Burn provenance (relay groups): the E.164 phones whose burn on this group's
+   * pool number belongs to THIS group's history - seeded from the initial roster
+   * at createRelayGroup and ADDed on every member add. A DynamoDB string set
+   * (reads back as a JS Set<string>); absent on legacy groups created before this
+   * attribute existed (member-add initializes it from the current roster then).
+   * Member REMOVE never touches it - a burn is forever, so a removed member can
+   * be re-added without a fresh (number, phone) claim.
+   */
+  ever_member_phones?: Set<string> | string[];
+  /**
+   * Close-announce dedup claim: the instant the ONE relay.group_closed final
+   * message was claimed (set by the atomic claimCloseAnnounce, condition
+   * status=open AND this attr absent). Cleared on reopen so a future close
+   * announces again. Its presence-while-open is the crash-retry marker: a close
+   * retry after a crash-between-announce-and-flip sees it set and skips the
+   * (already-sent) announcement, proceeding straight to the idempotent flip.
+   */
+  close_announced_at?: string;
   [key: string]: unknown;
 }
 
@@ -483,6 +502,17 @@ export interface ConversationsRepo {
    */
   setCloseNagNextAt(conversationId: string, at: string | null): Promise<void>;
   /**
+   * W3 close-announce dedup claim. Atomically SET close_announced_at conditional
+   * on the group being OPEN and the marker absent; returns true for the ONE
+   * winner (which then sends the relay.group_closed announcement) and false for
+   * losers/retries (already closed, already announced, or missing) - which skip
+   * the announcement and proceed to the idempotent status flip. Closes both the
+   * concurrent-close double-announce TOCTOU and the crash-between-announce-and-
+   * flip retry. Reopen clears the marker (setRelayStatus -> open) so a later
+   * close announces again.
+   */
+  claimCloseAnnounce(conversationId: string): Promise<boolean>;
+  /**
    * Record ONE relay member as opted-out on the conversation's
    * `relay_opted_out_members` map (A2P — the fan-out detected `sms_opt_out` and
    * skipped them). MERGES a single map slot (a targeted `SET
@@ -556,6 +586,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     conversationId: string,
     op: string,
     mutate: (roster: ConversationParticipant[]) => ConversationParticipant[] | undefined,
+    everMemberAdd?: string,
   ): Promise<ConversationItem> {
     for (let attempt = 0; attempt < ROSTER_MAX_RETRIES; attempt++) {
       const existing = await getById(conversationId);
@@ -573,21 +604,41 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       }
       const currentVersion =
         typeof existing.participants_version === 'number' ? existing.participants_version : 0;
+      // Burn provenance (W1): on the ADD path, record the added phone in
+      // ever_member_phones in the SAME conditional write as the roster (roster +
+      // provenance move together atomically). A LEGACY group (attr absent) is
+      // SEEDED from the post-add roster - its current members' burns
+      // definitionally belong to this group's provisioning - so a later
+      // remove-then-re-add of any of them needs no fresh claim; an existing set
+      // is extended with an ADD clause. removeMember passes no everMemberAdd (a
+      // burn is forever - history never shrinks).
+      const values: Record<string, unknown> = {
+        ':p': next,
+        ':curV': currentVersion,
+        ':nextV': currentVersion + 1,
+      };
+      let setExtra = '';
+      let addClause = '';
+      if (everMemberAdd !== undefined) {
+        if (existing.ever_member_phones === undefined) {
+          values[':everSeed'] = new Set(next.map((m) => m.phone));
+          setExtra = ', ever_member_phones = :everSeed';
+        } else {
+          values[':everAdd'] = new Set([everMemberAdd]);
+          addClause = ' ADD ever_member_phones :everAdd';
+        }
+      }
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
-            UpdateExpression: 'SET participants = :p, participants_version = :nextV',
+            UpdateExpression: `SET participants = :p, participants_version = :nextV${setExtra}${addClause}`,
             // Existence guard + the optimistic-concurrency check: the roster's
             // version must be exactly what we read (or absent on first mutation).
             ConditionExpression:
               'attribute_exists(conversationId) AND (attribute_not_exists(participants_version) OR participants_version = :curV)',
-            ExpressionAttributeValues: {
-              ':p': next,
-              ':curV': currentVersion,
-              ':nextV': currentVersion + 1,
-            },
+            ExpressionAttributeValues: values,
             ReturnValues: 'ALL_NEW',
           }),
         );
@@ -951,6 +1002,12 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         // (fan-out sends are not breaker-metered — see relayFanOut).
         ai_mode: 'manual',
         participants: members,
+        // Burn provenance (W1): seed from the initial roster - these phones'
+        // burns on the pool number belong to THIS group. A JS Set marshals to a
+        // DynamoDB string set (empty sets are forbidden, so only when non-empty).
+        ...(members.length > 0 && {
+          ever_member_phones: new Set(members.map((m) => m.phone)),
+        }),
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
         // Legacy back-compat: write placementId when the owner IS a placement
@@ -1053,10 +1110,16 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // silent clobber. Idempotent on phone: re-adding an existing phone is a
       // success no-op that never bumps the version (so it can't spuriously
       // conflict with a concurrent change).
-      return rosterMutate(conversationId, 'addMember', (roster) => {
-        if (roster.some((p) => p.phone === member.phone)) return undefined; // no-op
-        return [...roster, member];
-      });
+      return rosterMutate(
+        conversationId,
+        'addMember',
+        (roster) => {
+          if (roster.some((p) => p.phone === member.phone)) return undefined; // no-op
+          return [...roster, member];
+        },
+        // Record this phone's burn provenance atomically with the roster (W1).
+        member.phone,
+      );
     },
 
     async removeMember(conversationId, phone) {
@@ -1077,11 +1140,18 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // makes the flip conditional on the current status so concurrent
       // close/reopen are idempotent (the loser's precondition fails and it
       // throws ConditionalCheckFailedException for the route to no-op).
+      // W3: a REOPEN (-> open) also REMOVEs close_announced_at, so a FUTURE close
+      // re-announces (the marker is atomically cleared with the reopen flip - a
+      // separate write could crash-window into a close that never announces). A
+      // close (-> closed) leaves the marker set (the claim just wrote it).
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
-          UpdateExpression: 'SET #s = :status, relay_status = :rs',
+          UpdateExpression:
+            status === 'open'
+              ? 'SET #s = :status, relay_status = :rs REMOVE close_announced_at'
+              : 'SET #s = :status, relay_status = :rs',
           ConditionExpression: 'attribute_exists(conversationId) AND #s = :expected',
           ExpressionAttributeNames: { '#s': 'status' },
           ExpressionAttributeValues: {
@@ -1094,6 +1164,34 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId, status }, 'relay status set');
       return Attributes as ConversationItem;
+    },
+
+    async claimCloseAnnounce(conversationId) {
+      // W3 dedup claim: atomically win the right to send the ONE
+      // relay.group_closed final message. SET close_announced_at conditional on
+      // the group being OPEN and the marker still absent - so exactly one caller
+      // wins under concurrent closes, and a close retry after a crash between
+      // announce and flip (marker set, status still open) LOSES here and skips
+      // the already-sent announcement. ConditionalCheckFailed (already closed /
+      // already announced / missing) -> false. PII: log conversationId only.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET close_announced_at = :now',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND #s = :open AND attribute_not_exists(close_announced_at)',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: { ':now': new Date().toISOString(), ':open': 'open' },
+          }),
+        );
+        log.info({ conversationId }, 'relay close announce claimed');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
     },
 
     async setCloseNagNextAt(conversationId, at) {

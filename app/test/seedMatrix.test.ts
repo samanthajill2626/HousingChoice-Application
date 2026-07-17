@@ -473,6 +473,28 @@ describe('seed matrix: pool numbers and relay conversations', () => {
     }
   });
 
+  // Burn provenance (W1): every seeded relay group carries ever_member_phones
+  // covering its own roster (the phones whose burn on the number belongs to
+  // THIS group) - so a member-add of an already-rostered person needs no fresh
+  // claim and seeds are add-member-ready natively (no first-add legacy init).
+  it('every relay group seeds ever_member_phones covering its roster', () => {
+    const relayConvs = allConversations.filter((c) => c['type'] === 'relay_group');
+    expect(relayConvs.length).toBeGreaterThanOrEqual(2);
+    for (const conv of relayConvs) {
+      const rawEver = conv['ever_member_phones'];
+      const ever = new Set(
+        rawEver instanceof Set ? [...rawEver] : ((rawEver as string[] | undefined) ?? []),
+      );
+      const rosterPhones = ((conv['participants'] as Array<{ phone: string }> | undefined) ?? []).map(
+        (m) => m.phone,
+      );
+      expect(rosterPhones.length).toBeGreaterThan(0);
+      for (const phone of rosterPhones) {
+        expect(ever.has(phone)).toBe(true);
+      }
+    }
+  });
+
   // The Today relay-close-nag card needs a live subject in the full profile.
   it('exactly one seeded open relay group carries a past-due close nag', () => {
     const nagGroups = allConversations.filter(

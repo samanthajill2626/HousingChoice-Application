@@ -280,6 +280,13 @@ npm run pool:retire --workspace app
 It builds the pool service, runs the eligibility sweep once, and prints the
 released numbers plus a count (or a no-op notice when the flag is off).
 
+**Stuck `releasing` number.** The sweep claims a number into a transitional
+`releasing` state before dropping it at Twilio (a TOCTOU fence). If the process
+dies mid-release, a number can be left in `releasing` - HARMLESS to routing (it
+just cannot be reused or released) but it will never retire on its own. Operator
+remedy: put it back in service by resetting its `lifecycle_state` to `active`
+(DynamoDB `pool_numbers` item, PK = the E.164) - the next sweep re-evaluates it.
+
 **A2P / Messaging Service caveat.** Release is a Twilio `IncomingPhoneNumbers`
 DELETE (the new adapter capability). A released number ceases to exist on the
 account, so it drops out of any Messaging Service sender pool / A2P campaign

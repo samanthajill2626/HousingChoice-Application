@@ -286,6 +286,9 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
           { contactId: LIVE_IDS.tenantA, phone: LIVE_IDS.tenantAPhone, name: 'Diana Osei' },
           { contactId: LIVE_IDS.landlordA, phone: LIVE_IDS.landlordAPhone, name: 'Gloria Mensah' },
         ],
+        // Burn provenance (W1): the phones this group has burned on its pool
+        // number (same roster union as the pool's burned_phones); Set -> SS.
+        ever_member_phones: new Set([LIVE_IDS.tenantAPhone, LIVE_IDS.landlordAPhone]),
         participant_display_name: 'Diana Osei + Gloria Mensah',
         owner: { type: 'tour', id: LIVE_IDS.tourTomorrow },
         last_activity_at: iso,

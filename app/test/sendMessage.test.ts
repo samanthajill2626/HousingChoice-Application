@@ -125,6 +125,7 @@ function makeFakes(
     getByPoolNumber: async () => undefined,
     getAllByPoolNumber: async () => [],
     setCloseNagNextAt: async () => {},
+    claimCloseAnnounce: async () => false,
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,

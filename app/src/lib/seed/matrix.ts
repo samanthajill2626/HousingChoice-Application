@@ -1144,6 +1144,12 @@ function buildRelayConversations(
       type: 'relay_group',
       ai_mode: 'manual',
       participants,
+      // Burn provenance (W1): the phones this group has burned on its pool
+      // number (its roster union - consistent-by-construction with burned_phones
+      // in buildPoolNumbers). Only when non-empty (DynamoDB forbids empty sets).
+      ...(participants.length > 0 && {
+        ever_member_phones: new Set(participants.map((m) => m.phone)),
+      }),
       owner: { type: 'tour', id: tourId },
       created_at: D.T2,
       // The FIRST matrix relay group (conv-mx-relay-01) carries a PAST-due close

@@ -72,6 +72,11 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async noteGroupClosed(poolNumber) {
       closed.push(poolNumber);
     },
+    // Default fake: always allow the add-member burn (existing add tests). The
+    // burn-faithful reuse/refusal path is exercised by makeBurnFaithfulPool below.
+    async burnMember() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
@@ -103,11 +108,64 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
       throw new RelayProvisioningDisabledError(DISABLED_MESSAGE);
     },
     async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
     async getRecord() {
       return undefined;
+    },
+  };
+}
+
+/**
+ * A BURN-FAITHFUL pool service (W1): models burned_phones per number so
+ * provisionForGroup reuses only non-overlapping numbers and burnMember refuses a
+ * phone already burned on a number. Lets a route test drive the real
+ * multiplexing/refusal behavior (the default fake always hands out fresh numbers
+ * and always allows the add). `burned` is exposed for atomicity assertions.
+ */
+function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<string>> } {
+  let counter = 0;
+  const burned = new Map<string, Set<string>>();
+  const rec = (poolNumber: string): PoolNumberItem => ({
+    poolNumber,
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z',
+    voice_capable: true,
+    sms_capable: true,
+    provisioned_at: new Date().toISOString(),
+  });
+  return {
+    burned,
+    async provisionForGroup(rosterPhones: string[]) {
+      // Reuse the first number whose burn does not overlap the roster; else buy.
+      for (const [pn, set] of burned) {
+        if (!rosterPhones.some((p) => set.has(p))) {
+          for (const p of rosterPhones) set.add(p);
+          return { poolNumber: pn, record: rec(pn), provisioned: false };
+        }
+      }
+      counter += 1;
+      const pn = `+1555070${String(counter).padStart(4, '0')}`;
+      burned.set(pn, new Set(rosterPhones));
+      return { poolNumber: pn, record: rec(pn), provisioned: true };
+    },
+    async noteGroupClosed() {},
+    async burnMember(poolNumber: string, phone: string) {
+      const set = burned.get(poolNumber) ?? new Set<string>();
+      burned.set(poolNumber, set);
+      if (set.has(phone)) return false; // already burned here -> conflict
+      set.add(phone);
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord(poolNumber: string) {
+      return rec(poolNumber);
     },
   };
 }
@@ -794,6 +852,258 @@ describe('relay-group API (M1.7)', () => {
     expect(
       world.messages.filter((m) => m.conversationId === id && m.relay_sender_key === 'system'),
     ).toHaveLength(2);
+  });
+
+  // --- W1: add-member burn gap (ever_member_phones provenance) --------------
+  describe('W1 add-member burn gap', () => {
+    const CAROL = '+15550100003';
+    const DAVE = '+15550100004';
+    const ERIN = '+15550100005';
+
+    it('adding a person already rostered on ANOTHER group sharing the number is refused (409 phone_conflict_on_number); roster + burn unchanged', async () => {
+      const pool = makeBurnFaithfulPool();
+      const { app } = authedHarness(world, pool);
+      // g1 {ALICE,BOB} -> N; g2 {CAROL,DAVE} REUSES N (disjoint rosters).
+      const g1 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE }, { phone: BOB }] });
+      const id1 = g1.body.conversation.conversationId as string;
+      const n = g1.body.conversation.pool_number as string;
+      const g2 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: CAROL }, { phone: DAVE }] });
+      expect(g2.body.conversation.pool_number).toBe(n); // multiplexed on ONE number
+      const burnBefore = [...(pool.burned.get(n) ?? [])].sort();
+
+      // Add CAROL (burned by g2 on N) to g1 -> refused, ATOMIC.
+      const add = await request(app)
+        .post(`/api/conversations/${id1}/members`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: CAROL });
+      expect(add.status).toBe(409);
+      expect(add.body.error).toBe('phone_conflict_on_number');
+      expect(add.body.message).toMatch(/new group text/i);
+      // Roster unchanged (CAROL not added); burn set unchanged (no partial add).
+      const g1After = await world.conversationsRepo.getById(id1);
+      expect((g1After!.participants ?? []).map((p) => p.phone)).toEqual([ALICE, BOB]);
+      expect([...(pool.burned.get(n) ?? [])].sort()).toEqual(burnBefore);
+      // Audited with actor + reason, and NO phone (PII).
+      const refusal = world.auditEvents.find((a) => a.event_type === 'relay_member_add_refused');
+      expect(refusal?.actorId).toBe(SESSION_USER_ID);
+      expect(refusal?.payload?.['reason']).toBe('phone_conflict_on_number');
+      expect(JSON.stringify(refusal)).not.toContain(CAROL);
+    });
+
+    it('via-reuse regression: a phone added to a group is BURNED, so a later group with that phone lands on a DIFFERENT number (variant b)', async () => {
+      const pool = makeBurnFaithfulPool();
+      const { app } = authedHarness(world, pool);
+      // g1 {ALICE} -> N.
+      const g1 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE }] });
+      const id1 = g1.body.conversation.conversationId as string;
+      const n = g1.body.conversation.pool_number as string;
+      // Add CAROL to g1 -> CAROL is burned onto N (the W1 fix).
+      const add = await request(app)
+        .post(`/api/conversations/${id1}/members`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: CAROL });
+      expect(add.status).toBe(200);
+      expect([...(pool.burned.get(n) ?? [])]).toContain(CAROL);
+
+      // A NEW group containing CAROL must NOT reuse N (CAROL now overlaps its
+      // burn). WITHOUT the burn-on-add fix this lands back on N (the bug).
+      const g2 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: CAROL }, { phone: ERIN }] });
+      expect(g2.status).toBe(201);
+      expect(g2.body.conversation.pool_number).not.toBe(n);
+    });
+
+    it('remove then re-add the SAME member succeeds without a 409 (a burn is forever)', async () => {
+      const pool = makeBurnFaithfulPool();
+      const { app } = authedHarness(world, pool);
+      const g1 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE }, { phone: BOB }] });
+      const id = g1.body.conversation.conversationId as string;
+      const del = await request(app)
+        .delete(`/api/conversations/${id}/members/${encodeURIComponent(BOB)}`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+      expect(del.status).toBe(200);
+      expect((del.body.members as Array<{ phone: string }>).map((m) => m.phone)).not.toContain(BOB);
+      // Re-add BOB: rule 2 (still in ever_member_phones) -> no fresh burnClaim, no
+      // 409 (a burn-faithful pool WOULD 409 if burnMember were wrongly called).
+      const readd = await request(app)
+        .post(`/api/conversations/${id}/members`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: BOB });
+      expect(readd.status).toBe(200);
+      expect((readd.body.members as Array<{ phone: string }>).map((m) => m.phone)).toContain(BOB);
+    });
+
+    it('a legacy group (no ever_member_phones) initializes it from the roster on first add and behaves', async () => {
+      const pool = makeBurnFaithfulPool();
+      const { app } = authedHarness(world, pool);
+      const g1 = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE }] });
+      const id = g1.body.conversation.conversationId as string;
+      // Model a PRE-W1 row: strip the attribute the new code seeds.
+      delete world.conversations.get(id)!.ever_member_phones;
+
+      const add = await request(app)
+        .post(`/api/conversations/${id}/members`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ phone: BOB });
+      expect(add.status).toBe(200);
+      // Initialized from the post-add roster {ALICE, BOB}.
+      const raw = world.conversations.get(id)!.ever_member_phones;
+      const ever = raw instanceof Set ? raw : new Set(raw as string[]);
+      expect([...ever].sort()).toEqual([ALICE, BOB].sort());
+    });
+  });
+
+  // --- W2: reopen is fenced while the number is mid-release ------------------
+  it('reopen is REFUSED (409) while the number is mid-release (releasing) - W2 fence', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId as string;
+    const poolNumber = created.body.conversation.pool_number as string;
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    // The retirement sweep CLAIMED the number mid-window (active -> releasing).
+    pool.records.get(poolNumber)!.lifecycle_state = 'releasing';
+
+    const reopen = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: false });
+    expect(reopen.status).toBe(409);
+    expect(reopen.body.error).toBe('pool_number_released');
+    // No zombie: the group stays closed.
+    expect((await world.conversationsRepo.getById(id))!.status).toBe('closed');
+  });
+
+  // --- W3: close-announce dedup claim ---------------------------------------
+  describe('W3 close-announce dedup', () => {
+    it('two concurrent closes announce the final message EXACTLY once', async () => {
+      const pool = makeFakePoolNumbers();
+      const { app } = authedHarness(world, pool);
+      const created = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+      const id = created.body.conversation.conversationId as string;
+      world.sent.length = 0; // drop the intro sends
+
+      // Fire both closes concurrently: the atomic claim admits exactly one announce.
+      const [a, b] = await Promise.all([
+        request(app)
+          .patch(`/api/conversations/${id}/close`)
+          .set('x-origin-verify', SECRET)
+          .set('cookie', TEST_SESSION_COOKIE)
+          .send({ closed: true }),
+        request(app)
+          .patch(`/api/conversations/${id}/close`)
+          .set('x-origin-verify', SECRET)
+          .set('cookie', TEST_SESSION_COOKIE)
+          .send({ closed: true }),
+      ]);
+      expect([a.status, b.status]).toEqual([200, 200]);
+      // Exactly ONE relay.group_closed announcement persisted; one leg per member.
+      const systemRows = world.messages.filter(
+        (m) => m.conversationId === id && m.relay_sender_key === 'system' && m.body === CLOSED_COPY,
+      );
+      expect(systemRows).toHaveLength(1);
+      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(2);
+    });
+
+    it('a close retry after a crash between announce and flip announces NOTHING and still flips to closed', async () => {
+      const pool = makeFakePoolNumbers();
+      const { app } = authedHarness(world, pool);
+      const created = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+      const id = created.body.conversation.conversationId as string;
+      // Crash state: the announce was claimed but the flip never ran (marker set,
+      // group STILL open).
+      world.conversations.get(id)!.close_announced_at = new Date().toISOString();
+      world.sent.length = 0;
+      const rowsBefore = world.messages.filter((m) => m.conversationId === id).length;
+
+      const res = await request(app)
+        .patch(`/api/conversations/${id}/close`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ closed: true });
+      expect(res.status).toBe(200);
+      expect(res.body.conversation.status).toBe('closed'); // flip completed
+      // No re-announcement: no new legs, no new persisted rows.
+      expect(world.sent).toHaveLength(0);
+      expect(world.messages.filter((m) => m.conversationId === id).length).toBe(rowsBefore);
+    });
+
+    it('reopen clears the announce marker, so a subsequent close announces again (exactly once)', async () => {
+      const pool = makeFakePoolNumbers();
+      const { app } = authedHarness(world, pool);
+      const created = await request(app)
+        .post('/api/relay-groups')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+      const id = created.body.conversation.conversationId as string;
+      await request(app)
+        .patch(`/api/conversations/${id}/close`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ closed: true });
+      expect(world.conversations.get(id)!.close_announced_at).toBeDefined();
+      // Reopen CLEARS the marker (folded into the status flip).
+      await request(app)
+        .patch(`/api/conversations/${id}/close`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ closed: false });
+      expect(world.conversations.get(id)!.close_announced_at).toBeUndefined();
+      // A subsequent close announces AGAIN, exactly once.
+      world.sent.length = 0;
+      await request(app)
+        .patch(`/api/conversations/${id}/close`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ closed: true });
+      expect(world.sent.filter((s) => s.body === CLOSED_COPY)).toHaveLength(1);
+    });
   });
 
   it('FIX 2: POST a message to a CLOSED relay group → 409', async () => {

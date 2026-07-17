@@ -368,6 +368,10 @@ export function createFakeWorld(): FakeWorld {
         type: 'relay_group',
         ai_mode: 'manual',
         participants: members,
+        // W1 burn provenance: seed from the initial roster (Set marshals to SS).
+        ...(members.length > 0 && {
+          ever_member_phones: new Set(members.map((m) => m.phone)),
+        }),
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
         ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
@@ -405,6 +409,16 @@ export function createFakeWorld(): FakeWorld {
       if (!roster.some((p) => p.phone === member.phone)) {
         conv.participants = [...roster, member];
         conv.participants_version = (conv.participants_version ?? 0) + 1;
+        // W1 burn provenance (atomic-faithful): SEED a legacy group from the
+        // post-add roster (their burns belong to this group); else extend.
+        const raw = conv.ever_member_phones;
+        const ever = raw instanceof Set ? raw : Array.isArray(raw) ? new Set(raw) : undefined;
+        if (ever === undefined) {
+          conv.ever_member_phones = new Set(conv.participants.map((p) => p.phone));
+        } else {
+          ever.add(member.phone);
+          conv.ever_member_phones = ever;
+        }
       }
       return conv;
     },
@@ -432,7 +446,18 @@ export function createFakeWorld(): FakeWorld {
       }
       conv.status = status;
       conv.relay_status = `relay_group#${status}`; // lockstep with status (fidelity)
+      // W3: a reopen (-> open) clears the close-announce marker (folded into the
+      // flip in the real repo) so a future close re-announces.
+      if (status === 'open') delete conv.close_announced_at;
       return conv;
+    },
+    async claimCloseAnnounce(conversationId) {
+      // W3 dedup claim (atomic-faithful: synchronous check-and-set, no await
+      // between). Won only when the group is OPEN and unclaimed.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.status !== 'open' || conv.close_announced_at !== undefined) return false;
+      conv.close_announced_at = new Date().toISOString();
+      return true;
     },
     async setCloseNagNextAt(conversationId, at) {
       const conv = conversations.get(conversationId);

@@ -295,6 +295,52 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     // addMember is idempotent on phone — capture whether this member was already
     // on the roster so we only emit added_to_group_text for a REAL add.
     const wasMember = (conversation.participants ?? []).some((p) => p.phone === member.phone);
+    // W1 BURN GAP: a NEW member must be BURNED onto the group's pool number
+    // BEFORE the roster mutation, or (a) they might already be rostered on
+    // another group sharing this number - breaking (To,From) resolution (wrong
+    // delivery / privacy leak) - and (b) an unburned add lets a FUTURE group
+    // containing this phone legitimately reuse the same number (reuse consults
+    // only burned_phones). ever_member_phones records the phones THIS group has
+    // burned here, so the rule is:
+    //   (1) already a current participant -> unchanged idempotent add (no burn);
+    //   (2) already in ever_member_phones -> burned by THIS group already
+    //       (remove-then-re-add) -> allowed WITHOUT a new claim;
+    //   (3) else burnClaim FIRST - on conflict 409, on success the roster + the
+    //       ever_member_phones provenance are written together (addMember).
+    // CRASH-ORDERING: burn-then-roster. A crash between the two leaves a
+    // burned-but-unrostered phone - the CONSERVATIVE direction (blocks reuse,
+    // never mis-routes; consistent with burn-forever). Never roster-then-burn.
+    // LEGACY: a pre-W1 group has no ever_member_phones; a new phone is not a
+    // current participant, so rule (3) claims it, and addMember then initializes
+    // the set from the current roster (their burns belong to this group).
+    if (!wasMember) {
+      const rawEver = conversation.ever_member_phones;
+      const everSet =
+        rawEver instanceof Set ? rawEver : Array.isArray(rawEver) ? new Set(rawEver) : undefined;
+      const burnedByThisGroup = everSet !== undefined && everSet.has(member.phone);
+      const poolNumber = conversation.pool_number;
+      if (!burnedByThisGroup && typeof poolNumber === 'string' && poolNumber.length > 0) {
+        const burned = await poolNumbers.burnMember(poolNumber, member.phone);
+        if (!burned) {
+          // PII (doc section 9): actor + reason only - NEVER the phone in the audit/log.
+          await audit.append(`conversations#${conversationId}`, 'relay_member_add_refused', {
+            actor,
+            reason: 'phone_conflict_on_number',
+          });
+          log.info(
+            { conversationId, actor },
+            'relay member add refused - phone already burned on this number',
+          );
+          res.status(409).json({
+            error: 'phone_conflict_on_number',
+            message:
+              'This person already has a group text history on this number. Start a new ' +
+              'group text with them instead.',
+          });
+          return;
+        }
+      }
+    }
     let updated: ConversationItem;
     try {
       updated = await conversations.addMember(conversationId, member);
@@ -453,41 +499,49 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     let updated: ConversationItem;
     if (body.closed) {
       const poolNumber = conversation.pool_number;
-      // Double-announce guard (mission watch item): re-read status before
-      // announcing - only the close WINNER (a still-open group) may announce +
-      // flip; a sequential re-close is strictly a no-op here.
-      // ACCEPTED RACE: two concurrent closes can, in a narrow TOCTOU window, both
-      // pass this pre-announce status read and double-send the final message
-      // before one loses the conditional flip below. This guard minimizes it and
-      // sequential re-closes never re-announce; we deliberately do NOT add a new
-      // locking mechanism.
-      if (conversation.status !== 'open') {
-        log.info({ conversationId }, 'relay close: already closed - idempotent no-op');
-        res.json({ conversation });
-        return;
-      }
-      // (1) FINAL MESSAGE FIRST (spec 4.4): announce relay.group_closed to every
-      // member while the group is STILL OPEN (the announcement gate refuses a
-      // closed group). A send/persist failure LOGS and the close STILL PROCEEDS.
-      try {
-        const closedBody = await resolveWithSettings(
-          'relay.group_closed',
-          {},
-          { settingsRepo: settings },
+      // W3 CLOSE-ANNOUNCE DEDUP CLAIM: atomically win the right to send the ONE
+      // relay.group_closed final message (claimCloseAnnounce SETs
+      // close_announced_at, conditional on status=open AND the marker absent).
+      // Exactly one caller wins under concurrent closes; a retry after a crash
+      // between announce and flip sees the marker set and LOSES here, so it skips
+      // the already-sent announcement. The (idempotent) status flip below runs
+      // for winners AND losers: a loser whose group is already closed no-ops on
+      // the conditional flip; a loser mid-crash-retry (still open) completes it.
+      // This closes BOTH the concurrent-close double-announce TOCTOU and the
+      // crash-between-announce-and-flip retry.
+      const announceWon = await conversations.claimCloseAnnounce(conversationId);
+      if (announceWon) {
+        // (1) FINAL MESSAGE (spec 4.4): announce relay.group_closed to every
+        // member while the group is STILL OPEN (the announcement gate refuses a
+        // closed group). A send/persist failure LOGS and the close STILL PROCEEDS.
+        try {
+          const closedBody = await resolveWithSettings(
+            'relay.group_closed',
+            {},
+            { settingsRepo: settings },
+          );
+          await sendRelayAnnouncement(
+            {
+              conversationsRepo: conversations,
+              messagesRepo: messages,
+              contactsRepo: contacts,
+              adapter,
+              events,
+              ...(deps.logger !== undefined && { logger: deps.logger }),
+            },
+            { conversationId, body: closedBody, kind: 'group_closed' },
+          );
+        } catch (err) {
+          log.error({ err, conversationId }, 'relay close: final announcement failed - closing anyway');
+        }
+      } else {
+        // Lost the claim: a concurrent winner already announced, or this is a
+        // crash-retry (marker set, flip not yet done). Skip the announce - the
+        // idempotent flip below completes a pending close or no-ops a closed one.
+        log.info(
+          { conversationId },
+          'relay close: announcement already claimed - skipping (idempotent/retry)',
         );
-        await sendRelayAnnouncement(
-          {
-            conversationsRepo: conversations,
-            messagesRepo: messages,
-            contactsRepo: contacts,
-            adapter,
-            events,
-            ...(deps.logger !== undefined && { logger: deps.logger }),
-          },
-          { conversationId, body: closedBody, kind: 'group_closed' },
-        );
-      } catch (err) {
-        log.error({ err, conversationId }, 'relay close: final announcement failed - closing anyway');
       }
       // (2) Flip status='closed' (conditional on 'open'), KEEPING pool_number so
       // a late text still resolves the group. A concurrent/duplicate close fails
@@ -554,6 +608,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         }
       }
       try {
+        // W3: the open transition also REMOVEs close_announced_at (folded into
+        // setRelayStatus, atomic with the flip) so a FUTURE close of this group
+        // re-announces - a separate clear could crash-window into a silent close.
         updated = await conversations.setRelayStatus(conversationId, 'open', 'closed');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {

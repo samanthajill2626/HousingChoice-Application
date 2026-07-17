@@ -284,6 +284,20 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           // operator retry against the fresh roster.
           refetchMembers();
           setAddError('The roster just changed — refreshed it. Try adding again.');
+        } else if (
+          err instanceof ApiError &&
+          err.status === 409 &&
+          err.code === 'phone_conflict_on_number'
+        ) {
+          // W1: this person is already burned on this group's number (another
+          // group's history), so they cannot be added here - surface the
+          // server's actionable "start a new group text" copy.
+          const serverMsg = (err.body as { message?: unknown } | null)?.message;
+          setAddError(
+            typeof serverMsg === 'string' && serverMsg.length > 0
+              ? serverMsg
+              : 'This person already has a group text history on this number. Start a new group text with them instead.',
+          );
         } else {
           setAddError("Couldn't add that member. Please try again.");
         }

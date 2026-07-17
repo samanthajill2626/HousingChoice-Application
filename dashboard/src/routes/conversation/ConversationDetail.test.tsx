@@ -303,6 +303,29 @@ describe('ConversationDetail roster management', () => {
     // The 409 triggers a roster REFETCH (not swallowed).
     await waitFor(() => expect(getConversationMembers).toHaveBeenCalledTimes(2));
   });
+
+  it('add refused (409 phone_conflict_on_number): surfaces the actionable server message (W1)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getConversation.mockResolvedValue(relayHeader());
+    const serverMessage =
+      'This person already has a group text history on this number. Start a new group text with them instead.';
+    addConversationMember.mockRejectedValue(
+      new ApiError(409, 'phone_conflict_on_number', 'phone_conflict_on_number', {
+        error: 'phone_conflict_on_number',
+        message: serverMessage,
+      }),
+    );
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Add a member' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add member' }), '(404) 555-0177');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    // The actionable server copy renders (not the generic "Couldn't add that member.").
+    await waitFor(() => expect(screen.getByText(serverMessage)).toBeInTheDocument());
+  });
 });
 
 describe('ConversationDetail close / reopen', () => {

@@ -484,6 +484,108 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
   });
 });
 
+describe('TourDetail - close the group text after a terminal outcome (relay number lifecycle)', () => {
+  const OPEN_GROUP = {
+    conversationId: 'g1',
+    type: 'relay_group',
+    status: 'open',
+    participants: [
+      { contactId: 'tenant-1', phone: '+14045550111', name: 'Ann' },
+      { contactId: 'landlord-1', phone: '+14045550222', name: 'Lon' },
+    ],
+  };
+
+  it('recording "not a fit" on a tour WITH an open group offers to close the group text', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured', groupThreadId: 'g1' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'closed', groupThreadId: 'g1', outcome: 'not_a_fit', moveForward: false }),
+    );
+    getConversation.mockResolvedValue(OPEN_GROUP);
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'No - not a fit' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    // The ask dialog appears once the outcome saved + the group is confirmed open,
+    // named for the members.
+    const dialog = await screen.findByRole('dialog', {
+      name: /Also close the group text with Ann & Lon\?/i,
+    });
+    expect(within(dialog).getByRole('button', { name: 'Close group text' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Keep it open' })).toBeInTheDocument();
+  });
+
+  it('move-forward NEVER offers to close the group (conversion continues it silently)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured', groupThreadId: 'g1' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'toured', groupThreadId: 'g1', outcome: 'move_forward', moveForward: true, convertible: true }),
+    );
+    createPlacementFromTour.mockResolvedValue({
+      placement: { placementId: 'plc-1' },
+      tour: makeTour({ status: 'closed', convertedPlacementId: 'plc-1' }),
+    });
+    getConversation.mockResolvedValue(OPEN_GROUP);
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'Yes - move forward' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-1'));
+    expect(
+      screen.queryByRole('dialog', { name: /Also close the group text/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('recording "not a fit" with NO group shows no close-group dialog', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured', groupThreadId: undefined }));
+    patchTour.mockResolvedValue(makeTour({ status: 'closed', outcome: 'not_a_fit', moveForward: false }));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'No - not a fit' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    // The outcome modal closes; no ask dialog appears (no linked group).
+    await waitFor(() =>
+      expect(screen.queryByRole('dialog', { name: /Record outcome/i })).not.toBeInTheDocument(),
+    );
+    expect(getConversation).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+  });
+
+  it('canceling a tour WITH an open group offers to close the group text', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: 'g1' }));
+    patchTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: 'g1' }));
+    getConversation.mockResolvedValue(OPEN_GROUP);
+    getConversations.mockResolvedValue({
+      conversations: [conv('g1', 'tenant-1', 0, 'relay_group')],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Cancel tour' }));
+    const cancelDialog = screen.getByRole('dialog', { name: /Cancel tour\?/i });
+    await userEvent.click(within(cancelDialog).getByRole('button', { name: 'Cancel tour' }));
+    // The cancel saved; because the group is still open the ask dialog appears.
+    await screen.findByRole('dialog', { name: /Also close the group text/i });
+  });
+
+  it('skips the ask when the linked group is already closed', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'toured', groupThreadId: 'g1' }));
+    patchTour.mockResolvedValue(
+      makeTour({ status: 'closed', groupThreadId: 'g1', outcome: 'not_a_fit', moveForward: false }),
+    );
+    getConversation.mockResolvedValue({ ...OPEN_GROUP, status: 'closed' });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Record outcome' }));
+    await userEvent.click(screen.getByRole('radio', { name: 'No - not a fit' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
+    await waitFor(() => expect(getConversation).toHaveBeenCalledWith('g1'));
+    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+  });
+});
+
 describe('TourDetail - right column cards', () => {
   it('self-guided shows the Guidance card with the ID-gate lead + reminders route to the tenant 1:1', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided' }));

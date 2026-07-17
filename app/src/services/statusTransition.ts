@@ -42,6 +42,8 @@ import {
 } from '../repos/placementDeadlinesRepo.js';
 import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import type { ConversationsRepo } from '../repos/conversationsRepo.js';
+import { armRelayCloseNagIfOpen } from './relayCloseNag.js';
 
 /**
  * The RTA submission hard clock (Post-Tour & Application): entering
@@ -65,14 +67,15 @@ export interface StatusTransitionDeps {
    * logged and NEVER fails the transition; absent, the transition is unchanged.
    */
   armStageNudge?: (placement: PlacementItem, toStage: PlacementStage, nowIso: string) => Promise<void>;
-  /**
-   * OPTIONAL best-effort hook (Post-Tour & Application): close the placement's
-   * masked relay thread when the deal is LOST. Invoked ONLY on a move to `lost`,
-   * with the POST-transition placement. Best-effort like `armStageNudge`.
-   */
-  closeRelayForLostPlacement?: (placement: PlacementItem) => Promise<void>;
   /** Contact-timeline milestone emitter (best-effort). Optional — absent in legacy callers. */
   activityEventsRepo?: ActivityEventsRepo;
+  /**
+   * Relay-group repo for the D5 close-nag safety net (AF-1/CF-1): a terminal
+   * placement (lost/moved_in) with a linked OPEN relay group arms the 28-day
+   * close-nag so a forgotten group still surfaces on Today. Optional +
+   * best-effort - absent in legacy callers (arming is simply skipped).
+   */
+  conversationsRepo?: ConversationsRepo;
 }
 
 export interface TransitionPlacementInput {
@@ -184,7 +187,7 @@ export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
   const { placementsRepo, placementDeadlinesRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
-  const { armStageNudge, closeRelayForLostPlacement, activityEventsRepo } = deps;
+  const { armStageNudge, activityEventsRepo, conversationsRepo } = deps;
   const log = deps.logger ?? defaultLogger;
 
   const statusLabel = (contactType: string | undefined, status: string): string =>
@@ -448,24 +451,32 @@ export function createStatusTransitionService(
         await placementDeadlinesRepo.retire(placementId, 'rta_window');
       }
 
-      // 7) Best-effort choke-point hooks (Post-Tour & Application). Both OPTIONAL
-      // and wrapped so a hook failure NEVER fails the transition. They run AFTER
-      // the stage patch + derived writes, on the POST-transition placement.
-      //  - closeRelayForLostPlacement: close the masked relay thread on a lost deal.
-      //  - armStageNudge: re-key the stage-application nudge ladder to the new stage.
-      if (toStage === 'lost' && closeRelayForLostPlacement !== undefined) {
-        try {
-          await closeRelayForLostPlacement(updated);
-        } catch (err) {
-          log.error({ err, placementId }, 'lost relay-close hook failed (best-effort)');
-        }
-      }
+      // 7) Best-effort choke-point hook (Post-Tour & Application): armStageNudge
+      // re-keys the stage-application nudge ladder to the new stage. OPTIONAL and
+      // wrapped so a hook failure NEVER fails the transition; it runs AFTER the
+      // stage patch + derived writes, on the POST-transition placement.
+      // (relay-number-lifecycle spec 4.1: the lost-move relay-close hook was
+      // REMOVED - nothing auto-closes a relay group; closing is a human choice.)
       if (armStageNudge !== undefined) {
         try {
           await armStageNudge(updated, toStage, now);
         } catch (err) {
           log.error({ err, placementId }, 'stage-nudge arm hook failed (best-effort)');
         }
+      }
+
+      // 7b) D5 close-nag safety net (AF-1/CF-1): a terminal placement (lost or
+      // moved_in) whose linked relay group is still OPEN arms the 28-day
+      // close-nag (set-if-absent), so a group left open past the terminal event
+      // surfaces on Today even if the operator never answered the inline "Also
+      // close the group text?" ask. Best-effort - never fails the transition.
+      // (Arming a nag is NOT closing - spec D4 "nothing auto-closes" is intact.)
+      if (conversationsRepo !== undefined && (toStage === 'lost' || toStage === 'moved_in')) {
+        await armRelayCloseNagIfOpen(
+          { conversationsRepo, logger: log },
+          existing.group_thread,
+          'placement',
+        );
       }
 
       // Emit + log (the legacy CRUD path emits placement.updated; mirror it, no PII).

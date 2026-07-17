@@ -127,12 +127,13 @@ export const TABLES: readonly TableSpec[] = [
         hashKey: { name: 'status', type: 'S' },
         rangeKey: { name: 'last_activity_at', type: 'S' },
       },
-      // Relay routing (M1.7): pool number → the active relay_group thread.
-      // The inbound SMS webhook reads To via this index (cheap point query,
-      // never a scan) and treats "found" as "this To is one of our pool
-      // numbers". Sparse by data convention — only relay_group items carry
-      // pool_number, so 1:1 threads never index here. One ACTIVE relay per
-      // pool number (a closed relay releases its number to quarantine).
+      // Relay routing (M1.7): pool number -> relay_group threads. The inbound
+      // SMS webhook reads To via this index (cheap point query, never a scan)
+      // and treats "found" as "this To is one of our pool numbers". Sparse by
+      // data convention - only relay_group items carry pool_number, so 1:1
+      // threads never index here. MULTI-match under burn-multiplexing: a number
+      // fronts MANY groups (open + closed) since pool_number is never cleared,
+      // and inbound (To, From) resolution picks the right one.
       {
         indexName: 'byPoolNumber',
         hashKey: { name: 'pool_number', type: 'S' },
@@ -241,29 +242,29 @@ export const TABLES: readonly TableSpec[] = [
     gsis: [],
   },
   {
-    // NEW in M1.7 (NOT in the doc §5 9-table model — README deviation
+    // NEW in M1.7 (NOT in the doc section 5 9-table model - README deviation
     // 2026-06-13): the pool-number lifecycle pool for relay group threads.
-    // A pool number is provisioned voice+sms-capable (M1.7 pre-wires voice
-    // for the M1.9 masked-calling bridge), claimed by exactly one active
-    // relay_group conversation, and released to a 30-day quarantine when the
-    // relay closes (carriers recycle freed numbers; quarantine stops us
-    // re-handing a number whose prior conversants might still text it).
-    // PK is the E.164 number itself. Item is a flexible document; only the
-    // key + the byLifecycleState GSI attrs are contractual (lib/tables.ts).
+    // A pool number is provisioned voice+sms-capable (M1.7 pre-wires voice for
+    // the M1.9 masked-calling bridge) and MULTIPLEXED across many relay groups
+    // via a permanent (number, phone) BURN set: a group's roster phones are
+    // burned onto the number, and a number may host any new group whose roster
+    // does not overlap the burn. lifecycle_state is active | released (release
+    // hands the number back to Twilio after a 180-day grace; burn history is
+    // kept forever). PK is the E.164 number itself. Item is a flexible
+    // document; only the key + the byLifecycleState GSI attrs are contractual.
     baseName: 'pool_numbers',
     hashKey: { name: 'poolNumber', type: 'S' },
     gsis: [
-      // Available-pool query (lifecycle_state='available') + quarantine
-      // reclaim sweep (lifecycle_state='quarantined' AND quarantine_until <=
-      // now): partition by lifecycle_state, sort by quarantine_until.
+      // Assignment query (lifecycle_state='active') + the retirement sweep,
+      // both over the 'active' partition: partition by lifecycle_state, sort by
+      // quarantine_until.
       //
-      // NOT sparse: a DynamoDB GSI indexes an item only when BOTH key attrs
-      // are present, so quarantine_until is written on EVERY pool_numbers
-      // item (the repo sets a past-time sentinel for available/assigned and
-      // the real future timestamp once quarantined) — otherwise findAvailable
-      // could not query the 'available' partition. The reclaim sweep reads
-      // only the 'quarantined' partition, where the value is the live release
-      // deadline; sentinels in other partitions are never compared against.
+      // NOT sparse: a DynamoDB GSI indexes an item only when BOTH key attrs are
+      // present, so quarantine_until is written on EVERY pool_numbers item as a
+      // fixed past-time sentinel. Quarantine itself is GONE (burn-multiplexing
+      // replaces it), but the attr is RETAINED as the GSI range key so every
+      // active/released item still indexes - no table/GSI reshape. listActive
+      // queries the 'active' partition; the sentinel is never compared against.
       {
         indexName: 'byLifecycleState',
         hashKey: { name: 'lifecycle_state', type: 'S' },

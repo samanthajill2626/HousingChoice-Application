@@ -70,8 +70,7 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { type PushService } from '../services/pushService.js';
-import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
-import { createPlacementRelayLifecycle } from '../services/placementRelayLifecycle.js';
+import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { createSuggestionsRouter } from './suggestions.js';
@@ -345,10 +344,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // listings-sent endpoints, written by the response PATCH. Shared across the
   // sub-routers below.
   const listingSends = deps.listingSendsRepo ?? createListingSendsRepo({ logger: deps.logger });
-  // Post-Tour & Application (Task 5): the choke-point side effects wired onto the
+  // Post-Tour & Application (Task 5): the choke-point side effect wired onto the
   // ONE transition service. `armStageNudge` re-keys the stage-application nudge
-  // ladder on every move; the relay lifecycle closes a LOST placement's masked
-  // thread. Both are best-effort inside the transition service.
+  // ladder on every move (best-effort inside the transition service).
+  // (relay-number-lifecycle spec 4.1: the lost-move relay-close hook was removed -
+  // nothing auto-closes a relay group; closing is a human choice.)
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
   // First-class placement deadlines (placement-deadline-model): shared across the
   // placements / status-transition / today / contacts sub-routers so arm/retire
@@ -371,14 +371,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
-  const poolNumbersForLifecycle =
-    deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
-  const relayLifecycle = createPlacementRelayLifecycle({
-    conversationsRepo: conversations,
-    poolNumbersService: poolNumbersForLifecycle,
-    auditRepo: audit,
-    ...(deps.logger !== undefined && { logger: deps.logger }),
-  });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   // Voice Phase 1: the originate route + self cell verify-start need a messaging
@@ -617,6 +609,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined &&
         deps.contactsRepoForRelay === undefined && { contactsRepo: deps.contactsRepo }),
       auditRepo: audit,
+      // Close sends the relay.group_closed final message via sendRelayAnnouncement
+      // (persist + per-member legs FROM the pool number) BEFORE the status flip.
+      messagesRepo: messages,
+      adapter,
+      ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       // BE2: emit added_to_group_text / removed_from_group_text on membership.
       activityEventsRepo: activityEvents,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
@@ -702,8 +699,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       activityEventsRepo: activityEvents,
       events,
-      // Post-Tour & Application (Task 5): arm the stage nudge ladder + close a
-      // lost placement's relay thread from the ONE transition choke point.
+      // Post-Tour & Application (Task 5): arm the stage nudge ladder from the ONE
+      // transition choke point. (The lost-move relay-close hook was removed -
+      // relay-number-lifecycle spec 4.1: nothing auto-closes a relay group.)
       armStageNudge: (placement, toStage, nowIso) =>
         armNudgeForStage(placement, toStage, nowIso, {
           placementNudgesRepo: placementNudges,
@@ -712,7 +710,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
           events,
           ...(deps.logger !== undefined && { logger: deps.logger }),
         }),
-      closeRelayForLostPlacement: relayLifecycle.closeForLost,
     }),
   );
   // conversation-fact-extraction (T8) review API (requireAuth via the /api mount).

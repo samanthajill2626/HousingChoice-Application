@@ -1,29 +1,65 @@
-import { render, screen, within } from '@testing-library/react';
-import { MemoryRouter } from 'react-router-dom';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { TodayItem } from '../../api/index.js';
+import type { RelayCloseNag, TodayItem } from '../../api/index.js';
 
 // Drive the page entirely through a mocked useToday so the render test is
 // independent of fetching/SSE (those are covered in useToday.test.tsx).
-let state: { status: string; items: TodayItem[]; source: string } = {
+let state: {
+  status: string;
+  items: TodayItem[];
+  source: string;
+  relayCloseNags?: RelayCloseNag[];
+  dismissNag?: (id: string) => void;
+} = {
   status: 'loading',
   items: [],
   source: 'server',
 };
 vi.mock('./useToday.js', () => ({ useToday: () => state }));
 
+// The nag card drives the two relay endpoints directly; mock them, keep the rest.
+const closeConversation = vi.fn();
+const deferCloseNag = vi.fn();
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    closeConversation: (...a: unknown[]) => closeConversation(...a),
+    deferCloseNag: (...a: unknown[]) => deferCloseNag(...a),
+  };
+});
+
 import { Today } from './Today.js';
 
 function renderToday(): void {
   render(
     <MemoryRouter>
-      <Today />
+      <Routes>
+        <Route path="/" element={<Today />} />
+        <Route path="/tours/:tourId" element={<div>TOUR PAGE</div>} />
+      </Routes>
     </MemoryRouter>,
   );
 }
 
+function makeNag(over: Partial<RelayCloseNag> = {}): RelayCloseNag {
+  return {
+    conversationId: 'g1',
+    poolNumber: '+15550190001',
+    memberNames: ['Ann', 'Marcus'],
+    ownerType: 'tour',
+    ownerId: 'tour-1',
+    nagDueAt: '2026-07-01T00:00:00Z',
+    ...over,
+  };
+}
+
 beforeEach(() => {
   state = { status: 'loading', items: [], source: 'server' };
+  closeConversation.mockReset().mockResolvedValue({});
+  deferCloseNag.mockReset().mockResolvedValue({});
 });
 afterEach(() => {
   vi.restoreAllMocks();
@@ -142,5 +178,78 @@ describe('Today', () => {
     renderToday();
     const list = screen.getByRole('list', { name: /Tours today/i });
     expect(within(list).getAllByRole('listitem')).toHaveLength(2);
+  });
+});
+
+describe('Today - relay close-nag card (D5)', () => {
+  it('renders a nag with its pool number, copy, and an Open deep-link', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag: vi.fn(),
+    };
+    renderToday();
+    // Its own section (not "all caught up", even though items is empty).
+    expect(screen.getByRole('heading', { name: /Group texts to close/i })).toBeInTheDocument();
+    expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
+    // Pool number is display DATA (formatted), plus the close-it copy with members.
+    expect(screen.getByText('(555) 019-0001')).toBeInTheDocument();
+    expect(
+      screen.getByText(/Group text for Ann & Marcus is still open - close it\?/i),
+    ).toBeInTheDocument();
+    // Open deep-links the owning tour.
+    expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/tours/tour-1');
+  });
+
+  it('Close wires closeConversation(true) and removes the row', async () => {
+    const user = userEvent.setup();
+    const dismissNag = vi.fn();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag,
+    };
+    renderToday();
+    await user.click(screen.getByRole('button', { name: 'Close' }));
+    expect(closeConversation).toHaveBeenCalledWith('g1', true);
+    await waitFor(() => expect(dismissNag).toHaveBeenCalledWith('g1'));
+    expect(deferCloseNag).not.toHaveBeenCalled();
+  });
+
+  it('Keep open wires the 28-day defer and removes the row', async () => {
+    const user = userEvent.setup();
+    const dismissNag = vi.fn();
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag()],
+      dismissNag,
+    };
+    renderToday();
+    await user.click(screen.getByRole('button', { name: 'Keep open' }));
+    expect(deferCloseNag).toHaveBeenCalledWith('g1');
+    await waitFor(() => expect(dismissNag).toHaveBeenCalledWith('g1'));
+    expect(closeConversation).not.toHaveBeenCalled();
+  });
+
+  it('a nag with a tag names the tag instead of the members', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [],
+      relayCloseNags: [makeNag({ tag: 'Maple St tour', ownerType: null, ownerId: undefined })],
+      dismissNag: vi.fn(),
+    };
+    renderToday();
+    expect(
+      screen.getByText(/Group text for Maple St tour is still open - close it\?/i),
+    ).toBeInTheDocument();
+    // No owner -> Open falls back to the conversation.
+    expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/conversations/g1');
   });
 });

@@ -56,6 +56,10 @@ export function buildTimelineFallback(
         // SOURCE message can surface the "N member(s) opted out" note (the note
         // renders on the sender's contact page — this relay thread involves them).
         ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
+        // Relay number lifecycle: a late text intercepted from a now-closed group
+        // into this 1:1 carries the closed group's id - keep it so the badge renders
+        // on the fallback path too (the server timeline already serializes it).
+        ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
       };
       items.push(item);
     }

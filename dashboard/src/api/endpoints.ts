@@ -577,8 +577,10 @@ export async function removeConversationMember(
 }
 
 /** PATCH /api/conversations/:id/close { closed } → { conversation }. Closing
- *  releases the pool number; reopening (closed=false) provisions a fresh one and
- *  re-intros members. Returns the updated header. */
+ *  KEEPS the pool number (the closed group still intercepts late texts from
+ *  still-rostered members into their 1:1) and sends one final "group is closed"
+ *  message; reopening (closed=false) flips the status back on the SAME number and
+ *  provisions nothing. Returns the updated header. */
 export async function closeConversation(
   conversationId: string,
   closed: boolean,
@@ -586,6 +588,18 @@ export async function closeConversation(
   const res = await request<{ conversation: ConversationHeader }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/close`,
     { method: 'PATCH', body: { closed } },
+  );
+  return res.conversation;
+}
+
+/** POST /api/conversations/:id/close-nag/defer - "Keep open" on a relay group's
+ *  close nag: the server pushes the next nag out 28 days (fixed, no body). Returns
+ *  the updated header (carrying the fresh close_nag_next_at). Throws
+ *  ApiError(404 relay_group_not_found) for a non-relay / missing id. */
+export async function deferCloseNag(conversationId: string): Promise<ConversationHeader> {
+  const res = await request<{ conversation: ConversationHeader }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/close-nag/defer`,
+    { method: 'POST' },
   );
   return res.conversation;
 }

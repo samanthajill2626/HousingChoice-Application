@@ -178,7 +178,7 @@ test('happy path: convert → walk EVERY placement stage in ladder order (no ski
   await flow.expectRtaClockCleared();
 });
 
-test('marked deviation — landlord denies at Awaiting approval → Lost (tenant Searching, unit Available, relay closed)', async ({
+test('marked deviation - landlord denies at Awaiting approval -> Lost (tenant Searching, unit Available, relay stays open - close is a manual ask)', async ({
   page,
   request,
 }) => {
@@ -195,10 +195,11 @@ test('marked deviation — landlord denies at Awaiting approval → Lost (tenant
   await flow.teamMovesPlacementTo('Lost', { lostReason: "Landlord couldn't get rent" });
   await flow.expectPlacementLost();
 
-  // Bounce-back: tenant → Searching (re-match), property → Available, relay closed.
+  // Bounce-back: tenant -> Searching (re-match), property -> Available. The masked
+  // relay group STAYS OPEN now (nothing auto-closes; closing is a manual ask).
   await flow.expectTenantBackSearching();
   await flow.expectUnitAvailable(unit);
-  await flow.expectRelayClosed();
+  await flow.expectRelayStaysOpenOnLost();
 
   // Pending nudges were canceled on Lost — a tick fires nothing new.
   await flow.devPlacementNudgeTick(hoursFromNow(48));
@@ -245,7 +246,7 @@ test('marked deviation — 48h window BLOWN at Awaiting landlord submission → 
   await flow.expectPlacementGoneFromBoard();
 });
 
-test('marked deviation — party backs out early at Awaiting receipt → Lost (bounce-back, relay closed)', async ({
+test('marked deviation - party backs out early at Awaiting receipt -> Lost (bounce-back, relay stays open - close is a manual ask)', async ({
   page,
   request,
 }) => {
@@ -259,7 +260,7 @@ test('marked deviation — party backs out early at Awaiting receipt → Lost (b
   await flow.expectPlacementLost();
   await flow.expectTenantBackSearching();
   await flow.expectUnitAvailable(unit);
-  await flow.expectRelayClosed();
+  await flow.expectRelayStaysOpenOnLost();
 
   // The receipt-check nudge was canceled on Lost — a tick delivers nothing.
   await flow.devPlacementNudgeTick(hoursFromNow(48));

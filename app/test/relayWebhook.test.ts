@@ -20,6 +20,7 @@ import {
 import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import type { ContactItem } from '../src/repos/contactsRepo.js';
 import {
   createFakeWorld,
   makeWebhookHarness,
@@ -32,6 +33,9 @@ const POOL = '+15550109000';
 const ALICE = '+15550100001';
 const BOB = '+15550100002';
 const CAROL = '+15550100003';
+const DAVE = '+15550100004';
+// A phone on NO roster for POOL (an unknown/stranger sender).
+const ZARA = '+15550100009';
 
 const ERROR = 50;
 
@@ -147,14 +151,21 @@ describe('relay inbound webhook (M1.7)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
-  it('closed-thread reply: flagged received_on_closed_thread, NO fan-out', async () => {
-    seedRelay(world, { status: 'closed' });
+  it('closed-group late text from a member: delivered to the sender 1:1 with via_closed_group, NOT appended to the group, NO fan-out', async () => {
+    const group = seedRelay(world, { status: 'closed' });
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/sms', relayInboundParams());
     expect(res.status).toBe(200);
+    // Delivered into ALICE's OWN 1:1 thread (a non-group conversation) with provenance.
     const msg = world.messages.find((m) => m.provider_sid === 'SMrelay-in-1')!;
-    expect(msg.received_on_closed_thread).toBe(true);
+    expect(msg).toBeDefined();
+    expect(msg.conversationId).not.toBe(group.conversationId);
+    expect(msg.via_closed_group).toBe(group.conversationId);
+    // The old received_on_closed_thread flag is gone from the SMS path.
+    expect(msg.received_on_closed_thread).toBeUndefined();
+    // The closed GROUP transcript received nothing, and nothing fanned out.
+    expect(world.messages.filter((m) => m.conversationId === group.conversationId)).toHaveLength(0);
     expect(world.sent).toHaveLength(0);
   });
 
@@ -261,5 +272,326 @@ describe('relay inbound webhook (M1.7)', () => {
     const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID'));
     expect(err).toBeDefined();
     expect(err!['providerSid']).toBe('SM-never-persisted');
+  });
+});
+
+// One pool number now fronts MANY participant-disjoint groups (relay-number-
+// lifecycle): pool_number is never cleared, so inbound resolves on (To, From).
+describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  /** Seed an extra relay group on POOL (disjoint from the others by default). */
+  function seedGroup(
+    w: FakeWorld,
+    opts: {
+      id: string;
+      status?: 'open' | 'closed';
+      participants: { contactId: string; phone: string; name?: string }[];
+      createdAt?: string;
+    },
+  ): ConversationItem {
+    const now = opts.createdAt ?? new Date().toISOString();
+    const conv: ConversationItem = {
+      conversationId: opts.id,
+      participant_phone: POOL,
+      pool_number: POOL,
+      status: opts.status ?? 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: opts.participants,
+      created_at: now,
+    };
+    w.conversations.set(conv.conversationId, conv);
+    return conv;
+  }
+
+  it('open-match: two OPEN groups share the number; From routes to ITS group only (fan-out for that group only)', async () => {
+    seedGroup(world, {
+      id: 'conv-g1',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    seedGroup(world, {
+      id: 'conv-g2',
+      participants: [
+        { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+        { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: CAROL, MessageSid: 'SMg2-in' }),
+    );
+    expect(res.status).toBe(200);
+    // Stored on group2 only, attributed to Carol; group1 untouched.
+    const stored = world.messages.find((m) => m.provider_sid === 'SMg2-in')!;
+    expect(stored.conversationId).toBe('conv-g2');
+    expect(stored.relay_sender_key).toBe('c-carol');
+    expect(world.messages.filter((m) => m.conversationId === 'conv-g1')).toHaveLength(0);
+    // Fan-out to Dave ONLY (group2's other member), from the pool number.
+    expect(world.sent.map((s) => s.to)).toEqual([DAVE]);
+    expect(world.sent.every((s) => s.from === POOL)).toBe(true);
+  });
+
+  it('closed-match: late text delivers into the sender 1:1 (tenant_1to1) with via_closed_group, empty TwiML, no fan-out, group unchanged', async () => {
+    const group = seedGroup(world, {
+      id: 'conv-closed-a',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, MessageSid: 'SMlate-1' }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Response/>'); // empty TwiML, no auto-reply
+    const msg = world.messages.find((m) => m.provider_sid === 'SMlate-1')!;
+    expect(msg.via_closed_group).toBe(group.conversationId);
+    // Landed in a NON-group 1:1 conversation, typed tenant_1to1 (alice is a tenant).
+    const oneToOne = world.conversations.get(msg.conversationId)!;
+    expect(oneToOne.type).toBe('tenant_1to1');
+    expect(oneToOne.conversationId).not.toBe(group.conversationId);
+    // Group transcript unchanged; nothing fanned out.
+    expect(world.messages.filter((m) => m.conversationId === group.conversationId)).toHaveLength(0);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('closed-group member texting STOP: opt-out registered like the 1:1 path AND the message lands in the 1:1 with via_closed_group (AF-4)', async () => {
+    const group = seedGroup(world, {
+      id: 'conv-closed-stop',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    // ALICE is a real tenant contact whose PRIMARY number is ALICE.
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMclosed-stop' }),
+    );
+    expect(res.status).toBe(200);
+    // The STOP confirmation rides the TwiML response - parity with a STOP to the
+    // main number (pre-feature, a closed group's number fell through to the 1:1).
+    expect(res.text).toContain('<Message>');
+
+    // The STOP still lands in ALICE's OWN 1:1 thread WITH provenance (the message
+    // stays on the timeline exactly as the 1:1 path keeps it).
+    const msg = world.messages.find((m) => m.provider_sid === 'SMclosed-stop')!;
+    expect(msg.via_closed_group).toBe(group.conversationId);
+    expect(msg.conversationId).not.toBe(group.conversationId);
+
+    // Opt-out registered EXACTLY like the 1:1 STOP path:
+    //  - the conversation-level flag on the 1:1 thread,
+    expect(
+      world.optOutSets.some((o) => o.conversationId === msg.conversationId && o.value === true),
+    ).toBe(true);
+    //  - the CONTACT-level flag (STOP arrived on the contact's primary number),
+    expect(world.contacts.find((c) => c.contactId === 'c-alice')?.sms_opt_out).toBe(true);
+    //  - and the opt-out audit row on the contact.
+    expect(
+      world.auditEvents.some(
+        (a) => a.event_type === 'sms_opt_out_recorded' && a.entityKey === 'contacts#c-alice',
+      ),
+    ).toBe(true);
+    // Closed group: never a fan-out to the old members.
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('open WINS over closed: a sender in BOTH a closed and an open group on one number routes to the OPEN group', async () => {
+    const closed = seedGroup(world, {
+      id: 'conv-closed-b',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    seedGroup(world, {
+      id: 'conv-open-b',
+      status: 'open',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, MessageSid: 'SMprefer-open' }),
+    );
+    expect(res.status).toBe(200);
+    // Routed to the OPEN group (relay path): stored there + fanned out to Carol.
+    const stored = world.messages.find((m) => m.provider_sid === 'SMprefer-open')!;
+    expect(stored.conversationId).toBe('conv-open-b');
+    expect(stored.via_closed_group).toBeUndefined(); // NOT the closed-group 1:1 intercept
+    expect(world.sent.map((s) => s.to)).toEqual([CAROL]);
+    // The closed group's 1:1 intercept did NOT fire.
+    expect(world.messages.filter((m) => m.conversationId === closed.conversationId)).toHaveLength(0);
+  });
+
+  it('multiple closed matches: the NEWEST closed group wins for provenance', async () => {
+    // Older closed group inserted FIRST, newer closed group SECOND - so a naive
+    // first-match (no created_at sort) would pick the older one and fail here.
+    seedGroup(world, {
+      id: 'conv-closed-old',
+      status: 'closed',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const newer = seedGroup(world, {
+      id: 'conv-closed-new',
+      status: 'closed',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, MessageSid: 'SMnewest-closed' }),
+    );
+    expect(res.status).toBe(200);
+    const msg = world.messages.find((m) => m.provider_sid === 'SMnewest-closed')!;
+    expect(msg.via_closed_group).toBe(newer.conversationId); // the NEWER closed group
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('unknown sender: persisted on the newest OPEN group, no fan-out (non-member behavior preserved)', async () => {
+    seedGroup(world, {
+      id: 'conv-open-old',
+      status: 'open',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const newer = seedGroup(world, {
+      id: 'conv-open-new',
+      status: 'open',
+      createdAt: '2026-06-01T00:00:00.000Z',
+      participants: [
+        { contactId: 'c-carol', phone: CAROL, name: 'Carol' },
+        { contactId: 'c-dave', phone: DAVE, name: 'Dave' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    // ZARA is on NO roster for this number.
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ZARA, MessageSid: 'SMunknown' }),
+    );
+    expect(res.status).toBe(200);
+    const msg = world.messages.find((m) => m.provider_sid === 'SMunknown')!;
+    expect(msg.conversationId).toBe(newer.conversationId); // newest OPEN group
+    expect(msg.via_closed_group).toBeUndefined();
+    expect(world.sent).toHaveLength(0); // non-member -> no fan-out
+  });
+
+  it('echo guard: From is the pool number of a CLOSED-only group is still dropped', async () => {
+    seedGroup(world, {
+      id: 'conv-closed-echo',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: POOL, To: BOB, MessageSid: 'SMecho-closed' }),
+    );
+    expect(res.status).toBe(200);
+    expect(world.messages.find((m) => m.provider_sid === 'SMecho-closed')).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('unknown sender, only a CLOSED group on the number: falls through to a 1:1 (NOT buried in the closed group) (AF-5)', async () => {
+    const closed = seedGroup(world, {
+      id: 'conv-closed-only',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    const beforeGroupRows = world.messages.filter(
+      (m) => m.conversationId === closed.conversationId,
+    ).length;
+    const { app } = makeWebhookHarness({ world });
+
+    // ZARA is on NO roster and EVERY group on this number is closed: burying the
+    // text in a dead group transcript would hide it (a stranger/second-phone
+    // sender, or a member from a NEW phone). It falls through to the normal 1:1
+    // intake path instead (pre-feature behavior: a cleared number fell to 1:1).
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ZARA, MessageSid: 'SMclosed-fallback' }),
+    );
+    expect(res.status).toBe(200);
+    const msg = world.messages.find((m) => m.provider_sid === 'SMclosed-fallback')!;
+    // Landed in a fresh NON-group 1:1 conversation, NOT the closed group, and
+    // WITHOUT a provenance badge (ZARA is not a closed-roster member).
+    expect(msg.conversationId).not.toBe(closed.conversationId);
+    expect(msg.via_closed_group).toBeUndefined();
+    expect(world.conversations.get(msg.conversationId)!.type).not.toBe('relay_group');
+    // The closed group's transcript is unchanged, and nothing fanned out.
+    expect(
+      world.messages.filter((m) => m.conversationId === closed.conversationId).length,
+    ).toBe(beforeGroupRows);
+    expect(world.sent).toHaveLength(0);
   });
 });

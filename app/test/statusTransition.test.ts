@@ -43,7 +43,7 @@ function makeService(world: FakeWorld): StatusTransitionService {
 /** Build the service with optional choke-point hooks (Post-Tour & Application). */
 function makeServiceWith(
   world: FakeWorld,
-  hooks: Pick<StatusTransitionDeps, 'armStageNudge' | 'closeRelayForLostPlacement'>,
+  hooks: Pick<StatusTransitionDeps, 'armStageNudge'>,
 ): StatusTransitionService {
   return createStatusTransitionService({
     placementsRepo: world.placementsRepo,
@@ -737,11 +737,12 @@ describe('statusTransition — deadline items (no stored stuck nudge)', () => {
 });
 
 // Task 5 (Post-Tour & Application): the transition choke point ALSO (a) arms the
-// RTA 48h hard clock on entering awaiting_landlord_submission, (b) invokes the
-// optional armStageNudge hook (stage-application nudge ladder) on every move, and
-// (c) invokes the optional closeRelayForLostPlacement hook on a lost move. Both
-// hooks are best-effort and OPTIONAL — absent, behavior is identical to before
-// (proven by every test above, none of which pass hooks).
+// RTA 48h hard clock on entering awaiting_landlord_submission, and (b) invokes
+// the optional armStageNudge hook (stage-application nudge ladder) on every move.
+// The armStageNudge hook is best-effort and OPTIONAL - absent, behavior is
+// identical to before (proven by every test above, none of which pass hooks).
+// (relay-number-lifecycle spec 4.1: NOTHING auto-closes a relay group anymore -
+// the placement->lost relay-close hook was REMOVED; closing is a human choice.)
 describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)', () => {
   const RTA_WINDOW_MS = 48 * 60 * 60 * 1000;
   let world: FakeWorld;
@@ -800,62 +801,42 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(calls[0]!.nowIso).toBe(new Date(calls[0]!.nowIso).toISOString());
   });
 
-  it('a lost move invokes closeRelayForLostPlacement AND clears all deadline items (terminal behavior preserved)', async () => {
-    const closed: PlacementItem[] = [];
+  it('a lost move clears all deadline items but performs NO relay close (nothing auto-closes)', async () => {
     const armed: Array<{ placement: PlacementItem; toStage: string }> = [];
     const svc = makeServiceWith(world, {
-      closeRelayForLostPlacement: async (placement) => {
-        closed.push(placement);
-      },
       armStageNudge: async (placement, toStage) => {
         armed.push({ placement, toStage });
       },
+    });
+    // A linked OPEN relay group: the lost move must LEAVE IT OPEN (spec 4.1 -
+    // closing is a human choice via the inline ask / Today nag, never automatic).
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550100060',
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
     });
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
       unitId: 'unit-1',
       stage: 'awaiting_approval',
-      group_thread: 'conv-relay-1',
+      group_thread: group.conversationId,
     });
     // Give it a pending deadline so we can prove the terminal move clears it.
     await world.placementDeadlinesRepo.arm(c.placementId, 'follow_up', '2026-09-01T00:00:00.000Z');
 
     await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
 
-    // The relay-close hook fired once, with the POST-transition (lost) placement.
-    expect(closed).toHaveLength(1);
-    expect(closed[0]!.stage).toBe('lost');
-    expect(closed[0]!.group_thread).toBe('conv-relay-1');
     // Terminal clearing is unchanged in effect: the pending deadline is gone.
     expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
     // The arm hook ALSO fires on lost (its cancel-only path retires pending rows).
     expect(armed).toHaveLength(1);
     expect(armed[0]!.toStage).toBe('lost');
-  });
-
-  it('closeRelayForLostPlacement is NOT invoked on a non-lost move', async () => {
-    const closed: PlacementItem[] = [];
-    const svc = makeServiceWith(world, {
-      closeRelayForLostPlacement: async (placement) => {
-        closed.push(placement);
-      },
-    });
-    const c = await world.placementsRepo.create({
-      tenantId: 'tenant-1',
-      unitId: 'unit-1',
-      stage: 'send_application',
-      group_thread: 'conv-relay-1',
-    });
-    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_receipt', source: 'manual' });
-    expect(closed).toHaveLength(0);
+    // NO relay interaction: the linked group is still OPEN (no auto-close).
+    expect((await world.conversationsRepo.getById(group.conversationId))?.status).toBe('open');
   });
 
   it('a hook that throws NEVER fails the transition (best-effort)', async () => {
     const svc = makeServiceWith(world, {
       armStageNudge: async () => {
-        throw new Error('boom');
-      },
-      closeRelayForLostPlacement: async () => {
         throw new Error('boom');
       },
     });
@@ -1007,5 +988,120 @@ describe('statusTransition — placement stage milestone', () => {
     expect(ev).toHaveLength(1);
     expect(ev[0]!.label).toContain('tenant_withdrew');
     expect(ev[0]!.label).not.toContain('secret note');
+  });
+});
+
+// D5 close-nag safety net (relay-number-lifecycle AF-1/CF-1): a terminal
+// placement move (lost / moved_in) whose linked relay group is still OPEN arms
+// the 28-day close-nag (SET-IF-ABSENT) so a group left open past the terminal
+// event surfaces on Today - a backend arm, independent of the dashboard dialog.
+// Arming a nag is NOT closing (spec D4 "nothing auto-closes" is intact).
+describe('statusTransition - D5 relay close-nag arm on terminal moves (AF-1/CF-1)', () => {
+  const CLOSE_NAG_INTERVAL_MS = 28 * 24 * 60 * 60 * 1000;
+  let world: FakeWorld;
+
+  function svcWithConversations(w: FakeWorld): StatusTransitionService {
+    return createStatusTransitionService({
+      placementsRepo: w.placementsRepo,
+      placementDeadlinesRepo: w.placementDeadlinesRepo,
+      unitsRepo: w.unitsRepo,
+      contactsRepo: w.contactsRepo,
+      auditRepo: w.auditRepo,
+      events: w.events,
+      conversationsRepo: w.conversationsRepo,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+  }
+
+  beforeEach(async () => {
+    world = createFakeWorld();
+    await world.contactsRepo.create({ contactId: 'tenant-1', type: 'tenant' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
+  });
+
+  async function seedLinkedGroup(poolNumber = '+15550100070') {
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'tenant-1',
+      unitId: 'unit-1',
+      stage: 'awaiting_approval',
+      group_thread: group.conversationId,
+    });
+    return { group, placement };
+  }
+
+  it('a lost move arms the 28-day close-nag on the linked OPEN group (and does NOT close it)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    const before = Date.now();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    const conv = (await world.conversationsRepo.getById(group.conversationId))!;
+    expect(conv.close_nag_next_at).toBeDefined();
+    expect(Math.abs(Date.parse(conv.close_nag_next_at!) - (before + CLOSE_NAG_INTERVAL_MS))).toBeLessThan(60_000);
+    expect(conv.status).toBe('open'); // arming a nag is not closing (D4 intact)
+  });
+
+  it('a moved_in move arms the close-nag on the linked OPEN group', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'moved_in',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeDefined();
+  });
+
+  it('a NON-terminal move does NOT arm the close-nag', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'awaiting_inspection',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeUndefined();
+  });
+
+  it('a CLOSED linked group is never armed (nag stays absent)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    await world.conversationsRepo.setRelayStatus(group.conversationId, 'closed', 'open');
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBeUndefined();
+  });
+
+  it('an already-set nag is left UNTOUCHED (set-if-absent, never shortened/extended)', async () => {
+    const { group, placement } = await seedLinkedGroup();
+    const existing = new Date(Date.now() + 5 * 24 * 60 * 60 * 1000).toISOString();
+    await world.conversationsRepo.setCloseNagNextAt(group.conversationId, existing);
+    await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(
+      (await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at,
+    ).toBe(existing);
+  });
+
+  it('a nag-arm failure NEVER fails the transition (best-effort)', async () => {
+    const { placement } = await seedLinkedGroup();
+    world.conversationsRepo.setCloseNagNextAt = async () => {
+      throw new Error('nag boom');
+    };
+    const updated = await svcWithConversations(world).transitionPlacement(placement.placementId, {
+      toStage: 'lost',
+      source: 'manual',
+    });
+    expect(updated.stage).toBe('lost'); // the transition still committed
   });
 });

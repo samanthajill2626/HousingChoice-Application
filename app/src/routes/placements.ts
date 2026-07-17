@@ -378,6 +378,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       contactsRepo: contacts,
       auditRepo: audit,
       events,
+      // D5 close-nag safety net (AF-1/CF-1): arm the nag on a terminal
+      // (lost/moved_in) transition whose linked relay group is still open.
+      conversationsRepo: conversations,
       ...(deps.logger !== undefined && { logger: deps.logger }),
     });
 

@@ -467,6 +467,9 @@ const searchingTenant = {
       { contactId: C_SEARCHING, phone: PHONES.searchingTenant, name: 'Monique Everett' },
       { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
     ],
+    // Burn provenance (W1): the phones this group has burned on its pool number
+    // (same roster union as the pool's burned_phones). A JS Set marshals to SS.
+    ever_member_phones: new Set([PHONES.searchingTenant, '+15550100002']),
     participant_display_name: 'Tour Group - Monique Everett',
     last_message_preview: "Hello! I'm Monique Everett. Looking forward to seeing the place.",
     pool_number: RELAY_POOL_PHONE,
@@ -474,17 +477,18 @@ const searchingTenant = {
     owner: { type: 'tour', id: TOUR_SEARCHING },
     created_at: CQ,
   },
-  // Pool number row bound to the relay conversation
+  // Pool number backing the relay conversation (burn-multiplexing model)
   poolNumber: {
     poolNumber: RELAY_POOL_PHONE,
-    lifecycle_state: 'assigned',
-    quarantine_until: '0000-00-00T00:00:00.000Z', // sentinel for non-quarantined
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z', // retained GSI range sentinel
     provisioned_via: 'console',
     voice_capable: true,
     sms_capable: true,
-    assigned_conversation_id: CONV_SEARCHING_RELAY,
+    // burned_phones = the relay group's roster (tenant + landlord). A JS Set
+    // marshals to a DynamoDB string set via the seed doc client.
+    burned_phones: new Set([PHONES.searchingTenant, '+15550100002']),
     provisioned_at: CQ,
-    assigned_at: CQ,
   },
   // Requested tour (landlord_led; NO scheduledAt; ZERO reminder rows — invariant)
   tour: {
@@ -714,6 +718,8 @@ const touredYesTenant = {
       { contactId: C_TOURED_YES, phone: PHONES.touredYes, name: 'Brianna Whitfield' },
       { contactId: 'contact-landlord-0001', phone: '+15550100002', name: 'Marcus Bell' },
     ],
+    // Burn provenance (W1): the phones this group has burned (roster union).
+    ever_member_phones: new Set([PHONES.touredYes, '+15550100002']),
     participant_display_name: 'Tour Group - Brianna Whitfield',
     last_message_preview: 'See you at 2pm Saturday!',
     pool_number: RELAY_POOL_TOURED,
@@ -723,14 +729,13 @@ const touredYesTenant = {
   },
   poolNumber: {
     poolNumber: RELAY_POOL_TOURED,
-    lifecycle_state: 'assigned',
-    quarantine_until: '0000-00-00T00:00:00.000Z',
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z', // retained GSI range sentinel
     provisioned_via: 'console',
     voice_capable: true,
     sms_capable: true,
-    assigned_conversation_id: CONV_TOURED_RELAY,
+    burned_phones: new Set([PHONES.touredYes, '+15550100002']),
     provisioned_at: CW,
-    assigned_at: CW,
   },
   // Tour: toured, outcome move_forward, convertible (no reminder rows — all sent already)
   tour: {

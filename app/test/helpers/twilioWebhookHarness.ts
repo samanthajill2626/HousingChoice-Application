@@ -373,6 +373,10 @@ export function createFakeWorld(): FakeWorld {
         type: 'relay_group',
         ai_mode: 'manual',
         participants: members,
+        // W1 burn provenance: seed from the initial roster (Set marshals to SS).
+        ...(members.length > 0 && {
+          ever_member_phones: new Set(members.map((m) => m.phone)),
+        }),
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
         ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
@@ -386,6 +390,13 @@ export function createFakeWorld(): FakeWorld {
         if (conv.pool_number === poolNumber && conv.type === 'relay_group') return conv;
       }
       return undefined;
+    },
+    async getAllByPoolNumber(poolNumber) {
+      // Multi-match: pool_number is never cleared, so a number accumulates all
+      // its groups (open + closed).
+      return [...conversations.values()].filter(
+        (conv) => conv.pool_number === poolNumber && conv.type === 'relay_group',
+      );
     },
     async listRelayGroups(status) {
       // Mirrors the real repo: one relay status partition, newest-activity-first.
@@ -403,6 +414,16 @@ export function createFakeWorld(): FakeWorld {
       if (!roster.some((p) => p.phone === member.phone)) {
         conv.participants = [...roster, member];
         conv.participants_version = (conv.participants_version ?? 0) + 1;
+        // W1 burn provenance (atomic-faithful): SEED a legacy group from the
+        // post-add roster (their burns belong to this group); else extend.
+        const raw = conv.ever_member_phones;
+        const ever = raw instanceof Set ? raw : Array.isArray(raw) ? new Set(raw) : undefined;
+        if (ever === undefined) {
+          conv.ever_member_phones = new Set(conv.participants.map((p) => p.phone));
+        } else {
+          ever.add(member.phone);
+          conv.ever_member_phones = ever;
+        }
       }
       return conv;
     },
@@ -418,21 +439,36 @@ export function createFakeWorld(): FakeWorld {
       }
       return conv;
     },
-    async setRelayStatus(conversationId, status, poolNumber, expectedStatus) {
+    async setRelayStatus(conversationId, status, expectedCurrent) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setRelayStatus: no conversation ${conversationId}`);
-      // FIX 1: honor the optional conditional flip (concurrent close/reopen
-      // idempotency) — a precondition mismatch throws like the real repo.
-      if (expectedStatus !== undefined && conv.status !== expectedStatus) {
+      // Conditional flip (concurrent close/reopen idempotency) - a precondition
+      // mismatch throws like the real repo. pool_number is NEVER touched now.
+      if (conv.status !== expectedCurrent) {
         throw conditionalCheckFailed(
-          `setRelayStatus: ${conversationId} expected status ${expectedStatus} but was ${conv.status}`,
+          `setRelayStatus: ${conversationId} expected status ${expectedCurrent} but was ${conv.status}`,
         );
       }
       conv.status = status;
       conv.relay_status = `relay_group#${status}`; // lockstep with status (fidelity)
-      if (poolNumber === null) delete conv.pool_number;
-      else conv.pool_number = poolNumber;
+      // W3: a reopen (-> open) clears the close-announce marker (folded into the
+      // flip in the real repo) so a future close re-announces.
+      if (status === 'open') delete conv.close_announced_at;
       return conv;
+    },
+    async claimCloseAnnounce(conversationId) {
+      // W3 dedup claim (atomic-faithful: synchronous check-and-set, no await
+      // between). Won only when the group is OPEN and unclaimed.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.status !== 'open' || conv.close_announced_at !== undefined) return false;
+      conv.close_announced_at = new Date().toISOString();
+      return true;
+    },
+    async setCloseNagNextAt(conversationId, at) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`setCloseNagNextAt: no conversation ${conversationId}`);
+      if (at === null) delete conv.close_nag_next_at;
+      else conv.close_nag_next_at = at;
     },
     async setRelayMemberOptedOut(conversationId, memberKey, entry) {
       const conv = conversations.get(conversationId);
@@ -496,6 +532,8 @@ export function createFakeWorld(): FakeWorld {
         // Relay group (M1.7): preserve the inbound relay annotations.
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        // Relay number lifecycle: preserve the closed-group interception provenance.
+        ...(message.viaClosedGroup !== undefined && { via_closed_group: message.viaClosedGroup }),
         // Relay group (M1.7): preserve the seeded per-recipient delivery map so
         // the fan-out's child-only setRecipientDelivery has a parent to write
         // into (mirrors the real repo's append passthrough).
@@ -1938,6 +1976,9 @@ export function createFakeWorld(): FakeWorld {
       };
     },
     async setVoiceWebhook() {
+      // no-op fake
+    },
+    async releasePhoneNumber() {
       // no-op fake
     },
     async initiateCall(params) {

@@ -133,6 +133,19 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
   }
 }
 
+/**
+ * Sort relay groups NEWEST-first by created_at (missing created_at sorts last).
+ * Used to break ties in (To, From) resolution: at most one OPEN group should
+ * match by the burn invariant, but a corrupt-many is disambiguated to the
+ * newest (never a crash), and a sender in several CLOSED groups on one number
+ * routes to the newest for provenance.
+ */
+function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
+  const aC = a.created_at ?? '';
+  const bC = b.created_at ?? '';
+  return aC < bC ? 1 : aC > bC ? -1 : 0;
+}
+
 export interface TwilioWebhookDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -372,7 +385,6 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       deliveryStatus: 'delivered',
       relaySenderKey: senderKey,
       deliveryRecipients: {},
-      ...(isClosed && { receivedOnClosedThread: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -389,8 +401,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
-    // Closed-thread reply: flagged (receivedOnClosedThread above), NEVER fanned
-    // out — the conversation is over; the reply is kept for the record only.
+    // Closed-group defensive guard: the router only reaches this branch on the
+    // unknown-sender fallback (a member's late text is intercepted into the 1:1
+    // before this). Persist for the record, NEVER fan out - the group is over.
     if (isClosed) {
       log.info({ providerSid: MessageSid }, 'relay inbound on a CLOSED thread — persisted, no fan-out');
     } else if (!sender) {
@@ -438,6 +451,252 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   }
 
   // ---------------------------------------------------------------------
+  // Keyword handling (STOP / HELP / opt-in) - spec sec 6, WE own the replies.
+  // Extracted from the /sms handler so the closed-group intercept can REUSE the
+  // SAME logic path (relay-number-lifecycle AF-4: a closed-group member's STOP
+  // to the pool number must suppress exactly like a STOP to the main number did
+  // pre-feature, when a closed group's cleared number fell through to the 1:1).
+  // Sets the conversation opt-out flag, the CONTACT flag only on the primary
+  // number (BE1 number-scope), stamps inbound_text consent, audits, and returns
+  // the filed reply (STOP confirmation / HELP / welcome) to ride the TwiML
+  // response. Best-effort: a repo failure is logged and NEVER crashes the
+  // webhook (the message is already persisted). PII: SIDs/IDs only.
+  // ---------------------------------------------------------------------
+  async function processInboundKeywords(input: {
+    conversation: ConversationItem;
+    effectiveContact: ContactItem | undefined;
+    From: string;
+    Body: string | undefined;
+    OptOutType: string | undefined;
+    MessageSid: string;
+  }): Promise<string | undefined> {
+    const { conversation, effectiveContact, From, Body, OptOutType, MessageSid } = input;
+    let keywordReply: string | undefined;
+    try {
+      const keyword = (Body ?? '').trim().toUpperCase();
+      const isHelp = OptOutType === 'HELP' || keyword === 'HELP';
+      const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
+      const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
+
+      // Spec sec 3.2: ANY customer-initiated inbound confers inbound_text consent,
+      // so a later staff reply is never JIT-gated ("a reply in a contact-started
+      // conversation is always allowed"). A brand-new unknown phone is already
+      // stamped when its stub is minted (services/contactCapture.ts); the gap this
+      // closes is an EXISTING contact (e.g. one added via the contact form with no
+      // consent) who then texts in - stamp them here too. Restricted to a PLAIN
+      // inbound: an opt-out is a revocation (don't stamp), and the opt-in branch
+      // below does its own primary-number-scoped stamp. Idempotent - only when
+      // consent_method is absent (never overwrites a web_form/verbal record).
+      if (
+        effectiveContact &&
+        !effectiveContact.consent_method &&
+        !isHelp &&
+        !optedOut &&
+        !optedIn
+      ) {
+        await contacts.update(effectiveContact.contactId, {
+          consent_method: 'inbound_text',
+          consent_at: new Date().toISOString(),
+        });
+      }
+
+      if (isHelp) {
+        // HELP: no suppression change. Reply the filed HELP copy (declares no
+        // phone number - verified in lib/smsCompliance.ts + its test).
+        keywordReply = resolveMessage('keyword.help');
+      } else if (optedOut || optedIn) {
+        // The CONVERSATION flag is always written - a STOP from a phone with
+        // no contact record yet (auto-capture is M1.2) must still suppress
+        // every later send. The send wrapper gates on either flag.
+        await conversations.setSmsOptOut(conversation.conversationId, optedOut);
+        const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
+        const source =
+          OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
+        // BE1 number-scoped consent: the CONTACT-level flag (which suppresses the
+        // contact's GOOD primary number across broadcasts + 1:1 sends) is set ONLY
+        // when the STOP/START arrived on the contact's PRIMARY number (From ===
+        // contact.phone). A STOP on an ATTACHED secondary number must NOT
+        // contaminate the primary - the conversation-level flag above already
+        // suppresses this thread (the correct per-number scope).
+        const isPrimaryNumber =
+          effectiveContact !== undefined && From === effectiveContact.phone;
+        if (effectiveContact && isPrimaryNumber) {
+          if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
+          else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
+          await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
+            providerSid: MessageSid,
+            conversationId: conversation.conversationId,
+            source,
+          });
+          // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
+          // opt-in (spec sec 6): if this (primary-number) contact has NO
+          // consent_method yet, stamp inbound_text so proactive sends aren't
+          // JIT-gated. Idempotent - only stamped when absent (never overwrites
+          // a web_form / verbal record). Best-effort inside the same try.
+          if (optedIn && !effectiveContact.consent_method) {
+            await contacts.update(effectiveContact.contactId, {
+              consent_method: 'inbound_text',
+              consent_at: new Date().toISOString(),
+            });
+          }
+        } else if (effectiveContact) {
+          // Non-primary (attached) number: the contact flag is NOT touched (per-
+          // number scope) - only this conversation is suppressed (above). Audit on
+          // the conversation so the trail records the number-scoped opt-out/in.
+          log.info(
+            { providerSid: MessageSid, optOut: optedOut },
+            'opt-out/in on a non-primary attached number - conversation suppressed, contact flag NOT changed (number-scoped)',
+          );
+          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
+            providerSid: MessageSid,
+            conversationId: conversation.conversationId,
+            source,
+          });
+        } else {
+          // Only reachable when auto-capture itself failed above - the
+          // conversation flag still suppresses every later send.
+          log.warn(
+            { providerSid: MessageSid, optOut: optedOut },
+            'opt-out/in from a phone with no contact record - conversation flagged, no contact to flag (auto-capture failed)',
+          );
+          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
+            providerSid: MessageSid,
+            conversationId: conversation.conversationId,
+            source,
+          });
+        }
+        // The filed reply for the matched keyword (rides the TwiML response).
+        // STOP -> the compliance-locked confirmation; opt-in/START -> the welcome,
+        // resolved through settings so an operator `welcomeText` override is
+        // honored (sec 7 - matches the housing-fair path; today's raw-constant use
+        // ignored the override).
+        keywordReply = optedOut
+          ? resolveMessage('keyword.stop')
+          : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
+      }
+    } catch (err) {
+      log.error({ err, providerSid: MessageSid }, 'opt-out recording failed - message persisted, flag NOT updated');
+    }
+    return keywordReply;
+  }
+
+  // ---------------------------------------------------------------------
+  // Late text on a CLOSED relay group (relay-number-lifecycle, spec 3.1 step
+  // 3): the sender is only on a CLOSED group's roster for this pool number, so
+  // instead of appending to the dead group, deliver the message into their OWN
+  // 1:1 tenant/landlord thread (the public-intake idiom) tagged with
+  // via_closed_group provenance. No fan-out to old members, no auto-reply; the
+  // closed GROUP transcript receives nothing (the 1:1-with-provenance is
+  // strictly more useful and never pollutes group history). STOP/opt-out IS
+  // processed here (AF-4) via the shared processInboundKeywords path so a
+  // closed-group member's STOP suppresses exactly like a STOP to the main
+  // number - the filed reply is returned to the caller to ride the TwiML.
+  // ---------------------------------------------------------------------
+  async function handleClosedGroupInbound(
+    group: ConversationItem,
+    msg: {
+      MessageSid: string;
+      From: string;
+      Body: string | undefined;
+      params: WebhookParams;
+    },
+  ): Promise<string | undefined> {
+    const { MessageSid, From, Body } = msg;
+    const mediaUrls = parseInboundMediaUrls(msg.params);
+
+    // Resolve the sender's 1:1 thread exactly as the public-intake path does:
+    // honest conversation typing (only a reviewed contact type yields a typed
+    // thread), then createOrGetByParticipantPhone.
+    const contact = await contacts.findByPhone(From);
+    const conversation = await conversations.createOrGetByParticipantPhone(
+      From,
+      conversationTypeFor(contact),
+    );
+    mergeContext({ conversationId: conversation.conversationId });
+
+    const providerTs = new Date().toISOString();
+    const appended = await messages.append({
+      conversationId: conversation.conversationId,
+      providerSid: MessageSid,
+      providerTs,
+      type: mediaUrls.length > 0 ? 'mms' : 'sms',
+      direction: 'inbound',
+      // Same honesty rule as the 1:1 path: only a reviewed contact type may
+      // claim tenant/landlord authorship; everything else is `unknown`.
+      author:
+        contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown',
+      // Inbound messages are received by definition.
+      deliveryStatus: 'delivered',
+      // Provenance: the pool number this reached only matches From on the CLOSED
+      // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
+      viaClosedGroup: group.conversationId,
+      ...(Body !== undefined && Body.length > 0 && { body: Body }),
+      ...(mediaUrls.length > 0 && { mediaUrls }),
+    });
+
+    // Mirror MMS media on the FIRST delivery only (a redelivery is deduped ->
+    // already mirrored). Best-effort (mirrorInboundMedia never throws).
+    if (!appended.deduped) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: conversation.conversationId,
+        tsMsgId: appended.tsMsgId,
+        params: msg.params,
+      });
+    }
+
+    // Inbox touch + unread + SSE - the minimal 1:1 subset (fresh-append only, so
+    // a redelivery never double-counts/re-emits). Side-effect failures never
+    // crash the webhook.
+    let touched: ConversationItem | undefined;
+    try {
+      if (!appended.deduped) await conversations.incrementUnread(conversation.conversationId);
+      touched = await conversations.touchLastActivity(
+        conversation.conversationId,
+        Body || undefined,
+        providerTs,
+      );
+    } catch (err) {
+      log.error(
+        { err, providerSid: MessageSid },
+        'closed-group late text touchLastActivity/unread failed - message persisted, inbox stale',
+      );
+    }
+    if (!appended.deduped) {
+      events.emit('message.persisted', {
+        conversationId: conversation.conversationId,
+        tsMsgId: appended.tsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+    // PII (doc sec 9): IDs only - never the sender phone. viaGroup = the closed
+    // group's id; conversationId = the 1:1 the text was intercepted into.
+    log.info(
+      { conversationId: conversation.conversationId, viaGroup: group.conversationId },
+      'relay late text on closed group - delivered to 1:1 with provenance',
+    );
+
+    // AF-4: process STOP / HELP / opt-in on the 1:1 the text landed in, using the
+    // SAME keyword path as the main-number 1:1 inbound. A closed-group member's
+    // STOP must register the opt-out (conversation + primary-number contact
+    // flags) so later 1:1/relay sends are gated - restoring the pre-feature
+    // behavior (a closed group's cleared number fell through to the 1:1 STOP
+    // block). The message already landed above; the returned reply rides the
+    // TwiML the caller sends.
+    return processInboundKeywords({
+      conversation,
+      effectiveContact: contact,
+      From,
+      Body,
+      OptOutType: msg.params['OptOutType'],
+      MessageSid,
+    });
+  }
+
+  // ---------------------------------------------------------------------
   // Inbound message webhook — pipeline order per doc §7.1.
   // ---------------------------------------------------------------------
   router.post('/sms', verifySignature, async (req, res) => {
@@ -463,22 +722,79 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
-    if (await conversations.getByPoolNumber(From)) {
+    // Multiplexing: a pool number fronts MANY groups (open + closed), so the
+    // echo guard checks getAllByPoolNumber (any group, open or closed). The
+    // voice-only getByPoolNumber wrapper is no longer used on the SMS path.
+    if ((await conversations.getAllByPoolNumber(From)).length > 0) {
       log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is a pool number) — acknowledged, dropped');
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
 
-    // (1.5) Relay routing (M1.7): if To is one of our pool numbers, this is an
-    // inbound to a relay group — route it to the relay path (fan-out to the
-    // other members), NOT the 1:1 path. The byPoolNumber GSI read is the cheap
-    // lookup (never a scan); "found" means "To is a pool number".
+    // (1.5) Relay routing (relay-number-lifecycle): a pool number now fronts
+    // MANY participant-disjoint groups (concurrently + over time), so inbound
+    // resolves on (To, From) via getAllByPoolNumber (open + closed - pool_number
+    // is never cleared). The byPoolNumber GSI read is still the cheap lookup
+    // (never a scan). Zero groups on To -> fall through to the normal 1:1 path.
     if (To !== undefined && To.length > 0) {
-      const relay = await conversations.getByPoolNumber(To);
-      if (relay) {
-        await handleRelayInbound(relay, { MessageSid, From, To, Body, params });
-        res.type('text/xml').send(EMPTY_TWIML);
-        return;
+      const groups = await conversations.getAllByPoolNumber(To);
+      if (groups.length > 0) {
+        // (a) OPEN group whose roster contains the sender -> today's relay path
+        //     (fan-out, DLR pointers, STOP handling all unchanged). The burn
+        //     invariant guarantees at most one; a corrupt-many routes to the
+        //     newest and logs an error (never crashes the webhook).
+        const openMatches = groups.filter(
+          (g) => g.status === 'open' && (g.participants ?? []).some((m) => m.phone === From),
+        );
+        if (openMatches.length > 1) {
+          log.error(
+            { providerSid: MessageSid, matchCount: openMatches.length },
+            'multiple OPEN relay groups on one pool number match the sender (burn invariant violated) - routing to the newest',
+          );
+        }
+        const openMatch = openMatches.sort(byNewestCreated)[0];
+        if (openMatch) {
+          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
+          return;
+        }
+        // (b) Else a CLOSED group whose roster contains the sender -> deliver
+        //     the late text into the sender's OWN 1:1 thread with provenance
+        //     (newest of several - a person can be in several closed groups on
+        //     one number over the years). No fan-out, no group append.
+        const closedMatch = groups
+          .filter((g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From))
+          .sort(byNewestCreated)[0];
+        if (closedMatch) {
+          // AF-4: the intercept processes STOP/opt-out and returns the filed
+          // reply (STOP confirmation / HELP / welcome), which rides the TwiML.
+          const closedReply = await handleClosedGroupInbound(closedMatch, {
+            MessageSid,
+            From,
+            Body,
+            params,
+          });
+          res.type('text/xml').send(
+            closedReply !== undefined ? messageTwiml(closedReply) : EMPTY_TWIML,
+          );
+          return;
+        }
+        // (c) Unknown sender (on NO roster) texting a pool number.
+        //   - If any OPEN group exists: keep today's non-member behavior
+        //     (persist on the newest OPEN group for the record, no fan-out).
+        //   - If ALL groups are closed (AF-5): do NOT bury the text in a dead
+        //     group transcript (it could hide a real message - a stranger, a
+        //     second phone, or a member from a NEW phone). Fall THROUGH to the
+        //     normal 1:1 intake path below (pre-feature behavior: a cleared
+        //     number fell to 1:1). No via_closed_group - they are not a
+        //     closed-roster member (that interception is branch (b) above).
+        const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
+        if (openFallback) {
+          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
+          return;
+        }
+        // else: every group on this number is closed -> fall through to (2).
       }
     }
 
@@ -613,113 +929,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // end of the handler. The STOP confirmation MUST ride this TwiML response,
     // NOT the opt-out-gated sendMessage wrapper (which would refuse a send to a
     // just-opted-out number).
-    let keywordReply: string | undefined;
-    try {
-      const keyword = (Body ?? '').trim().toUpperCase();
-      const isHelp = OptOutType === 'HELP' || keyword === 'HELP';
-      const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
-      const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
-
-      // Spec §3.2: ANY customer-initiated inbound confers inbound_text consent,
-      // so a later staff reply is never JIT-gated ("a reply in a contact-started
-      // conversation is always allowed"). A brand-new unknown phone is already
-      // stamped when its stub is minted (services/contactCapture.ts); the gap this
-      // closes is an EXISTING contact (e.g. one added via the contact form with no
-      // consent) who then texts in — stamp them here too. Restricted to a PLAIN
-      // inbound: an opt-out is a revocation (don't stamp), and the opt-in branch
-      // below does its own primary-number-scoped stamp. Idempotent — only when
-      // consent_method is absent (never overwrites a web_form/verbal record).
-      // Rides the same best-effort try as the rest of keyword handling.
-      if (
-        effectiveContact &&
-        !effectiveContact.consent_method &&
-        !isHelp &&
-        !optedOut &&
-        !optedIn
-      ) {
-        await contacts.update(effectiveContact.contactId, {
-          consent_method: 'inbound_text',
-          consent_at: new Date().toISOString(),
-        });
-      }
-
-      if (isHelp) {
-        // HELP: no suppression change. Reply the filed HELP copy (declares no
-        // phone number — verified in lib/smsCompliance.ts + its test).
-        keywordReply = resolveMessage('keyword.help');
-      } else if (optedOut || optedIn) {
-        // The CONVERSATION flag is always written — a STOP from a phone with
-        // no contact record yet (auto-capture is M1.2) must still suppress
-        // every later send. The send wrapper gates on either flag.
-        await conversations.setSmsOptOut(conversation.conversationId, optedOut);
-        const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
-        const source =
-          OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
-        // BE1 number-scoped consent: the CONTACT-level flag (which suppresses the
-        // contact's GOOD primary number across broadcasts + 1:1 sends) is set ONLY
-        // when the STOP/START arrived on the contact's PRIMARY number (From ===
-        // contact.phone). A STOP on an ATTACHED secondary number must NOT
-        // contaminate the primary — the conversation-level flag above already
-        // suppresses this thread (the correct per-number scope).
-        const isPrimaryNumber =
-          effectiveContact !== undefined && From === effectiveContact.phone;
-        if (effectiveContact && isPrimaryNumber) {
-          if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
-          else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
-          });
-          // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
-          // opt-in (spec §6): if this (primary-number) contact has NO
-          // consent_method yet, stamp inbound_text so proactive sends aren't
-          // JIT-gated. Idempotent — only stamped when absent (never overwrites
-          // a web_form / verbal record). Best-effort inside the same try.
-          if (optedIn && !effectiveContact.consent_method) {
-            await contacts.update(effectiveContact.contactId, {
-              consent_method: 'inbound_text',
-              consent_at: new Date().toISOString(),
-            });
-          }
-        } else if (effectiveContact) {
-          // Non-primary (attached) number: the contact flag is NOT touched (per-
-          // number scope) — only this conversation is suppressed (above). Audit on
-          // the conversation so the trail records the number-scoped opt-out/in.
-          log.info(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in on a non-primary attached number — conversation suppressed, contact flag NOT changed (number-scoped)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
-          });
-        } else {
-          // Only reachable when auto-capture itself failed above — the
-          // conversation flag still suppresses every later send.
-          log.warn(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in from a phone with no contact record — conversation flagged, no contact to flag (auto-capture failed)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
-          });
-        }
-        // The filed reply for the matched keyword (rides the TwiML response).
-        // STOP → the compliance-locked confirmation; opt-in/START → the welcome,
-        // resolved through settings so an operator `welcomeText` override is
-        // honored (§7 — matches the housing-fair path; today's raw-constant use
-        // ignored the override).
-        keywordReply = optedOut
-          ? resolveMessage('keyword.stop')
-          : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
-      }
-    } catch (err) {
-      log.error({ err, providerSid: MessageSid }, 'opt-out recording failed — message persisted, flag NOT updated');
-    }
+    // Shared with the closed-group intercept (AF-4) so both inbound paths honor
+    // STOP identically. keywordReply rides the TwiML response at the ack below.
+    const keywordReply = await processInboundKeywords({
+      conversation,
+      effectiveContact,
+      From,
+      Body,
+      OptOutType,
+      MessageSid,
+    });
 
     // (5) MMS media — mirror each MediaUrl{i} into S3 (streams only). Runs before
     // the ack on purpose (decision): counts are tiny (<=10) and well inside

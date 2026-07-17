@@ -2617,27 +2617,23 @@ export class Scenario {
     });
   }
 
-  /** [App] Lost closed the placement's masked relay thread: the conversation is
-   *  `closed` and its pool number released (cleared). */
-  expectRelayClosed(): Promise<void> {
+  /** [App] NOTHING auto-closes now (relay-number-lifecycle design 4.1): a placement
+   *  Lost NO LONGER closes the masked relay thread. The group STAYS OPEN and KEEPS
+   *  its pool number - closing is a MANUAL ask surfaced on the dashboard after the
+   *  terminal transition (RelayCloseAskDialog), proven in the relay-number-lifecycle
+   *  e2e. This verb pins that new invariant on the linked group. */
+  expectRelayStaysOpenOnLost(): Promise<void> {
     const groupThreadId = this.requireActiveTourGroup().groupThreadId;
-    return step('App: the masked relay thread closed on Lost', async () => {
-      await expect
-        .poll(
-          async () => {
-            const res = await this.page.request.get(`${NEXT}/api/conversations/${groupThreadId}`);
-            if (!res.ok()) return null;
-            const { conversation } = (await res.json()) as {
-              conversation: { status?: string; pool_number?: string };
-            };
-            return conversation.status ?? null;
-          },
-          { timeout: 10_000 },
-        )
-        .toBe('closed');
+    return step('App: the masked relay thread STAYS OPEN on Lost (close is a manual ask)', async () => {
       const res = await this.page.request.get(`${NEXT}/api/conversations/${groupThreadId}`);
-      const { conversation } = (await res.json()) as { conversation: { pool_number?: string } };
-      expect(conversation.pool_number).toBeUndefined();
+      expect(res.ok()).toBeTruthy();
+      const { conversation } = (await res.json()) as {
+        conversation: { status?: string; pool_number?: string };
+      };
+      expect(conversation.status).toBe('open');
+      // The number is NEVER cleared now (burn-multiplexing) - it stays on the group.
+      expect(typeof conversation.pool_number).toBe('string');
+      expect((conversation.pool_number ?? '').length).toBeGreaterThan(0);
     });
   }
 

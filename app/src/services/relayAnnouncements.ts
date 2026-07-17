@@ -129,9 +129,14 @@ export async function sendRelayAnnouncement(
   const conversation = await deps.conversationsRepo.getById(conversationId);
   const poolNumber = conversation?.pool_number;
   const roster = (conversation?.participants ?? []) as ConversationParticipant[];
+  // HARDENING (spec 4.4): `status` is now the authoritative closed-gate. Because
+  // pool_number NEVER clears (burn-multiplexing keeps a closed group resolvable),
+  // a CLOSED group still carries its number, so a pool_number-presence check
+  // alone would let announcements leak into a closed thread. Gate on status.
   if (
     !conversation ||
     conversation.type !== 'relay_group' ||
+    conversation.status !== 'open' ||
     typeof poolNumber !== 'string' ||
     poolNumber.length === 0 ||
     roster.length === 0

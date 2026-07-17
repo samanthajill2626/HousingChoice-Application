@@ -72,8 +72,9 @@ export interface ConversationItem {
   participant_phone: string;
   /**
    * byLastActivity GSI HASH. 1:1 threads only ever write `open`. relay_group
-   * threads use `open` | `closed` (close releases the pool number to
-   * quarantine; reopen re-provisions one).
+   * threads use `open` | `closed`. Closing KEEPS the pool number (a closed
+   * group stays resolvable so late texts intercept to the sender's 1:1);
+   * reopening reuses the SAME number (nothing is re-provisioned).
    */
   status: string;
   /** byLastActivity GSI RANGE (ISO 8601). */
@@ -83,8 +84,9 @@ export interface ConversationItem {
   /**
    * Pool number fronting a relay_group thread (E.164; byPoolNumber GSI HASH).
    * Set ONLY for relay_group conversations — absent on 1:1 threads, which is
-   * what keeps the byPoolNumber GSI sparse. Cleared on close (the number is
-   * released to quarantine); re-set on reopen.
+   * what keeps the byPoolNumber GSI sparse. NEVER cleared once set: a number
+   * may front MANY groups (open + closed) under the burn-multiplexing model, so
+   * byPoolNumber is a MULTI-match index - resolve via getAllByPoolNumber.
    */
   pool_number?: string;
   /**
@@ -165,6 +167,32 @@ export interface ConversationItem {
    * be diluted out of the byLastActivity 'open' partition by open 1:1 volume.
    */
   relay_status?: string;
+  /**
+   * Recurring 28-day close-ask nag (D5): the instant this OPEN relay group's
+   * "still open - close it?" nag is next due on Today. Set when the inline
+   * close-ask is deferred / "Keep open" (now + CLOSE_NAG_INTERVAL_MS); CLEARED
+   * on close. Absent until the first deferral. Relay groups only.
+   */
+  close_nag_next_at?: string;
+  /**
+   * Burn provenance (relay groups): the E.164 phones whose burn on this group's
+   * pool number belongs to THIS group's history - seeded from the initial roster
+   * at createRelayGroup and ADDed on every member add. A DynamoDB string set
+   * (reads back as a JS Set<string>); absent on legacy groups created before this
+   * attribute existed (member-add initializes it from the current roster then).
+   * Member REMOVE never touches it - a burn is forever, so a removed member can
+   * be re-added without a fresh (number, phone) claim.
+   */
+  ever_member_phones?: Set<string> | string[];
+  /**
+   * Close-announce dedup claim: the instant the ONE relay.group_closed final
+   * message was claimed (set by the atomic claimCloseAnnounce, condition
+   * status=open AND this attr absent). Cleared on reopen so a future close
+   * announces again. Its presence-while-open is the crash-retry marker: a close
+   * retry after a crash-between-announce-and-flip sees it set and skips the
+   * (already-sent) announcement, proceeding straight to the idempotent flip.
+   */
+  close_announced_at?: string;
   [key: string]: unknown;
 }
 
@@ -172,6 +200,13 @@ export interface ConversationItem {
 export function relayStatusKey(status: 'open' | 'closed'): string {
   return `relay_group#${status}`;
 }
+
+/**
+ * Close-ask nag interval (D5): 28 days = exactly 4 weeks, so a deferred nag
+ * always lands on the same weekday it was deferred on and recurs within the
+ * month. Named export so no magic number sits inline at the call sites.
+ */
+export const CLOSE_NAG_INTERVAL_MS = 28 * 24 * 60 * 60 * 1000;
 
 /**
  * Generalized owner of a relay_group conversation (Task 5).
@@ -391,12 +426,21 @@ export interface ConversationsRepo {
    */
   rebindOwner(conversationId: string, newOwner: RelayOwner): Promise<ConversationItem>;
   /**
-   * Resolve a pool number to its active relay_group via the byPoolNumber GSI
-   * (the inbound-webhook routing key). Expect 0 or 1 — one ACTIVE relay per
-   * pool number is the invariant (a closed relay clears pool_number). Returns
-   * the open relay when present, else undefined.
+   * LEGACY single-collapse: resolve a pool number to ONE relay_group via the
+   * byPoolNumber GSI, preferring the OPEN match (else the first the GSI yields).
+   * Under burn-multiplexing a number fronts MANY groups (open + closed), so this
+   * lossy view is retained ONLY for the voice masked-inbound seam
+   * (webhooks/voice.ts), which assumes one group per number and is unchanged by
+   * this design. New callers (SMS routing, retirement) use getAllByPoolNumber.
    */
   getByPoolNumber(poolNumber: string): Promise<ConversationItem | undefined>;
+  /**
+   * ALL relay_group conversations ever fronted by this pool number (open +
+   * closed) via the byPoolNumber GSI - the multi-match routing/retirement read.
+   * pool_number is never cleared now, so a number accumulates every group it has
+   * hosted. Paged; returns the full array (never silently truncated).
+   */
+  getAllByPoolNumber(poolNumber: string): Promise<ConversationItem[]>;
   /**
    * List the relay_group conversations in ONE status partition ('open' |
    * 'closed'), newest-activity-first — the inbox relay rows + the contact
@@ -434,25 +478,40 @@ export interface ConversationsRepo {
    */
   removeMember(conversationId: string, phone: string): Promise<ConversationItem>;
   /**
-   * Flip a relay_group's status (open/closed) AND set/clear its pool_number
-   * in one write: closing clears pool_number (the number is released to
-   * quarantine by the caller); reopening writes the supplied (fresh) pool
-   * number back. Returns the post-update item (ALL_NEW). Throws
-   * ConditionalCheckFailedException for unknown conversations.
+   * Flip a relay_group's `status` (open/closed) with its `relay_status` GSI
+   * mirror in lockstep. pool_number is NEVER touched - a closed group keeps its
+   * number so late texts still intercept (burn-multiplexing) and reopen reuses
+   * the same number (nothing is re-provisioned).
    *
-   * `expectedStatus` (optional) makes the flip CONDITIONAL on the current
-   * status — close from `open`, reopen from `closed` — so concurrent
-   * close/reopen are idempotent: a flip whose precondition no longer holds
-   * throws ConditionalCheckFailedException and the caller no-ops (FIX 1 — the
-   * close/reopen race). When omitted, the flip is unconditional (existence
-   * only), preserving the original callers.
+   * `expectedCurrent` makes the flip CONDITIONAL on the current status - close
+   * from `open`, reopen from `closed` - so concurrent close/reopen are
+   * idempotent: a flip whose precondition no longer holds throws
+   * ConditionalCheckFailedException and the caller no-ops (the close/reopen
+   * race). Also throws ConditionalCheckFailedException for unknown
+   * conversations. Returns the post-update item (ALL_NEW).
    */
   setRelayStatus(
     conversationId: string,
     status: 'open' | 'closed',
-    poolNumber: string | null,
-    expectedStatus?: 'open' | 'closed',
+    expectedCurrent: 'open' | 'closed',
   ): Promise<ConversationItem>;
+  /**
+   * Set (ISO string) or CLEAR (null -> REMOVE) a relay group's recurring
+   * 28-day close-ask nag timestamp (D5). Conditional on the conversation
+   * existing. Cleared on close; set to now + CLOSE_NAG_INTERVAL_MS on defer.
+   */
+  setCloseNagNextAt(conversationId: string, at: string | null): Promise<void>;
+  /**
+   * W3 close-announce dedup claim. Atomically SET close_announced_at conditional
+   * on the group being OPEN and the marker absent; returns true for the ONE
+   * winner (which then sends the relay.group_closed announcement) and false for
+   * losers/retries (already closed, already announced, or missing) - which skip
+   * the announcement and proceed to the idempotent status flip. Closes both the
+   * concurrent-close double-announce TOCTOU and the crash-between-announce-and-
+   * flip retry. Reopen clears the marker (setRelayStatus -> open) so a later
+   * close announces again.
+   */
+  claimCloseAnnounce(conversationId: string): Promise<boolean>;
   /**
    * Record ONE relay member as opted-out on the conversation's
    * `relay_opted_out_members` map (A2P — the fan-out detected `sms_opt_out` and
@@ -527,6 +586,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     conversationId: string,
     op: string,
     mutate: (roster: ConversationParticipant[]) => ConversationParticipant[] | undefined,
+    everMemberAdd?: string,
   ): Promise<ConversationItem> {
     for (let attempt = 0; attempt < ROSTER_MAX_RETRIES; attempt++) {
       const existing = await getById(conversationId);
@@ -544,21 +604,41 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       }
       const currentVersion =
         typeof existing.participants_version === 'number' ? existing.participants_version : 0;
+      // Burn provenance (W1): on the ADD path, record the added phone in
+      // ever_member_phones in the SAME conditional write as the roster (roster +
+      // provenance move together atomically). A LEGACY group (attr absent) is
+      // SEEDED from the post-add roster - its current members' burns
+      // definitionally belong to this group's provisioning - so a later
+      // remove-then-re-add of any of them needs no fresh claim; an existing set
+      // is extended with an ADD clause. removeMember passes no everMemberAdd (a
+      // burn is forever - history never shrinks).
+      const values: Record<string, unknown> = {
+        ':p': next,
+        ':curV': currentVersion,
+        ':nextV': currentVersion + 1,
+      };
+      let setExtra = '';
+      let addClause = '';
+      if (everMemberAdd !== undefined) {
+        if (existing.ever_member_phones === undefined) {
+          values[':everSeed'] = new Set(next.map((m) => m.phone));
+          setExtra = ', ever_member_phones = :everSeed';
+        } else {
+          values[':everAdd'] = new Set([everMemberAdd]);
+          addClause = ' ADD ever_member_phones :everAdd';
+        }
+      }
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
-            UpdateExpression: 'SET participants = :p, participants_version = :nextV',
+            UpdateExpression: `SET participants = :p, participants_version = :nextV${setExtra}${addClause}`,
             // Existence guard + the optimistic-concurrency check: the roster's
             // version must be exactly what we read (or absent on first mutation).
             ConditionExpression:
               'attribute_exists(conversationId) AND (attribute_not_exists(participants_version) OR participants_version = :curV)',
-            ExpressionAttributeValues: {
-              ':p': next,
-              ':curV': currentVersion,
-              ':nextV': currentVersion + 1,
-            },
+            ExpressionAttributeValues: values,
             ReturnValues: 'ALL_NEW',
           }),
         );
@@ -922,6 +1002,12 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         // (fan-out sends are not breaker-metered — see relayFanOut).
         ai_mode: 'manual',
         participants: members,
+        // Burn provenance (W1): seed from the initial roster - these phones'
+        // burns on the pool number belong to THIS group. A JS Set marshals to a
+        // DynamoDB string set (empty sets are forbidden, so only when non-empty).
+        ...(members.length > 0 && {
+          ever_member_phones: new Set(members.map((m) => m.phone)),
+        }),
         created_at: now,
         ...(tag !== undefined && { placement_tag: tag }),
         // Legacy back-compat: write placementId when the owner IS a placement
@@ -945,6 +1031,10 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async getByPoolNumber(poolNumber) {
+      // LEGACY single-collapse for the voice seam (see interface): prefer the
+      // OPEN match, else the first the GSI yields. Under burn-multiplexing a
+      // number fronts many groups (open + closed); new SMS/retirement callers
+      // use getAllByPoolNumber instead.
       const { Items } = await doc.send(
         new QueryCommand({
           TableName: table,
@@ -953,10 +1043,30 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
           ExpressionAttributeValues: { ':p': poolNumber },
         }),
       );
-      // One ACTIVE relay per pool number; a closed relay clears pool_number so
-      // it leaves the sparse GSI. Prefer an open match defensively.
       const items = (Items as ConversationItem[] | undefined) ?? [];
       return items.find((c) => c.status === 'open') ?? items[0];
+    },
+
+    async getAllByPoolNumber(poolNumber) {
+      // Multi-match read: pool_number is never cleared, so byPoolNumber holds
+      // ALL of a number's relay groups (open + closed). Page the full partition
+      // (small in practice, but never truncate silently).
+      const items: ConversationItem[] = [];
+      let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
+      do {
+        const { Items, LastEvaluatedKey } = await doc.send(
+          new QueryCommand({
+            TableName: table,
+            IndexName: 'byPoolNumber',
+            KeyConditionExpression: 'pool_number = :p',
+            ExpressionAttributeValues: { ':p': poolNumber },
+            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+          }),
+        );
+        items.push(...((Items ?? []) as ConversationItem[]));
+        exclusiveStartKey = LastEvaluatedKey;
+      } while (exclusiveStartKey !== undefined);
+      return items;
     },
 
     async listRelayGroups(status) {
@@ -1000,10 +1110,16 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // silent clobber. Idempotent on phone: re-adding an existing phone is a
       // success no-op that never bumps the version (so it can't spuriously
       // conflict with a concurrent change).
-      return rosterMutate(conversationId, 'addMember', (roster) => {
-        if (roster.some((p) => p.phone === member.phone)) return undefined; // no-op
-        return [...roster, member];
-      });
+      return rosterMutate(
+        conversationId,
+        'addMember',
+        (roster) => {
+          if (roster.some((p) => p.phone === member.phone)) return undefined; // no-op
+          return [...roster, member];
+        },
+        // Record this phone's burn provenance atomically with the roster (W1).
+        member.phone,
+      );
     },
 
     async removeMember(conversationId, phone) {
@@ -1015,39 +1131,82 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       });
     },
 
-    async setRelayStatus(conversationId, status, poolNumber, expectedStatus) {
-      // Closing clears pool_number (the number leaves the byPoolNumber GSI so
-      // a re-provision elsewhere can never resolve to this dead thread);
-      // reopening writes the supplied fresh number back. FIX 1: an optional
-      // `expectedStatus` makes the flip conditional on the current status so
-      // concurrent close/reopen are idempotent (the loser's precondition fails
-      // and it throws ConditionalCheckFailedException for the route to no-op).
+    async setRelayStatus(conversationId, status, expectedCurrent) {
+      // pool_number is NEVER touched - a closed relay KEEPS its number so late
+      // texts still intercept to the sender's 1:1 (burn-multiplexing), and
+      // reopen reuses the same number. Only `status` + its `relay_status` GSI
+      // mirror flip, in lockstep so the byRelayStatus GSI moves the item to the
+      // new status partition (open<->closed). The required `expectedCurrent`
+      // makes the flip conditional on the current status so concurrent
+      // close/reopen are idempotent (the loser's precondition fails and it
+      // throws ConditionalCheckFailedException for the route to no-op).
+      // W3: a REOPEN (-> open) also REMOVEs close_announced_at, so a FUTURE close
+      // re-announces (the marker is atomically cleared with the reopen flip - a
+      // separate write could crash-window into a close that never announces). A
+      // close (-> closed) leaves the marker set (the claim just wrote it).
       const { Attributes } = await doc.send(
         new UpdateCommand({
           TableName: table,
           Key: { conversationId },
-          // relay_status rides the flip in lockstep with #s so the byRelayStatus
-          // GSI moves the item to the new status partition (open↔closed).
           UpdateExpression:
-            poolNumber === null
-              ? 'SET #s = :status, relay_status = :rs REMOVE pool_number'
-              : 'SET #s = :status, relay_status = :rs, pool_number = :pn',
-          ConditionExpression:
-            expectedStatus === undefined
-              ? 'attribute_exists(conversationId)'
-              : 'attribute_exists(conversationId) AND #s = :expected',
+            status === 'open'
+              ? 'SET #s = :status, relay_status = :rs REMOVE close_announced_at'
+              : 'SET #s = :status, relay_status = :rs',
+          ConditionExpression: 'attribute_exists(conversationId) AND #s = :expected',
           ExpressionAttributeNames: { '#s': 'status' },
           ExpressionAttributeValues: {
             ':status': status,
             ':rs': relayStatusKey(status),
-            ...(poolNumber !== null && { ':pn': poolNumber }),
-            ...(expectedStatus !== undefined && { ':expected': expectedStatus }),
+            ':expected': expectedCurrent,
           },
           ReturnValues: 'ALL_NEW',
         }),
       );
       log.info({ conversationId, status }, 'relay status set');
       return Attributes as ConversationItem;
+    },
+
+    async claimCloseAnnounce(conversationId) {
+      // W3 dedup claim: atomically win the right to send the ONE
+      // relay.group_closed final message. SET close_announced_at conditional on
+      // the group being OPEN and the marker still absent - so exactly one caller
+      // wins under concurrent closes, and a close retry after a crash between
+      // announce and flip (marker set, status still open) LOSES here and skips
+      // the already-sent announcement. ConditionalCheckFailed (already closed /
+      // already announced / missing) -> false. PII: log conversationId only.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET close_announced_at = :now',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND #s = :open AND attribute_not_exists(close_announced_at)',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: { ':now': new Date().toISOString(), ':open': 'open' },
+          }),
+        );
+        log.info({ conversationId }, 'relay close announce claimed');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async setCloseNagNextAt(conversationId, at) {
+      // SET the next-nag instant, or REMOVE it (null) when the group closes or
+      // has no pending nag. Conditional on existence only (D5).
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: at === null ? 'REMOVE close_nag_next_at' : 'SET close_nag_next_at = :at',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ...(at !== null && { ExpressionAttributeValues: { ':at': at } }),
+        }),
+      );
+      log.info({ conversationId, cleared: at === null }, 'relay close nag set');
     },
 
     async setRelayMemberOptedOut(conversationId, memberKey, entry) {

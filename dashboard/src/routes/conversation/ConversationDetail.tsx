@@ -284,6 +284,20 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           // operator retry against the fresh roster.
           refetchMembers();
           setAddError('The roster just changed — refreshed it. Try adding again.');
+        } else if (
+          err instanceof ApiError &&
+          err.status === 409 &&
+          err.code === 'phone_conflict_on_number'
+        ) {
+          // W1: this person is already burned on this group's number (another
+          // group's history), so they cannot be added here - surface the
+          // server's actionable "start a new group text" copy.
+          const serverMsg = (err.body as { message?: unknown } | null)?.message;
+          setAddError(
+            typeof serverMsg === 'string' && serverMsg.length > 0
+              ? serverMsg
+              : 'This person already has a group text history on this number. Start a new group text with them instead.',
+          );
         } else {
           setAddError("Couldn't add that member. Please try again.");
         }
@@ -319,7 +333,19 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         setClosing(false);
         setReopening(false);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // AF-3: surface the server's actionable copy when reopen is refused
+        // because the pool number was retired/released - a generic error would
+        // hide the "start a new group text instead" guidance.
+        if (err instanceof ApiError && err.status === 409 && err.code === 'pool_number_released') {
+          const serverMsg = (err.body as { message?: unknown } | null)?.message;
+          setActionError(
+            typeof serverMsg === 'string' && serverMsg.length > 0
+              ? serverMsg
+              : 'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.',
+          );
+          return;
+        }
         setActionError(next ? "Couldn't close the group." : "Couldn't reopen the group.");
       })
       .finally(() => setActionBusy(false));
@@ -590,8 +616,9 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            Closing this group <strong>releases the pool number</strong> — members can no longer
-            reach the group at that number, and sending is disabled.
+            Closing this group <strong>sends members a final automated message</strong> and
+            disables sending. The group keeps its number - a member who texts it later
+            reaches the team in their own 1:1 thread.
           </p>
           {actionError !== null ? (
             <p role="alert" className={styles.error}>
@@ -628,8 +655,8 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            Reopening <strong>provisions a fresh pool number and re-intros members</strong> — the
-            group gets a new number and everyone is reconnected.
+            Reopening <strong>keeps the same number</strong> - members can text the group again
+            right away. Nothing is re-provisioned and no intro messages are re-sent.
           </p>
           {actionError !== null ? (
             <p role="alert" className={styles.error}>

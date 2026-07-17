@@ -85,12 +85,13 @@ export interface DevRouterDeps {
 
 /**
  * A relay group is REPLAYABLE iff it has a pool number AND a well-formed
- * participants roster — member OBJECTS carrying non-empty phones. This screens
- * out the cast seeds' bare-id rosters (arrays of contactId STRINGS,
- * seed/cast.ts) and the matrix seeds' empty rosters (seed/matrix.ts), which
- * carry no phone to intro. The declared `participants` type is
- * ConversationParticipant[], but the real seed data violates it (bare strings),
- * so this guards at runtime against `unknown` entries.
+ * participants roster - member OBJECTS carrying non-empty phones. Seed rosters
+ * are now full ConversationParticipant objects (seed/cast.ts and seed/matrix.ts
+ * both carry tenant+landlord phones), so this is a DEFENSIVE runtime guard: the
+ * declared `participants` type is ConversationParticipant[], but a stray legacy
+ * or hand-written row could still carry bare contactId strings or an empty
+ * roster (no phone to intro), so it screens `unknown` entries out rather than
+ * crashing the replay.
  */
 function isReplayableRelayGroup(conv: ConversationItem): boolean {
   const pool = conv.pool_number;

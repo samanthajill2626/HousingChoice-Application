@@ -669,6 +669,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       async setVoiceWebhook() {
         throw new Error('adapter spy: setVoiceWebhook not expected');
       },
+      async releasePhoneNumber() {
+        throw new Error('adapter spy: releasePhoneNumber not expected');
+      },
       async initiateCall() {
         throw new Error('adapter spy: initiateCall not expected');
       },

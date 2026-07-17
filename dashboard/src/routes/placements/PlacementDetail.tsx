@@ -24,6 +24,7 @@ import {
   STAGE_PHASE,
   TERMINAL_STAGES,
   formatLostReason,
+  getConversation,
   getPlacement,
   getContact,
   getUnit,
@@ -55,6 +56,7 @@ import {
 import { gateFor, type TransitionGate } from './transitionGate.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
+import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { usePlacementNudges } from './usePlacementNudges.js';
@@ -108,6 +110,10 @@ export function PlacementDetail(): React.JSX.Element {
   // The "Set follow-up" kebab action + the Deadlines-and-nudges card's Set/Change
   // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
+  // The "Also close the group text?" ask, opened AFTER a terminal move saves.
+  const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
+    null,
+  );
 
   // Track the in-flight load so a refetch (SSE-driven or placementId change)
   // supersedes the previous one and a late response can't clobber fresher state.
@@ -217,6 +223,25 @@ export function PlacementDetail(): React.JSX.Element {
       .finally(() => setBusy(false));
   }, [busy, placementId, channels]);
 
+  // After a terminal move (lost / moved_in) the LINKED relay group is NOT
+  // auto-closed (nothing auto-closes now). If it is still OPEN, offer to close it.
+  // Best-effort + non-blocking: the transition already saved before this runs; a
+  // failed status check simply skips the prompt.
+  const askCloseGroupIfOpen = useCallback(async (pl: PlacementItem): Promise<void> => {
+    const groupId = pl.group_thread;
+    if (typeof groupId !== 'string' || groupId.length === 0) return;
+    try {
+      const conv = await getConversation(groupId);
+      if (conv.status !== 'open') return;
+      const names = (conv.participants ?? [])
+        .map((p) => p.name?.trim())
+        .filter((n): n is string => n !== undefined && n.length > 0);
+      setCloseAsk({ conversationId: groupId, memberSummary: names.join(' & ') });
+    } catch {
+      /* best-effort: never block the recorded move on the group check */
+    }
+  }, []);
+
   const runTransition = useCallback(
     (toStage: PlacementStage, extra: { lostReason?: LostReason } & MovePromptResult) => {
       setBusy(true);
@@ -230,14 +255,21 @@ export function PlacementDetail(): React.JSX.Element {
         ...(extra.inspectionDate !== undefined && { inspectionDate: extra.inspectionDate }),
         ...(extra.rentDetermined !== undefined && { rentDetermined: extra.rentDetermined }),
       })
-        .then((updated) => setPlacement(updated))
+        .then((updated) => {
+          setPlacement(updated);
+          // Terminal moves (lost = terminal-fail, moved_in = terminal-success) ask
+          // whether to also close the linked group text.
+          if (updated.stage === 'lost' || updated.stage === 'moved_in') {
+            void askCloseGroupIfOpen(updated);
+          }
+        })
         .catch(() => setError('That move was rejected — please try again.'))
         .finally(() => {
           setBusy(false);
           setPending(null);
         });
     },
-    [placementId, setPlacement],
+    [placementId, setPlacement, askCloseGroupIfOpen],
   );
 
   // Toggle a complete-paperwork checklist field (lease_signed / lif /
@@ -544,6 +576,14 @@ export function PlacementDetail(): React.JSX.Element {
           onClose={() => setPending(null)}
           onConfirm={(result) => runTransition(pending.toStage, result)}
           busy={busy}
+        />
+      ) : null}
+
+      {closeAsk !== null ? (
+        <RelayCloseAskDialog
+          conversationId={closeAsk.conversationId}
+          memberSummary={closeAsk.memberSummary}
+          onDone={() => setCloseAsk(null)}
         />
       ) : null}
     </div>

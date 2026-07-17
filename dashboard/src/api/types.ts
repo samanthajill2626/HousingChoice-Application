@@ -184,8 +184,30 @@ export interface TodayItem {
   tag?: string; // "Placement - Touring"
   attention?: boolean;
 }
+/** One "close this still-open group text?" nag on the Today queue (D5). Built
+ *  server-side from open relay groups whose 28-day close-nag is due. A SEPARATE
+ *  list from `items` (not a TodayItem). Mirrors the app wire shape verbatim. */
+export interface RelayCloseNag {
+  conversationId: string;
+  /** The pool number fronting the still-open group. Display DATA here (the
+   *  precedent is the opted-out Today card showing a phone). */
+  poolNumber: string;
+  /** Operator label (the placement tag), when stamped. */
+  tag?: string;
+  /** The members' resolved display names (or a phone when unnamed). */
+  memberNames: string[];
+  /** The owning tour/placement, or null for a standalone group. */
+  ownerType: 'tour' | 'placement' | null;
+  /** The owner's id (the deep-link target), when owned. */
+  ownerId?: string;
+  /** ISO instant the nag became due. */
+  nagDueAt: string;
+}
 export interface TodayResponse {
   items: TodayItem[];
+  /** Open relay groups whose 28-day close-nag is due (D5) - a SEPARATE list, not
+   *  part of `items`. Absent on an older backend, so the client defaults to []. */
+  relayCloseNags?: RelayCloseNag[];
   generatedAt: string;
 }
 
@@ -1391,6 +1413,11 @@ export interface TimelineMessage extends TimelineBase {
    *  reminder rung). The relay-group view resolves it to a sender label;
    *  absent on 1:1 messages. */
   relay_sender_key?: string;
+  /** Relay number lifecycle: set when this message is a late text a still-rostered
+   *  member sent to a now-CLOSED group's pool number - it was intercepted into the
+   *  sender's 1:1 thread and carries the CLOSED group's conversationId. The contact
+   *  timeline renders a "Sent to the closed group chat" badge linking to it. */
+  via_closed_group?: string;
 }
 export interface TimelineCall extends TimelineBase {
   kind: 'call';

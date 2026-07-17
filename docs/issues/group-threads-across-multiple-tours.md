@@ -3,10 +3,11 @@ id: group-threads-across-multiple-tours
 title: How to manage group threads across a tenant's multiple concurrent tours (open question)
 type: decision
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-07-01
-refs: docs/superpowers/specs/2026-07-01-tours-first-class-entity-design.md, docs/issues/tour-scheduling-off-placement.md
+resolved: 2026-07-17
+refs: docs/superpowers/specs/2026-07-01-tours-first-class-entity-design.md, docs/superpowers/specs/2026-07-17-relay-number-lifecycle-design.md, docs/issues/tour-scheduling-off-placement.md
 ---
 
 **Problem.** In the first-class Tours model, a tenant can have **several tours scheduled at
@@ -32,3 +33,14 @@ under time pressure during the Tours build.
 
 **Next step.** Product decision on the numbering + presentation strategy for concurrent-tour
 threads, then a follow-up design. Filed while specifying the Tours first-class entity.
+
+**Resolution (2026-07-17).** Resolved by the relay-number-lifecycle design. The
+numbering strategy is MULTIPLEXING with a permanent (number, person) burn: one
+pool number hosts many participant-disjoint relay groups, so a tenant's several
+concurrent tours can share ONE number as long as no person repeats on it; the
+first roster overlap forces the next number. Closing a group KEEPS its number
+(a later text from a closed-group member intercepts into that sender's 1:1
+thread with provenance), and idle numbers release back to Twilio only after a
+180-day grace, behind a config gate. Presentation/inbox questions are handled by
+the existing per-group threads plus the close-ask and Today nag flows. Spec:
+docs/superpowers/specs/2026-07-17-relay-number-lifecycle-design.md.

@@ -16,7 +16,12 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import type { PlacementDeadlineType, PlacementItem } from '../src/repos/placementsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-import { urgencyOf, type TodayItem, type TodayResponse } from '../src/routes/today.js';
+import {
+  urgencyOf,
+  type RelayCloseNagItem,
+  type TodayItem,
+  type TodayResponse,
+} from '../src/routes/today.js';
 
 describe('today action-queue API (BE6/C7)', () => {
   let app: Express;
@@ -125,8 +130,102 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(res.status).toBe(200);
     const body = res.body as TodayResponse;
     expect(body.items).toEqual([]);
+    expect(body.relayCloseNags).toEqual([]);
     expect(typeof body.generatedAt).toBe('string');
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
+  });
+
+  // --- D5: relay close-nags (open relay groups whose 28-day nag is due) -------
+  describe('relay close-nags (D5)', () => {
+    const NAG_ALICE = '+15550100201';
+    const NAG_BOB = '+15550100202';
+    const NAG_POOL = '+15550100250';
+
+    const seedRelayGroup = (o: {
+      conversationId: string;
+      poolNumber: string;
+      status: 'open' | 'closed';
+      closeNagNextAt?: string;
+      participants: Array<{ contactId: string; phone: string; name?: string }>;
+      tag?: string;
+      owner?: { type: 'tour' | 'placement' | null; id?: string };
+    }): void => {
+      seedConversation({
+        conversationId: o.conversationId,
+        participant_phone: o.poolNumber,
+        pool_number: o.poolNumber,
+        status: o.status,
+        relay_status: `relay_group#${o.status}`,
+        last_activity_at: iso(-1000),
+        type: 'relay_group',
+        ai_mode: 'manual',
+        created_at: iso(-1_000_000),
+        participants: o.participants,
+        ...(o.closeNagNextAt !== undefined && { close_nag_next_at: o.closeNagNextAt }),
+        ...(o.tag !== undefined && { placement_tag: o.tag }),
+        ...(o.owner !== undefined && { owner: o.owner }),
+      } as ConversationItem);
+    };
+
+    const getNags = async (): Promise<RelayCloseNagItem[]> => {
+      const res = await authedGet('/api/today');
+      expect(res.status).toBe(200);
+      return (res.body as TodayResponse).relayCloseNags;
+    };
+
+    it('surfaces exactly the DUE open nag with pool number, member names, tag + owner; future + closed are excluded', async () => {
+      const dueAt = iso(-60_000); // 1m ago -> due
+      seedRelayGroup({
+        conversationId: 'conv-nag-due',
+        poolNumber: NAG_POOL,
+        status: 'open',
+        closeNagNextAt: dueAt,
+        participants: [
+          { contactId: 'c-a', phone: NAG_ALICE, name: 'Alice' },
+          { contactId: 'c-b', phone: NAG_BOB }, // no name -> phone as display DATA
+        ],
+        tag: 'Maple St tour',
+        owner: { type: 'tour', id: 'tour-77' },
+      });
+      // Open group whose nag is in the FUTURE -> excluded by the timestamp filter.
+      seedRelayGroup({
+        conversationId: 'conv-nag-future',
+        poolNumber: '+15550100260',
+        status: 'open',
+        closeNagNextAt: iso(3_600_000),
+        participants: [{ contactId: 'c-c', phone: '+15550100203', name: 'Cara' }],
+      });
+      // CLOSED group with a stale (past) nag -> never appears (open-only source).
+      seedRelayGroup({
+        conversationId: 'conv-nag-closed',
+        poolNumber: '+15550100270',
+        status: 'closed',
+        closeNagNextAt: iso(-60_000),
+        participants: [{ contactId: 'c-d', phone: '+15550100204', name: 'Dan' }],
+      });
+
+      const nags = await getNags();
+      expect(nags).toHaveLength(1);
+      const nag = nags[0]!;
+      expect(nag.conversationId).toBe('conv-nag-due');
+      expect(nag.poolNumber).toBe(NAG_POOL);
+      expect(nag.nagDueAt).toBe(dueAt);
+      expect(nag.tag).toBe('Maple St tour');
+      expect(nag.ownerType).toBe('tour');
+      expect(nag.ownerId).toBe('tour-77');
+      // memberNames: prefer name, else the phone (display DATA precedent).
+      expect([...nag.memberNames].sort()).toEqual(['Alice', NAG_BOB].sort());
+    });
+
+    it('an open relay group with NO close_nag_next_at never appears', async () => {
+      seedRelayGroup({
+        conversationId: 'conv-no-nag',
+        poolNumber: NAG_POOL,
+        status: 'open',
+        participants: [{ contactId: 'c-a', phone: NAG_ALICE, name: 'Alice' }],
+      });
+      expect(await getNags()).toEqual([]);
+    });
   });
 
   it('groups items into all four groups with refType/refId and populated who/why', async () => {
@@ -733,12 +832,12 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(forOne).toMatchObject({ refType: 'contact', who: 'One Only', why: '1 suggestion(s)' });
   });
 
-  it('the envelope is { items, generatedAt } with an ISO generatedAt when items exist', async () => {
+  it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });
     const res = await authedGet('/api/today');
     const body = res.body as TodayResponse;
-    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items']);
+    expect(Object.keys(body).sort()).toEqual(['generatedAt', 'items', 'relayCloseNags']);
     expect(new Date(body.generatedAt).toISOString()).toBe(body.generatedAt);
     expect(body.items.length).toBeGreaterThan(0);
   });

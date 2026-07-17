@@ -12,6 +12,7 @@ import {
   createFakeWorld,
   makeWebhookHarness,
   ORIGIN_SECRET,
+  OUR_NUMBER,
 } from './helpers/twilioWebhookHarness.js';
 
 const SECRET = ORIGIN_SECRET;
@@ -313,7 +314,12 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     });
     expect(flyer.media).toHaveLength(2);
     for (const url of flyer.media) expect(url).toMatch(/^https:\/\/fake-s3\.local\//);
-    // The flyer shape carries no keys BEYOND the allowlist + media.
+    // The flyer now carries the FULL public payload upfront (no reveal tier)
+    // plus contact_number - the main 1:1 business number from config.
+    expect(flyer.contact_number).toBe(OUR_NUMBER);
+
+    // The flyer shape carries the full public allowlist + media + contact_number
+    // and NOTHING beyond it (address/deposit/pets/etc. are public now).
     expect(Object.keys(flyer).sort()).toEqual(
       [
         'accepted_programs',
@@ -327,10 +333,21 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
         'subzone',
         'unitId',
         'voucher_size',
+        'address',
+        'utilities',
+        'video_url',
+        'application_fee',
+        'same_day_rta',
+        'pets',
+        'accessibility',
+        'deposit',
+        'lease_terms',
+        'contact_number',
       ].sort(),
     );
 
-    // INTERNAL fields must never appear in the response.
+    // INTERNAL fields must never appear in the response (address + deposit are
+    // PUBLIC now, so they moved into the exact-keys assertion above).
     const serialized = JSON.stringify(res.body);
     for (const secret of [
       'tour_process',
@@ -339,10 +356,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       'landlordId',
       'contact-ll-secret',
       'payment_standard',
-      'deposit',
       'lif',
-      'address',
-      '123 Private St',
       'SECRET',
     ]) {
       expect(serialized, secret).not.toContain(secret);
@@ -379,13 +393,13 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       .get('/public/units/nope/flyer')
       .set('x-origin-verify', SECRET);
     expect(missing.status).toBe(404);
-    expect(missing.body).toEqual({ error: 'not_found' });
+    expect(missing.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
 
     const placed = await request(app)
       .get('/public/units/unit-1/flyer')
       .set('x-origin-verify', SECRET);
     expect(placed.status).toBe(404);
-    expect(placed.body).toEqual({ error: 'not_found' });
+    expect(placed.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
   it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
@@ -398,7 +412,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       .get('/public/units/unit-1/flyer')
       .set('x-origin-verify', SECRET);
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'not_found' });
+    expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 });
 
@@ -502,100 +516,47 @@ describe('POST /public/housing-fair — flyer attribution (optional unitId)', ()
   });
 });
 
-describe('GET /public/units/:unitId/details — the post-intake reveal', () => {
-  function seedFullUnit(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
-    const unit: UnitItem = {
+describe('GET /public/units/:unitId/details - REMOVED (flyer-full-info)', () => {
+  it('the details route no longer exists (plain 404 for any id)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-1', {
       unitId: 'unit-1',
-      landlordId: 'contact-ll-secret',
+      landlordId: 'll-1',
       status: 'available',
-      jurisdiction: 'DCA',
-      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
-      beds: 2,
-      baths: 1,
-      area: 'Westside',
-      subzone: 'Zone 4',
-      accepted_programs: ['GHV'],
-      rent_min: 1400,
-      rent_max: 1600,
-      payment_standard: 1700,
-      deposit: 1400,
-      lif: 500,
-      // Own-namespace key (review F2: only `unit-media/<thisUnit>/` presigns).
-      media: ['unit-media/unit-1/photo1'],
-      listing_link: 'https://example.com/listing/1',
-      utilities: 'Tenant-paid',
-      video_url: 'https://v.example/tour1',
-      application_fee: 50,
-      same_day_rta: true,
-      tour_process: 'SECRET lockbox 9999',
-      application_process: 'SECRET portal',
-      primary_voice_contact: 'contact-ll-agent',
-      ...overrides,
-    };
-    world.units.set(unit.unitId, unit);
-    return unit;
-  }
-
-  it('returns the richer reveal set (address/video/utilities/fee/RTA) for a shareable unit', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedFullUnit(world);
-
-    const res = await request(app)
-      .get('/public/units/unit-1/details')
-      .set('x-origin-verify', SECRET);
-    expect(res.status).toBe(200);
-    expect(res.body.details).toMatchObject({
-      unitId: 'unit-1',
-      address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
-      utilities: 'Tenant-paid',
-      video_url: 'https://v.example/tour1',
-      application_fee: 50,
-      same_day_rta: true,
-    });
-
-    // INTERNAL fields must never appear in the response.
-    const serialized = JSON.stringify(res.body);
-    for (const secret of [
-      'tour_process',
-      'application_process',
-      'primary_voice_contact',
-      'landlordId',
-      'contact-ll-secret',
-      'payment_standard',
-      'deposit',
-      'lif',
-      'SECRET',
-    ]) {
-      expect(serialized, secret).not.toContain(secret);
-    }
-  });
-
-  it('404s a missing unit and a non-shareable (placed) unit — no existence oracle', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedFullUnit(world, { status: 'placed' });
-
-    const missing = await request(app)
-      .get('/public/units/nope/details')
-      .set('x-origin-verify', SECRET);
-    expect(missing.status).toBe(404);
-    expect(missing.body).toEqual({ error: 'not_found' });
-
-    const placed = await request(app)
-      .get('/public/units/unit-1/details')
-      .set('x-origin-verify', SECRET);
-    expect(placed.status).toBe(404);
-    expect(placed.body).toEqual({ error: 'not_found' });
-  });
-
-  it('404s a soft-deleted unit even while its status is still shareable — no existence oracle', async () => {
-    const { app, world } = makeWebhookHarness();
-    seedFullUnit(world, { deleted_at: '2026-06-30T00:00:00.000Z' });
-
+    } as UnitItem);
     const res = await request(app)
       .get('/public/units/unit-1/details')
       .set('x-origin-verify', SECRET);
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'not_found' });
+  });
+});
+
+describe('GET /public/units/:unitId/flyer - the opaque 404 carries contact_number', () => {
+  it('missing, deleted, and not-shareable all return the IDENTICAL body', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.units.set('unit-held', {
+      unitId: 'unit-held',
+      landlordId: 'll-1',
+      status: 'on_hold',
+    } as UnitItem);
+    world.units.set('unit-gone', {
+      unitId: 'unit-gone',
+      landlordId: 'll-1',
+      status: 'available',
+      deleted_at: 'x',
+    } as UnitItem);
+    const bodies: unknown[] = [];
+    for (const id of ['nope', 'unit-held', 'unit-gone']) {
+      const res = await request(app)
+        .get(`/public/units/${id}/flyer`)
+        .set('x-origin-verify', SECRET);
+      expect(res.status, id).toBe(404);
+      bodies.push(res.body);
+    }
+    // Identical bodies - no existence oracle; the number is config, not unit data.
+    expect(bodies[0]).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
+    expect(bodies[1]).toEqual(bodies[0]);
+    expect(bodies[2]).toEqual(bodies[0]);
   });
 });
 
@@ -639,7 +600,7 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
     seedShareable(world, { status: 'on_hold' });
     const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
     expect(res.status).toBe(404);
-    expect(res.body).toEqual({ error: 'not_found' });
+    expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
   it('omits unresolvable entries but keeps legacy absolute-URL photos (E2/E4)', async () => {

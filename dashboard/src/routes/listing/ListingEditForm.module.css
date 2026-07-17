@@ -109,3 +109,10 @@
   color: var(--c-danger);
   font-size: var(--fs-xs);
 }
+
+/* Public-visibility note - which staff-entered facts render on the public flyer. */
+.hint {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}

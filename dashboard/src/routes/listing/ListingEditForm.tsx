@@ -211,6 +211,10 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
       }
     >
       <form id="listing-edit-form" className={styles.form} onSubmit={(e) => void onSubmit(e)}>
+        <p className={styles.hint}>
+          Address, rent, deposit, fees, utilities, pets, accessibility, and lease
+          terms are shown on the public flyer.
+        </p>
         <div className={styles.row}>
           <label className={styles.field}>
             <span className={styles.label}>Housing authority</span>

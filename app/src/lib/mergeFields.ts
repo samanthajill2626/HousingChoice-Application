@@ -7,7 +7,7 @@
 //   [Beds]        — the unit's bedroom count.
 //   [Address]     — formatAddress of the unit (one-line, NOT the public flyer).
 //   [Rent]        — the unit's asking-rent range.
-//   [FlyerLink]   — `${PUBLIC_BASE_URL}/p/${unitId}`.
+//   [FlyerLink]   - `${PUBLIC_BASE_URL}/p/${unitId}?cta=text`.
 //
 // Unit-derived tokens come from the unit and are identical for every recipient;
 // only [TenantName] is per-recipient, so the unit context is rendered ONCE and
@@ -20,11 +20,14 @@ import type { UnitItem } from '../repos/unitsRepo.js';
 /** Neutral [TenantName] fallback when no first name is known — NEVER a phone. */
 export const NEUTRAL_TENANT_NAME = 'there';
 
-/** Public flyer URL shape — the funnel route the public surface mounts (the
- *  FlyerFunnel at /p/:unitId). Every shared [FlyerLink] must land here. */
+/** Public flyer URL shape - the full-info page at /p/:unitId. ?cta=text selects
+ *  the known-tenant CTA (tap-to-text, no signup form): every AUTO-SENT
+ *  [FlyerLink] goes to someone we already text, so it always carries the flag.
+ *  The page strips the param from the address bar on load (copied URLs stay
+ *  clean). The BARE /p/:unitId (dashboard "Copy public link") keeps the form. */
 export function flyerUrl(publicBaseUrl: string | undefined, unitId: string): string {
   const base = (publicBaseUrl ?? '').replace(/\/+$/, '');
-  return `${base}/p/${unitId}`;
+  return `${base}/p/${unitId}?cta=text`;
 }
 
 /** Format a unit's asking-rent range; '' when no rent is known. */

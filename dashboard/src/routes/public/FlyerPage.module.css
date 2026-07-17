@@ -1,4 +1,4 @@
-/* FlyerFunnel — the public teaser/intake/reveal card. Mobile-first. Tokens only. */
+/* FlyerPage - the full-info public flyer. Mobile-first. Tokens only. */
 
 .status {
   padding: var(--sp-6) 0;
@@ -28,7 +28,7 @@
   color: var(--c-text-muted);
 }
 
-/* Photo gallery — horizontal scroll on mobile, snapping per photo. */
+/* Photo gallery - horizontal scroll on mobile, snapping per photo. */
 .gallery {
   display: flex;
   gap: var(--sp-2);
@@ -112,4 +112,12 @@
   margin: 0;
   font-size: var(--fs-md);
   color: var(--c-text);
+}
+
+.ctaSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
+  border-top: 1px solid var(--c-border);
+  padding-top: var(--sp-4);
 }

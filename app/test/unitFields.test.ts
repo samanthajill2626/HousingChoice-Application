@@ -1,12 +1,13 @@
-// Unit tests for the unit-field validation + flyer projections (public-pages
-// §3). Covers the 3 new writable fields (video_url/application_fee/same_day_rta)
-// and the toUnitFlyerDetails reveal allowlist — proving it exposes the richer
-// set WITHOUT ever leaking an internal/landlord/contact field.
+// Unit tests for the unit-field validation + the merged public flyer projection
+// (flyer-full-info 2026-07-16). Covers the writable fields
+// (video_url/application_fee/same_day_rta) and the toUnitFlyer allowlist -
+// proving it exposes the full public set WITHOUT ever leaking an
+// internal/landlord/contact field.
 import { describe, expect, it } from 'vitest';
 import {
-  toUnitFlyerDetails,
+  toUnitFlyer,
   validateUnitBody,
-  type UnitFlyerDetails,
+  type UnitFlyer,
 } from '../src/lib/unitFields.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 
@@ -169,7 +170,7 @@ describe('validateUnitBody - tour_type (structured, clear-to-absent)', () => {
   });
 });
 
-describe('toUnitFlyerDetails — the reveal allowlist', () => {
+describe('toUnitFlyer - the merged public allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
   function fullUnit(overrides: Partial<UnitItem> = {}): UnitItem {
@@ -186,19 +187,21 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       accepted_programs: ['GHV'],
       rent_min: 1400,
       rent_max: 1600,
-      payment_standard: 1700,
-      deposit: 1400,
-      lif: 500,
       media: ['s3://photo1.jpg'],
       listing_link: 'https://example.com/listing/9',
       utilities: 'Tenant-paid',
       video_url: 'https://v.example/tour9',
       application_fee: 50,
       same_day_rta: true,
-      accessibility: 'SECRET ground floor',
+      // newly PUBLIC (flyer-full-info 2026-07-16) - real values, asserted below
+      deposit: 1400,
+      accessibility: 'Ground floor, no stairs',
+      lease_terms: '12-month minimum',
+      pets: 'Cats only',
+      // still INTERNAL - SECRET markers prove they never serialize
+      payment_standard: 1700,
+      lif: 500,
       notes: 'SECRET in-unit washer note',
-      lease_terms: 'SECRET 12-month minimum',
-      pets: 'SECRET cats only',
       priority: 'SECRET high',
       tour_process: 'SECRET lockbox 9999',
       // E3 pin: set on the fixture but NOT listed in the exact-shape expected
@@ -212,10 +215,9 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
     };
   }
 
-  it('exposes the teaser fields PLUS the 5 reveal fields', () => {
-    const details = toUnitFlyerDetails(fullUnit());
-    expect(details).toEqual<UnitFlyerDetails>({
-      // teaser
+  it('exposes the merged public field set (teaser + reveal + tenant-useful)', () => {
+    const flyer = toUnitFlyer(fullUnit());
+    expect(flyer).toEqual<UnitFlyer>({
       unitId: 'unit-9',
       media: ['s3://photo1.jpg'],
       beds: 2,
@@ -227,66 +229,67 @@ describe('toUnitFlyerDetails — the reveal allowlist', () => {
       listing_link: 'https://example.com/listing/9',
       rent_min: 1400,
       rent_max: 1600,
-      // reveal
       address: { line1: '123 Private St', city: 'Atlanta', state: 'GA', zip: '30303' },
       utilities: 'Tenant-paid',
       video_url: 'https://v.example/tour9',
       application_fee: 50,
       same_day_rta: true,
+      pets: 'Cats only',
+      accessibility: 'Ground floor, no stairs',
+      deposit: 1400,
+      lease_terms: '12-month minimum',
     });
   });
 
   it('NEVER leaks an internal/landlord/contact field (allowlist wall)', () => {
-    const details = toUnitFlyerDetails(fullUnit());
-    const keys = Object.keys(details);
+    const flyer = toUnitFlyer(fullUnit());
+    const keys = Object.keys(flyer);
     for (const forbidden of [
-      'landlordId',
-      'primary_voice_contact',
-      'tour_process',
-      'tour_type',
-      'application_process',
-      'status',
-      'status_source',
-      'notes',
-      'lease_terms',
-      'payment_standard',
-      'deposit',
-      'lif',
-      'propertyId',
-      'jurisdiction',
-      'priority',
-      'accessibility',
-      'pets',
+      'landlordId', 'primary_voice_contact', 'tour_process', 'tour_type',
+      'application_process', 'status', 'status_source', 'notes',
+      'payment_standard', 'lif', 'propertyId', 'jurisdiction', 'priority',
+      'final_rent', 'voucher_size_accepted',
     ]) {
       expect(keys, forbidden).not.toContain(forbidden);
     }
     // And no SECRET value (carried on internal fields) reaches the serialization.
-    expect(JSON.stringify(details)).not.toContain('SECRET');
-    expect(JSON.stringify(details)).not.toContain('contact-ll-secret');
+    expect(JSON.stringify(flyer)).not.toContain('SECRET');
+    expect(JSON.stringify(flyer)).not.toContain('contact-ll-secret');
   });
 
-  it('falls each absent reveal field to null (not undefined) and address to {}', () => {
-    const details = toUnitFlyerDetails({
+  it('falls each absent field to null (not undefined) and address to {}', () => {
+    const flyer = toUnitFlyer({
       unitId: 'bare',
       landlordId: 'll',
       status: 'available',
     });
-    expect(details.address).toEqual({});
-    expect(details.utilities).toBeNull();
-    expect(details.video_url).toBeNull();
-    expect(details.application_fee).toBeNull();
-    expect(details.same_day_rta).toBeNull();
+    expect(flyer.address).toEqual({});
+    expect(flyer.utilities).toBeNull();
+    expect(flyer.video_url).toBeNull();
+    expect(flyer.application_fee).toBeNull();
+    expect(flyer.same_day_rta).toBeNull();
+    expect(flyer.pets).toBeNull();
+    expect(flyer.accessibility).toBeNull();
+    expect(flyer.deposit).toBeNull();
+    expect(flyer.lease_terms).toBeNull();
+  });
+
+  it('passes pets through as string or boolean; null when absent', () => {
+    expect(toUnitFlyer(fullUnit({ pets: true })).pets).toBe(true);
+    expect(toUnitFlyer(fullUnit({ pets: false })).pets).toBe(false);
+    expect(toUnitFlyer(fullUnit({ pets: 'Cats only' })).pets).toBe('Cats only');
+    expect(toUnitFlyer({ unitId: 'x', landlordId: 'll', status: 'available' }).pets).toBeNull();
   });
 
   it('drops a legacy plain-string address (only structured sub-fields survive)', () => {
-    const details = toUnitFlyerDetails({
+    const flyer = toUnitFlyer({
       unitId: 'legacy',
       landlordId: 'll',
       status: 'available',
-      // A legacy dev unit may hold a plain string here — it must NOT pass through
+      // A legacy dev unit may hold a plain string here - it must NOT pass through
       // as a raw blob; the projection re-validates to the structured allowlist.
       address: '123 Legacy St' as unknown as UnitItem['address'],
     });
-    expect(details.address).toEqual({});
+    expect(flyer.address).toEqual({});
   });
 });

@@ -33,7 +33,7 @@ import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
 import { PublicLayout } from './routes/public/PublicLayout.js';
-import { FlyerFunnel } from './routes/public/FlyerFunnel.js';
+import { FlyerPage } from './routes/public/FlyerPage.js';
 import { HousingFairIntake } from './routes/public/HousingFairIntake.js';
 import { TourDetail } from './routes/tours/TourDetail.js';
 import { ToursPage } from './routes/tours/ToursPage.js';
@@ -74,7 +74,7 @@ const IMPLEMENTED = new Set<string>([
  * AuthProvider / AuthGate / EventStreamProvider / AppFrame — they must NEVER
  * trigger the auth gate (no redirect-to-login, no session fetch, no event
  * stream). `/p/:unitId` is what `flyerUrl()` emits, so every shared
- * [FlyerLink] broadcast lands on the funnel teaser. `/join` is the standalone
+ * [FlyerLink] lands on the full-info flyer page. `/join` is the standalone
  * housing-fair intake. The trailing `<Route path="/*">` hands everything else
  * to the authed app.
  */
@@ -85,7 +85,7 @@ export default function App(): React.JSX.Element {
         path="/p/:unitId"
         element={
           <PublicLayout>
-            <FlyerFunnel />
+            <FlyerPage />
           </PublicLayout>
         }
       />

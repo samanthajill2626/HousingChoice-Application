@@ -149,7 +149,7 @@ describe('share-broadcast API (M1.8a)', () => {
     // Persisted as a draft with the flyer url snapshot.
     const stored = world.broadcasts.get(res.body.broadcastId)!;
     expect(stored.status).toBe('draft');
-    expect(stored.flyer_url).toBe(`${PUBLIC_BASE_URL}/p/unit-1`);
+    expect(stored.flyer_url).toBe(`${PUBLIC_BASE_URL}/p/unit-1?cta=text`);
   });
 
   it('rejects a non-tenant contact_type (never relay-group rosters)', async () => {

@@ -41,9 +41,12 @@ D4. NOTHING auto-closes. Terminal events ASK: placement->lost, tour
     the group text?" dialog for whoever recorded the outcome (any staff -
     the founder-decision policy is satisfied by practice, not role gates).
     Tour->placement conversion continues the group silently (unchanged).
-D5. Groups left open past a terminal event get a recurring ~30-day nag on
+D5. Groups left open past a terminal event get a recurring 28-DAY nag on
     the Today page: "Group text with <number> for <tenant/property> is
-    still open - close it?" with Close / Keep-open (keep restarts 30 days).
+    still open - close it?" with Close / Keep-open (keep restarts 28
+    days). 28 = exactly 4 weeks, so the nag always lands on the same
+    weekday the deferral happened on (typically a workday) and always
+    recurs within the month.
 D6. Closing sends ONE final automated message to all participants (message
     catalog): the group is closed, and texting this number still reaches
     the team (true under D2 interception).
@@ -105,7 +108,7 @@ becomes a pattern.
   stamps `last_group_closed_at` on the pool record (best-effort, logged).
 - NEW conversation field `close_nag_next_at` (ISO) on relay groups whose
   close-ask was declined/deferred - drives the Today nag (D5). Cleared on
-  close; reset to now+30d on "Keep open".
+  close; reset to now+28d on "Keep open".
 
 ## 3. Inbound routing (webhooks/twilio.ts)
 
@@ -151,7 +154,7 @@ group, show a confirm dialog "Also close the group text with <names>?"
 - placement -> its completed/terminal-success state (per STATUS-MODEL)
 - tour -> canceled, and tour -> closed / "not a fit"
 Close -> POST the existing close endpoint (4.4). Keep -> PATCH the group's
-close_nag_next_at = now+30d. The dialog is non-blocking for the outcome
+close_nag_next_at = now+28d. The dialog is non-blocking for the outcome
 itself: the status change is already saved before the dialog answers
 (never couple the transition to the dialog).
 
@@ -159,7 +162,7 @@ itself: the status change is already saved before the dialog answers
 
 A Today section lists open relay groups whose close_nag_next_at <= now:
 "Group text with <number> for <tenant> / <property> - still open. Close
-it?" [Close] / [Keep open] (keep -> +30d). Backend: a byRelayStatus-based
+it?" [Close] / [Keep open] (keep -> +28d). Backend: a byRelayStatus-based
 scan is fine at our scale (open groups only, filter on the timestamp);
 plan decides the exact query shape.
 
@@ -201,14 +204,20 @@ it - do not build new override machinery.)
   API path the adapter uses determines whether that is automatic; the plan
   verifies and the RUNBOOK documents the operator step if manual.
 
-## 6. Migration / backfill (one script, idempotent)
+## 6. Existing data (NO migration - nothing is live)
 
-For every relay_group conversation (any status): union its roster phones
-into its number's burned_phones; set last_group_closed_at from the newest
-closed group; map old lifecycle states -> active; drop
-assigned_conversation_id / quarantine fields. Seeded/dev data goes through
-the same script. The e2e lane reseed must produce burn-consistent state
-(seed profiles updated if they hand-place pool numbers).
+Cameron 2026-07-17: no production data exists and dev has never turned on
+group relays, so there is NO backfill/migration script. Instead:
+
+- SEEDS are the source of truth for local/e2e data: any seed profile that
+  creates relay groups / pool numbers must emit the NEW shape natively
+  (burned_phones populated from rosters, lifecycle_state=active,
+  last_group_closed_at where the seed closes a group). The mock-mode
+  relay-group seeds (fake-phones) are in scope for this.
+- Stray legacy rows in dev tables (old lifecycle states, quarantine
+  fields) are handled by tolerance, not conversion: assignment simply
+  ignores any record whose lifecycle_state is not `active`, and a normal
+  reseed wipes local strays. No code path reads the old fields.
 
 ## 7. Non-goals
 
@@ -228,8 +237,8 @@ assignment skips overlapping numbers and buys fresh when none clean;
 via_closed_group / unknown / multi-closed picks newest); close no longer
 clears pool_number; final message sent before close + close proceeds on
 send failure; nag timestamp lifecycle; retirement eligibility incl. the
-180d boundary, open-group veto, and the config gate; migration script
-idempotency.
+180d boundary, open-group veto, and the config gate; seeded relay groups
+produce burn-consistent pool records (assert seed output shape).
 
 E2e (playwright): close flow end-to-end - record "not a fit", inline ask,
 Close -> dev-outbox shows the final message to both participants, composer
@@ -247,7 +256,8 @@ worktree.
 
 - No new infra/tables (attribute-level changes only) unless the plan finds
   a GSI reshape is unavoidable - flag loudly if so.
-- Run the migration/backfill script on dev (and prod at cutover).
+- No data migration anywhere (section 6); a dev reseed after deploy is
+  sufficient.
 - RELAY_NUMBER_RELEASE_ENABLED stays OFF in deployed envs until Cameron
   turns it on (RUNBOOK entry + A2P/messaging-service note per section 5).
 - Resolves docs/issues/group-threads-across-multiple-tours.md (the

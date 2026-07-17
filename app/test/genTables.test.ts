@@ -9,9 +9,10 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4) + tours + tourReminders (Tours feature) + placementNudges (Post-Tour & Application), alphabetically keyed (for_each/state keys)', () => {
+  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4) + tours + tourReminders (Tours feature) + placementNudges (Post-Tour & Application) + ai_extraction (conversation-fact-extraction), alphabetically keyed (for_each/state keys)', () => {
     expect(Object.keys(tables)).toEqual([
       'activity_events',
+      'ai_extraction',
       'audit_events',
       'broadcasts',
       'contacts',

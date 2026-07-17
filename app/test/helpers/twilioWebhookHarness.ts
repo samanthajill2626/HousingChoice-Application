@@ -29,6 +29,7 @@ import {
   type ContactPhone,
   type ContactsRepo,
 } from '../../src/repos/contactsRepo.js';
+import type { ExtractionRepo } from '../../src/repos/extractionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -2040,6 +2041,13 @@ export interface HarnessOptions {
    * composition root mounts it (before the origin-secret gate).
    */
   devRouter?: Router;
+  /**
+   * Injected conversation-fact-extraction repo (conversation-fact-extraction).
+   * The inbound webhook schedules a debounced extraction run on a fresh
+   * tenant/unknown 1:1 inbound; tests pass a stub to assert scheduleExtraction
+   * calls without a real DynamoDB table. Omit to use the router's real default.
+   */
+  extractionRepo?: ExtractionRepo;
 }
 
 export interface Harness {
@@ -2188,6 +2196,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       usersRepo: fakeUsers.repo,
       pushService: world.pushService,
       events: world.events,
+      // conversation-fact-extraction: inject a stub so the schedule call is
+      // observable and never hits a real ai_extraction table.
+      ...(opts.extractionRepo !== undefined && { extractionRepo: opts.extractionRepo }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

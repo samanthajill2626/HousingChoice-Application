@@ -11,6 +11,8 @@ import {
   WELCOME_SMS,
 } from '../src/lib/smsCompliance.js';
 import { loadConfig } from '../src/lib/config.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import type { ExtractionRepo } from '../src/repos/extractionRepo.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -1054,5 +1056,158 @@ describe('config: OUR_PHONE_NUMBERS / MEDIA_BUCKET parsing', () => {
   it('exposes MEDIA_BUCKET as config.mediaBucket', () => {
     const config = loadConfig({ NODE_ENV: 'test', MEDIA_BUCKET: 'hc-dev-media-1' } as NodeJS.ProcessEnv);
     expect(config.mediaBucket).toBe('hc-dev-media-1');
+  });
+});
+
+describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (Task 6)', () => {
+  // A stub extraction repo that records scheduleExtraction calls; the other repo
+  // methods are never exercised by the webhook path (they throw if touched, which
+  // surfaces an accidental call as a test failure rather than a silent no-op).
+  function stubExtractionRepo(overrides: Partial<ExtractionRepo> = {}): {
+    repo: ExtractionRepo;
+    scheduleCalls: { conversationId: string; channel: 'sms' | 'voice'; dueAt: string }[];
+  } {
+    const scheduleCalls: { conversationId: string; channel: 'sms' | 'voice'; dueAt: string }[] = [];
+    const notImpl = (name: string) => async (): Promise<never> => {
+      throw new Error(`extraction stub: ${name} must not be called by the webhook path`);
+    };
+    const repo: ExtractionRepo = {
+      async scheduleExtraction(conversationId, channel, dueAt) {
+        scheduleCalls.push({ conversationId, channel, dueAt });
+      },
+      listDue: notImpl('listDue') as ExtractionRepo['listDue'],
+      claim: notImpl('claim') as ExtractionRepo['claim'],
+      complete: notImpl('complete') as ExtractionRepo['complete'],
+      fail: notImpl('fail') as ExtractionRepo['fail'],
+      getDue: notImpl('getDue') as ExtractionRepo['getDue'],
+      putSuggestion: notImpl('putSuggestion') as ExtractionRepo['putSuggestion'],
+      getSuggestion: notImpl('getSuggestion') as ExtractionRepo['getSuggestion'],
+      listSuggestionsByContact: notImpl('listSuggestionsByContact') as ExtractionRepo['listSuggestionsByContact'],
+      deleteSuggestion: notImpl('deleteSuggestion') as ExtractionRepo['deleteSuggestion'],
+      listPending: notImpl('listPending') as ExtractionRepo['listPending'],
+      ...overrides,
+    };
+    return { repo, scheduleCalls };
+  }
+
+  it('a fresh inbound on a tenant 1:1 schedules a sliding run (conversationId + dueAt ~ now+debounce)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app, world, config } = makeWebhookHarness({ extractionRepo: repo });
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+
+    const before = Date.now();
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMextract01' }));
+    const after = Date.now();
+
+    expect(res.status).toBe(200);
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('tenant_1to1');
+    expect(scheduleCalls).toHaveLength(1);
+    expect(scheduleCalls[0]!.conversationId).toBe(conv.conversationId);
+    expect(scheduleCalls[0]!.channel).toBe('sms');
+    const dueMs = Date.parse(scheduleCalls[0]!.dueAt);
+    expect(Number.isNaN(dueMs)).toBe(false);
+    // dueAt == wall-clock-at-call + debounce, so it lands in [before, after]+debounce.
+    expect(dueMs).toBeGreaterThanOrEqual(before + config.aiExtractionDebounceMs);
+    expect(dueMs).toBeLessThanOrEqual(after + config.aiExtractionDebounceMs);
+  });
+
+  it('schedules for an unknown_1to1 conversation (unknown contacts ARE extraction sources)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app, world } = makeWebhookHarness({ extractionRepo: repo });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMextract02' }));
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('unknown_1to1');
+    expect(scheduleCalls).toHaveLength(1);
+    expect(scheduleCalls[0]!.conversationId).toBe(conv.conversationId);
+  });
+
+  it('a deduped redelivery does NOT re-schedule (only the fresh append schedules)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app } = makeWebhookHarness({ extractionRepo: repo });
+    const params = inboundSmsParams({ MessageSid: 'SMextractDup' });
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    await signedTwilioPost(app, SMS_PATH, params); // redelivery -> dedupe
+
+    expect(scheduleCalls).toHaveLength(1);
+  });
+
+  it('does NOT schedule when AI_EXTRACTION_ENABLED is off (kill switch)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app } = makeWebhookHarness({
+      extractionRepo: repo,
+      env: { AI_EXTRACTION_ENABLED: 'false' },
+    });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMextractOff' }));
+
+    expect(res.status).toBe(200);
+    expect(scheduleCalls).toHaveLength(0);
+  });
+
+  it('does NOT schedule for a landlord_1to1 conversation (landlord is not a v1 source)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app, world } = makeWebhookHarness({ extractionRepo: repo });
+    world.contacts.push({ contactId: 'contact-LL', type: 'landlord', phone: TENANT_PHONE });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMextractLL' }));
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('landlord_1to1');
+    expect(scheduleCalls).toHaveLength(0);
+  });
+
+  it('does NOT schedule for a relay-group inbound (relay is out of scope in v1)', async () => {
+    const { repo, scheduleCalls } = stubExtractionRepo();
+    const { app, world } = makeWebhookHarness({ extractionRepo: repo });
+    const POOL = '+15550109000';
+    const MEMBER = '+15550100002';
+    const now = new Date().toISOString();
+    // Seed a relay group directly on the pool number so To=POOL routes to the
+    // relay path (which never schedules extraction). No fan-out handler needed:
+    // the enqueue is best-effort and the schedule assertion is what matters.
+    const relay: ConversationItem = {
+      conversationId: 'conv-relay-1',
+      participant_phone: POOL,
+      pool_number: POOL,
+      status: 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-a', phone: MEMBER, name: 'A' },
+        { contactId: 'c-b', phone: '+15550100003', name: 'B' },
+      ],
+      created_at: now,
+    };
+    world.conversations.set(relay.conversationId, relay);
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({ From: MEMBER, To: POOL, MessageSid: 'SMextractRelay' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(scheduleCalls).toHaveLength(0);
+  });
+
+  it('a scheduleExtraction failure NEVER fails the webhook ack (still 200, message persisted, WARN logged)', async () => {
+    const { repo } = stubExtractionRepo({
+      async scheduleExtraction() {
+        throw new Error('schedule exploded');
+      },
+    });
+    const { app, world, capture } = makeWebhookHarness({ extractionRepo: repo });
+
+    const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ MessageSid: 'SMextractThrow' }));
+
+    expect(res.status).toBe(200);
+    expect(world.messages).toHaveLength(1);
+    const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('extraction schedule failed'));
+    expect(warn).toBeDefined();
   });
 });

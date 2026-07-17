@@ -474,17 +474,18 @@ const searchingTenant = {
     owner: { type: 'tour', id: TOUR_SEARCHING },
     created_at: CQ,
   },
-  // Pool number row bound to the relay conversation
+  // Pool number backing the relay conversation (burn-multiplexing model)
   poolNumber: {
     poolNumber: RELAY_POOL_PHONE,
-    lifecycle_state: 'assigned',
-    quarantine_until: '0000-00-00T00:00:00.000Z', // sentinel for non-quarantined
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z', // retained GSI range sentinel
     provisioned_via: 'console',
     voice_capable: true,
     sms_capable: true,
-    assigned_conversation_id: CONV_SEARCHING_RELAY,
+    // burned_phones = the relay group's roster (tenant + landlord). A JS Set
+    // marshals to a DynamoDB string set via the seed doc client.
+    burned_phones: new Set([PHONES.searchingTenant, '+15550100002']),
     provisioned_at: CQ,
-    assigned_at: CQ,
   },
   // Requested tour (landlord_led; NO scheduledAt; ZERO reminder rows — invariant)
   tour: {
@@ -723,14 +724,13 @@ const touredYesTenant = {
   },
   poolNumber: {
     poolNumber: RELAY_POOL_TOURED,
-    lifecycle_state: 'assigned',
-    quarantine_until: '0000-00-00T00:00:00.000Z',
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z', // retained GSI range sentinel
     provisioned_via: 'console',
     voice_capable: true,
     sms_capable: true,
-    assigned_conversation_id: CONV_TOURED_RELAY,
+    burned_phones: new Set([PHONES.touredYes, '+15550100002']),
     provisioned_at: CW,
-    assigned_at: CW,
   },
   // Tour: toured, outcome move_forward, convertible (no reminder rows — all sent already)
   tour: {

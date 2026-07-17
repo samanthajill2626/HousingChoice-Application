@@ -248,6 +248,47 @@ Effect: every outstanding session cookie stops opening = **forced global logout*
 back in via Google). No data loss — sessions live only inside the cookies themselves. Rotate on any
 suspicion the secret leaked.
 
+### Relay number release (`RELAY_NUMBER_RELEASE_ENABLED`)
+
+`RELAY_NUMBER_RELEASE_ENABLED` is an app-behavior flag (an `.env.<env>` key like
+`RELAY_LIVE_PROVISIONING`: push it with `secrets:push` then deploy; it is NOT a
+Terraform-managed key). It is **OFF by default in every deployed env and STAYS
+OFF until Cameron turns it on.** While off, pool numbers are never handed back to
+Twilio: a closed relay group keeps its number forever (that is what lets a later
+text from a closed-group member intercept into their 1:1 thread), and the
+retirement sweep no-ops silently.
+
+Turning it on (`RELAY_NUMBER_RELEASE_ENABLED=true` in `.env.<env>` -> `secrets:push`
+-> deploy) does two things:
+
+- A lazy retirement sweep runs at the top of every relay-group provisioning (the
+  moment a number is assigned to a new group), releasing any now-eligible numbers.
+- It makes `npm run pool:retire` actually release numbers; with the flag off that
+  command is a no-op that only reports.
+
+**Eligibility (all four must hold):** the number is `active`, has ZERO open groups
+on it, its newest group closed at least 180 days ago, and it has hosted at least
+one group (never release a fresh, never-used number). Burn/audit records are KEPT
+forever after release (they are our record; the storage cost is trivial).
+
+**Manual ops run** (the `pool:retire` script lives in the app workspace):
+
+```powershell
+npm run pool:retire --workspace app
+```
+
+It builds the pool service, runs the eligibility sweep once, and prints the
+released numbers plus a count (or a no-op notice when the flag is off).
+
+**A2P / Messaging Service caveat.** Release is a Twilio `IncomingPhoneNumbers`
+DELETE (the new adapter capability). A released number ceases to exist on the
+account, so it drops out of any Messaging Service sender pool / A2P campaign
+association automatically - there is no separate de-registration step. Even so,
+after the FIRST production retirement spot-check the Messaging Service sender
+list in the Twilio console: A2P throughput and per-number cost scale with the
+number count, so confirm the sender pool shrank as expected and the campaign is
+still healthy.
+
 ### Users & access (invite-first)
 
 Access is **invite-first** (operator decision 2026-06-12, README deviations). A Google login

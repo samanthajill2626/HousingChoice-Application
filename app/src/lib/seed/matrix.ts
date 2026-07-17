@@ -1064,18 +1064,30 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
 // ---------------------------------------------------------------------------
 const POOL_NUMBERS = ['+15550190101', '+15550190102'] as const;
 
-function buildPoolNumbers(): Record<string, unknown>[] {
-  return POOL_NUMBERS.map((num, i) => ({
-    poolNumber: num,
-    lifecycle_state: 'assigned',
-    quarantine_until: '0000-00-00T00:00:00.000Z', // sentinel for byLifecycleState GSI
-    voice_capable: true,
-    sms_capable: true,
-    provisioned_via: 'console',
-    assigned_conversation_id: `conv-mx-relay-${String(i + 1).padStart(2, '0')}`,
-    provisioned_at: D.T2,
-    assigned_at: D.T2,
-  }));
+function buildPoolNumbers(relayConversations: SeedConversationRow[]): Record<string, unknown>[] {
+  return POOL_NUMBERS.map((num) => {
+    // Burn-multiplexing model: burned_phones is the union of every phone ever
+    // rostered on the relay groups this number fronts - consistent-by-
+    // construction with the group participants (no more assigned_conversation_id
+    // single-owner coupling). Seeds write via the doc client, so a JS Set
+    // marshals to a DynamoDB string set exactly like poolNumbersRepo.create.
+    const burned = new Set(
+      relayConversations
+        .filter((c) => c['pool_number'] === num)
+        .flatMap((c) => (c.participants ?? []).map((m) => m.phone)),
+    );
+    return {
+      poolNumber: num,
+      lifecycle_state: 'active',
+      quarantine_until: '0000-00-00T00:00:00.000Z', // retained sentinel for byLifecycleState GSI
+      voice_capable: true,
+      sms_capable: true,
+      provisioned_via: 'console',
+      // DynamoDB forbids empty string sets - only emit when the roster is non-empty.
+      ...(burned.size > 0 && { burned_phones: burned }),
+      provisioned_at: D.T2,
+    };
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1108,6 +1120,7 @@ function buildRelayConversations(
   tourGroups: TourGroup[],
   contactsById: Map<string, Record<string, unknown>>,
   unitsById: Map<string, Record<string, unknown>>,
+  now: Date,
 ): SeedConversationRow[] {
   return POOL_NUMBERS.map((num, i) => {
     const tourId = `tour-mx-scheduled-${String(i + 1).padStart(2, '0')}`;
@@ -1133,6 +1146,10 @@ function buildRelayConversations(
       participants,
       owner: { type: 'tour', id: tourId },
       created_at: D.T2,
+      // The FIRST matrix relay group (conv-mx-relay-01) carries a PAST-due close
+      // nag (~14 days ago, seed-now-relative) so the Today relay-close-nag card
+      // has a live demo/e2e subject. The group stays OPEN; only its nag is overdue.
+      ...(i === 0 && { close_nag_next_at: daysAgo(now, 14) }),
     };
   });
 }
@@ -1381,6 +1398,10 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
     if (typeof id === 'string') unitsById.set(id, u);
   }
 
+  // Build relay conversations first so pool numbers derive burned_phones from
+  // their groups' rosters (burn-multiplexing consistency-by-construction).
+  const relayConversations = buildRelayConversations(tourGroups, contactsById, unitsById, now);
+
   return {
     contacts,
     units,
@@ -1388,8 +1409,8 @@ export function matrixItems(now: Date = new Date()): Record<string, Record<strin
     placementDeadlines,
     tours,
     tourReminders,
-    pool_numbers: buildPoolNumbers(),
-    conversations: buildRelayConversations(tourGroups, contactsById, unitsById),
+    pool_numbers: buildPoolNumbers(relayConversations),
+    conversations: relayConversations,
     broadcasts: buildBroadcasts(),
     listing_sends: buildListingSends(),
     invoices: buildInvoices(),

@@ -28,3 +28,13 @@ go 1:1. The "no usable group" warning under-fires in that narrow edge.
 lands on a toured tour (keeping the combined-PATCH path idempotent), and align
 the routing chip with resolveUsableGroup semantics (expose "usable" on the
 tour GET or a shared predicate).
+
+**Update (2026-07-17, relay-number-lifecycle).** The RELAY-GROUP side of this is
+now handled: nothing auto-closes a group (design D4), and closing a group is an
+explicit human choice surfaced by the dashboard RelayCloseAskDialog after a
+terminal outcome is recorded (tour not_a_fit / canceled, placement lost /
+moved_in). So the "should this outcome also close the group text" decision is no
+longer implicit. This issue stays OPEN for the ORIGINAL gap, which is unchanged:
+the TOUR status 'closed' is still dashboard-composed (the Record-outcome modal
+folds status:'closed' into the PATCH) rather than backend-derived from a
+not-a-fit outcome. The relay close flow does not touch tour status.

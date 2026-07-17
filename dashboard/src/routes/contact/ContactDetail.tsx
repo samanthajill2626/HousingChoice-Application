@@ -65,6 +65,8 @@ import { ConsentCaptureModal } from './ConsentCaptureModal.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
 import { useSuggestions } from './useSuggestions.js';
+import { SuggestionChip } from './SuggestionChip.js';
+import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
@@ -204,6 +206,26 @@ export function ContactDetail(): React.JSX.Element {
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
+
+  // firstName/lastName can be WRITTEN or SUGGESTED for a tenant OR unknown contact
+  // (apply.ts), but the name lives in the header - not a file-pane row - so its
+  // review chips surface here, directly under the name. (voucherSize/pets/status/
+  // ... chips live in TenantFile/EligibilityIntakeCard; type in UnknownFile.)
+  const nameChipFor = (nameTarget: 'firstName' | 'lastName'): React.JSX.Element | null => {
+    if (kind !== 'tenant' && kind !== 'unknown') return null;
+    const s = suggestionFor(suggestions.suggestions, nameTarget);
+    if (!s) return null;
+    return (
+      <SuggestionChip
+        label={SUGGESTION_TARGET_LABEL[nameTarget] ?? nameTarget}
+        suggestion={s}
+        onAccept={() => onAcceptSuggestion(nameTarget)}
+        onDismiss={() => onDismissSuggestion(nameTarget)}
+        busy={suggestionBusy === nameTarget}
+        error={suggestionError?.target === nameTarget ? suggestionError.message : null}
+      />
+    );
+  };
 
   // Resolve which thread the reply sends into. Each of the contact's numbers is
   // its own 1:1 conversation; the picker lets the navigator choose, defaulting to
@@ -504,6 +526,8 @@ export function ContactDetail(): React.JSX.Element {
             ) : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
+          {nameChipFor('firstName')}
+          {nameChipFor('lastName')}
         </div>
         <div className={styles.actions}>
           {deleted ? (

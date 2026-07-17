@@ -52,9 +52,22 @@ export function buildExtractionSystemPrompt(): string {
   ].join('\n');
 }
 
+/**
+ * Collapse an utterance body to a SINGLE line: replace any run of CR/LF with
+ * ' / '. Each transcript line is `<timestamp> [<speaker>] <text>` and the lines
+ * are '\n'-joined, so a raw client SMS containing a newline plus a forged
+ * `<timestamp> [staff] ...` could otherwise masquerade as a genuine staff turn
+ * (prompt-injection, adversarial F2). Flattening the body means an injected
+ * "[staff]"/"[client]" tag can never begin a line - the model only ever sees
+ * server-authored speaker tags at the start of each line.
+ */
+function toSingleLine(text: string): string {
+  return text.replace(/[\r\n]+/g, ' / ');
+}
+
 export function buildExtractionUserContent(input: ExtractionInput): string {
   const profileJson = JSON.stringify(input.profile, null, 2);
   const ordered = [...input.transcript].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  const lines = ordered.map((u) => `${u.at} [${u.speaker}] ${u.text}`);
+  const lines = ordered.map((u) => `${u.at} [${u.speaker}] ${toSingleLine(u.text)}`);
   return ['CURRENT PROFILE', profileJson, '', 'TRANSCRIPT', ...lines].join('\n');
 }

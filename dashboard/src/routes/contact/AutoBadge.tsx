@@ -5,8 +5,10 @@
 // SuggestionChip.
 import styles from './AutoBadge.module.css';
 
-/** Format the provenance instant as a friendly date, or '' when absent/unparseable. */
-function formatSourceDate(at?: string): string {
+/** Format a provenance/suggestion instant as a friendly short date (the same
+ *  style the AutoBadge tooltip uses), or '' when absent/unparseable. Shared with
+ *  SuggestionChip so the badge tooltip and the chip's "(<date>)" read identically. */
+export function formatSourceDate(at?: string): string {
   if (typeof at === 'string' && at.length > 0) {
     const d = new Date(at);
     if (!Number.isNaN(d.getTime())) return d.toLocaleDateString();

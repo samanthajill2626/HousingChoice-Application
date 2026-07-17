@@ -290,18 +290,30 @@ export async function applyExtraction(
   const cleaned = rawNotes.map((line) => line.trim()).filter((line) => line.length > 0).slice(0, MAX_NOTE_LINES);
   if (cleaned.length > 0) {
     const prefix = autoPrefix(at);
-    const joined = cleaned.map((line) => `${prefix} ${line}`).join('\n');
     // Read-modify-write on the ctx.contact snapshot. This can lose a concurrent
     // human notes edit made between the snapshot read and this write; the race
     // is ACCEPTED (single scalar attribute, low write frequency) rather than
     // paying for an optimistic-concurrency retry loop on a low-stakes field.
     const existing = typeof contact.notes === 'string' ? contact.notes.trim() : '';
-    const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
-    try {
-      await deps.contacts.update(contactId, { notes: nextNotes });
-      notedLines = cleaned.length;
-    } catch (err) {
-      logger.warn({ contactId, err }, 'extraction notes append failed');
+    // Belt-and-braces idempotency guard (adversarial F1): applyExtraction runs
+    // BEFORE repo.complete(), so a complete() failure re-arms the SAME due row and
+    // the retry re-extracts the identical transcript against a contact that already
+    // carries run 1's appended line. Drop any candidate whose formatted
+    // `[Auto - <date>] <line>` OR bare `<line>` is already present verbatim in the
+    // current notes, so the retry appends nothing (the deterministic FAKE driver
+    // double-appends every time otherwise; the anthropic driver only usually does).
+    const toAppend = cleaned.filter(
+      (line) => !existing.includes(`${prefix} ${line}`) && !existing.includes(line),
+    );
+    if (toAppend.length > 0) {
+      const joined = toAppend.map((line) => `${prefix} ${line}`).join('\n');
+      const nextNotes = existing.length > 0 ? `${existing}\n${joined}` : joined;
+      try {
+        await deps.contacts.update(contactId, { notes: nextNotes });
+        notedLines = toAppend.length;
+      } catch (err) {
+        logger.warn({ contactId, err }, 'extraction notes append failed');
+      }
     }
   }
 

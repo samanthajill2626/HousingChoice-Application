@@ -395,6 +395,30 @@ describe('applyExtraction - noteLines (item 8)', () => {
     expect(outcome.notedLines).toBe(1);
     expect(records.updates[0]!.patch['notes']).toBe('existing note\n[Auto - Jul 16] new fact');
   });
+
+  it('is idempotent on a complete()-failure retry: the same result applied twice appends nothing the second time', async () => {
+    // Run 1 appends the note. A complete() failure re-arms the SAME due row; the
+    // retry re-fetches a contact now carrying run 1's line and re-extracts the
+    // identical transcript. The guard must drop the already-present line so the
+    // second run writes no notes (notedLines 0) - no double-append (F1).
+    const { deps, records } = makeDeps();
+    const result: ExtractionResult = { fields: {}, noteLines: ['stairs are a problem'] };
+
+    const first = await run(deps, makeContact({ type: 'tenant', notes: 'seed note' }), result);
+    expect(first.notedLines).toBe(1);
+    const afterFirst = records.updates[0]!.patch['notes'] as string;
+    expect(afterFirst).toBe('seed note\n[Auto - Jul 16] stairs are a problem');
+
+    // Retry state: the contact snapshot now carries run 1's appended line.
+    const second = await run(deps, makeContact({ type: 'tenant', notes: afterFirst }), result);
+    expect(second.notedLines).toBe(0);
+    // No second notes write landed, and nothing was emitted (nothing changed).
+    expect(records.updates).toHaveLength(1);
+    const line = 'stairs are a problem';
+    const occurrences = afterFirst.split(line).length - 1;
+    expect(occurrences).toBe(1);
+    expect(records.emits.filter((e) => e.name === 'suggestion.updated')).toHaveLength(1);
+  });
 });
 
 describe('applyExtraction - emit + best-effort isolation (items 9-10)', () => {

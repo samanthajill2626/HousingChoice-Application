@@ -16,8 +16,25 @@
   color: var(--c-text);
 }
 
+.date {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs, 0.75rem);
+}
+
 .reason {
   color: var(--c-text-muted);
+}
+
+.view {
+  padding: 0 var(--sp-2);
+  color: var(--c-accent, #2563eb);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.view:hover {
+  text-decoration: underline;
 }
 
 .actions {

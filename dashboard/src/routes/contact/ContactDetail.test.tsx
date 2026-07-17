@@ -362,6 +362,58 @@ describe('ContactDetail', () => {
     );
   });
 
+  it('renders a name SuggestionChip in the header and accepts it (firstName, tenant)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, firstName: 'Tash' });
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#k1#firstName',
+        ownerContactId: 'k1',
+        target: 'firstName',
+        currentValue: 'Tash',
+        suggestedValue: 'Tasha',
+        reason: 'gave full name',
+        conversationId: 'conv-1',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    acceptSuggestion.mockResolvedValue({
+      contact: { ...TENANT, firstName: 'Tasha', firstName_source: { source: 'ai', at: '2026-07-16T10:00:00.000Z' } },
+      suggestions: [],
+    });
+    renderAt('k1');
+
+    // The chip surfaces under the header name (not a file-pane row), labelled "first name".
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for first name' });
+    expect(within(chip).getByText('AI heard "Tasha"')).toBeInTheDocument();
+
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName');
+    // The returned contact applies in place: the chip drops.
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'AI suggestion for first name' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('renders name SuggestionChips for an UNKNOWN contact too (lastName)', async () => {
+    getContact.mockResolvedValue(UNKNOWN);
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#u9#lastName',
+        ownerContactId: 'u9',
+        target: 'lastName',
+        suggestedValue: 'Rivera',
+        reason: 'signed off with a surname',
+        conversationId: 'conv-2',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    renderAt('u9');
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for last name' });
+    expect(within(chip).getByText('AI heard "Rivera"')).toBeInTheDocument();
+  });
+
   it('the Placements-card "Start placement" action opens the create dialog pre-filled+locked to this tenant', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

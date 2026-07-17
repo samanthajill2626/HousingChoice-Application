@@ -46,10 +46,12 @@ cannot be turned on with configuration alone:
    auto_transcribe toggle): deterministic CallSid mapping via CustomerKey,
    per-env VI service isolation, and we control exactly which recordings
    are transcribed.
-6. Reliability: transcript creation is NOT fire-and-forget. It rides the
-   existing jobs pipeline (EventBridge Scheduler -> SQS -> worker) with
-   redelivery + DLQ visibility, plus a delayed reconciliation check that
-   self-heals a lost webhook. Only the pushes are best-effort.
+6. Reliability AND latency: transcript creation is NOT fire-and-forget,
+   and it must be fast. The happy path creates the VI transcript INLINE in
+   the recording callback (no jobs-pipeline latency floor); failure falls
+   back to the jobs pipeline (EventBridge Scheduler -> SQS -> worker) with
+   redelivery + DLQ visibility; a delayed reconciliation check self-heals
+   a lost webhook. Only the pushes are best-effort.
 7. Twilio is NEVER in the read path. Transcript text persists to DynamoDB
    on the call entity (existing `transcript` field); recording audio is
    already mirrored to S3. Conversation loads read only our DB/S3.
@@ -58,6 +60,11 @@ cannot be turned on with configuration alone:
    entry using the reserved 'voicemail' outcome, riding the existing
    recording mirror, the new VI pipeline, and the existing dashboard call
    bubble (playable recording + collapsible transcript already render).
+9. The legacy `/voice/transcription` endpoint is REMOVED (real Twilio never
+   had a path to it; fake + tests migrate to the VI shape - see 3.6).
+10. Schema flexibility: no schema change is expected, but the implementer
+    MAY adjust/extend the data model where that is cleaner or more
+    maintainable going forward (human's explicit allowance, 2026-07-17).
 
 ## 3. Slice 1 - Voice Intelligence transcription for founder-bridge calls
 
@@ -74,19 +81,28 @@ cannot be turned on with configuration alone:
   API calls (real host: intelligence.twilio.com) to the fake. Prod stays
   locked to real Twilio hosts.
 
-### 3.2 Create leg (reliable, job-based)
+### 3.2 Create leg (fast inline path + reliable job fallback)
 
 On the existing recording-completed handler (POST /voice/recording), AFTER
 the S3 mirror + entity stamp succeed, for founder-bridge (masked:false)
 recordings only, and only when `TWILIO_VI_SERVICE_SID` is set:
 
-- Enqueue job `createVoiceTranscript` with payload
-  `{ callSid, recordingSid }` via the standard jobs.enqueue() path.
-  Enqueue failure is logged and does not fail the recording callback
-  (the recording is already safe; the DLQ/alarm posture covers job-side
-  failures once enqueued).
+- FAST PATH: attempt the VI Create Transcript call INLINE (one short API
+  call, after recording persistence is already safe - it can never lose
+  the recording). On success, enqueue `reconcileVoiceTranscript`
+  ({ callSid, transcriptSid, attempt: 1 }, ~10 min) and finish.
+- FALLBACK: if the inline create fails (Twilio error, timeout), enqueue
+  job `createVoiceTranscript` with `{ callSid, recordingSid }` via the
+  standard jobs.enqueue() path and ack the callback normally. Enqueue
+  failure is logged and does not fail the recording callback.
 
-Job handler `createVoiceTranscript`:
+Rationale: the jobs pipeline has an EventBridge Scheduler delay floor of
+~60s, which would push every transcript a minute later than necessary.
+Inline-first keeps the happy path fast (transcripts typically land ~1-2
+minutes after hangup, often under a minute for short voicemails); the job
+exists purely as the retry/visibility mechanism for failures.
+
+Job handler `createVoiceTranscript` (fallback/retry only):
 
 1. Load the call entity by CallSid. Skip (success, log) if: missing, not a
    call, masked, or transcript already present.
@@ -151,19 +167,45 @@ the never-overwrite guardrail.
 ### 3.5 Transcript text format
 
 Stored verbatim as plain text on the call entity's existing `transcript`
-field. Sentences are joined in order, newline-separated. When the media has
-two channels (dual-channel bridge recordings), each line is prefixed with a
-stable speaker label derived from the sentence's channel: `Caller:` /
-`Receiver:` if the channel->party mapping proves reliable at build time,
-else `Speaker 1:` / `Speaker 2:`. Voicemail recordings are single-channel:
-no prefixes, just the joined text. No AI cleanup, no summarization - the
-verbatim rule from M1.9c stands.
+field. Sentences are joined in order, newline-separated. There are exactly
+two media shapes:
 
-### 3.6 Legacy endpoint
+- BRIDGE recordings are ALWAYS dual-channel (record-from-answer-dual: the
+  caller leg and the founder leg). Each line is prefixed with a stable
+  speaker label derived from the sentence's channel: `Caller:` /
+  `Receiver:` if the channel->party mapping proves reliable at build time,
+  else `Speaker 1:` / `Speaker 2:`.
+- VOICEMAIL recordings are the one single-channel case (nobody answered;
+  the `<Record>` captures only the caller): no prefixes, just the joined
+  text.
 
-`POST /voice/transcription` stays exactly as-is (tests included). It remains
-the seam for the fake's legacy shape and any manually-configured legacy
-source; it is no longer the path real Twilio is expected to use.
+No AI cleanup, no summarization - the verbatim rule from M1.9c stands.
+
+### 3.6 Legacy endpoint - REMOVED
+
+`POST /voice/transcription` is DELETED in this feature (decision with the
+human, 2026-07-17). The app's TwiML never sets `transcribeCallback`
+anywhere, so real Twilio has never had a path to this endpoint - its only
+caller is our own fake, which made transcription look "done" when it was
+not. Keeping it would confuse future developers. The removal migrates:
+
+- the fake engine's legacy text-in-body transcription flow -> the VI model
+  (section 6); legacy builders (`buildTranscriptionParams`) go with it;
+- the existing endpoint tests in voiceRecording.test.ts -> equivalent
+  coverage against the new VI webhook + persist path (the guardrail
+  intents - masked refusal, never-overwrite, signature required - carry
+  over 1:1).
+
+### 3.7 Latency expectations (user-visible; goes in the RUNBOOK too)
+
+- Call entry in dashboard: at RING time (entity persisted on the inbound
+  webhook; SSE-live), outcome stamped at hangup.
+- Recording playable: ~5-30s after hangup (Twilio recording processing +
+  our S3 mirror), SSE-live.
+- Transcript visible: typically ~1-2 minutes after hangup (inline create +
+  VI processing, which scales with audio length); short voicemails often
+  under a minute. Reconcile safety net means a lost webhook delays a
+  transcript to ~10 minutes, never loses it.
 
 ## 4. Slice 2 - platform voicemail (business line only)
 
@@ -228,9 +270,10 @@ refused before any of this.
 
 ## 5. Data model and dashboard
 
-- NO schema change. Uses: the reserved CallOutcome 'voicemail' (becomes
-  real), existing `recording_s3_key` (present => playable), existing
-  `transcript` (present => collapsible, never auto-shown).
+- No schema change EXPECTED. Uses: the reserved CallOutcome 'voicemail'
+  (becomes real), existing `recording_s3_key` (present => playable),
+  existing `transcript` (present => collapsible, never auto-shown).
+  Per decision 10, the implementer may adjust the model where cleaner.
 - Dashboard: the call bubble renders "Voicemail" labeling when
   outcome === 'voicemail' (wherever outcome currently renders: call bubble
   label/chip, contact timeline row, any outcome text map). Play + transcript
@@ -261,9 +304,10 @@ The CallEngine + REST surface grow a VI model:
   prompt, "records" for scenario-controlled duration, posts the completed
   recording callback, serves the canned MP3 - driving the real voicemail
   path end-to-end.
-- The legacy `/voice/transcription` text-in-body flow remains available in
-  the engine (existing scenarios keep passing) but new specs use the VI
-  shape.
+- The engine's legacy text-in-body transcription flow and its
+  `buildTranscriptionParams` builder are REMOVED; `scenario.transcript`
+  now feeds the VI sentences instead. Existing scenarios/specs that relied
+  on the legacy flow are migrated to the VI shape in the same change.
 
 ## 7. Testing
 
@@ -273,6 +317,9 @@ Unit (app):
   400, unknown transcript 200+warn, non-completed 200, completed persists
   joined sentences, masked call refused at persist, redelivery never
   overwrites, API failure 500s.
+- Recording handler create leg: inline create on success enqueues
+  reconcile (no fallback job); inline failure enqueues the fallback job
+  and still acks the callback; VI-unset skips both.
 - createVoiceTranscript job: skips (missing/masked/already-transcribed),
   creates with customerKey=callSid, throws on API failure, enqueues
   reconcile.

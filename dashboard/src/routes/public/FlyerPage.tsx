@@ -82,10 +82,17 @@ function contactFromError(err: unknown): string | null {
   return null;
 }
 
+/** Treat an empty string as absent - staff can save '' for a free-text field
+ *  (the write validator accepts it), and a labeled detail row with a blank
+ *  value must simply not render. */
+function textOrNull(v: string | null): string | null {
+  return v === '' ? null : v;
+}
+
 function petsLabel(pets: string | boolean | null): string | null {
   if (pets === true) return 'Allowed';
   if (pets === false) return 'Not allowed';
-  return pets;
+  return pets === '' ? null : pets;
 }
 
 export function FlyerPage(): React.JSX.Element {
@@ -184,9 +191,14 @@ export function FlyerPage(): React.JSX.Element {
             </p>
           )
         ) : (
-          <a className={styles.linkButton} href="/join">
-            See other homes
-          </a>
+          <>
+            <p className={styles.muted}>
+              Sign up to hear about other homes that fit your voucher.
+            </p>
+            <a className={styles.linkButton} href="/join">
+              See other homes
+            </a>
+          </>
         )}
       </section>
     );
@@ -199,6 +211,9 @@ export function FlyerPage(): React.JSX.Element {
   const safeListingUrl = safeHttpUrl(flyer.listing_link);
   const pets = petsLabel(flyer.pets);
   const address = addressLines(flyer.address);
+  const utilities = textOrNull(flyer.utilities);
+  const accessibility = textOrNull(flyer.accessibility);
+  const leaseTerms = textOrNull(flyer.lease_terms);
 
   return (
     <section className={styles.card}>
@@ -257,10 +272,10 @@ export function FlyerPage(): React.JSX.Element {
             <dd className={styles.dd}>${flyer.application_fee}</dd>
           </div>
         )}
-        {flyer.utilities !== null && (
+        {utilities !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Tenant pays</dt>
-            <dd className={styles.dd}>{flyer.utilities}</dd>
+            <dd className={styles.dd}>{utilities}</dd>
           </div>
         )}
         {pets !== null && (
@@ -269,16 +284,16 @@ export function FlyerPage(): React.JSX.Element {
             <dd className={styles.dd}>{pets}</dd>
           </div>
         )}
-        {flyer.accessibility !== null && (
+        {accessibility !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Accessibility</dt>
-            <dd className={styles.dd}>{flyer.accessibility}</dd>
+            <dd className={styles.dd}>{accessibility}</dd>
           </div>
         )}
-        {flyer.lease_terms !== null && (
+        {leaseTerms !== null && (
           <div className={styles.detailRow}>
             <dt className={styles.dt}>Lease terms</dt>
-            <dd className={styles.dd}>{flyer.lease_terms}</dd>
+            <dd className={styles.dd}>{leaseTerms}</dd>
           </div>
         )}
         {flyer.same_day_rta === true && (

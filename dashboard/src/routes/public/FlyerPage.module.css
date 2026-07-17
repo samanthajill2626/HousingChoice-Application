@@ -28,7 +28,7 @@
   color: var(--c-text-muted);
 }
 
-/* Photo gallery — horizontal scroll on mobile, snapping per photo. */
+/* Photo gallery - horizontal scroll on mobile, snapping per photo. */
 .gallery {
   display: flex;
   gap: var(--sp-2);

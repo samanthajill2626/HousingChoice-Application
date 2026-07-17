@@ -138,9 +138,13 @@ describe('FlyerPage', () => {
     );
 
     // Only the CTA section swaps; the info above stays on screen and the form is gone.
-    expect(
-      await screen.findByRole('heading', { name: /you're all set|we've got your info/i }),
-    ).toBeInTheDocument();
+    const thanks = await screen.findByRole('heading', {
+      name: /you're all set|we've got your info/i,
+    });
+    expect(thanks).toBeInTheDocument();
+    // a11y: on the thank-you swap (the conversion moment) focus moves to the new
+    // heading so screen readers announce the state change.
+    expect(thanks).toHaveFocus();
     expect(screen.getByText('88 Sycamore St', { exact: false })).toBeInTheDocument();
     expect(screen.queryByLabelText(/first name/i)).toBeNull();
   });
@@ -194,6 +198,25 @@ describe('FlyerPage', () => {
       'href',
       'sms:+15550009999?&body=' + encodeURIComponent("I'm interested in this home"),
     );
+  });
+
+  it('empty-string detail values render NO row (label suppressed)', async () => {
+    // Staff can save '' for the free-text fields (the write validator accepts
+    // it); a labeled <dt> with a blank <dd> must simply not render.
+    getFlyer.mockResolvedValue({
+      ...FLYER,
+      pets: '',
+      accessibility: '',
+      lease_terms: '',
+      utilities: '',
+    });
+    renderPage();
+
+    await screen.findByText('88 Sycamore St', { exact: false });
+    expect(screen.queryByText('Pets')).toBeNull();
+    expect(screen.queryByText('Accessibility')).toBeNull();
+    expect(screen.queryByText('Lease terms')).toBeNull();
+    expect(screen.queryByText('Tenant pays')).toBeNull();
   });
 
   it('unsafe (javascript:) video/listing URLs are not rendered as links', async () => {

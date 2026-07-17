@@ -205,10 +205,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   }
 
   // unit-photos S3 (D1): resolve the unit's photos to render-time presigned URLs
-  // for the PUBLIC surface. The wire shape stays string[] (a url list, so
-  // FlyerFunnel changes minimally); entries that fail to resolve (stored key with
-  // no store / a presign failure) are OMITTED - the private bucket is never
-  // exposed and a degraded photo simply doesn't appear.
+  // for the PUBLIC surface. The wire shape stays string[] (a url list the public
+  // flyer page (FlyerPage) renders as-is); entries that fail to resolve (stored
+  // key with no store / a presign failure) are OMITTED - the private bucket is
+  // never exposed and a degraded photo simply doesn't appear.
   async function resolvePublicMedia(unit: UnitItem, unitId: string): Promise<string[]> {
     const display = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
     return display

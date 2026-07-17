@@ -389,6 +389,52 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
     expect(world.sent).toHaveLength(0);
   });
 
+  it('closed-group member texting STOP: opt-out registered like the 1:1 path AND the message lands in the 1:1 with via_closed_group (AF-4)', async () => {
+    const group = seedGroup(world, {
+      id: 'conv-closed-stop',
+      status: 'closed',
+      participants: [
+        { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+        { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+      ],
+    });
+    // ALICE is a real tenant contact whose PRIMARY number is ALICE.
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMclosed-stop' }),
+    );
+    expect(res.status).toBe(200);
+    // The STOP confirmation rides the TwiML response - parity with a STOP to the
+    // main number (pre-feature, a closed group's number fell through to the 1:1).
+    expect(res.text).toContain('<Message>');
+
+    // The STOP still lands in ALICE's OWN 1:1 thread WITH provenance (the message
+    // stays on the timeline exactly as the 1:1 path keeps it).
+    const msg = world.messages.find((m) => m.provider_sid === 'SMclosed-stop')!;
+    expect(msg.via_closed_group).toBe(group.conversationId);
+    expect(msg.conversationId).not.toBe(group.conversationId);
+
+    // Opt-out registered EXACTLY like the 1:1 STOP path:
+    //  - the conversation-level flag on the 1:1 thread,
+    expect(
+      world.optOutSets.some((o) => o.conversationId === msg.conversationId && o.value === true),
+    ).toBe(true);
+    //  - the CONTACT-level flag (STOP arrived on the contact's primary number),
+    expect(world.contacts.find((c) => c.contactId === 'c-alice')?.sms_opt_out).toBe(true);
+    //  - and the opt-out audit row on the contact.
+    expect(
+      world.auditEvents.some(
+        (a) => a.event_type === 'sms_opt_out_recorded' && a.entityKey === 'contacts#c-alice',
+      ),
+    ).toBe(true);
+    // Closed group: never a fan-out to the old members.
+    expect(world.sent).toHaveLength(0);
+  });
+
   it('open WINS over closed: a sender in BOTH a closed and an open group on one number routes to the OPEN group', async () => {
     const closed = seedGroup(world, {
       id: 'conv-closed-b',
@@ -512,7 +558,7 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
     expect(world.sent).toHaveLength(0);
   });
 
-  it('closed-group fallback persist (unknown sender, only a CLOSED group exists) no longer sets received_on_closed_thread', async () => {
+  it('unknown sender, only a CLOSED group on the number: falls through to a 1:1 (NOT buried in the closed group) (AF-5)', async () => {
     const closed = seedGroup(world, {
       id: 'conv-closed-only',
       status: 'closed',
@@ -521,10 +567,15 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
         { contactId: 'c-bob', phone: BOB, name: 'Bob' },
       ],
     });
+    const beforeGroupRows = world.messages.filter(
+      (m) => m.conversationId === closed.conversationId,
+    ).length;
     const { app } = makeWebhookHarness({ world });
 
-    // Unknown sender, no OPEN group -> fallback persists on the newest (closed)
-    // group for the audit trail, no fan-out - and WITHOUT the retired flag.
+    // ZARA is on NO roster and EVERY group on this number is closed: burying the
+    // text in a dead group transcript would hide it (a stranger/second-phone
+    // sender, or a member from a NEW phone). It falls through to the normal 1:1
+    // intake path instead (pre-feature behavior: a cleared number fell to 1:1).
     const res = await signedTwilioPost(
       app,
       '/webhooks/twilio/sms',
@@ -532,8 +583,15 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
     );
     expect(res.status).toBe(200);
     const msg = world.messages.find((m) => m.provider_sid === 'SMclosed-fallback')!;
-    expect(msg.conversationId).toBe(closed.conversationId);
-    expect(msg.received_on_closed_thread).toBeUndefined();
+    // Landed in a fresh NON-group 1:1 conversation, NOT the closed group, and
+    // WITHOUT a provenance badge (ZARA is not a closed-roster member).
+    expect(msg.conversationId).not.toBe(closed.conversationId);
+    expect(msg.via_closed_group).toBeUndefined();
+    expect(world.conversations.get(msg.conversationId)!.type).not.toBe('relay_group');
+    // The closed group's transcript is unchanged, and nothing fanned out.
+    expect(
+      world.messages.filter((m) => m.conversationId === closed.conversationId).length,
+    ).toBe(beforeGroupRows);
     expect(world.sent).toHaveLength(0);
   });
 });

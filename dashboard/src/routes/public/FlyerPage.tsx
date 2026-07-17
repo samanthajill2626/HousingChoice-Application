@@ -82,17 +82,18 @@ function contactFromError(err: unknown): string | null {
   return null;
 }
 
-/** Treat an empty string as absent - staff can save '' for a free-text field
- *  (the write validator accepts it), and a labeled detail row with a blank
- *  value must simply not render. */
+/** Treat an empty or whitespace-only string as absent - staff can save '' (or
+ *  '   ': the edit form PATCHes untrimmed values) for a free-text field, and a
+ *  labeled detail row with a blank value must simply not render. */
 function textOrNull(v: string | null): string | null {
-  return v === '' ? null : v;
+  return v === null || v.trim() === '' ? null : v;
 }
 
 function petsLabel(pets: string | boolean | null): string | null {
   if (pets === true) return 'Allowed';
   if (pets === false) return 'Not allowed';
-  return pets === '' ? null : pets;
+  if (pets === null) return null;
+  return pets.trim() === '' ? null : pets;
 }
 
 export function FlyerPage(): React.JSX.Element {

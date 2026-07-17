@@ -219,6 +219,23 @@ describe('FlyerPage', () => {
     expect(screen.queryByText('Tenant pays')).toBeNull();
   });
 
+  it('whitespace-only detail values render NO row (edit form saves untrimmed)', async () => {
+    getFlyer.mockResolvedValue({
+      ...FLYER,
+      pets: '   ',
+      accessibility: '\t',
+      lease_terms: ' ',
+      utilities: '  ',
+    });
+    renderPage();
+
+    await screen.findByText('88 Sycamore St', { exact: false });
+    expect(screen.queryByText('Pets')).toBeNull();
+    expect(screen.queryByText('Accessibility')).toBeNull();
+    expect(screen.queryByText('Lease terms')).toBeNull();
+    expect(screen.queryByText('Tenant pays')).toBeNull();
+  });
+
   it('unsafe (javascript:) video/listing URLs are not rendered as links', async () => {
     getFlyer.mockResolvedValue({
       ...FLYER,

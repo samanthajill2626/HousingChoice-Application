@@ -166,6 +166,20 @@ relay it, and tell the orchestrator to return to fresh-foreground dispatch.
 Routine relays are an architecture failure; if you find yourself relaying
 every mission, stop and fix the process files.
 
+## Failure budget (planner side)
+
+Track every failure/recovery event across the mission - orchestrator
+misfires or deaths, child recoveries (the orchestrator logs its own in the
+heartbeat), watchdog stalls that turn out real. Report each one to Cameron
+AS A FAILURE COUNT in the status line ("recovery 2 of budget 2"), never as
+routine narration. When the mission exceeds the budget - more than 2
+recoveries total, or the same agent twice - do NOT keep rescuing: tell
+Cameron the run is systemically unstable, recommend pausing or switching to
+MANUAL, and wait for his call. The orchestrator has the mirror-image rule
+(it BLOCKS itself past 2 child recoveries); if it reports BLOCKED on its
+failure budget, that is a mission-level decision for Cameron, not something
+to nudge past.
+
 The 25-minute quiet threshold assumes the orchestrator's heartbeat contract
 (it appends to `.superpowers/sdd/heartbeat.log` on every action). A healthy
 long gate still touches output files; total worktree silence is the signal.

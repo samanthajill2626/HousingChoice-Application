@@ -280,6 +280,16 @@ for the feature area).
 - PARALLEL read-only children (the two Phase 4 reviewers) do NOT need
   background mode: put both foreground Agent calls in ONE message - they run
   concurrently and the turn waits for both.
+- FAILURE BUDGET (Cameron's rule, 2026-07-17): recovery is for RARE events,
+  not a working style. Count every child recovery in the mission (a misfire
+  retry, a death resume, a re-dispatch after an errored call). MORE THAN
+  TWO recoveries in one mission - or the SAME child needing recovery twice
+  - means the run is systemically unstable: STOP, write `STATUS: BLOCKED`
+  with the failure log (which children, what failed, what was recovered),
+  and let the human decide. Never grind through clustered failures to a
+  green handback - the gates passing does not make a pathological run
+  healthy. Log each recovery in the heartbeat when it happens so the count
+  is auditable.
 - COLD-DISPATCH MISFIRE (fresh dispatch returns boilerplate, ZERO tool
   calls): verify the tree is untouched, then SendMessage the SAME agent -
   "your reply had zero tool calls, begin now per your dispatch" + compressed

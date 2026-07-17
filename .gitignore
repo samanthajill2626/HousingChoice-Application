@@ -46,6 +46,11 @@ Thumbs.db
 # Brainstorming visual-companion scratch
 .superpowers/
 
+# Subagent persistent memory (agents with `memory: project` in their frontmatter,
+# e.g. build-orchestrator). Local working memory, harvested into the agent
+# definitions at post-mortems - never committed.
+.claude/agent-memory/
+
 # Issue tracker: INDEX.md is a derived, regenerable view (`npm run issues`) — the
 # per-issue docs/issues/<slug>.md files are the committed source of truth. Keeping
 # the index out of git is what makes concurrent issue-filing conflict-free.

@@ -256,6 +256,14 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
       // record existing (so a missing number is never phantom-created) AND the
       // new timestamp being strictly newer. Both an older timestamp and a
       // missing record fail the condition and are swallowed - best-effort.
+      //
+      // AF-11: distinguish the two condition-failure causes.
+      // ReturnValuesOnConditionCheckFailure 'ALL_OLD' makes the exception carry
+      // `Item` when the record EXISTS (the older-timestamp no-op - stay silent,
+      // expected) and NO `Item` when the record is MISSING (the retirement clock
+      // is silently never stamped). A missing record here is unexpected, so WARN
+      // it. PII (doc section 9): poolNumber is PII - log hasRecord only, NEVER
+      // the number.
       try {
         await doc.send(
           new UpdateCommand({
@@ -266,11 +274,23 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
               'attribute_exists(poolNumber) AND ' +
               '(attribute_not_exists(last_group_closed_at) OR last_group_closed_at < :t)',
             ExpressionAttributeValues: { ':t': closedAt },
+            ReturnValuesOnConditionCheckFailure: 'ALL_OLD',
           }),
         );
         log.info({ noted: true }, 'pool number group-close noted');
       } catch (err) {
-        if (err instanceof ConditionalCheckFailedException) return;
+        if (err instanceof ConditionalCheckFailedException) {
+          // No Item on the exception => the record is MISSING (not the benign
+          // older-timestamp no-op). Best-effort still returns (the group is
+          // already closed), but the missing pool record is worth noticing.
+          if (err.Item === undefined) {
+            log.warn(
+              { hasRecord: false },
+              'noteGroupClosed: pool record missing - retirement clock not stamped',
+            );
+          }
+          return;
+        }
         throw err;
       }
     },

@@ -408,6 +408,26 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     expect((await poolNumbers.get(pn))!.last_group_closed_at).toBe('2026-07-01T00:00:00.000Z');
   });
 
+  it('noteGroupClosed on a MISSING pool record does not throw and WARNs distinctly (AF-11)', async () => {
+    const capture = createLogCapture();
+    const repo = createPoolNumbersRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ destination: capture.stream }),
+    });
+    const missing = poolPn('+1555099'); // never created
+    // Best-effort: never throws even when the pool record is absent.
+    await expect(repo.noteGroupClosed(missing, '2026-07-01T00:00:00.000Z')).resolves.toBeUndefined();
+    // Distinct diagnostic: a MISSING record WARNs (not a silent swallow); the
+    // line carries hasRecord:false only - never the number (PII).
+    const WARN = 40;
+    const warned = capture
+      .atLevel(WARN)
+      .find((l) => String(l['msg']).includes('pool record missing'));
+    expect(warned).toBeDefined();
+    expect(warned?.['hasRecord']).toBe(false);
+  });
+
   it('releaseNumber flips active->released once; a second call returns undefined', async () => {
     const pn = poolPn('+1555067');
     await poolNumbers.create({

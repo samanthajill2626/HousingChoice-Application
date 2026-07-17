@@ -70,10 +70,16 @@ import {
   createToursRepo,
   type ToursRepo,
 } from '../repos/toursRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
-export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow_ups';
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'tours_today'
+  | 'unreplied'
+  | 'follow_ups'
+  | 'ai_suggestions';
 
 export interface TodayItem {
   group: TodayGroup;
@@ -99,6 +105,8 @@ export interface TodayRouterDeps {
   conversationsRepo?: ConversationsRepo;
   contactsRepo?: ContactsRepo;
   toursRepo?: ToursRepo;
+  /** Pending AI suggestions (conversation-fact-extraction) -> the ai_suggestions group. */
+  extractionRepo?: ExtractionRepo;
 }
 
 // --- Grouping rules (match the spec + the frontend fallback) -----------------
@@ -238,6 +246,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -329,6 +338,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     const toursToday: Ranked[] = [];
     const unreplied: Ranked[] = [];
     const followUps: Ranked[] = [];
+    const aiSuggestions: Ranked[] = [];
 
     // --- due deadlines: ONE byDueAt Query, bucket by type --------------------
     // listDue returns every deadline due AT/BEFORE now across all placements in
@@ -602,6 +612,39 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       }
     }
 
+    // --- ai_suggestions: pending AI extractions grouped by contact -----------
+    // conversation-fact-extraction: one bounded byPending Query returns the newest
+    // pending suggestions across all contacts; group by ownerContactId into ONE
+    // review row per contact (why = "<n> suggestion(s)"), skip deleted contacts,
+    // cap at 20 contact rows. count (the group size the dashboard shows) = distinct
+    // contacts, not raw suggestions.
+    {
+      const AI_SUGGESTIONS_ITEM_CAP = 20;
+      const pending = await extraction.listPending({ limit: GROUP_FETCH_LIMIT });
+      warnIfCapped('ai_suggestions', pending.length);
+      // Preserve first-seen order (listPending is newest-first) so the most recent
+      // suggestion's contact leads.
+      const byContact = new Map<string, number>();
+      for (const s of pending) {
+        byContact.set(s.ownerContactId, (byContact.get(s.ownerContactId) ?? 0) + 1);
+      }
+      for (const [contactId, count] of byContact) {
+        if (aiSuggestions.length >= AI_SUGGESTIONS_ITEM_CAP) break;
+        if (await isDeletedContact(contactId)) continue; // deleted -> off the boards
+        const who = (await resolveName(contactId)) ?? contactId;
+        aiSuggestions.push({
+          item: {
+            group: 'ai_suggestions',
+            refType: 'contact',
+            refId: contactId,
+            who,
+            why: `${count} suggestion(s)`,
+          },
+          at: now,
+        });
+      }
+    }
+
     // --- Deterministic total order, most-urgent first ------------------------
     // needs_you_now: by `at` ascending (overdue/attention=now sort first, then
     // soon-due), tie-break by refId. Same comparator family for the others
@@ -624,14 +667,19 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     );
     unreplied.sort(byUrgency);
     followUps.sort(byUrgency);
+    // AI-suggestion rows share "now" ordering - tie-break by refId for a stable order.
+    aiSuggestions.sort((a, b) =>
+      a.item.refId < b.item.refId ? -1 : a.item.refId > b.item.refId ? 1 : 0,
+    );
 
     // Group order matches the spec's reading order: Needs-you-now, Tours-today,
-    // Unreplied, Follow-ups.
+    // Unreplied, Follow-ups, AI-suggestions.
     const items: TodayItem[] = [
       ...needsYouNow.map((r) => r.item),
       ...toursToday.map((r) => r.item),
       ...unreplied.map((r) => r.item),
       ...followUps.map((r) => r.item),
+      ...aiSuggestions.map((r) => r.item),
     ];
 
     log.info(
@@ -640,6 +688,7 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
         tours_today: toursToday.length,
         unreplied: unreplied.length,
         follow_ups: followUps.length,
+        ai_suggestions: aiSuggestions.length,
       },
       'today queue assembled',
     );

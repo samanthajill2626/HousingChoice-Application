@@ -109,6 +109,27 @@ describe('Today', () => {
     );
   });
 
+  it('renders the AI suggestions group with its label and count', () => {
+    state = {
+      status: 'ready',
+      source: 'server',
+      items: [
+        {
+          group: 'ai_suggestions',
+          refType: 'contact',
+          refId: 'k1',
+          who: 'Tasha Williams',
+          why: '2 suggestion(s)',
+        },
+      ],
+    };
+    renderToday();
+    expect(screen.getByRole('heading', { name: /AI suggestions to review/i })).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Tasha Williams/ });
+    expect(link).toHaveAttribute('href', '/contacts/k1');
+    expect(within(link).getByText('2 suggestion(s)')).toBeInTheDocument();
+  });
+
   it('exposes each group as a list of rows', () => {
     state = {
       status: 'ready',

@@ -44,6 +44,7 @@ import type {
   RelayGroupRow,
   SendMessageResult,
   SimilarUnit,
+  SuggestionItem,
   SystemAlarmsResult,
   SystemErrorsResult,
   SystemFlags,
@@ -934,6 +935,47 @@ export async function updateContact(contactId: string, patch: ContactPatch): Pro
     { method: 'PATCH', body: patch },
   );
   return res.contact;
+}
+
+// --- Conversation fact extraction: AI suggestion review (T8 routes) ----------
+
+/** GET /api/contacts/:id/suggestions - the contact's pending AI suggestions
+ *  (empty array when none). Unwrapped from { suggestions }. */
+export async function getSuggestions(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<SuggestionItem[]> {
+  const res = await request<{ suggestions: SuggestionItem[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/suggestions`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.suggestions;
+}
+
+/** POST /api/contacts/:id/suggestions/:target/accept - apply a pending
+ *  suggestion. Returns the updated contact + the remaining suggestions. Throws
+ *  ApiError(409, 'phone_in_use') on a phone conflict (suggestion kept). */
+export async function acceptSuggestion(
+  contactId: string,
+  target: string,
+): Promise<{ contact: Contact; suggestions: SuggestionItem[] }> {
+  return request<{ contact: Contact; suggestions: SuggestionItem[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/accept`,
+    { method: 'POST' },
+  );
+}
+
+/** POST /api/contacts/:id/suggestions/:target/dismiss - drop a pending
+ *  suggestion. Returns the remaining suggestions (unwrapped). */
+export async function dismissSuggestion(
+  contactId: string,
+  target: string,
+): Promise<SuggestionItem[]> {
+  const res = await request<{ suggestions: SuggestionItem[] }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/dismiss`,
+    { method: 'POST' },
+  );
+  return res.suggestions;
 }
 
 /** POST /api/contacts - create a brand-new contact record. Returns the new

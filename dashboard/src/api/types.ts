@@ -168,7 +168,12 @@ export interface SystemErrorsResult {
 // client-side from /api/placements + /api/conversations when that endpoint 404s (see
 // routes/today/buildToday.ts). Copied verbatim from the build plan §C7.
 
-export type TodayGroup = 'needs_you_now' | 'tours_today' | 'unreplied' | 'follow_ups';
+export type TodayGroup =
+  | 'needs_you_now'
+  | 'tours_today'
+  | 'unreplied'
+  | 'follow_ups'
+  | 'ai_suggestions';
 export interface TodayItem {
   group: TodayGroup;
   refType: 'placement' | 'contact' | 'conversation' | 'tour';
@@ -948,6 +953,42 @@ export interface TourUpdatedEvent {
   status: string;
 }
 
+/** GET /api/events 'suggestion.updated' payload (conversation-fact-extraction T7).
+ *  A contact's pending AI suggestions changed (extraction ran, or one was
+ *  accepted/dismissed) - the contact page refetches its suggestions. */
+export interface SuggestionUpdatedEvent {
+  contactId: string;
+}
+
+// --- Conversation fact extraction (AI review UI) -----------------------------
+// The pending-review record the extraction pipeline writes (one per contact +
+// target). The dashboard reads these to render AutoBadges / SuggestionChips and
+// the Today "AI suggestions to review" group. Wire shape mirrors the server's
+// SuggestionItem (app/src/repos/extractionRepo.ts) verbatim.
+
+/** Provenance stamp written onto a contact field when its value came from (or was
+ *  accepted from) an AI extraction. `source === 'ai'` drives the AutoBadge. */
+export interface FieldSource {
+  source: string;
+  at?: string;
+  conversationId?: string;
+  tsMsgId?: string;
+  accepted_by?: string;
+}
+
+export interface SuggestionItem {
+  itemId: string;
+  ownerContactId: string;
+  /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type'. */
+  target: string;
+  currentValue?: string;
+  suggestedValue: string;
+  reason?: string;
+  conversationId: string;
+  tsMsgId?: string;
+  createdAt: string;
+}
+
 // --- Contact creation / vocabulary (extensible create flow) ------------------
 
 /** A relationship link on a contact (e.g. spouse, employer, property manager). */
@@ -1070,6 +1111,18 @@ export interface Contact {
   relationships?: Relationship[];
   /** Operator-defined custom fields stored on this record. */
   customFields?: CustomField[];
+  /** AI-extraction provenance (conversation-fact-extraction). Present on a field
+   *  when its value was written or accepted from an extraction; `source === 'ai'`
+   *  renders the AutoBadge next to that field. `status_source` already exists via
+   *  the transition model, so it is not re-declared here. */
+  firstName_source?: FieldSource;
+  lastName_source?: FieldSource;
+  voucherSize_source?: FieldSource;
+  housingAuthority_source?: FieldSource;
+  pets_source?: FieldSource;
+  evictions_source?: FieldSource;
+  tenure_source?: FieldSource;
+  porting_source?: FieldSource;
   [key: string]: unknown;
 }
 

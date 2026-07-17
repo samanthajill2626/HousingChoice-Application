@@ -40,6 +40,9 @@ const GROUP_ORDER: Record<TodayItem['group'], number> = {
   tours_today: 1,
   unreplied: 2,
   follow_ups: 3,
+  // The client fallback never assembles this group (it comes only from the server
+  // /api/today), but the record must stay exhaustive over TodayGroup.
+  ai_suggestions: 4,
 };
 
 /** Deadline types that route to follow_ups rather than needs_you_now. */

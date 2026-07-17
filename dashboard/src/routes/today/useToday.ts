@@ -117,6 +117,9 @@ export function useToday(): TodayState {
   useEventStream({
     onPlacementUpdated: scheduleRefetch,
     onConversationUpdated: scheduleRefetch,
+    // conversation-fact-extraction: a new/accepted/dismissed suggestion changes the
+    // "AI suggestions to review" group count.
+    onSuggestionUpdated: scheduleRefetch,
   });
 
   return state;

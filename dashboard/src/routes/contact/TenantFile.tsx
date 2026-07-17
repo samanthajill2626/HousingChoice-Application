@@ -11,7 +11,9 @@ import {
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type FieldSource,
   type RelayGroupRow,
+  type SuggestionItem,
   type Tour,
   type UnitItem,
   type ListingSendRow,
@@ -30,6 +32,9 @@ import {
   responseClass,
 } from './Card.js';
 import { DeadlineChip } from '../placements/DeadlineChip.js';
+import { AutoBadge } from './AutoBadge.js';
+import { SuggestionChip } from './SuggestionChip.js';
+import { SUGGESTION_TARGET_LABEL, aiSourceOf, suggestionFor } from './suggestionTargets.js';
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
 import { MediaGallery } from './MediaGallery.js';
@@ -53,6 +58,17 @@ export interface TenantFileProps {
   relayGroupsPending: boolean;
   /** The group texts (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
+  /** Pending AI suggestions for this contact (conversation-fact-extraction). A
+   *  chip renders under a field only when a suggestion for that target is present
+   *  here - the server is authoritative (no client-side policy). */
+  suggestions?: SuggestionItem[];
+  /** Accept / dismiss a suggestion by target. */
+  onAcceptSuggestion?: (target: string) => void;
+  onDismissSuggestion?: (target: string) => void;
+  /** The target currently mid-accept/dismiss (disables its chip). */
+  suggestionBusy?: string | null;
+  /** An inline error for one chip (e.g. a 409 phone conflict). */
+  suggestionError?: { target: string; message: string } | null;
   /** "Media from comms" — derived from the live timeline (updates as messages
    *  arrive); `mediaLoading` covers the brief window before the timeline lands. */
   media: CommsMediaItem[];
@@ -89,6 +105,11 @@ export function TenantFile({
   relayGroups,
   media,
   mediaLoading,
+  suggestions = [],
+  onAcceptSuggestion,
+  onDismissSuggestion,
+  suggestionBusy,
+  suggestionError,
   onEdit,
   onManagePhones,
   onStartPlacement,
@@ -96,6 +117,27 @@ export function TenantFile({
   onSendProperty,
 }: TenantFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
+  // A pending suggestion for `target` rendered as a review chip (or null). Shared
+  // by the Details rows below and passed down to the Eligibility intake card.
+  const chipFor = (target: string): React.JSX.Element | null => {
+    const s = suggestionFor(suggestions, target);
+    if (!s) return null;
+    return (
+      <SuggestionChip
+        label={SUGGESTION_TARGET_LABEL[target] ?? target}
+        suggestion={s}
+        onAccept={() => onAcceptSuggestion?.(target)}
+        onDismiss={() => onDismissSuggestion?.(target)}
+        busy={suggestionBusy === target}
+        error={suggestionError?.target === target ? suggestionError.message : null}
+      />
+    );
+  };
+  // The AutoBadge for a field whose value carries AI provenance (or null).
+  const badgeFor = (field: string): React.JSX.Element | null => {
+    const src = aiSourceOf(contact, field);
+    return src ? <AutoBadge {...(src.at !== undefined && { at: src.at })} /> : null;
+  };
   const myPlacements = tenantPlacements(placements, contact.contactId);
   const phoneList = phones.map((p) => formatPhone(p.phone)).join(' - ');
   const voucher = typeof contact.voucherSize === 'number' ? `${contact.voucherSize} BR` : '—';
@@ -117,8 +159,10 @@ export function TenantFile({
           )
         }
       >
-        <KV k="Voucher size" v={voucher} />
-        <KV k="Housing authority" v={housingAuthority} />
+        <KV k="Voucher size" v={<>{voucher}{badgeFor('voucherSize')}</>} />
+        {chipFor('voucherSize')}
+        <KV k="Housing authority" v={<>{housingAuthority}{badgeFor('housingAuthority')}</>} />
+        {chipFor('housingAuthority')}
         <KV k="Current address" v={currentAddress} />
         <KV
           k="Phone numbers"
@@ -136,6 +180,7 @@ export function TenantFile({
             </>
           }
         />
+        {chipFor('phone')}
         <KV
           k="Status"
           v={
@@ -155,12 +200,22 @@ export function TenantFile({
               {contact.porting === true ? (
                 <span className={responseClass.muted}> - Porting</span>
               ) : null}
+              {badgeFor('porting')}
             </>
           }
         />
+        {chipFor('status')}
+        {chipFor('porting')}
       </Card>
 
-      <EligibilityIntakeCard contact={contact} />
+      <EligibilityIntakeCard
+        contact={contact}
+        suggestions={suggestions}
+        {...(onAcceptSuggestion && { onAcceptSuggestion })}
+        {...(onDismissSuggestion && { onDismissSuggestion })}
+        {...(suggestionBusy !== undefined && { suggestionBusy })}
+        {...(suggestionError !== undefined && { suggestionError })}
+      />
 
       <Card
         title="Preferences & notes"

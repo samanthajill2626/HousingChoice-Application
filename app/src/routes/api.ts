@@ -747,6 +747,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       placementDeadlinesRepo: placementDeadlines,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
+      // conversation-fact-extraction (T9): the ai_suggestions group reads pending
+      // suggestions from the SAME store the review API + PATCH clear-hook share.
+      extractionRepo: extraction,
     }),
   );
   // C8/BE7 Inbox feed (requireAuth via the /api mount). A read-only,

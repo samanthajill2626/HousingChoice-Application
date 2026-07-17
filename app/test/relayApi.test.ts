@@ -32,6 +32,12 @@ const ALICE = '+15550100001';
 const BOB = '+15550100002';
 const SESSION_USER_ID = 'usr_testva00000000000000000';
 
+/** The relay.group_closed catalog default (spec 4.5) - sent to every member on close. */
+const CLOSED_COPY =
+  'This group chat is now closed. You can still text this number and a Housing Choice ' +
+  'team member will see your message and follow up.';
+const CLOSE_NAG_INTERVAL_MS = 28 * 24 * 60 * 60 * 1000;
+
 /** A fake pool-numbers service: hands out deterministic numbers, tracks provisions + close notes. */
 function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[]; closed: string[] } {
   let counter = 0;
@@ -412,6 +418,159 @@ describe('relay-group API (M1.7)', () => {
     // noteGroupClosed fired exactly ONCE - the idempotent second close no-oped
     // before it (the number is never released; burn-multiplexing keeps it).
     expect(pool.closed).toHaveLength(1);
+  });
+
+  // --- close lifecycle: final announcement, nag clear, defer (Task 5) -------
+  it('close sends the relay.group_closed final message to every member FIRST, then flips to closed', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }, { phone: BOB, name: 'Bob' }] });
+    const id = created.body.conversation.conversationId;
+    const poolNumber = created.body.conversation.pool_number;
+    world.sent.length = 0; // drop the intro sends - assert only the close message
+
+    const closed = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    expect(closed.status).toBe(200);
+    expect(closed.body.conversation.status).toBe('closed');
+
+    // The final message went to BOTH members FROM the pool number, verbatim copy.
+    expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
+    expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
+    expect(world.sent.every((s) => s.body === CLOSED_COPY)).toBe(true);
+    // Persisted ONCE on the (was-open) group thread as a system announcement.
+    const systemRows = world.messages.filter(
+      (m) => m.conversationId === id && m.relay_sender_key === 'system' && m.body === CLOSED_COPY,
+    );
+    expect(systemRows).toHaveLength(1);
+  });
+
+  it('a second close does NOT re-announce (idempotent, no second final message)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+
+    world.sent.length = 0;
+    const rowsBefore = world.messages.filter((m) => m.conversationId === id).length;
+    const second = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    expect(second.status).toBe(200);
+    // No second announcement: no new legs, no new persisted rows.
+    expect(world.sent).toHaveLength(0);
+    expect(world.messages.filter((m) => m.conversationId === id).length).toBe(rowsBefore);
+  });
+
+  it('close clears close_nag_next_at (the Today nag stops)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    // Simulate a pending close-nag on the open group (defer set it earlier).
+    world.conversations.get(id)!.close_nag_next_at = new Date().toISOString();
+
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    expect(world.conversations.get(id)!.close_nag_next_at).toBeUndefined();
+  });
+
+  it('close still succeeds when the final announcement fails (logged, not fatal)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    const poolNumber = created.body.conversation.pool_number;
+    // Force the announcement PERSIST to throw (the only propagating failure in
+    // sendRelayAnnouncement). Close must proceed regardless (spec 4.4).
+    world.messagesRepo.append = async () => {
+      throw new Error('append boom');
+    };
+
+    const closed = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    expect(closed.status).toBe(200);
+    expect(closed.body.conversation.status).toBe('closed');
+    expect(closed.body.conversation.pool_number).toBe(poolNumber);
+    expect(pool.closed).toEqual([poolNumber]); // still noted for retirement
+  });
+
+  it('POST /close-nag/defer sets close_nag_next_at ~= now + 28d and audits the deferral', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+
+    const before = Date.now();
+    const res = await request(app)
+      .post(`/api/conversations/${id}/close-nag/defer`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(200);
+    const nextAt = Date.parse(res.body.conversation.close_nag_next_at as string);
+    // Within a minute of now + 28d (the fixed server-side interval).
+    expect(Math.abs(nextAt - (before + CLOSE_NAG_INTERVAL_MS))).toBeLessThan(60_000);
+
+    const deferAudit = world.auditEvents.find((a) => a.event_type === 'relay_close_nag_deferred');
+    expect(deferAudit).toBeDefined();
+    expect(deferAudit?.actorId).toBe(SESSION_USER_ID);
+  });
+
+  it('POST /close-nag/defer 404s a non-relay conversation', async () => {
+    const { app } = authedHarness(world, makeFakePoolNumbers());
+    world.conversations.set('conv-1to1-defer', {
+      conversationId: 'conv-1to1-defer',
+      participant_phone: ALICE,
+      status: 'open',
+      last_activity_at: new Date().toISOString(),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: new Date().toISOString(),
+    });
+    const res = await request(app)
+      .post('/api/conversations/conv-1to1-defer/close-nag/defer')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('relay_group_not_found');
   });
 
   // --- FIX 2: relay-aware team send --------------------------------------

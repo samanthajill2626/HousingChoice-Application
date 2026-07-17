@@ -53,12 +53,12 @@ export interface StatusTransitionRouterDeps {
   activityEventsRepo?: ActivityEventsRepo;
   events?: EventBus;
   /**
-   * Post-Tour & Application choke-point hooks (optional, best-effort). Forwarded
+   * Post-Tour & Application choke-point hook (optional, best-effort). Forwarded
    * straight into the transition service so every stage/status write goes through
-   * the ONE service WITH the nudge-arm + lost-relay-close side effects wired.
+   * the ONE service WITH the nudge-arm side effect wired. (The lost-move relay-
+   * close hook was removed - relay-number-lifecycle spec 4.1: nothing auto-closes.)
    */
   armStageNudge?: StatusTransitionDeps['armStageNudge'];
-  closeRelayForLostPlacement?: StatusTransitionDeps['closeRelayForLostPlacement'];
   /** Test seam: inject the assembled service directly. */
   service?: StatusTransitionService;
 }
@@ -88,9 +88,6 @@ export function createStatusTransitionRouter(deps: StatusTransitionRouterDeps = 
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
       ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),
-      ...(deps.closeRelayForLostPlacement !== undefined && {
-        closeRelayForLostPlacement: deps.closeRelayForLostPlacement,
-      }),
     });
 
   const router = Router();

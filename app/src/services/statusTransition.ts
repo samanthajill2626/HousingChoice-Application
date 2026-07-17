@@ -65,12 +65,6 @@ export interface StatusTransitionDeps {
    * logged and NEVER fails the transition; absent, the transition is unchanged.
    */
   armStageNudge?: (placement: PlacementItem, toStage: PlacementStage, nowIso: string) => Promise<void>;
-  /**
-   * OPTIONAL best-effort hook (Post-Tour & Application): close the placement's
-   * masked relay thread when the deal is LOST. Invoked ONLY on a move to `lost`,
-   * with the POST-transition placement. Best-effort like `armStageNudge`.
-   */
-  closeRelayForLostPlacement?: (placement: PlacementItem) => Promise<void>;
   /** Contact-timeline milestone emitter (best-effort). Optional — absent in legacy callers. */
   activityEventsRepo?: ActivityEventsRepo;
 }
@@ -184,7 +178,7 @@ export function createStatusTransitionService(
   deps: StatusTransitionDeps,
 ): StatusTransitionService {
   const { placementsRepo, placementDeadlinesRepo, unitsRepo, contactsRepo, auditRepo, events } = deps;
-  const { armStageNudge, closeRelayForLostPlacement, activityEventsRepo } = deps;
+  const { armStageNudge, activityEventsRepo } = deps;
   const log = deps.logger ?? defaultLogger;
 
   const statusLabel = (contactType: string | undefined, status: string): string =>
@@ -448,18 +442,12 @@ export function createStatusTransitionService(
         await placementDeadlinesRepo.retire(placementId, 'rta_window');
       }
 
-      // 7) Best-effort choke-point hooks (Post-Tour & Application). Both OPTIONAL
-      // and wrapped so a hook failure NEVER fails the transition. They run AFTER
-      // the stage patch + derived writes, on the POST-transition placement.
-      //  - closeRelayForLostPlacement: close the masked relay thread on a lost deal.
-      //  - armStageNudge: re-key the stage-application nudge ladder to the new stage.
-      if (toStage === 'lost' && closeRelayForLostPlacement !== undefined) {
-        try {
-          await closeRelayForLostPlacement(updated);
-        } catch (err) {
-          log.error({ err, placementId }, 'lost relay-close hook failed (best-effort)');
-        }
-      }
+      // 7) Best-effort choke-point hook (Post-Tour & Application): armStageNudge
+      // re-keys the stage-application nudge ladder to the new stage. OPTIONAL and
+      // wrapped so a hook failure NEVER fails the transition; it runs AFTER the
+      // stage patch + derived writes, on the POST-transition placement.
+      // (relay-number-lifecycle spec 4.1: the lost-move relay-close hook was
+      // REMOVED - nothing auto-closes a relay group; closing is a human choice.)
       if (armStageNudge !== undefined) {
         try {
           await armStageNudge(updated, toStage, now);

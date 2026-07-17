@@ -22,15 +22,22 @@ import { mergeContext } from '../lib/context.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { VoiceCapabilityError } from '../adapters/messaging.js';
+import {
+  VoiceCapabilityError,
+  createMessagingAdapter,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { relayMemberKey } from '../repos/messagesRepo.js';
+import { createMessagesRepo, relayMemberKey, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
+import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_MEMBER_ADDED_JOB } from '../jobs/relayFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
+  CLOSE_NAG_INTERVAL_MS,
   type ConversationItem,
   type ConversationParticipant,
   createConversationsRepo,
@@ -43,7 +50,7 @@ import {
   createTourRemindersRepo,
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
-import { resolveMessage } from '../messages/index.js';
+import { resolveMessage, resolveWithSettings } from '../messages/index.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -61,6 +68,13 @@ export interface RelayGroupsRouterDeps {
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   poolNumbersService?: PoolNumbersService;
+  /** Close sends the relay.group_closed final message via sendRelayAnnouncement
+   *  (same wiring as the relay.intro chain): it persists the announcement + sends
+   *  one leg per member FROM the pool number. */
+  messagesRepo?: MessagesRepo;
+  adapter?: MessagingAdapter;
+  /** OrgSettings source for the operator-overridable close copy (resolveWithSettings). */
+  settingsRepo?: SettingsRepo;
   /** BE2/C2: emit added_to_group_text / removed_from_group_text milestones. */
   activityEventsRepo?: ActivityEventsRepo;
   /** The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled):
@@ -128,6 +142,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const events = deps.events ?? appEvents;
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
 
@@ -411,8 +428,13 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     res.json({ members: updated.participants ?? [] });
   });
 
-  // PATCH /api/conversations/:id/close — close (release pool number) / reopen
-  // (provision a fresh one). Body { closed: boolean }.
+  // PATCH /api/conversations/:id/close - close / reopen a relay group.
+  // Body { closed: boolean }. Close sends the relay.group_closed FINAL message
+  // to every member (while still open), then flips status='closed' KEEPING the
+  // pool number (burn-multiplexing: a late text still resolves the closed group
+  // and intercepts to the sender's 1:1) and clears the Today close-nag. Reopen
+  // is a pure status flip - the number never left the record, nothing is
+  // re-provisioned.
   router.patch('/conversations/:conversationId/close', async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId;
     const { conversationId } = req.params;
@@ -430,12 +452,47 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
 
     let updated: ConversationItem;
     if (body.closed) {
-      // CLOSE: flip status='closed' (conditional on 'open'), KEEPING pool_number
-      // so a late text still resolves the group and intercepts to the sender's
-      // 1:1 (burn-multiplexing). A concurrent/duplicate close fails the
-      // precondition and no-ops (idempotent). The number is NOT released - we
-      // only stamp its retirement clock (noteGroupClosed) for the D7 sweep.
       const poolNumber = conversation.pool_number;
+      // Double-announce guard (mission watch item): re-read status before
+      // announcing - only the close WINNER (a still-open group) may announce +
+      // flip; a sequential re-close is strictly a no-op here.
+      // ACCEPTED RACE: two concurrent closes can, in a narrow TOCTOU window, both
+      // pass this pre-announce status read and double-send the final message
+      // before one loses the conditional flip below. This guard minimizes it and
+      // sequential re-closes never re-announce; we deliberately do NOT add a new
+      // locking mechanism.
+      if (conversation.status !== 'open') {
+        log.info({ conversationId }, 'relay close: already closed - idempotent no-op');
+        res.json({ conversation });
+        return;
+      }
+      // (1) FINAL MESSAGE FIRST (spec 4.4): announce relay.group_closed to every
+      // member while the group is STILL OPEN (the announcement gate refuses a
+      // closed group). A send/persist failure LOGS and the close STILL PROCEEDS.
+      try {
+        const closedBody = await resolveWithSettings(
+          'relay.group_closed',
+          {},
+          { settingsRepo: settings },
+        );
+        await sendRelayAnnouncement(
+          {
+            conversationsRepo: conversations,
+            messagesRepo: messages,
+            contactsRepo: contacts,
+            adapter,
+            events,
+            ...(deps.logger !== undefined && { logger: deps.logger }),
+          },
+          { conversationId, body: closedBody, kind: 'group_closed' },
+        );
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay close: final announcement failed - closing anyway');
+      }
+      // (2) Flip status='closed' (conditional on 'open'), KEEPING pool_number so
+      // a late text still resolves the group. A concurrent/duplicate close fails
+      // the precondition and no-ops (idempotent). The number is NOT released - we
+      // only stamp its retirement clock (noteGroupClosed) for the D7 sweep.
       try {
         updated = await conversations.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
@@ -447,13 +504,19 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         }
         throw err;
       }
-      // Stamp the retirement clock (best-effort): drives the 180-day D7 sweep.
+      // (3) Stamp the retirement clock (best-effort): drives the 180-day D7 sweep.
       if (typeof poolNumber === 'string' && poolNumber.length > 0) {
         try {
           await poolNumbers.noteGroupClosed(poolNumber, new Date().toISOString());
         } catch (err) {
           log.error({ err, conversationId }, 'relay close: noteGroupClosed failed - closed anyway');
         }
+      }
+      // (4) Clear the Today close-nag (best-effort): a closed group no longer nags.
+      try {
+        await conversations.setCloseNagNextAt(conversationId, null);
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay close: clearing close-nag failed - closed anyway');
       }
       await audit.append(`conversations#${conversationId}`, 'relay_group_closed', {
         actor,
@@ -481,6 +544,29 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     events.emit('conversation.updated', toConversationUpdatedEvent(updated));
     log.info({ conversationId, closed: body.closed, actor }, 'relay group close/reopen via api');
     res.json({ conversation: updated });
+  });
+
+  // POST /api/conversations/:id/close-nag/defer - "Keep open" from the Today nag
+  // or the inline close-ask (D5): restart the 28-day close-nag clock. The
+  // interval is FIXED server-side (CLOSE_NAG_INTERVAL_MS) - no client-supplied
+  // timestamp (never trust an arbitrary defer target). Audited.
+  router.post('/conversations/:conversationId/close-nag/defer', async (req, res) => {
+    const actor = (req as AuthedRequest).user?.userId;
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation || conversation.type !== 'relay_group') {
+      res.status(404).json({ error: 'relay_group_not_found' });
+      return;
+    }
+    const nextAt = new Date(Date.now() + CLOSE_NAG_INTERVAL_MS).toISOString();
+    await conversations.setCloseNagNextAt(conversationId, nextAt);
+    await audit.append(`conversations#${conversationId}`, 'relay_close_nag_deferred', {
+      actor,
+    });
+    log.info({ conversationId, actor }, 'relay close-nag deferred (+28d) via api');
+    const refreshed = await conversations.getById(conversationId);
+    res.json({ conversation: refreshed ?? { ...conversation, close_nag_next_at: nextAt } });
   });
 
   return router;

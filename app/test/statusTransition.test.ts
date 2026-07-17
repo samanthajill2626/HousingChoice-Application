@@ -43,7 +43,7 @@ function makeService(world: FakeWorld): StatusTransitionService {
 /** Build the service with optional choke-point hooks (Post-Tour & Application). */
 function makeServiceWith(
   world: FakeWorld,
-  hooks: Pick<StatusTransitionDeps, 'armStageNudge' | 'closeRelayForLostPlacement'>,
+  hooks: Pick<StatusTransitionDeps, 'armStageNudge'>,
 ): StatusTransitionService {
   return createStatusTransitionService({
     placementsRepo: world.placementsRepo,
@@ -737,11 +737,12 @@ describe('statusTransition — deadline items (no stored stuck nudge)', () => {
 });
 
 // Task 5 (Post-Tour & Application): the transition choke point ALSO (a) arms the
-// RTA 48h hard clock on entering awaiting_landlord_submission, (b) invokes the
-// optional armStageNudge hook (stage-application nudge ladder) on every move, and
-// (c) invokes the optional closeRelayForLostPlacement hook on a lost move. Both
-// hooks are best-effort and OPTIONAL — absent, behavior is identical to before
-// (proven by every test above, none of which pass hooks).
+// RTA 48h hard clock on entering awaiting_landlord_submission, and (b) invokes
+// the optional armStageNudge hook (stage-application nudge ladder) on every move.
+// The armStageNudge hook is best-effort and OPTIONAL - absent, behavior is
+// identical to before (proven by every test above, none of which pass hooks).
+// (relay-number-lifecycle spec 4.1: NOTHING auto-closes a relay group anymore -
+// the placement->lost relay-close hook was REMOVED; closing is a human choice.)
 describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)', () => {
   const RTA_WINDOW_MS = 48 * 60 * 60 * 1000;
   let world: FakeWorld;
@@ -800,62 +801,42 @@ describe('statusTransition — RTA 48h hard clock + choke-point hooks (Task 5)',
     expect(calls[0]!.nowIso).toBe(new Date(calls[0]!.nowIso).toISOString());
   });
 
-  it('a lost move invokes closeRelayForLostPlacement AND clears all deadline items (terminal behavior preserved)', async () => {
-    const closed: PlacementItem[] = [];
+  it('a lost move clears all deadline items but performs NO relay close (nothing auto-closes)', async () => {
     const armed: Array<{ placement: PlacementItem; toStage: string }> = [];
     const svc = makeServiceWith(world, {
-      closeRelayForLostPlacement: async (placement) => {
-        closed.push(placement);
-      },
       armStageNudge: async (placement, toStage) => {
         armed.push({ placement, toStage });
       },
+    });
+    // A linked OPEN relay group: the lost move must LEAVE IT OPEN (spec 4.1 -
+    // closing is a human choice via the inline ask / Today nag, never automatic).
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550100060',
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
     });
     const c = await world.placementsRepo.create({
       tenantId: 'tenant-1',
       unitId: 'unit-1',
       stage: 'awaiting_approval',
-      group_thread: 'conv-relay-1',
+      group_thread: group.conversationId,
     });
     // Give it a pending deadline so we can prove the terminal move clears it.
     await world.placementDeadlinesRepo.arm(c.placementId, 'follow_up', '2026-09-01T00:00:00.000Z');
 
     await svc.transitionPlacement(c.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'stalled' } });
 
-    // The relay-close hook fired once, with the POST-transition (lost) placement.
-    expect(closed).toHaveLength(1);
-    expect(closed[0]!.stage).toBe('lost');
-    expect(closed[0]!.group_thread).toBe('conv-relay-1');
     // Terminal clearing is unchanged in effect: the pending deadline is gone.
     expect(await world.placementDeadlinesRepo.listByPlacement(c.placementId)).toHaveLength(0);
     // The arm hook ALSO fires on lost (its cancel-only path retires pending rows).
     expect(armed).toHaveLength(1);
     expect(armed[0]!.toStage).toBe('lost');
-  });
-
-  it('closeRelayForLostPlacement is NOT invoked on a non-lost move', async () => {
-    const closed: PlacementItem[] = [];
-    const svc = makeServiceWith(world, {
-      closeRelayForLostPlacement: async (placement) => {
-        closed.push(placement);
-      },
-    });
-    const c = await world.placementsRepo.create({
-      tenantId: 'tenant-1',
-      unitId: 'unit-1',
-      stage: 'send_application',
-      group_thread: 'conv-relay-1',
-    });
-    await svc.transitionPlacement(c.placementId, { toStage: 'awaiting_receipt', source: 'manual' });
-    expect(closed).toHaveLength(0);
+    // NO relay interaction: the linked group is still OPEN (no auto-close).
+    expect((await world.conversationsRepo.getById(group.conversationId))?.status).toBe('open');
   });
 
   it('a hook that throws NEVER fails the transition (best-effort)', async () => {
     const svc = makeServiceWith(world, {
       armStageNudge: async () => {
-        throw new Error('boom');
-      },
-      closeRelayForLostPlacement: async () => {
         throw new Error('boom');
       },
     });

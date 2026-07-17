@@ -24,6 +24,14 @@ window under full-suite load). Solo run: 13/13 green. Immediate full-suite
 re-run: green. Same family as the AppFrame/Inbox act() flake sighting
 (2026-07-10) and the tour-reminders-panel e2e flake (filed).
 
+**Second sighting (2026-07-17).** Different test case, same file, same class:
+"HARD-disables the composer when the group is closed" failed once in a full
+suite run during the flyer-full-info planner gate, on a tree whose
+dashboard/src/routes/conversation/ dir is byte-identical to main (empty
+feature diff). Solo run: 14/14 green. Full dashboard suite re-run: green.
+Confirms the cross-test mock-state class is file-wide, not specific to the
+members test - the audit suggested below should cover the whole describe.
+
 **Suggested fix.** Make the members fetch mock unconditional for every render
 path in that describe (or default-mock getConversationMembers at the module
 level to a resolved empty roster), so a mount outside the arranged window can

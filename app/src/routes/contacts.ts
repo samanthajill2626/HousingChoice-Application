@@ -79,6 +79,8 @@ import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
 } from '../repos/contactVocabularyRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { EXTRACTABLE_FIELDS } from '../services/extraction/schema.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -106,6 +108,12 @@ export interface ContactsRouterDeps {
    */
   placementsRepo?: PlacementsRepo;
   placementDeadlinesRepo?: PlacementDeadlinesRepo;
+  /**
+   * conversation-fact-extraction (T8): a human field edit clears AI provenance +
+   * best-effort deletes any pending suggestion for the changed field(s). Injected
+   * in tests (a no-network fake); defaults to the real repo.
+   */
+  extractionRepo?: ExtractionRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -758,9 +766,14 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
+
+  // conversation-fact-extraction (T8): the eight AI-extractable field names whose
+  // `<field>_source` provenance a human edit clears.
+  const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
 
   // GET /api/contacts?type=&status=&phone=&limit=&cursor= — list/filter (M1.5).
   // ?phone= is an exact byPhone lookup (returns 0 or 1) and takes priority;
@@ -1214,6 +1227,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         ? (await contacts.getById(contactId))?.voucher_expiration_date
         : undefined;
 
+    // conversation-fact-extraction (T8): a human edit SUPERSEDES the AI. For every
+    // changed extractable field, clear its `<field>_source` provenance (null ->
+    // REMOVE) so the AutoBadge disappears - UNLESS the incoming patch itself carries
+    // the provenance (future-proofing; the dashboard never sends one today).
+    for (const f of parsed.changedFields) {
+      if (EXTRACTABLE.has(f) && !(`${f}_source` in parsed.patch)) {
+        parsed.patch[`${f}_source`] = null;
+      }
+    }
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -1223,6 +1246,17 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         return;
       }
       throw err;
+    }
+
+    // conversation-fact-extraction (T8): a human edit supersedes any pending AI
+    // suggestion for the same field (and a `type` change supersedes the type
+    // recommendation). Best-effort - a suggestion-store hiccup never fails the PATCH.
+    for (const f of parsed.changedFields) {
+      try {
+        await extraction.deleteSuggestion(contactId, f);
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'extraction deleteSuggestion (human edit) failed (best-effort)');
+      }
     }
 
     // VOUCHER SYNC (placement-deadline-model §6): when this PATCH changed

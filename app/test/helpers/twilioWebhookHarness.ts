@@ -29,7 +29,7 @@ import {
   type ContactPhone,
   type ContactsRepo,
 } from '../../src/repos/contactsRepo.js';
-import type { ExtractionRepo } from '../../src/repos/extractionRepo.js';
+import type { ExtractionRepo, SuggestionItem } from '../../src/repos/extractionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -214,6 +214,9 @@ export interface FakeWorld {
   /** In-memory placement nudges (Post-Tour & Application, Task 3/5), keyed by nudgeId. */
   placementNudgesMap: Map<string, PlacementNudgeItem>;
   placementNudgesRepo: PlacementNudgesRepo;
+  /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
+  suggestions: Map<string, SuggestionItem>;
+  extractionRepo: ExtractionRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -254,6 +257,7 @@ export function createFakeWorld(): FakeWorld {
   events.on('placement.updated', (payload) => emitted.push({ event: 'placement.updated', payload }));
   events.on('scheduled.updated', (payload) => emitted.push({ event: 'scheduled.updated', payload }));
   events.on('tour.updated', (payload) => emitted.push({ event: 'tour.updated', payload }));
+  events.on('suggestion.updated', (payload) => emitted.push({ event: 'suggestion.updated', payload }));
 
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
@@ -1758,6 +1762,10 @@ export function createFakeWorld(): FakeWorld {
   // choke-point armStageNudge hook runs with NO DynamoDB/network in unit tests.
   const placementNudgesMap = new Map<string, PlacementNudgeItem>();
   let nudgeCounter = 0;
+
+  // conversation-fact-extraction (T8): pending AI suggestions, keyed by itemId
+  // (`sugg#<contactId>#<target>`).
+  const suggestions = new Map<string, SuggestionItem>();
   const placementNudgesRepo: PlacementNudgesRepo = {
     async create(input: { placementId: string; kind: NudgeKind; dueAt: string }) {
       const now = new Date().toISOString();
@@ -1838,6 +1846,66 @@ export function createFakeWorld(): FakeWorld {
           placementNudgesMap.set(n.nudgeId, n);
         }
       }
+    },
+  };
+
+  // conversation-fact-extraction (T8): an in-memory suggestion store so the
+  // review API (GET/accept/dismiss) + the contact-PATCH provenance-clear run
+  // end-to-end against the SAME store the api router reads. Due-item methods are
+  // minimal stubs (the webhook schedule path is covered by its own opts stub).
+  const extractionRepo: ExtractionRepo = {
+    async scheduleExtraction() {
+      /* no-op: webhook scheduling asserted via opts.extractionRepo */
+    },
+    async listDue() {
+      return [];
+    },
+    async claim() {
+      return false;
+    },
+    async complete() {
+      /* no-op */
+    },
+    async fail() {
+      /* no-op */
+    },
+    async getDue() {
+      return undefined;
+    },
+    async putSuggestion(s) {
+      const itemId = `sugg#${s.ownerContactId}#${s.target}`;
+      const item: SuggestionItem = {
+        itemId,
+        ownerContactId: s.ownerContactId,
+        target: s.target,
+        ...(s.currentValue !== undefined && { currentValue: s.currentValue }),
+        suggestedValue: s.suggestedValue,
+        ...(s.reason !== undefined && { reason: s.reason }),
+        conversationId: s.conversationId,
+        ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
+        _pendingPartition: 'pending',
+        createdAt: s.createdAt ?? new Date().toISOString(),
+      };
+      suggestions.set(itemId, item);
+      return { ...item };
+    },
+    async getSuggestion(contactId, target) {
+      const hit = suggestions.get(`sugg#${contactId}#${target}`);
+      return hit ? { ...hit } : undefined;
+    },
+    async listSuggestionsByContact(contactId) {
+      return [...suggestions.values()]
+        .filter((s) => s.ownerContactId === contactId)
+        .map((s) => ({ ...s }));
+    },
+    async deleteSuggestion(contactId, target) {
+      suggestions.delete(`sugg#${contactId}#${target}`);
+    },
+    async listPending(opts = {}) {
+      return [...suggestions.values()]
+        .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
+        .slice(0, opts.limit ?? 50)
+        .map((s) => ({ ...s }));
     },
   };
 
@@ -1998,6 +2066,8 @@ export function createFakeWorld(): FakeWorld {
     tourRemindersRepo,
     placementNudgesMap,
     placementNudgesRepo,
+    suggestions,
+    extractionRepo,
   };
 }
 
@@ -2123,6 +2193,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // Post-Tour & Application (Task 5): the choke-point armStageNudge hook runs
       // against this no-network fake instead of the real DynamoDB repo.
       placementNudgesRepo: world.placementNudgesRepo,
+      // conversation-fact-extraction (T8): the review API (suggestions router) +
+      // the contact-PATCH provenance-clear share this in-memory suggestion store.
+      extractionRepo: world.extractionRepo,
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).

@@ -73,6 +73,8 @@ import { type PushService } from '../services/pushService.js';
 import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPlacementRelayLifecycle } from '../services/placementRelayLifecycle.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { createSuggestionsRouter } from './suggestions.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import {
@@ -194,6 +196,12 @@ export interface ApiRouterDeps {
    * `armStageNudge` hook wired onto the transition service.
    */
   placementNudgesRepo?: PlacementNudgesRepo;
+  /**
+   * conversation-fact-extraction (T8) - the pending-suggestion store. Read by the
+   * review API (suggestions router) + the contact-PATCH provenance-clear. Injected
+   * in tests (a no-network fake); defaults to the real repo.
+   */
+  extractionRepo?: ExtractionRepo;
   /** M1.8a share-broadcast — injected in tests; default to the real repo/service. */
   broadcastsRepo?: BroadcastsRepo;
   audienceResolutionService?: AudienceResolutionService;
@@ -347,6 +355,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // and the computed next_deadline read all hit ONE repo.
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
+  // conversation-fact-extraction (T8): the pending-suggestion store, shared by the
+  // review API (suggestions router) and the contacts-router PATCH provenance-clear.
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
   // gather walks these five scheduled-send repos. Default-construct them here (the
   // same `?? create…` pattern as conversations/messages above) so the gather is
@@ -479,6 +490,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // upserts/retires the voucher deadline on the tenant's active placements.
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       placementDeadlinesRepo: placementDeadlines,
+      // conversation-fact-extraction (T8): a human field edit clears AI provenance
+      // + supersedes any pending suggestion for that field (best-effort).
+      extractionRepo: extraction,
       events,
     }),
   );
@@ -699,6 +713,24 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
           ...(deps.logger !== undefined && { logger: deps.logger }),
         }),
       closeRelayForLostPlacement: relayLifecycle.closeForLost,
+    }),
+  );
+  // conversation-fact-extraction (T8) review API (requireAuth via the /api mount).
+  // Its paths (/contacts/:id/suggestions[...]) are distinct segments from every
+  // router above, so no collision. Accept 'status' routes through the SAME ONE
+  // transition service construction the status-transition router uses.
+  router.use(
+    '/',
+    createSuggestionsRouter({
+      logger: deps.logger,
+      ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+      extractionRepo: extraction,
+      auditRepo: audit,
+      activityEventsRepo: activityEvents,
+      events,
+      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+      placementDeadlinesRepo: placementDeadlines,
+      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only

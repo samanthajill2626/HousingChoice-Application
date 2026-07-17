@@ -44,8 +44,8 @@ function makeDeps(opts: {
   };
 
   const extraction: ApplyDeps['extraction'] = {
-    putSuggestion: vi.fn(async (s: unknown) => {
-      if (opts.putSuggestionImpl) return opts.putSuggestionImpl(s);
+    putSuggestion: vi.fn(async (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]) => {
+      if (opts.putSuggestionImpl) return (await opts.putSuggestionImpl(s)) as never;
       records.suggestions.push(s);
       return s as never;
     }),

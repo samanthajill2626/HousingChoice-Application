@@ -31,6 +31,7 @@ const getPlacementHistory = vi.fn();
 // keep the conversation pane quiet + deterministic; this suite exercises the
 // header + right pane (the comms hub has its own tests in Task 6).
 const getConversations = vi.fn();
+const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
 // Deadlines-and-nudges card deps: quiet the nudge fetch so the card renders its
@@ -55,6 +56,7 @@ vi.mock('../../api/index.js', async () => {
     updateUnit: (...a: unknown[]) => updateUnit(...a),
     getPlacementHistory: (...a: unknown[]) => getPlacementHistory(...a),
     getConversations: (...a: unknown[]) => getConversations(...a),
+    getConversation: (...a: unknown[]) => getConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
     getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
@@ -122,6 +124,12 @@ beforeEach(() => {
   updateUnit.mockReset();
   getPlacementHistory.mockReset().mockResolvedValue([]);
   getConversations.mockReset().mockResolvedValue({ conversations: [], nextCursor: null });
+  getConversation.mockReset().mockResolvedValue({
+    conversationId: 'g1',
+    type: 'relay_group',
+    status: 'open',
+    participants: [],
+  });
   markConversationRead.mockReset().mockResolvedValue(undefined);
   provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
   getPlacementNudges.mockReset().mockResolvedValue([]);
@@ -566,6 +574,78 @@ describe('PlacementDetail', () => {
         source: 'manual',
       }),
     );
+  });
+});
+
+describe('PlacementDetail - close the group text after a terminal move (relay number lifecycle)', () => {
+  const OPEN_GROUP = {
+    conversationId: 'g1',
+    type: 'relay_group',
+    status: 'open',
+    participants: [
+      { contactId: 't1', phone: '+14045550111', name: 'Tasha' },
+      { contactId: 'l1', phone: '+14045550222', name: 'Larry' },
+    ],
+  };
+
+  it('marking a placement lost with an open group offers to close the group text', async () => {
+    const user = userEvent.setup();
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'lost', group_thread: 'g1' });
+    getConversation.mockResolvedValue(OPEN_GROUP);
+    renderAt();
+    await waitLoaded();
+    // Mark lost (kebab) -> LostReasonModal -> pick a reason -> confirm.
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Mark lost' }));
+    const lostModal = screen.getByRole('dialog', { name: /Mark placement lost/i });
+    await user.click(within(lostModal).getAllByRole('radio')[0]!);
+    await user.click(within(lostModal).getByRole('button', { name: 'Mark lost' }));
+    // Once lost saves + the group is confirmed open, the ask dialog appears.
+    await screen.findByRole('dialog', {
+      name: /Also close the group text with Tasha & Larry\?/i,
+    });
+  });
+
+  it('advancing to moved_in with an open group offers to close the group text', async () => {
+    const user = userEvent.setup();
+    getPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_move_in' });
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'moved_in', group_thread: 'g1' });
+    getConversation.mockResolvedValue(OPEN_GROUP);
+    renderAt();
+    await waitLoaded();
+    // awaiting_move_in -> moved_in has no gate: the move fires directly.
+    await chooseStage(user, 'moved_in');
+    await screen.findByRole('dialog', { name: /Also close the group text/i });
+  });
+
+  it('a non-terminal move NEVER offers to close the group', async () => {
+    const user = userEvent.setup();
+    // awaiting_inspection -> determine_rent gates on the inspection outcome.
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'determine_rent' });
+    renderAt();
+    await waitLoaded();
+    await chooseStage(user, 'determine_rent');
+    const dialog = screen.getByRole('dialog');
+    await user.click(within(dialog).getByRole('radio', { name: 'Fail' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
+    await waitFor(() => expect(transitionPlacement).toHaveBeenCalled());
+    expect(getConversation).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+  });
+
+  it('skips the ask when the placement has no linked group', async () => {
+    const user = userEvent.setup();
+    transitionPlacement.mockResolvedValue({ ...CASE, stage: 'lost' }); // no group_thread
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Mark lost' }));
+    const lostModal = screen.getByRole('dialog', { name: /Mark placement lost/i });
+    await user.click(within(lostModal).getAllByRole('radio')[0]!);
+    await user.click(within(lostModal).getByRole('button', { name: 'Mark lost' }));
+    await waitFor(() => expect(transitionPlacement).toHaveBeenCalled());
+    expect(getConversation).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
   });
 });
 

@@ -220,6 +220,72 @@
   }
 }
 
+/* --- Relay close-nag card (D5) -------------------------------------------- */
+/* Same card frame as .row, but it is NOT a link - it carries inline Close /
+ * Keep-open actions instead of navigating. */
+.nagCard {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  padding: var(--sp-3) var(--sp-4);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+}
+
+.nagActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+}
+
+.nagOpen {
+  padding: 1px var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+  text-decoration: none;
+}
+
+.nagOpen:hover {
+  text-decoration: underline;
+}
+
+.nagKeep,
+.nagClose {
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  cursor: pointer;
+}
+
+.nagKeep {
+  background: var(--c-surface-2);
+  color: var(--c-text);
+}
+
+.nagClose {
+  background: var(--c-text);
+  color: var(--c-surface);
+  border-color: var(--c-text);
+}
+
+.nagKeep:disabled,
+.nagClose:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.nagError {
+  margin: var(--sp-1) 0 0;
+  padding: 0 var(--sp-4);
+  color: var(--c-danger);
+  font-size: var(--fs-xs);
+}
+
 /* --- States --------------------------------------------------------------- */
 
 .error {

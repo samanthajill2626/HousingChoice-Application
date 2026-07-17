@@ -202,7 +202,10 @@ describe('ConversationDetail group view', () => {
   });
 
   it('HARD-disables the composer when the group is closed', async () => {
-    getConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    // Relay number lifecycle: a closed group KEEPS its pool_number (it still
+    // intercepts late texts); the composer hard-disable keys on status, not the
+    // number.
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /^Send$/ })).toBeDisabled();
@@ -307,7 +310,7 @@ describe('ConversationDetail close / reopen', () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader());
-    closeConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    closeConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
 
@@ -322,7 +325,7 @@ describe('ConversationDetail close / reopen', () => {
   it('reopens with a confirm that notes a fresh pool number + re-intro', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
-    getConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     closeConversation.mockResolvedValue(relayHeader());
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());

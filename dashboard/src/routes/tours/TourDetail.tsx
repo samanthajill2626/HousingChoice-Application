@@ -22,6 +22,7 @@ import {
   ApiError,
   createPlacementFromTour,
   createTourRelay,
+  getConversation,
   patchTour,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
@@ -54,6 +55,7 @@ import {
   RescheduleTourModal,
 } from './TourModals.js';
 import { describeTourActivity, tourActivityToMilestone } from './tourActivityFormat.js';
+import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './TourDetail.module.css';
 
@@ -161,6 +163,10 @@ function TourDetailLoaded({
   const [modal, setModal] = useState<'book' | 'reschedule' | 'outcome' | 'cancel' | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // The "Also close the group text?" ask, opened AFTER a terminal outcome saves.
+  const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
+    null,
+  );
 
   const isPm = tour.tourType === 'pm_team';
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
@@ -249,6 +255,25 @@ function TourDetailLoaded({
     }
   };
 
+  // After a terminal tour outcome (not-a-fit / canceled) the LINKED relay group is
+  // NOT auto-closed (nothing auto-closes now). If it is still OPEN, offer to close
+  // it. Best-effort + non-blocking: the outcome is already saved before this runs;
+  // a failed status check simply skips the prompt.
+  const maybeAskCloseGroup = async (): Promise<void> => {
+    const groupId = tour.groupThreadId;
+    if (typeof groupId !== 'string' || groupId.length === 0) return;
+    try {
+      const conv = await getConversation(groupId);
+      if (conv.status !== 'open') return;
+      const names = (conv.participants ?? [])
+        .map((p) => p.name?.trim())
+        .filter((n): n is string => n !== undefined && n.length > 0);
+      setCloseAsk({ conversationId: groupId, memberSummary: names.join(' & ') });
+    } catch {
+      /* best-effort: never block the recorded outcome on the group check */
+    }
+  };
+
   // Modal confirm handlers: apply the returned tour; THROW on failure so the modal
   // surfaces its own inline error and stays open.
   const confirmBook = async (isoScheduledAt: string): Promise<void> => {
@@ -284,10 +309,15 @@ function TourDetailLoaded({
           err instanceof ApiError ? err.message : 'Outcome saved, but starting the placement failed',
         );
       }
+    } else {
+      // not-a-fit closed the TOUR, not the group text - offer to close the group.
+      void maybeAskCloseGroup();
     }
   };
   const confirmCancel = async (): Promise<void> => {
     setTour(await patchTour(tourId, { status: 'canceled' }));
+    // Canceling the tour leaves the relay group open - offer to close it.
+    void maybeAskCloseGroup();
   };
 
   // --- Primary CTA (one status-aware happy-path button) ---------------------
@@ -544,6 +574,13 @@ function TourDetailLoaded({
       ) : null}
       {modal === 'cancel' ? (
         <CancelTourModal onClose={() => setModal(null)} onConfirm={confirmCancel} />
+      ) : null}
+      {closeAsk !== null ? (
+        <RelayCloseAskDialog
+          conversationId={closeAsk.conversationId}
+          memberSummary={closeAsk.memberSummary}
+          onDone={() => setCloseAsk(null)}
+        />
       ) : null}
     </div>
   );

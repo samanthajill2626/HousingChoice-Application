@@ -590,8 +590,9 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            Closing this group <strong>releases the pool number</strong> — members can no longer
-            reach the group at that number, and sending is disabled.
+            Closing this group <strong>sends members a final automated message</strong> and
+            disables sending. The group keeps its number - a member who texts it later
+            reaches the team in their own 1:1 thread.
           </p>
           {actionError !== null ? (
             <p role="alert" className={styles.error}>
@@ -628,8 +629,8 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            Reopening <strong>provisions a fresh pool number and re-intros members</strong> — the
-            group gets a new number and everyone is reconnected.
+            Reopening <strong>keeps the same number</strong> - members can text the group again
+            right away. Nothing is re-provisioned and no intro messages are re-sent.
           </p>
           {actionError !== null ? (
             <p role="alert" className={styles.error}>

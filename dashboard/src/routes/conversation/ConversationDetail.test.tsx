@@ -316,13 +316,13 @@ describe('ConversationDetail close / reopen', () => {
 
     await user.click(screen.getByRole('button', { name: 'Close group' }));
     const dialog = await screen.findByRole('dialog', { name: /Close group\?/i });
-    expect(within(dialog).getByText(/releases the pool number/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/sends members a final automated message/i)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Close group' }));
 
     await waitFor(() => expect(closeConversation).toHaveBeenCalledWith('conv-g1', true));
   });
 
-  it('reopens with a confirm that notes a fresh pool number + re-intro', async () => {
+  it('reopens with a confirm that notes the number is kept (no re-provisioning)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
@@ -332,7 +332,7 @@ describe('ConversationDetail close / reopen', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reopen group' }));
     const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });
-    expect(within(dialog).getByText(/provisions a fresh pool number and re-intros members/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/keeps the same number/i)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Reopen group' }));
 
     await waitFor(() => expect(closeConversation).toHaveBeenCalledWith('conv-g1', false));

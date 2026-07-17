@@ -153,6 +153,15 @@ const childEnv = {
   // makes sendMessage throw before anything reaches the fake — force it ON so the
   // hermetic stack actually exercises outbound sends against the fake host.
   SMS_SENDING_ENABLED: 'true',
+  // Conversation fact extraction (Phase 2): run the deterministic FAKE driver so
+  // specs drive extraction via inbound `EXTRACT:{...}` texts with no real
+  // Anthropic call. NODE_ENV here is 'development' (above), so AI_EXTRACTION_ENABLED
+  // already defaults ON and 'fake' is a legal driver (config refuses 'fake' only
+  // under NODE_ENV=production). This childEnv is passed to BOTH the app and worker
+  // processes (spawnNode) and is the SAME path the full `npm run e2e` suite boots
+  // (playwright.config webServer.command = node scripts/e2e-session.mjs), so it
+  // covers the fake driver in both e2e modes.
+  EXTRACTION_DRIVER: 'fake',
   // Stale-stack guard (e2e/support/preflight.ts): stamp the launch commit on the
   // app (/__dev/ping → appCommit) AND the dashboard (index.html <meta>) so a
   // reused server booted at a different commit is caught with an actionable error.

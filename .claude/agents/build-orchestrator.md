@@ -86,7 +86,10 @@ for the feature area).
 
 ## Phase 1 - research (+ spike when infra risk)  [1 read-only opus child]
 
-- Skip only if the plan already carries verified file:line anchors.
+- NEVER skip this phase - even a plan carrying complete code and anchors
+  gets the live-tree drift check (2026-07-16 proof: the flyer plan was
+  fully coded, and research still caught an importer of a to-be-renamed
+  css file that would have broken typecheck mid-build).
 - One read-only opus agent (FOREGROUND, like every child) produces a
   byte-exact file:line WORKLIST written
   to `.superpowers/sdd/` (or docs/research/ if the mission says to commit it):
@@ -177,13 +180,18 @@ for the feature area).
 - Review gate = read the actual diff YOURSELF for the gate-critical
   contract (routes + error taxonomy, CTA logic, placeholders render nothing,
   verbatim copy, conditional-write idiom). Reports alone are not the gate.
-- ONE fix wave, complete findings list, to the SAME implementer
-  (SendMessage - context-warm). Fix CONFIRMED must-fixes; adjudicate
-  PLAUSIBLE (fix cheap real ones; NOTE pre-existing nits). A fix that
-  touches behavior a test FAKE mirrors must fix BOTH real and fake. Fold
-  cheap NOTEs into the wave; FILE out-of-scope findings as docs/issues/
-  entries instead of scope-creeping. Re-verify the fix diff with the SAME
-  reviewer agent; re-run affected gates.
+- ONE fix wave, complete findings list, dispatched as a FRESH FOREGROUND
+  child briefed with the slice report + findings (file paths, not pasted
+  text) - never a SendMessage-resume of the original implementer (its
+  completion would route to the planner; the reports-as-files hygiene
+  exists precisely so a fresh child is equivalent). Fix CONFIRMED
+  must-fixes; adjudicate PLAUSIBLE (fix cheap real ones; NOTE pre-existing
+  nits). A fix that touches behavior a test FAKE mirrors must fix BOTH
+  real and fake. Fold cheap NOTEs into the wave; FILE out-of-scope
+  findings as docs/issues/ entries instead of scope-creeping. Re-verify
+  the fix diff with a FRESH FOREGROUND reviewer briefed with the prior
+  review report's file path (same judgment, direct result); re-run
+  affected gates.
 
 ## Phase 5 - live self-QA  [you drive it; never delegate the eyeball]
 
@@ -243,22 +251,32 @@ for the feature area).
 
 ## Child-agent lifecycle (battle-tested)
 
-- FOREGROUND DISPATCH IS THE RULE: every child agent is dispatched
-  SYNCHRONOUSLY (`run_in_background: false`). Background children from a
-  subagent context are INVISIBLE from outside (2026-07-16 flyer-full-info):
-  the parent's stop fires a "no live background children" notification even
-  while they run, they produce no worktree activity during long
-  thinking/reading phases, and no external liveness check can see them - so
-  the planner twice diagnosed live children as dead-at-birth and intervened,
-  risking a double-dispatched implementer corrupting the branch. Foreground
-  removes the whole ambiguity class, and your pipeline is serial anyway.
-  AGENTS only - background Bash commands (npm install, gates) are visible via
-  their output files and stay backgrounded per Phase 3. Same rule in MANUAL
-  mode: one behavior everywhere. If a foreground dispatch errors, retry
-  once, then write `STATUS: BLOCKED` with the error text. If you ever DO
-  find yourself with a possibly-alive background child (e.g. resumed from an
-  older transcript), adjudicate ownership before dispatching a replacement -
-  exactly one owner per slice, always.
+- FRESH FOREGROUND DISPATCH IS THE ONLY ROUTINE MODE (Cameron's rule,
+  2026-07-16/17 post-mortem): every child is a NEW Agent call with
+  `run_in_background: false`, briefed via FILE PATHS (reports, findings,
+  diff packages) - its result returns to you in-turn like a function call.
+  Two mechanisms are BANNED as routine because their completions route to
+  the PLANNER, not to you (forcing child->planner->orchestrator relays,
+  which Cameron ruled out as architecture):
+  (1) background child agents - additionally invisible to every external
+      liveness signal (the planner twice diagnosed live children as dead
+      and intervened, risking a double-dispatched implementer);
+  (2) SendMessage-RESUME of a prior child ("context-warm" continuation) -
+      resumed agents run detached and always complete to the planner.
+  SendMessage-resume survives ONLY as a RECOVERY fallback: a cold-misfire
+  or a mid-task death where uncommitted state genuinely cannot be rebuilt
+  from files. When you use it, write a WAITING ledger line saying the
+  result will arrive via planner relay. Fix waves and re-verifies are NOT
+  recovery - they get fresh foreground children (see Phase 4).
+  Foreground costs nothing here: the pipeline is serial, and parallel
+  read-only children (reviewers) = multiple foreground calls in ONE
+  message. AGENTS only - background Bash commands (npm install, gates) are
+  visible via output files and stay backgrounded per Phase 3. Same rule in
+  MANUAL mode: one behavior everywhere. If a foreground dispatch errors,
+  retry once, then write `STATUS: BLOCKED` with the error text. If you
+  ever DO find a possibly-alive background child (e.g. after a recovery
+  resume), adjudicate ownership before dispatching a replacement - exactly
+  one owner per slice, always.
 - PARALLEL read-only children (the two Phase 4 reviewers) do NOT need
   background mode: put both foreground Agent calls in ONE message - they run
   concurrently and the turn waits for both.

@@ -128,7 +128,12 @@ can stay 0 bytes while the agent runs (verified in the dry run).
 
 Tell Cameron to open `<worktree>/.superpowers/sdd/live.log` in the editor -
 it streams the orchestrator's narration, tool calls, and truncated results
-in real time, replacing the visibility of the old two-window setup. On a
+in real time, replacing the visibility of the old two-window setup. Set the
+three-surface expectation in the SAME message (he was surprised mid-mission
+without it): this chat = planner status lines only; live.log = readable
+build narration; the IDE's activity pane = the RAW tool-event firehose from
+the whole agent tree (children editing files WILL show there - that is the
+build working, not this session acting). On a
 FRESH re-dispatch (new task id -> new output file), TaskStop the old mirror
 and start a new one pointed at the new file, appending to the SAME live.log.
 The mirror shows the orchestrator (level 2); its children appear as TOOL>
@@ -142,7 +147,24 @@ answer would otherwise fire instantly on the stale, already-handled status.
 The stall exit is gated on the watchdog's own age (t0) because a re-armed
 watchdog inherits an already-quiet window - without the gate it trips
 instantly right after the nudge/resume it was re-armed behind. Checkpoints
-(10 min) cover the visibility gap while the gate matures.
+(5 min) cover the visibility gap while the gate matures.
+
+Watchdog exits surface as "Background command failed" notifications for
+exit 1 AND exit 2 - that is cosmetic (non-zero exit), not an error. Exit 2
+is the HEALTHY heartbeat; read the code, not the word "failed".
+
+## Child-completion routing (strict dispatch model)
+
+The orchestrator dispatches every child FRESH and FOREGROUND (its manual;
+Cameron's post-mortem rule 2026-07-17), so child results return to it
+in-turn and NEVER route to you. If a child completion or agent-message DOES
+arrive at this session, it is one of exactly two things: (a) a RECOVERY
+SendMessage-resume the orchestrator was forced into (its ledger will say
+so) - relay the result to the orchestrator via SendMessage (summary + the
+report file path), or (b) a stray background child from a rule violation -
+relay it, and tell the orchestrator to return to fresh-foreground dispatch.
+Routine relays are an architecture failure; if you find yourself relaying
+every mission, stop and fix the process files.
 
 The 25-minute quiet threshold assumes the orchestrator's heartbeat contract
 (it appends to `.superpowers/sdd/heartbeat.log` on every action). A healthy
@@ -150,13 +172,21 @@ long gate still touches output files; total worktree silence is the signal.
 
 ## Stall escalation ladder (in order; stop at the first rung that resolves)
 
+0. TRANSCRIPT PROBE (the reliable liveness check - learned 2026-07-16 the
+   hard way): `ls -lt <session>/subagents/` - a child/orchestrator .jsonl
+   whose mtime is fresh and size is growing is ALIVE AND THINKING, even
+   with a silent worktree. A "stopped with no live background children"
+   task-notification is UNDECIDABLE about grandchildren - never diagnose a
+   child dead from it, and never order a re-dispatch on that signal alone
+   (that is how we briefly ran two implementers on one branch).
 1. PEEK: `TaskOutput` on the orchestrator's task - read where it is parked.
    Mid-thought or actively working? False alarm: re-arm, note it.
 2. EVIDENCE: check the worktree yourself - git log, ledger tail, output-file
    mtimes, worktree-filtered process list. Diagnose BEFORE nudging.
 3. NUDGE: SendMessage the orchestrator what it is missing ("the e2e run you
    were waiting on exited EXIT=0; its log is at ...; continue from the
-   ledger"). This is the proven fix for parked-on-dead-child.
+   ledger"). Ask it to ADJUDICATE its own children's state - it can see
+   them; you cannot. This is the proven fix for parked-on-dead-work.
 4. SURGICAL KILL + RESUME: only if the orchestrator itself is wedged. Kill
    only PIDs whose command line matches THIS worktree; preserve logs;
    SendMessage a re-orientation ("your edits are intact; ledger says phase
@@ -170,6 +200,12 @@ e.g. "Orchestrator finished slice 2/4 (dashboard), gates green, starting
 e2e slice." No transcript replay, no file dumps. Detail stays in the ledger
 and reports; Cameron asks if he wants more ("what is the build doing?" ->
 TaskOutput peek, summarize in a few sentences).
+
+HONEST-STATUS RULE: separate observed fact from inference, in the status
+line itself. "No signal from the child; consistent with a reading phase"
+is honest; "the child is dead" without a rung-0 transcript probe is the
+exact overconfidence that caused two false interventions on 2026-07-16.
+Never present an inference as verified.
 
 ## Handback and fix waves
 

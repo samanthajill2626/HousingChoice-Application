@@ -137,9 +137,10 @@ New endpoint: `POST /webhooks/twilio/voice/intelligence`.
 - Flow:
   1. Fetch the Transcript resource -> status, customer_key (our CallSid),
      and media source recording sid.
-  2. Resolve CallSid: customer_key when present; else resolve via the
-     recording sid against our call entities; unresolvable => 200 + warn
-     (not our transcript - e.g. another tool on the same account).
+  2. Resolve CallSid via customer_key ONLY (we set it on every transcript
+     we create; there is no index to resolve a recording sid without a
+     table scan). Missing customer_key => 200 + warn (not our transcript -
+     e.g. another tool on the same account).
   3. Status 'failed' => stamp transcript_status 'failed' (3.7), 200.
      Any other non-'completed' status => 200 + info (the reconcile job is
      the safety net for stuck transcripts).
@@ -316,10 +317,17 @@ refused before any of this.
   transcript_status per 3.7's rendering table).
   Per decision 10, the implementer may adjust the model further where
   cleaner.
-- Dashboard: the call bubble renders "Voicemail" labeling when
-  outcome === 'voicemail' (wherever outcome currently renders: call bubble
-  label/chip, contact timeline row, any outcome text map). Play + transcript
-  UI is the existing machinery - no new components.
+- Dashboard: call entries render in exactly ONE component - CallCard on
+  the shared Timeline (used by the contact page, the only surface that
+  shows calls; relay/tour/placement panes drop call entries by design and
+  stay that way). CallCard already renders the outcome label (capitalized
+  raw outcome, so 'voicemail' -> "Voicemail" automatically) and the
+  collapsible transcript. CORRECTION from planning research: there is NO
+  recording player in the dashboard today (recording_s3_key is serialized
+  but never rendered; the auth-gated streaming endpoint
+  GET /api/calls/:callId/recording exists with no client caller). This
+  feature ADDS the player: an audio element on CallCard pointing at that
+  existing endpoint, shown when recording_s3_key is present.
 - Live updates: `message.persisted` on transcript save and the existing
   event on recording stamp already drive SSE refresh.
 - GLOSSARY: no new domain nouns expected ("voicemail" is a call outcome,

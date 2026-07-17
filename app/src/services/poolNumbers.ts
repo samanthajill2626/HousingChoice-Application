@@ -98,6 +98,13 @@ export interface PoolNumbersService {
   /** Stamp a group-close time onto the number (the retirement clock). */
   noteGroupClosed(poolNumber: string, closedAt: string): Promise<void>;
   /**
+   * Read the pool record (thin repo.get passthrough). Used by the reopen route
+   * (AF-3) to refuse reopening a group onto a number that retirement RELEASED -
+   * a pure status flip would otherwise mint a zombie open group on a number we
+   * no longer own at Twilio. Returns undefined when no record exists.
+   */
+  getRecord(poolNumber: string): Promise<PoolNumberItem | undefined>;
+  /**
    * Release-eligibility sweep (config-gated by relayNumberReleaseEnabled).
    * Releases every active number with zero open groups whose newest group closed
    * more than RELEASE_GRACE_MS ago. Returns the numbers released. Also exposed
@@ -283,6 +290,10 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
 
     async noteGroupClosed(poolNumber, closedAt) {
       await repo.noteGroupClosed(poolNumber, closedAt);
+    },
+
+    async getRecord(poolNumber) {
+      return repo.get(poolNumber);
     },
 
     retireEligible,

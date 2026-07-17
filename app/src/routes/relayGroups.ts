@@ -497,9 +497,13 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         updated = await conversations.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Already closed (concurrent/duplicate close) - idempotent no-op.
+          // Already closed (concurrent/duplicate close) - idempotent no-op. AF-8:
+          // re-fetch so the response body carries the ACTUAL (closed) status,
+          // not our STALE pre-announce read (taken while it was still open) - a
+          // concurrent-close loser must not return a dishonest status:'open' body.
+          const fresh = await conversations.getById(conversationId);
           log.info({ conversationId }, 'relay close: already closed - idempotent no-op');
-          res.json({ conversation });
+          res.json({ conversation: fresh ?? conversation });
           return;
         }
         throw err;
@@ -526,6 +530,29 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       // is a pure status flip back to 'open' (conditional on 'closed') - nothing
       // is re-provisioned. A concurrent/duplicate reopen fails the precondition
       // and no-ops (idempotent).
+      // AF-3: refuse reopen when the pool number was RELEASED by retirement (D7).
+      // A pure flip would mint a ZOMBIE open group on a number Twilio no longer
+      // routes to us (inbound never arrives; outbound announcements/fan-out send
+      // FROM a number we do not own). Read the pool record; a missing or
+      // non-active record blocks with an actionable 409.
+      const reopenPool = conversation.pool_number;
+      if (typeof reopenPool === 'string' && reopenPool.length > 0) {
+        const record = await poolNumbers.getRecord(reopenPool);
+        if (!record || record.lifecycle_state !== 'active') {
+          await audit.append(`conversations#${conversationId}`, 'relay_group_reopen_refused', {
+            actor,
+            reason: 'pool_number_released',
+          });
+          log.info({ conversationId }, 'relay reopen refused - pool number released');
+          res.status(409).json({
+            error: 'pool_number_released',
+            message:
+              'This group text cannot be reopened: its number was retired after long ' +
+              'inactivity. Start a new group text instead.',
+          });
+          return;
+        }
+      }
       try {
         updated = await conversations.setRelayStatus(conversationId, 'open', 'closed');
       } catch (err) {
@@ -557,6 +584,15 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const conversation = await conversations.getById(conversationId);
     if (!conversation || conversation.type !== 'relay_group') {
       res.status(404).json({ error: 'relay_group_not_found' });
+      return;
+    }
+    // AF-9: a CLOSED group never nags, so deferring a nag onto it is a pointless
+    // write (and would resurface if the group were later reopened). No-op - no
+    // write, no audit (Today-card race friendly: a close landing just before a
+    // Keep-open click must not stamp a stale nag field on the now-closed row).
+    if (conversation.status !== 'open') {
+      log.info({ conversationId }, 'close-nag defer ignored - group not open');
+      res.json({ conversation });
       return;
     }
     const nextAt = new Date(Date.now() + CLOSE_NAG_INTERVAL_MS).toISOString();

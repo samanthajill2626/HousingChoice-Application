@@ -337,4 +337,27 @@ describe('ConversationDetail close / reopen', () => {
 
     await waitFor(() => expect(closeConversation).toHaveBeenCalledWith('conv-g1', false));
   });
+
+  it('reopen refused (409 pool_number_released): surfaces the actionable server message (AF-3)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
+    const serverMessage =
+      'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.';
+    closeConversation.mockRejectedValue(
+      new ApiError(409, 'pool_number_released', 'pool_number_released', {
+        error: 'pool_number_released',
+        message: serverMessage,
+      }),
+    );
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Reopen group' }));
+    const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });
+    await user.click(within(dialog).getByRole('button', { name: 'Reopen group' }));
+
+    // The actionable server copy renders (not the generic "Couldn't reopen the group.").
+    await waitFor(() => expect(screen.getByText(serverMessage)).toBeInTheDocument());
+  });
 });

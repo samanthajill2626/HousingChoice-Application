@@ -319,7 +319,19 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         setClosing(false);
         setReopening(false);
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        // AF-3: surface the server's actionable copy when reopen is refused
+        // because the pool number was retired/released - a generic error would
+        // hide the "start a new group text instead" guidance.
+        if (err instanceof ApiError && err.status === 409 && err.code === 'pool_number_released') {
+          const serverMsg = (err.body as { message?: unknown } | null)?.message;
+          setActionError(
+            typeof serverMsg === 'string' && serverMsg.length > 0
+              ? serverMsg
+              : 'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.',
+          );
+          return;
+        }
         setActionError(next ? "Couldn't close the group." : "Couldn't reopen the group.");
       })
       .finally(() => setActionBusy(false));

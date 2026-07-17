@@ -4,6 +4,7 @@
 // wired so the intro enqueue resolves. Authed via the real sealed session
 // cookie next to the origin secret (every /api route is behind requireAuth).
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import request from 'supertest';
 import {
   InMemorySchedulerAdapter,
@@ -39,10 +40,15 @@ const CLOSED_COPY =
 const CLOSE_NAG_INTERVAL_MS = 28 * 24 * 60 * 60 * 1000;
 
 /** A fake pool-numbers service: hands out deterministic numbers, tracks provisions + close notes. */
-function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[]; closed: string[] } {
+function makeFakePoolNumbers(): PoolNumbersService & {
+  provisioned: string[];
+  closed: string[];
+  records: Map<string, PoolNumberItem>;
+} {
   let counter = 0;
   const provisioned: string[] = [];
   const closed: string[] = [];
+  const records = new Map<string, PoolNumberItem>();
   const rec = (poolNumber: string): PoolNumberItem => ({
     poolNumber,
     lifecycle_state: 'active',
@@ -54,17 +60,25 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[]; cl
   return {
     provisioned,
     closed,
+    records,
     async provisionForGroup() {
       counter += 1;
       const poolNumber = `+1555030${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
-      return { poolNumber, record: rec(poolNumber), provisioned: true };
+      const record = rec(poolNumber);
+      records.set(poolNumber, record);
+      return { poolNumber, record, provisioned: true };
     },
     async noteGroupClosed(poolNumber) {
       closed.push(poolNumber);
     },
     async retireEligible() {
       return [];
+    },
+    // AF-3: the reopen route reads the pool record. Default active; a test flips
+    // records.get(n)!.lifecycle_state = 'released' to prove the reopen refusal.
+    async getRecord(poolNumber) {
+      return records.get(poolNumber) ?? rec(poolNumber);
     },
   };
 }
@@ -91,6 +105,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async noteGroupClosed() {},
     async retireEligible() {
       return [];
+    },
+    async getRecord() {
+      return undefined;
     },
   };
 }
@@ -420,6 +437,97 @@ describe('relay-group API (M1.7)', () => {
     expect(pool.closed).toHaveLength(1);
   });
 
+  it('reopen is REFUSED (409 pool_number_released) when the number was retired; status stays closed (AF-3)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    const poolNumber = created.body.conversation.pool_number as string;
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    // D7 retirement RELEASED the number after 180 idle days.
+    pool.records.get(poolNumber)!.lifecycle_state = 'released';
+
+    const reopen = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: false });
+    expect(reopen.status).toBe(409);
+    expect(reopen.body.error).toBe('pool_number_released');
+    // No zombie: the group STAYS closed and the refusal is audited.
+    expect((await world.conversationsRepo.getById(id))!.status).toBe('closed');
+    expect(world.auditEvents.some((a) => a.event_type === 'relay_group_reopen_refused')).toBe(true);
+  });
+
+  it('reopen still works when the pool number is still active (AF-3 control)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    // The number is still active (default fake state) - reopen succeeds.
+    const reopen = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: false });
+    expect(reopen.status).toBe(200);
+    expect(reopen.body.conversation.status).toBe('open');
+  });
+
+  it('a concurrent-close loser returns the re-fetched CLOSED conversation, not a stale open body (AF-8)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    // Real DynamoDB reads return SNAPSHOTS - the pre-announce read and the
+    // re-fetch are DISTINCT objects. Make the fake do the same (it otherwise
+    // hands back the live reference, which would alias the two and mask the bug).
+    const realGetById = world.conversationsRepo.getById.bind(world.conversationsRepo);
+    world.conversationsRepo.getById = async (cid) => {
+      const conv = await realGetById(cid);
+      return conv ? { ...conv } : undefined;
+    };
+    // Simulate LOSING a concurrent close: a racing winner closes the group
+    // out-of-band, then THIS request's conditional flip hits ConditionalCheckFailed.
+    world.conversationsRepo.setRelayStatus = async (cid) => {
+      const conv = world.conversations.get(cid)!;
+      conv.status = 'closed';
+      conv.relay_status = 'relay_group#closed';
+      throw new ConditionalCheckFailedException({ message: 'lost the close race', $metadata: {} });
+    };
+
+    const res = await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    expect(res.status).toBe(200);
+    // AF-8: the response reflects the ACTUAL closed status (re-fetched), never
+    // the stale pre-announce 'open' read.
+    expect(res.body.conversation.status).toBe('closed');
+  });
+
   // --- close lifecycle: final announcement, nag clear, defer (Task 5) -------
   it('close sends the relay.group_closed final message to every member FIRST, then flips to closed', async () => {
     const pool = makeFakePoolNumbers();
@@ -571,6 +679,33 @@ describe('relay-group API (M1.7)', () => {
       .send();
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('relay_group_not_found');
+  });
+
+  it('POST /close-nag/defer on a CLOSED group is a 200 no-op (no nag write, no audit) (AF-9)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const created = await request(app)
+      .post('/api/relay-groups')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ members: [{ phone: ALICE, name: 'Alice' }] });
+    const id = created.body.conversation.conversationId;
+    await request(app)
+      .patch(`/api/conversations/${id}/close`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ closed: true });
+    world.auditEvents.length = 0; // drop the close audit so the defer assertion is clean
+
+    const res = await request(app)
+      .post(`/api/conversations/${id}/close-nag/defer`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(200);
+    // No nag armed on the closed group, and no defer audit was written.
+    expect(world.conversations.get(id)!.close_nag_next_at).toBeUndefined();
+    expect(world.auditEvents.some((a) => a.event_type === 'relay_close_nag_deferred')).toBe(false);
   });
 
   // --- FIX 2: relay-aware team send --------------------------------------

@@ -1364,6 +1364,9 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
     async retireEligible() {
       return [];
     },
+    async getRecord(poolNumber) {
+      return rec(poolNumber);
+    },
   };
 }
 
@@ -1379,6 +1382,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async retireEligible() {
       return [];
     },
+    async getRecord() {
+      return undefined;
+    },
   };
 }
 
@@ -1390,6 +1396,9 @@ function makeVoiceCapabilityFailingPool(): PoolNumbersService {
     async noteGroupClosed() {},
     async retireEligible() {
       return [];
+    },
+    async getRecord() {
+      return undefined;
     },
   };
 }

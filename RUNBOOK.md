@@ -641,8 +641,9 @@ channel `voice`, with **no debounce** (the transcript lands minutes after the ca
 once). Extraction windows are therefore **channel-mixed**: recent texts AND transcribed calls in one
 chronological transcript. Bridge-call speaker attribution is fixed in three layers - source-attributed
 `Staff:`/`Client:` line prefixes when the leg roles are known at ring time; in-call role inference
-otherwise; and any window containing inferred-role (`Speaker N`) lines **demotes every direct write to
-a suggestion**, so an unattributed transcript can only ever suggest, never silently write.
+otherwise; and any window containing inferred-role (`Speaker N`) lines **demotes every field write to
+a suggestion**, so an unattributed transcript can only ever suggest a profile FIELD, never silently
+write one (additive `notes` appends are not field writes and are never demoted).
 
 **Environment flags** (all in `.env.<env>`, pushed via the [Secrets](#secrets) flow):
 

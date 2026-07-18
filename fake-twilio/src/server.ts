@@ -10,6 +10,7 @@ import { RealClock } from './engine/clock.js';
 import { WebhookDispatcher } from './engine/dispatcher.js';
 import { createRestRouter } from './routes/rest.js';
 import { createVoiceRestRouter } from './routes/voiceRest.js';
+import { createIntelligenceRestRouter } from './routes/intelligenceRest.js';
 import { createControlRouter } from './routes/control.js';
 import { createVoiceControlRouter } from './routes/voiceControl.js';
 import { createRcsRouter } from './routes/rcs.js';
@@ -112,6 +113,9 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // Voice REST surface (Calls.json, AvailablePhoneNumbers, IncomingPhoneNumbers) +
   // the recording-serve route — replaces the former 501 stubs in createRestRouter.
   app.use(createVoiceRestRouter({ callEngine, registry, cannedRecordingPath: CANNED_RECORDING_PATH }));
+  // Voice Intelligence REST surface (POST /v2/Transcripts + fetch/sentences) the app's
+  // twilio client hits for transcription; a create schedules the signed JSON webhook.
+  app.use(createIntelligenceRestRouter({ callEngine, serviceSid: deps.config.viServiceSid }));
   // The control router mounts here with the same `engine` instance.
   app.use(createControlRouter(engine));
   // The VOICE control router shares the `/control` prefix but owns DISJOINT
@@ -150,7 +154,7 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks', '/recordings', '/v1'].some(
+      const reserved = ['/control', '/health', '/2010-04-01', '/webhooks', '/recordings', '/v1', '/v2'].some(
         (p) => req.path === p || req.path.startsWith(`${p}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

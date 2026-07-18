@@ -84,6 +84,26 @@ export function signTwilioWebhook(input: SignInput): string {
   return createHmac('sha1', input.authToken).update(Buffer.from(data, 'utf-8')).digest('base64');
 }
 
+export interface SignJsonInput {
+  authToken: string;
+  /** The exact URL the app reconstructs, INCLUDING the `?bodySHA256=<sha256hex(rawBody)>`
+   *  query the JSON-webhook scheme carries: `${appPublicBaseUrl}${path}?bodySHA256=...`. */
+  url: string;
+}
+
+/**
+ * Compute X-Twilio-Signature for a JSON-bodied webhook (the Voice Intelligence
+ * completion callback). Twilio's bodySHA256 scheme signs the FULL URL - which
+ * carries a `?bodySHA256=<sha256hex(rawBody)>` query param - with NO form params:
+ * base64(HMAC-SHA1(authToken, url)). This is signTwilioWebhook with empty params,
+ * kept as a named sibling so the JSON path reads clearly. The app validates it via
+ * twilio.validateRequestWithBody (validateRequest with {} params + a bodySHA256
+ * hash check over the raw body) - voiceSigner.test.ts pins that agreement.
+ */
+export function signTwilioJsonWebhook(input: SignJsonInput): string {
+  return createHmac('sha1', input.authToken).update(Buffer.from(input.url, 'utf-8')).digest('base64');
+}
+
 export interface BuildInboundVoiceInput { callSid: string; from: string; to: string; callStatus?: string; }
 export function buildInboundVoiceParams(i: BuildInboundVoiceInput): WebhookParams {
   return { CallSid: i.callSid, From: i.from, To: i.to, CallStatus: i.callStatus ?? 'ringing', ApiVersion: '2010-04-01' };
@@ -96,7 +116,4 @@ export function buildDialStatusParams(i: { callSid: string; dialCallStatus: stri
 }
 export function buildRecordingParams(i: { callSid: string; recordingSid: string; recordingUrl: string; durationSec?: number; status?: string }): WebhookParams {
   return { CallSid: i.callSid, RecordingSid: i.recordingSid, RecordingStatus: i.status ?? 'completed', RecordingUrl: i.recordingUrl, ...(i.durationSec !== undefined && { RecordingDuration: String(i.durationSec) }), ApiVersion: '2010-04-01' };
-}
-export function buildTranscriptionParams(i: { callSid: string; transcript: string; status?: string }): WebhookParams {
-  return { CallSid: i.callSid, TranscriptionText: i.transcript, TranscriptionStatus: i.status ?? 'completed', ApiVersion: '2010-04-01' };
 }

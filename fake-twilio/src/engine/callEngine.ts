@@ -21,7 +21,6 @@ import {
   buildWhisperGateParams,
   buildDialStatusParams,
   buildRecordingParams,
-  buildTranscriptionParams,
   type WebhookParams,
 } from './signer.js';
 import type { NumberRegistry } from './numberRegistry.js';
@@ -33,6 +32,37 @@ import type { CallState, CallKind, CallStatus, CallScenario, CallLeg } from './v
 export interface VoiceDispatcher {
   postForResponse(path: string, params: WebhookParams): Promise<{ status: number; body: string }>;
   post(path: string, params: WebhookParams): Promise<number>;
+  /** POST a JSON-bodied, bodySHA256-signed webhook (the VI completion callback). */
+  postJson(path: string, body: Record<string, unknown>): Promise<number>;
+}
+
+/** A recording awaiting an app-driven Voice Intelligence create, keyed by RecordingSid.
+ *  Captured when a recording fires (bridge in Task 12, voicemail in Task 13) so the
+ *  later POST /v2/Transcripts can build sentences from the scenario text + know whether
+ *  to deliver the completion webhook. `singleChannel` = voicemail (one caller channel);
+ *  bridge recordings are dual-channel and alternate 1/2 to exercise speaker labels. */
+interface PendingVi {
+  callSid: string;
+  text: string | undefined;
+  viWebhook: 'deliver' | 'drop';
+  singleChannel: boolean;
+}
+
+/** One sentence of a minted VI transcript (fake). */
+export interface ViSentenceRecord {
+  transcript: string;
+  mediaChannel: number;
+  sentenceIndex: number;
+}
+
+/** A minted VI transcript the fake REST surface serves (fetch + sentences). */
+export interface ViTranscriptRecord {
+  sid: string;
+  status: string;
+  customerKey: string;
+  serviceSid: string;
+  sourceSid: string;
+  sentences: ViSentenceRecord[];
 }
 
 export interface CallEngineDeps {
@@ -126,6 +156,13 @@ export class CallEngine {
   /** In-flight step promises kept so tests can await deterministic settling after
    *  clock.flush() runs the scheduled (async) callbacks. */
   private readonly pending = new Set<Promise<void>>();
+  /** Recordings awaiting an app-driven VI create (POST /v2/Transcripts), keyed by
+   *  RecordingSid. Populated when a recording fires; read by createViTranscript. */
+  private readonly pendingVi = new Map<string, PendingVi>();
+  /** Minted VI transcripts the REST surface serves, keyed by transcript sid. */
+  private readonly viTranscripts = new Map<string, ViTranscriptRecord>();
+  /** Deterministic VI transcript-sid counter (no Date.now()/Math.random()). */
+  private viSeq = 0;
 
   constructor(deps: CallEngineDeps) {
     this.clock = deps.clock;
@@ -162,6 +199,11 @@ export class CallEngine {
   private mintRecordingSid(): string {
     this.recordingSeq += 1;
     return `REfake${String(this.recordingSeq).padStart(8, '0')}`;
+  }
+
+  private mintViTranscriptSid(): string {
+    this.viSeq += 1;
+    return `GTfake${String(this.viSeq).padStart(8, '0')}`;
   }
 
   /** Extract pathname+search from an absolute TwiML url. The dispatcher prepends
@@ -525,10 +567,12 @@ export class CallEngine {
   }
 
   /**
-   * Post the recording callback (RecordingUrl ending in `.mp3` at the fake
-   * recording host) and, if the scenario carries a transcript, the transcription
-   * callback. Mints a deterministic RE… recordingSid and updates CallState +
-   * emits call.recording / call.transcript.
+   * Post the founder-bridge recording callback (RecordingUrl ending in `.mp3` at the
+   * fake recording host) and register the recording for an app-driven Voice
+   * Intelligence create. Mints a deterministic REfake recordingSid, updates CallState,
+   * and emits call.recording. Transcription is NO LONGER posted here: the app itself
+   * calls POST /v2/Transcripts (VI), which drives createViTranscript + the signed JSON
+   * completion webhook (Task 12) - replacing the deleted legacy text-in-body flow.
    */
   private async fireRecordingAndTranscription(
     call: CallState,
@@ -550,17 +594,103 @@ export class CallEngine {
     this.touch(call);
     this.hub.emit({ type: 'call.recording', call });
 
-    if (scenario.transcript !== undefined) {
-      // There is no TwiML-carried transcription callback URL; the app's
-      // transcription route is the fixed path below.
-      await this.dispatcher.post(
-        '/webhooks/twilio/voice/transcription',
-        buildTranscriptionParams({ callSid: call.callSid, transcript: scenario.transcript }),
-      );
-      call.transcript = scenario.transcript;
+    // Bridge recordings are dual-channel (caller + founder), so sentences alternate
+    // media_channel 1/2 to exercise the app's speaker-label joining.
+    this.registerPendingVi(recordingSid, {
+      callSid: call.callSid,
+      text: scenario.transcript,
+      viWebhook: scenario.viWebhook ?? 'deliver',
+      singleChannel: false,
+    });
+  }
+
+  /** Record a recording awaiting an app-driven VI create (bridge or voicemail). */
+  private registerPendingVi(recordingSid: string, entry: PendingVi): void {
+    this.pendingVi.set(recordingSid, entry);
+  }
+
+  /**
+   * Model the app's inline VI create (POST /v2/Transcripts): mint a GTfake transcript
+   * from the pending recording's scenario text, set call.viTranscriptSid, emit
+   * call.transcript, and - unless the pending entry's viWebhook is 'drop' - schedule
+   * the signed JSON completion webhook to the app. Returns the transcript record the
+   * REST route serializes. Idempotent-agnostic: each create mints a fresh sid (the
+   * app's persist seam dedupes downstream via never-overwrite).
+   */
+  createViTranscript(input: { serviceSid: string; customerKey: string; sourceSid: string }): ViTranscriptRecord {
+    const pending = this.pendingVi.get(input.sourceSid);
+    const sid = this.mintViTranscriptSid();
+    const sentences = this.buildSentences(pending?.text, pending?.singleChannel ?? true);
+    const record: ViTranscriptRecord = {
+      sid,
+      status: 'completed',
+      customerKey: input.customerKey,
+      serviceSid: input.serviceSid,
+      sourceSid: input.sourceSid,
+      sentences,
+    };
+    this.viTranscripts.set(sid, record);
+
+    // customerKey === the CallSid (the app sets it that way); mirror onto the call.
+    const call = this.calls.get(input.customerKey) ?? (pending ? this.calls.get(pending.callSid) : undefined);
+    if (call) {
+      call.viTranscriptSid = sid;
+      if (pending?.text !== undefined) call.transcript = pending.text;
       this.touch(call);
       this.hub.emit({ type: 'call.transcript', call });
     }
+
+    if ((pending?.viWebhook ?? 'deliver') === 'deliver') {
+      this.fireViWebhook({
+        transcript_sid: sid,
+        status: 'completed',
+        customer_key: input.customerKey,
+        service_sid: input.serviceSid,
+        event_type: 'voice_intelligence_transcript_available',
+      });
+    }
+    return record;
+  }
+
+  /** A minted VI transcript by sid, for the REST fetch + sentences routes. */
+  getViTranscript(sid: string): ViTranscriptRecord | undefined {
+    return this.viTranscripts.get(sid);
+  }
+
+  /** Split scenario text into 1-3 sentences and assign media channels. Single-channel
+   *  (voicemail) puts everything on channel 1; dual-channel (bridge) alternates 1/2 by
+   *  sentence index (even -> 1, odd -> 2) so the app renders Speaker 1/Speaker 2. */
+  private buildSentences(text: string | undefined, singleChannel: boolean): ViSentenceRecord[] {
+    if (text === undefined || text.trim().length === 0) return [];
+    const parts = (text.match(/[^.!?]+[.!?]*/g) ?? [text])
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0)
+      .slice(0, 3);
+    const list = parts.length > 0 ? parts : [text.trim()];
+    return list.map((transcript, index) => ({
+      transcript,
+      mediaChannel: singleChannel ? 1 : index % 2 === 0 ? 1 : 2,
+      sentenceIndex: index,
+    }));
+  }
+
+  /** Schedule the signed JSON VI completion webhook on the injected clock, tracked in
+   *  `pending` so settle() awaits it (Twilio returns the create response first, then
+   *  fires the webhook asynchronously - decoupled + deterministic under ManualClock). */
+  private fireViWebhook(payload: Record<string, unknown>): void {
+    const delayMs = (this.scheduleSeq += 1);
+    const p = new Promise<void>((resolve) => {
+      this.clock.schedule(delayMs, () => {
+        this.dispatcher
+          .postJson('/webhooks/twilio/voice/intelligence', payload)
+          .catch(() => {
+            /* a webhook delivery failure must not strand settle() (reconcile heals it) */
+          })
+          .finally(() => resolve());
+      });
+    });
+    this.pending.add(p);
+    void p.finally(() => this.pending.delete(p));
   }
 
   /**

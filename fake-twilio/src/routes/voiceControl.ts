@@ -38,6 +38,7 @@ export interface VoiceControlDeps {
 const ANSWER_LEGS = new Set(['callee', 'founder', 'team']);
 const DIGITS = new Set(['0', '1']);
 const OUTCOMES = new Set(['answered', 'no-answer', 'busy']);
+const VI_WEBHOOKS = new Set(['deliver', 'drop']);
 
 /** Lenient shape-check: reject obviously-bad types but fill no defaults (the
  *  engine does). Returns a validated CallScenario or throws with a message that
@@ -65,6 +66,9 @@ function validateScenario(raw: unknown): CallScenario {
   }
   if (s['transcript'] !== undefined && typeof s['transcript'] !== 'string') {
     throw new Error('scenario.transcript must be a string');
+  }
+  if (s['viWebhook'] !== undefined && !VI_WEBHOOKS.has(s['viWebhook'] as string)) {
+    throw new Error(`scenario.viWebhook must be one of deliver|drop`);
   }
   return raw as CallScenario;
 }

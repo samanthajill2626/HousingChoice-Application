@@ -39,6 +39,12 @@ export interface CallScenario {
   record?: boolean;
   transcript?: string;
   outcome?: 'answered' | 'no-answer' | 'busy';
+  /**
+   * Voice Intelligence completion-webhook delivery. 'deliver' (default) fires the
+   * signed JSON webhook to the app after a VI transcript is created; 'drop' suppresses
+   * it so tests exercise the app's reconcile (webhook-loss self-heal) leg instead.
+   */
+  viWebhook?: 'deliver' | 'drop';
 }
 
 export type CallStatus = 'ringing' | 'in-progress' | 'completed' | 'no-answer' | 'busy';
@@ -55,6 +61,8 @@ export interface CallState {
   recordingSid?: string;
   recordingUrl?: string;
   transcript?: string;
+  /** The Voice Intelligence transcript sid (GTfake...) minted for this call's recording. */
+  viTranscriptSid?: string;
   /** ISO-8601 (matches ThreadMessage); the CallEngine sets these via clock.nowIso(). */
   createdAt: string;
   updatedAt: string;

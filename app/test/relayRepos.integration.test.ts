@@ -554,4 +554,69 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     // A releasing number vanishes from the reuse candidate set instantly.
     expect((await poolNumbers.listActive()).map((i) => i.poolNumber)).not.toContain(pn);
   });
+
+  // --- listByState: per-state Query on byLifecycleState (listActive delegates) ---
+  it('listByState returns numbers in the requested state ONLY', async () => {
+    const act = poolPn('+1555070');
+    const rel = poolPn('+1555071');
+    const done = poolPn('+1555072');
+    for (const p of [act, rel, done]) {
+      await poolNumbers.create({
+        poolNumber: p, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+        burn: [`${p}-x`],
+      });
+    }
+    // rel -> releasing; done -> released (via the real W2 fence).
+    await poolNumbers.beginRelease(rel);
+    await poolNumbers.beginRelease(done);
+    await poolNumbers.releaseNumber(done);
+
+    const releasing = await poolNumbers.listByState('releasing');
+    const releasingPns = releasing.map((i) => i.poolNumber);
+    expect(releasingPns).toContain(rel);
+    expect(releasingPns).not.toContain(act);
+    expect(releasingPns).not.toContain(done);
+    // Cross-test-safe invariant: the partition returns ONLY releasing rows.
+    expect(releasing.every((i) => i.lifecycle_state === 'releasing')).toBe(true);
+  });
+
+  it('listByState returns RELEASED rows (sparse-GSI proof: the retained sentinel keeps them indexed)', async () => {
+    const pn = poolPn('+1555073');
+    await poolNumbers.create({
+      poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+      burn: [`${pn}-x`],
+    });
+    // The real release path: active -> releasing -> released.
+    await poolNumbers.beginRelease(pn);
+    await poolNumbers.releaseNumber(pn);
+
+    const released = await poolNumbers.listByState('released');
+    const row = released.find((i) => i.poolNumber === pn);
+    // A released row stays queryable via the GSI AND carries released_at.
+    expect(row).toBeDefined();
+    expect(typeof row?.released_at).toBe('string');
+    expect(released.every((i) => i.lifecycle_state === 'released')).toBe(true);
+  });
+
+  it('listActive still returns EXACTLY the active rows (delegates to listByState active)', async () => {
+    const act = poolPn('+1555074');
+    const done = poolPn('+1555075');
+    for (const p of [act, done]) {
+      await poolNumbers.create({
+        poolNumber: p, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+        burn: [`${p}-x`],
+      });
+    }
+    await poolNumbers.beginRelease(done);
+    await poolNumbers.releaseNumber(done);
+
+    const active = await poolNumbers.listActive();
+    const activePns = active.map((i) => i.poolNumber);
+    expect(activePns).toContain(act);
+    expect(activePns).not.toContain(done);
+    expect(active.every((i) => i.lifecycle_state === 'active')).toBe(true);
+    // Delegation equivalence: listActive() returns the same set as listByState('active').
+    const byState = (await poolNumbers.listByState('active')).map((i) => i.poolNumber).sort();
+    expect([...activePns].sort()).toEqual(byState);
+  });
 });

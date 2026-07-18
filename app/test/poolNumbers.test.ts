@@ -54,6 +54,9 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
     async listActive() {
       return [...store.values()].filter((i) => i.lifecycle_state === 'active');
     },
+    async listByState(state) {
+      return [...store.values()].filter((i) => i.lifecycle_state === state);
+    },
     async burnClaim(poolNumber, phones, tag) {
       if (phones.length === 0) return undefined;
       const item = store.get(poolNumber);

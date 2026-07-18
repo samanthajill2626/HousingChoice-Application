@@ -132,6 +132,13 @@ export interface PoolNumbersRepo {
   /** All ACTIVE numbers (paged Query on byLifecycleState 'active'). */
   listActive(): Promise<PoolNumberItem[]>;
   /**
+   * All numbers in ONE lifecycle state (paged Query on byLifecycleState).
+   * Generalizes listActive (which delegates to listByState('active')).
+   * releasing/released rows stay queryable because quarantine_until is retained
+   * as a fixed sentinel on EVERY item, so the GSI is deliberately non-sparse.
+   */
+  listByState(state: PoolNumberLifecycleState): Promise<PoolNumberItem[]>;
+  /**
    * THE atomic burn-as-claim. ADDs `phones` to burned_phones conditional on the
    * number being active AND none of them already burned here. Returns the
    * post-update item (ALL_NEW), or undefined on condition failure (overlap or
@@ -183,8 +190,32 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
     return Item as PoolNumberItem | undefined;
   }
 
+  async function listByState(state: PoolNumberLifecycleState): Promise<PoolNumberItem[]> {
+    // Paged Query on ONE lifecycle_state partition (the pool is small, but never
+    // truncate silently). quarantine_until (RANGE) is a fixed sentinel written on
+    // EVERY item and never removed, so the GSI is non-sparse: releasing/released
+    // rows stay indexed here and remain queryable. Order is arbitrary-but-stable.
+    const items: PoolNumberItem[] = [];
+    let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
+    do {
+      const { Items, LastEvaluatedKey } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byLifecycleState',
+          KeyConditionExpression: 'lifecycle_state = :s',
+          ExpressionAttributeValues: { ':s': state },
+          ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+        }),
+      );
+      items.push(...((Items ?? []) as PoolNumberItem[]));
+      exclusiveStartKey = LastEvaluatedKey;
+    } while (exclusiveStartKey !== undefined);
+    return items;
+  }
+
   return {
     get,
+    listByState,
 
     async create(input) {
       const now = new Date().toISOString();
@@ -216,25 +247,10 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
     },
 
     async listActive() {
-      // Paged Query on the 'active' partition (the pool is small, but never
-      // truncate silently). quarantine_until (RANGE) is a fixed sentinel, so
-      // items come back in an arbitrary-but-stable order.
-      const items: PoolNumberItem[] = [];
-      let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'];
-      do {
-        const { Items, LastEvaluatedKey } = await doc.send(
-          new QueryCommand({
-            TableName: table,
-            IndexName: 'byLifecycleState',
-            KeyConditionExpression: 'lifecycle_state = :s',
-            ExpressionAttributeValues: { ':s': 'active' },
-            ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
-          }),
-        );
-        items.push(...((Items ?? []) as PoolNumberItem[]));
-        exclusiveStartKey = LastEvaluatedKey;
-      } while (exclusiveStartKey !== undefined);
-      return items;
+      // All ACTIVE numbers - the hot reuse/sweep path. Delegates to listByState;
+      // kept as its own named method so callers (services/poolNumbers.ts) read
+      // clearly and the contract is unchanged.
+      return listByState('active');
     },
 
     async burnClaim(poolNumber, phones, tag) {

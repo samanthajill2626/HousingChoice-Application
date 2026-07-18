@@ -328,7 +328,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
@@ -390,6 +390,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
+    // Classify the inbound body/OptOutType ONCE via the shared detector (spec
+    // 3.1). A bare keyword is a command to the SYSTEM: it SKIPS the fan-out
+    // below and is processed against the sender's own 1:1 further down - it is
+    // never relayed to the other members. A body that merely CONTAINS a keyword
+    // is undefined here and relays exactly as today.
+    const kind = classifyInboundKeyword(Body, msg.params['OptOutType']);
+
     // Closed-group defensive guard: the router only reaches this branch on the
     // unknown-sender fallback (a member's late text is intercepted into the 1:1
     // before this). Persist for the record, NEVER fan out - the group is over.
@@ -399,6 +406,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Removed-member reply: persisted for the audit trail, no fan-out (they
       // are no longer a current participant).
       log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
+    } else if (kind !== undefined) {
+      // A bare keyword is a command to the SYSTEM, not group content (spec sec 2
+      // decision 2): persisted above for the audit trail, processed below, and
+      // NEVER relayed to the other members.
+      log.info(
+        { providerSid: MessageSid, kind },
+        'relay inbound keyword - processed, not fanned out',
+      );
     } else if (!appended.deduped) {
       // Current member, open thread, fresh message → fan out immediately
       // (enqueueImmediate → SQS DelaySeconds 0, no EventBridge 60s floor). A
@@ -433,10 +448,64 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
       if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
     }
+
+    // Keyword processing (spec 3.2): the SHARED seam runs against the sender's
+    // OWN 1:1 (closed-intercept idiom) - the conversation opt-out flag must land
+    // on their per-phone thread, NEVER on the relay group. The keyword message
+    // itself stays on the relay thread (persisted above for the audit trail).
+    let keywordReply: string | undefined;
+    if (kind !== undefined) {
+      const effectiveContact = senderContact ?? (await contacts.findByPhone(From));
+      const oneToOne = await conversations.createOrGetByParticipantPhone(
+        From,
+        conversationTypeFor(effectiveContact),
+      );
+      keywordReply = await processInboundKeywords({
+        conversation: oneToOne,
+        effectiveContact,
+        From,
+        Body,
+        OptOutType: msg.params['OptOutType'],
+        MessageSid,
+      });
+      // Immediate staff visibility (spec 3.4): a display/attention ANNOTATION for
+      // a CURRENT roster member only; suppression truth lives in the flags (3.3),
+      // never in this map. Best-effort - a failure NEVER crashes the webhook (the
+      // message is persisted and the compliance flags are already written).
+      if (sender) {
+        try {
+          if (kind === 'opt_out') {
+            await conversations.setRelayMemberOptedOut(relay.conversationId, senderKey, {
+              ...(sender.contactId !== undefined &&
+                sender.contactId.length > 0 && { contactId: sender.contactId }),
+              phone: sender.phone,
+              ...(sender.name !== undefined && { name: sender.name }),
+              at: new Date().toISOString(),
+            });
+          } else if (kind === 'opt_in') {
+            await conversations.clearRelayMemberOptedOut(relay.conversationId, senderKey);
+          }
+        } catch (err) {
+          log.error(
+            { err, providerSid: MessageSid, memberKey: senderKey },
+            'relay keyword annotation failed - flags recorded, attention item stale until next fan-out',
+          );
+        }
+      }
+    }
+
     log.info(
-      { providerSid: MessageSid, direction: 'inbound', bodyLength: Body?.length ?? 0, closed: isClosed, fannedOut: !isClosed && Boolean(sender) && !appended.deduped },
+      {
+        providerSid: MessageSid,
+        direction: 'inbound',
+        bodyLength: Body?.length ?? 0,
+        closed: isClosed,
+        fannedOut: !isClosed && Boolean(sender) && !appended.deduped && kind === undefined,
+        keyword: kind !== undefined,
+      },
       'twilio relay inbound message processed',
     );
+    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
@@ -743,8 +812,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         const openMatch = openMatches.sort(byNewestCreated)[0];
         if (openMatch) {
-          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
+          // Parity with the closed intercept: an open-path keyword (STOP/HELP/
+          // opt-in) returns its filed reply to ride the TwiML; a normal relay
+          // returns undefined -> empty ack.
+          const relayReply = await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(
+            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
+          );
           return;
         }
         // (b) Else a CLOSED group whose roster contains the sender -> deliver
@@ -779,8 +853,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         //     closed-roster member (that interception is branch (b) above).
         const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
         if (openFallback) {
-          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
+          // Same reply-riding-TwiML contract as the open-roster match above (an
+          // unknown-sender STOP still gets its confirmation).
+          const relayReply = await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(
+            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
+          );
           return;
         }
         // else: every group on this number is closed -> fall through to (2).

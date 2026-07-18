@@ -595,3 +595,226 @@ describe('relay inbound - (To, From) resolution (relay-number-lifecycle)', () =>
     expect(world.sent).toHaveLength(0);
   });
 });
+
+// Open-path keyword handling (relay-open-path-stop, plan Task 3): a member (or
+// any sender) who texts STOP / HELP / an opt-in keyword to a pool number while
+// the group is OPEN gets the keyword processed exactly like the 1:1 and closed
+// paths - flags set/cleared on the sender's OWN 1:1 (never the group), filed
+// reply on the TwiML, and the bare keyword NEVER relayed to the other members.
+describe('open-path keyword handling (relay-open-path-stop)', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  /** The 1:1 thread the keyword flag must land on = the conversation whose
+   *  participant_phone is the SENDER's phone (never the relay group, whose
+   *  participant_phone is the pool number). */
+  function oneToOneFor(phone: string): ConversationItem | undefined {
+    return [...world.conversations.values()].find((c) => c.participant_phone === phone);
+  }
+
+  it('STOP from a roster member: persisted on the relay thread, NO fan-out, 1:1 flagged, contact flagged (primary), annotation set, STOP confirmation TwiML', async () => {
+    seedRelay(world);
+    // ALICE is a real tenant contact whose PRIMARY number is ALICE.
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMopen-stop' }),
+    );
+    expect(res.status).toBe(200);
+    // The STOP confirmation rides the TwiML response (WE own the reply).
+    expect(res.text).toContain('<Message>');
+
+    // The bare STOP stays on the RELAY thread for the audit trail (one row,
+    // inbound, attributed to Alice) - and is NEVER fanned out to Bob/Carol.
+    const relayMsgs = world.messages.filter((m) => m.conversationId === 'conv-relay-1');
+    expect(relayMsgs).toHaveLength(1);
+    expect(relayMsgs[0]!.direction).toBe('inbound');
+    expect(relayMsgs[0]!.relay_sender_key).toBe('c-alice');
+    expect(relayMsgs[0]!.body).toBe('STOP');
+    expect(world.sent).toHaveLength(0);
+
+    // The conversation flag lands on Alice's OWN 1:1 - NEVER the relay group.
+    const oneToOne = oneToOneFor(ALICE);
+    expect(oneToOne).toBeDefined();
+    expect(world.optOutSets).toContainEqual({ conversationId: oneToOne!.conversationId, value: true });
+    expect(world.optOutSets.every((o) => o.conversationId !== 'conv-relay-1')).toBe(true);
+
+    // Contact flag set (STOP on the contact's primary number - BE1 scope).
+    expect(world.contacts.find((c) => c.contactId === 'c-alice')?.sms_opt_out).toBe(true);
+
+    // Immediate staff-visibility annotation on the relay group for the member.
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members?.['c-alice']).toBeDefined();
+  });
+
+  it('STOP from a roster member whose phone is NOT the contact primary: 1:1 flagged, contact flag NOT set (BE1 corner)', async () => {
+    seedRelay(world);
+    // Bob was rostered with phone BOB, but a later primary swap made BOB his
+    // SECONDARY number - his contact's PRIMARY is a different number now.
+    const bobPrimaryElsewhere = '+15550100042';
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: bobPrimaryElsewhere } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: BOB, Body: 'STOP', MessageSid: 'SMopen-stop-secondary' }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Message>');
+
+    // The 1:1 for the SECONDARY number (BOB) is flagged - the correct per-number
+    // suppression record when the contact flag is out of reach.
+    const oneToOne = oneToOneFor(BOB);
+    expect(oneToOne).toBeDefined();
+    expect(world.optOutSets).toContainEqual({ conversationId: oneToOne!.conversationId, value: true });
+
+    // Contact flag NOT set: the STOP did not arrive on the contact's primary
+    // number, so the primary must not be contaminated (number-scoped).
+    expect(world.contacts.find((c) => c.contactId === 'c-bob')?.sms_opt_out).toBeUndefined();
+    expect(world.flagWrites.some((w) => w.contactId === 'c-bob')).toBe(false);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('HELP from a member: filed HELP reply TwiML, no flags, no fan-out', async () => {
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'HELP', MessageSid: 'SMopen-help' }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Message>'); // the filed HELP copy rides the TwiML
+    // HELP never touches suppression state and never fans out.
+    expect(world.optOutSets).toHaveLength(0);
+    expect(world.flagWrites).toHaveLength(0);
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('START from a previously opted-out member: flags cleared, annotation cleared, welcome TwiML, no fan-out', async () => {
+    seedRelay(world, {
+      relay_opted_out_members: {
+        'c-alice': { contactId: 'c-alice', phone: ALICE, at: '2026-07-16T00:00:00.000Z' },
+      },
+    });
+    // Alice previously opted out; her contact flag is currently set.
+    world.contacts.push({
+      contactId: 'c-alice',
+      type: 'tenant',
+      phone: ALICE,
+      sms_opt_out: true,
+    } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'START', MessageSid: 'SMopen-start' }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Message>'); // the welcome copy rides the TwiML
+
+    // The 1:1 flag is CLEARED (value false), and the contact flag is cleared.
+    const oneToOne = oneToOneFor(ALICE);
+    expect(oneToOne).toBeDefined();
+    expect(world.optOutSets).toContainEqual({ conversationId: oneToOne!.conversationId, value: false });
+    expect(world.contacts.find((c) => c.contactId === 'c-alice')?.sms_opt_out).toBe(false);
+
+    // The Today attention annotation is cleared for the member.
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members?.['c-alice']).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('a body merely CONTAINING a keyword fans out normally with empty TwiML and no flags', async () => {
+    seedRelay(world);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'please stop by at 3', MessageSid: 'SMopen-contains' }),
+    );
+    expect(res.status).toBe(200);
+    // Not a keyword -> relays exactly as today: empty TwiML + fan-out to the others.
+    expect(res.text).toContain('<Response/>');
+    expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+    expect(world.sent.every((s) => s.body === 'Alice: please stop by at 3')).toBe(true);
+    // No suppression state touched.
+    expect(world.optOutSets).toHaveLength(0);
+    expect(world.flagWrites).toHaveLength(0);
+  });
+
+  it('unknown-sender STOP on the open fallback: 1:1 + contact flagged, NO annotation, confirmation TwiML, no fan-out', async () => {
+    seedRelay(world); // open group Alice/Bob/Carol; ZARA is on NO roster
+    // ZARA is a known contact (primary = ZARA) but not a member of this group.
+    world.contacts.push({ contactId: 'c-zara', type: 'tenant', phone: ZARA } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ZARA, Body: 'STOP', MessageSid: 'SMopen-unknown-stop' }),
+    );
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('<Message>'); // the STOP confirmation still rides the TwiML
+
+    // ZARA's own 1:1 + contact are flagged (same as a STOP to the main number).
+    const oneToOne = oneToOneFor(ZARA);
+    expect(oneToOne).toBeDefined();
+    expect(world.optOutSets).toContainEqual({ conversationId: oneToOne!.conversationId, value: true });
+    expect(world.contacts.find((c) => c.contactId === 'c-zara')?.sms_opt_out).toBe(true);
+
+    // NO roster annotation: the sender is on no roster (nothing to suppress there).
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('redelivered STOP (same MessageSid): still no fan-out, idempotent flag re-writes, confirmation TwiML again', async () => {
+    seedRelay(world);
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const params = relayInboundParams({ From: ALICE, Body: 'STOP', MessageSid: 'SMopen-stop-redeliver' });
+    const first = await signedTwilioPost(app, '/webhooks/twilio/sms', params);
+    expect(first.status).toBe(200);
+    expect(first.text).toContain('<Message>');
+
+    // Twilio redelivers the SAME SID.
+    const second = await signedTwilioPost(app, '/webhooks/twilio/sms', params);
+    expect(second.status).toBe(200);
+    expect(second.text).toContain('<Message>'); // confirmation re-rides the TwiML
+
+    // The relay message persisted exactly ONCE (SID dedupe), never fanned out.
+    expect(world.messages.filter((m) => m.provider_sid === 'SMopen-stop-redeliver')).toHaveLength(1);
+    expect(world.sent).toHaveLength(0);
+    // Idempotent re-writes: the flag remains set (both stores).
+    expect(world.contacts.find((c) => c.contactId === 'c-alice')?.sms_opt_out).toBe(true);
+    const oneToOne = oneToOneFor(ALICE);
+    expect(oneToOne).toBeDefined();
+    expect(world.optOutSets.filter((o) => o.conversationId === oneToOne!.conversationId && o.value === true).length).toBeGreaterThanOrEqual(1);
+  });
+});

@@ -367,10 +367,13 @@ assigned **inbound-voice-line holder's verified cell** — assigned in **Setting
 must verify their cell first). There is no `FOUNDER_CELL` fallback (removed). With **NO holder
 configured**, an inbound call is **NOT bridged**: the app emits an ERROR log (→ the
 `hc-<env>-error-logs` alarm, so ops is notified) and the caller hears the "please send us a text
-message" greeting. The holder lives as a single pointer row in the users TABLE (not config), so
-dev-data resets/reseeds can silently clear it (observed 2026-07-18: dev holder was assigned, later
-found unset). **If inbound falls back to the text-us greeting, check Settings > Team first** and
-re-assign; re-check after any dev users-table reseed.
+message" greeting. The holder is a ONE-TIME, PER-ENVIRONMENT manual assignment stored as a single
+pointer row in that env's users TABLE (not config): it survives deploys and normal terraform
+applies, but a users-table recreate/restore loses it, and a fresh environment starts WITHOUT one
+(deployed envs have NO data seeding - only the hermetic LOCAL stack auto-assigns the seeded admin).
+Observed 2026-07-18: cloud dev had no holder despite inbound "working" before - the fallback
+greeting masks it. **If inbound falls back to the text-us greeting, check Settings > Team first**
+and re-assign.
 
 **`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
 defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing

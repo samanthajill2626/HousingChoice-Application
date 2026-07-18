@@ -14,7 +14,15 @@ export type CallScenario = {
   outcome?: 'answered' | 'no-answer' | 'busy';
   ringMs?: number;
   record?: boolean;
+  // The text the fake Voice Intelligence transcript is built from (split into 1-3
+  // sentences). Bridge recordings render dual-channel (Speaker 1/2); voicemail is single.
   transcript?: string;
+  // 'deliver' (default) fires the signed VI completion webhook after a transcript is
+  // created; 'drop' suppresses it so the app's reconcile (webhook-loss) leg transcribes.
+  viWebhook?: 'deliver' | 'drop';
+  // Missed INBOUND founder-bridge voicemail: an object (default ~6s) leaves a message;
+  // `false` hangs up at the beep. Ignored for masked/outbound/answered calls.
+  voicemail?: { durationSec?: number } | false;
 };
 
 export interface FakeCall {

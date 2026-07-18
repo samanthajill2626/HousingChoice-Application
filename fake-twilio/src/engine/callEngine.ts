@@ -542,15 +542,32 @@ export class CallEngine {
         ? 'completed'
         : 'no-answer';
 
+    let recordPlan: Extract<TwimlPlan, { kind: 'record' }> | undefined;
     if (actionUrl !== undefined) {
-      await this.dispatcher.post(
-        this.pathOf(actionUrl),
-        buildDialStatusParams({
-          callSid: call.callSid,
-          dialCallStatus: dialStatus,
-          dialCallDuration: dialStatus === 'completed' ? 1 : 0,
-        }),
-      );
+      const statusParams = buildDialStatusParams({
+        callSid: call.callSid,
+        dialCallStatus: dialStatus,
+        dialCallDuration: dialStatus === 'completed' ? 1 : 0,
+      });
+      if (dialStatus === 'completed') {
+        // Answered: fire-and-forget exactly as before (the response body is unused).
+        await this.dispatcher.post(this.pathOf(actionUrl), statusParams);
+      } else {
+        // Missed: READ the Dial-action response - a missed INBOUND founder-bridge offers
+        // voicemail via a <Record>. Masked/outbound miss => say/hangup => no record plan,
+        // so this stays a no-op for them and behavior is byte-identical to today.
+        const { body } = await this.dispatcher.postForResponse(this.pathOf(actionUrl), statusParams);
+        const plan = interpretTwiml(body);
+        if (plan.kind === 'record') recordPlan = plan;
+      }
+    }
+
+    // Missed-branch voicemail: leave a message unless scenario.voicemail is false.
+    // leaveVoicemail records + closes the call ('completed'); otherwise fall through to
+    // today's terminal behavior. Answered calls never carry a record plan here.
+    if (recordPlan !== undefined && scenario.voicemail !== false) {
+      await this.leaveVoicemail(call, recordPlan, scenario);
+      return;
     }
 
     call.status = dialStatus;
@@ -558,50 +575,82 @@ export class CallEngine {
     this.hub.emit({ type: 'call.completed', call });
 
     // After the bridge answered + the <Dial action> status posted, fire the
-    // founder-bridge recording (and then transcription) when the TwiML asked to
-    // record AND the bridge actually answered. Masked (record='do-not-record', no
-    // recordingStatusCallback) yields recording.enabled === false → skip both.
+    // founder-bridge recording when the TwiML asked to record AND the bridge answered.
+    // Masked (record='do-not-record', no recordingStatusCallback) yields
+    // recording.enabled === false, so neither recording nor VI fires.
     if (recording.enabled && accepted && dialStatus === 'completed') {
-      await this.fireRecordingAndTranscription(call, recording.callbackUrl, scenario);
+      await this.fireRecording(call, recording.callbackUrl, 1, false, scenario);
     }
   }
 
   /**
-   * Post the founder-bridge recording callback (RecordingUrl ending in `.mp3` at the
-   * fake recording host) and register the recording for an app-driven Voice
-   * Intelligence create. Mints a deterministic REfake recordingSid, updates CallState,
-   * and emits call.recording. Transcription is NO LONGER posted here: the app itself
-   * calls POST /v2/Transcripts (VI), which drives createViTranscript + the signed JSON
-   * completion webhook (Task 12) - replacing the deleted legacy text-in-body flow.
+   * Post a recording callback (RecordingUrl ending in `.mp3` at the fake recording
+   * host) and register the recording for an app-driven Voice Intelligence create.
+   * Shared by the answered founder bridge (dual-channel, duration 1) and the missed
+   * voicemail (single-channel, scenario duration). Mints a deterministic REfake
+   * recordingSid, updates CallState, emits call.recording. Transcription is NOT posted
+   * here: the app calls POST /v2/Transcripts (VI), which drives createViTranscript.
    */
-  private async fireRecordingAndTranscription(
+  private async fireRecording(
     call: CallState,
     recordingCallbackUrl: string,
+    durationSec: number,
+    singleChannel: boolean,
     scenario: CallScenario,
   ): Promise<void> {
     const recordingSid = this.mintRecordingSid();
-    // CRITICAL: the URL MUST already end in `.mp3` — the app's getRecordingStream
-    // appends `.mp3` only when the URL lacks `.mp3/.wav`, and Phase 6's
-    // recording-serve route matches exactly this shape.
+    // CRITICAL: the URL MUST already end in `.mp3` - the app's getRecordingStream
+    // appends `.mp3` only when the URL lacks `.mp3/.wav`, and Phase 6's recording-serve
+    // route matches exactly this shape.
     const recordingUrl = `${this.recordingServeBase}/recordings/${call.callSid}/${recordingSid}.mp3`;
 
     await this.dispatcher.post(
       this.pathOf(recordingCallbackUrl),
-      buildRecordingParams({ callSid: call.callSid, recordingSid, recordingUrl, durationSec: 1 }),
+      buildRecordingParams({ callSid: call.callSid, recordingSid, recordingUrl, durationSec }),
     );
     call.recordingSid = recordingSid;
     call.recordingUrl = recordingUrl;
     this.touch(call);
     this.hub.emit({ type: 'call.recording', call });
 
-    // Bridge recordings are dual-channel (caller + founder), so sentences alternate
-    // media_channel 1/2 to exercise the app's speaker-label joining.
     this.registerPendingVi(recordingSid, {
       callSid: call.callSid,
       text: scenario.transcript,
       viWebhook: scenario.viWebhook ?? 'deliver',
-      singleChannel: false,
+      singleChannel,
     });
+  }
+
+  /**
+   * Follow the app's missed INBOUND founder-bridge voicemail TwiML (Say+Record+Say+
+   * Hangup): "record" for the scenario duration (default 6s), POST the completed
+   * recording callback (the app classifies a completed recording on a missed
+   * founder-bridge call as a voicemail, upgrades the outcome, and requests VI - single
+   * channel), then POST the Record action (/voicemail-done) to close the call. The call
+   * ends 'completed'. Only reached when the Dial-action response was a <Record> AND
+   * scenario.voicemail !== false (masked/outbound/answered never get a record plan).
+   */
+  private async leaveVoicemail(
+    call: CallState,
+    plan: Extract<TwimlPlan, { kind: 'record' }>,
+    scenario: CallScenario,
+  ): Promise<void> {
+    const vm = scenario.voicemail;
+    const durationSec = vm && vm.durationSec !== undefined ? vm.durationSec : 6;
+    if (plan.recordingStatusCallback !== undefined) {
+      await this.fireRecording(call, plan.recordingStatusCallback, durationSec, true, scenario);
+    }
+    if (plan.actionUrl !== undefined) {
+      // The Record action (/voicemail-done) only closes the call; the app reads just
+      // CallSid + ApiVersion there, so a minimal form POST suffices.
+      await this.dispatcher.postForResponse(this.pathOf(plan.actionUrl), {
+        CallSid: call.callSid,
+        ApiVersion: '2010-04-01',
+      });
+    }
+    call.status = 'completed';
+    this.touch(call);
+    this.hub.emit({ type: 'call.completed', call });
   }
 
   /** Record a recording awaiting an app-driven VI create (bridge or voicemail). */

@@ -70,6 +70,17 @@ function validateScenario(raw: unknown): CallScenario {
   if (s['viWebhook'] !== undefined && !VI_WEBHOOKS.has(s['viWebhook'] as string)) {
     throw new Error(`scenario.viWebhook must be one of deliver|drop`);
   }
+  // voicemail is either `false` (hang up at the beep) or an object { durationSec? }.
+  if (s['voicemail'] !== undefined && s['voicemail'] !== false) {
+    const vm = s['voicemail'];
+    if (typeof vm !== 'object' || vm === null || Array.isArray(vm)) {
+      throw new Error('scenario.voicemail must be an object or false');
+    }
+    const dur = (vm as Record<string, unknown>)['durationSec'];
+    if (dur !== undefined && typeof dur !== 'number') {
+      throw new Error('scenario.voicemail.durationSec must be a number');
+    }
+  }
   return raw as CallScenario;
 }
 

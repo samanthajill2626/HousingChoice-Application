@@ -45,6 +45,14 @@ export interface CallScenario {
    * it so tests exercise the app's reconcile (webhook-loss self-heal) leg instead.
    */
   viWebhook?: 'deliver' | 'drop';
+  /**
+   * Missed INBOUND founder-bridge voicemail behavior. When the app's Dial-action
+   * response offers a <Record>, an object (default, ~6s) leaves a message: the engine
+   * posts the completed recording callback + the Record action. `false` hangs up at the
+   * beep (no recording). Ignored when the app returns no <Record> (masked/outbound miss,
+   * any answered call) - the standing masked never-record invariant is untouched.
+   */
+  voicemail?: { durationSec?: number } | false;
 }
 
 export type CallStatus = 'ringing' | 'in-progress' | 'completed' | 'no-answer' | 'busy';

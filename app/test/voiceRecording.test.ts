@@ -536,6 +536,29 @@ describe('recording callback create-leg - VI transcription request (voice-transc
     expect(logs).not.toContain('inline vi create failed');
   });
 
+  it('inline create failure + fallback enqueue failure stamps transcript_status failed (no stuck pending)', async () => {
+    // The pipeline gave up IMMEDIATELY: no VI transcript exists and no job will
+    // ever retry. Leaving transcript_status 'pending' would show "Transcribing..."
+    // forever - spec 3.7 requires 'failed' when the pipeline gives up.
+    const world = createFakeWorld();
+    world.viCreateError = new Error('twilio down');
+    const { app } = await seedFounderBridgeVi(world);
+    configureOutboundQueue({
+      enqueue: async (envelope, opts) => {
+        if (envelope.jobName === CREATE_VOICE_TRANSCRIPT_JOB) throw new Error('sqs down');
+        return queueAdapter.enqueue(envelope, opts);
+      },
+    });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(res.status).toBe(200); // recording is safe; never 5xx
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.transcript_status).toBe('failed');
+    // The failed transition is announced live (SSE) like every other transition.
+    expect(world.emitted.some((e) => e.event === 'message.persisted')).toBe(true);
+  });
+
   it('VI unset -> no pending stamp, no create, no jobs (recording still stored)', async () => {
     const world = createFakeWorld();
     const { app } = await seedFounderBridge(world); // VI OFF harness

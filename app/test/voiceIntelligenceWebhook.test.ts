@@ -165,6 +165,30 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     expect(world.messages.find((m) => m.provider_sid === 'CAmask1')!.transcript).toBeUndefined();
   });
 
+  it('a FAILED-status event for a MASKED call is refused before any stamp (defense-in-depth)', async () => {
+    // The masked guardrail must precede the failed-stamp branch: a stray VI
+    // 'failed' event whose customerKey points at a masked call must not touch
+    // transcript_status (masked calls have no transcript lifecycle at all).
+    const world = createFakeWorld();
+    world.messages.push({
+      conversationId: 'conv-relay',
+      tsMsgId: 'CAmask2',
+      type: 'call',
+      direction: 'inbound',
+      provider_sid: 'CAmask2',
+      delivery_status: 'delivered',
+      masked: true,
+      call_outcome: 'missed',
+    } as never);
+    world.viTranscripts.set('GTmaskfail', { status: 'failed', customerKey: 'CAmask2', sentences: [] });
+    const { app } = makeWebhookHarness({ world });
+    const res = await signedJsonPost(app, VI_PATH, { transcript_sid: 'GTmaskfail' });
+    expect(res.status).toBe(200);
+    const entry = world.messages.find((m) => m.provider_sid === 'CAmask2')!;
+    expect(entry.transcript_status).toBeUndefined();
+    expect(entry.transcript).toBeUndefined();
+  });
+
   it('a queued/in-progress transcript is a 200 no-op - nothing persisted (adjudication F4b)', async () => {
     // Spec 3.3: any non-completed, non-failed status (Twilio's 'queued' /
     // 'in-progress') acks 200 with NO writes - the reconcile job is the safety

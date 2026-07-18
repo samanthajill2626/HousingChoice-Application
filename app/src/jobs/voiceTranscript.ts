@@ -29,11 +29,18 @@ export const RECONCILE_VOICE_TRANSCRIPT_JOB = 'voice.reconcileTranscript';
 /** Reconcile re-checks the VI transcript this many times before stamping failed. */
 export const RECONCILE_MAX_ATTEMPTS = 3;
 
+/** The fallback create retries this many times before stamping failed (planner
+ * review finding 1: without a cap-and-stamp, a sustained VI outage left
+ * transcript_status 'pending' forever - "Transcribing..." with no self-heal). */
+export const CREATE_MAX_ATTEMPTS = 3;
+
 export interface CreateVoiceTranscriptPayload {
   /** Twilio CallSid of the founder-bridge call = the VI CustomerKey. */
   callSid: string;
   /** RecordingSid of the mirrored recording to transcribe. */
   recordingSid: string;
+  /** 1-based create attempt; caps at CREATE_MAX_ATTEMPTS (absent = 1). */
+  attempt: number;
 }
 
 export interface ReconcileVoiceTranscriptPayload {
@@ -54,7 +61,11 @@ export function parseCreateVoiceTranscriptPayload(payload: unknown): CreateVoice
   if (typeof p.recordingSid !== 'string' || p.recordingSid.length === 0) {
     throw new Error('createVoiceTranscript: missing recordingSid');
   }
-  return { callSid: p.callSid, recordingSid: p.recordingSid };
+  // attempt is optional for backward compat with envelopes enqueued pre-cap.
+  if (p.attempt !== undefined && (typeof p.attempt !== 'number' || !Number.isInteger(p.attempt) || p.attempt < 1)) {
+    throw new Error('createVoiceTranscript: invalid attempt');
+  }
+  return { callSid: p.callSid, recordingSid: p.recordingSid, attempt: p.attempt ?? 1 };
 }
 
 export function parseReconcileVoiceTranscriptPayload(
@@ -96,6 +107,24 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     runAt: new Date(Date.now() + cfg.voiceTranscriptReconcileSeconds * 1000),
   });
 
+  /** Stamp transcript_status failed (pending -> failed) + emit SSE (spec 3.7:
+   * every transition announces live). Returns whether the stamp won. */
+  const stampFailedAndEmit = async (repo: MessagesRepo, bus: EventBus, callSid: string): Promise<boolean> => {
+    const stamped = await repo.setTranscriptFailed(callSid);
+    if (stamped) {
+      const fresh = await repo.getByProviderSid(callSid);
+      if (fresh) {
+        bus.emit('message.persisted', {
+          conversationId: fresh.conversationId,
+          tsMsgId: fresh.tsMsgId,
+          direction: fresh.direction,
+          deliveryStatus: fresh.delivery_status,
+        });
+      }
+    }
+    return stamped;
+  };
+
   defineJobHandler(CREATE_VOICE_TRANSCRIPT_JOB, async (rawPayload) => {
     const payload = parseCreateVoiceTranscriptPayload(rawPayload);
     config ??= loadConfig();
@@ -124,14 +153,40 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
       return;
     }
 
-    // API failure THROWS - the jobs pipeline redelivers (5 receives) then DLQs.
-    // The checks above make redelivery idempotent (a duplicate create dedupes at
-    // the persist seam; CustomerKey ties every copy to the same call).
-    const { transcriptSid } = await adapter.createViTranscript({
-      serviceSid,
-      recordingSid: payload.recordingSid,
-      customerKey: payload.callSid,
-    });
+    // Explicit capped retries (planner review finding 1): an API failure
+    // re-enqueues this job with attempt+1 up to CREATE_MAX_ATTEMPTS; exhaustion
+    // stamps transcript_status 'failed' so the "Transcribing..." indicator can
+    // never be stuck forever on a sustained VI outage. (Self-managed attempts
+    // instead of throw->SQS-redelivery so the FINAL attempt is knowable and can
+    // close the lifecycle; the exhaustion WARN is the operator signal.) The
+    // step-1 checks above keep every retry idempotent.
+    let transcriptSid: string;
+    try {
+      ({ transcriptSid } = await adapter.createViTranscript({
+        serviceSid,
+        recordingSid: payload.recordingSid,
+        customerKey: payload.callSid,
+      }));
+    } catch (err) {
+      if (payload.attempt < CREATE_MAX_ATTEMPTS) {
+        await enqueue(
+          CREATE_VOICE_TRANSCRIPT_JOB,
+          { callSid: payload.callSid, recordingSid: payload.recordingSid, attempt: payload.attempt + 1 },
+          reconcileDelay(config),
+        );
+        log.warn(
+          { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempt: payload.attempt + 1 },
+          'createVoiceTranscript: VI create failed - retry enqueued',
+        );
+        return;
+      }
+      const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
+      log.warn(
+        { err, callSid: payload.callSid, recordingSid: payload.recordingSid, attempts: payload.attempt, stamped },
+        'createVoiceTranscript: exhausted attempts - stamped transcript_status failed',
+      );
+      return;
+    }
     await enqueue(
       RECONCILE_VOICE_TRANSCRIPT_JOB,
       { callSid: payload.callSid, transcriptSid, attempt: 1 },
@@ -184,18 +239,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     // Exhausted: stamp transcript_status failed (spec 3.4/3.7) + emit SSE. A very
     // late webhook can still upgrade failed -> completed (setCallTranscript
     // condition is on transcript, not status).
-    const stamped = await messages.setTranscriptFailed(payload.callSid);
-    if (stamped) {
-      const fresh = await messages.getByProviderSid(payload.callSid);
-      if (fresh) {
-        events.emit('message.persisted', {
-          conversationId: fresh.conversationId,
-          tsMsgId: fresh.tsMsgId,
-          direction: fresh.direction,
-          deliveryStatus: fresh.delivery_status,
-        });
-      }
-    }
+    const stamped = await stampFailedAndEmit(messages, events, payload.callSid);
     log.warn(
       { callSid: payload.callSid, transcriptSid: payload.transcriptSid, attempts: payload.attempt, stamped },
       'reconcileVoiceTranscript: exhausted attempts - stamped transcript_status failed',

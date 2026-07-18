@@ -135,20 +135,49 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
     expect(world.viCreates).toHaveLength(0);
   });
 
-  it('create: adapter failure throws (queue redelivers)', async () => {
-    register(testConfig());
-    seedCall();
+  it('create: adapter failure re-enqueues itself with attempt+1 (delayed, no throw)', async () => {
+    register(testConfig()); // reconcileSeconds 1 -> the retry lands in queueAdapter.delayed
+    seedCall({ transcript_status: 'pending' });
     world.viCreateError = new Error('twilio down');
-    // The InProcess queue swallows a deferred-dispatch failure, so assert the
-    // throw via dispatchJob directly (which re-throws handler errors -> the SQS
-    // consumer redelivers, then DLQs after the receive cap).
-    await expect(
-      dispatchJob({
-        jobName: CREATE_VOICE_TRANSCRIPT_JOB,
-        payload: { callSid: CALL_SID, recordingSid: RECORDING_SID },
-      }),
-    ).rejects.toThrow('twilio down');
+    await dispatchJob({
+      jobName: CREATE_VOICE_TRANSCRIPT_JOB,
+      payload: { callSid: CALL_SID, recordingSid: RECORDING_SID, attempt: 1 },
+    });
     expect(world.viCreates).toHaveLength(0);
+    expect(queueAdapter.delayed).toHaveLength(1);
+    const retry = queueAdapter.delayed[0]!;
+    expect(retry.envelope.jobName).toBe(CREATE_VOICE_TRANSCRIPT_JOB);
+    expect(retry.envelope.payload).toEqual({ callSid: CALL_SID, recordingSid: RECORDING_SID, attempt: 2 });
+    // Not exhausted yet -> the lifecycle stays pending (the retry owns closing it).
+    expect(world.messages[0]!.transcript_status).toBe('pending');
+  });
+
+  it('create: exhausts CREATE_MAX_ATTEMPTS then stamps transcript_status failed + emits SSE', async () => {
+    register(testConfig({ voiceTranscriptReconcileSeconds: 0 })); // immediate retries -> settle drains the chain
+    seedCall({ transcript_status: 'pending' });
+    world.viCreateError = new Error('twilio down');
+    await enqueueImmediate(CREATE_VOICE_TRANSCRIPT_JOB, {
+      callSid: CALL_SID,
+      recordingSid: RECORDING_SID,
+      attempt: 1,
+    });
+    await queueAdapter.settle();
+    expect(world.viCreates).toHaveLength(0);
+    expect(queueAdapter.delayed).toHaveLength(0); // no further retries queued
+    expect(world.messages[0]!.transcript_status).toBe('failed');
+    expect(world.emitted.some((e) => e.event === 'message.persisted')).toBe(true);
+    expect(JSON.stringify(capture.lines)).toContain('createVoiceTranscript: exhausted attempts');
+  });
+
+  it('create: legacy payload without attempt parses as attempt 1; invalid attempt rejected', () => {
+    expect(parseCreateVoiceTranscriptPayload({ callSid: 'CA1', recordingSid: 'RE1' })).toEqual({
+      callSid: 'CA1',
+      recordingSid: 'RE1',
+      attempt: 1,
+    });
+    expect(() =>
+      parseCreateVoiceTranscriptPayload({ callSid: 'CA1', recordingSid: 'RE1', attempt: 0 }),
+    ).toThrow();
   });
 
   it('reconcile: transcript already present -> no adapter fetch (webhook won)', async () => {
@@ -243,6 +272,7 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
     expect(parseCreateVoiceTranscriptPayload({ callSid: 'x', recordingSid: 'r' })).toEqual({
       callSid: 'x',
       recordingSid: 'r',
+      attempt: 1,
     });
     expect(() => parseReconcileVoiceTranscriptPayload({ callSid: 'x', transcriptSid: 't' })).toThrow();
     expect(() =>

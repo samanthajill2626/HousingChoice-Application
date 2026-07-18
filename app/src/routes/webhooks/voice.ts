@@ -1668,9 +1668,25 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     } catch (err) {
       log.warn({ err, callSid: entryCallSid, recordingSid }, 'inline vi create failed - falling back to job');
       try {
-        await enqueue(CREATE_VOICE_TRANSCRIPT_JOB, { callSid: entryCallSid, recordingSid });
+        await enqueue(CREATE_VOICE_TRANSCRIPT_JOB, { callSid: entryCallSid, recordingSid, attempt: 1 });
       } catch (enqueueErr) {
+        // No VI transcript exists and no job will ever retry - the pipeline gave
+        // up NOW, so close the lifecycle (spec 3.7: 'failed' when the pipeline
+        // gives up; a stuck 'pending' would show "Transcribing..." forever) and
+        // announce the transition live.
         log.error({ err: enqueueErr, callSid: entryCallSid }, 'vi create fallback enqueue failed');
+        const stamped = await messages.setTranscriptFailed(entryCallSid);
+        if (stamped) {
+          const latest = await messages.getByProviderSid(entryCallSid);
+          if (latest) {
+            events.emit('message.persisted', {
+              conversationId: latest.conversationId,
+              tsMsgId: latest.tsMsgId,
+              direction: latest.direction,
+              deliveryStatus: latest.delivery_status,
+            });
+          }
+        }
       }
       return;
     }

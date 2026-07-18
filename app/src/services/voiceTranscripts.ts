@@ -85,23 +85,9 @@ export async function persistViTranscript(
     return 'not-ours';
   }
 
-  if (summary.status === 'failed') {
-    const stamped = await messages.setTranscriptFailed(callSid);
-    if (stamped) {
-      const entry = await messages.getByProviderSid(callSid);
-      if (entry) emitPersisted(events, entry);
-    }
-    logger.info({ transcriptSid, callSid, stamped }, 'vi transcript: reported failed - transcript_status stamped');
-    return 'failed-stamped';
-  }
-  if (summary.status !== 'completed') {
-    logger.info(
-      { transcriptSid, callSid, status: summary.status },
-      'vi transcript: not completed yet - reconcile is the safety net',
-    );
-    return 'not-completed';
-  }
-
+  // Resolve OUR call FIRST - every status branch below (including the failed
+  // stamp) must sit behind the not-ours and masked guardrails, not lean on the
+  // conditional write being a no-op (defense-in-depth, planner review nit 3).
   const entry = await messages.getByProviderSid(callSid);
   if (!entry || entry.type !== 'call') {
     logger.warn({ transcriptSid, callSid }, 'vi transcript: no founder-bridge call for customerKey - not ours');
@@ -112,6 +98,20 @@ export async function persistViTranscript(
     // VI event whose customerKey points at one.
     logger.warn({ transcriptSid, callSid, masked: true }, 'vi transcript for a MASKED call - refused');
     return 'masked-refused';
+  }
+
+  if (summary.status === 'failed') {
+    const stamped = await messages.setTranscriptFailed(callSid);
+    if (stamped) emitPersisted(events, entry);
+    logger.info({ transcriptSid, callSid, stamped }, 'vi transcript: reported failed - transcript_status stamped');
+    return 'failed-stamped';
+  }
+  if (summary.status !== 'completed') {
+    logger.info(
+      { transcriptSid, callSid, status: summary.status },
+      'vi transcript: not completed yet - reconcile is the safety net',
+    );
+    return 'not-completed';
   }
 
   const sentences = await adapter.listViSentences(transcriptSid);

@@ -42,12 +42,39 @@ import {
 import { TEST_ADMIN_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
+import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
 // The inbound-voice-line HOLDER's verified cell — the number inbound calls ring.
 // Just this suite's fake holder cell; NOT an env var (there is no FOUNDER_CELL /
 // env-var fallback anymore — inbound rings the assigned holder's verified cell).
 const HOLDER_CELL = '+15550160000';
+// A relay pool number + two members - for the MASKED privacy-invariant test
+// (a masked missed call NEVER gets a voicemail; it keeps today's goodbye).
+const POOL = '+15550109000';
+const ALICE = '+15550100001';
+const BOB = '+15550100002';
+
+/** Seed an open relay group so a MASKED inbound call bridges (masked:true). */
+function seedRelayGroup(world: FakeWorld): ConversationItem {
+  const now = new Date().toISOString();
+  const conv: ConversationItem = {
+    conversationId: 'conv-relay-voice-1',
+    participant_phone: POOL,
+    pool_number: POOL,
+    status: 'open',
+    last_activity_at: now,
+    type: 'relay_group',
+    ai_mode: 'manual',
+    participants: [
+      { contactId: 'c-alice', phone: ALICE, name: 'Alice' },
+      { contactId: 'c-bob', phone: BOB, name: 'Bob' },
+    ],
+    created_at: now,
+  };
+  world.conversations.set(conv.conversationId, conv);
+  return conv;
+}
 
 /** A standard inbound voice webhook to the BUSINESS number (non-pool To). */
 function bizVoiceParams(over: Record<string, string> = {}): Record<string, string> {
@@ -469,11 +496,12 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(world.sent[0]!.body).toBe(world.settings.missedCallAutoText);
   });
 
-  it('no-answer <Dial action> returns a masked goodbye TwiML — never Twilio\'s generic error', async () => {
+  it('missed INBOUND founder-bridge <Dial action> OFFERS VOICEMAIL: prompt + <Record maxLength 120 playBeep + callbacks> - never Twilio\'s generic error', async () => {
     // The <Dial action> URL (= /status) MUST get valid TwiML back, or Twilio
     // plays "an application error has occurred" to the caller on a no-answer
-    // (the 2026-06-15 bug — /status used to return an empty 200). We have no
-    // voicemail; the caller hears a brief masked goodbye, then hangs up.
+    // (the 2026-06-15 bug - /status used to return an empty 200). A missed
+    // INBOUND business-line call now OFFERS A VOICEMAIL (prompt + <Record>) -
+    // the caller can leave a message; the recording rides the existing callback.
     const app = await seedRingingBridge();
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
       CallSid: 'CAbiz0001',
@@ -483,9 +511,18 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(res.status).toBe(200);
     expect(res.headers['content-type']).toContain('text/xml');
     expect(res.text).toContain('<Say');
-    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
+    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+    expect(res.text).toContain('<Record');
+    expect(res.text).toContain('maxLength="120"');
+    expect(res.text).toContain('playBeep="true"');
+    expect(res.text).toContain('/webhooks/twilio/voice/voicemail-done');
+    expect(res.text).toContain('/webhooks/twilio/voice/recording');
+    expect(res.text).toContain('recordingStatusCallbackEvent="completed"');
+    expect(res.text).toContain(resolveMessage('voice.voicemail_thanks'));
     expect(res.text).toContain('<Hangup');
-    expect(res.text).not.toContain(CALLER); // never the caller's number
+    // The old goodbye is gone for the inbound business line; never the caller's number.
+    expect(res.text).not.toContain(resolveMessage('voice.missed_call_goodbye'));
+    expect(res.text).not.toContain(CALLER);
   });
 
   it('answered/completed <Dial action> returns clean (empty) TwiML — no goodbye, no error', async () => {
@@ -547,8 +584,9 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(call.call_duration).toBeUndefined(); // a miss records no talk time
     expect(world.pushSends.filter((p) => p.notification.kind === 'missed_call')).toHaveLength(1);
     expect(world.sent).toHaveLength(1); // the auto-text fired
-    // The caller hears the goodbye (answers + cleanly ends the leg → no loop).
-    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
+    // The caller is offered a voicemail (answers + cleanly ends the leg -> no loop).
+    expect(res.text).toContain(resolveMessage('voice.voicemail_prompt'));
+    expect(res.text).toContain('<Record');
     expect(res.text).toContain('<Hangup');
   });
 
@@ -723,5 +761,62 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     // Push still went (the founder should know); the auto-text was refused.
     expect(world.pushSends.some((p) => p.notification.kind === 'missed_call')).toBe(true);
     expect(world.sent).toHaveLength(0);
+  });
+
+  it('a missed MASKED relay call keeps goodbye + hangup - NEVER a voicemail (privacy invariant; the same guard excludes OUTBOUND misses)', async () => {
+    // Voicemail is BUSINESS LINE ONLY (spec decision 3). A masked relay miss
+    // must keep today's goodbye + hangup - never a <Record>. (The TwiML guard
+    // is `entry.masked !== true && entry.direction !== 'outbound'`, so an
+    // outbound founder-bridge miss is excluded by the same clause.)
+    seedRelayGroup(world);
+    const { app } = makeWebhookHarness({ world });
+    // Masked relay inbound call -> a masked:true call entry.
+    await signedTwilioPost(app, '/webhooks/twilio/voice', {
+      CallSid: 'CAmasked1',
+      From: ALICE,
+      To: POOL,
+      CallStatus: 'ringing',
+      Direction: 'inbound',
+      ApiVersion: '2010-04-01',
+    });
+    expect(world.messages.find((m) => m.provider_sid === 'CAmasked1')!.masked).toBe(true);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAmasked1',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain('<Record'); // masked NEVER records a voicemail
+  });
+
+  it('POST /voicemail-done returns the thanks + hangup TwiML (signature-gated)', async () => {
+    const app = await seedRingingBridge();
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/voicemail-done', {
+      CallSid: 'CAbiz0001',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/xml');
+    expect(res.text).toContain(resolveMessage('voice.voicemail_thanks'));
+    expect(res.text).toContain('<Hangup');
+  });
+
+  it('POST /voicemail-done rejects an invalid X-Twilio-Signature (403)', async () => {
+    const app = await seedRingingBridge();
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/voicemail-done',
+      { CallSid: 'CAbiz0001', ApiVersion: '2010-04-01' },
+      { tamper: true },
+    );
+    expect(res.status).toBe(403);
+  });
+
+  it('catalog: the voicemail prompt + thanks entries resolve', () => {
+    expect(resolveMessage('voice.voicemail_prompt')).toMatch(/leave a message after the tone/);
+    expect(resolveMessage('voice.voicemail_thanks')).toMatch(/got your message/);
   });
 });

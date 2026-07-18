@@ -1364,13 +1364,35 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // call from the TwiML we return. An empty/non-TwiML 200 here made Twilio
     // play its generic "an application error has occurred" to the caller on a
     // no-answer (the action fired with no TwiML to continue). Answer with valid
-    // TwiML: on a MISS, a brief masked goodbye — we have NO voicemail; a missed
-    // bridge is handled by the missed push + auto-text — then hang up; on an
-    // answered/completed bridge (or a per-leg statusCallback, whose response
-    // Twilio ignores) an empty <Response/> ends the call cleanly. Never leaks
-    // the caller's number (no <Number>/callerId echoed here).
+    // TwiML. On a MISS:
+    //  - INBOUND founder-bridge (business line, masked:false) -> OFFER A VOICEMAIL
+    //    (voice-transcription spec 4.1): a prompt + <Record> whose recording rides
+    //    the EXISTING recordingStatusCallback (/voice/recording), where it is
+    //    classified as a voicemail; then thanks + hangup on the Record action. The
+    //    miss-time missed push + auto-text already fired above (before any message).
+    //  - masked relay OR outbound miss -> today's brief goodbye + hangup (spec
+    //    decision 3: voicemail is BUSINESS LINE ONLY; masked calls never record).
+    // On an answered/completed bridge (or a per-leg statusCallback, whose response
+    // Twilio ignores) an empty <Response/> ends the call cleanly. Never leaks the
+    // caller's number (no <Number>/callerId echoed here). Identify the call with
+    // `entry` (NOT `fresh`, which is scoped to the transitioned block above) - it
+    // is populated for every terminal Dial summary, i.e. whenever isMissed is true;
+    // the guard matches the onFounderBridgeMissed side-effect guard exactly.
     const reply = new VoiceResponse();
-    if (isMissed) {
+    if (isMissed && entry?.type === 'call' && entry.masked !== true && entry.direction !== 'outbound') {
+      reply.say(resolveMessage('voice.voicemail_prompt'));
+      reply.record({
+        maxLength: 120,
+        playBeep: true,
+        action: `${baseUrl}/webhooks/twilio/voice/voicemail-done`,
+        recordingStatusCallback: `${baseUrl}/webhooks/twilio/voice/recording`,
+        recordingStatusCallbackEvent: ['completed'],
+      });
+      // Reached only if <Record> falls through without a recording (caller hung up
+      // before the beep) - the recording, if any, arrives via the callback above.
+      reply.say(resolveMessage('voice.voicemail_thanks'));
+      reply.hangup();
+    } else if (isMissed) {
       reply.say(resolveMessage('voice.missed_call_goodbye'));
       reply.hangup();
     }
@@ -1522,6 +1544,19 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // above, so this is never reached for them.
     await requestTranscription(entryCallSid, RecordingSid);
     res.status(200).end();
+  });
+
+  // ---------------------------------------------------------------------
+  // <Record action> - POST /voice/voicemail-done (voice-transcription 4.1).
+  // Fires when the caller finishes the voicemail (# / timeout / hangup mid-record).
+  // The voicemail audio itself arrives separately via the recordingStatusCallback
+  // (/voice/recording); this route only closes the call politely. Signature-gated
+  // like the other voice webhooks.
+  router.post('/voicemail-done', verifySignature, (_req, res) => {
+    const reply = new VoiceResponse();
+    reply.say(resolveMessage('voice.voicemail_thanks'));
+    reply.hangup();
+    sendTwiml(res, reply);
   });
 
   // ---------------------------------------------------------------------

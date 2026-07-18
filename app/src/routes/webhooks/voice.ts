@@ -1479,6 +1479,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       RecordingDuration !== undefined && RecordingDuration.length > 0 ? Number(RecordingDuration) : undefined;
     const duration =
       recordingDuration !== undefined && Number.isFinite(recordingDuration) ? recordingDuration : undefined;
+
+    // Voicemail classification (voice-transcription spec 4.2): a completed
+    // recording on a MISSED inbound founder-bridge call IS a voicemail (an
+    // answered bridge records on an 'answered' call; the Dial summary always
+    // precedes the Record verb, so the outcome is settled first). Masked calls
+    // were already refused above; outbound founder-bridge misses take no voicemail.
+    const isVoicemail = entry.call_outcome === 'missed' && entry.direction !== 'outbound';
+    // A near-empty voicemail (caller hung up at/before the beep) is discarded -
+    // not stored, outcome stays 'missed', the miss-time auto-text already fired.
+    // BEFORE the claim so nothing is stored. PII: sids + duration only.
+    if (isVoicemail && duration !== undefined && duration < 2) {
+      log.info(
+        { callSid: entryCallSid, recordingSid: RecordingSid, duration },
+        'voicemail below minimum duration - discarded',
+      );
+      res.status(200).end();
+      return;
+    }
     // The S3 key is fully derivable up front (recordings/<callSid>/<recordingSid>),
     // so we can CLAIM the RecordingSid with its intended key BEFORE the fetch.
     const key = `recordings/${entryCallSid}/${RecordingSid}`;
@@ -1538,6 +1556,28 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored: true },
       'founder-bridge recording mirrored to S3',
     );
+    // Voicemail outcome upgrade (spec 4.2): promote 'missed' -> 'voicemail' via a
+    // CONDITIONAL write (only-if-missed) - which also makes a redelivered recording
+    // callback idempotent. On the FIRST delivery (the upgrade won): emit the live
+    // update + fire the best-effort "New voicemail" push (never throws; a push
+    // failure must not 5xx the callback - the recording is already safe). Answered
+    // calls never match; masked already refused.
+    if (isVoicemail) {
+      const upgraded = await messages.upgradeCallOutcomeToVoicemail(entryCallSid);
+      if (upgraded) {
+        events.emit('message.persisted', {
+          conversationId: entry.conversationId,
+          tsMsgId: entry.tsMsgId,
+          direction: entry.direction,
+          deliveryStatus: entry.delivery_status,
+        });
+        try {
+          await sendVoicemailPush(entry.conversationId, entryCallSid);
+        } catch (err) {
+          log.error({ err, callSid: entryCallSid }, 'voicemail push failed');
+        }
+      }
+    }
     // Create leg (spec 3.2): request VI transcription now that the recording is
     // safely mirrored. Runs for EVERY non-masked founder-bridge recording (bridge
     // AND voicemail); no-op when VI is unconfigured. Masked calls already returned
@@ -1712,6 +1752,43 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         await pushService.sendToUser(founder.userId, { kind: 'missed_call', payload });
       } catch (err) {
         log.warn({ err, callSid, userId: founder.userId }, 'founder triage: missed-call push failed for a founder — continuing');
+      }
+    }
+  }
+
+  /**
+   * Send the "New voicemail" push to every founder (admin user). Sibling of
+   * sendMissedCallPush - identical masked posture: the call_party_label (a
+   * role/name, NEVER a raw phone), an unknown caller's number surfaced ONLY on
+   * the founder's own device via pushCallerLabel. kind 'voicemail'; no quick-reply
+   * actions (a voicemail is read, not quick-replied). Best-effort - a per-founder
+   * failure is logged and never propagates (the recording is already safe).
+   */
+  async function sendVoicemailPush(conversationId: string, callSid: string): Promise<void> {
+    const founders = await resolveFounders();
+    if (founders.length === 0) {
+      log.info({ callSid }, 'voicemail: no admin users to push');
+      return;
+    }
+    const entry = await messages.getByProviderSid(callSid);
+    const storedLabel =
+      typeof entry?.call_party_label === 'string' && entry.call_party_label.length > 0
+        ? entry.call_party_label
+        : UNKNOWN_CALLER_LABEL;
+    const conversation = await conversations.getById(conversationId);
+    const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
+    const payload = {
+      title: 'New voicemail',
+      body: `New voicemail - ${callerLabel}`,
+      kind: 'voicemail' as const,
+      callId: callSid,
+      conversationId,
+    };
+    for (const founder of founders) {
+      try {
+        await pushService.sendToUser(founder.userId, { kind: 'voicemail', payload });
+      } catch (err) {
+        log.warn({ err, callSid, userId: founder.userId }, 'voicemail push failed for a founder - continuing');
       }
     }
   }

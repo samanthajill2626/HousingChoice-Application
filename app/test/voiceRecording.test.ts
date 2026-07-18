@@ -556,4 +556,133 @@ describe('recording callback create-leg - VI transcription request (voice-transc
     await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
     expect(world.viCreates).toHaveLength(1);
   });
+
+  // --- Voicemail classification (voice-transcription spec 4.2) ---------------
+  // A completed recording on a MISSED inbound founder-bridge call IS a voicemail:
+  // upgrade the outcome (conditional, idempotent), fire the "New voicemail" push,
+  // and request transcription (shared create leg). A near-empty (<2s) recording is
+  // discarded before the mirror. Answered/masked/outbound never become voicemail.
+
+  /** Drive the seeded founder bridge to a terminal MISS (no-answer Dial summary). */
+  async function driveToMissed(app: Parameters<typeof signedTwilioPost>[0]) {
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+  }
+
+  it('a completed recording on a MISSED inbound founder-bridge call becomes a voicemail: outcome upgraded, New-voicemail push, transcription requested', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+    await driveToMissed(app);
+    world.pushSends.length = 0; // drop the missed-call push; assert only the voicemail push
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/recording',
+      recordingParams({ RecordingDuration: '6' }),
+    );
+    expect(res.status).toBe(200);
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    // The outcome was upgraded 'missed' -> 'voicemail'.
+    expect(call.call_outcome).toBe('voicemail');
+    // The recording is stored + transcription requested (voicemail rides the create leg).
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111');
+    expect(world.viCreates).toHaveLength(1);
+    // Exactly one "New voicemail" push to the founder, masked (no raw caller phone).
+    const vmPush = world.pushSends.filter((p) => p.notification.kind === 'voicemail');
+    expect(vmPush).toHaveLength(1);
+    expect(vmPush[0]!.notification.payload.kind).toBe('voicemail');
+    expect(vmPush[0]!.notification.payload.title).toBe('New voicemail');
+    expect(vmPush[0]!.notification.payload.callId).toBe('CAbiz0001');
+    expect(JSON.stringify(vmPush[0]!.notification.payload)).not.toContain(CALLER);
+  });
+
+  it('a redelivered voicemail recording callback upgrades + pushes only once', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+    await driveToMissed(app);
+    world.pushSends.length = 0;
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams({ RecordingDuration: '6' }));
+    expect(world.messages.find((m) => m.provider_sid === 'CAbiz0001')!.call_outcome).toBe('voicemail');
+    expect(world.pushSends.filter((p) => p.notification.kind === 'voicemail')).toHaveLength(1);
+
+    // Redeliver: recording_s3_key present -> early 200 before any upgrade/push.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams({ RecordingDuration: '6' }));
+    expect(world.pushSends.filter((p) => p.notification.kind === 'voicemail')).toHaveLength(1);
+  });
+
+  it('a sub-2s voicemail is discarded: no store, outcome stays missed, no push, no VI', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+    await driveToMissed(app);
+    world.pushSends.length = 0;
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/recording',
+      recordingParams({ RecordingDuration: '1' }),
+    );
+    expect(res.status).toBe(200);
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_outcome).toBe('missed'); // never upgraded
+    expect(call.recording_s3_key).toBeUndefined(); // not stored
+    expect(world.mediaPuts).toHaveLength(0);
+    expect(world.pushSends.filter((p) => p.notification.kind === 'voicemail')).toHaveLength(0);
+    expect(world.viCreates).toHaveLength(0); // discarded before the create leg
+  });
+
+  it('an ANSWERED call recording never upgrades outcome or fires the voicemail push', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+    // Accept the bridge (press-1), then a completed Dial summary WITH duration -> answered.
+    await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/whisper-gate?conversationId=x&parentCallSid=CAbiz0001&leg=founder',
+      { Digits: '1', CallSid: 'CAfounder-leg' },
+    );
+    await signedTwilioPost(app, '/webhooks/twilio/voice/status', {
+      CallSid: 'CAbiz0001',
+      DialCallStatus: 'completed',
+      DialCallDuration: '42',
+      ApiVersion: '2010-04-01',
+    });
+    expect(world.messages.find((m) => m.provider_sid === 'CAbiz0001')!.call_outcome).toBe('answered');
+    world.pushSends.length = 0;
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/recording',
+      recordingParams({ RecordingDuration: '6' }),
+    );
+    expect(res.status).toBe(200);
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_outcome).toBe('answered'); // never upgraded to voicemail
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111'); // bridge recording stored
+    expect(world.pushSends.filter((p) => p.notification.kind === 'voicemail')).toHaveLength(0);
+    expect(world.viCreates).toHaveLength(1); // transcription still requested for the bridge
+  });
+
+  it('a voicemail push failure never breaks the callback (200, recording stored, outcome upgraded)', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+    await driveToMissed(app);
+    // Make the push throw for the voicemail push (contained, best-effort posture).
+    world.pushService.sendToUser = async () => {
+      throw new Error('push down');
+    };
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/voice/recording',
+      recordingParams({ RecordingDuration: '6' }),
+    );
+    expect(res.status).toBe(200);
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.call_outcome).toBe('voicemail'); // upgrade still happened
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111'); // recording still stored
+  });
 });

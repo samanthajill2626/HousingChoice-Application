@@ -60,13 +60,21 @@ export const SYSTEM_SENDER_KEY = 'system';
  */
 export async function isMemberSuppressed(
   contacts: ContactsRepo,
+  conversations: ConversationsRepo,
   member: ConversationParticipant,
 ): Promise<boolean> {
   const contact =
     typeof member.contactId === 'string' && member.contactId.length > 0
       ? await contacts.getById(member.contactId)
       : await contacts.findByPhone(member.phone);
-  return contact?.sms_opt_out === true;
+  if (contact?.sms_opt_out === true) return true;
+  // BE1 per-phone scope: a STOP texted from this phone (to the pool number
+  // via the open-path handler, or to the main number) flags the phone's OWN
+  // 1:1 conversation - the correct suppression record when the contact flag
+  // is out of reach (roster phone became a secondary attached number).
+  // Read-only GSI query - a leg check must never mint a conversation.
+  const threads = await conversations.findByParticipantPhone(member.phone);
+  return threads.some((c) => c.type !== 'relay_group' && c.sms_opt_out === true);
 }
 
 export interface RelayAnnouncementDeps {
@@ -203,7 +211,7 @@ export async function sendRelayAnnouncement(
       // slot is marked failed/contact_opted_out (terminal; the rollup chip
       // excludes opted-out slots from its totals). A suppression-read failure
       // is caught below and skips this member WITHOUT sending (fail CLOSED).
-      if (await isMemberSuppressed(deps.contactsRepo, member)) {
+      if (await isMemberSuppressed(deps.contactsRepo, deps.conversationsRepo, member)) {
         if (persist && tsMsgId !== undefined) {
           await markSlot(deps.messagesRepo, conversationId, tsMsgId, memberKey, {
             status: 'failed',

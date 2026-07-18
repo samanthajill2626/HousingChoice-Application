@@ -430,7 +430,7 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       // slot failed/contact_opted_out (terminal → a continuation skips it, no
       // retry) so the thread + Today attention surface can show the member is
       // suppressed. A repo failure propagates (fail CLOSED → job redelivers).
-      if (await isMemberSuppressed(contacts, member)) {
+      if (await isMemberSuppressed(contacts, conversations, member)) {
         await markRecipient(messages, payload, key, {
           status: 'failed',
           errorCode: 'contact_opted_out',

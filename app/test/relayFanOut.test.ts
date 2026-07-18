@@ -197,6 +197,53 @@ describe('relay.fanOut (M1.7)', () => {
     expect(stored.delivery_recipients?.['c-carol']?.status).toBe('queued');
   });
 
+  it('does NOT relay to a member suppressed ONLY via the 1:1 conversation flag (BE1 per-phone scope)', async () => {
+    seedRelay(world);
+    // Bob's CONTACT carries no flag, but his phone's OWN 1:1 conversation is
+    // flagged sms_opt_out (a STOP he texted from a secondary attached number).
+    // The leg gate must honor that per-phone 1:1 flag and skip him just the same.
+    world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB });
+    const now = new Date().toISOString();
+    world.conversations.set('conv-1to1-bob', {
+      conversationId: 'conv-1to1-bob',
+      participant_phone: BOB,
+      status: 'open',
+      last_activity_at: now,
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: now,
+      sms_opt_out: true,
+    });
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    // Carol receives; Bob (1:1-flagged) NEVER does.
+    const recipients = world.sent.map((s: SendMessageParams) => s.to);
+    expect(recipients).toEqual([CAROL]);
+    expect(world.sent.some((s) => s.to === BOB)).toBe(false);
+
+    // Bob's slot reaches the same terminal failed/contact_opted_out state and he
+    // is annotated on the conversation so Today can surface the suppression.
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(stored.delivery_recipients?.['c-bob']).toMatchObject({
+      status: 'failed',
+      errorCode: 'contact_opted_out',
+    });
+    expect(stored.delivery_recipients?.['c-carol']?.status).toBe('queued');
+    const conv = world.conversations.get('conv-relay-1')!;
+    expect(conv.relay_opted_out_members?.['c-bob']).toMatchObject({
+      contactId: 'c-bob',
+      phone: BOB,
+      name: 'Bob',
+    });
+  });
+
   it('records the opted-out member on the CONVERSATION (relay_opted_out_members) so Today can surface it', async () => {
     seedRelay(world);
     world.contacts.push({ contactId: 'c-bob', type: 'tenant', phone: BOB, sms_opt_out: true });

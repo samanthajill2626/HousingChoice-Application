@@ -165,6 +165,25 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     expect(world.messages.find((m) => m.provider_sid === 'CAmask1')!.transcript).toBeUndefined();
   });
 
+  it('a queued/in-progress transcript is a 200 no-op - nothing persisted (adjudication F4b)', async () => {
+    // Spec 3.3: any non-completed, non-failed status (Twilio's 'queued' /
+    // 'in-progress') acks 200 with NO writes - the reconcile job is the safety
+    // net that re-checks later. Pinned at the WEBHOOK level here (previously
+    // only exercised through the reconcile-job suite).
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridge(world);
+    world.viTranscripts.set('GTinprog', {
+      status: 'in-progress',
+      customerKey: 'CAbiz0001',
+      sentences: [{ text: 'not ready yet', mediaChannel: 1 }],
+    });
+    const res = await signedJsonPost(app, VI_PATH, { transcript_sid: 'GTinprog' });
+    expect(res.status).toBe(200);
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.transcript).toBeUndefined();
+    expect(call.transcript_status).toBeUndefined();
+  });
+
   it('status failed stamps transcript_status=failed (200)', async () => {
     const world = createFakeWorld();
     const { app } = await seedFounderBridge(world);

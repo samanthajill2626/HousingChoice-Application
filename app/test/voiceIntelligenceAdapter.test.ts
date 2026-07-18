@@ -56,6 +56,24 @@ describe('VI adapter methods (TwilioMessagingDriver)', () => {
       { text: 'hi back', mediaChannel: 2 },
     ]);
   });
+
+  it('listViSentences returns sentences in sentenceIndex order even when the API lists them shuffled (adjudication F3)', async () => {
+    // joinViSentences persists whatever order the adapter returns and DROPS the
+    // sortable keys - so the driver must re-establish spoken order here, or an
+    // out-of-order/paginated VI response scrambles the transcript irrecoverably.
+    const f = fakeTwilioClient();
+    f.list.mockResolvedValue([
+      { transcript: 'third', mediaChannel: 1, sentenceIndex: 2 },
+      { transcript: 'first', mediaChannel: 1, sentenceIndex: 0 },
+      { transcript: 'second', mediaChannel: 2, sentenceIndex: 1 },
+    ]);
+    const driver = new TwilioMessagingDriver({ ...BASE_DEPS, client: f.client as never });
+    expect(await driver.listViSentences('GTfake1')).toEqual([
+      { text: 'first', mediaChannel: 1 },
+      { text: 'second', mediaChannel: 2 },
+      { text: 'third', mediaChannel: 1 },
+    ]);
+  });
 });
 
 describe('VI adapter methods (ConsoleMessagingDriver)', () => {

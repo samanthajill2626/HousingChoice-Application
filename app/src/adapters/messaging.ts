@@ -346,7 +346,13 @@ export interface TwilioClientLike {
     v2: {
       transcripts: ((transcriptSid: string) => {
         fetch(): Promise<{ sid: string; status: string; customerKey?: string }>;
-        sentences: { list(): Promise<Array<{ transcript: string; mediaChannel: number }>> };
+        sentences: {
+          // sentenceIndex is REQUIRED on the real SDK's SentenceInstance
+          // (required-to-optional is assignable); optional here so message-only
+          // fakes keep compiling and the driver's ordering guard stays honest
+          // about a runtime row that might omit it.
+          list(): Promise<Array<{ transcript: string; mediaChannel: number; sentenceIndex?: number }>>;
+        };
       }) & {
         create(params: {
           serviceSid: string;
@@ -633,8 +639,19 @@ export class TwilioMessagingDriver implements MessagingAdapter {
       throw new Error('TwilioMessagingDriver: client lacks the intelligence API');
     }
     const sentences = await intelligence.v2.transcripts(transcriptSid).sentences.list();
+    // Defensive ordering (adjudication F3): the join step persists the adapter's
+    // order verbatim and drops the sortable keys, so re-establish SPOKEN order
+    // here. When every row carries the SDK's numeric sentenceIndex, sort by it
+    // (a copy; ties cannot occur - indexes are unique per transcript). If any
+    // row lacks one (an off-spec response), keep the list order untouched
+    // rather than guess with a partial key.
+    const allIndexed = sentences.every((s) => Number.isFinite(s.sentenceIndex));
+    const ordered = allIndexed
+      ? // The ?? 0 fallbacks are unreachable (allIndexed) - type narrowing only.
+        [...sentences].sort((a, b) => (a.sentenceIndex ?? 0) - (b.sentenceIndex ?? 0))
+      : sentences;
     // PII (voice privacy): map to text + channel; never log the transcript text.
-    return sentences.map((s) => ({ text: s.transcript, mediaChannel: s.mediaChannel }));
+    return ordered.map((s) => ({ text: s.transcript, mediaChannel: s.mediaChannel }));
   }
 
   async getMediaStream(mediaUrl: string): Promise<Readable> {

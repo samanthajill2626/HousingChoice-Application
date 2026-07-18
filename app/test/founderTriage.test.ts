@@ -17,6 +17,7 @@
 //  - the founder-bridge RECORDS (M1.9c / CO1) — record-from-answer-dual +
 //    recordingStatusCallback (the masked relay stays do-not-record)
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import request from 'supertest';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -36,10 +37,11 @@ import {
   createFakeWorld,
   makeWebhookHarness,
   signedTwilioPost,
+  ORIGIN_SECRET,
   OUR_NUMBER,
   type FakeWorld,
 } from './helpers/twilioWebhookHarness.js';
-import { TEST_ADMIN_USER } from './helpers/authSession.js';
+import { TEST_ADMIN_USER, TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { resolveMessage } from '../src/messages/index.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
@@ -54,6 +56,10 @@ const HOLDER_CELL = '+15550160000';
 const POOL = '+15550109000';
 const ALICE = '+15550100001';
 const BOB = '+15550100002';
+// Outbound-miss coverage (adjudication F4a): the originating navigator's
+// verified cell + the called contact's phone (the voiceOutbound suite's shapes).
+const NAV_CELL = '+15550140000';
+const TARGET = '+15550188888';
 
 /** Seed an open relay group so a MASKED inbound call bridges (masked:true). */
 function seedRelayGroup(world: FakeWorld): ConversationItem {
@@ -790,6 +796,42 @@ describe('founder call-triage — MISSED → push + auto-text (M1.9b)', () => {
     expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
     expect(res.text).toContain('<Hangup');
     expect(res.text).not.toContain('<Record'); // masked NEVER records a voicemail
+  });
+
+  it('a missed OUTBOUND founder-bridge call keeps goodbye + hangup - NEVER a voicemail <Record> (spec 4.3)', async () => {
+    // Voicemail is the INBOUND business line only. An originated (outbound)
+    // call nobody answers is excluded by the `entry.direction !== 'outbound'`
+    // clause of the same TwiML guard - pinned explicitly here (adjudication
+    // F4a; the masked clause is pinned by the test above). Fixture = the
+    // voiceOutbound suite's originate flow: a navigator with a verified cell
+    // places the call, then the <Dial action> summary reports no-answer.
+    world.contacts.push({ contactId: 'c-target', type: 'tenant', phone: TARGET, firstName: 'Jane', lastName: 'Doe' });
+    const harness = founderHarness(world);
+    const nav = harness.fakeUsers.users.get(TEST_SESSION_USER.userId)!;
+    nav.cell = NAV_CELL;
+    nav.cell_verified_at = '2026-07-01T00:00:00.000Z';
+
+    const originate = await request(harness.app)
+      .post('/api/contacts/c-target/call')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(originate.status).toBe(200);
+    const callSid = (originate.body as { callSid: string }).callSid;
+    expect(world.messages.find((m) => m.provider_sid === callSid)!.direction).toBe('outbound');
+
+    const res = await signedTwilioPost(harness.app, '/webhooks/twilio/voice/status', {
+      CallSid: callSid,
+      DialCallStatus: 'no-answer',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    // The miss really registered (guards the no-Record assertion against vacuity)...
+    expect(world.messages.find((m) => m.provider_sid === callSid)!.call_outcome).toBe('missed');
+    // ...and the caller-side TwiML is the brief goodbye - no voicemail offer.
+    expect(res.text).toContain(resolveMessage('voice.missed_call_goodbye'));
+    expect(res.text).toContain('<Hangup');
+    expect(res.text).not.toContain('<Record'); // outbound NEVER records a voicemail
   });
 
   it('POST /voicemail-done returns the thanks + hangup TwiML (signature-gated)', async () => {

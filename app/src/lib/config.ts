@@ -136,6 +136,8 @@ export interface AppConfig {
    * Delay in seconds before the transcript reconcile job re-checks Twilio for a
    * transcript a lost completion webhook never delivered (spec 3.4). Default
    * 600; the hermetic e2e sets it tiny. Rides SQS DelaySeconds exactly (<= 720).
+   * A non-finite or non-positive value (including an explicit '0') falls back
+   * to the default with a WARN - never fail-fast (transcription is a bolt-on).
    */
   voiceTranscriptReconcileSeconds: number;
   /**
@@ -558,6 +560,31 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Transcript reconcile delay (voice-transcription spec 3.4). Same NOT-fail-
+  // fast idiom as A2P_RATE_LIMIT_PER_SEC above: transcription is a bolt-on
+  // feature, so a bad value falls back to the 600s default instead of blocking
+  // boot - but it must NEVER ride through raw (a negative value makes every
+  // reconcile attempt run immediately, exhausting the retry cap and stamping
+  // transcript_status=failed before VI ever completes; an explicit '0' is
+  // equally invalid - there is no zero-delay reconcile). An explicitly-set-but-
+  // invalid value WARNs so the operator notices the fallback.
+  const VOICE_TRANSCRIPT_RECONCILE_DEFAULT = 600;
+  let voiceTranscriptReconcileSeconds = VOICE_TRANSCRIPT_RECONCILE_DEFAULT;
+  if (
+    env.VOICE_TRANSCRIPT_RECONCILE_SECONDS !== undefined &&
+    env.VOICE_TRANSCRIPT_RECONCILE_SECONDS.length > 0
+  ) {
+    const parsed = Number(env.VOICE_TRANSCRIPT_RECONCILE_SECONDS);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      voiceTranscriptReconcileSeconds = parsed;
+    } else {
+      logger.warn(
+        { value: env.VOICE_TRANSCRIPT_RECONCILE_SECONDS, fallback: VOICE_TRANSCRIPT_RECONCILE_DEFAULT },
+        'VOICE_TRANSCRIPT_RECONCILE_SECONDS is not a positive number - using the default',
+      );
+    }
+  }
+
   // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
   // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
   // would accept enqueues into the in-memory adapter (silently undelivered)
@@ -693,7 +720,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
     twilioApiBaseUrl: twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? twilioApiBaseUrl : undefined,
     twilioViServiceSid: env.TWILIO_VI_SERVICE_SID?.trim() || undefined,
-    voiceTranscriptReconcileSeconds: Number(env.VOICE_TRANSCRIPT_RECONCILE_SECONDS ?? '600') || 600,
+    voiceTranscriptReconcileSeconds,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,

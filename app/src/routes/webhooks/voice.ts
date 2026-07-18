@@ -1632,11 +1632,17 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
    * transcript_status 'pending' BEFORE the inline create (so the "Transcribing..."
    * indicator is correct even while the fallback job retries) and emits SSE.
    * FAST PATH: create the VI transcript inline, then enqueue the ~10min reconcile
-   * safety net. FALLBACK: on an inline create failure, enqueue the
+   * safety net. FALLBACK: on an inline CREATE failure only, enqueue the
    * createVoiceTranscript job (jobs-pipeline redelivery/DLQ); an enqueue failure
-   * there is only logged - it never fails the recording callback. NEVER called
-   * for masked calls (the masked refusal returns earlier). PII (doc section 9):
-   * callSid / recordingSid / transcriptSid only.
+   * there is only logged - it never fails the recording callback. The two try
+   * scopes are SPLIT (adjudication F1): once the create has succeeded, a
+   * reconcile-enqueue failure is logged and swallowed - falling back to the
+   * create job at that point would mint a DUPLICATE VI transcript for the same
+   * recording (the job's idempotency guard reads the persisted transcript,
+   * which async VI has not delivered yet). The completion webhook still
+   * delivers the minted transcript; only that call's lost-webhook self-heal is
+   * lost. NEVER called for masked calls (the masked refusal returns earlier).
+   * PII (doc section 9): callSid / recordingSid / transcriptSid only.
    */
   async function requestTranscription(entryCallSid: string, recordingSid: string): Promise<void> {
     const serviceSid = config.twilioViServiceSid;
@@ -1652,18 +1658,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         deliveryStatus: fresh.delivery_status,
       });
     }
+    let transcriptSid: string;
     try {
-      const { transcriptSid } = await adapter.createViTranscript({
+      ({ transcriptSid } = await adapter.createViTranscript({
         serviceSid,
         recordingSid,
         customerKey: entryCallSid,
-      });
-      await enqueue(
-        RECONCILE_VOICE_TRANSCRIPT_JOB,
-        { callSid: entryCallSid, transcriptSid, attempt: 1 },
-        { runAt: new Date(Date.now() + config.voiceTranscriptReconcileSeconds * 1000) },
-      );
-      log.info({ callSid: entryCallSid, transcriptSid }, 'vi transcript requested inline');
+      }));
     } catch (err) {
       log.warn({ err, callSid: entryCallSid, recordingSid }, 'inline vi create failed - falling back to job');
       try {
@@ -1671,6 +1672,22 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       } catch (enqueueErr) {
         log.error({ err: enqueueErr, callSid: entryCallSid }, 'vi create fallback enqueue failed');
       }
+      return;
+    }
+    // The create SUCCEEDED - the transcript exists at Twilio. From here on,
+    // NEVER enqueue the create job (duplicate-transcript guard, F1 above).
+    try {
+      await enqueue(
+        RECONCILE_VOICE_TRANSCRIPT_JOB,
+        { callSid: entryCallSid, transcriptSid, attempt: 1 },
+        { runAt: new Date(Date.now() + config.voiceTranscriptReconcileSeconds * 1000) },
+      );
+      log.info({ callSid: entryCallSid, transcriptSid }, 'vi transcript requested inline');
+    } catch (err) {
+      log.error(
+        { err, callSid: entryCallSid, transcriptSid },
+        'reconcile enqueue failed after successful create',
+      );
     }
   }
 

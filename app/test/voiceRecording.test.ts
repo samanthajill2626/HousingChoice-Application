@@ -499,6 +499,43 @@ describe('recording callback create-leg - VI transcription request (voice-transc
     expect(createJobs[0]!.payload).toMatchObject({ callSid: 'CAbiz0001', recordingSid: 'RE1111' });
   });
 
+  it('a reconcile-enqueue failure AFTER a successful inline create logs an error and never enqueues the create job (adjudication F1)', async () => {
+    // The inline create SUCCEEDED - VI transcript #1 is minted. If the reconcile
+    // enqueue then throws (an SQS hiccup), falling back to the create job would
+    // mint a DUPLICATE VI transcript for the same recording (double Twilio cost):
+    // the create-job idempotency guard checks the PERSISTED transcript, which VI
+    // (async) has not delivered yet. Required: 200, error logged, NO create job -
+    // the completion webhook still delivers; only this call's self-heal is lost.
+    const world = createFakeWorld();
+    const { app, capture } = await seedFounderBridgeVi(world);
+    // Fail ONLY the reconcile enqueue: wrap the recorder adapter so a create-job
+    // fallback (the bug) would still be captured in `dispatched` below.
+    configureOutboundQueue({
+      enqueue: async (envelope, opts) => {
+        if (envelope.jobName === RECONCILE_VOICE_TRANSCRIPT_JOB) throw new Error('sqs down');
+        return queueAdapter.enqueue(envelope, opts);
+      },
+    });
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    // A lost self-heal never 5xxs the callback (the recording is already safe).
+    expect(res.status).toBe(200);
+
+    // The inline create ran exactly once...
+    expect(world.viCreates).toHaveLength(1);
+    // ...and NOTHING was enqueued: no reconcile (it threw) and - the point - no
+    // duplicate-minting createVoiceTranscript fallback.
+    expect(queueAdapter.delayed).toHaveLength(0);
+    await queueAdapter.settle();
+    expect(dispatched.filter((e) => e.jobName === CREATE_VOICE_TRANSCRIPT_JOB)).toHaveLength(0);
+
+    // The failure is reported for what it IS (a reconcile-enqueue failure after a
+    // successful create), never as the untrue 'inline vi create failed'.
+    const logs = JSON.stringify(capture.lines);
+    expect(logs).toContain('reconcile enqueue failed after successful create');
+    expect(logs).not.toContain('inline vi create failed');
+  });
+
   it('VI unset -> no pending stamp, no create, no jobs (recording still stored)', async () => {
     const world = createFakeWorld();
     const { app } = await seedFounderBridge(world); // VI OFF harness

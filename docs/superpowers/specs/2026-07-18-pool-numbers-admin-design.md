@@ -131,8 +131,14 @@ sections do; the API 403s).
 - No purchase/release/retire actions from the page.
 - No per-message history (group threads already show transcripts).
 - No VA visibility or read-only VA variant.
-- No schema/GSI changes (one additive repo method only).
 - No pagination UI (launch scale; the API returns all rows).
+
+Schema/GSI posture (human, 2026-07-18): none is ANTICIPATED - the existing
+byLifecycleState + byPoolNumber GSIs cover both access patterns and one
+additive repo method suffices. But we are dev-only with no live data, so a
+schema/GSI change IS allowed if the build finds a genuine need or a
+clearly better-practice shape - it must be called out in the handback
+with the terraform plan/apply recorded as an owed post-merge op.
 
 ## 7. Testing
 
@@ -163,6 +169,7 @@ E2E (one spec):
 
 ## 8. Rollout
 
-Pure app+dashboard code; no schema, deps, flags, seeds, or infra. No
-post-merge ops. GLOSSARY.md updated with the staff noun in the same
-change.
+Expected pure app+dashboard code: no deps, flags, or seeds, and no
+schema/infra unless the build exercises the section-6 allowance (then the
+tf plan/apply is an owed post-merge op in the handback). GLOSSARY.md
+updated with the staff noun in the same change.

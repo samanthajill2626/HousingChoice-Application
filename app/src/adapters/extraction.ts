@@ -16,7 +16,10 @@ import { EXTRACTION_SCHEMA, parseExtractionText } from '../services/extraction/s
 import { FakeExtractionDriver } from './extractionFake.js';
 
 export interface TranscriptUtterance {
-  speaker: 'staff' | 'client';
+  // 'unknown' is a call line labeled `Speaker N:` (legacy/underivable role) -
+  // the extraction job assigns it (adapters/extractionFake skips non-client
+  // speakers; the prompt renders the label verbatim).
+  speaker: 'staff' | 'client' | 'unknown';
   text: string;
   at: string; // ISO 8601
   channel: 'sms' | 'voice';

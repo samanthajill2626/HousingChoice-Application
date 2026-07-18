@@ -58,6 +58,32 @@ function msg(seconds: number, direction: 'inbound' | 'outbound', body: string): 
   };
 }
 
+// A stored call carrying a transcript. Mirrors msg()'s tsMsgId shape with a
+// `#c<seconds>` suffix so calls and texts remain distinctly, stably sortable.
+// toUtterances parses `transcript` (never the call's direction), so direction
+// here only exercises the freshness gate's inbound-vs-completed branches.
+function callMsg(
+  seconds: number,
+  direction: 'inbound' | 'outbound',
+  transcript: string,
+  transcriptStatus: MessageItem['transcript_status'],
+): MessageItem {
+  const ts = `2026-07-16T12:00:${String(seconds).padStart(2, '0')}.000Z`;
+  return {
+    conversationId: 'conv1',
+    tsMsgId: `${ts}#c${seconds}`,
+    type: 'call',
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    provider_sid: `c${seconds}`,
+    provider_ts: ts,
+    delivery_status: 'delivered',
+    created_at: ts,
+    transcript,
+    transcript_status: transcriptStatus,
+  };
+}
+
 function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
@@ -320,5 +346,147 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 0, failed: 1 });
     const expected = new Date(Date.parse(NOW) + DEBOUNCE).toISOString();
     expect(h.repo.fail).toHaveBeenCalledWith('conv1', expect.stringContaining('declined'), expected);
+  });
+
+  it('call transcript: parses the four line forms into voice utterances', async () => {
+    // One completed call whose transcript exercises every prefix branch:
+    //   Staff: / Client: -> prefix STRIPPED, role known;
+    //   Speaker N:       -> speaker 'unknown', prefix KEPT (model tracks turns);
+    //   unprefixed       -> voicemail: the client speaking.
+    // A voice-channel due row bypasses the freshness gate so assembly runs.
+    const transcript = [
+      'Staff: how can I help',
+      'Client: I have two kids',
+      'Speaker 1: legacy unattributed line',
+      'left a voicemail about a 2 bed',
+    ].join('\n');
+    const call = callMsg(2, 'inbound', transcript, 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'voice' })],
+      messages: [call],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    // Every utterance shares the call row's created_at and is channel 'voice'.
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'staff', text: 'how can I help', at: call.created_at, channel: 'voice' },
+      { speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
+      { speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
+      { speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
+    ]);
+  });
+
+  it('channel-mixed window: an SMS and a transcribed call interleave chronologically', async () => {
+    const sms1 = msg(1, 'inbound', 'hi there');
+    const call = callMsg(2, 'inbound', ['Client: I have a voucher', 'Staff: which authority'].join('\n'), 'completed');
+    const sms3 = msg(3, 'outbound', 'thanks');
+    const h = makeHarness({
+      dueRows: [dueRow()], // sms row; the inbound sms1 clears the freshness gate
+      messages: [sms3, call, sms1], // newest-first, as listByConversation returns
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    const t = h.seen[0]!.transcript;
+    expect(t.map((u) => u.text)).toEqual(['hi there', 'I have a voucher', 'which authority', 'thanks']);
+    expect(t.map((u) => u.speaker)).toEqual(['client', 'client', 'staff', 'staff']);
+    expect(t.map((u) => u.channel)).toEqual(['sms', 'voice', 'voice', 'sms']);
+    // The call's two utterances both carry the call row's created_at, slotted
+    // between the two texts (the window is chronological by `at`).
+    expect(t.map((u) => u.at)).toEqual([sms1.created_at, call.created_at, call.created_at, sms3.created_at]);
+  });
+
+  it('incomplete or empty-transcript calls contribute zero utterances', async () => {
+    const sms = msg(1, 'inbound', 'hello'); // inbound sms clears the freshness gate
+    const pending = callMsg(2, 'outbound', 'Client: ignored while pending', 'pending');
+    const emptyCompleted = callMsg(3, 'outbound', '', 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [emptyCompleted, pending, sms], // newest-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    // Only the SMS survives; neither the pending nor the empty-completed call
+    // adds anything.
+    expect(h.seen[0]!.transcript).toEqual([{ speaker: 'client', text: 'hello', at: sms.created_at, channel: 'sms' }]);
+  });
+
+  it('voice due item: runs even when the newest call row is OLDER than the cursor (freshness bypass)', async () => {
+    // The cursor is lexicographically GREATER than the call's tsMsgId
+    // (`...:05...#s5` > `...:01...#c1`), so on an SMS row this would early-exit.
+    // The voice channel bypasses the gate: the transcript persists minutes after
+    // the call row, so an earlier SMS run may already have advanced the cursor.
+    const call = callMsg(1, 'inbound', 'left a voicemail: I need a 2 bedroom', 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'voice', cursor: '2026-07-16T12:00:05.000Z#s5' })],
+      messages: [call],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
+    ]);
+    expect(h.repo.fail).not.toHaveBeenCalled();
+  });
+
+  it('sms due item: still early-exits when only staff + an incomplete call are newer than the cursor', async () => {
+    // The sole client message is AT the cursor; the only newer items are a staff
+    // text and an outbound PENDING call - neither counts as new client content.
+    const client = msg(1, 'inbound', 'hi');
+    const staff = msg(2, 'outbound', 'hello');
+    const pendingCall = callMsg(3, 'outbound', 'Client: not counted yet', 'pending');
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: client.tsMsgId })],
+      messages: [pendingCall, staff, client], // newest-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 0 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.complete).toHaveBeenCalledWith('conv1', client.tsMsgId, NOW);
+  });
+
+  it('sms due item: a fresh completed-transcript call triggers a run with no new inbound SMS', async () => {
+    // The client SMS is AT the cursor; the newer completed call is OUTBOUND, so
+    // it counts as client content ONLY via the completed-transcript branch (it
+    // carries the client's speech regardless of the call row's stored direction).
+    const client = msg(1, 'inbound', 'hi');
+    const staff = msg(2, 'outbound', 'hello');
+    const call = callMsg(3, 'outbound', 'Client: my voucher got approved', 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: client.tsMsgId })],
+      messages: [call, staff, client], // newest-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'client', text: 'hi', at: client.created_at, channel: 'sms' },
+      { speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
+      { speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
+    ]);
   });
 });

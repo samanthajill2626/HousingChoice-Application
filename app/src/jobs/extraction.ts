@@ -87,14 +87,54 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   return profile;
 }
 
-/** Map a stored message to a channel-neutral transcript utterance. */
-function toUtterance(m: MessageItem): TranscriptUtterance {
-  return {
-    speaker: m.direction === 'inbound' ? 'client' : 'staff',
-    text: m.body ?? '[media]',
-    at: m.created_at,
-    channel: 'sms',
-  };
+/**
+ * Map a stored message to zero or more channel-tagged transcript utterances.
+ *
+ * - sms/mms: exactly one utterance - speaker from direction, channel 'sms'.
+ * - call WITH a completed, non-empty transcript: one utterance per NON-EMPTY
+ *   line, all sharing the call row's timestamp, channel 'voice'. Per-line
+ *   speaker attribution (the prefixes are baked in by joinViSentences at save
+ *   time - Layer 1):
+ *     - 'Staff: ' / 'Client: ' -> known role, prefix STRIPPED.
+ *     - 'Speaker N: '           -> speaker 'unknown', prefix KEPT so the model
+ *                                  can track who is who across the call's lines.
+ *     - otherwise (voicemail / single-channel, unprefixed) -> 'client' (the
+ *       caller is the client by construction).
+ * - call WITHOUT a completed transcript, or with an empty one: nothing.
+ */
+function toUtterances(m: MessageItem): TranscriptUtterance[] {
+  if (m.type === 'call') {
+    if (m.transcript_status !== 'completed' || !m.transcript) return [];
+    const at = m.created_at;
+    const utterances: TranscriptUtterance[] = [];
+    for (const line of m.transcript.split('\n')) {
+      if (line.length === 0) continue; // drop empty lines
+      const staff = /^Staff: (.*)$/.exec(line);
+      if (staff) {
+        utterances.push({ speaker: 'staff', text: staff[1]!, at, channel: 'voice' });
+        continue;
+      }
+      const client = /^Client: (.*)$/.exec(line);
+      if (client) {
+        utterances.push({ speaker: 'client', text: client[1]!, at, channel: 'voice' });
+        continue;
+      }
+      if (/^Speaker \d+: /.test(line)) {
+        utterances.push({ speaker: 'unknown', text: line, at, channel: 'voice' });
+        continue;
+      }
+      utterances.push({ speaker: 'client', text: line, at, channel: 'voice' });
+    }
+    return utterances;
+  }
+  return [
+    {
+      speaker: m.direction === 'inbound' ? 'client' : 'staff',
+      text: m.body ?? '[media]',
+      at: m.created_at,
+      channel: 'sms',
+    },
+  ];
 }
 
 /**
@@ -158,7 +198,20 @@ async function processRow(
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const fresh = [...newestFirst].reverse().filter((m) => m.created_at >= cutoff);
 
-  const hasNewClient = fresh.some((m) => m.direction === 'inbound' && m.tsMsgId > cursor);
+  // Freshness gate. A voice-triggered run (row.channel === 'voice') BYPASSES it
+  // entirely: a transcript persists minutes after the call row's tsMsgId, so an
+  // SMS-triggered run may already have advanced the cursor past the call row -
+  // the voice schedule is our signal that new transcript content exists. On an
+  // SMS-triggered run, a fresh COMPLETED-transcript call also counts as new
+  // client-side content: it carries the client's speech regardless of the call
+  // row's stored direction.
+  const hasNewClient =
+    row.channel === 'voice' ||
+    fresh.some(
+      (m) =>
+        m.tsMsgId > cursor &&
+        (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
+    );
   if (!hasNewClient) {
     logger.debug({ conversationId }, 'extraction: no new client messages since cursor - completing');
     await repo.complete(conversationId, cursor, nowIso);
@@ -166,7 +219,7 @@ async function processRow(
   }
 
   const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
-  const transcript = fresh.map(toUtterance);
+  const transcript = fresh.flatMap(toUtterances);
 
   const result = await driver.extract({ transcript, profile: toProfile(contact) });
   await applyExtraction(applyDeps, {

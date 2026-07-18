@@ -118,6 +118,9 @@ function makeSendFakes(
     },
     createRelayGroup: async () => conversation,
     getByPoolNumber: async () => undefined,
+    getAllByPoolNumber: async () => [],
+    setCloseNagNextAt: async () => {},
+    claimCloseAnnounce: async () => false,
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
@@ -185,6 +188,7 @@ function makeSendFakes(
       sid: 'PNfake-sm',
     }),
     setVoiceWebhook: async () => {},
+    releasePhoneNumber: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
     createViTranscript: async () => {
       throw new Error('not used');

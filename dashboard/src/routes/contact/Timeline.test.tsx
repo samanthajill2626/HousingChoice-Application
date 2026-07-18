@@ -746,6 +746,32 @@ describe('Timeline relay-group annotations', () => {
   });
 });
 
+describe('Timeline - closed-group provenance badge (relay number lifecycle)', () => {
+  it('renders a "Sent to the closed group chat" link to the closed group', () => {
+    const late: TimelineItem = {
+      kind: 'message',
+      id: 'late1',
+      at: '2026-07-10T09:00:00',
+      conversationId: 'c-tenant-1to1',
+      tsMsgId: 'late1',
+      direction: 'inbound',
+      author: 'tenant',
+      type: 'sms',
+      delivery_status: 'delivered',
+      body: 'Are we still on?',
+      via_closed_group: 'g-closed-1',
+    };
+    renderTimeline({ items: [late] });
+    const badge = screen.getByRole('link', { name: 'Sent to the closed group chat' });
+    expect(badge).toHaveAttribute('href', '/conversations/g-closed-1');
+  });
+
+  it('renders no badge on an ordinary 1:1 message (no via_closed_group)', () => {
+    renderTimeline({ items: [MESSAGE_IN] });
+    expect(screen.queryByRole('link', { name: /closed group chat/i })).not.toBeInTheDocument();
+  });
+});
+
 describe('Timeline stick-to-bottom', () => {
   // jsdom does no layout, so drive the scroll geometry ourselves: mock
   // scrollHeight/clientHeight and back scrollTop with a real read/write value.

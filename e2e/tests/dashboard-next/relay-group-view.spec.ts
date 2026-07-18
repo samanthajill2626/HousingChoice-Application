@@ -1,5 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { getOutbox } from '../../fixtures/outbox.js';
+// The final "group is closed" copy (single source of truth) - close now sends it.
+import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 
 // Relay-group conversation view (/conversations/:conversationId) — spec §10.
 // Drives the real dashboard + API against the hermetic lane stack and proves the
@@ -27,6 +29,8 @@ const GLORIA_PHONE = '+15550170003'; // Gloria Mensah (landlord)
 // Inbox label = "With <all member names>"; contact-card label = "With <others>".
 const INBOX_LABEL = 'With Diana Osei & Gloria Mensah';
 const CARD_LABEL = 'With Gloria Mensah';
+// The close route sends this to every member (the send may brand-prefix it).
+const CLOSED_COPY = MESSAGE_CATALOG['relay.group_closed'].default;
 
 /** Reseed the lane with the FULL profile so the live relay group is present. */
 async function reseedFull(request: APIRequestContext): Promise<void> {
@@ -173,7 +177,10 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await expect(list.getByText('Leon Abara')).toHaveCount(0);
 });
 
-test('Close group: the composer hard-disables', async ({ page }) => {
+test('Close group: final message sent to both, number kept, composer hard-disables', async ({
+  page,
+  request,
+}) => {
   await devLogin(page);
   await page.goto(`${NEXT}/conversations/${CONV_ID}`);
   await expect(page.getByText(INBOX_LABEL)).toBeVisible();
@@ -181,7 +188,7 @@ test('Close group: the composer hard-disables', async ({ page }) => {
   // Sending is available while open.
   await expect(page.getByRole('button', { name: 'Send' })).toBeVisible();
 
-  // Close (header action → confirm dialog).
+  // Close (header action -> confirm dialog).
   await page.getByRole('button', { name: 'Close', exact: true }).click();
   const closeDialog = page.getByRole('dialog', { name: 'Close group?' });
   await closeDialog.getByRole('button', { name: 'Close group' }).click();
@@ -191,4 +198,28 @@ test('Close group: the composer hard-disables', async ({ page }) => {
   await expect(page.getByText(/This group is closed/i)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('button', { name: 'Send' })).toBeDisabled();
   await expect(page.getByText('Closed').first()).toBeVisible();
+
+  // Close sends the relay.group_closed final message to EVERY member FROM the pool
+  // number (burn-multiplexing: the copy invites late texts to the same number).
+  for (const memberPhone of [DIANA_PHONE, GLORIA_PHONE]) {
+    await expect
+      .poll(
+        async () => {
+          const msgs = await getOutbox(request, { to: memberPhone });
+          return msgs.some((m) => (m.body ?? '').includes(CLOSED_COPY) && m.from === POOL);
+        },
+        { timeout: 15_000, message: `closed-copy to ${memberPhone} not observed in outbox` },
+      )
+      .toBe(true);
+  }
+
+  // The pool number is KEPT on the closed conversation (never released now).
+  // Authenticated /api call rides the page's dev-login session (page.request).
+  const res = await page.request.get(`${NEXT}/api/conversations/${CONV_ID}`);
+  expect(res.ok(), `conversation fetch failed: ${res.status()}`).toBeTruthy();
+  const { conversation } = (await res.json()) as {
+    conversation: { status?: string; pool_number?: string };
+  };
+  expect(conversation.status).toBe('closed');
+  expect(conversation.pool_number).toBe(POOL);
 });

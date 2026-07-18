@@ -337,6 +337,19 @@ export function registerRelayFanOutJobHandler(deps: RelayFanOutJobDeps = {}): vo
       log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation not found — nothing to fan out');
       return;
     }
+    // AF-2 status gate: the group may have CLOSED between enqueue and now (a
+    // queued/continuation job outlives a close). pool_number is KEPT on close
+    // (burn-multiplexing), so `status` - not pool_number presence - is the
+    // authoritative closed-gate (mirrors relayAnnouncements.ts). A closed group
+    // must never fan out: a late relayed message would contradict the already-
+    // sent "This group chat is now closed" final message.
+    if (conversation.status !== 'open') {
+      log.info(
+        { conversationId: payload.relayConversationId, status: conversation.status },
+        'relay fan-out skipped - group not open',
+      );
+      return;
+    }
     const poolNumber = conversation.pool_number;
     if (typeof poolNumber !== 'string' || poolNumber.length === 0) {
       log.warn({ conversationId: payload.relayConversationId }, 'relayFanOut: relay conversation has no pool number — skipping');

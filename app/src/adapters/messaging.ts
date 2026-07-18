@@ -151,6 +151,14 @@ export interface MessagingAdapter {
    */
   setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void>;
   /**
+   * RELEASE a provisioned number back to Twilio (relay retirement, D7) - called
+   * ONLY by the config-gated retirement sweep. The Twilio driver DELETEs the
+   * IncomingPhoneNumber resource (idempotent: a missing resource is a logged
+   * no-op); the console driver logs a no-op. NOTE (RUNBOOK): deleting the number
+   * also drops it from any Messaging Service / A2P campaign it belonged to.
+   */
+  releasePhoneNumber(phoneNumber: string): Promise<void>;
+  /**
    * Originate an OUTBOUND call (M1.9a). NOT used by the inbound masked bridge
    * (that answers with <Dial> TwiML) — this is the seam for press-0 → team and
    * the later founder-bridge. The Twilio driver calls client.calls.create; the
@@ -333,7 +341,10 @@ export interface TwilioClientLike {
       voiceUrl?: string;
     }): Promise<TwilioIncomingNumber>;
     list(params: { phoneNumber: string; limit?: number }): Promise<TwilioIncomingNumber[]>;
-    (sid: string): { update(params: { voiceUrl?: string }): Promise<TwilioIncomingNumber> };
+    (sid: string): {
+      update(params: { voiceUrl?: string }): Promise<TwilioIncomingNumber>;
+      remove(): Promise<boolean>;
+    };
   };
   /**
    * Voice Intelligence (M1.9 voice-transcription). Optional so the existing
@@ -587,6 +598,23 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     this.log.info({ sid: match.sid }, 'twilio voice webhook set');
   }
 
+  async releasePhoneNumber(phoneNumber: string): Promise<void> {
+    const incoming = this.client.incomingPhoneNumbers;
+    if (!incoming) {
+      throw new Error('TwilioMessagingDriver: client lacks number-provisioning APIs');
+    }
+    // Look the number up by E.164 to get its resource SID, then DELETE it.
+    const matches = await incoming.list({ phoneNumber, limit: 1 });
+    const match = matches[0];
+    if (!match) {
+      // Idempotent: already gone (or never ours) - nothing to release.
+      this.log.warn({ released: false }, 'releasePhoneNumber: no IncomingPhoneNumber resource - no-op');
+      return;
+    }
+    await incoming(match.sid).remove();
+    this.log.info({ sid: match.sid }, 'twilio phone number released');
+  }
+
   async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
     const calls = this.client.calls;
     if (!calls) {
@@ -819,6 +847,12 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     void phoneNumber;
     void voiceUrl;
     this.log.info({ wired: true }, 'console messaging driver: voice webhook "set" (no-op)');
+  }
+
+  async releasePhoneNumber(phoneNumber: string): Promise<void> {
+    // No-op locally - there is no real number to release. PII: never log the number.
+    void phoneNumber;
+    this.log.info({ released: true }, 'console messaging driver: phone number "released" (no-op)');
   }
 
   async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {

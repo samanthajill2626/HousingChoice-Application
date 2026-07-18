@@ -286,6 +286,9 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
           { contactId: LIVE_IDS.tenantA, phone: LIVE_IDS.tenantAPhone, name: 'Diana Osei' },
           { contactId: LIVE_IDS.landlordA, phone: LIVE_IDS.landlordAPhone, name: 'Gloria Mensah' },
         ],
+        // Burn provenance (W1): the phones this group has burned on its pool
+        // number (same roster union as the pool's burned_phones); Set -> SS.
+        ever_member_phones: new Set([LIVE_IDS.tenantAPhone, LIVE_IDS.landlordAPhone]),
         participant_display_name: 'Diana Osei + Gloria Mensah',
         owner: { type: 'tour', id: LIVE_IDS.tourTomorrow },
         last_activity_at: iso,
@@ -300,14 +303,15 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
     pool_numbers: [
       {
         poolNumber: LIVE_IDS.poolNumber,
-        lifecycle_state: 'assigned',
+        lifecycle_state: 'active',
         voice_capable: true,
         sms_capable: true,
         provisioned_via: 'console',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        assigned_conversation_id: LIVE_IDS.relayGroup,
+        quarantine_until: '0000-00-00T00:00:00.000Z', // retained GSI range sentinel
+        // burned_phones = the live demo group's roster (tenant A + landlord A);
+        // a JS Set marshals to a DynamoDB string set via the seed doc client.
+        burned_phones: new Set([LIVE_IDS.tenantAPhone, LIVE_IDS.landlordAPhone]),
         provisioned_at: iso,
-        assigned_at: iso,
       },
     ],
 

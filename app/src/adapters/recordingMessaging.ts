@@ -112,6 +112,9 @@ export class RecordingMessagingDriver implements MessagingAdapter {
   setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void> {
     return this.inner.setVoiceWebhook(phoneNumber, voiceUrl);
   }
+  releasePhoneNumber(phoneNumber: string): Promise<void> {
+    return this.inner.releasePhoneNumber(phoneNumber);
+  }
   initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
     return this.inner.initiateCall(params);
   }

@@ -136,6 +136,10 @@ interface TimelineMessage extends TimelineBase {
    *  excluded from THIS server timeline today, so this is carried for
    *  completeness + future-proofing; the client fallback is the live path.) */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /** Relay number lifecycle: on a 1:1 bubble that was a late text intercepted
+   *  from a CLOSED relay group, the closed group's conversationId - the client
+   *  renders a "via the closed group chat" provenance badge. Absent otherwise. */
+  via_closed_group?: string;
 }
 interface TimelineCall extends TimelineBase {
   kind: 'call';
@@ -342,6 +346,7 @@ function toTimelineMessage(
     ...(m.error_code !== undefined && { error_code: m.error_code }),
     ...(m.retry_of !== undefined && { retry_of: m.retry_of }),
     ...(m.delivery_recipients !== undefined && { delivery_recipients: m.delivery_recipients }),
+    ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
   };

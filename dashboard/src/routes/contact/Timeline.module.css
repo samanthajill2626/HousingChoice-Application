@@ -577,6 +577,21 @@ a.pill:focus-visible {
   margin-bottom: 2px;
 }
 
+/* Relay number lifecycle: attribution badge on a late text intercepted from a
+ * now-CLOSED group into the sender's 1:1 - a small link back to that group. */
+.viaClosedGroup {
+  display: inline-block;
+  margin-bottom: 2px;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+.viaClosedGroup:hover {
+  text-decoration: underline;
+}
+
 .replyBox {
   width: 100%;
   /* One line by default (rows=1); useAutoGrowTextarea grows it to fit the draft

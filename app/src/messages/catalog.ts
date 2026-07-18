@@ -43,6 +43,8 @@ export type MessageId =
   | 'relay.member_added'
   // Operational - relay group media-only fan-out body (jobs/relayFanOut.ts)
   | 'relay.media_only'
+  // Operational - relay group closed final message (routes/relayGroups.ts close)
+  | 'relay.group_closed'
   // Compliance-derived, already editable
   | 'welcome.sms'
   | 'missed_call.autotext'
@@ -203,6 +205,21 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     editable: true,
     channel: 'sms',
     vars: ['name'],
+  },
+  // Final message sent to every member when a group text is CLOSED (spec 4.5):
+  // the group is closed, and texting this number still reaches the team (true
+  // under the closed-group->1:1 interception). No tokens. editable:true so an
+  // operator can override it via the existing catalog machinery (resolveWith-
+  // Settings) - no new override map/UI is built here.
+  'relay.group_closed': {
+    id: 'relay.group_closed',
+    default:
+      'This group chat is now closed. You can still text this number and a Housing Choice ' +
+      'team member will see your message and follow up.',
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: [],
   },
 
   // --- Compliance-derived, already editable (reference smsCompliance consts) ---

@@ -145,6 +145,30 @@ describe('relay.fanOut (M1.7)', () => {
     expect(world.relaySidPointers.size).toBe(2);
   });
 
+  it('does NOT fan out when the group closed after the message was enqueued (status gate, AF-2)', async () => {
+    // Enqueued while OPEN, but the group is CLOSED before the queued job runs.
+    // pool_number is KEPT on close (burn-multiplexing), so the pool-number guard
+    // alone would let this through - the status gate is what stops it.
+    const conv = seedRelay(world);
+    const source = seedSource(world, 'is the unit still available?', 'c-alice');
+    conv.status = 'closed';
+    world.conversations.set(conv.conversationId, conv);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    // Zero adapter sends - a closed group never fans out (never contradicts the
+    // "This group chat is now closed" final message).
+    expect(world.sent).toHaveLength(0);
+    // No per-recipient delivery slots were written on the source message either.
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+  });
+
   it('does NOT relay to an opted-out member — marks the slot failed/contact_opted_out, still sends the others', async () => {
     seedRelay(world);
     // Bob STOP'd — contact-level sms_opt_out set. Relay must skip him.

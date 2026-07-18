@@ -1,0 +1,13 @@
+/* RelayCloseAskDialog - minimal body + error styling inside the shared Modal. */
+
+.body {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+.error {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}

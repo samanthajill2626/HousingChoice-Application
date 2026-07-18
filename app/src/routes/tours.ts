@@ -78,6 +78,7 @@ import {
   type PoolNumbersService,
 } from '../services/poolNumbers.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
+import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
@@ -645,6 +646,19 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
         'tour_outcome',
         `Tour outcome - ${newMoveForward === true ? 'moved forward' : 'not a fit'}`,
       );
+    }
+
+    // D5 close-nag safety net (AF-1/CF-1): a terminal tour event that leaves the
+    // linked group open past it - canceled, or an exit-gate "not a fit" (NOT
+    // move-forward, which continues into a placement and keeps the thread) -
+    // arms the 28-day close-nag (set-if-absent) on the group so a forgotten
+    // group still surfaces on Today even if the operator dismissed the inline
+    // "Also close the group text?" ask. Best-effort - never fails the patch.
+    const tourWentCanceled = effectiveStatus === 'canceled' && currentStatus !== 'canceled';
+    const tourNotAFit =
+      newMoveForward === false || (outcomeNewlySet && newOutcome === 'not_a_fit');
+    if (tourWentCanceled || tourNotAFit) {
+      await armRelayCloseNagIfOpen({ conversationsRepo: conversations, logger: log }, tour.groupThreadId, 'tour');
     }
 
     // Live tour-page refresh (tour-detail-page 1a): advise dashboards this tour

@@ -171,8 +171,19 @@ export interface NewMessage {
   errorCode?: string;
   /** Relay group (M1.7): sender member key on an inbound relay message. */
   relaySenderKey?: string;
-  /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out). */
+  /** Relay group (M1.7): inbound landed on a closed relay thread (no fan-out).
+   *  Retained for the VOICE masked-call path (webhooks/voice.ts); the SMS relay
+   *  path no longer sets it (a late text is intercepted into the 1:1 instead -
+   *  see viaClosedGroup). */
   receivedOnClosedThread?: boolean;
+  /**
+   * Relay group (relay-number-lifecycle): a LATE text to a pool number whose
+   * only roster match for the sender is a CLOSED group is delivered into the
+   * sender's 1:1 thread; this records that closed group's conversationId so the
+   * dashboard can badge the message's provenance ("via the closed group chat").
+   * Absent on every other message.
+   */
+  viaClosedGroup?: string;
   /**
    * Relay group (M1.7): SEED the per-recipient delivery map on the SOURCE
    * message at append time. The fan-out's setRecipientDelivery is a CHILD-ONLY
@@ -282,9 +293,17 @@ export interface MessageItem {
   /**
    * Relay group (M1.7): true when this inbound arrived on a CLOSED relay
    * thread — persisted for the audit trail but NOT fanned out. Absent
-   * otherwise.
+   * otherwise. Set today only by the VOICE masked-call path (webhooks/voice.ts);
+   * the SMS relay path intercepts late texts into the 1:1 (via_closed_group).
    */
   received_on_closed_thread?: boolean;
+  /**
+   * Relay group (relay-number-lifecycle): the conversationId of the CLOSED
+   * relay group a late text was intercepted from. Present ONLY on a 1:1 message
+   * delivered by the closed-group interception path; the dashboard renders a
+   * "via the closed group chat" provenance badge off it. Absent otherwise.
+   */
+  via_closed_group?: string;
   /**
    * Relay group (M1.7): per-recipient delivery state for the fan-out of THIS
    * (inbound source) message to the other members, keyed by member key. The
@@ -607,6 +626,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           message.mediaAttachments.length > 0 && { media_attachments: message.mediaAttachments }),
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
+        ...(message.viaClosedGroup !== undefined && { via_closed_group: message.viaClosedGroup }),
         // Seed the per-recipient delivery map (possibly empty) so the fan-out's
         // child-only setRecipientDelivery has a parent map to write into.
         ...(message.deliveryRecipients !== undefined && {

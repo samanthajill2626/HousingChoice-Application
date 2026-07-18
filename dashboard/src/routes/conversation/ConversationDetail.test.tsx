@@ -202,7 +202,10 @@ describe('ConversationDetail group view', () => {
   });
 
   it('HARD-disables the composer when the group is closed', async () => {
-    getConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    // Relay number lifecycle: a closed group KEEPS its pool_number (it still
+    // intercepts late texts); the composer hard-disable keys on status, not the
+    // number.
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
     expect(screen.getByRole('button', { name: /^Send$/ })).toBeDisabled();
@@ -300,6 +303,29 @@ describe('ConversationDetail roster management', () => {
     // The 409 triggers a roster REFETCH (not swallowed).
     await waitFor(() => expect(getConversationMembers).toHaveBeenCalledTimes(2));
   });
+
+  it('add refused (409 phone_conflict_on_number): surfaces the actionable server message (W1)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getConversation.mockResolvedValue(relayHeader());
+    const serverMessage =
+      'This person already has a group text history on this number. Start a new group text with them instead.';
+    addConversationMember.mockRejectedValue(
+      new ApiError(409, 'phone_conflict_on_number', 'phone_conflict_on_number', {
+        error: 'phone_conflict_on_number',
+        message: serverMessage,
+      }),
+    );
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Add a member' }));
+    await user.type(screen.getByRole('combobox', { name: 'Add member' }), '(404) 555-0177');
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+
+    // The actionable server copy renders (not the generic "Couldn't add that member.").
+    await waitFor(() => expect(screen.getByText(serverMessage)).toBeInTheDocument());
+  });
 });
 
 describe('ConversationDetail close / reopen', () => {
@@ -307,31 +333,54 @@ describe('ConversationDetail close / reopen', () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
     getConversation.mockResolvedValue(relayHeader());
-    closeConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    closeConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Close group' }));
     const dialog = await screen.findByRole('dialog', { name: /Close group\?/i });
-    expect(within(dialog).getByText(/releases the pool number/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/sends members a final automated message/i)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Close group' }));
 
     await waitFor(() => expect(closeConversation).toHaveBeenCalledWith('conv-g1', true));
   });
 
-  it('reopens with a confirm that notes a fresh pool number + re-intro', async () => {
+  it('reopens with a confirm that notes the number is kept (no re-provisioning)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();
-    getConversation.mockResolvedValue(relayHeader({ status: 'closed', pool_number: undefined }));
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
     closeConversation.mockResolvedValue(relayHeader());
     renderAt('conv-g1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
 
     await user.click(screen.getByRole('button', { name: 'Reopen group' }));
     const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });
-    expect(within(dialog).getByText(/provisions a fresh pool number and re-intros members/i)).toBeInTheDocument();
+    expect(within(dialog).getByText(/keeps the same number/i)).toBeInTheDocument();
     await user.click(within(dialog).getByRole('button', { name: 'Reopen group' }));
 
     await waitFor(() => expect(closeConversation).toHaveBeenCalledWith('conv-g1', false));
+  });
+
+  it('reopen refused (409 pool_number_released): surfaces the actionable server message (AF-3)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getConversation.mockResolvedValue(relayHeader({ status: 'closed' }));
+    const serverMessage =
+      'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.';
+    closeConversation.mockRejectedValue(
+      new ApiError(409, 'pool_number_released', 'pool_number_released', {
+        error: 'pool_number_released',
+        message: serverMessage,
+      }),
+    );
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+
+    await user.click(screen.getByRole('button', { name: 'Reopen group' }));
+    const dialog = await screen.findByRole('dialog', { name: /Reopen group\?/i });
+    await user.click(within(dialog).getByRole('button', { name: 'Reopen group' }));
+
+    // The actionable server copy renders (not the generic "Couldn't reopen the group.").
+    await waitFor(() => expect(screen.getByText(serverMessage)).toBeInTheDocument());
   });
 });

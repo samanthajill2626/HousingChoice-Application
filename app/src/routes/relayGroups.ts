@@ -8,9 +8,10 @@
 //   DELETE /api/conversations/:id/members/:phone  → { members }
 //   PATCH  /api/conversations/:id/close          { closed: boolean }                    → { conversation }
 //
-// Pool numbers: create provisions one (poolNumbers service); closing releases
-// it to quarantine; reopening provisions a fresh one. The intro message is
-// throttle-sent via an immediate relay.intro job (naming everyone connected).
+// Pool numbers: create provisions one (poolNumbers service). Closing KEEPS the
+// number (burn-multiplexing: a closed group stays resolvable so late texts
+// intercept to the sender's 1:1); reopening reuses the same number. The intro
+// message is throttle-sent via an immediate relay.intro job (naming everyone).
 //
 // PII (doc §9): responses carry rosters/numbers to the authenticated client;
 // LOG LINES are IDs/counts only.
@@ -21,15 +22,22 @@ import { mergeContext } from '../lib/context.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { VoiceCapabilityError } from '../adapters/messaging.js';
+import {
+  VoiceCapabilityError,
+  createMessagingAdapter,
+  type MessagingAdapter,
+} from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { relayMemberKey } from '../repos/messagesRepo.js';
+import { createMessagesRepo, relayMemberKey, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
+import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_MEMBER_ADDED_JOB } from '../jobs/relayFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
+  CLOSE_NAG_INTERVAL_MS,
   type ConversationItem,
   type ConversationParticipant,
   createConversationsRepo,
@@ -42,7 +50,7 @@ import {
   createTourRemindersRepo,
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
-import { resolveMessage } from '../messages/index.js';
+import { resolveMessage, resolveWithSettings } from '../messages/index.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -60,6 +68,13 @@ export interface RelayGroupsRouterDeps {
   contactsRepo?: ContactsRepo;
   auditRepo?: AuditRepo;
   poolNumbersService?: PoolNumbersService;
+  /** Close sends the relay.group_closed final message via sendRelayAnnouncement
+   *  (same wiring as the relay.intro chain): it persists the announcement + sends
+   *  one leg per member FROM the pool number. */
+  messagesRepo?: MessagesRepo;
+  adapter?: MessagingAdapter;
+  /** OrgSettings source for the operator-overridable close copy (resolveWithSettings). */
+  settingsRepo?: SettingsRepo;
   /** BE2/C2: emit added_to_group_text / removed_from_group_text milestones. */
   activityEventsRepo?: ActivityEventsRepo;
   /** The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled):
@@ -127,6 +142,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const events = deps.events ?? appEvents;
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
 
@@ -277,6 +295,52 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     // addMember is idempotent on phone — capture whether this member was already
     // on the roster so we only emit added_to_group_text for a REAL add.
     const wasMember = (conversation.participants ?? []).some((p) => p.phone === member.phone);
+    // W1 BURN GAP: a NEW member must be BURNED onto the group's pool number
+    // BEFORE the roster mutation, or (a) they might already be rostered on
+    // another group sharing this number - breaking (To,From) resolution (wrong
+    // delivery / privacy leak) - and (b) an unburned add lets a FUTURE group
+    // containing this phone legitimately reuse the same number (reuse consults
+    // only burned_phones). ever_member_phones records the phones THIS group has
+    // burned here, so the rule is:
+    //   (1) already a current participant -> unchanged idempotent add (no burn);
+    //   (2) already in ever_member_phones -> burned by THIS group already
+    //       (remove-then-re-add) -> allowed WITHOUT a new claim;
+    //   (3) else burnClaim FIRST - on conflict 409, on success the roster + the
+    //       ever_member_phones provenance are written together (addMember).
+    // CRASH-ORDERING: burn-then-roster. A crash between the two leaves a
+    // burned-but-unrostered phone - the CONSERVATIVE direction (blocks reuse,
+    // never mis-routes; consistent with burn-forever). Never roster-then-burn.
+    // LEGACY: a pre-W1 group has no ever_member_phones; a new phone is not a
+    // current participant, so rule (3) claims it, and addMember then initializes
+    // the set from the current roster (their burns belong to this group).
+    if (!wasMember) {
+      const rawEver = conversation.ever_member_phones;
+      const everSet =
+        rawEver instanceof Set ? rawEver : Array.isArray(rawEver) ? new Set(rawEver) : undefined;
+      const burnedByThisGroup = everSet !== undefined && everSet.has(member.phone);
+      const poolNumber = conversation.pool_number;
+      if (!burnedByThisGroup && typeof poolNumber === 'string' && poolNumber.length > 0) {
+        const burned = await poolNumbers.burnMember(poolNumber, member.phone);
+        if (!burned) {
+          // PII (doc section 9): actor + reason only - NEVER the phone in the audit/log.
+          await audit.append(`conversations#${conversationId}`, 'relay_member_add_refused', {
+            actor,
+            reason: 'phone_conflict_on_number',
+          });
+          log.info(
+            { conversationId, actor },
+            'relay member add refused - phone already burned on this number',
+          );
+          res.status(409).json({
+            error: 'phone_conflict_on_number',
+            message:
+              'This person already has a group text history on this number. Start a new ' +
+              'group text with them instead.',
+          });
+          return;
+        }
+      }
+    }
     let updated: ConversationItem;
     try {
       updated = await conversations.addMember(conversationId, member);
@@ -410,8 +474,13 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     res.json({ members: updated.participants ?? [] });
   });
 
-  // PATCH /api/conversations/:id/close — close (release pool number) / reopen
-  // (provision a fresh one). Body { closed: boolean }.
+  // PATCH /api/conversations/:id/close - close / reopen a relay group.
+  // Body { closed: boolean }. Close sends the relay.group_closed FINAL message
+  // to every member (while still open), then flips status='closed' KEEPING the
+  // pool number (burn-multiplexing: a late text still resolves the closed group
+  // and intercepts to the sender's 1:1) and clears the Today close-nag. Reopen
+  // is a pure status flip - the number never left the record, nothing is
+  // re-provisioned.
   router.patch('/conversations/:conversationId/close', async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId;
     const { conversationId } = req.params;
@@ -429,79 +498,123 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
 
     let updated: ConversationItem;
     if (body.closed) {
-      // FIX 1 — CLOSE: clear pool_number FIRST (atomic status='closed' + REMOVE
-      // pool_number, conditional on status='open'), THEN release the captured
-      // number. Clearing first means an inbound arriving in the window no
-      // longer resolves via getByPoolNumber() (the sparse byPoolNumber GSI
-      // drops it the instant the attribute is removed), so it can never fan
-      // out a closed thread. The release runs AFTER, and only if THIS call won
-      // the close — a concurrent/duplicate close fails the precondition and we
-      // no-op (idempotent), skipping the release so we never double-quarantine.
-      const oldPoolNumber = conversation.pool_number;
+      const poolNumber = conversation.pool_number;
+      // W3 CLOSE-ANNOUNCE DEDUP CLAIM: atomically win the right to send the ONE
+      // relay.group_closed final message (claimCloseAnnounce SETs
+      // close_announced_at, conditional on status=open AND the marker absent).
+      // Exactly one caller wins under concurrent closes; a retry after a crash
+      // between announce and flip sees the marker set and LOSES here, so it skips
+      // the already-sent announcement. The (idempotent) status flip below runs
+      // for winners AND losers: a loser whose group is already closed no-ops on
+      // the conditional flip; a loser mid-crash-retry (still open) completes it.
+      // This closes BOTH the concurrent-close double-announce TOCTOU and the
+      // crash-between-announce-and-flip retry.
+      const announceWon = await conversations.claimCloseAnnounce(conversationId);
+      if (announceWon) {
+        // (1) FINAL MESSAGE (spec 4.4): announce relay.group_closed to every
+        // member while the group is STILL OPEN (the announcement gate refuses a
+        // closed group). A send/persist failure LOGS and the close STILL PROCEEDS.
+        try {
+          const closedBody = await resolveWithSettings(
+            'relay.group_closed',
+            {},
+            { settingsRepo: settings },
+          );
+          await sendRelayAnnouncement(
+            {
+              conversationsRepo: conversations,
+              messagesRepo: messages,
+              contactsRepo: contacts,
+              adapter,
+              events,
+              ...(deps.logger !== undefined && { logger: deps.logger }),
+            },
+            { conversationId, body: closedBody, kind: 'group_closed' },
+          );
+        } catch (err) {
+          log.error({ err, conversationId }, 'relay close: final announcement failed - closing anyway');
+        }
+      } else {
+        // Lost the claim: a concurrent winner already announced, or this is a
+        // crash-retry (marker set, flip not yet done). Skip the announce - the
+        // idempotent flip below completes a pending close or no-ops a closed one.
+        log.info(
+          { conversationId },
+          'relay close: announcement already claimed - skipping (idempotent/retry)',
+        );
+      }
+      // (2) Flip status='closed' (conditional on 'open'), KEEPING pool_number so
+      // a late text still resolves the group. A concurrent/duplicate close fails
+      // the precondition and no-ops (idempotent). The number is NOT released - we
+      // only stamp its retirement clock (noteGroupClosed) for the D7 sweep.
       try {
-        updated = await conversations.setRelayStatus(conversationId, 'closed', null, 'open');
+        updated = await conversations.setRelayStatus(conversationId, 'closed', 'open');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Already closed (concurrent/duplicate close) — idempotent no-op.
-          log.info({ conversationId }, 'relay close: already closed — idempotent no-op');
-          res.json({ conversation });
+          // Already closed (concurrent/duplicate close) - idempotent no-op. AF-8:
+          // re-fetch so the response body carries the ACTUAL (closed) status,
+          // not our STALE pre-announce read (taken while it was still open) - a
+          // concurrent-close loser must not return a dishonest status:'open' body.
+          const fresh = await conversations.getById(conversationId);
+          log.info({ conversationId }, 'relay close: already closed - idempotent no-op');
+          res.json({ conversation: fresh ?? conversation });
           return;
         }
         throw err;
       }
-      if (typeof oldPoolNumber === 'string' && oldPoolNumber.length > 0) {
+      // (3) Stamp the retirement clock (best-effort): drives the 180-day D7 sweep.
+      if (typeof poolNumber === 'string' && poolNumber.length > 0) {
         try {
-          await poolNumbers.release(oldPoolNumber);
+          await poolNumbers.noteGroupClosed(poolNumber, new Date().toISOString());
         } catch (err) {
-          log.error({ err, conversationId }, 'relay close: pool number release failed — closed anyway');
+          log.error({ err, conversationId }, 'relay close: noteGroupClosed failed - closed anyway');
         }
+      }
+      // (4) Clear the Today close-nag (best-effort): a closed group no longer nags.
+      try {
+        await conversations.setCloseNagNextAt(conversationId, null);
+      } catch (err) {
+        log.error({ err, conversationId }, 'relay close: clearing close-nag failed - closed anyway');
       }
       await audit.append(`conversations#${conversationId}`, 'relay_group_closed', {
         actor,
       });
     } else {
-      // FIX 1 — REOPEN: ALWAYS provision a FRESH number; NEVER reuse the
-      // conversation's stale pool_number (the old one is in quarantine — reusing
-      // it is the collision bug). Then flip status='open' conditional on
-      // status='closed'. If that condition fails (already open / concurrent
-      // reopen), release the freshly-provisioned number back so it never leaks.
-      let poolNumber: string;
-      try {
-        const provisioned = await poolNumbers.provisionForPlacement(conversationId);
-        poolNumber = provisioned.poolNumber;
-      } catch (err) {
-        // Kill-switch refusal (M1.7): reopen needs a fresh number but live
-        // provisioning is off — refuse cleanly (no purchase). Stable 503 code +
-        // actionable message; audit the refusal (actor + reason, no PII).
-        if (err instanceof RelayProvisioningDisabledError) {
-          log.warn({ err: { name: err.name }, conversationId, actor }, 'relay reopen: number provisioning disabled');
-          await audit.append(`conversations#${conversationId}`, 'relay_provisioning_disabled', {
+      // REOPEN: the number never left the record (burn-multiplexing), so reopen
+      // is a pure status flip back to 'open' (conditional on 'closed') - nothing
+      // is re-provisioned. A concurrent/duplicate reopen fails the precondition
+      // and no-ops (idempotent).
+      // AF-3: refuse reopen when the pool number was RELEASED by retirement (D7).
+      // A pure flip would mint a ZOMBIE open group on a number Twilio no longer
+      // routes to us (inbound never arrives; outbound announcements/fan-out send
+      // FROM a number we do not own). Read the pool record; a missing or
+      // non-active record blocks with an actionable 409.
+      const reopenPool = conversation.pool_number;
+      if (typeof reopenPool === 'string' && reopenPool.length > 0) {
+        const record = await poolNumbers.getRecord(reopenPool);
+        if (!record || record.lifecycle_state !== 'active') {
+          await audit.append(`conversations#${conversationId}`, 'relay_group_reopen_refused', {
             actor,
-            reason: 'reopen',
+            reason: 'pool_number_released',
           });
-          res
-            .status(503)
-            .json({ error: 'relay_provisioning_disabled', message: err.message });
+          log.info({ conversationId }, 'relay reopen refused - pool number released');
+          res.status(409).json({
+            error: 'pool_number_released',
+            message:
+              'This group text cannot be reopened: its number was retired after long ' +
+              'inactivity. Start a new group text instead.',
+          });
           return;
         }
-        if (err instanceof VoiceCapabilityError) {
-          res.status(503).json({ error: 'pool_number_unavailable' });
-          return;
-        }
-        throw err;
       }
       try {
-        updated = await conversations.setRelayStatus(conversationId, 'open', poolNumber, 'closed');
+        // W3: the open transition also REMOVEs close_announced_at (folded into
+        // setRelayStatus, atomic with the flip) so a FUTURE close of this group
+        // re-announces - a separate clear could crash-window into a silent close.
+        updated = await conversations.setRelayStatus(conversationId, 'open', 'closed');
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Already open (concurrent/duplicate reopen) — release the number we
-          // just provisioned so it isn't leaked, then idempotent no-op.
-          try {
-            await poolNumbers.release(poolNumber);
-          } catch (releaseErr) {
-            log.error({ err: releaseErr, conversationId }, 'relay reopen: releasing the unused fresh number failed');
-          }
-          log.info({ conversationId }, 'relay reopen: already open — released fresh number, idempotent no-op');
+          log.info({ conversationId }, 'relay reopen: already open - idempotent no-op');
           res.json({ conversation });
           return;
         }
@@ -515,6 +628,38 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     events.emit('conversation.updated', toConversationUpdatedEvent(updated));
     log.info({ conversationId, closed: body.closed, actor }, 'relay group close/reopen via api');
     res.json({ conversation: updated });
+  });
+
+  // POST /api/conversations/:id/close-nag/defer - "Keep open" from the Today nag
+  // or the inline close-ask (D5): restart the 28-day close-nag clock. The
+  // interval is FIXED server-side (CLOSE_NAG_INTERVAL_MS) - no client-supplied
+  // timestamp (never trust an arbitrary defer target). Audited.
+  router.post('/conversations/:conversationId/close-nag/defer', async (req, res) => {
+    const actor = (req as AuthedRequest).user?.userId;
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation || conversation.type !== 'relay_group') {
+      res.status(404).json({ error: 'relay_group_not_found' });
+      return;
+    }
+    // AF-9: a CLOSED group never nags, so deferring a nag onto it is a pointless
+    // write (and would resurface if the group were later reopened). No-op - no
+    // write, no audit (Today-card race friendly: a close landing just before a
+    // Keep-open click must not stamp a stale nag field on the now-closed row).
+    if (conversation.status !== 'open') {
+      log.info({ conversationId }, 'close-nag defer ignored - group not open');
+      res.json({ conversation });
+      return;
+    }
+    const nextAt = new Date(Date.now() + CLOSE_NAG_INTERVAL_MS).toISOString();
+    await conversations.setCloseNagNextAt(conversationId, nextAt);
+    await audit.append(`conversations#${conversationId}`, 'relay_close_nag_deferred', {
+      actor,
+    });
+    log.info({ conversationId, actor }, 'relay close-nag deferred (+28d) via api');
+    const refreshed = await conversations.getById(conversationId);
+    res.json({ conversation: refreshed ?? { ...conversation, close_nag_next_at: nextAt } });
   });
 
   return router;

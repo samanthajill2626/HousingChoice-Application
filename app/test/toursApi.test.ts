@@ -262,6 +262,58 @@ describe('PATCH /api/tours/:tourId', () => {
     expect(res.body.tour.convertible).toBe(false);
   });
 
+  // D5 close-nag safety net (relay-number-lifecycle AF-1/CF-1): a terminal tour
+  // event (canceled or exit-gate not-a-fit) whose linked relay group is still
+  // OPEN arms the 28-day close-nag (set-if-absent). A move-forward exit does NOT
+  // (it continues into a placement and keeps the thread). Backend arm.
+  async function seedTouredTourWithOpenGroup(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    world: FakeWorld,
+    poolNumber: string,
+  ): Promise<{ tourId: string; groupId: string }> {
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber,
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    // Link the group to the tour, then move the tour to 'toured' (exit-gate ready).
+    world.toursMap.get(tourId)!.groupThreadId = group.conversationId;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'toured' });
+    return { tourId, groupId: group.conversationId };
+  }
+
+  it('exit-gate "not a fit" (moveForward:false) arms the close-nag on the linked OPEN group (AF-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, groupId } = await seedTouredTourWithOpenGroup(app, world, '+15550100080');
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'not_a_fit', moveForward: false, status: 'closed' });
+    expect((await world.conversationsRepo.getById(groupId))!.close_nag_next_at).toBeDefined();
+  });
+
+  it('a move-forward exit gate does NOT arm the close-nag (thread continues into the placement)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, groupId } = await seedTouredTourWithOpenGroup(app, world, '+15550100082');
+    await authed(app)
+      .patch(`/api/tours/${tourId}`)
+      .send({ outcome: 'move_forward', moveForward: true });
+    expect((await world.conversationsRepo.getById(groupId))!.close_nag_next_at).toBeUndefined();
+  });
+
+  it('canceling a tour arms the close-nag on its linked OPEN group (AF-1)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    const group = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550100081',
+      members: [{ phone: '+15550100001', contactId: '', name: 'Alice' }],
+    });
+    world.toursMap.get(tourId)!.groupThreadId = group.conversationId;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
+    expect((await world.conversationsRepo.getById(group.conversationId))!.close_nag_next_at).toBeDefined();
+  });
+
   it('rejects illegal transition: closed → scheduled (409)', async () => {
     const { app } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
@@ -1289,31 +1341,34 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
 // resolves in-process and we can assert the pool number used for sends.
 
 /** Minimal fake pool-numbers service: deterministic numbers, no Twilio. */
-function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provisioned: string[] } {
+function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
   let counter = 0;
-  const released: string[] = [];
   const provisioned: string[] = [];
   const rec = (poolNumber: string): PoolNumberItem => ({
     poolNumber,
-    lifecycle_state: 'assigned',
+    lifecycle_state: 'active',
     quarantine_until: '0000-00-00T00:00:00.000Z',
     voice_capable: true,
     sms_capable: true,
     provisioned_at: new Date().toISOString(),
   });
   return {
-    released,
     provisioned,
-    async provisionForPlacement() {
+    async provisionForGroup() {
       counter += 1;
       const poolNumber = `+1555040${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
       return { poolNumber, record: rec(poolNumber), provisioned: true };
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      released.push(poolNumber);
-      return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord(poolNumber) {
+      return rec(poolNumber);
     },
   };
 }
@@ -1322,39 +1377,37 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
   let provisionAttempts = 0;
   return {
     get provisionAttempts() { return provisionAttempts; },
-    async provisionForPlacement() {
+    async provisionForGroup() {
       provisionAttempts += 1;
       throw new RelayProvisioningDisabledError('set RELAY_LIVE_PROVISIONING=true after A2P approval');
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: true,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord() {
+      return undefined;
     },
   };
 }
 
 function makeVoiceCapabilityFailingPool(): PoolNumbersService {
   return {
-    async provisionForPlacement() {
+    async provisionForGroup() {
       throw new VoiceCapabilityError('no voice-capable number available');
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: false,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord() {
+      return undefined;
     },
   };
 }

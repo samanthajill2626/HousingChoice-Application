@@ -439,9 +439,9 @@ describe('seed matrix: pool numbers and relay conversations', () => {
   const allPoolNumbers = PROFILE['pool_numbers'] ?? [];
   const allConversations = PROFILE['conversations'] ?? [];
 
-  it('≥2 pool_numbers rows exist (assigned lifecycle)', () => {
-    const assigned = allPoolNumbers.filter((p) => p['lifecycle_state'] === 'assigned');
-    expect(assigned.length).toBeGreaterThanOrEqual(2);
+  it('at least 2 pool_numbers rows exist (active lifecycle)', () => {
+    const active = allPoolNumbers.filter((p) => p['lifecycle_state'] === 'active');
+    expect(active.length).toBeGreaterThanOrEqual(2);
   });
 
   it('≥2 relay_group conversations exist', () => {
@@ -449,12 +449,65 @@ describe('seed matrix: pool numbers and relay conversations', () => {
     expect(relayConvs.length).toBeGreaterThanOrEqual(2);
   });
 
-  it('pool numbers and relay conversations are cross-referenced', () => {
-    const poolConvIds = new Set(allPoolNumbers.map((p) => p['assigned_conversation_id'] as string).filter(Boolean));
-    const relayConvIds = new Set(allConversations.filter((c) => c['type'] === 'relay_group').map((c) => c['conversationId'] as string));
-    for (const id of poolConvIds) {
-      expect(relayConvIds.has(id), `pool number assigned_conversation_id '${id}' must match a relay_group conversation`).toBe(true);
+  // Burn-multiplexing shape (relay-number-lifecycle): pool numbers no longer
+  // carry assigned_conversation_id. Instead every seeded pool number is active
+  // and its burned_phones set covers the full roster of every relay group it
+  // fronts (consistent-by-construction with the group participants).
+  it('every pool number is active and burns its groups full roster', () => {
+    const relayConvs = allConversations.filter((c) => c['type'] === 'relay_group');
+    expect(allPoolNumbers.length).toBeGreaterThanOrEqual(2);
+    for (const pool of allPoolNumbers) {
+      expect(pool['lifecycle_state']).toBe('active');
+      expect(pool['assigned_conversation_id']).toBeUndefined();
+      const rawBurn = pool['burned_phones'];
+      const burned = new Set(
+        rawBurn instanceof Set ? [...rawBurn] : ((rawBurn as string[] | undefined) ?? []),
+      );
+      const rosterPhones = relayConvs
+        .filter((c) => c['pool_number'] === pool['poolNumber'])
+        .flatMap((c) => ((c['participants'] as Array<{ phone: string }> | undefined) ?? []).map((m) => m.phone));
+      expect(rosterPhones.length).toBeGreaterThan(0);
+      for (const phone of rosterPhones) {
+        expect(burned.has(phone)).toBe(true);
+      }
     }
+  });
+
+  // Burn provenance (W1): every seeded relay group carries ever_member_phones
+  // covering its own roster (the phones whose burn on the number belongs to
+  // THIS group) - so a member-add of an already-rostered person needs no fresh
+  // claim and seeds are add-member-ready natively (no first-add legacy init).
+  it('every relay group seeds ever_member_phones covering its roster', () => {
+    const relayConvs = allConversations.filter((c) => c['type'] === 'relay_group');
+    expect(relayConvs.length).toBeGreaterThanOrEqual(2);
+    for (const conv of relayConvs) {
+      const rawEver = conv['ever_member_phones'];
+      const ever = new Set(
+        rawEver instanceof Set ? [...rawEver] : ((rawEver as string[] | undefined) ?? []),
+      );
+      const rosterPhones = ((conv['participants'] as Array<{ phone: string }> | undefined) ?? []).map(
+        (m) => m.phone,
+      );
+      expect(rosterPhones.length).toBeGreaterThan(0);
+      for (const phone of rosterPhones) {
+        expect(ever.has(phone)).toBe(true);
+      }
+    }
+  });
+
+  // The Today relay-close-nag card needs a live subject in the full profile.
+  it('exactly one seeded open relay group carries a past-due close nag', () => {
+    const nagGroups = allConversations.filter(
+      (c) => c['type'] === 'relay_group' && c['close_nag_next_at'] !== undefined,
+    );
+    expect(nagGroups).toHaveLength(1);
+    const nag = nagGroups[0]!;
+    expect(nag['status']).toBe('open');
+    const nagAt = Date.parse(nag['close_nag_next_at'] as string);
+    expect(Number.isNaN(nagAt)).toBe(false);
+    // Past relative to seed-now (seeded as daysAgo(now, 14)).
+    expect(nagAt).toBeLessThan(Date.now());
+    expect(Date.now() - nagAt).toBeGreaterThan(10 * 24 * 60 * 60 * 1000);
   });
 });
 

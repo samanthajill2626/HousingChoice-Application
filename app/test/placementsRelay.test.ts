@@ -36,31 +36,34 @@ import {
 const TENANT_PHONE = '+15550100001';
 const LANDLORD_PHONE = '+15550100002';
 
-function makeFakePoolNumbers(): PoolNumbersService & { released: string[]; provisioned: string[] } {
+function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
   let counter = 0;
-  const released: string[] = [];
   const provisioned: string[] = [];
   const rec = (poolNumber: string): PoolNumberItem => ({
     poolNumber,
-    lifecycle_state: 'assigned',
+    lifecycle_state: 'active',
     quarantine_until: '0000-00-00T00:00:00.000Z',
     voice_capable: true,
     sms_capable: true,
     provisioned_at: new Date().toISOString(),
   });
   return {
-    released,
     provisioned,
-    async provisionForPlacement() {
+    async provisionForGroup() {
       counter += 1;
       const poolNumber = `+1555030${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
       return { poolNumber, record: rec(poolNumber), provisioned: true };
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      released.push(poolNumber);
-      return { ...rec(poolNumber), lifecycle_state: 'quarantined' };
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord(poolNumber) {
+      return rec(poolNumber);
     },
   };
 }
@@ -71,20 +74,19 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     get provisionAttempts() {
       return provisionAttempts;
     },
-    async provisionForPlacement() {
+    async provisionForGroup() {
       provisionAttempts += 1;
       throw new RelayProvisioningDisabledError('set RELAY_LIVE_PROVISIONING=true after A2P approval');
     },
-    async assignConversation() {},
-    async release(poolNumber) {
-      return {
-        poolNumber,
-        lifecycle_state: 'quarantined',
-        quarantine_until: '0000-00-00T00:00:00.000Z',
-        voice_capable: true,
-        sms_capable: true,
-        provisioned_at: new Date().toISOString(),
-      };
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async getRecord() {
+      return undefined;
     },
   };
 }

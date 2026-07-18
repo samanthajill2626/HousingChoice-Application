@@ -123,6 +123,9 @@ function makeFakes(
     // Relay groups (M1.7 / Task 5) — unused by the send service:
     createRelayGroup: async () => conversation,
     getByPoolNumber: async () => undefined,
+    getAllByPoolNumber: async () => [],
+    setCloseNagNextAt: async () => {},
+    claimCloseAnnounce: async () => false,
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
@@ -193,6 +196,7 @@ function makeFakes(
       sid: 'PNfake-sm',
     }),
     setVoiceWebhook: async () => {},
+    releasePhoneNumber: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
     createViTranscript: async () => {
       throw new Error('not used');

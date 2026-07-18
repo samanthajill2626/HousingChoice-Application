@@ -47,6 +47,7 @@ const fakeInner: MessagingAdapter = {
   getRecordingStream: async () => { throw new Error('n/a'); },
   provisionPhoneNumber: async () => { throw new Error('n/a'); },
   setVoiceWebhook: async () => {},
+  releasePhoneNumber: async () => {},
   initiateCall: async () => { throw new Error('n/a'); },
   createViTranscript: async () => { throw new Error('n/a'); },
   fetchViTranscript: async () => { throw new Error('n/a'); },

@@ -398,6 +398,19 @@ function MessageBubble({
       {senderLabel !== undefined ? (
         <div className={styles.relaySender ?? ''}>{senderLabel}</div>
       ) : null}
+      {/* Relay number lifecycle: a late text a still-rostered member sent to a
+       *  now-CLOSED group's number was intercepted into their 1:1 - attribute it
+       *  back to that closed group (link out; stopPropagation so it doesn't toggle
+       *  the bubble meta). */}
+      {typeof msg.via_closed_group === 'string' && msg.via_closed_group.length > 0 ? (
+        <Link
+          to={`/conversations/${msg.via_closed_group}`}
+          className={styles.viaClosedGroup ?? ''}
+          onClick={(e) => e.stopPropagation()}
+        >
+          Sent to the closed group chat
+        </Link>
+      ) : null}
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
       {attachments.length > 0 ? (
         sid ? (

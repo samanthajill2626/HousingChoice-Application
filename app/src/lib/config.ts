@@ -83,7 +83,7 @@ export interface AppConfig {
   messagingDriver: MessagingDriverName;
   /**
    * Relay number-provisioning kill-switch (M1.7 safety). When false,
-   * provisionForPlacement refuses to OBTAIN a new pool number (no
+   * provisionForGroup refuses to OBTAIN a new pool number (no
    * adapter.provisionPhoneNumber → no real Twilio number PURCHASE) and throws
    * RelayProvisioningDisabledError. Read from RELAY_LIVE_PROVISIONING; when
    * unset it DEFAULTS to (messagingDriver === 'console') — true locally/test
@@ -92,6 +92,14 @@ export interface AppConfig {
    * approval to enable buying a pool number.
    */
   relayLiveProvisioning: boolean;
+  /**
+   * Relay number-RELEASE gate (D7 retirement). When true, the retirement sweep
+   * (retireEligible / `npm run pool:retire`) may DELETE idle pool numbers at
+   * Twilio after the 180-day grace. Read from RELAY_NUMBER_RELEASE_ENABLED ===
+   * 'true'; defaults to FALSE everywhere (deployed AND local) until ops turns it
+   * on, so no number is ever released by accident. The sweep no-ops when off.
+   */
+  relayNumberReleaseEnabled: boolean;
   /**
    * Outbound-SMS kill-switch (A2P safety). When false, every real-Twilio SMS
    * send is REFUSED before the provider call (the send wrapper throws a
@@ -455,6 +463,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Relay number-RELEASE gate (D7 retirement). Simpler posture than the
+  // provisioning kill-switch: default FALSE everywhere (no driver-based default)
+  // so retirement stays OFF until ops explicitly enables it - only an exact
+  // 'true' turns it on. A number release DELETEs it at Twilio, so the default
+  // must never be permissive.
+  const relayNumberReleaseEnabled = env.RELAY_NUMBER_RELEASE_ENABLED === 'true';
+
   // Outbound-SMS kill-switch (A2P) — same shape/posture as RELAY_LIVE_PROVISIONING:
   // default OFF on the deployed (twilio) stacks so NO real SMS is sent before A2P
   // approval (an unregistered-number send draws Twilio 30034 and hurts sender
@@ -712,6 +727,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     jobsQueueUrl: env.JOBS_QUEUE_URL,
     messagingDriver,
     relayLiveProvisioning,
+    relayNumberReleaseEnabled,
     smsSendingEnabled,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,

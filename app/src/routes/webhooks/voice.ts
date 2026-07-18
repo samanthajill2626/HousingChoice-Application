@@ -44,7 +44,10 @@ import { formatPhoneForDisplay } from '../../lib/phone.js';
 import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { resolveMessage } from '../../messages/index.js';
-import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
+import {
+  twilioSignatureMiddleware,
+  twilioJsonSignatureMiddleware,
+} from '../../middleware/twilioSignature.js';
 import {
   createContactsRepo,
   type ContactItem,
@@ -75,6 +78,7 @@ import {
   UNKNOWN_CALLER_LABEL,
 } from '../../lib/voiceMasking.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
+import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueueImmediate } from '../../jobs/jobs.js';
 import { MISSED_CALL_AUTOTEXT_JOB } from '../../jobs/missedCallAutoText.js';
 
@@ -291,6 +295,15 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   const router = Router();
   const verifySignature = twilioSignatureMiddleware({
+    authToken: config.twilioAuthToken,
+    publicBaseUrl: config.publicBaseUrl,
+    nodeEnv: config.nodeEnv,
+    logger: log,
+  });
+  // The JSON-body sibling for the Voice Intelligence completion webhook (spec
+  // 3.3): same auth token + base URL, but validates the bodySHA256 scheme over
+  // the raw JSON body instead of parsed form params.
+  const verifyJsonSignature = twilioJsonSignatureMiddleware({
     authToken: config.twilioAuthToken,
     publicBaseUrl: config.publicBaseUrl,
     nodeEnv: config.nodeEnv,
@@ -1509,6 +1522,32 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       'founder-bridge recording mirrored to S3',
     );
     res.status(200).end();
+  });
+
+  // ---------------------------------------------------------------------
+  // Voice Intelligence completion webhook - POST /voice/intelligence
+  // (voice-transcription spec 3.3). Twilio POSTs a JSON body carrying ONLY a
+  // transcript_sid; we trust nothing else and re-fetch the transcript + its
+  // sentences from the VI API, join them, and persist via the idempotent
+  // setCallTranscript seam (masked refusal + never-overwrite enforced there).
+  // Signature-gated by the JSON (bodySHA256) variant. A Twilio API failure mid-
+  // flow returns 500 so Twilio redelivers (the idempotent persist makes that
+  // safe). PII (doc section 9): NEVER log the transcript text - lengths + sids.
+  // ---------------------------------------------------------------------
+  router.post('/intelligence', verifyJsonSignature, async (req, res) => {
+    const transcriptSid = (req.body as { transcript_sid?: unknown } | undefined)?.transcript_sid;
+    if (typeof transcriptSid !== 'string' || transcriptSid.length === 0) {
+      log.warn({ hasTranscriptSid: false }, 'vi webhook: missing transcript_sid - rejected');
+      res.status(400).json({ error: 'bad request' });
+      return;
+    }
+    try {
+      await persistViTranscript({ adapter, messages, events, logger: log }, transcriptSid);
+      res.status(200).end();
+    } catch (err) {
+      log.error({ err, transcriptSid }, 'vi webhook: twilio api failure - 500 for redelivery');
+      res.status(500).end();
+    }
   });
 
   // ---------------------------------------------------------------------

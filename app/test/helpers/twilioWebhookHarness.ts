@@ -3,6 +3,7 @@
 // signed-form-POST builder that computes REAL HMAC-SHA1 X-Twilio-Signature
 // values with the twilio package — signature verification is exercised for
 // real, never mocked out.
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
@@ -2300,6 +2301,36 @@ export function signedTwilioPost(
     req = req.set('x-twilio-signature', opts.tamper ? `${signature}TAMPERED` : signature);
   }
   return req.send(params);
+}
+
+/**
+ * POST a Twilio-style JSON webhook (Voice Intelligence events) with a REAL
+ * computed signature under the bodySHA256 scheme (spec 3.3): the URL carries
+ * ?bodySHA256=<sha256hex(rawBody)>, and X-Twilio-Signature =
+ * base64(HMAC-SHA1(authToken, fullUrl)) over that URL with NO form params. The
+ * exact bytes sent (`raw`) are what the app's json parser captures as rawBody, so
+ * validateRequestWithBody re-hashes them and matches. Mirrors signedTwilioPost's
+ * tamper/omit/base-URL options + the /webhooks origin-secret header.
+ */
+export function signedJsonPost(
+  app: Express,
+  path: string,
+  body: unknown,
+  opts: SignedPostOptions = {},
+): Test {
+  const raw = JSON.stringify(body);
+  const sha = createHash('sha256').update(raw, 'utf8').digest('hex');
+  const pathWithSha = `${path}?bodySHA256=${sha}`;
+  const url = `${opts.signatureBaseUrl ?? PUBLIC_BASE_URL}${pathWithSha}`;
+  const signature = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, {});
+  let req = request(app)
+    .post(pathWithSha)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('content-type', 'application/json');
+  if (!opts.omitSignature) {
+    req = req.set('x-twilio-signature', opts.tamper ? `${signature}TAMPERED` : signature);
+  }
+  return req.send(raw);
 }
 
 /** Standard inbound SMS webhook params (Programmable Messaging shape). */

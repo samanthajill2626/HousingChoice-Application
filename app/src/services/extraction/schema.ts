@@ -106,6 +106,22 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
       type: 'array',
       items: { type: 'string' },
     },
+    // Layer-2 role attribution for `Speaker N` (unknown) call lines. Modeled as
+    // an ARRAY OF PAIRS, not a dynamic-key map: structured outputs require
+    // additionalProperties:false on every object, which a `{ "Speaker 1": role }`
+    // map cannot satisfy. parseExtractionText folds this to a Record.
+    speakerRoles: {
+      type: 'array',
+      items: {
+        type: 'object',
+        additionalProperties: false,
+        properties: {
+          speaker: { type: 'string' },
+          role: { type: 'string', enum: ['client', 'staff', 'uncertain'] },
+        },
+        required: ['speaker', 'role'],
+      },
+    },
   },
   required: ['fields'],
 };
@@ -175,6 +191,23 @@ export function parseExtractionText(text: string): ExtractionResult {
       .slice(0, MAX_NOTE_LINES)
       .map((line) => clamp(line, MAX_NOTE_CHARS));
     if (lines.length > 0) result.noteLines = lines;
+  }
+
+  // Fold the wire array of {speaker,role} pairs into a Record. Keep only items
+  // with a non-empty string speaker and an in-enum role; last write wins on a
+  // duplicate speaker. Assign only when non-empty so a payload WITHOUT
+  // speakerRoles round-trips unchanged.
+  if (Array.isArray(root.speakerRoles)) {
+    const roles: Record<string, 'client' | 'staff' | 'uncertain'> = {};
+    for (const item of root.speakerRoles) {
+      if (!isRecord(item)) continue;
+      const speaker = item.speaker;
+      const role = item.role;
+      if (typeof speaker !== 'string' || speaker.length === 0) continue;
+      if (role !== 'client' && role !== 'staff' && role !== 'uncertain') continue;
+      roles[speaker] = role;
+    }
+    if (Object.keys(roles).length > 0) result.speakerRoles = roles;
   }
 
   return result;

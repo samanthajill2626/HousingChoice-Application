@@ -457,3 +457,109 @@ describe('applyExtraction - emit + best-effort isolation (items 9-10)', () => {
     expect(records.updates.some((u) => u.patch['pets'] === 'dog')).toBe(true);
   });
 });
+
+describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
+  const ROLES = { 'Speaker 1': 'client', 'Speaker 2': 'staff' } as const;
+
+  it('demotes a write on an EMPTY field to a suggestion and audits the demotion', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant' }); // no pets yet
+    const outcome = await applyExtraction(deps, {
+      contact,
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: {
+        fields: { pets: { op: 'write', value: 'has a dog', reason: 'said has a dog' } },
+        speakerRoles: { ...ROLES },
+      },
+      hasInferredRoleContent: true,
+    });
+
+    // The write became a suggestion: nothing direct-written, no <field>_source.
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual(['pets']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      ownerContactId: 'c1',
+      target: 'pets',
+      suggestedValue: 'has a dog',
+      reason: 'said has a dog',
+      conversationId: CONV,
+      tsMsgId: 'ts-9',
+    });
+
+    // The write-audit is NOT emitted (no direct write happened).
+    expect(records.audits.find((a) => a.type === 'ai_extraction_applied')).toBeUndefined();
+    // A separate demotion audit carries the demoted field names + the role map.
+    const demoted = records.audits.find((a) => a.type === 'ai_extraction_demoted');
+    expect(demoted).toBeDefined();
+    expect(demoted!.entityKey).toBe('contacts#c1');
+    expect(demoted!.payload).toEqual({
+      fields: ['pets'],
+      speakerRoles: { 'Speaker 1': 'client', 'Speaker 2': 'staff' },
+      conversationId: CONV,
+    });
+    // Something changed, so the single event still fires.
+    expect(records.emits.filter((e) => e.name === 'suggestion.updated')).toHaveLength(1);
+  });
+
+  it('leaves native suggestions and notes appends untouched under the flag (no demotion audit)', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant', voucherSize: 2 });
+    const outcome = await applyExtraction(deps, {
+      contact,
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: {
+        fields: { voucherSize: { op: 'suggest', value: '3', reason: 'now needs 3BR' } },
+        noteLines: ['likes the neighborhood'],
+      },
+      hasInferredRoleContent: true,
+    });
+
+    // Native suggest behaves exactly as without the flag.
+    expect(outcome.suggested).toEqual(['voucherSize']);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'voucherSize',
+      currentValue: '2',
+      suggestedValue: '3',
+    });
+    // Notes are additive - the append still lands directly.
+    expect(outcome.notedLines).toBe(1);
+    const noteUpdate = records.updates.find((u) => typeof u.patch['notes'] === 'string');
+    expect(noteUpdate!.patch['notes']).toContain('[Auto - Jul 16] likes the neighborhood');
+    // No write op was present, so no demotion audit fires.
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
+  });
+
+  it('with the flag explicitly false, a write on an empty field lands directly (parity)', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { pets: { op: 'write', value: 'has a dog' } } },
+      hasInferredRoleContent: false,
+    });
+    expect(outcome.wrote).toEqual(['pets']);
+    expect(outcome.suggested).toEqual([]);
+    expect(records.updates[0]!.patch['pets']).toBe('has a dog');
+    expect(records.updates[0]!.patch['pets_source']).toMatchObject({ source: 'ai', conversationId: CONV });
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
+  });
+
+  it('demotion audit omits speakerRoles when the result carries none', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await applyExtraction(deps, {
+      contact: makeContact({ type: 'tenant' }),
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: { fields: { pets: { op: 'write', value: 'has a dog' } } }, // no speakerRoles
+      hasInferredRoleContent: true,
+    });
+    expect(outcome.suggested).toEqual(['pets']);
+    const demoted = records.audits.find((a) => a.type === 'ai_extraction_demoted');
+    expect(demoted!.payload).toEqual({ fields: ['pets'], conversationId: CONV });
+    expect(demoted!.payload!['speakerRoles']).toBeUndefined();
+  });
+});

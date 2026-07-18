@@ -10,14 +10,22 @@ import { HOUSING_AUTHORITY_VOCAB } from './schema.js';
 export function buildExtractionSystemPrompt(): string {
   const vocab = HOUSING_AUTHORITY_VOCAB.join(', ');
   return [
-    'You extract facts about the CLIENT from an SMS conversation between housing',
-    'navigation staff and a client (a person seeking housing help). Output ONLY a',
-    'JSON object matching the provided schema. Do not add any prose.',
+    'You extract facts about the CLIENT from a conversation transcript of text',
+    'messages and phone calls between housing navigation staff and a client (a',
+    'person seeking housing help). Output ONLY a JSON object matching the',
+    'provided schema. Do not add any prose.',
     '',
     'The user message contains a CURRENT PROFILE JSON block (what we already know',
     'about this contact) and a TRANSCRIPT of the conversation in chronological',
-    'order. Each transcript line is "<timestamp> [<speaker>] <text>" where',
-    '<speaker> is "staff" or "client".',
+    'order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"',
+    'where <speaker> is staff, client, or unknown and <channel> is sms or voice.',
+    '[unknown] lines come from a two-party phone call whose speakers are labeled',
+    'Speaker 1 / Speaker 2 with no role attribution. FIRST decide who is the',
+    'client and output speakerRoles: for each Speaker label, an entry giving its',
+    'role (client, staff, or uncertain). Extract only facts clearly stated by or',
+    'about the client; if a fact\'s speaker role is uncertain, omit the fact.',
+    '[client/voice] lines with no Speaker label are a voicemail: the client',
+    'speaking.',
     '',
     'RECONCILIATION - for each field, compare the conversation against the CURRENT',
     'PROFILE and choose one op:',
@@ -54,7 +62,7 @@ export function buildExtractionSystemPrompt(): string {
 
 /**
  * Collapse an utterance body to a SINGLE line: replace any run of CR/LF with
- * ' / '. Each transcript line is `<timestamp> [<speaker>] <text>` and the lines
+ * ' / '. Each transcript line is `<timestamp> [<speaker>/<channel>] <text>` and the lines
  * are '\n'-joined, so a raw client SMS containing a newline plus a forged
  * `<timestamp> [staff] ...` could otherwise masquerade as a genuine staff turn
  * (prompt-injection, adversarial F2). Flattening the body means an injected
@@ -68,6 +76,6 @@ function toSingleLine(text: string): string {
 export function buildExtractionUserContent(input: ExtractionInput): string {
   const profileJson = JSON.stringify(input.profile, null, 2);
   const ordered = [...input.transcript].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  const lines = ordered.map((u) => `${u.at} [${u.speaker}] ${toSingleLine(u.text)}`);
+  const lines = ordered.map((u) => `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`);
   return ['CURRENT PROFILE', profileJson, '', 'TRANSCRIPT', ...lines].join('\n');
 }

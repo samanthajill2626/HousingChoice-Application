@@ -220,6 +220,9 @@ async function processRow(
 
   const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
   const transcript = fresh.flatMap(toUtterances);
+  // Spec Layer 3: any unknown-speaker (Speaker N) call line demotes the whole
+  // run to suggest-only in apply.
+  const hasInferredRoleContent = transcript.some((u) => u.speaker === 'unknown');
 
   const result = await driver.extract({ transcript, profile: toProfile(contact) });
   await applyExtraction(applyDeps, {
@@ -227,6 +230,7 @@ async function processRow(
     conversationId,
     cursorTsMsgId: newestTsMsgId,
     result,
+    hasInferredRoleContent,
   });
   await repo.complete(conversationId, newestTsMsgId, nowIso);
   logger.info({ conversationId }, 'extraction run complete');

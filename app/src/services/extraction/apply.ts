@@ -116,7 +116,16 @@ function autoPrefix(nowIso: string): string {
 
 export async function applyExtraction(
   deps: ApplyDeps,
-  ctx: { contact: ContactItem; conversationId: string; cursorTsMsgId?: string; result: ExtractionResult },
+  ctx: {
+    contact: ContactItem;
+    conversationId: string;
+    cursorTsMsgId?: string;
+    result: ExtractionResult;
+    // Spec Layer 3: when the assembled window contained ANY inferred-role
+    // (unknown-speaker) utterance, the whole run is demoted to suggest-only.
+    // OPTIONAL/defaulted-false so slice-1 callers/tests are unaffected.
+    hasInferredRoleContent?: boolean;
+  },
 ): Promise<ApplyOutcome> {
   const { contact, conversationId, cursorTsMsgId, result } = ctx;
   const { logger, now } = deps;
@@ -139,6 +148,8 @@ export async function applyExtraction(
   const writePatch: Record<string, unknown> = {};
   const auditFields: Array<{ field: string; from: unknown; to: unknown; reason?: string }> = [];
   const pendingWrites: string[] = [];
+  // Fields whose op:'write' was demoted to a suggestion (spec Layer 3 audit).
+  const demotedFields: string[] = [];
 
   for (const field of EXTRACTABLE_FIELDS) {
     const fieldOp = result.fields[field];
@@ -155,7 +166,7 @@ export async function applyExtraction(
       continue;
     }
 
-    if (fieldOp.op === 'write') {
+    if (fieldOp.op === 'write' && ctx.hasInferredRoleContent !== true) {
       writePatch[field] = coerced.value;
       writePatch[`${field}_source`] = sourceStamp;
       auditFields.push({
@@ -166,8 +177,11 @@ export async function applyExtraction(
       });
       pendingWrites.push(field);
     } else {
-      // op === 'suggest'. Belt-and-braces: skip when the suggestion string-equals
-      // the current value exactly.
+      // op === 'suggest', OR a demoted op:'write' (inferred-role content, spec
+      // Layer 3): route the write through the SAME suggest path - no direct write,
+      // no <field>_source provenance stamped (nothing is written).
+      if (fieldOp.op === 'write') demotedFields.push(field);
+      // Belt-and-braces: skip when the suggestion string-equals the current value.
       const currentValue = contact[field] !== undefined ? String(contact[field]) : undefined;
       const suggestedValue = String(coerced.value);
       if (currentValue !== undefined && currentValue === suggestedValue) {
@@ -204,6 +218,22 @@ export async function applyExtraction(
       }
     } catch (err) {
       logger.warn({ contactId, err }, 'extraction field write failed');
+    }
+  }
+
+  // Inferred-role demotion audit (spec Layer 3). The write-audit above sits
+  // inside the pendingWrites block, which is empty under full demotion, so the
+  // demotion records its own best-effort append. Field NAMES + the role map are
+  // labels (not transcript text or phone numbers) - safe to log.
+  if (ctx.hasInferredRoleContent === true && demotedFields.length > 0) {
+    try {
+      await deps.audit.append(`contacts#${contactId}`, 'ai_extraction_demoted', {
+        fields: demotedFields,
+        ...(result.speakerRoles !== undefined && { speakerRoles: result.speakerRoles }),
+        conversationId,
+      });
+    } catch (err) {
+      logger.warn({ contactId, err }, 'extraction demotion audit append failed');
     }
   }
 

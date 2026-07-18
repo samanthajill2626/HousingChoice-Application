@@ -47,6 +47,12 @@ export interface ExtractionResult {
   typeSuggestion?: { value: 'tenant' | 'landlord'; reason?: string };
   phoneAddition?: { phone: string; label?: string; reason?: string };
   noteLines?: string[];
+  // The model's role attribution for `Speaker N`-labeled (unknown) call lines:
+  // each Speaker label mapped to client/staff/uncertain (spec Layer 2). Keyed by
+  // the raw label (e.g. "Speaker 1"). Absent when the window had no unknown
+  // speakers. On the wire it is an array of {speaker,role} pairs (schema.ts);
+  // parseExtractionText folds it to this Record.
+  speakerRoles?: Record<string, 'client' | 'staff' | 'uncertain'>;
 }
 
 export interface ExtractionProfileSnapshot {

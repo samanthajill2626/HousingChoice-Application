@@ -109,12 +109,60 @@ describe('parseExtractionText', () => {
   it('throws SyntaxError on unparseable text', () => {
     expect(() => parseExtractionText('not json{')).toThrow(SyntaxError);
   });
+
+  it('folds a speakerRoles array of pairs into a Record', () => {
+    const parsed = parseExtractionText(
+      JSON.stringify({
+        fields: {},
+        speakerRoles: [
+          { speaker: 'Speaker 1', role: 'client' },
+          { speaker: 'Speaker 2', role: 'staff' },
+        ],
+      }),
+    );
+    expect(parsed.speakerRoles).toEqual({ 'Speaker 1': 'client', 'Speaker 2': 'staff' });
+  });
+
+  it('clamps speakerRoles: drops bad roles, non-string/empty speakers; ignores extra keys; last write wins', () => {
+    const parsed = parseExtractionText(
+      JSON.stringify({
+        fields: {},
+        speakerRoles: [
+          { speaker: 'Speaker 1', role: 'uncertain', extra: 'ignored' }, // extra key ignored; kept
+          { speaker: 'Speaker 2', role: 'bogus' }, // role not in enum -> dropped
+          { speaker: 42, role: 'client' }, // non-string speaker -> dropped
+          { role: 'staff' }, // missing speaker -> dropped
+          { speaker: '', role: 'client' }, // empty speaker -> dropped
+          { speaker: 'Speaker 1', role: 'staff' }, // dup speaker -> last write wins
+        ],
+      }),
+    );
+    expect(parsed.speakerRoles).toEqual({ 'Speaker 1': 'staff' });
+  });
+
+  it('omits speakerRoles entirely when no item survives the clamp (empty map)', () => {
+    const parsed = parseExtractionText(
+      JSON.stringify({ fields: {}, speakerRoles: [{ speaker: 'Speaker 1', role: 'nope' }] }),
+    );
+    expect(parsed.speakerRoles).toBeUndefined();
+  });
 });
 
 describe('prompt builders', () => {
   it('system prompt lists every housing-authority vocabulary value', () => {
     const sys = buildExtractionSystemPrompt();
     for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
+  });
+
+  it('system prompt frames the mixed transcript and states the [unknown]/voicemail rules', () => {
+    const sys = buildExtractionSystemPrompt();
+    // Per-line format now carries the channel.
+    expect(sys).toContain('[<speaker>/<channel>]');
+    // Layer 2: commit to speakerRoles for Speaker-N (unknown) call lines.
+    expect(sys).toContain('[unknown]');
+    expect(sys).toContain('speakerRoles');
+    // Voicemail rule: unlabeled voice lines are the client speaking.
+    expect(sys).toContain('voicemail');
   });
 
   it('user content carries the profile JSON then a chronological transcript', () => {
@@ -129,10 +177,10 @@ describe('prompt builders', () => {
     expect(user).toContain('CURRENT PROFILE');
     expect(user).toContain('"contactType": "tenant"');
     expect(user).toContain('TRANSCRIPT');
-    expect(user).toContain('[staff] Hello');
-    expect(user).toContain('[client] Hi there');
+    expect(user).toContain('[staff/sms] Hello');
+    expect(user).toContain('[client/sms] Hi there');
     // Chronological order by timestamp regardless of input order.
-    expect(user.indexOf('[staff] Hello')).toBeLessThan(user.indexOf('[client] Hi there'));
+    expect(user.indexOf('[staff/sms] Hello')).toBeLessThan(user.indexOf('[client/sms] Hi there'));
   });
 
   it('flattens a multi-line client body so it cannot forge a "[staff]" transcript turn', () => {

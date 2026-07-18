@@ -1346,6 +1346,9 @@ export interface Message {
   recording_s3_key?: string;
   /** VERBATIM call transcript (founder-bridge calls only). */
   transcript?: string;
+  /** Transcript lifecycle (voice-transcription 3.7); the bare CallSid for the
+   *  recording endpoint is the existing `provider_sid`. Founder-bridge only. */
+  transcript_status?: 'pending' | 'completed' | 'failed';
   created_at: string;
   [key: string]: unknown;
 }
@@ -1427,6 +1430,14 @@ export interface TimelineCall extends TimelineBase {
   party_phone?: string; // which number
   recording_s3_key?: string; // present ⇒ playable
   transcript?: string; // present ⇒ collapsible (never auto-shown)
+  /** Transcript lifecycle (voice-transcription 3.7): pending => "Transcribing...",
+   *  failed => "Transcript unavailable", completed => the collapsible transcript,
+   *  absent => nothing. Never present on masked calls. */
+  transcript_status?: 'pending' | 'completed' | 'failed';
+  /** The BARE CallSid (== provider_sid), NOT `id` (the composite tsMsgId). The
+   *  audio player targets GET /api/calls/:callId/recording with this; `id` 404s.
+   *  Never present on masked calls (they carry no recording). */
+  call_sid?: string;
 }
 export interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';

@@ -54,6 +54,17 @@ export type CallStatus =
  */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
+/**
+ * Transcript lifecycle status on a call entity (voice-transcription spec 3.7),
+ * driving the in-flight "Transcribing..." indicator on the call bubble. ABSENT
+ * when no transcript will ever be requested (masked calls, VI unconfigured,
+ * pre-feature calls): 'pending' is stamped the moment a transcript WILL be
+ * requested, 'completed' is stamped atomically by setCallTranscript, 'failed'
+ * when the pipeline gives up. A late successful persist may upgrade
+ * failed -> completed; completed is terminal.
+ */
+export type TranscriptStatus = 'pending' | 'completed' | 'failed';
+
 /** Forward-only CallStatus progression: which prior statuses each may overwrite. */
 const ALLOWED_PRIOR_CALL_STATUS: Record<CallStatus, CallStatus[]> = {
   // Non-terminal: ringing may only be the first write (nothing transitions INTO it).
@@ -345,6 +356,12 @@ export interface MessageItem {
    * AI / structured extraction — that is Phase 2.
    */
   transcript?: string;
+  /**
+   * Transcript lifecycle status (voice-transcription spec 3.7) - drives the
+   * in-flight "Transcribing..." indicator on the call bubble. Absent until the
+   * recording handler's create leg stamps 'pending'; see TranscriptStatus.
+   */
+  transcript_status?: TranscriptStatus;
   [key: string]: unknown;
 }
 
@@ -453,6 +470,32 @@ export interface MessagesRepo {
    * NEVER log the transcript text.
    */
   setCallTranscript(callSid: string, transcript: string): Promise<boolean>;
+  /**
+   * Voice transcription lifecycle (voice-transcription spec 3.7): stamp
+   * transcript_status = 'pending' the moment a transcript WILL be requested
+   * (recording persisted, founder-bridge, VI configured). Conditional on no
+   * transcript_status existing yet, so a redelivered recording callback is a
+   * no-op. Returns true on the first stamp, false when already stamped or the
+   * CallSid is unknown.
+   */
+  setTranscriptPending(callSid: string): Promise<boolean>;
+  /**
+   * Voice transcription lifecycle (spec 3.7): stamp transcript_status =
+   * 'failed' when the pipeline gives up (VI reports failed / reconcile exhausts
+   * attempts). Conditional on the status still being 'pending', so a saved
+   * transcript ('completed') is never regressed - completed is terminal.
+   * Returns true when it flips a pending call to failed, false otherwise
+   * (already completed/failed, never pending, or the CallSid is unknown).
+   */
+  setTranscriptFailed(callSid: string): Promise<boolean>;
+  /**
+   * Platform voicemail (voice-transcription spec 4.2): upgrade a call outcome
+   * 'missed' -> 'voicemail' via a conditional write (only-if-currently-missed),
+   * which also makes redelivered recording callbacks idempotent. Returns true
+   * on the first upgrade, false when the call is not currently 'missed'
+   * (already voicemail/answered) or the CallSid is unknown.
+   */
+  upgradeCallOutcomeToVoicemail(callSid: string): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
@@ -866,12 +909,15 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           new UpdateCommand({
             TableName: table,
             Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
-            UpdateExpression: 'SET transcript = :t',
+            // Also stamp transcript_status = 'completed' atomically (spec 3.7).
+            // The condition is on `transcript` (NOT status), so a late webhook
+            // still upgrades a 'failed' call to completed; completed is terminal.
+            UpdateExpression: 'SET transcript = :t, transcript_status = :c',
             // Idempotent: commit ONLY when no (non-empty) transcript exists yet,
             // so a redelivered transcription callback never overwrites a saved
             // transcript. (An empty redelivery is refused at the callback too.)
             ConditionExpression: 'attribute_not_exists(transcript) OR transcript = :empty',
-            ExpressionAttributeValues: { ':t': transcript, ':empty': '' },
+            ExpressionAttributeValues: { ':t': transcript, ':empty': '', ':c': 'completed' },
           }),
         );
       } catch (err) {
@@ -882,6 +928,98 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       log.info({ callSid, transcriptLength: transcript.length }, 'call transcript saved');
+      return true;
+    },
+
+    async setTranscriptPending(callSid) {
+      // Voice transcription lifecycle (spec 3.7): stamp 'pending' the moment a
+      // transcript WILL be requested. CallSid == provider_sid (same pointer
+      // lookup). Conditional on no transcript_status yet, so a redelivered
+      // recording callback never re-stamps. PII: sids only.
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid }, 'transcript-pending for unknown CallSid ignored');
+        return false;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: 'SET transcript_status = :p',
+            ConditionExpression: 'attribute_not_exists(transcript_status)',
+            ExpressionAttributeValues: { ':p': 'pending' },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ callSid }, 'transcript-pending stamp skipped (already stamped)');
+          return false;
+        }
+        throw err;
+      }
+      log.info({ callSid }, 'transcript status set to pending');
+      return true;
+    },
+
+    async setTranscriptFailed(callSid) {
+      // Voice transcription lifecycle (spec 3.7): flip 'pending' to 'failed'
+      // when the pipeline gives up. Conditional on the status still being
+      // 'pending' so a 'completed' transcript is never regressed (completed is
+      // terminal). PII: sids only.
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid }, 'transcript-failed for unknown CallSid ignored');
+        return false;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: 'SET transcript_status = :f',
+            ConditionExpression: 'transcript_status = :p',
+            ExpressionAttributeValues: { ':f': 'failed', ':p': 'pending' },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ callSid }, 'transcript-failed stamp skipped (not pending)');
+          return false;
+        }
+        throw err;
+      }
+      log.info({ callSid }, 'transcript status set to failed');
+      return true;
+    },
+
+    async upgradeCallOutcomeToVoicemail(callSid) {
+      // Platform voicemail (spec 4.2): upgrade 'missed' to 'voicemail' on the
+      // completed recording. Conditional on the outcome still being 'missed', so
+      // a redelivered recording callback is idempotent (only the first wins).
+      const existing = await getByProviderSid(callSid);
+      if (!existing) {
+        log.warn({ callSid }, 'voicemail outcome upgrade for unknown CallSid ignored');
+        return false;
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: existing.conversationId, tsMsgId: existing.tsMsgId },
+            UpdateExpression: 'SET call_outcome = :v',
+            ConditionExpression: 'call_outcome = :m',
+            ExpressionAttributeValues: { ':v': 'voicemail', ':m': 'missed' },
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ callSid }, 'voicemail outcome upgrade skipped (not currently missed)');
+          return false;
+        }
+        throw err;
+      }
+      log.info({ callSid }, 'call outcome upgraded from missed to voicemail');
       return true;
     },
 

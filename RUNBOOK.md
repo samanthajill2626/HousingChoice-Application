@@ -347,6 +347,9 @@ must hold or messages silently stop flowing:
   arrive.
 - **The phone number must sit in the live A2P campaign's sender pool** of that Messaging Service —
   a number outside the pool can't send campaign traffic.
+- **The NUMBER-level "A message comes in" URL is unused** while the number sits in the Messaging
+  Service (the service's webhook wins). It may still show Twilio's demo default
+  (`demo.twilio.com/welcome/sms/reply`) - cosmetic; do not "fix" it expecting behavior to change.
 - **Voice URLs on the number** — calls ARE handled by the app now (Voice Phase 1: inbound
   founder-bridge + outbound masked calling). On the number's Voice configuration:
   - **"A call comes in"** → `https://<canonical>/webhooks/twilio/voice` (HTTP **POST**)
@@ -364,12 +367,75 @@ assigned **inbound-voice-line holder's verified cell** — assigned in **Setting
 must verify their cell first). There is no `FOUNDER_CELL` fallback (removed). With **NO holder
 configured**, an inbound call is **NOT bridged**: the app emits an ERROR log (→ the
 `hc-<env>-error-logs` alarm, so ops is notified) and the caller hears the "please send us a text
-message" greeting.
+message" greeting. The holder is a ONE-TIME, PER-ENVIRONMENT manual assignment stored as a single
+pointer row in that env's users TABLE (not config): it survives deploys and normal terraform
+applies, but a users-table recreate/restore loses it, and a fresh environment starts WITHOUT one
+(deployed envs have NO data seeding - only the hermetic LOCAL stack auto-assigns the seeded admin).
+Observed 2026-07-18: cloud dev had no holder despite inbound "working" before - the fallback
+greeting masks it. **If inbound falls back to the text-us greeting, check Settings > Team first**
+and re-assign.
 
 **`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
 defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
+
+#### Voice Intelligence transcription + platform voicemail
+
+Business-line CALL recordings (the founder bridge) and platform VOICEMAILS are transcribed by Twilio
+**Voice Intelligence (VI)** - a paid, account-configured service. Transcription is OFF until an
+operator sets it up per env; recordings and voicemails still work regardless (they just carry no
+transcript). Masked relay calls are NEVER recorded or transcribed (standing privacy invariant).
+
+**Operator setup (per env - once for dev, once for prod; each env gets its OWN VI service so
+completion webhooks never cross environments):**
+
+1. In the Twilio console create a Voice Intelligence **Service** (Voice Intelligence -> Services);
+   note its **`GAxxxx` service sid**.
+2. Set that service's **webhook URL** to `<env base URL>/webhooks/twilio/voice/intelligence` (the
+   transcript-available event), using the canonical custom-domain host - e.g.
+   `https://dev.app.housingchoice.org/webhooks/twilio/voice/intelligence`.
+3. Put the sid in **`TWILIO_VI_SERVICE_SID`** template-first: confirm the key in `.env.<env>.example`,
+   `npm run secrets:sync -- <env>`, fill the real value in `.env.<env>`, `npm run secrets:push -- <env>`,
+   then deploy (see [Secrets](#secrets)). Leaving it unset keeps transcription OFF for that env.
+
+**Cost:** VI is billed per transcribed hour. Only business-line bridge calls + voicemails are
+transcribed (masked relay never is), so the spend tracks real founder-line call/voicemail minutes.
+
+**How a transcript flows (background behavior, no operator action):** a completed recording mirrors to
+S3, the call entry is stamped `transcript_status: pending` (the conversation shows a live
+"Transcribing..." note), and the app creates a VI transcript INLINE. VI processes the audio and calls
+the webhook above with a transcript sid; the app fetches the sentences and persists the transcript
+text on the call entry (SSE-live). Twilio is NEVER in the read path - the conversation loads only our
+DB/S3.
+
+**Reconcile safety net:** if that completion webhook is lost, a delayed reconcile job re-checks Twilio
+(~10 min in prod; a tiny delay in the hermetic lane) and persists the transcript anyway - so a lost
+webhook DELAYS a transcript, it never loses it. If VI reports the transcript failed, or reconcile
+gives up, the call entry stamps `transcript_status: failed` and the conversation shows "Transcript
+unavailable" (the recording stays playable); a very late webhook can still upgrade failed to completed.
+
+**Latency the founder/staff see (useful when triaging "where is my transcript"):**
+
+- Call entry: at RING time (SSE-live); outcome stamped at hangup.
+- Recording playable: ~5-30s after hangup (Twilio processing + our S3 mirror), SSE-live.
+- Transcript visible: typically ~1-2 min after hangup (scales with audio length); short voicemails
+  often under a minute. The "Transcribing..." note bridges the wait so it is visible, not confusing.
+
+**Voicemail (business line only):** a MISSED inbound business-line call now plays a voicemail prompt
+and records up to a 2-minute message; when a message lands the founder gets a **"New voicemail"** push
+and the message is transcribed like any bridge recording. The missed-call auto-text still fires as
+before (it catches callers who hang up without leaving a message; a sub-2-second recording is
+discarded and the call simply stays "missed"). OUTBOUND unanswered calls and masked relay calls get NO
+voicemail.
+
+**Hermetic stack:** in dev/e2e the fake-twilio host impersonates the VI REST API + fires the signed
+completion webhook, so local transcription exercises the REAL VI wire shapes (no real Twilio, no VI
+spend). The fake's voice scenario grows `viWebhook` (`deliver`|`drop`; `drop` exercises the reconcile
+leg) and `voicemail` (`{durationSec?}`|`false`) knobs, and `transcript` now feeds the VI sentences.
+`TWILIO_VI_SERVICE_SID` + `VOICE_TRANSCRIPT_RECONCILE_SECONDS` are wired into the hermetic stack
+(`scripts/e2e-session.mjs`, and `scripts/dev.mjs --mock`); the app's Intelligence API calls ride the
+same `TWILIO_API_BASE_URL` redirect as the rest of Twilio (prod stays locked to real hosts).
 
 ### fake-twilio (HTTP-seam messaging mock)
 

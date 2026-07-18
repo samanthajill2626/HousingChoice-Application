@@ -1,9 +1,16 @@
-// Task 5.3: founder-bridge recording + transcription.
+// Task 5.3 (recording) + Task 12 (Voice Intelligence model).
 //
-// Pins that after a founder bridge reaches `completed`, the engine ALSO posts the
-// recording callback (RecordingUrl ending in `.mp3`) then the transcription, in
-// that order AFTER the <Dial action> /voice/status post — and that masked calls
-// (record="do-not-record", no recordingStatusCallback) fire NEITHER.
+// Pins that after a founder bridge reaches `completed`, the engine posts the
+// recording callback (RecordingUrl ending in `.mp3`) AFTER the <Dial action>
+// /voice/status post, and registers a pending VI entry keyed on the RecordingSid.
+// A subsequent VI create (POST /v2/Transcripts, modelled here by calling the
+// engine's createViTranscript directly the way the REST route does) mints a
+// GTfake transcript, sets call.viTranscriptSid, emits call.transcript, and - when
+// scenario.viWebhook is 'deliver' (default) - fires the signed JSON completion
+// webhook to /webhooks/twilio/voice/intelligence. 'drop' registers the transcript
+// but posts no webhook (exercises the app's reconcile leg). Masked calls
+// (record="do-not-record", no recordingStatusCallback) fire NEITHER a recording
+// NOR any VI. The legacy text-in-body /voice/transcription flow is GONE.
 import { describe, expect, it } from 'vitest';
 import { CallEngine } from '../src/engine/callEngine.js';
 import { EventHub } from '../src/engine/eventHub.js';
@@ -20,9 +27,15 @@ const GATE_ACCEPT = `<?xml version="1.0" encoding="UTF-8"?><Response><Pause leng
 // Masked fixture (no recording): record="do-not-record", no recordingStatusCallback.
 const MASKED_DIAL = `<?xml version="1.0" encoding="UTF-8"?><Response><Dial callerId="+15550199001" record="do-not-record" answerOnBridge="true" action="https://app/webhooks/twilio/voice/status" method="POST"><Number url="https://app/webhooks/twilio/voice/whisper?callerLabel=Tenant&leg=callee" statusCallback="https://app/webhooks/twilio/voice/status">+15550199001</Number></Dial></Response>`;
 
-interface Recorded { method: 'postForResponse' | 'post'; path: string; params: WebhookParams }
+interface Recorded {
+  method: 'postForResponse' | 'post' | 'postJson';
+  path: string;
+  params?: WebhookParams;
+  body?: Record<string, unknown>;
+}
 
 const RECORDING_BASE = 'http://recording-host:9999';
+const VI_SERVICE = 'GAfakeservice';
 
 function makeStubDispatcher(inboundBody: string) {
   const calls: Recorded[] = [];
@@ -31,7 +44,6 @@ function makeStubDispatcher(inboundBody: string) {
     if (path.startsWith('/webhooks/twilio/voice/whisper')) return WHISPER_GATHER;
     if (path.startsWith('/webhooks/twilio/voice/status')) return '';
     if (path.startsWith('/webhooks/twilio/voice/recording')) return '';
-    if (path.startsWith('/webhooks/twilio/voice/transcription')) return '';
     if (path === '/webhooks/twilio/voice') return inboundBody;
     return '';
   };
@@ -42,6 +54,10 @@ function makeStubDispatcher(inboundBody: string) {
     },
     async post(path: string, params: WebhookParams) {
       calls.push({ method: 'post', path, params });
+      return 200;
+    },
+    async postJson(path: string, body: Record<string, unknown>) {
+      calls.push({ method: 'postJson', path, body });
       return 200;
     },
   };
@@ -60,51 +76,84 @@ function makeEngine(inboundBody: string) {
   return { engine, clock, calls, events, registry };
 }
 
-describe('CallEngine recording + transcription (Task 5.3)', () => {
-  it('founder bridge: records (.mp3) then transcribes, in order after /voice/status', async () => {
+/** Simulate the app's inline VI create (POST /v2/Transcripts) the way the REST
+ *  route delegates: pass the recording's source_sid + the callSid as CustomerKey. */
+function driveViCreate(engine: CallEngine, clock: ManualClock, callSid: string, recordingSid: string) {
+  const record = engine.createViTranscript({ serviceSid: VI_SERVICE, customerKey: callSid, sourceSid: recordingSid });
+  clock.flush();
+  return record;
+}
+
+describe('CallEngine recording + Voice Intelligence (Task 5.3 + Task 12)', () => {
+  it('founder bridge: records (.mp3) after /voice/status; a VI create fires the signed JSON webhook (deliver)', async () => {
     const { engine, clock, calls, events } = makeEngine(FOUNDER_DIAL);
     await engine.placeCall({
       from: '+15550100001',
-      to: '+15551230000', // not a pool number → founder
+      to: '+15551230000', // not a pool number -> founder
       scenario: { answerLeg: 'founder', digit: '1', record: true, transcript: 'hi', outcome: 'answered' },
     });
     clock.flush();
     await engine.settle();
 
     const seq = calls.map((c) => `${c.method} ${c.path.split('?')[0]}`);
-    // The recording + transcription posts come AFTER the <Dial action> /voice/status post.
     const statusIdx = seq.indexOf('post /webhooks/twilio/voice/status');
     const recIdx = seq.indexOf('post /webhooks/twilio/voice/recording');
-    const txIdx = seq.indexOf('post /webhooks/twilio/voice/transcription');
     expect(statusIdx).toBeGreaterThanOrEqual(0);
     expect(recIdx).toBeGreaterThan(statusIdx);
-    expect(txIdx).toBeGreaterThan(recIdx);
+    // The legacy text-in-body transcription callback is GONE.
+    expect(seq.some((s) => s.includes('/webhooks/twilio/voice/transcription'))).toBe(false);
 
-    // RecordingUrl ends in `.mp3` and points at the fake recording host.
     const rec = calls.find((c) => c.path.startsWith('/webhooks/twilio/voice/recording'));
-    expect(rec?.params['RecordingUrl']).toBeDefined();
-    expect(rec?.params['RecordingUrl']?.endsWith('.mp3')).toBe(true);
-    expect(rec?.params['RecordingUrl']?.startsWith(RECORDING_BASE)).toBe(true);
-    expect(rec?.params['RecordingSid']?.startsWith('RE')).toBe(true);
+    expect(rec?.params?.['RecordingUrl']?.endsWith('.mp3')).toBe(true);
+    expect(rec?.params?.['RecordingUrl']?.startsWith(RECORDING_BASE)).toBe(true);
+    const recordingSid = rec?.params?.['RecordingSid'];
+    expect(recordingSid?.startsWith('RE')).toBe(true);
 
-    const tx = calls.find((c) => c.path.startsWith('/webhooks/twilio/voice/transcription'));
-    expect(tx?.params['TranscriptionText']).toBe('hi');
+    const call = engine.getCalls()[0]!;
+    // The app drives VI create in the recording callback; model that here.
+    const created = driveViCreate(engine, clock, call.callSid, recordingSid!);
+    await engine.settle();
 
-    const call = engine.getCalls()[0];
-    expect(call?.recordingSid).toBeDefined();
-    expect(call?.recordingUrl?.endsWith('.mp3')).toBe(true);
-    expect(call?.transcript).toBe('hi');
+    expect(created?.sid.startsWith('GTfake')).toBe(true);
+    expect(call.viTranscriptSid).toBe(created?.sid);
+    expect(call.transcript).toBe('hi');
 
-    const types = events.map((e) => e.type);
-    expect(types).toContain('call.recording');
-    expect(types).toContain('call.transcript');
+    // The signed JSON completion webhook fired to /webhooks/twilio/voice/intelligence.
+    const hook = calls.find((c) => c.method === 'postJson' && c.path.startsWith('/webhooks/twilio/voice/intelligence'));
+    expect(hook).toBeDefined();
+    expect(hook?.body?.['transcript_sid']).toBe(created?.sid);
+    expect(hook?.body?.['customer_key']).toBe(call.callSid);
+
+    expect(events.map((e) => e.type)).toContain('call.recording');
+    expect(events.map((e) => e.type)).toContain('call.transcript');
   });
 
-  it('masked bridge: fires NEITHER recording nor transcription', async () => {
+  it('viWebhook drop: the VI create registers the transcript but posts NO webhook', async () => {
+    const { engine, clock, calls } = makeEngine(FOUNDER_DIAL);
+    await engine.placeCall({
+      from: '+15550100001',
+      to: '+15551230000',
+      scenario: { answerLeg: 'founder', digit: '1', record: true, transcript: 'hi', outcome: 'answered', viWebhook: 'drop' },
+    });
+    clock.flush();
+    await engine.settle();
+
+    const call = engine.getCalls()[0]!;
+    const recordingSid = call.recordingSid!;
+    const created = driveViCreate(engine, clock, call.callSid, recordingSid);
+    await engine.settle();
+
+    expect(created?.sid.startsWith('GTfake')).toBe(true);
+    expect(call.viTranscriptSid).toBe(created?.sid);
+    // Reconcile leg: no completion webhook was delivered.
+    expect(calls.some((c) => c.method === 'postJson')).toBe(false);
+  });
+
+  it('masked bridge: fires NEITHER a recording NOR any VI', async () => {
     const { engine, clock, calls } = makeEngine(MASKED_DIAL);
     await engine.placeCall({
       from: '+15550100001',
-      to: '+15550190001', // pool number → masked
+      to: '+15550190001', // pool number -> masked
       scenario: { answerLeg: 'callee', digit: '1', record: true, transcript: 'hi', outcome: 'answered' },
     });
     clock.flush();
@@ -113,12 +162,14 @@ describe('CallEngine recording + transcription (Task 5.3)', () => {
     const paths = calls.map((c) => c.path);
     expect(paths.some((p) => p.startsWith('/webhooks/twilio/voice/recording'))).toBe(false);
     expect(paths.some((p) => p.startsWith('/webhooks/twilio/voice/transcription'))).toBe(false);
-    const call = engine.getCalls()[0];
-    expect(call?.recordingSid).toBeUndefined();
-    expect(call?.transcript).toBeUndefined();
+    expect(calls.some((c) => c.method === 'postJson')).toBe(false);
+    const call = engine.getCalls()[0]!;
+    expect(call.recordingSid).toBeUndefined();
+    expect(call.viTranscriptSid).toBeUndefined();
+    expect(call.transcript).toBeUndefined();
   });
 
-  it('founder record:true but transcript omitted: records, does NOT transcribe', async () => {
+  it('founder bridge with no scenario.transcript: records; the VI create yields an empty transcript', async () => {
     const { engine, clock, calls } = makeEngine(FOUNDER_DIAL);
     await engine.placeCall({
       from: '+15550100001',
@@ -128,11 +179,14 @@ describe('CallEngine recording + transcription (Task 5.3)', () => {
     clock.flush();
     await engine.settle();
 
-    const paths = calls.map((c) => c.path);
-    expect(paths.some((p) => p.startsWith('/webhooks/twilio/voice/recording'))).toBe(true);
-    expect(paths.some((p) => p.startsWith('/webhooks/twilio/voice/transcription'))).toBe(false);
-    const call = engine.getCalls()[0];
-    expect(call?.recordingSid).toBeDefined();
-    expect(call?.transcript).toBeUndefined();
+    const call = engine.getCalls()[0]!;
+    expect(call.recordingSid).toBeDefined();
+    // No engine-driven transcription happens until the app calls VI create.
+    expect(calls.some((c) => c.method === 'postJson')).toBe(false);
+
+    const created = driveViCreate(engine, clock, call.callSid, call.recordingSid!);
+    await engine.settle();
+    expect(created?.sid.startsWith('GTfake')).toBe(true);
+    expect(created?.sentences.length).toBe(0);
   });
 });

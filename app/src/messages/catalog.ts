@@ -66,6 +66,8 @@ export type MessageId =
   | 'voice.masked_refuse'
   | 'voice.outbound_unavailable'
   | 'voice.missed_call_goodbye'
+  | 'voice.voicemail_prompt'
+  | 'voice.voicemail_thanks'
   // Transactional
   | 'verify.cell_code';
 
@@ -380,6 +382,23 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     id: 'voice.missed_call_goodbye',
     default:
       'Sorry we missed your call. Please send us a text message and we will get right back to you. Goodbye.',
+    class: 'voice',
+    editable: false,
+    channel: 'voice',
+    vars: [],
+  },
+  'voice.voicemail_prompt': {
+    id: 'voice.voicemail_prompt',
+    default:
+      'Sorry we missed your call. Please leave a message after the tone, and we will get back to you as soon as we can.',
+    class: 'voice',
+    editable: false,
+    channel: 'voice',
+    vars: [],
+  },
+  'voice.voicemail_thanks': {
+    id: 'voice.voicemail_thanks',
+    default: 'Thank you. We got your message and will get back to you soon. Goodbye.',
     class: 'voice',
     editable: false,
     channel: 'voice',

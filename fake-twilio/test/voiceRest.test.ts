@@ -29,6 +29,7 @@ function makeApp() {
   const dispatcher = {
     postForResponse: async () => ({ status: 200, body: '<Response/>' }),
     post: async () => 200,
+    postJson: async () => 200,
   };
   const callEngine = new CallEngine({
     clock: new ManualClock('2026-06-16T00:00:00.000Z'),

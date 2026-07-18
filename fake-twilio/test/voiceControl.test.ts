@@ -34,6 +34,9 @@ function makeStubDispatcher() {
     async post(_path: string, _params: WebhookParams) {
       return 200;
     },
+    async postJson(_path: string, _body: Record<string, unknown>) {
+      return 200;
+    },
   };
 }
 

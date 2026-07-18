@@ -675,6 +675,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       async initiateCall() {
         throw new Error('adapter spy: initiateCall not expected');
       },
+      async createViTranscript() {
+        throw new Error('adapter spy: createViTranscript not expected');
+      },
+      async fetchViTranscript() {
+        throw new Error('adapter spy: fetchViTranscript not expected');
+      },
+      async listViSentences() {
+        throw new Error('adapter spy: listViSentences not expected');
+      },
     };
     return { adapter, sends };
   }

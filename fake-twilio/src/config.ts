@@ -33,6 +33,14 @@ export interface FakeTwilioConfig {
    * with the app's TWILIO_API_BASE_URL so it can't drift.
    */
   publicBaseUrl: string;
+  /**
+   * The Voice Intelligence service sid (GA...) the app is configured with
+   * (TWILIO_VI_SERVICE_SID). The fake's POST /v2/Transcripts route validates the
+   * ServiceSid form field against this so a create for the wrong service is rejected.
+   * Defaults to the dev/e2e value 'GAfakeservice' (scripts/dev.mjs + e2e wiring set
+   * the SAME value on the app), so the two agree without extra plumbing.
+   */
+  viServiceSid: string;
 }
 
 /** The app's local CF_ORIGIN_SECRET default (app/src/lib/config.ts) + the value
@@ -56,6 +64,7 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
   // to localhost:<port> (the e2e/dev wiring sets both to :8889); FAKE_TWILIO_PUBLIC_URL
   // overrides when the app reaches the fake at a different host (e.g. 127.0.0.1).
   const publicBaseUrl = (env.FAKE_TWILIO_PUBLIC_URL ?? `http://localhost:${port}`).replace(/\/$/, '');
+  const viServiceSid = env.TWILIO_VI_SERVICE_SID?.trim() || 'GAfakeservice';
   return {
     port,
     appBaseUrl: appBaseUrl.replace(/\/$/, ''),
@@ -63,6 +72,7 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
     authToken,
     originSecret,
     publicBaseUrl,
+    viServiceSid,
     ...(env.FAKE_TWILIO_UI_DIST ? { uiDistDir: env.FAKE_TWILIO_UI_DIST } : {}),
   };
 }

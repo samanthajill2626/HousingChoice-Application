@@ -4,7 +4,7 @@
 //   POST /webhooks/twilio/voice/whisper-gate — the press-1/press-0/timeout gate
 //   POST /webhooks/twilio/voice/status       — call status callback (forward-only)
 //   POST /webhooks/twilio/voice/recording    — recordingStatusCallback (M1.9c)
-//   POST /webhooks/twilio/voice/transcription— transcription callback (M1.9c)
+//   POST /webhooks/twilio/voice/intelligence - Voice Intelligence completion webhook (JSON)
 //
 // All are signature-gated identically to the SMS handlers (the same
 // twilioSignatureMiddleware over the parsed form params; query params are part
@@ -18,13 +18,16 @@
 // transcribed (record="do-not-record") — they produce a metadata-only `call`
 // timeline entry (who→whom by ROLE, when, duration, answered/missed).
 //
-// FOUNDER-BRIDGE RECORDING + TRANSCRIPTION — the M1.9c path (CO1, v2.17): the
-// founder-bridge call (M1.9b, masked:false) RECORDS. The recordingStatusCallback
-// fetches the recording media (authenticated, SSRF-guarded) + streams it to S3,
-// then stamps recording_s3_key/duration on the `call` entity. A separate
-// transcription callback persists a VERBATIM transcript (NO AI / structured
-// extraction — Phase 2). ONLY the founder-bridge (non-masked) records; the
-// masked relay <Dial> STAYS do-not-record.
+// FOUNDER-BRIDGE RECORDING + VOICE INTELLIGENCE TRANSCRIPTION - the M1.9c path
+// (CO1, v2.17) + voice-transcription: the founder-bridge call (M1.9b,
+// masked:false) RECORDS. The recordingStatusCallback fetches the recording media
+// (authenticated, SSRF-guarded) + streams it to S3, stamps
+// recording_s3_key/duration on the `call` entity, and requests a Voice
+// Intelligence transcript (inline create + reconcile fallback). The VI completion
+// webhook (POST /voice/intelligence, JSON) fetches the sentences and persists a
+// VERBATIM transcript (NO AI / structured extraction - Phase 2). ONLY the
+// founder-bridge (non-masked) records/transcribes; the masked relay <Dial> STAYS
+// do-not-record.
 //
 // PII (doc §9): NEVER log a real caller's phone/name, and NEVER speak/announce
 // or persist a raw counterpart phone — IDs/SIDs/CallSid/role-labels/counts only.
@@ -44,7 +47,10 @@ import { formatPhoneForDisplay } from '../../lib/phone.js';
 import { appEvents, type EventBus } from '../../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { resolveMessage } from '../../messages/index.js';
-import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
+import {
+  twilioSignatureMiddleware,
+  twilioJsonSignatureMiddleware,
+} from '../../middleware/twilioSignature.js';
 import {
   createContactsRepo,
   type ContactItem,
@@ -75,8 +81,13 @@ import {
   UNKNOWN_CALLER_LABEL,
 } from '../../lib/voiceMasking.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
-import { enqueueImmediate } from '../../jobs/jobs.js';
+import { persistViTranscript } from '../../services/voiceTranscripts.js';
+import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
 import { MISSED_CALL_AUTOTEXT_JOB } from '../../jobs/missedCallAutoText.js';
+import {
+  CREATE_VOICE_TRANSCRIPT_JOB,
+  RECONCILE_VOICE_TRANSCRIPT_JOB,
+} from '../../jobs/voiceTranscript.js';
 
 const { VoiceResponse } = twilio.twiml;
 
@@ -85,18 +96,6 @@ type WebhookParams = Record<string, string | undefined>;
 
 function asParams(body: unknown): WebhookParams {
   return (typeof body === 'object' && body !== null ? body : {}) as WebhookParams;
-}
-
-/**
- * First trimmed non-empty string from a list of candidates, else undefined
- * (M1.9c: the transcription callback is lenient about WHICH field carries the
- * transcript across legacy / Voice Intelligence payload shapes).
- */
-function firstNonEmptyString(candidates: (string | undefined)[]): string | undefined {
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim().length > 0) return c;
-  }
-  return undefined;
 }
 
 /**
@@ -291,6 +290,15 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
 
   const router = Router();
   const verifySignature = twilioSignatureMiddleware({
+    authToken: config.twilioAuthToken,
+    publicBaseUrl: config.publicBaseUrl,
+    nodeEnv: config.nodeEnv,
+    logger: log,
+  });
+  // The JSON-body sibling for the Voice Intelligence completion webhook (spec
+  // 3.3): same auth token + base URL, but validates the bodySHA256 scheme over
+  // the raw JSON body instead of parsed form params.
+  const verifyJsonSignature = twilioJsonSignatureMiddleware({
     authToken: config.twilioAuthToken,
     publicBaseUrl: config.publicBaseUrl,
     nodeEnv: config.nodeEnv,
@@ -1356,13 +1364,35 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // call from the TwiML we return. An empty/non-TwiML 200 here made Twilio
     // play its generic "an application error has occurred" to the caller on a
     // no-answer (the action fired with no TwiML to continue). Answer with valid
-    // TwiML: on a MISS, a brief masked goodbye — we have NO voicemail; a missed
-    // bridge is handled by the missed push + auto-text — then hang up; on an
-    // answered/completed bridge (or a per-leg statusCallback, whose response
-    // Twilio ignores) an empty <Response/> ends the call cleanly. Never leaks
-    // the caller's number (no <Number>/callerId echoed here).
+    // TwiML. On a MISS:
+    //  - INBOUND founder-bridge (business line, masked:false) -> OFFER A VOICEMAIL
+    //    (voice-transcription spec 4.1): a prompt + <Record> whose recording rides
+    //    the EXISTING recordingStatusCallback (/voice/recording), where it is
+    //    classified as a voicemail; then thanks + hangup on the Record action. The
+    //    miss-time missed push + auto-text already fired above (before any message).
+    //  - masked relay OR outbound miss -> today's brief goodbye + hangup (spec
+    //    decision 3: voicemail is BUSINESS LINE ONLY; masked calls never record).
+    // On an answered/completed bridge (or a per-leg statusCallback, whose response
+    // Twilio ignores) an empty <Response/> ends the call cleanly. Never leaks the
+    // caller's number (no <Number>/callerId echoed here). Identify the call with
+    // `entry` (NOT `fresh`, which is scoped to the transitioned block above) - it
+    // is populated for every terminal Dial summary, i.e. whenever isMissed is true;
+    // the guard matches the onFounderBridgeMissed side-effect guard exactly.
     const reply = new VoiceResponse();
-    if (isMissed) {
+    if (isMissed && entry?.type === 'call' && entry.masked !== true && entry.direction !== 'outbound') {
+      reply.say(resolveMessage('voice.voicemail_prompt'));
+      reply.record({
+        maxLength: 120,
+        playBeep: true,
+        action: `${baseUrl}/webhooks/twilio/voice/voicemail-done`,
+        recordingStatusCallback: `${baseUrl}/webhooks/twilio/voice/recording`,
+        recordingStatusCallbackEvent: ['completed'],
+      });
+      // Reached only if <Record> falls through without a recording (caller hung up
+      // before the beep) - the recording, if any, arrives via the callback above.
+      reply.say(resolveMessage('voice.voicemail_thanks'));
+      reply.hangup();
+    } else if (isMissed) {
       reply.say(resolveMessage('voice.missed_call_goodbye'));
       reply.hangup();
     }
@@ -1449,6 +1479,24 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       RecordingDuration !== undefined && RecordingDuration.length > 0 ? Number(RecordingDuration) : undefined;
     const duration =
       recordingDuration !== undefined && Number.isFinite(recordingDuration) ? recordingDuration : undefined;
+
+    // Voicemail classification (voice-transcription spec 4.2): a completed
+    // recording on a MISSED inbound founder-bridge call IS a voicemail (an
+    // answered bridge records on an 'answered' call; the Dial summary always
+    // precedes the Record verb, so the outcome is settled first). Masked calls
+    // were already refused above; outbound founder-bridge misses take no voicemail.
+    const isVoicemail = entry.call_outcome === 'missed' && entry.direction !== 'outbound';
+    // A near-empty voicemail (caller hung up at/before the beep) is discarded -
+    // not stored, outcome stays 'missed', the miss-time auto-text already fired.
+    // BEFORE the claim so nothing is stored. PII: sids + duration only.
+    if (isVoicemail && duration !== undefined && duration < 2) {
+      log.info(
+        { callSid: entryCallSid, recordingSid: RecordingSid, duration },
+        'voicemail below minimum duration - discarded',
+      );
+      res.status(200).end();
+      return;
+    }
     // The S3 key is fully derivable up front (recordings/<callSid>/<recordingSid>),
     // so we can CLAIM the RecordingSid with its intended key BEFORE the fetch.
     const key = `recordings/${entryCallSid}/${RecordingSid}`;
@@ -1508,84 +1556,156 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored: true },
       'founder-bridge recording mirrored to S3',
     );
+    // Voicemail outcome upgrade (spec 4.2): promote 'missed' -> 'voicemail' via a
+    // CONDITIONAL write (only-if-missed) - which also makes a redelivered recording
+    // callback idempotent. On the FIRST delivery (the upgrade won): emit the live
+    // update + fire the best-effort "New voicemail" push (never throws; a push
+    // failure must not 5xx the callback - the recording is already safe). Answered
+    // calls never match; masked already refused.
+    if (isVoicemail) {
+      const upgraded = await messages.upgradeCallOutcomeToVoicemail(entryCallSid);
+      if (upgraded) {
+        events.emit('message.persisted', {
+          conversationId: entry.conversationId,
+          tsMsgId: entry.tsMsgId,
+          direction: entry.direction,
+          deliveryStatus: entry.delivery_status,
+        });
+        try {
+          await sendVoicemailPush(entry.conversationId, entryCallSid);
+        } catch (err) {
+          log.error({ err, callSid: entryCallSid }, 'voicemail push failed');
+        }
+      }
+    }
+    // Create leg (spec 3.2): request VI transcription now that the recording is
+    // safely mirrored. Runs for EVERY non-masked founder-bridge recording (bridge
+    // AND voicemail); no-op when VI is unconfigured. Masked calls already returned
+    // above, so this is never reached for them.
+    await requestTranscription(entryCallSid, RecordingSid);
     res.status(200).end();
   });
 
   // ---------------------------------------------------------------------
-  // Transcription callback — POST /voice/transcription (M1.9c). Persists a
-  // VERBATIM transcript onto the founder-bridge `call` entity. The transcription
-  // ENGINE itself is Twilio VOICE INTELLIGENCE — a paid, account-configured
-  // Service (OPERATOR step; the legacy <Record transcribe> attribute is
-  // deprecated and does NOT apply to <Dial> recordings). This endpoint does NOT
-  // call any transcription API inline — it only PERSISTS what the engine POSTs
-  // here (the transcript field populates when Voice Intelligence POSTs to this
-  // callback). Lenient on the payload shape: accept TranscriptionText (legacy)
-  // or a Voice Intelligence transcript body. Idempotent: an empty redelivery, or
-  // one after a transcript is already saved, never overwrites. ONLY founder-
-  // bridge (masked:false) calls — a masked call is refused. PII (doc §9): NEVER
-  // log the transcript text — length only.
+  // <Record action> - POST /voice/voicemail-done (voice-transcription 4.1).
+  // Fires when the caller finishes the voicemail (# / timeout / hangup mid-record).
+  // The voicemail audio itself arrives separately via the recordingStatusCallback
+  // (/voice/recording); this route only closes the call politely. Signature-gated
+  // like the other voice webhooks.
+  router.post('/voicemail-done', verifySignature, (_req, res) => {
+    const reply = new VoiceResponse();
+    reply.say(resolveMessage('voice.voicemail_thanks'));
+    reply.hangup();
+    sendTwiml(res, reply);
+  });
+
   // ---------------------------------------------------------------------
-  router.post('/transcription', verifySignature, async (req, res) => {
-    const params = asParams(req.body);
-    const { CallSid, TranscriptionStatus } = params;
-    const entryCallSid = params['ParentCallSid'] ?? CallSid;
-    if (!entryCallSid) {
-      log.warn({ hasCallSid: false }, 'twilio transcription callback missing CallSid — rejected');
+  // Voice Intelligence completion webhook - POST /voice/intelligence
+  // (voice-transcription spec 3.3). Twilio POSTs a JSON body carrying ONLY a
+  // transcript_sid; we trust nothing else and re-fetch the transcript + its
+  // sentences from the VI API, join them, and persist via the idempotent
+  // setCallTranscript seam (masked refusal + never-overwrite enforced there).
+  // Signature-gated by the JSON (bodySHA256) variant. A Twilio API failure mid-
+  // flow returns 500 so Twilio redelivers (the idempotent persist makes that
+  // safe). PII (doc section 9): NEVER log the transcript text - lengths + sids.
+  // ---------------------------------------------------------------------
+  router.post('/intelligence', verifyJsonSignature, async (req, res) => {
+    const transcriptSid = (req.body as { transcript_sid?: unknown } | undefined)?.transcript_sid;
+    if (typeof transcriptSid !== 'string' || transcriptSid.length === 0) {
+      log.warn({ hasTranscriptSid: false }, 'vi webhook: missing transcript_sid - rejected');
       res.status(400).json({ error: 'bad request' });
       return;
     }
-    // A failed-transcription callback carries no usable text — ack + ignore.
-    if (TranscriptionStatus !== undefined && TranscriptionStatus !== 'completed') {
-      log.info({ callSid: entryCallSid, transcriptionStatus: TranscriptionStatus }, 'transcription callback: non-completed status — ignored');
+    try {
+      await persistViTranscript({ adapter, messages, events, logger: log }, transcriptSid);
       res.status(200).end();
-      return;
+    } catch (err) {
+      log.error({ err, transcriptSid }, 'vi webhook: twilio api failure - 500 for redelivery');
+      res.status(500).end();
     }
+  });
 
-    // Lenient extraction: the legacy/simple shape is TranscriptionText; a Voice
-    // Intelligence callback may instead carry the transcript under a `Transcript`
-    // / `transcript` field. Take the first non-empty string. NEVER log the value.
-    const transcriptText = firstNonEmptyString([
-      params['TranscriptionText'],
-      params['Transcript'],
-      params['transcript'],
-      params['transcript_text'],
-    ]);
-    if (transcriptText === undefined) {
-      log.info({ callSid: entryCallSid }, 'transcription callback: empty transcript — nothing to save');
-      res.status(200).end();
-      return;
-    }
-
-    // Resolve the call entity. Founder-bridge only — a masked relay call is
-    // never recorded/transcribed, so refuse it.
-    const entry = await messages.getByProviderSid(entryCallSid);
-    if (!entry || entry.type !== 'call') {
-      log.warn({ callSid: entryCallSid }, 'transcription callback: no founder-bridge call for CallSid — ignored');
-      res.status(200).end();
-      return;
-    }
-    if (entry.masked === true) {
-      log.warn({ callSid: entryCallSid, masked: true }, 'transcription callback for a MASKED call — refused (masked calls are never transcribed)');
-      res.status(200).end();
-      return;
-    }
-    mergeContext({ conversationId: entry.conversationId });
-
-    // Save VERBATIM, idempotently — a redelivery after a saved transcript loses
-    // the conditional write (false), so the transcript is never overwritten/dup.
-    const saved = await messages.setCallTranscript(entryCallSid, transcriptText);
-    if (saved) {
+  /**
+   * Create leg (voice-transcription spec 3.2): request VI transcription for a
+   * just-mirrored founder-bridge recording. The recording is ALREADY safe, so
+   * this can never lose it. No-op when VI is unconfigured. Stamps
+   * transcript_status 'pending' BEFORE the inline create (so the "Transcribing..."
+   * indicator is correct even while the fallback job retries) and emits SSE.
+   * FAST PATH: create the VI transcript inline, then enqueue the ~10min reconcile
+   * safety net. FALLBACK: on an inline CREATE failure only, enqueue the
+   * createVoiceTranscript job (jobs-pipeline redelivery/DLQ); an enqueue failure
+   * there is only logged - it never fails the recording callback. The two try
+   * scopes are SPLIT (adjudication F1): once the create has succeeded, a
+   * reconcile-enqueue failure is logged and swallowed - falling back to the
+   * create job at that point would mint a DUPLICATE VI transcript for the same
+   * recording (the job's idempotency guard reads the persisted transcript,
+   * which async VI has not delivered yet). The completion webhook still
+   * delivers the minted transcript; only that call's lost-webhook self-heal is
+   * lost. NEVER called for masked calls (the masked refusal returns earlier).
+   * PII (doc section 9): callSid / recordingSid / transcriptSid only.
+   */
+  async function requestTranscription(entryCallSid: string, recordingSid: string): Promise<void> {
+    const serviceSid = config.twilioViServiceSid;
+    if (serviceSid === undefined) return;
+    // Idempotent stamp; emit regardless of first/repeat so the indicator shows.
+    await messages.setTranscriptPending(entryCallSid);
+    const fresh = await messages.getByProviderSid(entryCallSid);
+    if (fresh) {
       events.emit('message.persisted', {
-        conversationId: entry.conversationId,
-        tsMsgId: entry.tsMsgId,
-        direction: entry.direction,
-        deliveryStatus: entry.delivery_status,
+        conversationId: fresh.conversationId,
+        tsMsgId: fresh.tsMsgId,
+        direction: fresh.direction,
+        deliveryStatus: fresh.delivery_status,
       });
     }
-    // PII: transcriptLength only — NEVER the transcript text.
-    log.info({ callSid: entryCallSid, transcriptLength: transcriptText.length, saved }, 'founder-bridge transcript saved');
-    res.status(200).end();
-  });
+    let transcriptSid: string;
+    try {
+      ({ transcriptSid } = await adapter.createViTranscript({
+        serviceSid,
+        recordingSid,
+        customerKey: entryCallSid,
+      }));
+    } catch (err) {
+      log.warn({ err, callSid: entryCallSid, recordingSid }, 'inline vi create failed - falling back to job');
+      try {
+        await enqueue(CREATE_VOICE_TRANSCRIPT_JOB, { callSid: entryCallSid, recordingSid, attempt: 1 });
+      } catch (enqueueErr) {
+        // No VI transcript exists and no job will ever retry - the pipeline gave
+        // up NOW, so close the lifecycle (spec 3.7: 'failed' when the pipeline
+        // gives up; a stuck 'pending' would show "Transcribing..." forever) and
+        // announce the transition live.
+        log.error({ err: enqueueErr, callSid: entryCallSid }, 'vi create fallback enqueue failed');
+        const stamped = await messages.setTranscriptFailed(entryCallSid);
+        if (stamped) {
+          const latest = await messages.getByProviderSid(entryCallSid);
+          if (latest) {
+            events.emit('message.persisted', {
+              conversationId: latest.conversationId,
+              tsMsgId: latest.tsMsgId,
+              direction: latest.direction,
+              deliveryStatus: latest.delivery_status,
+            });
+          }
+        }
+      }
+      return;
+    }
+    // The create SUCCEEDED - the transcript exists at Twilio. From here on,
+    // NEVER enqueue the create job (duplicate-transcript guard, F1 above).
+    try {
+      await enqueue(
+        RECONCILE_VOICE_TRANSCRIPT_JOB,
+        { callSid: entryCallSid, transcriptSid, attempt: 1 },
+        { runAt: new Date(Date.now() + config.voiceTranscriptReconcileSeconds * 1000) },
+      );
+      log.info({ callSid: entryCallSid, transcriptSid }, 'vi transcript requested inline');
+    } catch (err) {
+      log.error(
+        { err, callSid: entryCallSid, transcriptSid },
+        'reconcile enqueue failed after successful create',
+      );
+    }
+  }
 
   /**
    * Side effects when a founder-bridge call is MISSED (M1.9b): the missed-call
@@ -1665,6 +1785,43 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         await pushService.sendToUser(founder.userId, { kind: 'missed_call', payload });
       } catch (err) {
         log.warn({ err, callSid, userId: founder.userId }, 'founder triage: missed-call push failed for a founder — continuing');
+      }
+    }
+  }
+
+  /**
+   * Send the "New voicemail" push to every founder (admin user). Sibling of
+   * sendMissedCallPush - identical masked posture: the call_party_label (a
+   * role/name, NEVER a raw phone), an unknown caller's number surfaced ONLY on
+   * the founder's own device via pushCallerLabel. kind 'voicemail'; no quick-reply
+   * actions (a voicemail is read, not quick-replied). Best-effort - a per-founder
+   * failure is logged and never propagates (the recording is already safe).
+   */
+  async function sendVoicemailPush(conversationId: string, callSid: string): Promise<void> {
+    const founders = await resolveFounders();
+    if (founders.length === 0) {
+      log.info({ callSid }, 'voicemail: no admin users to push');
+      return;
+    }
+    const entry = await messages.getByProviderSid(callSid);
+    const storedLabel =
+      typeof entry?.call_party_label === 'string' && entry.call_party_label.length > 0
+        ? entry.call_party_label
+        : UNKNOWN_CALLER_LABEL;
+    const conversation = await conversations.getById(conversationId);
+    const callerLabel = pushCallerLabel(storedLabel, conversation?.participant_phone);
+    const payload = {
+      title: 'New voicemail',
+      body: `New voicemail - ${callerLabel}`,
+      kind: 'voicemail' as const,
+      callId: callSid,
+      conversationId,
+    };
+    for (const founder of founders) {
+      try {
+        await pushService.sendToUser(founder.userId, { kind: 'voicemail', payload });
+      } catch (err) {
+        log.warn({ err, callSid, userId: founder.userId }, 'voicemail push failed for a founder - continuing');
       }
     }
   }

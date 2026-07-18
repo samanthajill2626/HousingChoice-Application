@@ -29,10 +29,7 @@ import {
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
-import {
-  OPT_IN_KEYWORDS,
-  OPT_OUT_KEYWORDS,
-} from '../../lib/smsCompliance.js';
+import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
 import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -54,6 +51,7 @@ import {
 import {
   createConversationsRepo,
   type ConversationItem,
+  type ConversationParticipant,
   type ConversationsRepo,
   type ConversationType,
 } from '../../repos/conversationsRepo.js';
@@ -66,6 +64,7 @@ import {
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -339,7 +338,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<void> {
+  ): Promise<string | undefined> {
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
@@ -401,6 +400,55 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
     }
 
+    // Classify the inbound body/OptOutType ONCE via the shared detector (spec
+    // 3.1). STOP-family and HELP are ALWAYS commands to the SYSTEM: they SKIP
+    // the fan-out below and are processed against the sender's own 1:1 further
+    // down - never relayed to the other members. A body that merely CONTAINS a
+    // keyword is undefined here and relays exactly as today.
+    //
+    // W3 (human ruling 2026-07-18): a bare OPT-IN keyword (YES/HOME/START/JOIN/
+    // UNSTOP) is a command ONLY from a CURRENTLY-SUPPRESSED sender (a genuine
+    // re-subscribe). From an UNSUPPRESSED sender it is ORDINARY GROUP CONTENT -
+    // in a tour-scheduling group "Yes" is the single most common one-word reply -
+    // so it relays exactly like a non-keyword message (no keyword processing, no
+    // reply, no flag writes, no annotation). ONE decision is computed here and
+    // used by BOTH the fan-out guard AND the keyword-processing block below so
+    // they can never diverge.
+    //
+    // W4 (SF-2) OptOutType coupling: we run with Twilio Advanced Opt-Out OFF
+    // (A2P checklist). classifyInboundKeyword returns a kind on OptOutType alone
+    // regardless of body; were Advanced Opt-Out ever flipped ON, a full sentence
+    // "stop the listings but keep the tour" would carry OptOutType=STOP and be
+    // treated as a command here, swallowing it from the group. That is the
+    // compliance-correct direction (Twilio also actions the opt-out itself), and
+    // the W3 narrowing already guards the opt-in (YES) case - keep Advanced
+    // Opt-Out OFF so human sentences are never reclassified.
+    const kind = classifyInboundKeyword(Body, msg.params['OptOutType']);
+    // A keyword is a command by default; an opt-in narrows to command ONLY when
+    // the sender is currently suppressed. This ONE boolean drives both the
+    // fan-out guard and the keyword-processing block (they must never diverge).
+    let isCommand = kind !== undefined;
+    if (kind === 'opt_in') {
+      // For a roster member check the member; for a non-member/unknown sender
+      // synthesize a minimal participant carrying just the phone (contactId ''
+      // -> the shared predicate resolves by phone, the honest lookup for a
+      // non-roster sender).
+      const member: ConversationParticipant = sender ?? { contactId: '', phone: From };
+      try {
+        isCommand = await isMemberSuppressed(contacts, conversations, member);
+      } catch (err) {
+        // Fail CLOSED: an indeterminate suppression state must never cause a
+        // relay, so treat the opt-in as a command (not fanned out) - consistent
+        // with every other suppression read in this codebase. PII: SID + kind
+        // only, never a phone.
+        log.error(
+          { err, providerSid: MessageSid, kind },
+          'relay opt-in suppression check failed - treating as a command (fail closed, not relayed)',
+        );
+        isCommand = true;
+      }
+    }
+
     // Closed-group defensive guard: the router only reaches this branch on the
     // unknown-sender fallback (a member's late text is intercepted into the 1:1
     // before this). Persist for the record, NEVER fan out - the group is over.
@@ -410,6 +458,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Removed-member reply: persisted for the audit trail, no fan-out (they
       // are no longer a current participant).
       log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
+    } else if (isCommand) {
+      // A command keyword (STOP-family, HELP, or an opt-in from a suppressed
+      // sender - see the isCommand narrowing above) is a message to the SYSTEM,
+      // not group content: persisted above for the audit trail, processed below,
+      // and NEVER relayed to the other members. (An opt-in from an unsuppressed
+      // sender has isCommand=false and falls through to the fan-out below.)
+      log.info(
+        { providerSid: MessageSid, kind },
+        'relay inbound keyword - processed, not fanned out',
+      );
     } else if (!appended.deduped) {
       // Current member, open thread, fresh message → fan out immediately
       // (enqueueImmediate → SQS DelaySeconds 0, no EventBridge 60s floor). A
@@ -444,10 +502,66 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
       if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
     }
+
+    // Keyword processing (spec 3.2): the SHARED seam runs against the sender's
+    // OWN 1:1 (closed-intercept idiom) - the conversation opt-out flag must land
+    // on their per-phone thread, NEVER on the relay group. The keyword message
+    // itself stays on the relay thread (persisted above for the audit trail).
+    // Gated on isCommand (NOT kind): an unsuppressed opt-in is content and was
+    // already fanned out above, so it must skip keyword processing entirely.
+    let keywordReply: string | undefined;
+    if (isCommand) {
+      const effectiveContact = senderContact ?? (await contacts.findByPhone(From));
+      const oneToOne = await conversations.createOrGetByParticipantPhone(
+        From,
+        conversationTypeFor(effectiveContact),
+      );
+      keywordReply = await processInboundKeywords({
+        conversation: oneToOne,
+        effectiveContact,
+        From,
+        Body,
+        OptOutType: msg.params['OptOutType'],
+        MessageSid,
+      });
+      // Immediate staff visibility (spec 3.4): a display/attention ANNOTATION for
+      // a CURRENT roster member only; suppression truth lives in the flags (3.3),
+      // never in this map. Best-effort - a failure NEVER crashes the webhook (the
+      // message is persisted and the compliance flags are already written).
+      if (sender) {
+        try {
+          if (kind === 'opt_out') {
+            await conversations.setRelayMemberOptedOut(relay.conversationId, senderKey, {
+              ...(sender.contactId !== undefined &&
+                sender.contactId.length > 0 && { contactId: sender.contactId }),
+              phone: sender.phone,
+              ...(sender.name !== undefined && { name: sender.name }),
+              at: new Date().toISOString(),
+            });
+          } else if (kind === 'opt_in') {
+            await conversations.clearRelayMemberOptedOut(relay.conversationId, senderKey);
+          }
+        } catch (err) {
+          log.error(
+            { err, providerSid: MessageSid, memberKey: logSafeMemberKey(sender) },
+            'relay keyword annotation failed - flags recorded, attention item stale until next fan-out',
+          );
+        }
+      }
+    }
+
     log.info(
-      { providerSid: MessageSid, direction: 'inbound', bodyLength: Body?.length ?? 0, closed: isClosed, fannedOut: !isClosed && Boolean(sender) && !appended.deduped },
+      {
+        providerSid: MessageSid,
+        direction: 'inbound',
+        bodyLength: Body?.length ?? 0,
+        closed: isClosed,
+        fannedOut: !isClosed && Boolean(sender) && !appended.deduped && !isCommand,
+        keyword: isCommand,
+      },
       'twilio relay inbound message processed',
     );
+    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
@@ -473,10 +587,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const { conversation, effectiveContact, From, Body, OptOutType, MessageSid } = input;
     let keywordReply: string | undefined;
     try {
-      const keyword = (Body ?? '').trim().toUpperCase();
-      const isHelp = OptOutType === 'HELP' || keyword === 'HELP';
-      const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
-      const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
+      const kind = classifyInboundKeyword(Body, OptOutType);
+      const isHelp = kind === 'help';
+      const optedOut = kind === 'opt_out';
+      const optedIn = kind === 'opt_in';
 
       // Spec sec 3.2: ANY customer-initiated inbound confers inbound_text consent,
       // so a later staff reply is never JIT-gated ("a reply in a contact-started
@@ -754,8 +868,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         const openMatch = openMatches.sort(byNewestCreated)[0];
         if (openMatch) {
-          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
+          // Parity with the closed intercept: an open-path keyword (STOP/HELP/
+          // opt-in) returns its filed reply to ride the TwiML; a normal relay
+          // returns undefined -> empty ack.
+          const relayReply = await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(
+            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
+          );
           return;
         }
         // (b) Else a CLOSED group whose roster contains the sender -> deliver
@@ -790,8 +909,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         //     closed-roster member (that interception is branch (b) above).
         const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
         if (openFallback) {
-          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(EMPTY_TWIML);
+          // Same reply-riding-TwiML contract as the open-roster match above (an
+          // unknown-sender STOP still gets its confirmation).
+          const relayReply = await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(
+            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
+          );
           return;
         }
         // else: every group on this number is closed -> fall through to (2).

@@ -38,6 +38,7 @@ export interface VoiceControlDeps {
 const ANSWER_LEGS = new Set(['callee', 'founder', 'team']);
 const DIGITS = new Set(['0', '1']);
 const OUTCOMES = new Set(['answered', 'no-answer', 'busy']);
+const VI_WEBHOOKS = new Set(['deliver', 'drop']);
 
 /** Lenient shape-check: reject obviously-bad types but fill no defaults (the
  *  engine does). Returns a validated CallScenario or throws with a message that
@@ -65,6 +66,20 @@ function validateScenario(raw: unknown): CallScenario {
   }
   if (s['transcript'] !== undefined && typeof s['transcript'] !== 'string') {
     throw new Error('scenario.transcript must be a string');
+  }
+  if (s['viWebhook'] !== undefined && !VI_WEBHOOKS.has(s['viWebhook'] as string)) {
+    throw new Error(`scenario.viWebhook must be one of deliver|drop`);
+  }
+  // voicemail is either `false` (hang up at the beep) or an object { durationSec? }.
+  if (s['voicemail'] !== undefined && s['voicemail'] !== false) {
+    const vm = s['voicemail'];
+    if (typeof vm !== 'object' || vm === null || Array.isArray(vm)) {
+      throw new Error('scenario.voicemail must be an object or false');
+    }
+    const dur = (vm as Record<string, unknown>)['durationSec'];
+    if (dur !== undefined && typeof dur !== 'number') {
+      throw new Error('scenario.voicemail.durationSec must be a number');
+    }
   }
   return raw as CallScenario;
 }

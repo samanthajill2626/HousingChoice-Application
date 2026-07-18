@@ -200,6 +200,18 @@ export type InboundKeywordKind = 'help' | 'opt_out' | 'opt_in';
  * historical logic exactly: HELP first (OptOutType or bare keyword), then
  * opt-out, then opt-in. A message that merely CONTAINS a keyword is NOT a
  * keyword (exact match on the trimmed uppercased body).
+ *
+ * OptOutType coupling (SF-2): `optOutType` is populated by Twilio ONLY when
+ * Advanced Opt-Out is enabled on the messaging service. We run with it OFF
+ * (A2P checklist), so classification is body-driven today. If it is ever
+ * flipped ON, Twilio stamps OptOutType=STOP/START/HELP on a message regardless
+ * of its body, so a full sentence like "stop the listings but keep the tour"
+ * would classify as opt_out - and on the open relay path
+ * (routes/webhooks/twilio.ts) that suppresses the fan-out, swallowing a human
+ * sentence from the group. That is the compliance-correct direction (Twilio
+ * also actions the opt-out itself), and the open-path opt-in narrowing already
+ * guards the YES case - keep Advanced Opt-Out OFF so human sentences are never
+ * reclassified.
  */
 export function classifyInboundKeyword(
   body: string | undefined,

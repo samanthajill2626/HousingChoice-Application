@@ -50,6 +50,7 @@ import {
 import {
   createConversationsRepo,
   type ConversationItem,
+  type ConversationParticipant,
   type ConversationsRepo,
   type ConversationType,
 } from '../../repos/conversationsRepo.js';
@@ -62,7 +63,7 @@ import {
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
-import { logSafeMemberKey } from '../../services/relayAnnouncements.js';
+import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -392,11 +393,53 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     }
 
     // Classify the inbound body/OptOutType ONCE via the shared detector (spec
-    // 3.1). A bare keyword is a command to the SYSTEM: it SKIPS the fan-out
-    // below and is processed against the sender's own 1:1 further down - it is
-    // never relayed to the other members. A body that merely CONTAINS a keyword
-    // is undefined here and relays exactly as today.
+    // 3.1). STOP-family and HELP are ALWAYS commands to the SYSTEM: they SKIP
+    // the fan-out below and are processed against the sender's own 1:1 further
+    // down - never relayed to the other members. A body that merely CONTAINS a
+    // keyword is undefined here and relays exactly as today.
+    //
+    // W3 (human ruling 2026-07-18): a bare OPT-IN keyword (YES/HOME/START/JOIN/
+    // UNSTOP) is a command ONLY from a CURRENTLY-SUPPRESSED sender (a genuine
+    // re-subscribe). From an UNSUPPRESSED sender it is ORDINARY GROUP CONTENT -
+    // in a tour-scheduling group "Yes" is the single most common one-word reply -
+    // so it relays exactly like a non-keyword message (no keyword processing, no
+    // reply, no flag writes, no annotation). ONE decision is computed here and
+    // used by BOTH the fan-out guard AND the keyword-processing block below so
+    // they can never diverge.
+    //
+    // W4 (SF-2) OptOutType coupling: we run with Twilio Advanced Opt-Out OFF
+    // (A2P checklist). classifyInboundKeyword returns a kind on OptOutType alone
+    // regardless of body; were Advanced Opt-Out ever flipped ON, a full sentence
+    // "stop the listings but keep the tour" would carry OptOutType=STOP and be
+    // treated as a command here, swallowing it from the group. That is the
+    // compliance-correct direction (Twilio also actions the opt-out itself), and
+    // the W3 narrowing already guards the opt-in (YES) case - keep Advanced
+    // Opt-Out OFF so human sentences are never reclassified.
     const kind = classifyInboundKeyword(Body, msg.params['OptOutType']);
+    // A keyword is a command by default; an opt-in narrows to command ONLY when
+    // the sender is currently suppressed. This ONE boolean drives both the
+    // fan-out guard and the keyword-processing block (they must never diverge).
+    let isCommand = kind !== undefined;
+    if (kind === 'opt_in') {
+      // For a roster member check the member; for a non-member/unknown sender
+      // synthesize a minimal participant carrying just the phone (contactId ''
+      // -> the shared predicate resolves by phone, the honest lookup for a
+      // non-roster sender).
+      const member: ConversationParticipant = sender ?? { contactId: '', phone: From };
+      try {
+        isCommand = await isMemberSuppressed(contacts, conversations, member);
+      } catch (err) {
+        // Fail CLOSED: an indeterminate suppression state must never cause a
+        // relay, so treat the opt-in as a command (not fanned out) - consistent
+        // with every other suppression read in this codebase. PII: SID + kind
+        // only, never a phone.
+        log.error(
+          { err, providerSid: MessageSid, kind },
+          'relay opt-in suppression check failed - treating as a command (fail closed, not relayed)',
+        );
+        isCommand = true;
+      }
+    }
 
     // Closed-group defensive guard: the router only reaches this branch on the
     // unknown-sender fallback (a member's late text is intercepted into the 1:1
@@ -407,10 +450,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Removed-member reply: persisted for the audit trail, no fan-out (they
       // are no longer a current participant).
       log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
-    } else if (kind !== undefined) {
-      // A bare keyword is a command to the SYSTEM, not group content (spec sec 2
-      // decision 2): persisted above for the audit trail, processed below, and
-      // NEVER relayed to the other members.
+    } else if (isCommand) {
+      // A command keyword (STOP-family, HELP, or an opt-in from a suppressed
+      // sender - see the isCommand narrowing above) is a message to the SYSTEM,
+      // not group content: persisted above for the audit trail, processed below,
+      // and NEVER relayed to the other members. (An opt-in from an unsuppressed
+      // sender has isCommand=false and falls through to the fan-out below.)
       log.info(
         { providerSid: MessageSid, kind },
         'relay inbound keyword - processed, not fanned out',
@@ -454,8 +499,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // OWN 1:1 (closed-intercept idiom) - the conversation opt-out flag must land
     // on their per-phone thread, NEVER on the relay group. The keyword message
     // itself stays on the relay thread (persisted above for the audit trail).
+    // Gated on isCommand (NOT kind): an unsuppressed opt-in is content and was
+    // already fanned out above, so it must skip keyword processing entirely.
     let keywordReply: string | undefined;
-    if (kind !== undefined) {
+    if (isCommand) {
       const effectiveContact = senderContact ?? (await contacts.findByPhone(From));
       const oneToOne = await conversations.createOrGetByParticipantPhone(
         From,
@@ -501,8 +548,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: 'inbound',
         bodyLength: Body?.length ?? 0,
         closed: isClosed,
-        fannedOut: !isClosed && Boolean(sender) && !appended.deduped && kind === undefined,
-        keyword: kind !== undefined,
+        fannedOut: !isClosed && Boolean(sender) && !appended.deduped && !isCommand,
+        keyword: isCommand,
       },
       'twilio relay inbound message processed',
     );

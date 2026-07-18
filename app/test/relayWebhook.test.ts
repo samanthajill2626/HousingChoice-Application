@@ -749,6 +749,56 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
+  it('bare YES from an UNSUPPRESSED roster member: relayed as group content (fanned out), no keyword processing, empty TwiML', async () => {
+    seedRelay(world);
+    // Alice is a real, UNSUPPRESSED tenant contact (no sms_opt_out set).
+    world.contacts.push({ contactId: 'c-alice', type: 'tenant', phone: ALICE } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'YES', MessageSid: 'SMopen-yes' }),
+    );
+    expect(res.status).toBe(200);
+    // W3 human ruling: an opt-in from an unsuppressed sender is ordinary group
+    // content - it fans out to the other members with empty TwiML (no reply).
+    expect(res.text).toContain('<Response/>');
+    expect(res.text).not.toContain('<Message>');
+    expect(world.sent.map((s) => s.to).sort()).toEqual([BOB, CAROL].sort());
+    expect(world.sent.every((s) => s.body === 'Alice: YES')).toBe(true);
+    // NO keyword processing: no conversation opt-out writes, no contact flag
+    // writes, and no relay opt-out annotation.
+    expect(world.optOutSets).toHaveLength(0);
+    expect(world.flagWrites).toHaveLength(0);
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
+  });
+
+  it('opt-in suppression read THROWS: fails CLOSED to the command path (welcome TwiML, no fan-out)', async () => {
+    seedRelay(world);
+    // Alice is a roster member with NO contact flag, so the suppression predicate
+    // moves past the contact read to the conversation-thread read...
+    const { app } = makeWebhookHarness({ world });
+    // ...which we force to THROW for Alice's phone (a transient read failure).
+    const realFind = world.conversationsRepo.findByParticipantPhone.bind(world.conversationsRepo);
+    world.conversationsRepo.findByParticipantPhone = async (phone: string) => {
+      if (phone === ALICE) throw new Error('suppression read boom');
+      return realFind(phone);
+    };
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ALICE, Body: 'YES', MessageSid: 'SMopen-yes-throw' }),
+    );
+    expect(res.status).toBe(200);
+    // Fail CLOSED: an indeterminate suppression state is treated as a command, so
+    // the YES is NOT relayed (a fan-out to Bob/Carol would prove fail-OPEN) and
+    // the welcome reply rides the TwiML.
+    expect(res.text).toContain('<Message>');
+    expect(world.sent).toHaveLength(0);
+  });
+
   it('a body merely CONTAINING a keyword fans out normally with empty TwiML and no flags', async () => {
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
@@ -791,6 +841,28 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     // NO roster annotation: the sender is on no roster (nothing to suppress there).
     expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
     expect(world.sent).toHaveLength(0);
+  });
+
+  it('unsuppressed UNKNOWN-sender YES on the open fallback: no fan-out, no flag writes, empty TwiML', async () => {
+    seedRelay(world); // open group Alice/Bob/Carol; ZARA is on NO roster
+    // ZARA is a known but UNSUPPRESSED contact (no sms_opt_out), not a member.
+    world.contacts.push({ contactId: 'c-zara', type: 'tenant', phone: ZARA } as ContactItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      '/webhooks/twilio/sms',
+      relayInboundParams({ From: ZARA, Body: 'YES', MessageSid: 'SMopen-unknown-yes' }),
+    );
+    expect(res.status).toBe(200);
+    // Non-member: persisted on the group for the record, never fanned out. And an
+    // UNSUPPRESSED opt-in is content, not a command: no processing, empty TwiML.
+    expect(res.text).toContain('<Response/>');
+    expect(res.text).not.toContain('<Message>');
+    expect(world.sent).toHaveLength(0);
+    expect(world.optOutSets).toHaveLength(0);
+    expect(world.flagWrites).toHaveLength(0);
+    expect(world.conversations.get('conv-relay-1')?.relay_opted_out_members).toBeUndefined();
   });
 
   it('redelivered STOP (same MessageSid): still no fan-out, idempotent flag re-writes, confirmation TwiML again', async () => {

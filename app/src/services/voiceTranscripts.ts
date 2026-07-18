@@ -12,6 +12,7 @@ import type { MessagingAdapter, ViSentence } from '../adapters/messaging.js';
 import type { MessagesRepo, MessageItem } from '../repos/messagesRepo.js';
 import type { EventBus } from '../lib/events.js';
 import type { Logger } from '../lib/logger.js';
+import type { createExtractionRepo } from '../repos/extractionRepo.js';
 
 /**
  * A source-attributed channel->role map (voice-extraction Layer 1): keys are the
@@ -63,6 +64,15 @@ export interface PersistViTranscriptDeps {
   messages: MessagesRepo;
   events: EventBus;
   logger: Logger;
+  /**
+   * Conversation fact extraction (voice-extraction T2): a fresh transcript save
+   * schedules an IMMEDIATE (no-debounce) extraction run so the AI pipeline sees
+   * the new call text. Optional - the helper degrades to a pure persist when it
+   * is unwired. Gated by aiExtractionEnabled.
+   */
+  extraction?: Pick<ReturnType<typeof createExtractionRepo>, 'scheduleExtraction'>;
+  /** Kill switch (config.aiExtractionEnabled): OFF skips the hook entirely. */
+  aiExtractionEnabled: boolean;
 }
 
 /**
@@ -152,6 +162,23 @@ export async function persistViTranscript(
     emitPersisted(events, entry);
     // PII: transcriptLength only - NEVER the text.
     logger.info({ transcriptSid, callSid, transcriptLength: text.length }, 'vi transcript saved');
+    // Voice-extraction T2: schedule an IMMEDIATE (no-debounce) extraction run so
+    // the AI pipeline picks up the new call text. Best-effort + kill-switch-gated:
+    // a schedule failure NEVER changes the 'saved' outcome. Fires ONLY on this
+    // fresh-save branch (already-saved/not-ours/masked/failed/not-completed all
+    // returned earlier); no conversation-type lookup here - the extraction job's
+    // contact-type guard already no-ops landlord/team/relay threads.
+    if (deps.aiExtractionEnabled && deps.extraction) {
+      try {
+        await deps.extraction.scheduleExtraction(entry.conversationId, 'voice', new Date().toISOString());
+      } catch (err) {
+        // PII: sids + err only - NEVER the transcript text or message bodies.
+        logger.warn(
+          { transcriptSid, callSid, err },
+          'vi transcript: scheduleExtraction failed (saved regardless)',
+        );
+      }
+    }
     return 'saved';
   }
   logger.info({ transcriptSid, callSid }, 'vi transcript: already saved (never-overwrite) - no-op');

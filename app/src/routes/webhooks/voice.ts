@@ -70,6 +70,7 @@ import {
   type MessageItem,
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../../repos/extractionRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../../repos/settingsRepo.js';
 import { createUsersRepo, type UserItem, type UsersRepo } from '../../repos/usersRepo.js';
 import {
@@ -249,6 +250,10 @@ export interface TwilioVoiceWebhookDeps {
   pushService?: PushService;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
+  /** Fact-extraction repo (voice-extraction T2): the VI completion webhook
+   * schedules a run on a fresh transcript save. Injectable in tests; the real
+   * repo by default. */
+  extractionRepo?: ExtractionRepo;
 }
 
 export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Router {
@@ -260,6 +265,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
@@ -1624,7 +1630,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       return;
     }
     try {
-      await persistViTranscript({ adapter, messages, events, logger: log }, transcriptSid);
+      await persistViTranscript(
+        { adapter, messages, events, logger: log, extraction, aiExtractionEnabled: config.aiExtractionEnabled },
+        transcriptSid,
+      );
       res.status(200).end();
     } catch (err) {
       log.error({ err, transcriptSid }, 'vi webhook: twilio api failure - 500 for redelivery');

@@ -32,6 +32,11 @@ import {
   parseReconcileVoiceTranscriptPayload,
   registerVoiceTranscriptJobHandlers,
 } from '../src/jobs/voiceTranscript.js';
+import {
+  persistViTranscript,
+  type PersistViTranscriptDeps,
+} from '../src/services/voiceTranscripts.js';
+import type { ExtractionRepo } from '../src/repos/extractionRepo.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -79,6 +84,9 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
       adapter: world.adapter,
       messagesRepo: world.messagesRepo,
       events: world.events,
+      // T2: the reconcile leg schedules an extraction run on a fresh save - inject
+      // the world's in-memory stub so it never reaches a real ai_extraction table.
+      extractionRepo: world.extractionRepo,
       logger,
     });
   }
@@ -281,5 +289,152 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
     expect(
       parseReconcileVoiceTranscriptPayload({ callSid: 'x', transcriptSid: 't', attempt: 2 }),
     ).toEqual({ callSid: 'x', transcriptSid: 't', attempt: 2 });
+  });
+
+  // ---------------------------------------------------------------------------
+  // T2 hook (voice-extraction): a FRESH transcript save schedules an immediate
+  // (no-debounce) voice extraction run. persistViTranscript is exercised DIRECTLY
+  // here - the same fake-adapter / fake-messages world the reconcile leg uses - so
+  // every status branch can be pinned against a scheduleExtraction spy. It MUST
+  // never change the persist outcome (best-effort, kill-switch-gated).
+  // ---------------------------------------------------------------------------
+  describe('persistViTranscript T2 hook: fresh save schedules a voice extraction run', () => {
+    /** Minimal extraction stub: scheduleExtraction records its args (or throws). */
+    function spyExtraction(throwErr?: Error) {
+      const calls: { conversationId: string; channel: 'sms' | 'voice'; dueAt: string }[] = [];
+      const extraction: Pick<ExtractionRepo, 'scheduleExtraction'> = {
+        async scheduleExtraction(conversationId, channel, dueAt) {
+          calls.push({ conversationId, channel, dueAt });
+          if (throwErr) throw throwErr;
+        },
+      };
+      return { calls, extraction };
+    }
+
+    function deps(over: Partial<PersistViTranscriptDeps> = {}): PersistViTranscriptDeps {
+      return {
+        adapter: world.adapter,
+        messages: world.messagesRepo,
+        events: world.events,
+        logger,
+        aiExtractionEnabled: true,
+        ...over,
+      };
+    }
+
+    it('a fresh save schedules ONCE with the call conversationId, channel voice, no debounce', async () => {
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTsave', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: 'hi there', mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTsave');
+      expect(outcome).toBe('saved');
+      expect(calls).toHaveLength(1);
+      expect(calls[0]!.conversationId).toBe('conv-1');
+      expect(calls[0]!.channel).toBe('voice');
+      // Valid ISO AND ~now (no debounce added) - distinguishes now from now+debounce.
+      expect(calls[0]!.dueAt).toBe(new Date(calls[0]!.dueAt).toISOString());
+      expect(Math.abs(Date.parse(calls[0]!.dueAt) - Date.now())).toBeLessThan(5000);
+    });
+
+    it('the kill switch OFF (aiExtractionEnabled=false) never schedules, even on a fresh save', async () => {
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GToff', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: 'hi', mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction, aiExtractionEnabled: false }), 'GToff');
+      expect(outcome).toBe('saved');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('no extraction dep wired: a fresh save still returns saved (no throw)', async () => {
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTnodep', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: 'hi', mediaChannel: 1 }],
+      });
+      const outcome = await persistViTranscript(deps(), 'GTnodep');
+      expect(outcome).toBe('saved');
+    });
+
+    it('a scheduleExtraction failure never changes the outcome (still saved) + logs a warn (sids only)', async () => {
+      seedCall({ transcript_status: 'pending' });
+      const secret = 'transcript body words that must never be logged';
+      world.viTranscripts.set('GTthrow', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: secret, mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction(new Error('dynamo down'));
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTthrow');
+      expect(outcome).toBe('saved'); // outcome is UNCHANGED by the failure
+      expect(calls).toHaveLength(1); // it WAS attempted
+      const logged = JSON.stringify(capture.lines);
+      expect(logged).toContain('scheduleExtraction failed');
+      expect(logged).not.toContain(secret); // PII: never the transcript text
+    });
+
+    it('an already-saved transcript (never-overwrite no-op) does NOT schedule', async () => {
+      seedCall({ transcript: 'already here', transcript_status: 'completed' });
+      world.viTranscripts.set('GTdup', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: 'new text', mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTdup');
+      expect(outcome).toBe('already-saved');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('a not-ours transcript (no matching call) does NOT schedule', async () => {
+      world.viTranscripts.set('GTforeign', {
+        status: 'completed',
+        customerKey: 'CAsomeoneelse',
+        sentences: [{ text: 'x', mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTforeign');
+      expect(outcome).toBe('not-ours');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('a masked call transcript (refused) does NOT schedule', async () => {
+      seedCall({ masked: true });
+      world.viTranscripts.set('GTmask', {
+        status: 'completed',
+        customerKey: CALL_SID,
+        sentences: [{ text: 'x', mediaChannel: 1 }],
+      });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTmask');
+      expect(outcome).toBe('masked-refused');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('a failed-status transcript (stamped) does NOT schedule', async () => {
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTfail2', { status: 'failed', customerKey: CALL_SID, sentences: [] });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTfail2');
+      expect(outcome).toBe('failed-stamped');
+      expect(calls).toHaveLength(0);
+    });
+
+    it('a not-completed transcript (in-progress) does NOT schedule', async () => {
+      seedCall({ transcript_status: 'pending' });
+      world.viTranscripts.set('GTprog', { status: 'in-progress', customerKey: CALL_SID, sentences: [] });
+      const { calls, extraction } = spyExtraction();
+      const outcome = await persistViTranscript(deps({ extraction }), 'GTprog');
+      expect(outcome).toBe('not-completed');
+      expect(calls).toHaveLength(0);
+    });
   });
 });

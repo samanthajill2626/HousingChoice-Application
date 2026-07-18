@@ -2400,7 +2400,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       events: world.events,
       // conversation-fact-extraction: inject a stub so the schedule call is
       // observable and never hits a real ai_extraction table.
-      ...(opts.extractionRepo !== undefined && { extractionRepo: opts.extractionRepo }),
+      // conversation-fact-extraction / voice-extraction: default to the world's
+      // in-memory stub so NEITHER webhook router (SMS or voice) ever reaches a real
+      // ai_extraction table; a test may pass opts.extractionRepo (a spy) to OBSERVE
+      // the schedule call.
+      extractionRepo: opts.extractionRepo ?? world.extractionRepo,
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

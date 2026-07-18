@@ -4,7 +4,7 @@
 //   POST /webhooks/twilio/voice/whisper-gate — the press-1/press-0/timeout gate
 //   POST /webhooks/twilio/voice/status       — call status callback (forward-only)
 //   POST /webhooks/twilio/voice/recording    — recordingStatusCallback (M1.9c)
-//   POST /webhooks/twilio/voice/transcription— transcription callback (M1.9c)
+//   POST /webhooks/twilio/voice/intelligence - Voice Intelligence completion webhook (JSON)
 //
 // All are signature-gated identically to the SMS handlers (the same
 // twilioSignatureMiddleware over the parsed form params; query params are part
@@ -18,13 +18,16 @@
 // transcribed (record="do-not-record") — they produce a metadata-only `call`
 // timeline entry (who→whom by ROLE, when, duration, answered/missed).
 //
-// FOUNDER-BRIDGE RECORDING + TRANSCRIPTION — the M1.9c path (CO1, v2.17): the
-// founder-bridge call (M1.9b, masked:false) RECORDS. The recordingStatusCallback
-// fetches the recording media (authenticated, SSRF-guarded) + streams it to S3,
-// then stamps recording_s3_key/duration on the `call` entity. A separate
-// transcription callback persists a VERBATIM transcript (NO AI / structured
-// extraction — Phase 2). ONLY the founder-bridge (non-masked) records; the
-// masked relay <Dial> STAYS do-not-record.
+// FOUNDER-BRIDGE RECORDING + VOICE INTELLIGENCE TRANSCRIPTION - the M1.9c path
+// (CO1, v2.17) + voice-transcription: the founder-bridge call (M1.9b,
+// masked:false) RECORDS. The recordingStatusCallback fetches the recording media
+// (authenticated, SSRF-guarded) + streams it to S3, stamps
+// recording_s3_key/duration on the `call` entity, and requests a Voice
+// Intelligence transcript (inline create + reconcile fallback). The VI completion
+// webhook (POST /voice/intelligence, JSON) fetches the sentences and persists a
+// VERBATIM transcript (NO AI / structured extraction - Phase 2). ONLY the
+// founder-bridge (non-masked) records/transcribes; the masked relay <Dial> STAYS
+// do-not-record.
 //
 // PII (doc §9): NEVER log a real caller's phone/name, and NEVER speak/announce
 // or persist a raw counterpart phone — IDs/SIDs/CallSid/role-labels/counts only.
@@ -93,18 +96,6 @@ type WebhookParams = Record<string, string | undefined>;
 
 function asParams(body: unknown): WebhookParams {
   return (typeof body === 'object' && body !== null ? body : {}) as WebhookParams;
-}
-
-/**
- * First trimmed non-empty string from a list of candidates, else undefined
- * (M1.9c: the transcription callback is lenient about WHICH field carries the
- * transcript across legacy / Voice Intelligence payload shapes).
- */
-function firstNonEmptyString(candidates: (string | undefined)[]): string | undefined {
-  for (const c of candidates) {
-    if (typeof c === 'string' && c.trim().length > 0) return c;
-  }
-  return undefined;
 }
 
 /**
@@ -1557,82 +1548,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, transcriptSid }, 'vi webhook: twilio api failure - 500 for redelivery');
       res.status(500).end();
     }
-  });
-
-  // ---------------------------------------------------------------------
-  // Transcription callback — POST /voice/transcription (M1.9c). Persists a
-  // VERBATIM transcript onto the founder-bridge `call` entity. The transcription
-  // ENGINE itself is Twilio VOICE INTELLIGENCE — a paid, account-configured
-  // Service (OPERATOR step; the legacy <Record transcribe> attribute is
-  // deprecated and does NOT apply to <Dial> recordings). This endpoint does NOT
-  // call any transcription API inline — it only PERSISTS what the engine POSTs
-  // here (the transcript field populates when Voice Intelligence POSTs to this
-  // callback). Lenient on the payload shape: accept TranscriptionText (legacy)
-  // or a Voice Intelligence transcript body. Idempotent: an empty redelivery, or
-  // one after a transcript is already saved, never overwrites. ONLY founder-
-  // bridge (masked:false) calls — a masked call is refused. PII (doc §9): NEVER
-  // log the transcript text — length only.
-  // ---------------------------------------------------------------------
-  router.post('/transcription', verifySignature, async (req, res) => {
-    const params = asParams(req.body);
-    const { CallSid, TranscriptionStatus } = params;
-    const entryCallSid = params['ParentCallSid'] ?? CallSid;
-    if (!entryCallSid) {
-      log.warn({ hasCallSid: false }, 'twilio transcription callback missing CallSid — rejected');
-      res.status(400).json({ error: 'bad request' });
-      return;
-    }
-    // A failed-transcription callback carries no usable text — ack + ignore.
-    if (TranscriptionStatus !== undefined && TranscriptionStatus !== 'completed') {
-      log.info({ callSid: entryCallSid, transcriptionStatus: TranscriptionStatus }, 'transcription callback: non-completed status — ignored');
-      res.status(200).end();
-      return;
-    }
-
-    // Lenient extraction: the legacy/simple shape is TranscriptionText; a Voice
-    // Intelligence callback may instead carry the transcript under a `Transcript`
-    // / `transcript` field. Take the first non-empty string. NEVER log the value.
-    const transcriptText = firstNonEmptyString([
-      params['TranscriptionText'],
-      params['Transcript'],
-      params['transcript'],
-      params['transcript_text'],
-    ]);
-    if (transcriptText === undefined) {
-      log.info({ callSid: entryCallSid }, 'transcription callback: empty transcript — nothing to save');
-      res.status(200).end();
-      return;
-    }
-
-    // Resolve the call entity. Founder-bridge only — a masked relay call is
-    // never recorded/transcribed, so refuse it.
-    const entry = await messages.getByProviderSid(entryCallSid);
-    if (!entry || entry.type !== 'call') {
-      log.warn({ callSid: entryCallSid }, 'transcription callback: no founder-bridge call for CallSid — ignored');
-      res.status(200).end();
-      return;
-    }
-    if (entry.masked === true) {
-      log.warn({ callSid: entryCallSid, masked: true }, 'transcription callback for a MASKED call — refused (masked calls are never transcribed)');
-      res.status(200).end();
-      return;
-    }
-    mergeContext({ conversationId: entry.conversationId });
-
-    // Save VERBATIM, idempotently — a redelivery after a saved transcript loses
-    // the conditional write (false), so the transcript is never overwritten/dup.
-    const saved = await messages.setCallTranscript(entryCallSid, transcriptText);
-    if (saved) {
-      events.emit('message.persisted', {
-        conversationId: entry.conversationId,
-        tsMsgId: entry.tsMsgId,
-        direction: entry.direction,
-        deliveryStatus: entry.delivery_status,
-      });
-    }
-    // PII: transcriptLength only — NEVER the transcript text.
-    log.info({ callSid: entryCallSid, transcriptLength: transcriptText.length, saved }, 'founder-bridge transcript saved');
-    res.status(200).end();
   });
 
   /**

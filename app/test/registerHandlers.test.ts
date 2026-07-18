@@ -24,6 +24,8 @@ describe('registerAllJobHandlers', () => {
         'relay.fanOut',
         'relay.intro',
         'relay.memberAdded',
+        'voice.createTranscript',
+        'voice.reconcileTranscript',
       ].sort(),
     );
   });

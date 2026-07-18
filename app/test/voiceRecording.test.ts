@@ -84,18 +84,6 @@ function recordingParams(over: Record<string, string> = {}): Record<string, stri
   };
 }
 
-/** A simulated completed transcription callback (legacy TranscriptionText shape). */
-function transcriptionParams(over: Record<string, string> = {}): Record<string, string> {
-  return {
-    CallSid: 'CAbiz0001',
-    TranscriptionStatus: 'completed',
-    TranscriptionText: 'Hi, I am calling about the two bedroom unit on Main Street.',
-    AccountSid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    ApiVersion: '2010-04-01',
-    ...over,
-  };
-}
-
 function founderHarness(world: FakeWorld) {
   const harness = makeWebhookHarness({ world });
   // Voice Phase 1 (spec §6): inbound bridges to the inbound-voice-line HOLDER's
@@ -344,99 +332,6 @@ describe('recording callback — POST /voice/recording (M1.9c)', () => {
     expect(logs).not.toContain(RECORDING_URL);
     // The IDs/SIDs ARE allowed in logs (correlation) — sanity that we logged.
     expect(logs).toContain('RE1111');
-  });
-});
-
-describe('transcription callback — POST /voice/transcription (M1.9c)', () => {
-  it('completed → saves the verbatim transcript on the call; emits live', async () => {
-    const world = createFakeWorld();
-    const { app } = await seedFounderBridge(world);
-    const before = world.emitted.filter((e) => e.event === 'message.persisted').length;
-
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams());
-    expect(res.status).toBe(200);
-
-    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    expect(call.transcript).toBe('Hi, I am calling about the two bedroom unit on Main Street.');
-
-    const after = world.emitted.filter((e) => e.event === 'message.persisted').length;
-    expect(after).toBeGreaterThan(before);
-  });
-
-  it('accepts a Voice Intelligence transcript body shape (lenient field)', async () => {
-    const world = createFakeWorld();
-    const { app } = await seedFounderBridge(world);
-    // No TranscriptionText — the transcript rides a `Transcript` field instead.
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', {
-      CallSid: 'CAbiz0001',
-      TranscriptionStatus: 'completed',
-      Transcript: 'Verbatim from Voice Intelligence.',
-      ApiVersion: '2010-04-01',
-    });
-    expect(res.status).toBe(200);
-    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    expect(call.transcript).toBe('Verbatim from Voice Intelligence.');
-  });
-
-  it('GUARDRAIL: a redelivered transcription callback never overwrites / duplicates', async () => {
-    const world = createFakeWorld();
-    const { app } = await seedFounderBridge(world);
-
-    await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams());
-    // A redelivery with DIFFERENT text must NOT overwrite the saved transcript.
-    await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams({ TranscriptionText: 'DIFFERENT redelivered text' }));
-
-    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    expect(call.transcript).toBe('Hi, I am calling about the two bedroom unit on Main Street.');
-  });
-
-  it('an empty-transcript redelivery never clobbers a saved transcript', async () => {
-    const world = createFakeWorld();
-    const { app } = await seedFounderBridge(world);
-    await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams());
-    // Empty redelivery → nothing to save, existing transcript preserved.
-    await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams({ TranscriptionText: '' }));
-    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    expect(call.transcript).toBe('Hi, I am calling about the two bedroom unit on Main Street.');
-  });
-
-  it('GUARDRAIL: a MASKED relay call → transcription REFUSED (masked never transcribes)', async () => {
-    const world = createFakeWorld();
-    seedRelay(world);
-    const { app } = makeWebhookHarness({ world });
-    await signedTwilioPost(app, '/webhooks/twilio/voice', {
-      CallSid: 'CAmasked1',
-      From: ALICE,
-      To: POOL,
-      CallStatus: 'ringing',
-      Direction: 'inbound',
-      ApiVersion: '2010-04-01',
-    });
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', {
-      CallSid: 'CAmasked1',
-      TranscriptionStatus: 'completed',
-      TranscriptionText: 'should never be saved',
-      ApiVersion: '2010-04-01',
-    });
-    expect(res.status).toBe(200);
-    expect(world.messages.find((m) => m.provider_sid === 'CAmasked1')!.transcript).toBeUndefined();
-  });
-
-  it('never logs the transcript text (PII, doc §9)', async () => {
-    const world = createFakeWorld();
-    const { app, capture } = await seedFounderBridge(world);
-    await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams());
-    const logs = JSON.stringify(capture.lines);
-    expect(logs).not.toContain('two bedroom unit on Main Street');
-  });
-
-  it('rejects an invalid X-Twilio-Signature (signature-gated)', async () => {
-    const world = createFakeWorld();
-    const { app } = await seedFounderBridge(world);
-    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/transcription', transcriptionParams(), {
-      tamper: true,
-    });
-    expect(res.status).toBe(403);
   });
 });
 

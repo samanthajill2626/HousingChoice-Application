@@ -3,9 +3,9 @@
 // carrying ONLY a transcript_sid; the handler re-fetches the transcript + its
 // sentences from the VI API (the world fake adapter here), joins them, and
 // persists via the idempotent setCallTranscript seam. These cases MIGRATE the
-// guardrail intents from the deleted legacy /voice/transcription endpoint:
-// signature-gated (JSON bodySHA256 variant), never-overwrite, masked refusal,
-// non-completed no-op, API-failure 500. PII: the transcript text is NEVER logged.
+// guardrail intents from the deleted legacy transcription endpoint: signature-gated
+// (JSON bodySHA256 variant), never-overwrite, masked refusal, non-completed no-op,
+// API-failure 500. PII: the transcript text is NEVER logged.
 import { describe, expect, it } from 'vitest';
 import {
   createFakeWorld,

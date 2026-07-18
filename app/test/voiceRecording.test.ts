@@ -18,7 +18,7 @@
 //    re-fetches / re-stores; a redelivered transcription callback never
 //    overwrites / duplicates
 //  - no recording URL content / transcript text in ANY log line
-import { describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import {
@@ -30,6 +30,20 @@ import {
   type FakeWorld,
 } from './helpers/twilioWebhookHarness.js';
 import { TEST_SESSION_COOKIE, TEST_ADMIN_USER } from './helpers/authSession.js';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureOutboundQueue,
+  configureScheduler,
+} from '../src/jobs/jobs.js';
+import type { JobEnvelope } from '../src/jobs/types.js';
+import {
+  CREATE_VOICE_TRANSCRIPT_JOB,
+  RECONCILE_VOICE_TRANSCRIPT_JOB,
+} from '../src/jobs/voiceTranscript.js';
 
 const CALLER = '+15550177777'; // a tenant calling the business number
 // The inbound-voice-line HOLDER's verified cell — the number inbound calls ring
@@ -499,5 +513,152 @@ describe('GET /api/calls/:callId/recording (M1.9c, authed)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
     const logs = JSON.stringify(capture.lines);
     expect(logs).not.toContain('recording-bytes-for');
+  });
+});
+
+describe('recording callback create-leg - VI transcription request (voice-transcription 3.2)', () => {
+  // The recording handler's create leg enqueues jobs, so the jobs pipeline must
+  // be wired. A RECORDER dispatch captures every dispatched envelope WITHOUT
+  // running a handler (we assert the enqueue, not the job's effects here).
+  let dispatched: JobEnvelope[];
+  let queueAdapter: InProcessOutboundQueueAdapter;
+
+  beforeEach(() => {
+    _resetForTests();
+    configureScheduler(new InMemorySchedulerAdapter());
+    dispatched = [];
+    queueAdapter = new InProcessOutboundQueueAdapter({
+      dispatch: async (raw) => {
+        dispatched.push(raw as JobEnvelope);
+      },
+    });
+    configureOutboundQueue(queueAdapter);
+  });
+
+  afterEach(async () => {
+    await queueAdapter.settle();
+    _resetForTests();
+  });
+
+  /** A founder harness with Voice Intelligence CONFIGURED (VI SID + reconcile secs). */
+  function viFounderHarness(world: FakeWorld) {
+    const harness = makeWebhookHarness({
+      world,
+      env: { TWILIO_VI_SERVICE_SID: 'GAsvc', VOICE_TRANSCRIPT_RECONCILE_SECONDS: '1' },
+    });
+    const admin = harness.fakeUsers.users.get(TEST_ADMIN_USER.userId);
+    if (admin) {
+      admin.cell = HOLDER_CELL;
+      admin.cell_verified_at = '2026-07-01T00:00:00.000Z';
+      void harness.fakeUsers.repo.assignInboundVoiceLine(admin.userId);
+    }
+    return harness;
+  }
+
+  async function seedFounderBridgeVi(world: FakeWorld) {
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app, capture } = viFounderHarness(world);
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    return { app, capture };
+  }
+
+  it('completed founder-bridge recording stamps transcript_status=pending, creates VI inline, enqueues reconcile', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(res.status).toBe(200);
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.transcript_status).toBe('pending');
+    // Inline VI create fired with customerKey = the CallSid.
+    expect(world.viCreates).toEqual([
+      { serviceSid: 'GAsvc', recordingSid: 'RE1111', customerKey: 'CAbiz0001' },
+    ]);
+    // One reconcile enqueued with the ~10min delay (delaySeconds 1 -> delayed[]).
+    expect(queueAdapter.delayed).toHaveLength(1);
+    const d = queueAdapter.delayed[0]!;
+    expect(d.envelope.jobName).toBe(RECONCILE_VOICE_TRANSCRIPT_JOB);
+    expect(d.envelope.payload).toMatchObject({ callSid: 'CAbiz0001', transcriptSid: 'GTfake1', attempt: 1 });
+  });
+
+  it('inline create failure falls back to the createVoiceTranscript job and still 200s', async () => {
+    const world = createFakeWorld();
+    world.viCreateError = new Error('twilio down');
+    const { app } = await seedFounderBridgeVi(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(res.status).toBe(200);
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    // pending is stamped BEFORE the create attempt, so the indicator is correct
+    // even while the fallback job retries.
+    expect(call.transcript_status).toBe('pending');
+    expect(world.viCreates).toHaveLength(0);
+    // No reconcile (create failed); a createVoiceTranscript fallback was enqueued
+    // (delay 0 -> drained by settle() into the recorder).
+    expect(queueAdapter.delayed).toHaveLength(0);
+    await queueAdapter.settle();
+    const createJobs = dispatched.filter((e) => e.jobName === CREATE_VOICE_TRANSCRIPT_JOB);
+    expect(createJobs).toHaveLength(1);
+    expect(createJobs[0]!.payload).toMatchObject({ callSid: 'CAbiz0001', recordingSid: 'RE1111' });
+  });
+
+  it('VI unset -> no pending stamp, no create, no jobs (recording still stored)', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridge(world); // VI OFF harness
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(res.status).toBe(200);
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    expect(call.transcript_status).toBeUndefined();
+    // The recording is still mirrored + stamped (the create leg is additive).
+    expect(call.recording_s3_key).toBe('recordings/CAbiz0001/RE1111');
+    expect(world.viCreates).toHaveLength(0);
+    expect(queueAdapter.delayed).toHaveLength(0);
+    await queueAdapter.settle();
+    expect(dispatched).toHaveLength(0);
+  });
+
+  it('masked recording still refused before any VI activity', async () => {
+    const world = createFakeWorld();
+    seedRelay(world);
+    const { app } = makeWebhookHarness({
+      world,
+      env: { TWILIO_VI_SERVICE_SID: 'GAsvc', VOICE_TRANSCRIPT_RECONCILE_SECONDS: '1' },
+    });
+    await signedTwilioPost(app, '/webhooks/twilio/voice', {
+      CallSid: 'CAmasked1',
+      From: ALICE,
+      To: POOL,
+      CallStatus: 'ringing',
+      Direction: 'inbound',
+      ApiVersion: '2010-04-01',
+    });
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice/recording', {
+      CallSid: 'CAmasked1',
+      RecordingSid: 'REmask',
+      RecordingStatus: 'completed',
+      RecordingUrl: RECORDING_URL,
+      RecordingDuration: '10',
+      ApiVersion: '2010-04-01',
+    });
+    expect(res.status).toBe(200);
+    // Masked calls are refused before the mirror, so no VI create + no pending.
+    expect(world.viCreates).toHaveLength(0);
+    expect(world.messages.find((m) => m.provider_sid === 'CAmasked1')!.transcript_status).toBeUndefined();
+  });
+
+  it('a redelivered recording callback does not double-create (recording_s3_key present -> early 200)', async () => {
+    const world = createFakeWorld();
+    const { app } = await seedFounderBridgeVi(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(world.viCreates).toHaveLength(1);
+
+    // Redeliver: the "already stored" early return fires before requestTranscription.
+    await signedTwilioPost(app, '/webhooks/twilio/voice/recording', recordingParams());
+    expect(world.viCreates).toHaveLength(1);
   });
 });

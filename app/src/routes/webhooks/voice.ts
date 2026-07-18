@@ -79,8 +79,12 @@ import {
 } from '../../lib/voiceMasking.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
-import { enqueueImmediate } from '../../jobs/jobs.js';
+import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
 import { MISSED_CALL_AUTOTEXT_JOB } from '../../jobs/missedCallAutoText.js';
+import {
+  CREATE_VOICE_TRANSCRIPT_JOB,
+  RECONCILE_VOICE_TRANSCRIPT_JOB,
+} from '../../jobs/voiceTranscript.js';
 
 const { VoiceResponse } = twilio.twiml;
 
@@ -1521,6 +1525,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       { callSid: entryCallSid, recordingSid: RecordingSid, recordingDuration: duration, stored: true },
       'founder-bridge recording mirrored to S3',
     );
+    // Create leg (spec 3.2): request VI transcription now that the recording is
+    // safely mirrored. Runs for EVERY non-masked founder-bridge recording (bridge
+    // AND voicemail); no-op when VI is unconfigured. Masked calls already returned
+    // above, so this is never reached for them.
+    await requestTranscription(entryCallSid, RecordingSid);
     res.status(200).end();
   });
 
@@ -1625,6 +1634,55 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     log.info({ callSid: entryCallSid, transcriptLength: transcriptText.length, saved }, 'founder-bridge transcript saved');
     res.status(200).end();
   });
+
+  /**
+   * Create leg (voice-transcription spec 3.2): request VI transcription for a
+   * just-mirrored founder-bridge recording. The recording is ALREADY safe, so
+   * this can never lose it. No-op when VI is unconfigured. Stamps
+   * transcript_status 'pending' BEFORE the inline create (so the "Transcribing..."
+   * indicator is correct even while the fallback job retries) and emits SSE.
+   * FAST PATH: create the VI transcript inline, then enqueue the ~10min reconcile
+   * safety net. FALLBACK: on an inline create failure, enqueue the
+   * createVoiceTranscript job (jobs-pipeline redelivery/DLQ); an enqueue failure
+   * there is only logged - it never fails the recording callback. NEVER called
+   * for masked calls (the masked refusal returns earlier). PII (doc section 9):
+   * callSid / recordingSid / transcriptSid only.
+   */
+  async function requestTranscription(entryCallSid: string, recordingSid: string): Promise<void> {
+    const serviceSid = config.twilioViServiceSid;
+    if (serviceSid === undefined) return;
+    // Idempotent stamp; emit regardless of first/repeat so the indicator shows.
+    await messages.setTranscriptPending(entryCallSid);
+    const fresh = await messages.getByProviderSid(entryCallSid);
+    if (fresh) {
+      events.emit('message.persisted', {
+        conversationId: fresh.conversationId,
+        tsMsgId: fresh.tsMsgId,
+        direction: fresh.direction,
+        deliveryStatus: fresh.delivery_status,
+      });
+    }
+    try {
+      const { transcriptSid } = await adapter.createViTranscript({
+        serviceSid,
+        recordingSid,
+        customerKey: entryCallSid,
+      });
+      await enqueue(
+        RECONCILE_VOICE_TRANSCRIPT_JOB,
+        { callSid: entryCallSid, transcriptSid, attempt: 1 },
+        { runAt: new Date(Date.now() + config.voiceTranscriptReconcileSeconds * 1000) },
+      );
+      log.info({ callSid: entryCallSid, transcriptSid }, 'vi transcript requested inline');
+    } catch (err) {
+      log.warn({ err, callSid: entryCallSid, recordingSid }, 'inline vi create failed - falling back to job');
+      try {
+        await enqueue(CREATE_VOICE_TRANSCRIPT_JOB, { callSid: entryCallSid, recordingSid });
+      } catch (enqueueErr) {
+        log.error({ err: enqueueErr, callSid: entryCallSid }, 'vi create fallback enqueue failed');
+      }
+    }
+  }
 
   /**
    * Side effects when a founder-bridge call is MISSED (M1.9b): the missed-call

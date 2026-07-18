@@ -67,6 +67,22 @@ export interface PoolNumbersAdminRouterDeps {
 const ONE_DAY_MS = 86_400_000;
 
 /**
+ * Lifecycle progression rank for the W1 de-dupe (higher = further along):
+ * released > releasing > active. A pool number lives in exactly ONE lifecycle
+ * partition, so the only way the three listByState Queries can return it under
+ * two states at once is a state transition (active -> releasing -> released)
+ * racing the reads: the byLifecycleState GSI is eventually consistent, so it can
+ * still project the row under its OLD partition while the NEW one already sees
+ * it. We keep the FURTHEST-ALONG copy because a mid-transition duplicate always
+ * reflects a FORWARD transition, so the furthest state is the honest render.
+ */
+const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
+  active: 0,
+  releasing: 1,
+  released: 2,
+};
+
+/**
  * Server-side group label, precedence (spec sec 3; adjudication A6): (1) ALL
  * participants that carry a non-empty name, joined with ' & ' under a 'With '
  * prefix (admin view - no "self" to exclude); (2) the placement_tag, read
@@ -146,6 +162,13 @@ function retireMirror(
     return { eligible: false };
   }
   const closedMs = Date.parse(closedAt);
+  // W2: a corrupt / unparseable last_group_closed_at parses to NaN. The SWEEP
+  // (services/poolNumbers.ts) tests `Date.parse(closedAt) > cutoff`, which is
+  // FALSE for NaN, so it would fall through and proceed toward release. This
+  // advisory page DELIBERATELY diverges: rather than emit NaN artifacts
+  // (Math.ceil(NaN) = NaN, which JSON.stringify serializes to null so the client
+  // renders "nulld remaining"), it reports plain not-eligible with no countdown.
+  if (Number.isNaN(closedMs)) return { eligible: false };
   if (closedMs <= nowMs - RELEASE_GRACE_MS) return { eligible: true };
   const daysRemaining = Math.ceil((closedMs + RELEASE_GRACE_MS - nowMs) / ONE_DAY_MS);
   return { eligible: false, daysRemaining };
@@ -166,7 +189,26 @@ export function createPoolNumbersAdminRouter(deps: PoolNumbersAdminRouterDeps = 
   // the client filters. N+1 group lookups are accepted at launch scale (spec sec 3).
   router.get('/', async (_req, res) => {
     const states: PoolNumberLifecycleState[] = ['active', 'releasing', 'released'];
-    const records = (await Promise.all(states.map((s) => poolNumbers.listByState(s)))).flat();
+    const flat = (await Promise.all(states.map((s) => poolNumbers.listByState(s)))).flat();
+    // W1: these three Queries are NOT a consistent snapshot. A number changing
+    // state as we read can be projected under TWO partitions at once (a stale old
+    // + a fresh new), so `flat` would carry it TWICE and render a duplicate row
+    // (and duplicate React keys downstream). De-dupe by poolNumber, keeping the
+    // furthest-along lifecycle state (see LIFECYCLE_RANK). This heals the
+    // DUPLICATE half; the mirror-image VANISH half (dropped from the old
+    // partition before it lands in the new) is inherently transient and
+    // self-heals on the next reload.
+    const byNumber = new Map<string, PoolNumberItem>();
+    for (const rec of flat) {
+      const seen = byNumber.get(rec.poolNumber);
+      if (
+        seen === undefined ||
+        LIFECYCLE_RANK[rec.lifecycle_state] > LIFECYCLE_RANK[seen.lifecycle_state]
+      ) {
+        byNumber.set(rec.poolNumber, rec);
+      }
+    }
+    const records = [...byNumber.values()];
     const nowMs = now().getTime();
 
     const numbers: PoolNumberRow[] = await Promise.all(

@@ -347,6 +347,9 @@ must hold or messages silently stop flowing:
   arrive.
 - **The phone number must sit in the live A2P campaign's sender pool** of that Messaging Service —
   a number outside the pool can't send campaign traffic.
+- **The NUMBER-level "A message comes in" URL is unused** while the number sits in the Messaging
+  Service (the service's webhook wins). It may still show Twilio's demo default
+  (`demo.twilio.com/welcome/sms/reply`) - cosmetic; do not "fix" it expecting behavior to change.
 - **Voice URLs on the number** — calls ARE handled by the app now (Voice Phase 1: inbound
   founder-bridge + outbound masked calling). On the number's Voice configuration:
   - **"A call comes in"** → `https://<canonical>/webhooks/twilio/voice` (HTTP **POST**)
@@ -364,7 +367,10 @@ assigned **inbound-voice-line holder's verified cell** — assigned in **Setting
 must verify their cell first). There is no `FOUNDER_CELL` fallback (removed). With **NO holder
 configured**, an inbound call is **NOT bridged**: the app emits an ERROR log (→ the
 `hc-<env>-error-logs` alarm, so ops is notified) and the caller hears the "please send us a text
-message" greeting.
+message" greeting. The holder lives as a single pointer row in the users TABLE (not config), so
+dev-data resets/reseeds can silently clear it (observed 2026-07-18: dev holder was assigned, later
+found unset). **If inbound falls back to the text-us greeting, check Settings > Team first** and
+re-assign; re-check after any dev users-table reseed.
 
 **`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
 defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing

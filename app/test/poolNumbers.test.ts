@@ -117,6 +117,15 @@ function makeFakeAdapter(opts: { voice?: boolean } = {}): MessagingAdapter & { p
     async initiateCall() {
       return { callSid: 'CAtest-pool' };
     },
+    async createViTranscript() {
+      throw new Error('not used');
+    },
+    async fetchViTranscript() {
+      throw new Error('not used');
+    },
+    async listViSentences() {
+      throw new Error('not used');
+    },
   };
   return adapter;
 }

@@ -202,6 +202,15 @@ export interface FakeWorld {
   pushSends: { userId: string; notification: PushNotification }[];
   /** Fake push service the voice router uses — records sends into pushSends. */
   pushService: PushService;
+  /** VI create() inputs recorded by the fake adapter (voice-transcription), in order. */
+  viCreates: { serviceSid: string; recordingSid: string; customerKey: string }[];
+  /** Inspectable VI transcript store keyed by transcriptSid; tests seed status + sentences. */
+  viTranscripts: Map<
+    string,
+    { status: string; customerKey?: string; sentences: { text: string; mediaChannel: number }[] }
+  >;
+  /** Set by a test to force the fake inline createViTranscript to throw (fallback path). */
+  viCreateError?: Error;
   adapter: MessagingAdapter;
   mediaStore: MediaStore;
   /** In-memory tours (Tours feature), keyed by tourId. */
@@ -232,6 +241,13 @@ export function createFakeWorld(): FakeWorld {
   const unreadIncrements: string[] = [];
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
+  // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
+  // an inspectable transcript store, and a settable inline-create error. The
+  // return literal exposes viCreateError via get/set so a test's reassignment
+  // (world.viCreateError = ...) is observed by the adapter closure below.
+  const viCreates: FakeWorld['viCreates'] = [];
+  const viTranscripts: FakeWorld['viTranscripts'] = new Map();
+  let viCreateError: Error | undefined;
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const presignPosts: FakeWorld['presignPosts'] = [];
   const failMediaUrls = new Set<string>();
@@ -1908,6 +1924,30 @@ export function createFakeWorld(): FakeWorld {
       initiatedCalls.push(params);
       return { callSid: `CAfake-${++callCounter}` };
     },
+    async createViTranscript(input) {
+      // Voice Intelligence inline create (spec 3.2). viCreateError forces the
+      // fallback path; otherwise record the input and mint a deterministic sid,
+      // seeding a completed transcript so a same-tick reconcile can persist.
+      if (viCreateError) throw viCreateError;
+      viCreates.push(input);
+      const sid = `GTfake${viCreates.length}`;
+      if (!viTranscripts.has(sid)) {
+        viTranscripts.set(sid, { status: 'completed', customerKey: input.customerKey, sentences: [] });
+      }
+      return { transcriptSid: sid };
+    },
+    async fetchViTranscript(transcriptSid) {
+      const t = viTranscripts.get(transcriptSid);
+      if (!t) throw new Error(`no such transcript ${transcriptSid}`);
+      return {
+        transcriptSid,
+        status: t.status,
+        ...(t.customerKey !== undefined && { customerKey: t.customerKey }),
+      };
+    },
+    async listViSentences(transcriptSid) {
+      return (viTranscripts.get(transcriptSid)?.sentences ?? []).slice();
+    },
   };
 
   const mediaStore: MediaStore = {
@@ -2019,6 +2059,17 @@ export function createFakeWorld(): FakeWorld {
     vocabularyRepo,
     pushSends,
     pushService,
+    viCreates,
+    viTranscripts,
+    // get/set bridges a test's `world.viCreateError = ...` reassignment to the
+    // local `let` the adapter closure reads (the array/map seams share a
+    // reference, so they need no accessor).
+    get viCreateError(): Error | undefined {
+      return viCreateError;
+    },
+    set viCreateError(e: Error | undefined) {
+      viCreateError = e;
+    },
     adapter,
     mediaStore,
     toursMap,

@@ -153,6 +153,9 @@ function makeSendFakes(
     setCallRecording: async () => true,
     releaseCallRecording: async () => {},
     setCallTranscript: async () => true,
+    setTranscriptPending: async () => false,
+    setTranscriptFailed: async () => false,
+    upgradeCallOutcomeToVoicemail: async () => false,
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
@@ -183,6 +186,15 @@ function makeSendFakes(
     }),
     setVoiceWebhook: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
+    createViTranscript: async () => {
+      throw new Error('not used');
+    },
+    fetchViTranscript: async () => {
+      throw new Error('not used');
+    },
+    listViSentences: async () => {
+      throw new Error('not used');
+    },
   };
 
   const service = createSendMessageService({

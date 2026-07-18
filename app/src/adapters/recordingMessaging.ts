@@ -13,6 +13,8 @@ import type {
   ProvisionPhoneNumberResult,
   SendMessageParams,
   SendMessageResult,
+  ViSentence,
+  ViTranscriptSummary,
 } from './messaging.js';
 
 /** Base name; physical table is `${TABLE_PREFIX}dev-outbox` (e.g. hc-local-dev-outbox). */
@@ -112,5 +114,18 @@ export class RecordingMessagingDriver implements MessagingAdapter {
   }
   initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
     return this.inner.initiateCall(params);
+  }
+  createViTranscript(input: {
+    serviceSid: string;
+    recordingSid: string;
+    customerKey: string;
+  }): Promise<{ transcriptSid: string }> {
+    return this.inner.createViTranscript(input);
+  }
+  fetchViTranscript(transcriptSid: string): Promise<ViTranscriptSummary> {
+    return this.inner.fetchViTranscript(transcriptSid);
+  }
+  listViSentences(transcriptSid: string): Promise<ViSentence[]> {
+    return this.inner.listViSentences(transcriptSid);
   }
 }

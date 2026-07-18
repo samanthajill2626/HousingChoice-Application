@@ -6,7 +6,7 @@
 //
 // The four scenarios:
 //   1. Answered business-line call   -> dual-channel recording -> a VI transcript
-//      with "Speaker 1:/Speaker 2:" labels + a playable recording on the call card.
+//      with "Client:/Staff:" labels (source-attributed dual-channel bridge) + a player.
 //   2. Missed business-line call     -> the caller leaves a voicemail -> a "Voicemail"
 //      card with a SINGLE-channel transcript (no speaker labels) + player, AND the
 //      missed-call auto-text still fires (asserted via /__dev/outbox).
@@ -113,7 +113,9 @@ test('an answered business-line call gets a transcript with speaker labels + a r
 
   // Inbound to the business line; digit:'1' auto-runs the bridge to ANSWERED, which
   // records (record-from-answer-dual) and requests a VI transcript. Two sentences ->
-  // the fake alternates media channels 1/2 -> the app renders "Speaker 1:/Speaker 2:".
+  // the fake alternates media channels 1/2; the inbound bridge stamps source-attributed
+  // roles (channel 1 = client, 2 = staff), so the app renders "Client:/Staff:" labels
+  // (voice-extraction Layer 1) - NOT the legacy "Speaker N:" ordinals.
   await placeCall(api, {
     from: caller,
     to: BUSINESS,
@@ -127,7 +129,7 @@ test('an answered business-line call gets a transcript with speaker labels + a r
       const c = await latestCall(api, contactId);
       return typeof c?.['transcript'] === 'string' ? String(c['transcript']) : '';
     }, { timeout: 25_000 })
-    .toContain('Speaker 1:');
+    .toContain('Client:');
 
   await page.goto(`${NEXT}/contacts/${contactId}`);
   const region = commsRegion(page);
@@ -138,8 +140,8 @@ test('an answered business-line call gets a transcript with speaker labels + a r
   const transcript = region.getByText('Transcript', { exact: true });
   await expect(transcript).toBeVisible({ timeout: 15_000 });
   await transcript.click();
-  await expect(region.getByText(/Speaker 1:/)).toBeVisible();
-  await expect(region.getByText(/Speaker 2:/)).toBeVisible();
+  await expect(region.getByText(/Client:/)).toBeVisible();
+  await expect(region.getByText(/Staff:/)).toBeVisible();
 });
 
 // ---------------------------------------------------------------------------

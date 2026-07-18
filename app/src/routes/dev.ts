@@ -48,6 +48,7 @@ import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
 import { appEvents } from '../lib/events.js';
 import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
+import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
  *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
@@ -358,6 +359,124 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     const { processed, failed } = await runDueExtractions(nowIso, extractionDeps());
     log.info({ now: nowIso, processed, failed }, 'dev extraction tick ran');
     res.status(200).json({ processed, failed });
+  });
+
+  // POST /__dev/voice/transcript-fixture - hermetic e2e-only seam to plant a
+  // COMPLETED call transcript directly (voice-extraction T6), bypassing the real
+  // Voice-Intelligence pipeline. It exercises the REAL downstream plumbing end to
+  // end: the call MessageItem append (+ optional transcript_channel_roles - T1),
+  // joinViSentences (T1 role-aware join: Client:/Staff: from a full roles map,
+  // else Speaker N / unprefixed voicemail), setCallTranscript (stamps transcript +
+  // transcript_status='completed' atomically, never-overwrite), and the voice
+  // extraction trigger (scheduleExtraction channel 'voice', no debounce - mirrors
+  // T2's persist-hook EFFECT, which a direct plant bypasses). A following
+  // POST /__dev/extraction/tick then runs a voice-channel extraction over the
+  // planted conversation. Marker-safe: the transcript is stored VERBATIM (no
+  // sentence split), so an EXTRACT: marker on a client/voicemail line survives for
+  // the fake driver. placeCall is deliberately NOT used here (its buildSentences
+  // splits on . ! ? and would corrupt marker JSON; and an always-attributed bridge
+  // cannot produce the Speaker-N form scenario 3 needs).
+  //
+  // Body: { conversationId, callSid, sentences: [{ text, mediaChannel }], roles?,
+  //   direction? }. `roles` maps the raw VI mediaChannel int-as-string -> the KNOWN
+  //   speaker role ('staff'|'client') for a dual-channel bridge; absent => legacy
+  //   labels. Same triple-gate/hermetic-LOCAL-only construction as the seams above
+  //   (the dev router only mounts behind lib/devRoutes.ts, structurally absent in
+  //   every deployed env); json() is scoped to this route. PII: ids/counts/callSid
+  //   ONLY - NEVER the sentence text.
+  let voiceFixtureRepos:
+    | { messages: ReturnType<typeof createMessagesRepo>; extraction: ReturnType<typeof createExtractionRepo> }
+    | undefined;
+  const transcriptFixtureRepos = () => {
+    voiceFixtureRepos ??= {
+      messages: createMessagesRepo({ logger: log }),
+      extraction: createExtractionRepo({ logger: log }),
+    };
+    return voiceFixtureRepos;
+  };
+  router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
+    const body = (req.body ?? {}) as {
+      conversationId?: unknown;
+      callSid?: unknown;
+      sentences?: unknown;
+      roles?: unknown;
+      direction?: unknown;
+    };
+    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : '';
+    const callSid = typeof body.callSid === 'string' ? body.callSid : '';
+    if (conversationId.length === 0 || callSid.length === 0) {
+      res.status(400).json({ error: 'conversationId and callSid (non-empty strings) are required' });
+      return;
+    }
+    // sentences: a non-empty array of { text: string, mediaChannel: number }.
+    if (
+      !Array.isArray(body.sentences) ||
+      body.sentences.length === 0 ||
+      !body.sentences.every(
+        (s) =>
+          s !== null &&
+          typeof s === 'object' &&
+          typeof (s as { text?: unknown }).text === 'string' &&
+          typeof (s as { mediaChannel?: unknown }).mediaChannel === 'number',
+      )
+    ) {
+      res
+        .status(400)
+        .json({ error: 'sentences must be a non-empty array of { text: string, mediaChannel: number }' });
+      return;
+    }
+    const sentences = (body.sentences as Array<{ text: string; mediaChannel: number }>).map((s) => ({
+      text: s.text,
+      mediaChannel: s.mediaChannel,
+    }));
+    // Optional roles map: channel-int-as-string -> 'staff' | 'client'.
+    let roles: ChannelRoles | undefined;
+    if (body.roles !== undefined) {
+      if (body.roles === null || typeof body.roles !== 'object' || Array.isArray(body.roles)) {
+        res.status(400).json({ error: 'roles must be an object mapping channel -> "staff" | "client"' });
+        return;
+      }
+      const entries = Object.entries(body.roles as Record<string, unknown>);
+      if (!entries.every(([, v]) => v === 'staff' || v === 'client')) {
+        res.status(400).json({ error: 'roles values must be "staff" or "client"' });
+        return;
+      }
+      roles = Object.fromEntries(entries) as ChannelRoles;
+    }
+    const direction: 'inbound' | 'outbound' = body.direction === 'outbound' ? 'outbound' : 'inbound';
+
+    const { messages, extraction } = transcriptFixtureRepos();
+    const nowIso = new Date().toISOString();
+    // 1) Append the call MessageItem (exercises T1's append + role-stamp plumbing).
+    //    author 'unknown': the real founder-bridge append uses authorForContact(),
+    //    whose fallback is 'unknown' ('contact' is NOT a MessageAuthor); the call's
+    //    speaker attribution rides the transcript prefixes, not this cosmetic field.
+    await messages.append({
+      conversationId,
+      providerSid: callSid,
+      providerTs: nowIso,
+      type: 'call',
+      direction,
+      author: 'unknown',
+      deliveryStatus: 'delivered',
+      callStatus: 'completed',
+      startedAt: nowIso,
+      masked: false,
+      ...(roles !== undefined && { transcriptChannelRoles: roles }),
+    });
+    // 2) Join sentences into the stored verbatim transcript (T1 role-aware join).
+    const text = joinViSentences(sentences, roles);
+    // 3) Stamp transcript + transcript_status='completed' atomically.
+    await messages.setCallTranscript(callSid, text);
+    // 4) Schedule an immediate voice-channel extraction (mirrors T2's hook effect).
+    await extraction.scheduleExtraction(conversationId, 'voice', nowIso);
+
+    // PII: ids/counts/callSid ONLY - NEVER the sentence text.
+    log.info(
+      { conversationId, callSid, sentenceCount: sentences.length, hasRoles: roles !== undefined, direction },
+      'dev voice transcript-fixture applied',
+    );
+    res.status(200).json({ ok: true });
   });
 
   // POST /__dev/placements/:placementId/deadline-fixture — hermetic e2e-only seam

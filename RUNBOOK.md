@@ -636,6 +636,14 @@ the contact (write empty fields with provenance, suggest on conflicts, append se
 notes). It is a **durable-row poll** like the two above (state in the new `ai_extraction` table,
 never in process): a third 60-second `setInterval` in the worker, gated on `AI_EXTRACTION_ENABLED`.
 
+A saved **voice transcript** (a completed call OR a voicemail) ALSO schedules an extraction run -
+channel `voice`, with **no debounce** (the transcript lands minutes after the call, so it fires at
+once). Extraction windows are therefore **channel-mixed**: recent texts AND transcribed calls in one
+chronological transcript. Bridge-call speaker attribution is fixed in three layers - source-attributed
+`Staff:`/`Client:` line prefixes when the leg roles are known at ring time; in-call role inference
+otherwise; and any window containing inferred-role (`Speaker N`) lines **demotes every direct write to
+a suggestion**, so an unattributed transcript can only ever suggest, never silently write.
+
 **Environment flags** (all in `.env.<env>`, pushed via the [Secrets](#secrets) flow):
 
 | Key | Default | Purpose |
@@ -672,6 +680,17 @@ webhook and worker simply skip the extraction path). To turn it on in an env:
 Dev applies after merge; **prod rides the M1.11 cutover**. If extraction seems dead in a deployed env:
 confirm `AI_EXTRACTION_ENABLED=true` is hydrated on the box, the `ai_extraction` table exists, and look
 for `extraction poll error` lines in the worker logs.
+
+**Post-merge LIVE verification (voice Layer 1 attribution).** The `Staff:`/`Client:` line prefixes on a
+bridge transcript come from a channel->role map stamped at ring time on the assumption that a Twilio
+dual-channel `<Dial>` records the parent leg as channel 1 and the dialed party as channel 2 (inbound
+founder bridge: channel 1 = the caller/client, channel 2 = the dialed staff cell). This is doc-verified
+but NOT yet confirmed against a real recording. AFTER the operator VI services + `TWILIO_VI_SERVICE_SID`
+secrets are configured and deployed (see the voice-transcription runbook), place **ONE** real dev
+founder-bridge call, let it transcribe, and confirm the stored transcript's `Staff:`/`Client:` prefixes
+match who actually spoke. **Until this passes, trust Layer 3 (an unattributed window demotes writes to
+suggestions) - not Layer 1 attribution;** a wrong channel->role guess would mislabel speakers but can
+still only ever produce suggestions on such windows, never a silent mis-attributed write.
 
 ### What the health-check gate does
 

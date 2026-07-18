@@ -60,3 +60,51 @@ export async function sendExtractSms(
   });
   if (status !== 200) throw new Error(`sendExtractSms webhook rejected: ${status} ${respBody}`);
 }
+
+/** One transcribed call to plant: its sentences + optional source-attributed roles. */
+export interface PlanTranscribedCallInput {
+  /** The 1:1 conversation to plant into (resolve via POST /api/contacts/:id/conversation). */
+  conversationId: string;
+  /** A per-plant-unique Twilio CallSid (the append idempotency key). */
+  callSid: string;
+  /** VI sentences: keep any EXTRACT: marker on ONE line (no raw newlines in `text`). */
+  sentences: Array<{ text: string; mediaChannel: number }>;
+  /** Source-attributed channel(int-as-string) -> role map. A FULL dual-channel map
+   *  renders Client:/Staff: prefixes (attributed bridge); omit for a voicemail
+   *  (single-channel, unprefixed) or a legacy Speaker-N bridge (2 channels, no map). */
+  roles?: Record<string, 'staff' | 'client'>;
+  /** Call direction on the planted item (default 'inbound'). */
+  direction?: 'inbound' | 'outbound';
+}
+
+/**
+ * Plant a COMPLETED call transcript directly into a conversation via the
+ * hermetic-only dev seam (POST /__dev/voice/transcript-fixture). The route appends
+ * the call MessageItem (with the optional transcript_channel_roles map), joins the
+ * sentences (Client:/Staff: when the roles map covers both channels, else Speaker N
+ * for a 2-channel bridge, else unprefixed for a single-channel voicemail), stamps
+ * transcript_status='completed', and schedules an IMMEDIATE voice-channel
+ * extraction - so a following `extractionTick` runs a voice-channel pass over the
+ * conversation. The transcript is stored VERBATIM (no sentence split), so an
+ * EXTRACT: marker on a client/voicemail line survives for the fake driver (the
+ * driver reads only CLIENT-speaker lines; a Speaker-N line is 'unknown', its marker
+ * invisible - so it only supplies the run-level demotion trigger). Throws on
+ * any non-200.
+ */
+export async function planTranscribedCall(
+  request: APIRequestContext,
+  input: PlanTranscribedCallInput,
+): Promise<void> {
+  const res = await request.post('/__dev/voice/transcript-fixture', {
+    data: {
+      conversationId: input.conversationId,
+      callSid: input.callSid,
+      sentences: input.sentences,
+      ...(input.roles !== undefined && { roles: input.roles }),
+      ...(input.direction !== undefined && { direction: input.direction }),
+    },
+  });
+  if (!res.ok()) {
+    throw new Error(`/__dev/voice/transcript-fixture failed: ${res.status()} ${await res.text()}`);
+  }
+}

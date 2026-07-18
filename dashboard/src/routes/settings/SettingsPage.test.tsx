@@ -57,7 +57,14 @@ describe('SettingsPage — role gating (desktop tabs)', () => {
     isAdmin = true;
     renderPage();
     const tabNames = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabNames).toEqual(['Team', 'Templates', 'Notifications', 'Voice', 'System status']);
+    expect(tabNames).toEqual([
+      'Team',
+      'Templates',
+      'Notifications',
+      'Voice',
+      'System status',
+      'Group text numbers',
+    ]);
   });
 
   it('a VA sees Templates + Notifications + Voice (no Team, no System)', () => {

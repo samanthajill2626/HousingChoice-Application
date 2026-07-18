@@ -15,6 +15,7 @@ import type {
   PlacementItem,
   PlacementsPage,
   PlacementStage,
+  PoolNumberRow,
   Contact,
   ContactCreate,
   ContactMediaItem,
@@ -1243,6 +1244,17 @@ export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }>
   return request<{ deleted: true }>(`/api/broadcasts/${encodeURIComponent(broadcastId)}`, {
     method: 'DELETE',
   });
+}
+
+// --- Settings > Group text numbers (/api/pool-numbers) (admin-only) ----------
+// The admin pool-number inventory. requireRole('admin') upstream; a VA gets 403.
+
+/** GET /api/pool-numbers - the pool-number inventory (unwrapped from { numbers }). */
+export async function listPoolNumbers(signal?: AbortSignal): Promise<PoolNumberRow[]> {
+  const res = await request<{ numbers: PoolNumberRow[] }>('/api/pool-numbers', {
+    ...(signal !== undefined && { signal }),
+  });
+  return res.numbers;
 }
 
 // --- Settings ▸ Team (/api/users) (admin-only on the server) ----------------

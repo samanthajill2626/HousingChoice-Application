@@ -22,6 +22,7 @@ export const SETTINGS_TABS: SettingsTab[] = [
   // logged-in user (not admin-only), so a VA can set + verify their own cell.
   { id: 'voice', label: 'Voice', path: '/settings/voice', adminOnly: false },
   { id: 'system', label: 'System status', path: '/settings/system', adminOnly: true },
+  { id: 'numbers', label: 'Group text numbers', path: '/settings/numbers', adminOnly: true },
 ];
 
 /** The self cell-verification tab path — the CallMenu deep-links here when the

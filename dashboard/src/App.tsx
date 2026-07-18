@@ -29,6 +29,7 @@ import { TemplatesSection } from './routes/settings/TemplatesSection.js';
 import { NotificationsSection } from './routes/settings/NotificationsSection.js';
 import { VoiceSection } from './routes/settings/VoiceSection.js';
 import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
+import { NumbersSection } from './routes/settings/NumbersSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
@@ -177,6 +178,14 @@ function AuthedApp(): React.JSX.Element {
                 element={
                   <AdminRoute>
                     <SystemStatusSection />
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="numbers"
+                element={
+                  <AdminRoute>
+                    <NumbersSection />
                   </AdminRoute>
                 }
               />

@@ -18,8 +18,13 @@ describe('settingsTabs', () => {
       'notifications',
       'voice',
       'system',
+      'numbers',
     ]);
-    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system']);
+    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual([
+      'team',
+      'system',
+      'numbers',
+    ]);
   });
 
   it('visibleTabs(true) returns all tabs (admin sees Team + System)', () => {
@@ -29,6 +34,7 @@ describe('settingsTabs', () => {
       'notifications',
       'voice',
       'system',
+      'numbers',
     ]);
   });
 

@@ -66,6 +66,38 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
+// --- Settings: Group text numbers (admin pool-number inventory) --------------
+// Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
+// The dashboard is a separate package and cannot import from app/src, so these
+// are duplicated; keep them in sync with the router when the shape changes.
+
+/** One group ever hosted on a pool number (wire row; newest-first in `groups`). */
+export interface PoolNumberGroupRow {
+  conversationId: string;
+  label: string;
+  memberCount: number;
+  status: 'open' | 'closed';
+  createdAt?: string;
+  closedAt?: string;
+  lastActivityAt?: string;
+}
+
+/** One pool number + its group history. `state` drives the table filter; `retire`
+ *  mirrors the sweep's eligibility EXACTLY (daysRemaining present only while an
+ *  idle number counts down). Absent optional stamps render as "-" on the page. */
+export interface PoolNumberRow {
+  number: string;
+  state: 'active' | 'releasing' | 'released';
+  openGroups: number;
+  totalGroups: number;
+  burnedCount: number;
+  lastActivityAt?: string;
+  lastGroupClosedAt?: string;
+  releasedAt?: string;
+  retire: { eligible: boolean; daysRemaining?: number };
+  groups: PoolNumberGroupRow[];
+}
+
 // --- Settings: OrgSettings (founder-editable call-triage templates) ----------
 // MIRRORS app/src/repos/settingsRepo.ts `OrgSettings`. The dashboard cannot
 // import from app/src, so the shape is duplicated; keep it in sync. `welcomeText`

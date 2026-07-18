@@ -149,6 +149,15 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   New-property form's Rent fields), not on the person. `lease_terms` is
   internal-only (never on the flyer projections).
 
+- **"Group text number"** = the STAFF-FACING name a navigator sees for a relay
+  **pool number** (the shared number the relay multiplexes group texts onto).
+  Code and data stay `pool_number` / `poolNumber` (`poolNumbersRepo`,
+  `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the admin Settings
+  inventory at `/settings/numbers` is titled **"Group text numbers"** (admin-only,
+  read-only). A number is provisioned with the first group text and can outlive
+  many groups (burn-as-claim multiplexing), so the accurate noun is "group text
+  number", never "the group's number". Tenants and landlords never see this term.
+
 ---
 
 ## For the future AI layer

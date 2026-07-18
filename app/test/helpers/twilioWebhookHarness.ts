@@ -574,6 +574,12 @@ export function createFakeWorld(): FakeWorld {
         ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
         ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
         ...(message.transcript !== undefined && { transcript: message.transcript }),
+        // Voice-extraction Layer 1: preserve the source-attributed channel->role
+        // map so tests observe it on the appended call entity (mirrors the real
+        // repo's append passthrough).
+        ...(message.transcriptChannelRoles !== undefined && {
+          transcript_channel_roles: message.transcriptChannelRoles,
+        }),
       });
       return { deduped: false, tsMsgId };
     },

@@ -507,6 +507,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         startedAt,
         masked: false,
         callPartyLabel: callerLabel,
+        // Source-attributed channel roles (voice-extraction Layer 1). Twilio
+        // dual-channel <Dial>: the PARENT call is channel 1, the dialed child is
+        // channel 2 (https://www.twilio.com/docs/voice/twiml/dial). Here the
+        // parent is the INBOUND caller (client called us) and the child is the
+        // dialed staff cell -> { "1":"client", "2":"staff" }. OPPOSITE the
+        // outbound originate bridge, where WE ring the staff cell as the parent.
+        transcriptChannelRoles: { '1': 'client', '2': 'staff' },
       });
       if (!appended.deduped) {
         events.emit('message.persisted', {

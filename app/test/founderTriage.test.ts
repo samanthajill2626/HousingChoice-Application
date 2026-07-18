@@ -255,6 +255,21 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(world.messages.filter((m) => m.type === 'call')).toHaveLength(1);
   });
 
+  it('stamps source-attributed transcript_channel_roles { "1":"client", "2":"staff" } on the inbound founder-bridge call (Layer 1)', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app } = founderHarness(world);
+
+    await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+
+    const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
+    // Twilio dual-channel <Dial>: parent(ch1) = the INBOUND caller (client called
+    // us), child(ch2) = the dialed staff cell. Orientation is OPPOSITE the
+    // outbound originate bridge (voiceOutbound.test.ts). This is the SAME call
+    // entity persistViTranscript's getByProviderSid + setCallTranscript resolve.
+    expect(call.transcript_channel_roles).toEqual({ '1': 'client', '2': 'staff' });
+  });
+
   it('an UNKNOWN caller → masked STORED label, but the pre-ring PUSH surfaces the caller number', async () => {
     const world = createFakeWorld();
     const { app, capture } = founderHarness(world);

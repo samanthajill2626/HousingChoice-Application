@@ -241,6 +241,16 @@ export interface NewMessage {
    */
   recordingS3Key?: string;
   transcript?: string;
+  /**
+   * Source-attributed channel->role map for a dual-channel bridge recording
+   * (voice-extraction Layer 1). Keys = VI mediaChannel ints as strings ("1"/"2"),
+   * values = the KNOWN speaker role for that channel. Stamped at call-append time
+   * by the two dial sites (inbound founder bridge / outbound originate), where
+   * leg orientation is deterministic at ring time. Persisted as the snake_case
+   * attr `transcript_channel_roles`. Call-only; absent on sms/mms and on
+   * voicemail (single-channel, no dial).
+   */
+  transcriptChannelRoles?: Record<string, 'staff' | 'client'>;
 }
 
 /** One mirrored MMS attachment: its S3 key + the normalized stored Content-Type. */
@@ -362,6 +372,15 @@ export interface MessageItem {
    * recording handler's create leg stamps 'pending'; see TranscriptStatus.
    */
   transcript_status?: TranscriptStatus;
+  /**
+   * Source-attributed channel->role map (voice-extraction Layer 1) - a
+   * flexible-doc attr `transcript_channel_roles?: Record<string,'staff'|'client'>`
+   * stamped at call-append time on dual-channel bridge recordings: keys = VI
+   * mediaChannel ints as strings, values = that channel's KNOWN speaker role.
+   * Read back via the index signature below (no explicit typed field) by
+   * joinViSentences to render `Staff: `/`Client: ` prefixes. Absent on sms/mms
+   * and on voicemail (single-channel, no dial).
+   */
   [key: string]: unknown;
 }
 
@@ -651,6 +670,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.callPartyLabel !== undefined && { call_party_label: message.callPartyLabel }),
         ...(message.recordingS3Key !== undefined && { recording_s3_key: message.recordingS3Key }),
         ...(message.transcript !== undefined && { transcript: message.transcript }),
+        // Voice-extraction Layer 1: source-attributed channel->role map for the
+        // call's dual-channel recording (keys = VI mediaChannel ints as strings).
+        // Stamped by the two dial sites; read back by joinViSentences via the
+        // MessageItem index signature. Call-only; absent on sms/mms/voicemail.
+        ...(message.transcriptChannelRoles !== undefined && {
+          transcript_channel_roles: message.transcriptChannelRoles,
+        }),
       };
       try {
         await doc.send(

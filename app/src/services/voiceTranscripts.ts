@@ -14,15 +14,40 @@ import type { EventBus } from '../lib/events.js';
 import type { Logger } from '../lib/logger.js';
 
 /**
- * Join VI sentences into the stored verbatim transcript (spec 3.5). A single
- * media channel (voicemail: the caller only) joins the sentence texts with
- * newlines and NO prefix. More than one distinct channel (a dual-channel bridge
- * recording) prefixes each line `Speaker <n>: ` where n is the 1-based order of
- * that channel's FIRST appearance - stable and channel-number-agnostic (the raw
- * Twilio channel ints are not assumed to be 1/2 or ordered).
+ * A source-attributed channel->role map (voice-extraction Layer 1): keys are the
+ * raw VI mediaChannel ints as strings ("1"/"2"), values the KNOWN speaker role
+ * for that channel. Stamped onto the call item at append time by the two dial
+ * sites (inbound founder bridge / outbound originate) whose leg orientation is
+ * deterministic at ring time.
  */
-export function joinViSentences(sentences: ViSentence[]): string {
+export type ChannelRoles = Record<string, 'staff' | 'client'>;
+
+/**
+ * Join VI sentences into the stored verbatim transcript (spec 3.5).
+ *
+ * When `roles` is supplied AND covers EVERY distinct channel in the recording,
+ * each line is prefixed `Staff: `/`Client: ` by the RAW mediaChannel int
+ * (String(mediaChannel)) - NOT the Speaker-N ordinal (voice-extraction Layer 1).
+ * A partial or absent map degrades gracefully to the legacy labels below (never
+ * block a transcript on attribution).
+ *
+ * Legacy labels: a single media channel (voicemail: the caller only) joins the
+ * sentence texts with newlines and NO prefix. More than one distinct channel (a
+ * dual-channel bridge recording) prefixes each line `Speaker <n>: ` where n is
+ * the 1-based order of that channel's FIRST appearance - stable and
+ * channel-number-agnostic (the raw Twilio channel ints are not assumed to be
+ * 1/2 or ordered).
+ */
+export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): string {
   const distinctChannels = new Set(sentences.map((s) => s.mediaChannel));
+  // Source-attributed roles win when present AND total (every distinct channel
+  // mapped). Look up by the RAW channel int-as-string, not the speakerOrder
+  // ordinal, so the label matches who actually spoke regardless of channel order.
+  if (roles !== undefined && [...distinctChannels].every((c) => roles[String(c)] !== undefined)) {
+    return sentences
+      .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${s.text}`)
+      .join('\n');
+  }
   if (distinctChannels.size <= 1) {
     return sentences.map((s) => s.text).join('\n');
   }
@@ -115,7 +140,13 @@ export async function persistViTranscript(
   }
 
   const sentences = await adapter.listViSentences(transcriptSid);
-  const text = joinViSentences(sentences);
+  // Source-attributed channel roles (voice-extraction Layer 1) are stamped onto
+  // this call item at append time by our OWN dial sites (inbound voice.ts /
+  // outbound originateCall.ts) - a fixed { "1"|"2": "staff"|"client" } shape - so
+  // reading it back off the item's index-signature attr as ChannelRoles is sound.
+  // joinViSentences degrades to legacy labels when it is absent (voicemail/legacy).
+  const roles = entry.transcript_channel_roles as ChannelRoles | undefined;
+  const text = joinViSentences(sentences, roles);
   const saved = await messages.setCallTranscript(callSid, text);
   if (saved) {
     emitPersisted(events, entry);

@@ -603,22 +603,28 @@ export class CallEngine {
     // appends `.mp3` only when the URL lacks `.mp3/.wav`, and Phase 6's recording-serve
     // route matches exactly this shape.
     const recordingUrl = `${this.recordingServeBase}/recordings/${call.callSid}/${recordingSid}.mp3`;
-
-    await this.dispatcher.post(
-      this.pathOf(recordingCallbackUrl),
-      buildRecordingParams({ callSid: call.callSid, recordingSid, recordingUrl, durationSec }),
-    );
     call.recordingSid = recordingSid;
     call.recordingUrl = recordingUrl;
-    this.touch(call);
-    this.hub.emit({ type: 'call.recording', call });
 
+    // Register the pending VI BEFORE posting the recording callback. The app's
+    // recording handler synchronously calls POST /v2/Transcripts (createViTranscript,
+    // the inline fast path) DURING this awaited callback, so the pending entry - the
+    // source of the transcript sentences - must already exist or the transcript is
+    // built EMPTY. (Unit tests stub the dispatcher with no re-entrant callback, so
+    // this ordering only bites the real end-to-end path.)
     this.registerPendingVi(recordingSid, {
       callSid: call.callSid,
       text: scenario.transcript,
       viWebhook: scenario.viWebhook ?? 'deliver',
       singleChannel,
     });
+
+    await this.dispatcher.post(
+      this.pathOf(recordingCallbackUrl),
+      buildRecordingParams({ callSid: call.callSid, recordingSid, recordingUrl, durationSec }),
+    );
+    this.touch(call);
+    this.hub.emit({ type: 'call.recording', call });
   }
 
   /**

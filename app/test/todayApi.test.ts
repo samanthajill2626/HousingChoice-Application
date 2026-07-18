@@ -754,6 +754,74 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(needs.some((i) => i.refId === 'phone#+15550100000')).toBe(false);
   });
 
+  it('surfaces the item when suppression lives ONLY on the member phone 1:1 flag (secondary-number STOP, contact flag never set)', async () => {
+    // The STOP arrived from a phone that is the contact's SECONDARY attached
+    // number, so the contact flag was never settable (BE1 primary-scope). The
+    // member is still silenced via the roster phone's own 1:1 conversation flag -
+    // the exact corner this feature closed for sends. Today must honor that same
+    // per-phone suppression truth, not the contact flag alone.
+    world.contacts.push({
+      contactId: 'c-secondary',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'Second',
+      lastName: 'Number',
+      phone: '+15550107777', // the contact PRIMARY; the roster phone below is secondary
+    });
+    // The roster phone's own 1:1 thread carries the opt-out flag (what STOP set).
+    seedConversation({
+      conversationId: 'conv-1to1-secondary',
+      participant_phone: '+15550102222',
+      status: 'open',
+      last_activity_at: iso(-30_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-60_000),
+      sms_opt_out: true,
+    } as ConversationItem);
+    seedRelayWithOptOut('c-secondary', '+15550102222');
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    const item = needs.find((i) => i.refType === 'contact' && i.refId === 'c-secondary');
+    // FAILS before the widened live-confirm: the old contact-flag-only staleness
+    // check dropped this member because their contact flag is not set.
+    expect(item).toBeDefined();
+    expect(item).toMatchObject({
+      group: 'needs_you_now',
+      refType: 'contact',
+      refId: 'c-secondary',
+      who: 'Second Number',
+      tag: 'Group text',
+      attention: true,
+    });
+  });
+
+  it('does NOT surface the item when neither the contact flag nor the phone 1:1 is opted out (per-phone auto-resolve)', async () => {
+    world.contacts.push({
+      contactId: 'c-clean',
+      type: 'tenant',
+      status: 'active',
+      firstName: 'All',
+      lastName: 'Clear',
+      phone: '+15550108888',
+    });
+    // A 1:1 exists for the roster phone but is NOT opted out -> not suppressed on
+    // either axis, so the stale annotation auto-resolves silently.
+    seedConversation({
+      conversationId: 'conv-1to1-clean',
+      participant_phone: '+15550102222',
+      status: 'open',
+      last_activity_at: iso(-30_000),
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-60_000),
+    } as ConversationItem);
+    seedRelayWithOptOut('c-clean', '+15550102222');
+
+    const needs = (await getItems()).filter((i) => i.group === 'needs_you_now');
+    expect(needs.some((i) => i.refId === 'c-clean')).toBe(false);
+  });
+
   // --- FIX C: de-dupe untriaged inbounds by phone (one item per person) ----------
   it('an unknown inbound (unknown_1to1 unread + needs_review contact, same phone) yields ONE needs_you_now item linking to the contact', async () => {
     const phone = '+15550105555';

@@ -71,6 +71,7 @@ import {
   createToursRepo,
   type ToursRepo,
 } from '../repos/toursRepo.js';
+import { isMemberSuppressed } from '../services/relayAnnouncements.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
@@ -516,9 +517,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             // No contactId → we can't link OR live-confirm; skip (honesty rule).
             if (typeof memberContactId !== 'string' || memberContactId.length === 0) continue;
             const memberContact = await getContact(memberContactId);
-            // Skip if the member opted back in, or their contact is gone/deleted —
-            // the flag on the conversation is stale; auto-resolve silently.
-            if (!memberContact || memberContact.sms_opt_out !== true) continue;
+            // Contact gone -> nothing to link or confirm; the annotation is stale,
+            // auto-resolve silently (also narrows memberContact for the checks below).
+            if (!memberContact) continue;
+            // Live-confirm against the ONE shared suppression predicate: the member
+            // is still silenced when the contact flag is set OR (BE1 per-phone scope)
+            // their roster phone's own 1:1 conversation carries sms_opt_out - the
+            // secondary-number STOP corner this feature closed for sends, where the
+            // contact flag is never set. Reading isMemberSuppressed here keeps Today
+            // and the leg gates on one suppression truth. Old annotations with no
+            // phone can't run the per-phone check, so they fall back to the
+            // contact-flag-only confirm.
+            const stillSuppressed =
+              typeof entry.phone === 'string' && entry.phone.length > 0
+                ? await isMemberSuppressed(contacts, conversations, {
+                    contactId: memberContactId,
+                    phone: entry.phone,
+                  })
+                : memberContact.sms_opt_out === true;
+            if (!stillSuppressed) continue;
             if (isDeleted(memberContact)) continue;
             const memberWho =
               nameFromContact(memberContact) ?? entry.name ?? entry.phone ?? memberContactId;

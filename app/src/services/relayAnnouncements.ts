@@ -110,7 +110,7 @@ export interface RelayAnnouncementResult {
  * redaction constant. NOT relayMemberKey() — its `phone#<E164>` fallback for
  * contact-less members would put a raw phone number in the log line.
  */
-function logSafeMemberKey(member: { contactId?: string }): string {
+export function logSafeMemberKey(member: { contactId?: string }): string {
   return member.contactId !== undefined && member.contactId.length > 0
     ? member.contactId
     : 'phone-only-member';

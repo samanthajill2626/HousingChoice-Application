@@ -62,6 +62,7 @@ import {
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -487,7 +488,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           }
         } catch (err) {
           log.error(
-            { err, providerSid: MessageSid, memberKey: senderKey },
+            { err, providerSid: MessageSid, memberKey: logSafeMemberKey(sender) },
             'relay keyword annotation failed - flags recorded, attention item stale until next fan-out',
           );
         }

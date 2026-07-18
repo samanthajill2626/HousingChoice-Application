@@ -39,6 +39,11 @@
 
 .actions {
   display: inline-flex;
+  /* Wrap so the third action (View conversation) drops to a second row instead
+     of clipping in the narrow Details card. The `gap` shorthand already spaces
+     wrapped rows, so no separate row-gap is needed. Verified at the desktop
+     two-pane width and 390px mobile (voice-extraction spec section 6). */
+  flex-wrap: wrap;
   gap: var(--sp-1);
   margin-left: auto;
 }

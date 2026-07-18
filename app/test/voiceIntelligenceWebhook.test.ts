@@ -82,8 +82,10 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     expect(res.status).toBe(200);
 
     const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    // Two distinct media channels -> stable Speaker <n> prefixes by first appearance.
-    expect(call.transcript).toBe('Speaker 1: hello\nSpeaker 2: hi');
+    // Two distinct media channels + the inbound founder-bridge role map
+    // ({ "1":"client","2":"staff" } stamped at ring time) -> source-attributed
+    // Staff:/Client: prefixes by RAW channel (voice-extraction Layer 1).
+    expect(call.transcript).toBe('Client: hello\nStaff: hi');
     expect(call.transcript_status).toBe('completed');
     const after = world.emitted.filter((e) => e.event === 'message.persisted').length;
     expect(after).toBeGreaterThan(before);

@@ -54,15 +54,26 @@ describe('joinViSentences role-aware rendering (voice-extraction Layer 1)', () =
     expect(joinViSentences(sentences)).toBe('Speaker 1: hello\nSpeaker 2: hi');
   });
 
-  it('a single distinct channel with no map joins UNPREFIXED (voicemail: one caller, no dial => never role-stamped)', () => {
-    // A voicemail recording has ONE media channel and is captured by <Record>, NOT
-    // <Dial> - so no append site ever stamps transcript_channel_roles on it (the
-    // dial sites are the only stampers; asserted in founderTriage/voiceOutbound).
-    // A lone channel therefore stays unprefixed in the real flow.
+  it('a single distinct channel with no map joins UNPREFIXED (legacy/underivable call)', () => {
     const sentences: ViSentence[] = [
       { text: 'please call me back', mediaChannel: 1 },
       { text: 'it is about the unit', mediaChannel: 1 },
     ];
     expect(joinViSentences(sentences)).toBe('please call me back\nit is about the unit');
+  });
+
+  it('a single distinct channel WITH a full role map still joins UNPREFIXED (voicemail rides the role-stamped bridge item)', () => {
+    // REACHABILITY (verified): a platform voicemail is captured by <Record> on the
+    // MISSED inbound founder-bridge call and RIDES that same call item - which the
+    // inbound <Dial> site stamped { "1":"client","2":"staff" } at ring time. So the
+    // item DOES carry a roles map, but the recording is single-channel (the caller
+    // only). Role prefixing requires 2+ distinct channels, so this stays unprefixed
+    // (the caller is the client by construction, spec 4; T3 maps it to 'client').
+    const sentences: ViSentence[] = [
+      { text: 'please call me back', mediaChannel: 1 },
+      { text: 'it is about the unit', mediaChannel: 1 },
+    ];
+    const roles: ChannelRoles = { '1': 'client', '2': 'staff' };
+    expect(joinViSentences(sentences, roles)).toBe('please call me back\nit is about the unit');
   });
 });

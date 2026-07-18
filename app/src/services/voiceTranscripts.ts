@@ -26,11 +26,19 @@ export type ChannelRoles = Record<string, 'staff' | 'client'>;
 /**
  * Join VI sentences into the stored verbatim transcript (spec 3.5).
  *
- * When `roles` is supplied AND covers EVERY distinct channel in the recording,
- * each line is prefixed `Staff: `/`Client: ` by the RAW mediaChannel int
+ * Layer 1 role prefixes apply ONLY to a genuine DUAL-channel bridge recording
+ * (2+ distinct channels) whose `roles` map covers EVERY distinct channel: each
+ * line is prefixed `Staff: `/`Client: ` by the RAW mediaChannel int
  * (String(mediaChannel)) - NOT the Speaker-N ordinal (voice-extraction Layer 1).
- * A partial or absent map degrades gracefully to the legacy labels below (never
- * block a transcript on attribution).
+ * A partial/absent map - OR a SINGLE-channel recording - degrades gracefully to
+ * the legacy labels below (never block a transcript on attribution).
+ *
+ * Single-channel note: a platform voicemail RIDES the same inbound founder-bridge
+ * call item, which is stamped { "1":"client", "2":"staff" } at ring time - so its
+ * item DOES carry a roles map (the plan's "voicemail has no map" assumption is
+ * false). We still join it UNPREFIXED: the caller is the client by construction
+ * (spec section 4), and T3 maps an unprefixed voice line to 'client'. Requiring
+ * 2+ distinct channels is what keeps a voicemail unprefixed despite the map.
  *
  * Legacy labels: a single media channel (voicemail: the caller only) joins the
  * sentence texts with newlines and NO prefix. More than one distinct channel (a
@@ -42,9 +50,17 @@ export type ChannelRoles = Record<string, 'staff' | 'client'>;
 export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): string {
   const distinctChannels = new Set(sentences.map((s) => s.mediaChannel));
   // Source-attributed roles win when present AND total (every distinct channel
-  // mapped). Look up by the RAW channel int-as-string, not the speakerOrder
-  // ordinal, so the label matches who actually spoke regardless of channel order.
-  if (roles !== undefined && [...distinctChannels].every((c) => roles[String(c)] !== undefined)) {
+  // mapped) AND the recording is genuinely dual-channel (2+ distinct channels).
+  // A single-channel recording (a platform voicemail, or a one-sided bridge)
+  // stays legacy-unprefixed even though the bridge item carries a
+  // { "1":"client","2":"staff" } map - the caller is the client by construction
+  // (spec 4). Look up by the RAW channel int-as-string so the label matches who
+  // spoke regardless of channel order.
+  if (
+    roles !== undefined &&
+    distinctChannels.size >= 2 &&
+    [...distinctChannels].every((c) => roles[String(c)] !== undefined)
+  ) {
     return sentences
       .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${s.text}`)
       .join('\n');

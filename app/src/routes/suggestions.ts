@@ -70,7 +70,8 @@ export interface SuggestionsRouterDeps {
   placementDeadlinesRepo?: PlacementDeadlinesRepo;
   unitsRepo?: UnitsRepo;
   armStageNudge?: StatusTransitionDeps['armStageNudge'];
-  closeRelayForLostPlacement?: StatusTransitionDeps['closeRelayForLostPlacement'];
+  /** D5 close-nag arm on terminal placements (relay-number-lifecycle seam). */
+  conversationsRepo?: StatusTransitionDeps['conversationsRepo'];
   /** Test seam: inject the assembled status-transition service directly. */
   statusService?: StatusTransitionService;
 }
@@ -125,9 +126,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       events,
       ...(deps.logger !== undefined && { logger: deps.logger }),
       ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),
-      ...(deps.closeRelayForLostPlacement !== undefined && {
-        closeRelayForLostPlacement: deps.closeRelayForLostPlacement,
-      }),
+      ...(deps.conversationsRepo !== undefined && { conversationsRepo: deps.conversationsRepo }),
     });
 
   const router = Router();

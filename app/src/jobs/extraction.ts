@@ -218,6 +218,17 @@ async function processRow(
     return 'skipped';
   }
 
+  // A voice-triggered run bypasses the client-freshness early-exit above, so an
+  // empty window (nothing survived the 30-day / newest-50 cutoff) would fall
+  // through to fresh[fresh.length - 1] and throw. Guard it explicitly: nothing to
+  // extract -> complete with the existing cursor. (An SMS run already early-exits
+  // on an empty window via hasNewClient=false.)
+  if (fresh.length === 0) {
+    logger.debug({ conversationId }, 'extraction: empty transcript window - completing');
+    await repo.complete(conversationId, cursor, nowIso);
+    return 'skipped';
+  }
+
   const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
   const transcript = fresh.flatMap(toUtterances);
   // Spec Layer 3: any unknown-speaker (Speaker N) call line demotes the whole
@@ -232,7 +243,13 @@ async function processRow(
     result,
     hasInferredRoleContent,
   });
-  await repo.complete(conversationId, newestTsMsgId, nowIso);
+  // Keep the cursor MONOTONIC: a voice-triggered run's newestTsMsgId can be OLDER
+  // than the current cursor (the call row predates a cursor an SMS run already
+  // advanced), and complete() writes the cursor unconditionally - advancing to
+  // max(newest, cursor) prevents a regression that would make a later SMS run
+  // re-examine already-processed messages.
+  const nextCursor = newestTsMsgId > cursor ? newestTsMsgId : cursor;
+  await repo.complete(conversationId, nextCursor, nowIso);
   logger.info({ conversationId }, 'extraction run complete');
   return 'processed';
 }

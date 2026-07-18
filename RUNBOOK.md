@@ -688,9 +688,14 @@ founder bridge: channel 1 = the caller/client, channel 2 = the dialed staff cell
 but NOT yet confirmed against a real recording. AFTER the operator VI services + `TWILIO_VI_SERVICE_SID`
 secrets are configured and deployed (see the voice-transcription runbook), place **ONE** real dev
 founder-bridge call, let it transcribe, and confirm the stored transcript's `Staff:`/`Client:` prefixes
-match who actually spoke. **Until this passes, trust Layer 3 (an unattributed window demotes writes to
-suggestions) - not Layer 1 attribution;** a wrong channel->role guess would mislabel speakers but can
-still only ever produce suggestions on such windows, never a silent mis-attributed write.
+match who actually spoke. **This is a HARD gate before trusting voice attribution in prod.** An
+ATTRIBUTED call (source-stamped roles) DIRECT-WRITES fields on the assumed orientation, so an inverted
+channel->role guess would silently mis-attribute a staff statement to the client and write it with an
+Auto badge - no review. Layer 3 (demote-to-suggestion) only protects UNATTRIBUTED windows (legacy
+`Speaker N` transcripts with no role map); it does NOT cover the attributed path. The orientation is
+doc-verified (Twilio: parent leg = channel 1), so the risk is low - but confirm it empirically here
+before relying on voice attribution. Nothing writes until `AI_EXTRACTION_ENABLED` is on, so this gate
+sits comfortably ahead of any real extraction.
 
 ### What the health-check gate does
 

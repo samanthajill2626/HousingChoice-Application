@@ -443,6 +443,10 @@ describe('runDueExtractions', () => {
       { speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
     ]);
     expect(h.repo.fail).not.toHaveBeenCalled();
+    // Cursor is MONOTONIC: the call's tsMsgId (`...:01...#c1`) is older than the
+    // cursor (`...:05...#s5`), so complete() must KEEP the cursor, never regress it
+    // to the older call row (which would make a later SMS run re-examine messages).
+    expect(h.repo.complete).toHaveBeenCalledWith('conv1', '2026-07-16T12:00:05.000Z#s5', NOW);
   });
 
   it('sms due item: still early-exits when only staff + an incomplete call are newer than the cursor', async () => {
@@ -488,5 +492,25 @@ describe('runDueExtractions', () => {
       { speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
       { speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
     ]);
+  });
+
+  it('voice due item: an EMPTY window completes without throwing (bypass guard)', async () => {
+    // A voice run BYPASSES the client-freshness early-exit, so an empty window (no
+    // messages survived the 30-day / newest-50 cutoff) must NOT fall through to
+    // fresh[fresh.length - 1] and throw - it completes with the existing cursor and
+    // reports nothing processed (never a spurious failure/park).
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'voice', cursor: '2026-07-16T12:00:05.000Z#s5' })],
+      messages: [], // empty transcript window
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 0 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.fail).not.toHaveBeenCalled();
+    expect(h.repo.complete).toHaveBeenCalledWith('conv1', '2026-07-16T12:00:05.000Z#s5', NOW);
   });
 });

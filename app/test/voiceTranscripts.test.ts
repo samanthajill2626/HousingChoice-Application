@@ -10,8 +10,8 @@
 // PII (voice standing rule): the sample texts here are synthetic, never real
 // transcript content.
 import { describe, it, expect } from 'vitest';
-import { joinViSentences, type ChannelRoles } from './voiceTranscripts.js';
-import type { ViSentence } from '../adapters/messaging.js';
+import { joinViSentences, type ChannelRoles } from '../src/services/voiceTranscripts.js';
+import type { ViSentence } from '../src/adapters/messaging.js';
 
 describe('joinViSentences role-aware rendering (voice-extraction Layer 1)', () => {
   it('renders Staff:/Client: prefixes when EVERY distinct channel is mapped - regardless of raw channel ints or order', () => {

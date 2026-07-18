@@ -3,6 +3,7 @@
 // signed-form-POST builder that computes REAL HMAC-SHA1 X-Twilio-Signature
 // values with the twilio package — signature verification is exercised for
 // real, never mocked out.
+import { createHash } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
@@ -202,6 +203,15 @@ export interface FakeWorld {
   pushSends: { userId: string; notification: PushNotification }[];
   /** Fake push service the voice router uses — records sends into pushSends. */
   pushService: PushService;
+  /** VI create() inputs recorded by the fake adapter (voice-transcription), in order. */
+  viCreates: { serviceSid: string; recordingSid: string; customerKey: string }[];
+  /** Inspectable VI transcript store keyed by transcriptSid; tests seed status + sentences. */
+  viTranscripts: Map<
+    string,
+    { status: string; customerKey?: string; sentences: { text: string; mediaChannel: number }[] }
+  >;
+  /** Set by a test to force the fake inline createViTranscript to throw (fallback path). */
+  viCreateError?: Error;
   adapter: MessagingAdapter;
   mediaStore: MediaStore;
   /** In-memory tours (Tours feature), keyed by tourId. */
@@ -232,6 +242,13 @@ export function createFakeWorld(): FakeWorld {
   const unreadIncrements: string[] = [];
   const sent: SendMessageParams[] = [];
   const initiatedCalls: InitiateCallParams[] = [];
+  // Voice Intelligence (voice-transcription) fake seams: recorded create inputs,
+  // an inspectable transcript store, and a settable inline-create error. The
+  // return literal exposes viCreateError via get/set so a test's reassignment
+  // (world.viCreateError = ...) is observed by the adapter closure below.
+  const viCreates: FakeWorld['viCreates'] = [];
+  const viTranscripts: FakeWorld['viTranscripts'] = new Map();
+  let viCreateError: Error | undefined;
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const presignPosts: FakeWorld['presignPosts'] = [];
   const failMediaUrls = new Set<string>();
@@ -607,11 +624,41 @@ export function createFakeWorld(): FakeWorld {
     },
     async setCallTranscript(callSid, transcript) {
       // Mirror the real repo: idempotent — a non-empty transcript already
-      // present is never overwritten (false).
+      // present is never overwritten (false). Also stamps transcript_status
+      // 'completed' atomically (spec 3.7) - gated on transcript, not status, so
+      // a late save still upgrades a 'failed' call to completed.
       const existing = findBySid(callSid);
       if (!existing) return false;
       if (typeof existing.transcript === 'string' && existing.transcript.length > 0) return false;
       existing.transcript = transcript;
+      existing.transcript_status = 'completed';
+      return true;
+    },
+    async setTranscriptPending(callSid) {
+      // Mirror the real repo: conditional on no transcript_status yet, so a
+      // redelivered recording callback never re-stamps.
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.transcript_status !== undefined) return false;
+      existing.transcript_status = 'pending';
+      return true;
+    },
+    async setTranscriptFailed(callSid) {
+      // Mirror the real repo: flip 'pending' to 'failed' only; 'completed' is
+      // terminal (never regressed).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.transcript_status !== 'pending') return false;
+      existing.transcript_status = 'failed';
+      return true;
+    },
+    async upgradeCallOutcomeToVoicemail(callSid) {
+      // Mirror the real repo: upgrade 'missed' to 'voicemail' only (idempotent
+      // on redelivery).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.call_outcome !== 'missed') return false;
+      existing.call_outcome = 'voicemail';
       return true;
     },
     async listByConversation(conversationId, opts = {}) {
@@ -1919,6 +1966,30 @@ export function createFakeWorld(): FakeWorld {
       initiatedCalls.push(params);
       return { callSid: `CAfake-${++callCounter}` };
     },
+    async createViTranscript(input) {
+      // Voice Intelligence inline create (spec 3.2). viCreateError forces the
+      // fallback path; otherwise record the input and mint a deterministic sid,
+      // seeding a completed transcript so a same-tick reconcile can persist.
+      if (viCreateError) throw viCreateError;
+      viCreates.push(input);
+      const sid = `GTfake${viCreates.length}`;
+      if (!viTranscripts.has(sid)) {
+        viTranscripts.set(sid, { status: 'completed', customerKey: input.customerKey, sentences: [] });
+      }
+      return { transcriptSid: sid };
+    },
+    async fetchViTranscript(transcriptSid) {
+      const t = viTranscripts.get(transcriptSid);
+      if (!t) throw new Error(`no such transcript ${transcriptSid}`);
+      return {
+        transcriptSid,
+        status: t.status,
+        ...(t.customerKey !== undefined && { customerKey: t.customerKey }),
+      };
+    },
+    async listViSentences(transcriptSid) {
+      return (viTranscripts.get(transcriptSid)?.sentences ?? []).slice();
+    },
   };
 
   const mediaStore: MediaStore = {
@@ -2030,6 +2101,17 @@ export function createFakeWorld(): FakeWorld {
     vocabularyRepo,
     pushSends,
     pushService,
+    viCreates,
+    viTranscripts,
+    // get/set bridges a test's `world.viCreateError = ...` reassignment to the
+    // local `let` the adapter closure reads (the array/map seams share a
+    // reference, so they need no accessor).
+    get viCreateError(): Error | undefined {
+      return viCreateError;
+    },
+    set viCreateError(e: Error | undefined) {
+      viCreateError = e;
+    },
     adapter,
     mediaStore,
     toursMap,
@@ -2260,6 +2342,36 @@ export function signedTwilioPost(
     req = req.set('x-twilio-signature', opts.tamper ? `${signature}TAMPERED` : signature);
   }
   return req.send(params);
+}
+
+/**
+ * POST a Twilio-style JSON webhook (Voice Intelligence events) with a REAL
+ * computed signature under the bodySHA256 scheme (spec 3.3): the URL carries
+ * ?bodySHA256=<sha256hex(rawBody)>, and X-Twilio-Signature =
+ * base64(HMAC-SHA1(authToken, fullUrl)) over that URL with NO form params. The
+ * exact bytes sent (`raw`) are what the app's json parser captures as rawBody, so
+ * validateRequestWithBody re-hashes them and matches. Mirrors signedTwilioPost's
+ * tamper/omit/base-URL options + the /webhooks origin-secret header.
+ */
+export function signedJsonPost(
+  app: Express,
+  path: string,
+  body: unknown,
+  opts: SignedPostOptions = {},
+): Test {
+  const raw = JSON.stringify(body);
+  const sha = createHash('sha256').update(raw, 'utf8').digest('hex');
+  const pathWithSha = `${path}?bodySHA256=${sha}`;
+  const url = `${opts.signatureBaseUrl ?? PUBLIC_BASE_URL}${pathWithSha}`;
+  const signature = twilio.getExpectedTwilioSignature(AUTH_TOKEN, url, {});
+  let req = request(app)
+    .post(pathWithSha)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('content-type', 'application/json');
+  if (!opts.omitSignature) {
+    req = req.set('x-twilio-signature', opts.tamper ? `${signature}TAMPERED` : signature);
+  }
+  return req.send(raw);
 }
 
 /** Standard inbound SMS webhook params (Programmable Messaging shape). */

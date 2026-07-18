@@ -209,6 +209,13 @@ if (mockRedirect) {
     TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
     TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
     SMS_SENDING_ENABLED: 'true',
+    // Voice Intelligence (voice-transcription): --mock points the app at the fake VI
+    // REST + completion webhook, so turn transcription ON with the fake's default
+    // service sid (the fake process inherits childEnv, so both sides agree). A tiny
+    // reconcile delay self-heals a dropped completion webhook in ~2s locally. Applied
+    // only-if-absent (loop below), so a real .env value still wins.
+    TWILIO_VI_SERVICE_SID: 'GAfakeservice',
+    VOICE_TRANSCRIPT_RECONCILE_SECONDS: '2',
     // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's
     // verified cell. The local seed (devReset → seedInboundVoiceLineHolder) uses
     // the hardcoded SEED_INBOUND_VOICE_CELL fake, so nothing is injected here (the

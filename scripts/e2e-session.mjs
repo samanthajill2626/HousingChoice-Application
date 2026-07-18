@@ -145,6 +145,16 @@ const childEnv = {
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
   TWILIO_API_BASE_URL: fakeUrl,
   OUR_PHONE_NUMBERS: '+15550009999',
+  // --- Voice Intelligence (voice-transcription feature) ---
+  // The fake-twilio host also impersonates the VI REST API and fires the signed
+  // completion webhook. TWILIO_VI_SERVICE_SID turns transcription ON and MUST equal
+  // the fake's viServiceSid; the fake process inherits THIS same childEnv, so pinning
+  // both to 'GAfakeservice' aligns the two sides automatically. The reconcile
+  // self-heal delay is tiny in the lane so the viWebhook:'drop' spec proves the
+  // reconcile leg fast without a long wait. NOTE: '0' would coerce back to the 600s
+  // default (Number('0') is falsy in the config parse), so 2 is the intended value.
+  TWILIO_VI_SERVICE_SID: process.env.TWILIO_VI_SERVICE_SID ?? 'GAfakeservice',
+  VOICE_TRANSCRIPT_RECONCILE_SECONDS: process.env.VOICE_TRANSCRIPT_RECONCILE_SECONDS ?? '2',
   // NOTE: inbound call-triage dials the seeded inbound-voice-line HOLDER's verified
   // cell. The local seed (devReset → seedInboundVoiceLineHolder) uses the hardcoded
   // SEED_INBOUND_VOICE_CELL fake, so nothing is injected here (the deprecated

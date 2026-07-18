@@ -353,6 +353,52 @@ describe('GET /api/contacts/:id/timeline (BE2/C2)', () => {
     expect(JSON.stringify(masked)).not.toContain('should-not-leak');
   });
 
+  it('serializes transcript_status + call_sid (the bare CallSid) on non-masked calls, NEVER on masked', async () => {
+    seedContact();
+    seedConversation('conv-a', PHONE_A);
+    // Founder-bridge voicemail (non-masked): the audio player needs the BARE
+    // CallSid (== provider_sid) for GET /api/calls/:callId/recording (the wire
+    // `id` is the composite tsMsgId, which would 404), plus transcript_status.
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-founder2',
+      providerTs: '2026-06-16T12:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'voicemail',
+      recordingS3Key: 'recordings/founder2.mp3',
+      transcript: 'the voicemail text',
+    });
+    await world.messagesRepo.append({
+      conversationId: 'conv-a',
+      providerSid: 'CA-masked2',
+      providerTs: '2026-06-16T13:00:00.000Z',
+      type: 'call',
+      direction: 'inbound',
+      author: 'tenant',
+      deliveryStatus: 'delivered',
+      callOutcome: 'missed',
+      masked: true,
+    });
+    // transcript_status is a new field with no append param - stamp it directly.
+    world.messages.find((m) => m.provider_sid === 'CA-founder2')!.transcript_status = 'completed';
+    world.messages.find((m) => m.provider_sid === 'CA-masked2')!.transcript_status = 'pending';
+
+    const res = await authedGet('/api/contacts/c-tenant/timeline');
+    const calls = res.body.items.filter((i: { kind: string }) => i.kind === 'call');
+    const founder = calls.find((c: { id: string }) => c.id.includes('CA-founder2'));
+    const masked = calls.find((c: { id: string }) => c.id.includes('CA-masked2'));
+
+    // Non-masked: transcript_status + the bare CallSid are exposed.
+    expect(founder.transcript_status).toBe('completed');
+    expect(founder.call_sid).toBe('CA-founder2');
+    // Masked: NEITHER transcript_status NOR call_sid (privacy invariant holds).
+    expect(masked.transcript_status).toBeUndefined();
+    expect(masked.call_sid).toBeUndefined();
+  });
+
   it("a call's at equals its provider_ts (sort-key parity) and sorts among messages", async () => {
     seedContact();
     seedConversation('conv-a', PHONE_A);

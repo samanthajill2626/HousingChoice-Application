@@ -16,6 +16,7 @@ import { registerRetrySendJobHandler } from './retrySend.js';
 import { registerRelayFanOutJobHandler } from './relayFanOut.js';
 import { registerBroadcastSendJobHandler } from './broadcastFanOut.js';
 import { registerMissedCallAutoTextJobHandler } from './missedCallAutoText.js';
+import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
@@ -25,13 +26,16 @@ export interface RegisterJobHandlersDeps {
 /**
  * Register every job handler. Job names produced: `messaging.retrySend`,
  * `relay.fanOut` + `relay.intro` (both from the relay registrar), `broadcast.send`,
- * `call.missedAutoText`. retrySend is a single low-volume send and is intentionally
- * not throttled; the rest share `tokenBucket` so the COMBINED outbound rate stays
- * under the registered A2P tier.
+ * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`.
+ * retrySend is a single low-volume send and is intentionally not throttled; the
+ * SMS handlers share `tokenBucket` so the COMBINED outbound rate stays under the
+ * registered A2P tier. The voice-transcript jobs make VI API calls (no outbound
+ * SMS), so they draw no token and lazily build their own config/adapter/repos.
  */
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
   registerRelayFanOutJobHandler({ tokenBucket: deps.tokenBucket });
   registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
+  registerVoiceTranscriptJobHandlers();
 }

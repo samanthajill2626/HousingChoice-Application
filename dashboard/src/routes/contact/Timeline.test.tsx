@@ -116,6 +116,62 @@ describe('Timeline', () => {
     expect(screen.getByText(/Operator: hello/)).toBeVisible();
   });
 
+  it('renders "Transcribing..." while a transcript is pending (no collapsible)', () => {
+    renderTimeline({
+      items: [
+        { kind: 'call', id: 'call1', at: '2026-06-08T11:00:00', call_outcome: 'missed', transcript_status: 'pending' },
+      ],
+    });
+    expect(screen.getByText('Transcribing...')).toBeInTheDocument();
+    expect(screen.queryByText('Transcript')).not.toBeInTheDocument(); // no collapsible yet
+  });
+
+  it('renders "Transcript unavailable" when the transcript failed', () => {
+    renderTimeline({
+      items: [
+        { kind: 'call', id: 'call1', at: '2026-06-08T11:00:00', call_outcome: 'answered', transcript_status: 'failed' },
+      ],
+    });
+    expect(screen.getByText('Transcript unavailable')).toBeInTheDocument();
+    expect(screen.queryByText('Transcript')).not.toBeInTheDocument();
+  });
+
+  it('renders a Voicemail call card with an audio player pointed at the recording endpoint (bare CallSid)', () => {
+    renderTimeline({
+      items: [
+        {
+          kind: 'call',
+          id: 'ts#CA1', // the composite tsMsgId - NOT what the player should use
+          at: '2026-06-08T11:00:00',
+          call_outcome: 'voicemail',
+          recording_s3_key: 'recordings/CA1/RE1',
+          call_sid: 'CA1',
+          transcript_status: 'completed',
+          transcript: 'Please call me back.',
+        },
+      ],
+    });
+    expect(screen.getByText(/Voicemail/)).toBeInTheDocument();
+    const player = screen.getByLabelText('Call recording');
+    // The player targets the BARE CallSid (call_sid), NOT the composite id.
+    expect(player).toHaveAttribute('src', '/api/calls/CA1/recording');
+  });
+
+  it('renders NO audio player when call_sid is absent (the recording endpoint would 404)', () => {
+    renderTimeline({
+      items: [
+        {
+          kind: 'call',
+          id: 'ts#CA1',
+          at: '2026-06-08T11:00:00',
+          call_outcome: 'voicemail',
+          recording_s3_key: 'recordings/CA1/RE1',
+        },
+      ],
+    });
+    expect(screen.queryByLabelText('Call recording')).not.toBeInTheDocument();
+  });
+
   it('renders a milestone pin that links out via refType/refId', () => {
     renderTimeline({ items: [MILESTONE] });
     const link = screen.getByRole('link', { name: /Placement opened/ });

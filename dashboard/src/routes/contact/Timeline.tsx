@@ -525,7 +525,25 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
         </span>
         <span className={styles.callTime}>{formatTime(call.at)}</span>
       </div>
-      {call.transcript ? (
+      {/* Playable recording (founder-bridge calls + voicemails). The src uses the
+          BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
+          at GET /api/calls/:callId/recording. Rendered only when both are present. */}
+      {call.recording_s3_key && call.call_sid ? (
+        <audio
+          className={styles.recordingPlayer}
+          controls
+          preload="none"
+          src={`/api/calls/${call.call_sid}/recording`}
+          aria-label="Call recording"
+        />
+      ) : null}
+      {/* Transcript lifecycle (voice-transcription 3.7): the in-flight indicator
+          replaces the collapsible while pending/failed. */}
+      {call.transcript_status === 'pending' ? (
+        <p className={styles.transcriptPendingNote}>Transcribing...</p>
+      ) : call.transcript_status === 'failed' ? (
+        <p className={styles.transcriptPendingNote}>Transcript unavailable</p>
+      ) : call.transcript ? (
         <details className={styles.transcript}>
           <summary className={styles.transcriptToggle}>Transcript</summary>
           <p className={styles.transcriptBody}>{call.transcript}</p>

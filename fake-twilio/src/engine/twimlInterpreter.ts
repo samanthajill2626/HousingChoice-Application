@@ -9,6 +9,7 @@ export type TwimlPlan =
   | { kind: 'dial'; callerId?: string; record?: string; actionUrl?: string; recordingStatusCallback?: string; pauseBeforeMs: number; numbers: DialNumber[] }
   | { kind: 'gather'; actionUrl?: string; numDigits: number; timeoutSec: number; sayContainsPress0: boolean }
   | { kind: 'pause'; lengthSec: number }
+  | { kind: 'record'; maxLength?: number; playBeep?: boolean; actionUrl?: string; recordingStatusCallback?: string }
   | { kind: 'hangup' }
   | { kind: 'say'; text: string }
   | { kind: 'empty' };
@@ -61,6 +62,18 @@ export function interpretTwiml(xml: string): TwimlPlan {
     return { kind: 'gather', ...(g['@_action'] !== undefined && { actionUrl: String(g['@_action']) }), numDigits: Number(g['@_numDigits'] ?? 1), timeoutSec: Number(g['@_timeout'] ?? 5), sayContainsPress0: /press 0/i.test(say) };
   }
   if ('Pause' in r) return { kind: 'pause', lengthSec: Number((r['Pause'] as Record<string, unknown>)['@_length'] ?? 1) };
+  // A voicemail response is Say+Record+Say+Hangup: check for the self-closing <Record/>
+  // BEFORE the Hangup/Say fallbacks (Hangup would otherwise win the first-match ladder).
+  if ('Record' in r) {
+    const rec = r['Record'] as Record<string, unknown>;
+    return {
+      kind: 'record',
+      ...(rec['@_maxLength'] !== undefined && { maxLength: Number(rec['@_maxLength']) }),
+      ...(rec['@_playBeep'] !== undefined && { playBeep: String(rec['@_playBeep']) === 'true' }),
+      ...(rec['@_action'] !== undefined && { actionUrl: String(rec['@_action']) }),
+      ...(rec['@_recordingStatusCallback'] !== undefined && { recordingStatusCallback: String(rec['@_recordingStatusCallback']) }),
+    };
+  }
   if ('Hangup' in r) return { kind: 'hangup' };
   if ('Say' in r) return { kind: 'say', text: String(r['Say']) };
   return { kind: 'empty' };

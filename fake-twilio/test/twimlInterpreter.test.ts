@@ -65,4 +65,17 @@ describe('interpretTwiml', () => {
     if (plan.kind !== 'dial') throw new Error('x');
     expect(plan.numbers[0]?.whisperUrl).toBeUndefined();
   });
+  it('parses a Say+Record+Say+Hangup voicemail response into a record plan (self-closing <Record/> wins over the trailing Hangup)', () => {
+    // The EXACT byte shape the app's missed inbound founder-bridge /status branch emits
+    // (slice 3 report): self-closing <Record/> with camelCase attrs, wrapped by Say(prompt)
+    // + Say(thanks) + Hangup. Record MUST be detected before the Hangup/Say fallbacks.
+    const VOICEMAIL = `<?xml version="1.0" encoding="UTF-8"?><Response><Say>Sorry we missed your call.</Say><Record maxLength="120" playBeep="true" action="https://app/webhooks/twilio/voice/voicemail-done" recordingStatusCallback="https://app/webhooks/twilio/voice/recording" recordingStatusCallbackEvent="completed"/><Say>Thank you.</Say><Hangup/></Response>`;
+    const plan = interpretTwiml(VOICEMAIL);
+    expect(plan.kind).toBe('record');
+    if (plan.kind !== 'record') throw new Error('x');
+    expect(plan.maxLength).toBe(120);
+    expect(plan.playBeep).toBe(true);
+    expect(plan.actionUrl).toContain('/voice/voicemail-done');
+    expect(plan.recordingStatusCallback).toContain('/voice/recording');
+  });
 });

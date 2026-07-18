@@ -33,6 +33,9 @@ function makeStubDispatcher(gateBodyFor: (digit: string) => string) {
       calls.push({ method: 'post', path, params });
       return 200;
     },
+    async postJson(_path: string, _body: Record<string, unknown>) {
+      return 200;
+    },
   };
   return { dispatcher, calls };
 }

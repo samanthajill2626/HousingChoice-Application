@@ -101,6 +101,24 @@ export interface InitiateCallResult {
   callSid: string;
 }
 
+/**
+ * Voice Intelligence transcript summary (voice-transcription spec 3.3) - the
+ * subset of the twilio v6 Transcript resource the app reads. `status` is
+ * Twilio's raw string (queued | in-progress | completed | new | failed |
+ * canceled | error), passed through untouched; the reconcile job branches on it.
+ */
+export interface ViTranscriptSummary {
+  transcriptSid: string;
+  status: string;
+  customerKey?: string;
+}
+
+/** One Voice Intelligence sentence: the text plus which media channel spoke it. */
+export interface ViSentence {
+  text: string;
+  mediaChannel: number;
+}
+
 export interface MessagingAdapter {
   sendMessage(params: SendMessageParams): Promise<SendMessageResult>;
   /** Streams-only media fetch (Builder B: MMS → S3 mirroring). */
@@ -148,6 +166,28 @@ export interface MessagingAdapter {
    * PII (doc §9): the driver logs the CallSid only, never the to/from numbers.
    */
   initiateCall(params: InitiateCallParams): Promise<InitiateCallResult>;
+  /**
+   * Voice Intelligence (voice-transcription spec 3.2): create a transcript for a
+   * recording under the given VI service, keyed by CustomerKey = our CallSid so
+   * the completion webhook / reconcile job can map it back to the call entity.
+   * Thin passthrough over intelligence.v2.transcripts.create; returns the minted
+   * transcript sid. Throws on a Twilio API error (callers redeliver/retry).
+   */
+  createViTranscript(input: {
+    serviceSid: string;
+    recordingSid: string;
+    customerKey: string;
+  }): Promise<{ transcriptSid: string }>;
+  /**
+   * Voice Intelligence (spec 3.3): fetch a transcript's status + CustomerKey.
+   * `status` is Twilio's raw string, passed through.
+   */
+  fetchViTranscript(transcriptSid: string): Promise<ViTranscriptSummary>;
+  /**
+   * Voice Intelligence (spec 3.3): list a transcript's sentences (the SDK
+   * paginates to completion), mapped to text + media channel.
+   */
+  listViSentences(transcriptSid: string): Promise<ViSentence[]>;
 }
 
 /** Twilio media host allowlist — MediaUrl{i} values always live here. */
@@ -304,6 +344,33 @@ export interface TwilioClientLike {
     (sid: string): {
       update(params: { voiceUrl?: string }): Promise<TwilioIncomingNumber>;
       remove(): Promise<boolean>;
+    };
+  };
+  /**
+   * Voice Intelligence (M1.9 voice-transcription). Optional so the existing
+   * message-only fakes keep compiling; the real twilio v6 SDK provides it, and
+   * the VI methods guard with a clear error when a fake omits it. Shape mirrors
+   * intelligence.v2.transcripts: a callable `(sid) => { fetch, sentences }` that
+   * ALSO carries `.create` (worklist SDK FACTS). channel is JSON-shaped (any).
+   */
+  intelligence?: {
+    v2: {
+      transcripts: ((transcriptSid: string) => {
+        fetch(): Promise<{ sid: string; status: string; customerKey?: string }>;
+        sentences: {
+          // sentenceIndex is REQUIRED on the real SDK's SentenceInstance
+          // (required-to-optional is assignable); optional here so message-only
+          // fakes keep compiling and the driver's ordering guard stays honest
+          // about a runtime row that might omit it.
+          list(): Promise<Array<{ transcript: string; mediaChannel: number; sentenceIndex?: number }>>;
+        };
+      }) & {
+        create(params: {
+          serviceSid: string;
+          channel: unknown;
+          customerKey?: string;
+        }): Promise<{ sid: string }>;
+      };
     };
   };
 }
@@ -561,6 +628,60 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     return { callSid: call.sid };
   }
 
+  async createViTranscript(input: {
+    serviceSid: string;
+    recordingSid: string;
+    customerKey: string;
+  }): Promise<{ transcriptSid: string }> {
+    const intelligence = this.client.intelligence;
+    if (!intelligence) {
+      throw new Error('TwilioMessagingDriver: client lacks the intelligence API');
+    }
+    // media_properties/source_sid stay snake_case INSIDE the channel object -
+    // the SDK JSON.stringifies channel verbatim onto the wire (worklist D1).
+    const transcript = await intelligence.v2.transcripts.create({
+      serviceSid: input.serviceSid,
+      channel: { media_properties: { source_sid: input.recordingSid } },
+      customerKey: input.customerKey,
+    });
+    this.log.info({ transcriptSid: transcript.sid }, 'vi transcript created');
+    return { transcriptSid: transcript.sid };
+  }
+
+  async fetchViTranscript(transcriptSid: string): Promise<ViTranscriptSummary> {
+    const intelligence = this.client.intelligence;
+    if (!intelligence) {
+      throw new Error('TwilioMessagingDriver: client lacks the intelligence API');
+    }
+    const t = await intelligence.v2.transcripts(transcriptSid).fetch();
+    return {
+      transcriptSid: t.sid,
+      status: t.status,
+      ...(t.customerKey !== undefined && { customerKey: t.customerKey }),
+    };
+  }
+
+  async listViSentences(transcriptSid: string): Promise<ViSentence[]> {
+    const intelligence = this.client.intelligence;
+    if (!intelligence) {
+      throw new Error('TwilioMessagingDriver: client lacks the intelligence API');
+    }
+    const sentences = await intelligence.v2.transcripts(transcriptSid).sentences.list();
+    // Defensive ordering (adjudication F3): the join step persists the adapter's
+    // order verbatim and drops the sortable keys, so re-establish SPOKEN order
+    // here. When every row carries the SDK's numeric sentenceIndex, sort by it
+    // (a copy; ties cannot occur - indexes are unique per transcript). If any
+    // row lacks one (an off-spec response), keep the list order untouched
+    // rather than guess with a partial key.
+    const allIndexed = sentences.every((s) => Number.isFinite(s.sentenceIndex));
+    const ordered = allIndexed
+      ? // The ?? 0 fallbacks are unreachable (allIndexed) - type narrowing only.
+        [...sentences].sort((a, b) => (a.sentenceIndex ?? 0) - (b.sentenceIndex ?? 0))
+      : sentences;
+    // PII (voice privacy): map to text + channel; never log the transcript text.
+    return ordered.map((s) => ({ text: s.transcript, mediaChannel: s.mediaChannel }));
+  }
+
   async getMediaStream(mediaUrl: string): Promise<Readable> {
     return this.fetchTwilioMediaStream(mediaUrl, 'getMediaStream');
   }
@@ -739,6 +860,26 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     // the sendMessage SMconsole-* convention. PII: never log to/from.
     this.log.info({ callSid: `CAconsole-${params.idempotencyKey ?? 'x'}` }, 'console messaging driver: call "initiated"');
     return { callSid: `CAconsole-${params.idempotencyKey ?? randomUUID()}` };
+  }
+
+  // Voice Intelligence is never reached on the console driver: route/job code
+  // guards on config.twilioViServiceSid (unset locally) before calling. These
+  // carry the full interface signature (params ignored) and fail loudly if that
+  // guard ever regresses.
+  async createViTranscript(_input: {
+    serviceSid: string;
+    recordingSid: string;
+    customerKey: string;
+  }): Promise<{ transcriptSid: string }> {
+    throw new Error('voice intelligence unavailable on console driver');
+  }
+
+  async fetchViTranscript(_transcriptSid: string): Promise<ViTranscriptSummary> {
+    throw new Error('voice intelligence unavailable on console driver');
+  }
+
+  async listViSentences(_transcriptSid: string): Promise<ViSentence[]> {
+    throw new Error('voice intelligence unavailable on console driver');
   }
 }
 

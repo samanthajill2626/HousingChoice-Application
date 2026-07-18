@@ -1,5 +1,6 @@
 // fake-twilio/src/engine/dispatcher.ts
-import { signTwilioWebhook, type WebhookParams } from './signer.js';
+import { createHash } from 'node:crypto';
+import { signTwilioWebhook, signTwilioJsonWebhook, type WebhookParams } from './signer.js';
 
 export interface WebhookDispatcherDeps {
   /** Where to actually POST (the app's real address). */
@@ -46,5 +47,33 @@ export class WebhookDispatcher {
       signal: AbortSignal.timeout(5000),
     });
     return { status: res.status, body: await res.text() };
+  }
+
+  /**
+   * POST a JSON-bodied webhook signed with Twilio's bodySHA256 scheme - used for the
+   * Voice Intelligence completion callback (/webhooks/twilio/voice/intelligence). The
+   * URL carries `?bodySHA256=<sha256hex(rawBody)>`; X-Twilio-Signature is HMAC-SHA1
+   * over that full URL with NO form params, matching the app's validateRequestWithBody.
+   * Returns the response status (fire-and-read; the caller ignores the body).
+   */
+  async postJson(path: string, body: Record<string, unknown>): Promise<number> {
+    const raw = JSON.stringify(body);
+    const sha = createHash('sha256').update(raw, 'utf8').digest('hex');
+    const query = `?bodySHA256=${sha}`;
+    const signature = signTwilioJsonWebhook({
+      authToken: this.deps.authToken,
+      url: `${this.deps.appPublicBaseUrl}${path}${query}`,
+    });
+    const res = await fetch(`${this.deps.appBaseUrl}${path}${query}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-twilio-signature': signature,
+        'x-origin-verify': this.deps.originSecret ?? 'dev-placeholder-not-a-secret',
+      },
+      body: raw,
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.status;
   }
 }

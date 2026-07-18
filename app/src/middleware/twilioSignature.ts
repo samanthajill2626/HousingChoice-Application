@@ -19,6 +19,7 @@
 // and nothing persisted (this runs before any handler touches a repo).
 import type { RequestHandler } from 'express';
 import twilio from 'twilio';
+import type { RequestWithRawBody } from '../app.js';
 import type { Logger } from '../lib/logger.js';
 
 export interface TwilioSignatureOptions {
@@ -76,6 +77,72 @@ export function twilioSignatureMiddleware(opts: TwilioSignatureOptions): Request
           reason: typeof signature === 'string' ? 'signature mismatch' : 'signature header missing',
         },
         'twilio webhook rejected: invalid X-Twilio-Signature',
+      );
+      res.status(403).json({ error: 'forbidden' });
+      return;
+    }
+
+    next();
+  };
+}
+
+/**
+ * JSON-body sibling of twilioSignatureMiddleware for Twilio webhooks that POST
+ * application/json (Voice Intelligence completion events, voice-transcription
+ * spec 3.3). Twilio signs these with the bodySHA256 scheme: the webhook URL
+ * carries a `?bodySHA256=<sha256hex(rawBody)>` query param, and
+ * X-Twilio-Signature = base64(HMAC-SHA1(authToken, fullUrl)) over that full URL
+ * with NO form params. Validation therefore runs over req.rawBody (the exact
+ * bytes app.ts captured via the json parser's verify hook) and the full
+ * originalUrl (which carries the bodySHA256 param). Unconfigured behavior and
+ * rejection posture mirror the form middleware above exactly.
+ */
+export function twilioJsonSignatureMiddleware(opts: TwilioSignatureOptions): RequestHandler {
+  const { authToken, publicBaseUrl, nodeEnv, logger } = opts;
+  const configured = Boolean(authToken) && Boolean(publicBaseUrl);
+
+  return (req, res, next) => {
+    if (!configured) {
+      if (nodeEnv === 'production') {
+        // Fail closed: same posture as the form middleware - a missing
+        // token/base URL in production is an outage, not a bypass.
+        logger.error(
+          { path: req.path, missing: { twilioAuthToken: !authToken, publicBaseUrl: !publicBaseUrl } },
+          'twilio JSON webhook REJECTED: signature validation unconfigured in production (fail closed)',
+        );
+        res.status(403).json({ error: 'forbidden' });
+        return;
+      }
+      logger.warn(
+        { path: req.path },
+        'twilio JSON webhook accepted WITHOUT signature validation (unconfigured - local dev only)',
+      );
+      next();
+      return;
+    }
+
+    const signature = req.headers['x-twilio-signature'];
+    // The exact public URL Twilio signed, INCLUDING the ?bodySHA256=... query.
+    const url = `${publicBaseUrl}${req.originalUrl}`;
+    // The raw request bytes app.ts captured (json parser verify hook) -
+    // validateRequestWithBody re-hashes these and checks them against the
+    // bodySHA256 query param, then validates the URL signature with no params.
+    const rawBody = (req as RequestWithRawBody).rawBody?.toString('utf8') ?? '';
+
+    const valid =
+      typeof signature === 'string' &&
+      twilio.validateRequestWithBody(authToken as string, signature, url, rawBody);
+    if (!valid) {
+      // Same rejection shape/marker as the form middleware (the webhook-failure
+      // metric keys on `event`); the body is NEVER logged (PII).
+      logger.warn(
+        {
+          event: 'webhook_signature_rejected',
+          path: req.path,
+          remoteIp: req.socket.remoteAddress ?? null,
+          reason: typeof signature === 'string' ? 'signature mismatch' : 'signature header missing',
+        },
+        'twilio JSON webhook rejected: invalid X-Twilio-Signature',
       );
       res.status(403).json({ error: 'forbidden' });
       return;

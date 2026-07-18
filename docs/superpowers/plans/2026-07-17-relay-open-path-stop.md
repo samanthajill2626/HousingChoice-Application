@@ -340,14 +340,14 @@ describe('open-path keyword handling', () => {
 
 ```ts
     if (isClosed) {
-      log.info({ providerSid: MessageSid }, 'relay inbound on a CLOSED thread — persisted, no fan-out');
+      /* existing log line, unchanged */
     } else if (!sender) {
-      log.info({ providerSid: MessageSid }, 'relay inbound from a non-member — persisted, no fan-out');
+      /* existing log line, unchanged */
     } else if (kind !== undefined) {
       // A bare keyword is a command to the SYSTEM, not group content (spec
       // sec 2 decision 2): persisted above for the audit trail, processed
       // below, NEVER relayed to the other members.
-      log.info({ providerSid: MessageSid, kind }, 'relay inbound keyword — processed, not fanned out');
+      log.info({ providerSid: MessageSid, kind }, 'relay inbound keyword - processed, not fanned out');
     } else if (!appended.deduped) {
       /* existing enqueueImmediate block unchanged */
     }
@@ -394,7 +394,7 @@ describe('open-path keyword handling', () => {
         } catch (err) {
           log.error(
             { err, providerSid: MessageSid, memberKey: senderKey },
-            'relay keyword annotation failed — flags recorded, attention item stale until next fan-out',
+            'relay keyword annotation failed - flags recorded, attention item stale until next fan-out',
           );
         }
       }

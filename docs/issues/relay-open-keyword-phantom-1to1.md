@@ -43,3 +43,15 @@ right, which is why this was filed instead of fixed in-branch:
 4. Accept + triage affordance: teach the unknown-triage surface to
    recognize "phone is on a relay roster" and label it instead of
    prompting triage.
+
+**Addendum (2026-07-18, planner adversarial review N-1 - verified).** The
+same corner also skips CONTACT CAPTURE: the open keyword path resolves
+`contacts.findByPhone(From)` (twilio.ts ~459) but never runs
+`captureContact` the way the main-number 1:1 path does (twilio.ts ~961),
+so a contactless keyword sender gets a conversation-flag-only opt-out and
+no contact stub. Compliance holds (the conversation flag gates
+`sendMessage` and `isMemberSuppressed` reads it for relay legs); the gap
+is that the phantom 1:1 has no linkable contact either. Mirrors the
+already-filed closed-intercept capture-skip gap
+(docs/issues/closed-intercept-skips-contact-capture, if/when both are
+picked up they should be fixed together).

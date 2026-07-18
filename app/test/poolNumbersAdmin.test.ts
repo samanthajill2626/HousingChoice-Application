@@ -598,6 +598,17 @@ describe('GET /api/pool-numbers - retire mirror <-> sweep PARITY (W3)', () => {
       groups: [],
       eligible: false,
     },
+    {
+      // W4: a corrupt / unparseable last_group_closed_at. The route mirror guards
+      // NaN (not eligible); the sweep must SKIP it too - so neither surface acts
+      // (the sweep's released list must NOT contain this number).
+      name: 'unparseable close stamp -> not eligible (both sides skip corrupt)',
+      pn: '+15551239206',
+      state: 'active',
+      lastClosedAt: 'not-a-date',
+      groups: ['closed'],
+      eligible: false,
+    },
   ];
 
   it.each(activeCases)('active: $name - route verdict == sweep release membership', async (pc) => {

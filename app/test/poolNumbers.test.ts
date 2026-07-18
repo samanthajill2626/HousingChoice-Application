@@ -406,6 +406,24 @@ describe('poolNumbersService.retireEligible', () => {
     expect(adapter.released).toEqual([]);
   });
 
+  it('vetoes a corrupt / unparseable last_group_closed_at (adapter NOT called, nothing released, stays active)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // A corrupt stamp: Date.parse('not-a-date') = NaN, and NaN > cutoff is false,
+    // so an unguarded grace check would WRONGLY fall through and release it. The
+    // sweep must instead SKIP it (parity with the admin page's NaN guard).
+    await seedClosed(repo, '+1CORRUPT', 'not-a-date');
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1CORRUPT': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    expect(await svc.retireEligible()).toEqual([]);
+    expect(adapter.released).toEqual([]); // never dropped at Twilio
+    expect(repo.store.get('+1CORRUPT')!.lifecycle_state).toBe('active'); // never claimed
+  });
+
   it('no-ops entirely when relayNumberReleaseEnabled=false', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();

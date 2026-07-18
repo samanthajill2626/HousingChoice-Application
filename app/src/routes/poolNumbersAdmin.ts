@@ -162,12 +162,13 @@ function retireMirror(
     return { eligible: false };
   }
   const closedMs = Date.parse(closedAt);
-  // W2: a corrupt / unparseable last_group_closed_at parses to NaN. The SWEEP
-  // (services/poolNumbers.ts) tests `Date.parse(closedAt) > cutoff`, which is
-  // FALSE for NaN, so it would fall through and proceed toward release. This
-  // advisory page DELIBERATELY diverges: rather than emit NaN artifacts
+  // W2/W4: a corrupt / unparseable last_group_closed_at parses to NaN. Both sides
+  // now treat that as NOT eligible: the SWEEP (services/poolNumbers.ts
+  // retireEligible) skips the number and error-logs the corrupt stamp, and this
+  // page returns plain not-eligible with no countdown - so page and sweep AGREE
+  // (no divergence). Reporting not-eligible here also avoids emitting NaN artifacts
   // (Math.ceil(NaN) = NaN, which JSON.stringify serializes to null so the client
-  // renders "nulld remaining"), it reports plain not-eligible with no countdown.
+  // would render "nulld remaining").
   if (Number.isNaN(closedMs)) return { eligible: false };
   if (closedMs <= nowMs - RELEASE_GRACE_MS) return { eligible: true };
   const daysRemaining = Math.ceil((closedMs + RELEASE_GRACE_MS - nowMs) / ONE_DAY_MS);

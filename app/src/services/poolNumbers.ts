@@ -177,6 +177,19 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
     for (const record of await repo.listActive()) {
       // Must have hosted a group AND that newest close is past the grace window.
       const closedAt = record.last_group_closed_at;
+      // W4: a corrupt / unparseable last_group_closed_at parses to NaN, and
+      // `NaN > cutoff` is false - so the grace check below would WRONGLY fall
+      // through and release the number, treating "unknown close time" as
+      // infinitely past grace. Skip it as NOT eligible (the admin page's retire
+      // mirror guards NaN the same way, so page and sweep stay in parity). PII:
+      // log neither the number nor any phone - only that the stamp was unparseable.
+      if (closedAt !== undefined && Number.isNaN(Date.parse(closedAt))) {
+        log.error(
+          { hasParseableCloseStamp: false },
+          'relay retirement: unparseable last_group_closed_at - skipping (corrupt stamp)',
+        );
+        continue;
+      }
       if (closedAt === undefined || Date.parse(closedAt) > cutoff) continue;
       // Cheap PRE-veto (skip obviously-live numbers without claim/abort churn);
       // the AUTHORITATIVE veto is the post-claim re-verify below.

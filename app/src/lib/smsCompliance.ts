@@ -189,6 +189,29 @@ export const OPT_IN_KEYWORDS: ReadonlySet<string> = new Set<string>([
   'UNSTOP',
 ]);
 
+// --- Inbound keyword classification ----------------------------------------
+
+/** What an inbound body/OptOutType pair IS, for the three inbound paths. */
+export type InboundKeywordKind = 'help' | 'opt_out' | 'opt_in';
+
+/**
+ * do-not-fork - the ONE keyword detector for every inbound path (1:1,
+ * closed-group intercept, open relay). Precedence mirrors the webhook's
+ * historical logic exactly: HELP first (OptOutType or bare keyword), then
+ * opt-out, then opt-in. A message that merely CONTAINS a keyword is NOT a
+ * keyword (exact match on the trimmed uppercased body).
+ */
+export function classifyInboundKeyword(
+  body: string | undefined,
+  optOutType: string | undefined,
+): InboundKeywordKind | undefined {
+  const keyword = (body ?? '').trim().toUpperCase();
+  if (optOutType === 'HELP' || keyword === 'HELP') return 'help';
+  if (optOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword)) return 'opt_out';
+  if (optOutType === 'START' || OPT_IN_KEYWORDS.has(keyword)) return 'opt_in';
+  return undefined;
+}
+
 // --- Template-validation floor ---------------------------------------------
 
 /**

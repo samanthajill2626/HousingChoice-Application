@@ -21,6 +21,7 @@ import {
   OPT_OUT_KEYWORDS,
   OPT_IN_KEYWORDS,
   templateHasOptOutLanguage,
+  classifyInboundKeyword,
 } from '../src/lib/smsCompliance.js';
 
 describe('brand + links', () => {
@@ -140,5 +141,35 @@ describe('templateHasOptOutLanguage — A2P/CTIA compliance floor', () => {
   });
   it('does not count STOP embedded in another word', () => {
     expect(templateHasOptOutLanguage('nonstop updates all day')).toBe(false);
+  });
+});
+
+describe('classifyInboundKeyword', () => {
+  it('classifies every filed opt-out keyword, case/whitespace-insensitive', () => {
+    for (const k of ['STOP', 'stop', ' Stop ', 'STOPALL', 'unsubscribe', 'CANCEL', 'END', 'QUIT', 'OPTOUT', 'REVOKE']) {
+      expect(classifyInboundKeyword(k, undefined)).toBe('opt_out');
+    }
+  });
+  it('classifies every filed opt-in keyword', () => {
+    for (const k of ['START', 'join', 'HOME', 'yes', 'UNSTOP']) {
+      expect(classifyInboundKeyword(k, undefined)).toBe('opt_in');
+    }
+  });
+  it('classifies HELP, and HELP wins over a conflicting OptOutType', () => {
+    expect(classifyInboundKeyword('HELP', undefined)).toBe('help');
+    expect(classifyInboundKeyword('help', 'STOP')).toBe('help');
+    expect(classifyInboundKeyword('whatever', 'HELP')).toBe('help');
+  });
+  it('honors OptOutType STOP/START regardless of body', () => {
+    expect(classifyInboundKeyword('I want out', 'STOP')).toBe('opt_out');
+    expect(classifyInboundKeyword('add me back', 'START')).toBe('opt_in');
+  });
+  it('a message CONTAINING a keyword is not a keyword', () => {
+    expect(classifyInboundKeyword('please stop by at 3', undefined)).toBeUndefined();
+    expect(classifyInboundKeyword('can you help me', undefined)).toBeUndefined();
+  });
+  it('undefined/empty body with no OptOutType is not a keyword', () => {
+    expect(classifyInboundKeyword(undefined, undefined)).toBeUndefined();
+    expect(classifyInboundKeyword('', undefined)).toBeUndefined();
   });
 });

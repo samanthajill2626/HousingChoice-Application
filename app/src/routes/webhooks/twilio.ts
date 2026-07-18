@@ -29,10 +29,7 @@ import {
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
-import {
-  OPT_IN_KEYWORDS,
-  OPT_OUT_KEYWORDS,
-} from '../../lib/smsCompliance.js';
+import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
 import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -465,10 +462,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const { conversation, effectiveContact, From, Body, OptOutType, MessageSid } = input;
     let keywordReply: string | undefined;
     try {
-      const keyword = (Body ?? '').trim().toUpperCase();
-      const isHelp = OptOutType === 'HELP' || keyword === 'HELP';
-      const optedOut = !isHelp && (OptOutType === 'STOP' || OPT_OUT_KEYWORDS.has(keyword));
-      const optedIn = !isHelp && !optedOut && (OptOutType === 'START' || OPT_IN_KEYWORDS.has(keyword));
+      const kind = classifyInboundKeyword(Body, OptOutType);
+      const isHelp = kind === 'help';
+      const optedOut = kind === 'opt_out';
+      const optedIn = kind === 'opt_in';
 
       // Spec sec 3.2: ANY customer-initiated inbound confers inbound_text consent,
       // so a later staff reply is never JIT-gated ("a reply in a contact-started

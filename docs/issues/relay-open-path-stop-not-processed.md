@@ -3,9 +3,10 @@ id: relay-open-path-stop-not-processed
 title: Relay-member STOP to a pool number is not processed on the OPEN group path
 type: debt
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-07-17
+resolved: 2026-07-18
 refs: app/src/routes/webhooks/twilio.ts:325
 ---
 
@@ -37,3 +38,12 @@ conversation flag) exactly like the 1:1 and closed-group paths. Decide the reply
 behavior (a STOP confirmation TwiML vs empty) and whether the STOP should also
 suppress the current message's own fan-out. Keep the single keyword source of
 truth (lib/smsCompliance.ts) - do not fork a parallel keyword list.
+
+**Resolved (2026-07-18, feat/relay-open-path-stop).** The open path now runs
+the shared keyword logic: classifyInboundKeyword (lib/smsCompliance.ts) +
+processInboundKeywords against the sender's own 1:1; bare STOP/HELP never fan
+out; opt-in keywords are commands only from a currently-suppressed sender
+(human ruling); isMemberSuppressed also honors the member phone's 1:1
+conversation flag (BE1 per-phone corner). Follow-ups spun out:
+relay-open-keyword-phantom-1to1, staff-unmute-vs-per-phone-optout,
+fake-phones-no-twiml-replies.

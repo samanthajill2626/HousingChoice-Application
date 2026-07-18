@@ -96,6 +96,7 @@ import {
   type PlacementNudgesRepo,
 } from '../../src/repos/placementNudgesRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
+import { type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
 import {
   type PushNotification,
   type PushService,
@@ -2139,6 +2140,10 @@ export interface HarnessOptions {
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
   poolNumbersService?: PoolNumbersService;
+  /** Injected pool-numbers REPO for the admin inventory route (GET /api/pool-numbers). */
+  poolNumbersRepo?: PoolNumbersRepo;
+  /** Injected clock for the pool-numbers retire-mirror grace cutoff (boundary tests). */
+  poolNumbersNow?: () => Date;
   /**
    * Override the share-broadcast audience resolver (M1.8a). Default resolves
    * against the world contacts; tests inject a stub to drive the over-cap /
@@ -2258,6 +2263,8 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,
       }),
+      ...(opts.poolNumbersRepo !== undefined && { poolNumbersRepo: opts.poolNumbersRepo }),
+      ...(opts.poolNumbersNow !== undefined && { poolNumbersNow: opts.poolNumbersNow }),
       ...(opts.systemStatusService !== undefined && {
         systemStatusService: opts.systemStatusService,
       }),

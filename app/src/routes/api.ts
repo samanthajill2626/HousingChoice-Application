@@ -70,6 +70,7 @@ import {
 } from '../services/sendMessage.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
+import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
@@ -81,6 +82,7 @@ import {
 import { type BroadcastsRepo } from '../repos/broadcastsRepo.js';
 import { type AudienceResolutionService } from '../services/audienceResolution.js';
 import { createAdminUsersRouter } from './adminUsers.js';
+import { createPoolNumbersAdminRouter } from './poolNumbersAdmin.js';
 import { createUsersMeRouter, createVoiceCallRouter } from './voiceApi.js';
 import { createBroadcastsRouter } from './broadcasts.js';
 import { createPlacementsRouter } from './placements.js';
@@ -185,6 +187,13 @@ export interface ApiRouterDeps {
   listingSendsRepo?: ListingSendsRepo;
   /** M1.7 relay groups — injected in tests; defaults to the real service. */
   poolNumbersService?: PoolNumbersService;
+  /**
+   * pool-numbers admin inventory (GET /api/pool-numbers) - injected in tests;
+   * defaults to the real repo. The route reads listByState (repo), not the service.
+   */
+  poolNumbersRepo?: PoolNumbersRepo;
+  /** Injected clock for the pool-numbers retire-mirror grace cutoff (tests only). */
+  poolNumbersNow?: () => Date;
   contactsRepoForRelay?: ContactsRepo;
   /**
    * Post-Tour & Application (Task 5) — durable placement-nudge rows. Injected in
@@ -326,6 +335,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const config = deps.config ?? loadConfig();
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  // pool-numbers admin inventory (GET /api/pool-numbers) reads the repo directly
+  // (listByState); the service has no list method.
+  const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   // BE2/C2: the activity-event log feeds the merged timeline + is emitted into
@@ -433,6 +445,19 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
       auditRepo: audit,
+    }),
+  );
+  // Group text numbers - admin-only READ-ONLY pool-number inventory
+  // (GET /api/pool-numbers; requireRole admin inside the router). Reads the pool
+  // repo (listByState) + each number's byPoolNumber group history; the retire
+  // block mirrors services/poolNumbers.ts retireEligible.
+  router.use(
+    '/pool-numbers',
+    createPoolNumbersAdminRouter({
+      logger: deps.logger,
+      poolNumbersRepo: poolNumbers,
+      conversationsRepo: conversations,
+      ...(deps.poolNumbersNow !== undefined && { now: deps.poolNumbersNow }),
     }),
   );
   // System Status (M1.4; requireRole admin on every route). Go-live flags +

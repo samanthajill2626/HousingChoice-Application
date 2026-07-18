@@ -448,6 +448,19 @@ a.pill:focus-visible {
   overflow-wrap: anywhere;
 }
 
+.recordingPlayer {
+  width: 100%;
+  max-width: 320px;
+  margin-top: var(--sp-2);
+}
+
+.transcriptPendingNote {
+  margin-top: var(--sp-2);
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  font-style: italic;
+}
+
 /* --- Upcoming (pinned scheduled-message section) -------------------------- */
 /* Pinned BETWEEN the scrollable stream and the composer: not-yet-sent scheduled
  * messages. Distinct dashed/muted treatment so it never reads as sent history. */

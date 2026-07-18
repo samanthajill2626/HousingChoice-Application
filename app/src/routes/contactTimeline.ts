@@ -145,6 +145,14 @@ interface TimelineCall extends TimelineBase {
   party_phone?: string;
   recording_s3_key?: string;
   transcript?: string;
+  /** Transcript lifecycle (voice-transcription 3.7): drives the "Transcribing..."
+   *  / "Transcript unavailable" indicator. ABSENT = no transcript will be
+   *  requested (masked, VI unconfigured, pre-feature). Never on masked calls. */
+  transcript_status?: 'pending' | 'completed' | 'failed';
+  /** The BARE CallSid (== provider_sid) - NOT `id` (the composite tsMsgId). The
+   *  audio player points GET /api/calls/:callId/recording at this; `id` would
+   *  404 there. Never on masked calls (masked calls carry no recording). */
+  call_sid?: string;
 }
 interface TimelineMilestone extends TimelineBase {
   kind: 'milestone';
@@ -370,6 +378,10 @@ function toTimelineCall(
     // Masked calls are NEVER recorded/transcribed — never expose these.
     ...(!masked && typeof m.recording_s3_key === 'string' && { recording_s3_key: m.recording_s3_key }),
     ...(!masked && typeof m.transcript === 'string' && { transcript: m.transcript }),
+    ...(!masked && m.transcript_status !== undefined && { transcript_status: m.transcript_status }),
+    // The bare CallSid for the recording endpoint (D2): `id` is the composite
+    // tsMsgId, which would 404 at GET /api/calls/:callId/recording.
+    ...(!masked && typeof m.provider_sid === 'string' && { call_sid: m.provider_sid }),
   };
 }
 

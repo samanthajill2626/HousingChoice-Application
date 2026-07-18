@@ -99,8 +99,11 @@ Inside the handler, after the existing persist + media mirror:
      the 1:1 conversation flag, the contact flag when From is the
      contact's primary number (BE1 scope), stamps consent on opt-in,
      audits, and returns the filed reply.
-   - Relay-scoped suppression marker (3.3) on opt-out / clear on opt-in,
-     for the SENDER when they are a current roster member.
+   - Member-scoped relay suppression needs NO extra write: the 1:1
+     conversation flag `processInboundKeywords` just set/cleared is what
+     the widened `isMemberSuppressed` reads (3.3).
+   - Immediate staff-visibility annotation (3.4) when the sender is a
+     current roster member.
    - Return the reply to ride the TwiML.
 
 The conversation-level flag deliberately lands on the sender's own 1:1
@@ -114,7 +117,8 @@ member marker (the sender is on no roster; there is nothing to suppress -
 but their STOP still flags their 1:1 + contact and they still get the
 confirmation, matching what the main number would have done).
 
-### 3.3 Member-scoped suppression marker (closes the BE1 corner)
+### 3.3 Per-phone suppression via the 1:1 conversation flag (closes the
+BE1 corner)
 
 The A2P floor is "messages from THIS number to THIS person stop". Today's
 only leg gate is `isMemberSuppressed` = the CONTACT flag
@@ -123,31 +127,43 @@ announcements). The BE1 number-scope rule sets the contact flag ONLY when
 the STOP arrives from the contact's PRIMARY number - so a member whose
 roster phone has become a secondary attached number (primary swap after
 rostering) would STOP and keep receiving legs. Reachable, rare, and a
-compliance violation - so the roster entry itself records the opt-out:
+compliance violation.
 
-- `ConversationParticipant` (app/src/repos/conversationsRepo.ts) gains
-  `optedOutAt?: string` (ISO timestamp; absent = not opted out).
-- On an open-path opt-out from a current roster member: stamp
-  `optedOutAt` on that member's roster entry (new repo helper
-  `conversations.setParticipantOptOut(conversationId, phone, isoTs |
-  undefined)` - set/remove by phone on the embedded participants list).
-- On an open-path opt-in from a current roster member: clear it (same
-  helper, undefined).
-- `isMemberSuppressed(contacts, member)` becomes: `member.optedOutAt !==
-  undefined || contact.sms_opt_out === true` (member marker checked
-  first - no contact read needed when it is set).
+BE1 already defines the per-PHONE suppression record: the phone's own 1:1
+conversation `sms_opt_out` flag ("the correct per-number scope" - set and
+cleared by `processInboundKeywords` on every path, including the new open
+path in 3.2). So no new state is introduced; the leg gate simply learns
+to read it:
 
-The marker is stamped on EVERY member opt-out (not only the secondary-
-number corner): uniform write path, and the roster then carries its own
-provenance of who opted out when. Scope notes:
+- `isMemberSuppressed(contacts, conversations, member)` (signature gains
+  the conversations repo; both call sites - relayFanOut and
+  relayAnnouncements - already construct/hold it):
+  1. the member's contact (by contactId-or-phone) has `sms_opt_out` ->
+     suppressed (today's check, unchanged);
+  2. else `conversations.findByParticipantPhone(member.phone)` (read-only
+     byParticipantPhone GSI query - NEVER the createOrGet variant, a leg
+     check must not mint conversations) returns any non-relay_group
+     conversation with `sms_opt_out === true` -> suppressed.
+  No 1:1 exists -> not suppressed (no create).
 
-- Burn invariant: one phone is on at most ONE group per pool number ever,
-  so the marker on the matched group IS number-scoped suppression for
-  this (number, person) pair.
-- Groups on OTHER pool numbers containing the same contact are governed
-  by the contact flag exactly as today (global when the STOP was primary-
-  number scoped; untouched otherwise - unchanged semantics).
-- The closed path needs no marker (closed groups never fan out or
+Scope notes:
+
+- STOP on the pool number from a member (3.2) creates/gets their 1:1 and
+  flags it via the shared seam -> legs stop, whether or not the contact
+  flag was settable (primary vs secondary). START clears it -> legs
+  resume. Symmetric with the main-number behavior by construction.
+- The flag lives on the 1:1 conversation, not the roster entry - so
+  roster churn (remove then re-add) can never resurrect messaging to an
+  opted-out phone.
+- A phone whose 1:1 was suppressed via the MAIN number is also skipped on
+  relay legs. That is deliberate over-suppression in the A2P-safe
+  direction: the phone told us to stop texting it.
+- Accepted race: the byParticipantPhone GSI is eventually consistent, so
+  a leg evaluated within seconds of the STOP could miss the fresh flag in
+  the secondary-number corner (the primary case is covered by the
+  strongly-read contact flag). The fan-out enqueue happens after the
+  webhook completes, making the window practically empty.
+- The closed path needs nothing extra (closed groups never fan out or
   announce).
 
 ### 3.4 Immediate staff visibility
@@ -155,11 +171,14 @@ provenance of who opted out when. Scope notes:
 The fan-out already annotates the group when it SKIPS an opted-out member
 (`conversations.setRelayMemberOptedOut` -> Today attention item + failed
 legs marked `contact_opted_out`). The open-path STOP handler calls the
-SAME annotation immediately (best-effort, never crashes the webhook), so
-staff see the Today attention item when the STOP happens - not on the
-next fan-out. No new dashboard surface: the group transcript shows the
-persisted STOP bubble, later sends show the skipped leg, Today shows the
-attention item.
+SAME annotation immediately for a roster-member sender (best-effort,
+never crashes the webhook), so staff see the Today attention item when
+the STOP happens - not on the next fan-out. The open-path START from a
+roster member clears it (`clearRelayMemberOptedOut` - the existing
+helper). The map stays a display/attention ANNOTATION - suppression
+truth lives in the flags (3.3), never in this map. No new dashboard
+surface: the group transcript shows the persisted STOP bubble, later
+sends show the skipped leg, Today shows the attention item.
 
 ### 3.5 What does NOT change
 
@@ -168,26 +187,27 @@ attention item.
 - The 1:1 `/sms` section (4) keyword block - refactored to use the
   classifier, byte-identical behavior.
 - Fan-out / announcement skip machinery - only the `isMemberSuppressed`
-  predicate widens (member marker OR contact flag).
+  predicate widens (contact flag OR the member phone's 1:1 conversation
+  flag) and gains the conversations repo in its signature.
 - No schema/GSI/infra changes; no new deps; no new catalog copy; the
   do-not-remove consent gates are untouched.
 
 ## 4. Error handling
 
-- All keyword side effects (flags, marker, annotation, audit) are
-  best-effort inside the existing try/catch idiom: the message is already
-  persisted; a repo failure is ERROR-logged and never 5xxes the webhook.
-  The marker write failing leaves the contact-flag path (primary case)
-  intact; the fan-out skip re-annotates on the next send.
+- All keyword side effects (flags, annotation, audit) are best-effort
+  inside the existing try/catch idiom: the message is already persisted;
+  a repo failure is ERROR-logged and never 5xxes the webhook. The
+  annotation failing loses only display immediacy (the fan-out skip
+  re-annotates on the next send); the flag writes are the compliance
+  substance and live inside the shared seam's own guard.
 - Twilio redelivery (dedupe) re-runs keyword processing idempotently -
-  same flags re-set, marker re-stamped with a fresh timestamp (accepted:
-  the timestamp is provenance, not an invariant), confirmation re-rides
-  the TwiML (Twilio dedupes its own replies poorly but a duplicate
-  confirmation on a redelivery is the existing 1:1 behavior - unchanged
-  risk).
+  same flags re-set, annotation re-stamped with a fresh timestamp
+  (accepted: the timestamp is provenance, not an invariant), confirmation
+  re-rides the TwiML (a duplicate confirmation on a redelivery is the
+  existing 1:1 behavior - unchanged risk).
 - PII: phones never logged (member keys / conversation ids / SIDs only) -
-  the existing rule; the marker stores the phone as DATA on the roster
-  (already stored there).
+  the existing rule; the annotation stores the phone as DATA (already the
+  existing helper's shape).
 
 ## 5. Testing
 
@@ -197,19 +217,24 @@ Unit (app):
   keyword, undefined body.
 - processInboundKeywords refactor: existing tests stay green
   (byte-identical behavior proof).
-- Open-path webhook tests (routes/webhooks/twilio tests): STOP from a
-  roster member -> persisted on relay thread, NO fan-out enqueue, contact
-  flag set (primary case), member marker stamped, 1:1 conversation flag
-  set, setRelayMemberOptedOut called, STOP confirmation TwiML; HELP ->
-  reply + no flags + no fan-out; START -> marker cleared + flags cleared +
-  welcome TwiML; non-keyword body containing "stop" -> fans out, no
-  flags; unknown-sender STOP on the open fallback -> 1:1 + contact
-  flagged, no marker, confirmation TwiML; redelivery (dedupe) -> no
-  double fan-out skip side effects beyond the idempotent re-writes.
-- isMemberSuppressed: member marker alone suppresses (no contact read),
-  contact flag alone suppresses, neither -> not suppressed.
-- Fan-out: a marker-suppressed member's leg is skipped and marked
-  `contact_opted_out` (existing skip-path tests extended).
+- Open-path webhook tests (twilioSmsWebhook / relayWebhook tests): STOP
+  from a roster member -> persisted on relay thread, NO fan-out enqueue,
+  contact flag set (primary case), 1:1 conversation flag set,
+  setRelayMemberOptedOut called, STOP confirmation TwiML; STOP from a
+  roster member whose phone is NOT the contact primary -> contact flag
+  NOT set, 1:1 conversation flag set (the BE1 corner); HELP -> reply +
+  no flags + no fan-out; START -> flags cleared + clearRelayMemberOptedOut
+  called + welcome TwiML; non-keyword body containing "stop" -> fans
+  out, no flags; unknown-sender STOP on the open fallback -> 1:1 +
+  contact flagged, no annotation, confirmation TwiML; redelivery
+  (dedupe) -> no fan-out enqueue, idempotent re-writes only.
+- isMemberSuppressed: contact flag alone suppresses; 1:1 conversation
+  flag alone suppresses (contact flag false); relay_group rows returned
+  by the phone query are ignored; no 1:1 and no contact flag -> not
+  suppressed; no conversation is ever created by the check.
+- Fan-out: a member suppressed ONLY via their 1:1 conversation flag is
+  skipped and marked `contact_opted_out` (existing skip-path tests
+  extended).
 
 E2E (extend the relay spec):
 - Member texts STOP to the pool number -> outbox shows the STOP

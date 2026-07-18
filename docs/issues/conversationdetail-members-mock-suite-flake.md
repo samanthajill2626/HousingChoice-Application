@@ -37,3 +37,9 @@ path in that describe (or default-mock getConversationMembers at the module
 level to a resolved empty roster), so a mount outside the arranged window can
 never see undefined. Audit wouldn't hurt: any test in the file that renders the
 group view without arranging the members call.
+
+**Promoted to a scheduled fix (post-mortem #2, 2026-07-17).** Third
+sighting this week across two missions (different test cases, same class);
+now the dominant gate-noise source - each occurrence costs a triage cycle.
+The module-level default-mock fix below is approved work, sized as a small
+slice.

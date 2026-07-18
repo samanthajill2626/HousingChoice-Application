@@ -125,6 +125,20 @@ export interface AppConfig {
    */
   twilioApiBaseUrl?: string;
   /**
+   * Voice Intelligence service SID (GAxxxx) - the per-env VI service the app
+   * creates transcripts under (voice-transcription spec 3.1). Optional, absent
+   * by default: absent means the transcription feature is OFF (recordings and
+   * voicemails still work; no transcript is ever requested). Allowed in every
+   * env - dev and prod each get their OWN VI service, so there is no prod guard.
+   */
+  twilioViServiceSid?: string;
+  /**
+   * Delay in seconds before the transcript reconcile job re-checks Twilio for a
+   * transcript a lost completion webhook never delivered (spec 3.4). Default
+   * 600; the hermetic e2e sets it tiny. Rides SQS DelaySeconds exactly (<= 720).
+   */
+  voiceTranscriptReconcileSeconds: number;
+  /**
    * Public https base URL of the stack (the CloudFront domain,
    * `https://<domain>`) — Twilio webhook signature reconstruction needs the
    * exact public URL (M1.1 Builder B). Empty locally.
@@ -678,6 +692,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioAuthToken: env.TWILIO_AUTH_TOKEN,
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
     twilioApiBaseUrl: twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? twilioApiBaseUrl : undefined,
+    twilioViServiceSid: env.TWILIO_VI_SERVICE_SID?.trim() || undefined,
+    voiceTranscriptReconcileSeconds: Number(env.VOICE_TRANSCRIPT_RECONCILE_SECONDS ?? '600') || 600,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     ourPhoneNumbers,

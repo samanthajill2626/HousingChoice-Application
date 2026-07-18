@@ -569,11 +569,41 @@ export function createFakeWorld(): FakeWorld {
     },
     async setCallTranscript(callSid, transcript) {
       // Mirror the real repo: idempotent — a non-empty transcript already
-      // present is never overwritten (false).
+      // present is never overwritten (false). Also stamps transcript_status
+      // 'completed' atomically (spec 3.7) - gated on transcript, not status, so
+      // a late save still upgrades a 'failed' call to completed.
       const existing = findBySid(callSid);
       if (!existing) return false;
       if (typeof existing.transcript === 'string' && existing.transcript.length > 0) return false;
       existing.transcript = transcript;
+      existing.transcript_status = 'completed';
+      return true;
+    },
+    async setTranscriptPending(callSid) {
+      // Mirror the real repo: conditional on no transcript_status yet, so a
+      // redelivered recording callback never re-stamps.
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.transcript_status !== undefined) return false;
+      existing.transcript_status = 'pending';
+      return true;
+    },
+    async setTranscriptFailed(callSid) {
+      // Mirror the real repo: flip 'pending' to 'failed' only; 'completed' is
+      // terminal (never regressed).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.transcript_status !== 'pending') return false;
+      existing.transcript_status = 'failed';
+      return true;
+    },
+    async upgradeCallOutcomeToVoicemail(callSid) {
+      // Mirror the real repo: upgrade 'missed' to 'voicemail' only (idempotent
+      // on redelivery).
+      const existing = findBySid(callSid);
+      if (!existing) return false;
+      if (existing.call_outcome !== 'missed') return false;
+      existing.call_outcome = 'voicemail';
       return true;
     },
     async listByConversation(conversationId, opts = {}) {

@@ -54,6 +54,35 @@ describe('joinViSentences role-aware rendering (voice-extraction Layer 1)', () =
     expect(joinViSentences(sentences)).toBe('Speaker 1: hello\nSpeaker 2: hi');
   });
 
+  // REGRESSION (adversarial review, slice 2): a newline INSIDE one VI sentence must
+  // NOT orphan a fragment onto its own line - the blob's '\n' is the speaker
+  // delimiter ONLY, so downstream toUtterances (which splits on '\n' and defaults an
+  // unprefixed line to 'client') can never mis-attribute a staff fragment as client
+  // and silently direct-write it. The invariant: one ViSentence -> exactly one line.
+  it('flattens an intra-sentence newline so one attributed sentence stays one line', () => {
+    const sentences: ViSentence[] = [
+      { text: 'I own\nthree units', mediaChannel: 2 },
+      { text: 'ok', mediaChannel: 1 },
+    ];
+    const roles: ChannelRoles = { '1': 'client', '2': 'staff' };
+    const blob = joinViSentences(sentences, roles);
+    // Exactly two lines, each a real speaker line - no orphaned 'three units'.
+    expect(blob).toBe('Staff: I own three units\nClient: ok');
+    for (const line of blob.split('\n')) {
+      expect(/^(Staff|Client): /.test(line)).toBe(true);
+    }
+  });
+
+  it('flattens intra-sentence newlines in the legacy Speaker N and voicemail paths too', () => {
+    const dual: ViSentence[] = [
+      { text: 'line one\nline two', mediaChannel: 1 },
+      { text: 'reply', mediaChannel: 2 },
+    ];
+    expect(joinViSentences(dual)).toBe('Speaker 1: line one line two\nSpeaker 2: reply');
+    const voicemail: ViSentence[] = [{ text: 'call me\nabout the unit', mediaChannel: 1 }];
+    expect(joinViSentences(voicemail)).toBe('call me about the unit');
+  });
+
   it('a single distinct channel with no map joins UNPREFIXED (legacy/underivable call)', () => {
     const sentences: ViSentence[] = [
       { text: 'please call me back', mediaChannel: 1 },

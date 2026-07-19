@@ -48,6 +48,14 @@ export type ChannelRoles = Record<string, 'staff' | 'client'>;
  * 1/2 or ordered).
  */
 export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): string {
+  // The joined blob uses '\n' as the per-sentence / speaker-line delimiter, and
+  // toUtterances re-splits on '\n' (defaulting an unprefixed line to 'client').
+  // A newline INSIDE one VI sentence's text would therefore orphan a fragment
+  // onto its own line and mis-attribute it - on an attributed dual-channel call
+  // a staff fragment would default to 'client' and, with no Speaker N line to
+  // trip demotion, be silently direct-written. Flatten intra-sentence newlines
+  // so the invariant "one sentence -> exactly one line" holds in every branch.
+  const flat = (t: string): string => t.replace(/[\r\n]+/g, ' ');
   const distinctChannels = new Set(sentences.map((s) => s.mediaChannel));
   // Source-attributed roles win when present AND total (every distinct channel
   // mapped) AND the recording is genuinely dual-channel (2+ distinct channels).
@@ -62,17 +70,17 @@ export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): 
     [...distinctChannels].every((c) => roles[String(c)] !== undefined)
   ) {
     return sentences
-      .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${s.text}`)
+      .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${flat(s.text)}`)
       .join('\n');
   }
   if (distinctChannels.size <= 1) {
-    return sentences.map((s) => s.text).join('\n');
+    return sentences.map((s) => flat(s.text)).join('\n');
   }
   const speakerOrder = new Map<number, number>();
   for (const s of sentences) {
     if (!speakerOrder.has(s.mediaChannel)) speakerOrder.set(s.mediaChannel, speakerOrder.size + 1);
   }
-  return sentences.map((s) => `Speaker ${speakerOrder.get(s.mediaChannel)}: ${s.text}`).join('\n');
+  return sentences.map((s) => `Speaker ${speakerOrder.get(s.mediaChannel)}: ${flat(s.text)}`).join('\n');
 }
 
 export interface PersistViTranscriptDeps {

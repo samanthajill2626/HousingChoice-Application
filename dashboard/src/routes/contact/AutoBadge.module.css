@@ -1,0 +1,15 @@
+.badge {
+  display: inline-block;
+  margin-left: var(--sp-2);
+  padding: 0 var(--sp-1);
+  border-radius: var(--radius-sm, 4px);
+  border: 1px solid var(--c-border, #d0d5dd);
+  background: var(--c-surface-muted, #f2f4f7);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs, 0.7rem);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  vertical-align: middle;
+  cursor: help;
+}

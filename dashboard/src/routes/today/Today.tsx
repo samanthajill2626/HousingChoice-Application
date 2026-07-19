@@ -28,6 +28,7 @@ const GROUP_META: { group: TodayGroup; label: string }[] = [
   { group: 'tours_today', label: 'Tours today' },
   { group: 'unreplied', label: 'Unreplied' },
   { group: 'follow_ups', label: 'Follow-ups due' },
+  { group: 'ai_suggestions', label: 'AI suggestions to review' },
 ];
 
 /** The deep-link target for a row, driven by its refType. The contact +

@@ -43,6 +43,12 @@ import { createUnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
+import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { createAuditRepo } from '../repos/auditRepo.js';
+import { createExtractionDriver } from '../adapters/extraction.js';
+import { appEvents } from '../lib/events.js';
+import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
+import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
  *  and ENQUEUES the real relay.intro job per well-formed one — so it needs only
@@ -70,6 +76,9 @@ export interface DevRouterDeps {
   /** Poll deps for POST /__dev/placement-nudges/tick — injected in tests (the
    *  world fakes); defaults to the worker's construction (worker.ts). */
   placementNudgeDeps?: RunDuePlacementNudgesDeps;
+  /** Poll deps for POST /__dev/extraction/tick - injected in tests (the world
+   *  fakes); defaults to the worker's construction (worker.ts). */
+  extractionTickDeps?: ExtractionJobDeps;
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
@@ -296,6 +305,178 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDuePlacementNudges(nowIso, placementNudgeDeps());
     log.info({ now: nowIso }, 'dev placement-nudge tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/extraction/tick - the deterministic e2e seam for the worker's
+  // 60s conversation-fact-extraction poll (worker.ts): one POST runs ONE
+  // runDueExtractions pass instead of waiting for the wall-clock setInterval.
+  // Same triple-gate/hermetic-LOCAL-only construction as the tick seams above.
+  //
+  // The tick clock is pushed to `now + debounce + 1s` so a JUST-scheduled due
+  // item (an inbound text posted by the test moments earlier) is already past
+  // its sliding dueAt - the test need NOT wait out the real debounce window.
+  //
+  // SINGLE-INSTANCE SEAM: because this tick runs IN THE APP PROCESS, apply.ts's
+  // `suggestion.updated` emit DOES reach app SSE clients here (unlike the worker
+  // poll). That is exactly why the dashboard's live v1 path is dev-tick +
+  // accept/dismiss; a worker-poller-driven change surfaces only on next fetch.
+  let extractionTickDeps = deps.extractionTickDeps;
+  const extractionDeps = (): ExtractionJobDeps => {
+    // Built lazily on the first tick - mirrors worker.ts's extraction deps
+    // construction exactly (driver selected from config; the same repo instance
+    // backs both the job and its applyDeps.extraction).
+    if (extractionTickDeps === undefined) {
+      const extractionRepo = createExtractionRepo({ logger: log });
+      const contactsRepo = createContactsRepo({ logger: log });
+      extractionTickDeps = {
+        repo: extractionRepo,
+        conversations: createConversationsRepo({ logger: log }),
+        messages: createMessagesRepo({ logger: log }),
+        contacts: contactsRepo,
+        driver: createExtractionDriver({
+          driver: config.extractionDriver,
+          model: config.aiExtractionModel,
+          ...(config.anthropicApiKey !== undefined && { apiKey: config.anthropicApiKey }),
+          ...(config.anthropicApiBaseUrl !== undefined && { apiBaseUrl: config.anthropicApiBaseUrl }),
+        }),
+        applyDeps: {
+          contacts: contactsRepo,
+          extraction: extractionRepo,
+          audit: createAuditRepo({ logger: log }),
+          events: appEvents,
+          logger: log,
+          now: () => new Date().toISOString(),
+        },
+        config,
+        logger: log,
+      };
+    }
+    return extractionTickDeps;
+  };
+  router.post('/__dev/extraction/tick', json(), async (_req, res) => {
+    // tests need not wait out the debounce - jump the clock past a just-slid dueAt.
+    const nowIso = new Date(Date.now() + config.aiExtractionDebounceMs + 1000).toISOString();
+    const { processed, failed } = await runDueExtractions(nowIso, extractionDeps());
+    log.info({ now: nowIso, processed, failed }, 'dev extraction tick ran');
+    res.status(200).json({ processed, failed });
+  });
+
+  // POST /__dev/voice/transcript-fixture - hermetic e2e-only seam to plant a
+  // COMPLETED call transcript directly (voice-extraction T6), bypassing the real
+  // Voice-Intelligence pipeline. It exercises the REAL downstream plumbing end to
+  // end: the call MessageItem append (+ optional transcript_channel_roles - T1),
+  // joinViSentences (T1 role-aware join: Client:/Staff: from a full roles map,
+  // else Speaker N / unprefixed voicemail), setCallTranscript (stamps transcript +
+  // transcript_status='completed' atomically, never-overwrite), and the voice
+  // extraction trigger (scheduleExtraction channel 'voice', no debounce - mirrors
+  // T2's persist-hook EFFECT, which a direct plant bypasses). A following
+  // POST /__dev/extraction/tick then runs a voice-channel extraction over the
+  // planted conversation. Marker-safe: the transcript is stored VERBATIM (no
+  // sentence split), so an EXTRACT: marker on a client/voicemail line survives for
+  // the fake driver. placeCall is deliberately NOT used here (its buildSentences
+  // splits on . ! ? and would corrupt marker JSON; and an always-attributed bridge
+  // cannot produce the Speaker-N form scenario 3 needs).
+  //
+  // Body: { conversationId, callSid, sentences: [{ text, mediaChannel }], roles?,
+  //   direction? }. `roles` maps the raw VI mediaChannel int-as-string -> the KNOWN
+  //   speaker role ('staff'|'client') for a dual-channel bridge; absent => legacy
+  //   labels. Same triple-gate/hermetic-LOCAL-only construction as the seams above
+  //   (the dev router only mounts behind lib/devRoutes.ts, structurally absent in
+  //   every deployed env); json() is scoped to this route. PII: ids/counts/callSid
+  //   ONLY - NEVER the sentence text.
+  let voiceFixtureRepos:
+    | { messages: ReturnType<typeof createMessagesRepo>; extraction: ReturnType<typeof createExtractionRepo> }
+    | undefined;
+  const transcriptFixtureRepos = () => {
+    voiceFixtureRepos ??= {
+      messages: createMessagesRepo({ logger: log }),
+      extraction: createExtractionRepo({ logger: log }),
+    };
+    return voiceFixtureRepos;
+  };
+  router.post('/__dev/voice/transcript-fixture', json(), async (req, res) => {
+    const body = (req.body ?? {}) as {
+      conversationId?: unknown;
+      callSid?: unknown;
+      sentences?: unknown;
+      roles?: unknown;
+      direction?: unknown;
+    };
+    const conversationId = typeof body.conversationId === 'string' ? body.conversationId : '';
+    const callSid = typeof body.callSid === 'string' ? body.callSid : '';
+    if (conversationId.length === 0 || callSid.length === 0) {
+      res.status(400).json({ error: 'conversationId and callSid (non-empty strings) are required' });
+      return;
+    }
+    // sentences: a non-empty array of { text: string, mediaChannel: number }.
+    if (
+      !Array.isArray(body.sentences) ||
+      body.sentences.length === 0 ||
+      !body.sentences.every(
+        (s) =>
+          s !== null &&
+          typeof s === 'object' &&
+          typeof (s as { text?: unknown }).text === 'string' &&
+          typeof (s as { mediaChannel?: unknown }).mediaChannel === 'number',
+      )
+    ) {
+      res
+        .status(400)
+        .json({ error: 'sentences must be a non-empty array of { text: string, mediaChannel: number }' });
+      return;
+    }
+    const sentences = (body.sentences as Array<{ text: string; mediaChannel: number }>).map((s) => ({
+      text: s.text,
+      mediaChannel: s.mediaChannel,
+    }));
+    // Optional roles map: channel-int-as-string -> 'staff' | 'client'.
+    let roles: ChannelRoles | undefined;
+    if (body.roles !== undefined) {
+      if (body.roles === null || typeof body.roles !== 'object' || Array.isArray(body.roles)) {
+        res.status(400).json({ error: 'roles must be an object mapping channel -> "staff" | "client"' });
+        return;
+      }
+      const entries = Object.entries(body.roles as Record<string, unknown>);
+      if (!entries.every(([, v]) => v === 'staff' || v === 'client')) {
+        res.status(400).json({ error: 'roles values must be "staff" or "client"' });
+        return;
+      }
+      roles = Object.fromEntries(entries) as ChannelRoles;
+    }
+    const direction: 'inbound' | 'outbound' = body.direction === 'outbound' ? 'outbound' : 'inbound';
+
+    const { messages, extraction } = transcriptFixtureRepos();
+    const nowIso = new Date().toISOString();
+    // 1) Append the call MessageItem (exercises T1's append + role-stamp plumbing).
+    //    author 'unknown': the real founder-bridge append uses authorForContact(),
+    //    whose fallback is 'unknown' ('contact' is NOT a MessageAuthor); the call's
+    //    speaker attribution rides the transcript prefixes, not this cosmetic field.
+    await messages.append({
+      conversationId,
+      providerSid: callSid,
+      providerTs: nowIso,
+      type: 'call',
+      direction,
+      author: 'unknown',
+      deliveryStatus: 'delivered',
+      callStatus: 'completed',
+      startedAt: nowIso,
+      masked: false,
+      ...(roles !== undefined && { transcriptChannelRoles: roles }),
+    });
+    // 2) Join sentences into the stored verbatim transcript (T1 role-aware join).
+    const text = joinViSentences(sentences, roles);
+    // 3) Stamp transcript + transcript_status='completed' atomically.
+    await messages.setCallTranscript(callSid, text);
+    // 4) Schedule an immediate voice-channel extraction (mirrors T2's hook effect).
+    await extraction.scheduleExtraction(conversationId, 'voice', nowIso);
+
+    // PII: ids/counts/callSid ONLY - NEVER the sentence text.
+    log.info(
+      { conversationId, callSid, sentenceCount: sentences.length, hasRoles: roles !== undefined, direction },
+      'dev voice transcript-fixture applied',
+    );
+    res.status(200).json({ ok: true });
   });
 
   // POST /__dev/placements/:placementId/deadline-fixture — hermetic e2e-only seam

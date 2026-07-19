@@ -274,6 +274,44 @@ export interface AppConfig {
   vapidPrivateKey?: string;
   /** VAPID `sub` claim — a `mailto:` or `https:` URI identifying the sender. */
   vapidSubject?: string;
+  /**
+   * Conversation fact extraction kill-switch (Phase 2). When true, an inbound
+   * text schedules a debounced LLM extraction run over the conversation. Read
+   * from AI_EXTRACTION_ENABLED; default false in production (dormant until the
+   * ai_extraction table + ANTHROPIC_API_KEY are provisioned) and true for local
+   * NODE_ENVs so the dev loop + e2e exercise the pipeline. Boolean parse mirrors
+   * SMS_SENDING_ENABLED (true|1|yes / false|0|no; warn + default otherwise).
+   */
+  aiExtractionEnabled: boolean;
+  /**
+   * Which extraction driver to use: anthropic (real structured-output LLM),
+   * console (offline no-op so `npm run dev` stays offline), or fake
+   * (deterministic test seam). EXTRACTION_DRIVER env; default anthropic when
+   * deployed (NODE_ENV=production), console for local NODE_ENVs. The fake driver
+   * is REFUSED in production (fail-closed) - a test-only seam.
+   */
+  extractionDriver: 'anthropic' | 'console' | 'fake';
+  /** Model id the anthropic extraction driver calls (AI_EXTRACTION_MODEL; default 'claude-opus-4-8'). */
+  aiExtractionModel: string;
+  /**
+   * Sliding debounce window (ms) between an inbound text and its extraction run
+   * (AI_EXTRACTION_DEBOUNCE_MS, default 30000). NOT fail-fast: a bad/missing
+   * value WARNs and falls back to the default (a debounce typo must never take
+   * the app down). Must be a positive integer.
+   */
+  aiExtractionDebounceMs: number;
+  /**
+   * Anthropic API key (operator secret) the extraction driver authenticates
+   * with. Required only when extraction is ENABLED with the anthropic driver in
+   * production (loadConfig fails fast on that combination). Never log.
+   */
+  anthropicApiKey?: string;
+  /**
+   * Dev-only override of the Anthropic REST base URL (e.g. a local mock host).
+   * REJECTED in production (fail-closed) - mirror TWILIO_API_BASE_URL; deployed
+   * stacks always use the real Anthropic endpoint.
+   */
+  anthropicApiBaseUrl?: string;
 }
 
 /**
@@ -489,6 +527,108 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       logger.warn(
         { default: smsSendingEnabledDefault },
         "SMS_SENDING_ENABLED is not one of true/1/yes/false/0/no — using the default",
+      );
+    }
+  }
+
+  // Conversation fact extraction (Phase 2). Default OFF when deployed
+  // (NODE_ENV=production) so the feature stays dormant until the ai_extraction
+  // table + ANTHROPIC_API_KEY are provisioned; ON for local NODE_ENVs so the
+  // dev loop and e2e exercise the pipeline. Boolean parse mirrors
+  // SMS_SENDING_ENABLED: true|1|yes / false|0|no, warn + default otherwise (a
+  // boolean flag, no PII - never crash boot). Placed before the prod job/auth
+  // gates so the extraction-specific throws below fire regardless of them.
+  const aiExtractionEnabledDefault = nodeEnv !== 'production';
+  let aiExtractionEnabled = aiExtractionEnabledDefault;
+  const aiExtractionEnabledRaw = env.AI_EXTRACTION_ENABLED;
+  if (aiExtractionEnabledRaw !== undefined && aiExtractionEnabledRaw.trim().length > 0) {
+    const normalized = aiExtractionEnabledRaw.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      aiExtractionEnabled = true;
+    } else if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      aiExtractionEnabled = false;
+    } else {
+      logger.warn(
+        { default: aiExtractionEnabledDefault },
+        'AI_EXTRACTION_ENABLED is not one of true/1/yes/false/0/no - using the default',
+      );
+    }
+  }
+
+  // Extraction driver: anthropic (real structured-output LLM) | console
+  // (offline no-op) | fake (deterministic test seam). Default anthropic when
+  // deployed, console for local NODE_ENVs. The fake driver is a TEST-ONLY seam
+  // and is REFUSED in production (fail-closed) so a deployed stack can never
+  // silently no-op extraction against the fake EXTRACT: protocol.
+  const extractionDriverRaw = env.EXTRACTION_DRIVER ?? (nodeEnv === 'production' ? 'anthropic' : 'console');
+  if (
+    extractionDriverRaw !== 'anthropic' &&
+    extractionDriverRaw !== 'console' &&
+    extractionDriverRaw !== 'fake'
+  ) {
+    throw new Error(
+      `EXTRACTION_DRIVER must be 'anthropic', 'console', or 'fake', got: ${extractionDriverRaw}`,
+    );
+  }
+  if (extractionDriverRaw === 'fake' && nodeEnv === 'production') {
+    throw new Error(
+      'EXTRACTION_DRIVER=fake is a test-only seam and is refused while NODE_ENV=production - ' +
+        'refusing to start. Use anthropic (real) or console (offline no-op) in a deployed stack.',
+    );
+  }
+  const extractionDriver: 'anthropic' | 'console' | 'fake' = extractionDriverRaw;
+
+  // Anthropic API key (operator secret). Required only when extraction is
+  // ENABLED with the anthropic driver in production - mirror the
+  // MESSAGING_DRIVER=twilio required-vars block: fail fast so a deployed stack
+  // never runs enabled-but-keyless (every extraction run would 401 at runtime).
+  const anthropicApiKey = env.ANTHROPIC_API_KEY;
+  if (nodeEnv === 'production' && aiExtractionEnabled && extractionDriver === 'anthropic' && !anthropicApiKey) {
+    throw new Error(
+      'ANTHROPIC_API_KEY is required when NODE_ENV=production, AI_EXTRACTION_ENABLED=true, and ' +
+        'EXTRACTION_DRIVER=anthropic - hydrate from Parameter Store (npm run secrets:push) or ' +
+        'disable extraction (AI_EXTRACTION_ENABLED=false). Refusing to start without it.',
+    );
+  }
+
+  // Dev-only override of the Anthropic REST base URL (a local mock host).
+  // REJECTED in production (fail-closed) - same posture as TWILIO_API_BASE_URL:
+  // deployed stacks must use the real Anthropic endpoint. Non-prod: validate it
+  // parses so a malformed override fails fast at config load.
+  const anthropicApiBaseUrl = env.ANTHROPIC_API_BASE_URL?.trim();
+  if (anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0 && nodeEnv === 'production') {
+    throw new Error(
+      'ANTHROPIC_API_BASE_URL is set while NODE_ENV=production - refusing to start. It is a ' +
+        'dev-only override that redirects Anthropic REST calls to a fake host; production must ' +
+        'use the real Anthropic endpoint.',
+    );
+  }
+  if (anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0) {
+    try {
+      new URL(anthropicApiBaseUrl);
+    } catch {
+      throw new Error(`ANTHROPIC_API_BASE_URL must be a valid URL, got: ${anthropicApiBaseUrl}`);
+    }
+  }
+
+  // Extraction model knob (non-secret). Empty/unset falls back to our current
+  // structured-output model.
+  const aiExtractionModel = env.AI_EXTRACTION_MODEL?.trim() || 'claude-opus-4-8';
+
+  // Sliding debounce window (ms) between an inbound text and its extraction
+  // run. NOT fail-fast: a bad/missing value WARNs and falls back to 30000
+  // (mirror A2P_RATE_LIMIT_PER_SEC; a debounce typo must never crash boot).
+  // Must be a positive integer.
+  const AI_EXTRACTION_DEBOUNCE_DEFAULT = 30_000;
+  let aiExtractionDebounceMs = AI_EXTRACTION_DEBOUNCE_DEFAULT;
+  if (env.AI_EXTRACTION_DEBOUNCE_MS !== undefined && env.AI_EXTRACTION_DEBOUNCE_MS.length > 0) {
+    const parsed = Number(env.AI_EXTRACTION_DEBOUNCE_MS);
+    if (Number.isInteger(parsed) && parsed > 0) {
+      aiExtractionDebounceMs = parsed;
+    } else {
+      logger.warn(
+        { value: env.AI_EXTRACTION_DEBOUNCE_MS, fallback: AI_EXTRACTION_DEBOUNCE_DEFAULT },
+        'AI_EXTRACTION_DEBOUNCE_MS is not a positive integer - using the default',
       );
     }
   }
@@ -759,5 +899,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     vapidPublicKey: env.VAPID_PUBLIC_KEY,
     vapidPrivateKey: env.VAPID_PRIVATE_KEY,
     vapidSubject: vapidSubject !== undefined && vapidSubject.length > 0 ? vapidSubject : undefined,
+    aiExtractionEnabled,
+    extractionDriver,
+    aiExtractionModel,
+    aiExtractionDebounceMs,
+    anthropicApiKey,
+    anthropicApiBaseUrl:
+      anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0 ? anthropicApiBaseUrl : undefined,
   };
 }

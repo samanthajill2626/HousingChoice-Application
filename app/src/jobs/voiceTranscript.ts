@@ -19,6 +19,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { persistViTranscript } from '../services/voiceTranscripts.js';
 import { defineJobHandler, enqueue } from './jobs.js';
@@ -92,6 +93,9 @@ export interface VoiceTranscriptJobDeps {
   adapter?: MessagingAdapter;
   messagesRepo?: MessagesRepo;
   events?: EventBus;
+  /** Fact-extraction repo (voice-extraction T2): the reconcile leg schedules a
+   * run on a fresh transcript save. Injectable in tests; real repo by default. */
+  extractionRepo?: ExtractionRepo;
   logger?: Logger;
 }
 
@@ -102,6 +106,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
   let adapter = deps.adapter;
   let messages = deps.messagesRepo;
   let events = deps.events;
+  let extraction = deps.extractionRepo;
 
   const reconcileDelay = (cfg: AppConfig): { runAt: Date } => ({
     runAt: new Date(Date.now() + cfg.voiceTranscriptReconcileSeconds * 1000),
@@ -204,6 +209,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     adapter ??= createMessagingAdapter({ config, logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
     events ??= appEvents;
+    extraction ??= createExtractionRepo({ logger: deps.logger });
 
     // The webhook already won (spec 3.4 step 1): a transcript is present -> done.
     const entry = await messages.getByProviderSid(payload.callSid);
@@ -218,7 +224,7 @@ export function registerVoiceTranscriptJobHandlers(deps: VoiceTranscriptJobDeps 
     // Shared persist helper (never duplicated). Twilio API errors propagate ->
     // jobs redelivery/DLQ. Only 'not-completed' is non-terminal.
     const outcome = await persistViTranscript(
-      { adapter, messages, events, logger: log },
+      { adapter, messages, events, logger: log, extraction, aiExtractionEnabled: config.aiExtractionEnabled },
       payload.transcriptSid,
     );
     if (outcome !== 'not-completed') return;

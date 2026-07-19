@@ -867,6 +867,39 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(contact).toMatchObject({ refId: 'contact-only', who: '+15550104444', attention: true });
   });
 
+  // --- conversation-fact-extraction (T9): ai_suggestions group ------------------
+  it('groups pending AI suggestions by contact into an ai_suggestions row (count = distinct contacts, why = n suggestion(s))', async () => {
+    seedTenant('t-sug', 'Sug', 'Gest');
+    seedTenant('t-one', 'One', 'Only');
+    // Two pending suggestions for one contact + one for another.
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: 't-sug',
+      target: 'voucherSize',
+      suggestedValue: '3',
+      conversationId: 'conv-a',
+    });
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: 't-sug',
+      target: 'pets',
+      suggestedValue: 'yes',
+      conversationId: 'conv-a',
+    });
+    await world.extractionRepo.putSuggestion({
+      ownerContactId: 't-one',
+      target: 'status',
+      suggestedValue: 'searching',
+      conversationId: 'conv-b',
+    });
+
+    const items = await getItems();
+    const ai = items.filter((i) => i.group === 'ai_suggestions');
+    expect(ai).toHaveLength(2); // one row per distinct contact
+    const forSug = ai.find((i) => i.refId === 't-sug');
+    expect(forSug).toMatchObject({ refType: 'contact', who: 'Sug Gest', why: '2 suggestion(s)' });
+    const forOne = ai.find((i) => i.refId === 't-one');
+    expect(forOne).toMatchObject({ refType: 'contact', who: 'One Only', why: '1 suggestion(s)' });
+  });
+
   it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });

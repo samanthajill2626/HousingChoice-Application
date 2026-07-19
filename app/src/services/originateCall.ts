@@ -180,6 +180,14 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
         startedAt,
         masked: false,
         callPartyLabel,
+        // Source-attributed channel roles (voice-extraction Layer 1). Twilio
+        // dual-channel <Dial>: the PARENT call is channel 1, the dialed child is
+        // channel 2 (https://www.twilio.com/docs/voice/twiml/dial). Here WE ring
+        // the navigator/staff cell FIRST (the parent leg runs the /outbound-bridge
+        // TwiML that <Dial>s the target), so channel 1 is staff and channel 2 is
+        // the dialed client -> { "1":"staff", "2":"client" }. OPPOSITE the inbound
+        // founder bridge, whose parent leg is the client caller.
+        transcriptChannelRoles: { '1': 'staff', '2': 'client' },
       });
       if (!appended.deduped) {
         events.emit('message.persisted', {

@@ -40,6 +40,7 @@ import {
   type BroadcastsRepo,
 } from '../../repos/broadcastsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../../repos/contactsRepo.js';
+import { createExtractionRepo, type ExtractionRepo } from '../../repos/extractionRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo, TERMINAL_STAGES } from '../../repos/placementsRepo.js';
 import {
@@ -172,6 +173,12 @@ export interface TwilioWebhookDeps {
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /**
+   * Conversation fact extraction (AI): a fresh inbound on a tenant/unknown 1:1
+   * thread schedules a debounced extraction run (sliding due upsert). Injectable
+   * in tests; the real singleton by default. Gated on config.aiExtractionEnabled.
+   */
+  extractionRepo?: ExtractionRepo;
+  /**
    * How long the status callback waits before retrying an unknown-SID lookup
    * once (the send/append race window). Injectable for tests; default 2500ms.
    */
@@ -196,6 +203,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+  const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -1100,6 +1108,31 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       });
       if (touched) {
         events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+      }
+      // Conversation fact extraction (AI): a fresh inbound on a tenant/unknown 1:1
+      // thread schedules a debounced extraction run. The sliding upsert collapses
+      // a burst of inbounds into ONE run at the latest dueAt (now + debounce).
+      // Relay/landlord threads are NOT extraction sources in v1 (the relay path
+      // never reaches this block; the type gate excludes landlord_1to1). Gated on
+      // the kill switch (config.aiExtractionEnabled). Best-effort: a schedule
+      // failure NEVER fails the webhook ack (a WARN is logged and the next inbound
+      // re-arms the run).
+      if (
+        config.aiExtractionEnabled &&
+        (touched?.type === 'tenant_1to1' || touched?.type === 'unknown_1to1')
+      ) {
+        try {
+          await extraction.scheduleExtraction(
+            persistedConversationId,
+            'sms',
+            new Date(Date.now() + config.aiExtractionDebounceMs).toISOString(),
+          );
+        } catch (err) {
+          log.warn(
+            { err, providerSid: MessageSid },
+            'extraction schedule failed - message persisted, extraction not scheduled',
+          );
+        }
       }
     }
     log.info(

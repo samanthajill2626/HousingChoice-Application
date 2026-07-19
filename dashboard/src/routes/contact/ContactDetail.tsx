@@ -64,6 +64,9 @@ import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
 import { ConsentCaptureModal } from './ConsentCaptureModal.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
+import { useSuggestions } from './useSuggestions.js';
+import { SuggestionChip } from './SuggestionChip.js';
+import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
 import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
@@ -94,6 +97,12 @@ export function ContactDetail(): React.JSX.Element {
   const [optOutBusy, setOptOutBusy] = useState(false);
   const [voiceOptOutBusy, setVoiceOptOutBusy] = useState(false);
   const [triaging, setTriaging] = useState(false);
+  // Conversation-fact-extraction (T9): which suggestion target is mid-accept/dismiss
+  // (disables its chip) + a per-target inline error (e.g. a 409 phone conflict).
+  const [suggestionBusy, setSuggestionBusy] = useState<string | null>(null);
+  const [suggestionError, setSuggestionError] = useState<{ target: string; message: string } | null>(
+    null,
+  );
   // The header's interactive status pill (tenant/landlord lifecycle change).
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -121,6 +130,8 @@ export function ContactDetail(): React.JSX.Element {
   const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
+  // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
+  const suggestions = useSuggestions(contactId);
 
   // The /contacts/:contactId route re-renders this SAME component instance on a
   // param change (no remount — the same reason Timeline takes resetScrollKey), so
@@ -130,6 +141,8 @@ export function ContactDetail(): React.JSX.Element {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatusError(null);
     setStatusBusy(false);
+    setSuggestionBusy(null);
+    setSuggestionError(null);
   }, [contactId]);
   // The current navigator's voice self-view — gates the masked-call control on
   // "has a verified cell" (the CallMenu prompts them to set one otherwise).
@@ -193,6 +206,26 @@ export function ContactDetail(): React.JSX.Element {
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
+
+  // firstName/lastName can be WRITTEN or SUGGESTED for a tenant OR unknown contact
+  // (apply.ts), but the name lives in the header - not a file-pane row - so its
+  // review chips surface here, directly under the name. (voucherSize/pets/status/
+  // ... chips live in TenantFile/EligibilityIntakeCard; type in UnknownFile.)
+  const nameChipFor = (nameTarget: 'firstName' | 'lastName'): React.JSX.Element | null => {
+    if (kind !== 'tenant' && kind !== 'unknown') return null;
+    const s = suggestionFor(suggestions.suggestions, nameTarget);
+    if (!s) return null;
+    return (
+      <SuggestionChip
+        label={SUGGESTION_TARGET_LABEL[nameTarget] ?? nameTarget}
+        suggestion={s}
+        onAccept={() => onAcceptSuggestion(nameTarget)}
+        onDismiss={() => onDismissSuggestion(nameTarget)}
+        busy={suggestionBusy === nameTarget}
+        error={suggestionError?.target === nameTarget ? suggestionError.message : null}
+      />
+    );
+  };
 
   // Resolve which thread the reply sends into. Each of the contact's numbers is
   // its own 1:1 conversation; the picker lets the navigator choose, defaulting to
@@ -347,6 +380,44 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // Accept an AI suggestion. The route RETURNS the updated contact (with the value
+  // written + `<field>_source` provenance) plus the remaining suggestions, so we
+  // apply the contact in place (setContact) - the badge appears and the chip drops.
+  // A 409 phone_in_use surfaces as an inline error on that chip (suggestion kept).
+  const onAcceptSuggestion = (target: string): void => {
+    if (suggestionBusy !== null) return;
+    setSuggestionBusy(target);
+    setSuggestionError(null);
+    void suggestions
+      .accept(target)
+      .then((res) => {
+        setContact(res.contact);
+        // Accepting status writes a milestone with no SSE - pull the timeline.
+        if (target === 'status') timeline.refetch();
+      })
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.status === 409) {
+          setSuggestionError({
+            target,
+            message: 'That number already belongs to another contact.',
+          });
+        }
+        /* other failures: leave the chip in place; it re-enables for a retry */
+      })
+      .finally(() => setSuggestionBusy(null));
+  };
+  const onDismissSuggestion = (target: string): void => {
+    if (suggestionBusy !== null) return;
+    setSuggestionBusy(target);
+    setSuggestionError(null);
+    void suggestions
+      .dismiss(target)
+      .catch(() => {
+        /* leave the chip; it re-enables for a retry */
+      })
+      .finally(() => setSuggestionBusy(null));
+  };
+
   // Lifecycle-status change from the header's interactive pill. Goes through the
   // transition service (setTenantStatus serves ALL contact types — the route
   // validates against the stored contact's own type-scoped allowlist), NEVER a
@@ -455,6 +526,8 @@ export function ContactDetail(): React.JSX.Element {
             ) : null}
           </div>
           {facts ? <div className={styles.facts}>{facts}</div> : null}
+          {nameChipFor('firstName')}
+          {nameChipFor('lastName')}
         </div>
         <div className={styles.actions}>
           {deleted ? (
@@ -590,6 +663,7 @@ export function ContactDetail(): React.JSX.Element {
                 units={file.units}
                 media={media}
                 mediaLoading={mediaLoading}
+                suggestions={suggestions.suggestions}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onTriage={onTriage}
@@ -612,6 +686,11 @@ export function ContactDetail(): React.JSX.Element {
                 relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
                 media={media}
                 mediaLoading={mediaLoading}
+                suggestions={suggestions.suggestions}
+                onAcceptSuggestion={onAcceptSuggestion}
+                onDismissSuggestion={onDismissSuggestion}
+                suggestionBusy={suggestionBusy}
+                suggestionError={suggestionError}
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onStartPlacement={() => setStartingPlacement(true)}

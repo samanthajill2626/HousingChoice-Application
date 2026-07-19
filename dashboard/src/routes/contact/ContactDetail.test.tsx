@@ -25,6 +25,10 @@ const createPlacement = vi.fn();
 // Used by the contact file's Tours card + the "Schedule a tour" dialog.
 const getTours = vi.fn();
 const createTour = vi.fn();
+// Conversation-fact-extraction (T9): the review-UI endpoints.
+const getSuggestions = vi.fn();
+const acceptSuggestion = vi.fn();
+const dismissSuggestion = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -49,6 +53,9 @@ vi.mock('../../api/index.js', async () => {
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     getTours: (...a: unknown[]) => getTours(...a),
     createTour: (...a: unknown[]) => createTour(...a),
+    getSuggestions: (...a: unknown[]) => getSuggestions(...a),
+    acceptSuggestion: (...a: unknown[]) => acceptSuggestion(...a),
+    dismissSuggestion: (...a: unknown[]) => dismissSuggestion(...a),
     // The page marks the contact read on view (useMarkContactRead) — stub it so
     // the tests don't fire a real fetch.
     markInboxRead: vi.fn(() => Promise.resolve()),
@@ -132,6 +139,10 @@ beforeEach(() => {
   getTours.mockReset();
   getTours.mockResolvedValue([]);
   createTour.mockReset();
+  getSuggestions.mockReset();
+  getSuggestions.mockResolvedValue([]);
+  acceptSuggestion.mockReset();
+  dismissSuggestion.mockReset();
   getPlacements.mockResolvedValue(CASES);
   getUnits.mockResolvedValue(UNITS);
   getContactTimeline.mockRejectedValue(new ApiError(404, 'not_found', 'x'));
@@ -312,6 +323,95 @@ describe('ContactDetail', () => {
     await waitFor(() => expect(screen.getByText('Tenant')).toBeInTheDocument());
     expect(screen.getByText('Voucher size')).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Mark as Tenant/i })).not.toBeInTheDocument();
+  });
+
+  it('accepts a voucher-size AI suggestion: applies the returned contact in place (value + Auto badge, chip gone)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, voucherSize: 2 });
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#k1#voucherSize',
+        ownerContactId: 'k1',
+        target: 'voucherSize',
+        currentValue: '2',
+        suggestedValue: '3',
+        reason: 'said a 3BR',
+        conversationId: 'conv-1',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    acceptSuggestion.mockResolvedValue({
+      contact: { ...TENANT, voucherSize: 3, voucherSize_source: { source: 'ai', at: '2026-07-16T10:00:00.000Z' } },
+      suggestions: [],
+    });
+    renderAt('k1');
+
+    // Switch to the Profile pane so the file card (chips) is visible on narrow test widths.
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for voucher size' });
+    expect(within(chip).getByText('AI heard "3"')).toBeInTheDocument();
+
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'voucherSize');
+    // The returned contact is applied in place: value shows 3 with the Auto badge; chip gone.
+    await waitFor(() => expect(screen.getByText('3 BR')).toBeInTheDocument());
+    expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'AI suggestion for voucher size' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('renders a name SuggestionChip in the header and accepts it (firstName, tenant)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, firstName: 'Tash' });
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#k1#firstName',
+        ownerContactId: 'k1',
+        target: 'firstName',
+        currentValue: 'Tash',
+        suggestedValue: 'Tasha',
+        reason: 'gave full name',
+        conversationId: 'conv-1',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    acceptSuggestion.mockResolvedValue({
+      contact: { ...TENANT, firstName: 'Tasha', firstName_source: { source: 'ai', at: '2026-07-16T10:00:00.000Z' } },
+      suggestions: [],
+    });
+    renderAt('k1');
+
+    // The chip surfaces under the header name (not a file-pane row), labelled "first name".
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for first name' });
+    expect(within(chip).getByText('AI heard "Tasha"')).toBeInTheDocument();
+
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName');
+    // The returned contact applies in place: the chip drops.
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'AI suggestion for first name' })).not.toBeInTheDocument(),
+    );
+  });
+
+  it('renders name SuggestionChips for an UNKNOWN contact too (lastName)', async () => {
+    getContact.mockResolvedValue(UNKNOWN);
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#u9#lastName',
+        ownerContactId: 'u9',
+        target: 'lastName',
+        suggestedValue: 'Rivera',
+        reason: 'signed off with a surname',
+        conversationId: 'conv-2',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    renderAt('u9');
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for last name' });
+    expect(within(chip).getByText('AI heard "Rivera"')).toBeInTheDocument();
   });
 
   it('the Placements-card "Start placement" action opens the create dialog pre-filled+locked to this tenant', async () => {

@@ -29,6 +29,7 @@ import type {
   BroadcastUpdatedEvent,
   ScheduledUpdatedEvent,
   TourUpdatedEvent,
+  SuggestionUpdatedEvent,
 } from './types.js';
 
 export interface EventStreamHandlers {
@@ -45,6 +46,9 @@ export interface EventStreamHandlers {
   /** A broadcast changed — the Results view overlays status+stats live (then
    *  refetches for the per-recipient detail the payload omits). */
   onBroadcastUpdated?: (event: BroadcastUpdatedEvent) => void;
+  /** A contact's pending AI suggestions changed (extraction ran, or one was
+   *  accepted/dismissed) - the contact page + Today refetch. */
+  onSuggestionUpdated?: (event: SuggestionUpdatedEvent) => void;
   /** Called when the stream opens (after connect/reconnect). */
   onOpen?: () => void;
   /** Called when the stream errors (before a reconnect is scheduled). */
@@ -195,6 +199,12 @@ export function EventStreamProvider({ children }: { children: ReactNode }): Reac
         markActivity();
         const data = parse<TourUpdatedEvent>((ev as MessageEvent).data);
         if (data) dispatch((h) => h.onTourUpdated, data);
+      });
+
+      source.addEventListener('suggestion.updated', (ev) => {
+        markActivity();
+        const data = parse<SuggestionUpdatedEvent>((ev as MessageEvent).data);
+        if (data) dispatch((h) => h.onSuggestionUpdated, data);
       });
 
       source.addEventListener('error', () => {

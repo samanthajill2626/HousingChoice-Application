@@ -123,6 +123,28 @@ describe('POST /api/contacts/:contactId/call — originate (spec §5)', () => {
     expect(JSON.stringify(harness.capture.lines)).not.toContain(TARGET);
   });
 
+  it('stamps source-attributed transcript_channel_roles { "1":"staff", "2":"client" } on the outbound originate call (Layer 1)', async () => {
+    const world = createFakeWorld();
+    const contactId = seedContact(world);
+    const harness = makeWebhookHarness({ world });
+    seedNavigatorCell(harness);
+
+    const res = await request(harness.app)
+      .post(`/api/contacts/${contactId}/call`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    expect(res.status).toBe(200);
+
+    const entry = world.messages.filter((m) => m.type === 'call')[0]!;
+    // Twilio dual-channel <Dial>: parent(ch1) = the ORIGINATED leg (we ring the
+    // navigator/staff cell first, it runs the /outbound-bridge TwiML), child(ch2)
+    // = the dialed target (client). Orientation is OPPOSITE the inbound founder
+    // bridge (founderTriage.test.ts) because the parent leg is staff here, client
+    // there. Same entity persistViTranscript resolves by the call's provider_sid.
+    expect(entry.transcript_channel_roles).toEqual({ '1': 'staff', '2': 'client' });
+  });
+
   it('409 cell_not_verified when the navigator has no verified cell — NO call placed', async () => {
     const world = createFakeWorld();
     const contactId = seedContact(world);

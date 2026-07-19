@@ -12,25 +12,75 @@ import type { MessagingAdapter, ViSentence } from '../adapters/messaging.js';
 import type { MessagesRepo, MessageItem } from '../repos/messagesRepo.js';
 import type { EventBus } from '../lib/events.js';
 import type { Logger } from '../lib/logger.js';
+import type { createExtractionRepo } from '../repos/extractionRepo.js';
 
 /**
- * Join VI sentences into the stored verbatim transcript (spec 3.5). A single
- * media channel (voicemail: the caller only) joins the sentence texts with
- * newlines and NO prefix. More than one distinct channel (a dual-channel bridge
- * recording) prefixes each line `Speaker <n>: ` where n is the 1-based order of
- * that channel's FIRST appearance - stable and channel-number-agnostic (the raw
- * Twilio channel ints are not assumed to be 1/2 or ordered).
+ * A source-attributed channel->role map (voice-extraction Layer 1): keys are the
+ * raw VI mediaChannel ints as strings ("1"/"2"), values the KNOWN speaker role
+ * for that channel. Stamped onto the call item at append time by the two dial
+ * sites (inbound founder bridge / outbound originate) whose leg orientation is
+ * deterministic at ring time.
  */
-export function joinViSentences(sentences: ViSentence[]): string {
+export type ChannelRoles = Record<string, 'staff' | 'client'>;
+
+/**
+ * Join VI sentences into the stored verbatim transcript (spec 3.5).
+ *
+ * Layer 1 role prefixes apply ONLY to a genuine DUAL-channel bridge recording
+ * (2+ distinct channels) whose `roles` map covers EVERY distinct channel: each
+ * line is prefixed `Staff: `/`Client: ` by the RAW mediaChannel int
+ * (String(mediaChannel)) - NOT the Speaker-N ordinal (voice-extraction Layer 1).
+ * A partial/absent map - OR a SINGLE-channel recording - degrades gracefully to
+ * the legacy labels below (never block a transcript on attribution).
+ *
+ * Single-channel note: a platform voicemail RIDES the same inbound founder-bridge
+ * call item, which is stamped { "1":"client", "2":"staff" } at ring time - so its
+ * item DOES carry a roles map (the plan's "voicemail has no map" assumption is
+ * false). We still join it UNPREFIXED: the caller is the client by construction
+ * (spec section 4), and T3 maps an unprefixed voice line to 'client'. Requiring
+ * 2+ distinct channels is what keeps a voicemail unprefixed despite the map.
+ *
+ * Legacy labels: a single media channel (voicemail: the caller only) joins the
+ * sentence texts with newlines and NO prefix. More than one distinct channel (a
+ * dual-channel bridge recording) prefixes each line `Speaker <n>: ` where n is
+ * the 1-based order of that channel's FIRST appearance - stable and
+ * channel-number-agnostic (the raw Twilio channel ints are not assumed to be
+ * 1/2 or ordered).
+ */
+export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): string {
+  // The joined blob uses '\n' as the per-sentence / speaker-line delimiter, and
+  // toUtterances re-splits on '\n' (defaulting an unprefixed line to 'client').
+  // A newline INSIDE one VI sentence's text would therefore orphan a fragment
+  // onto its own line and mis-attribute it - on an attributed dual-channel call
+  // a staff fragment would default to 'client' and, with no Speaker N line to
+  // trip demotion, be silently direct-written. Flatten intra-sentence newlines
+  // so the invariant "one sentence -> exactly one line" holds in every branch.
+  const flat = (t: string): string => t.replace(/[\r\n]+/g, ' ');
   const distinctChannels = new Set(sentences.map((s) => s.mediaChannel));
+  // Source-attributed roles win when present AND total (every distinct channel
+  // mapped) AND the recording is genuinely dual-channel (2+ distinct channels).
+  // A single-channel recording (a platform voicemail, or a one-sided bridge)
+  // stays legacy-unprefixed even though the bridge item carries a
+  // { "1":"client","2":"staff" } map - the caller is the client by construction
+  // (spec 4). Look up by the RAW channel int-as-string so the label matches who
+  // spoke regardless of channel order.
+  if (
+    roles !== undefined &&
+    distinctChannels.size >= 2 &&
+    [...distinctChannels].every((c) => roles[String(c)] !== undefined)
+  ) {
+    return sentences
+      .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${flat(s.text)}`)
+      .join('\n');
+  }
   if (distinctChannels.size <= 1) {
-    return sentences.map((s) => s.text).join('\n');
+    return sentences.map((s) => flat(s.text)).join('\n');
   }
   const speakerOrder = new Map<number, number>();
   for (const s of sentences) {
     if (!speakerOrder.has(s.mediaChannel)) speakerOrder.set(s.mediaChannel, speakerOrder.size + 1);
   }
-  return sentences.map((s) => `Speaker ${speakerOrder.get(s.mediaChannel)}: ${s.text}`).join('\n');
+  return sentences.map((s) => `Speaker ${speakerOrder.get(s.mediaChannel)}: ${flat(s.text)}`).join('\n');
 }
 
 export interface PersistViTranscriptDeps {
@@ -38,6 +88,15 @@ export interface PersistViTranscriptDeps {
   messages: MessagesRepo;
   events: EventBus;
   logger: Logger;
+  /**
+   * Conversation fact extraction (voice-extraction T2): a fresh transcript save
+   * schedules an IMMEDIATE (no-debounce) extraction run so the AI pipeline sees
+   * the new call text. Optional - the helper degrades to a pure persist when it
+   * is unwired. Gated by aiExtractionEnabled.
+   */
+  extraction?: Pick<ReturnType<typeof createExtractionRepo>, 'scheduleExtraction'>;
+  /** Kill switch (config.aiExtractionEnabled): OFF skips the hook entirely. */
+  aiExtractionEnabled: boolean;
 }
 
 /**
@@ -115,12 +174,35 @@ export async function persistViTranscript(
   }
 
   const sentences = await adapter.listViSentences(transcriptSid);
-  const text = joinViSentences(sentences);
+  // Source-attributed channel roles (voice-extraction Layer 1) are stamped onto
+  // this call item at append time by our OWN dial sites (inbound voice.ts /
+  // outbound originateCall.ts) - a fixed { "1"|"2": "staff"|"client" } shape - so
+  // reading it back off the item's index-signature attr as ChannelRoles is sound.
+  // joinViSentences degrades to legacy labels when it is absent (voicemail/legacy).
+  const roles = entry.transcript_channel_roles as ChannelRoles | undefined;
+  const text = joinViSentences(sentences, roles);
   const saved = await messages.setCallTranscript(callSid, text);
   if (saved) {
     emitPersisted(events, entry);
     // PII: transcriptLength only - NEVER the text.
     logger.info({ transcriptSid, callSid, transcriptLength: text.length }, 'vi transcript saved');
+    // Voice-extraction T2: schedule an IMMEDIATE (no-debounce) extraction run so
+    // the AI pipeline picks up the new call text. Best-effort + kill-switch-gated:
+    // a schedule failure NEVER changes the 'saved' outcome. Fires ONLY on this
+    // fresh-save branch (already-saved/not-ours/masked/failed/not-completed all
+    // returned earlier); no conversation-type lookup here - the extraction job's
+    // contact-type guard already no-ops landlord/team/relay threads.
+    if (deps.aiExtractionEnabled && deps.extraction) {
+      try {
+        await deps.extraction.scheduleExtraction(entry.conversationId, 'voice', new Date().toISOString());
+      } catch (err) {
+        // PII: sids + err only - NEVER the transcript text or message bodies.
+        logger.warn(
+          { transcriptSid, callSid, err },
+          'vi transcript: scheduleExtraction failed (saved regardless)',
+        );
+      }
+    }
     return 'saved';
   }
   logger.info({ transcriptSid, callSid }, 'vi transcript: already saved (never-overwrite) - no-op');

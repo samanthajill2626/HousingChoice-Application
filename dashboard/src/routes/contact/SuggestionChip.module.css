@@ -1,0 +1,77 @@
+.chip {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin: var(--sp-1) 0 var(--sp-2);
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px dashed var(--c-border, #d0d5dd);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--c-surface-muted, #f8f9fc);
+  font-size: var(--fs-sm);
+}
+
+.heard {
+  font-weight: 600;
+  color: var(--c-text);
+}
+
+.date {
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs, 0.75rem);
+}
+
+.reason {
+  color: var(--c-text-muted);
+}
+
+.view {
+  padding: 0 var(--sp-2);
+  color: var(--c-accent, #2563eb);
+  font-size: var(--fs-sm);
+  white-space: nowrap;
+  text-decoration: none;
+}
+
+.view:hover {
+  text-decoration: underline;
+}
+
+.actions {
+  display: inline-flex;
+  /* Wrap so the third action (View conversation) drops to a second row instead
+     of clipping in the narrow Details card. The `gap` shorthand already spaces
+     wrapped rows, so no separate row-gap is needed. Verified at the desktop
+     two-pane width and 390px mobile (voice-extraction spec section 6). */
+  flex-wrap: wrap;
+  gap: var(--sp-1);
+  margin-left: auto;
+}
+
+.accept,
+.dismiss {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border, #d0d5dd);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--c-surface, #fff);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.accept {
+  border-color: var(--c-accent, #2563eb);
+  color: var(--c-accent, #2563eb);
+}
+
+.accept:disabled,
+.dismiss:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.error {
+  flex-basis: 100%;
+  color: var(--c-danger, #b42318);
+  font-size: var(--fs-xs, 0.75rem);
+}

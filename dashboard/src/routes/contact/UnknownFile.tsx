@@ -7,14 +7,26 @@
 // can't persist. Deliberately omits the tenant cards (voucher / housing authority
 // / listings-sent / tours) and landlord cards (units) — those presume a type we
 // don't have yet, which is exactly the bug this fixes.
-import type { PlacementItem, Contact, ContactPhone, UnitItem } from '../../api/index.js';
+import type {
+  PlacementItem,
+  Contact,
+  ContactPhone,
+  SuggestionItem,
+  UnitItem,
+} from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, Row } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
+import { suggestionFor } from './suggestionTargets.js';
 import { contactStatusLabel, formatAddress, formatPhone } from './format.js';
 import styles from './UnknownFile.module.css';
+
+/** Capitalize a triage type value ('tenant' -> 'Tenant') for the AI-suggests line. */
+function capitalize(value: string): string {
+  return value.length > 0 ? value[0]!.toUpperCase() + value.slice(1) : value;
+}
 
 export interface UnknownFileProps {
   contact: Contact;
@@ -32,6 +44,9 @@ export interface UnknownFileProps {
    *  `triaging` disables the buttons. */
   onTriage?: (type: 'tenant' | 'landlord') => void;
   triaging?: boolean;
+  /** Pending AI suggestions - a `type` suggestion surfaces a recommendation line
+   *  inside the triage card (the Mark-as buttons remain the action). */
+  suggestions?: SuggestionItem[];
 }
 
 export function UnknownFile({
@@ -45,8 +60,10 @@ export function UnknownFile({
   onManagePhones,
   onTriage,
   triaging = false,
+  suggestions = [],
 }: UnknownFileProps): React.JSX.Element {
   const unitMap = new Map(units.map((u) => [u.unitId, u]));
+  const typeSuggestion = suggestionFor(suggestions, 'type');
   // Placements that reference this contact (none expected for a fresh inbound, but show
   // them if a navigator linked one before triaging).
   const myPlacements = tenantPlacements(placements, contact.contactId);
@@ -60,6 +77,12 @@ export function UnknownFile({
           This contact hasn&apos;t been classified yet. Classify them as a tenant or
           landlord to file them correctly and unlock the matching workspace.
         </p>
+        {typeSuggestion ? (
+          <p className={styles.aiSuggest}>
+            {`AI suggests: ${capitalize(typeSuggestion.suggestedValue)}`}
+            {typeSuggestion.reason ? ` - ${typeSuggestion.reason}` : null}
+          </p>
+        ) : null}
         <div className={styles.actions}>
           <Button
             variant="secondary"

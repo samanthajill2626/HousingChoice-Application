@@ -452,6 +452,46 @@ export const TABLES: readonly TableSpec[] = [
       },
     ],
   },
+  {
+    // NEW in conversation-fact-extraction (README deviation): a single-key table
+    // holding BOTH the per-conversation debounce/cursor items (itemId
+    // `due#<conversationId>`) AND the per-(contact, target) pending suggestion
+    // items (itemId `sugg#<contactId>#<target>`). One table serves the worker
+    // poll, the per-contact review list, and the pending-count Today tile.
+    //
+    // All three GSIs are TRULY sparse (unlike the tourReminders/placementNudges
+    // byDueAt, whose fixed partition is written on every row): a row indexes ONLY
+    // while BOTH its GSI key attributes are present, so the repo must REMOVE both
+    // key attrs together to retire a row from an index.
+    //   byDueAt   - poll query for due conversations. Present ONLY while a run is
+    //               scheduled; claim/complete/park REMOVE _duePartition AND dueAt.
+    //   byOwner   - a contact's pending suggestions (review UI). Only suggestion
+    //               rows carry ownerContactId.
+    //   byPending - all pending suggestions, newest-first by createdAt (Today
+    //               count). Only suggestion rows carry _pendingPartition.
+    baseName: 'ai_extraction',
+    hashKey: { name: 'itemId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byDueAt',
+        hashKey: { name: '_duePartition', type: 'S' },
+        rangeKey: { name: 'dueAt', type: 'S' },
+        sparse: true,
+      },
+      {
+        indexName: 'byOwner',
+        hashKey: { name: 'ownerContactId', type: 'S' },
+        rangeKey: { name: 'itemId', type: 'S' },
+        sparse: true,
+      },
+      {
+        indexName: 'byPending',
+        hashKey: { name: '_pendingPartition', type: 'S' },
+        rangeKey: { name: 'createdAt', type: 'S' },
+        sparse: true,
+      },
+    ],
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

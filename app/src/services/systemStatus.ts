@@ -173,7 +173,11 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
         //   systemOom    — kernel OOM-killer lines in the system log group
         const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
-          cloudwatch.queryInsights([config.errorLogGroupName], PINO_ERROR_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
+          // BOTH process log groups: worker-side errors (extraction poll, tour
+          // reminder + placement nudge polls, voice transcript jobs) were
+          // invisible to this panel when only the app group was queried
+          // (found live 2026-07-20: an extraction 400 surfaced nowhere).
+          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], PINO_ERROR_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);

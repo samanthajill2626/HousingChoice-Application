@@ -189,6 +189,17 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(result).toEqual({ available: false, reason: 'cloudwatch_error' });
   });
 
+  it('the pino-error query reads BOTH the app and worker log groups (worker-side errors - extraction, reminder pollers - must reach the panel)', async () => {
+    const config = deployedConfig();
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    const pinoCall = seam.queryInsights.mock.calls.find((c) => c[1] === PINO_ERROR_INSIGHTS_FILTER);
+    expect(pinoCall, 'a queryInsights call with the pino error filter').toBeDefined();
+    expect(pinoCall![0]).toEqual(
+      expect.arrayContaining([config.errorLogGroupName, config.workerLogGroupName]),
+    );
+  });
+
   it('deployed-like + a working seam → available:true with the events passed through', async () => {
     const events = [
       { timestamp: '2026-06-29T03:00:00.000Z', level: 60, message: 'fatal', correlationId: 'c1' },
@@ -265,9 +276,10 @@ describe('systemStatus.getErrors — degradation + window', () => {
     ]);
     // Exactly 3 Insights queries are issued (Promise.all): pino + V8 OOM (2 groups) + system OOM
     expect(seam.queryInsights).toHaveBeenCalledTimes(3);
-    // Pino query: errorLogGroupName
+    // Pino query: BOTH process groups (app + worker) - worker-side errors
+    // (extraction/reminder pollers) must reach the panel (2026-07-20 fix).
     expect(seam.queryInsights).toHaveBeenCalledWith(
-      [config.errorLogGroupName],
+      [config.errorLogGroupName, config.workerLogGroupName],
       PINO_ERROR_INSIGHTS_FILTER,
       expect.any(Number),
       25,

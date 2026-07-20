@@ -496,6 +496,33 @@ describe('extractionRepo suggestions', () => {
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
     expect(await repo.listSuggestionsByContact('c1')).toHaveLength(0);
   });
+
+  it('round-trips suggestedAddress parts for the compound address target', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    await repo.putSuggestion({
+      ownerContactId: 'contact-1',
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      conversationId: 'conv-1',
+      createdAt: T1,
+    });
+
+    const got = await repo.getSuggestion('contact-1', 'address');
+    expect(got!.suggestedAddress).toEqual({ line1: '1 Main St', city: 'Atlanta' });
+    expect(got!.suggestedValue).toBe('1 Main St, Atlanta');
+  });
+
+  it('omits suggestedAddress when the target carries none', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x' });
+    const got = await repo.getSuggestion('c1', 'pets');
+    expect(got!.suggestedAddress).toBeUndefined();
+  });
 });
 
 // ---------------------------------------------------------------------------

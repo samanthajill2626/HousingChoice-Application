@@ -19,6 +19,12 @@ import type { createExtractionRepo } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
 import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB } from './schema.js';
+import {
+  cleanAddressParts,
+  contactAddressToParts,
+  formatAddressParts,
+  normalizeAddressForCompare,
+} from './address.js';
 import type { Logger } from '../../lib/logger.js';
 
 export interface ApplyDeps {
@@ -201,6 +207,59 @@ export async function applyExtraction(
     }
   }
 
+  // --- address (compound ninth target; spec 2026-07-20 SS5) ------------------
+  // Rides the SAME batched contacts.update + ai_extraction_applied audit as the
+  // scalar field writes above (block placed before the commit). Tenant-only:
+  // landlord/team_member/unknown conversations are saturated with PROPERTY
+  // addresses, so the false-positive cost dominates any triage value.
+  if (result.address !== undefined) {
+    if (contact.type !== 'tenant') {
+      logger.debug({ contactId, contactType: contact.type }, 'extraction address ignored for contact type');
+    } else {
+      const parts = cleanAddressParts(result.address.parts);
+      const formattedNew = formatAddressParts(parts);
+      if (formattedNew.length === 0) {
+        logger.debug({ contactId }, 'extraction address skipped (no usable parts)');
+      } else {
+        const formattedCurrent = formatAddressParts(contactAddressToParts(contact['address']));
+        const hasCurrent = formattedCurrent.length > 0;
+        if (result.address.op === 'write' && ctx.hasInferredRoleContent !== true) {
+          writePatch['address'] = parts;
+          writePatch['address_source'] = sourceStamp;
+          // from/to are FORMATTED single-line strings (never the raw object) so
+          // the audit shape stays flat; from is undefined when there was none.
+          auditFields.push({
+            field: 'address',
+            from: hasCurrent ? formattedCurrent : undefined,
+            to: formattedNew,
+            ...(result.address.reason !== undefined && { reason: result.address.reason }),
+          });
+          pendingWrites.push('address');
+        } else {
+          if (result.address.op === 'write') demotedFields.push('address');
+          if (
+            hasCurrent &&
+            normalizeAddressForCompare(formattedCurrent) === normalizeAddressForCompare(formattedNew)
+          ) {
+            logger.debug({ contactId }, 'extraction address suggestion skipped (equal to current)');
+          } else {
+            const ok = await putSuggestionSafe(deps, {
+              ownerContactId: contactId,
+              target: 'address',
+              ...(hasCurrent && { currentValue: formattedCurrent }),
+              suggestedValue: formattedNew, // display string (the chip)
+              suggestedAddress: parts, // parts payload (what accept writes)
+              ...(result.address.reason !== undefined && { reason: result.address.reason }),
+              conversationId,
+              ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+            });
+            if (ok) suggested.push('address');
+          }
+        }
+      }
+    }
+  }
+
   // Commit all direct field writes in ONE update patch (best-effort). Only mark
   // them `wrote` once the update actually lands.
   if (pendingWrites.length > 0) {
@@ -316,7 +375,12 @@ export async function applyExtraction(
 
   // --- 8. noteLines --------------------------------------------------------
   let notedLines = 0;
-  const rawNotes = [...(result.noteLines ?? []), ...noteStrings];
+  // Addresses are a structured target now - a model that still narrates one into
+  // noteLines is overridden deterministically (spec SS5); the prompt forbids it,
+  // this filter makes the ban belt-and-braces.
+  const rawNotes = [...(result.noteLines ?? []), ...noteStrings].filter(
+    (line) => !/^current address\b/i.test(line.trim()),
+  );
   const cleaned = rawNotes.map((line) => line.trim()).filter((line) => line.length > 0).slice(0, MAX_NOTE_LINES);
   if (cleaned.length > 0) {
     const prefix = autoPrefix(at);

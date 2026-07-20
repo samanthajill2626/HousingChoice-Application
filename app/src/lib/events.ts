@@ -315,5 +315,5 @@ export function createEventBus(deps: { logger?: Logger } = {}): EventBus {
   };
 }
 
-/** The process-wide bus (see the single-instance assumption above). */
+/** The process-wide bus (see the SSE-spine note in the file header). */
 export const appEvents: EventBus = createEventBus();

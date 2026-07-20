@@ -1,0 +1,41 @@
+---
+id: event-bridge-hardening-followups
+title: Event bridge - low-severity hardening follow-ups from adversarial review
+type: improvement
+severity: low
+status: open
+area: app
+created: 2026-07-20
+refs: app/src/routes/internal.ts:47, app/src/lib/config.ts:481, app/src/lib/eventBridge.ts:24
+---
+
+**Problem.** The 2026-07-20 adversarial review of the cross-process event
+bridge (feat/event-bridge, spec docs/superpowers/specs/2026-07-20-event-bridge-design.md)
+found no must-fix defects but four low-severity hardening/ops items worth a
+follow-up pass rather than scope-creeping the feature branch:
+
+1. POST /internal/events has no rate limit, and the global express.json()
+   (default 100kb cap) parses the body BEFORE the route's bridge-token check.
+   Exploiting this requires already holding CF_ORIGIN_SECRET or network
+   access inside the box/compose network (the locked chain gates everything
+   else), so exposure is minimal - but a router-level limiter and/or a
+   tighter body cap for /internal would shrink the parse-then-403 surface.
+2. WORKER_POLL_INTERVAL_MS validates only "positive integer" - a value like
+   100 (a plausible "meant seconds" typo) makes all three worker polls fire
+   every 100ms (~30 listDue queries/sec). Consider a sane floor (>= 1000ms)
+   while still allowing the ~1500ms QA cadence the design names.
+3. The bridge token is HKDF-derived from SESSION_SECRET (deliberate:
+   zero new secret material). Ops note: rotating SESSION_SECRET changes the
+   token, so until BOTH containers restart on the new value, worker bridge
+   POSTs 403 and live updates silently degrade to next-fetch (best-effort
+   semantics, self-heals). Worth one line in any future rotation runbook.
+4. Ops awareness (by design, not a defect): the forwarder attaches at the
+   appEvents singleton, so EVERY worker emit crosses the bridge - SQS job
+   handlers (broadcast fan-out per-recipient message.persisted etc.)
+   included, not just the three polls. Volume is A2P-paced (~1 send/sec) and
+   poll-scale; a claim-skip backlog bursts at most one POST per listDue row.
+
+**Suggested fix.** Small standalone pass: add a createRateLimit instance in
+front of createInternalRouter's POST handler + consider a floor in the
+WORKER_POLL_INTERVAL_MS validation; fold items 3-4 into operator docs when a
+rotation runbook next gets touched. None of this blocks the bridge.

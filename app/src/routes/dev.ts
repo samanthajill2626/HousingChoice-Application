@@ -316,10 +316,11 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // item (an inbound text posted by the test moments earlier) is already past
   // its sliding dueAt - the test need NOT wait out the real debounce window.
   //
-  // SINGLE-INSTANCE SEAM: because this tick runs IN THE APP PROCESS, apply.ts's
-  // `suggestion.updated` emit DOES reach app SSE clients here (unlike the worker
-  // poll). That is exactly why the dashboard's live v1 path is dev-tick +
-  // accept/dismiss; a worker-poller-driven change surfaces only on next fetch.
+  // IN-APP TICK: because this tick runs IN THE APP PROCESS, apply.ts's
+  // `suggestion.updated` emit reaches app SSE clients directly - no bridge hop.
+  // Worker-poll runs now ALSO arrive live via the cross-process event bridge
+  // (lib/eventBridge.ts); the tick remains the deterministic no-wait path for
+  // hermetic tests.
   let extractionTickDeps = deps.extractionTickDeps;
   const extractionDeps = (): ExtractionJobDeps => {
     // Built lazily on the first tick - mirrors worker.ts's extraction deps

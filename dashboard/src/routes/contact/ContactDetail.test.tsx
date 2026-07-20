@@ -362,6 +362,59 @@ describe('ContactDetail', () => {
     );
   });
 
+  it('shows the Auto badge on the Current address row when address_source is ai', async () => {
+    getContact.mockResolvedValue({
+      ...TENANT,
+      address: { line1: '1 Main St', city: 'Atlanta' },
+      address_source: { source: 'ai', at: '2026-07-16T10:00:00.000Z' },
+    });
+    renderAt('k1');
+
+    // The Current address row renders the formatted address + the Auto badge.
+    expect(await screen.findByText('1 Main St, Atlanta')).toBeInTheDocument();
+    expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
+  });
+
+  it('renders the current-address SuggestionChip and accepts it (forwards target "address")', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue({ ...TENANT, address: { line1: '9 Old Rd', city: 'Macon' } });
+    getSuggestions.mockResolvedValue([
+      {
+        itemId: 'sugg#k1#address',
+        ownerContactId: 'k1',
+        target: 'address',
+        currentValue: '9 Old Rd, Macon',
+        suggestedValue: '1 Main St, Atlanta',
+        reason: 'stated a new current address',
+        conversationId: 'conv-1',
+        createdAt: '2026-07-16T10:00:00.000Z',
+      },
+    ]);
+    acceptSuggestion.mockResolvedValue({
+      contact: {
+        ...TENANT,
+        address: { line1: '1 Main St', city: 'Atlanta' },
+        address_source: { source: 'ai', at: '2026-07-16T10:00:00.000Z' },
+      },
+      suggestions: [],
+    });
+    renderAt('k1');
+
+    await waitFor(() => expect(screen.getByText('Tasha Williams')).toBeInTheDocument());
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for current address' });
+    expect(within(chip).getByText('AI heard "1 Main St, Atlanta"')).toBeInTheDocument();
+
+    await user.click(within(chip).getByRole('button', { name: 'Accept' }));
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'address');
+    // The returned contact applies in place: the row shows the new address + Auto badge; chip gone.
+    await waitFor(() => expect(screen.getByText('1 Main St, Atlanta')).toBeInTheDocument());
+    expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.queryByRole('group', { name: 'AI suggestion for current address' })).not.toBeInTheDocument(),
+    );
+  });
+
   it('renders a name SuggestionChip in the header and accepts it (firstName, tenant)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');
     const user = userEvent.setup();

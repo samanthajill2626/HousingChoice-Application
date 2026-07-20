@@ -163,7 +163,8 @@ export function TenantFile({
         {chipFor('voucherSize')}
         <KV k="Housing authority" v={<>{housingAuthority}{badgeFor('housingAuthority')}</>} />
         {chipFor('housingAuthority')}
-        <KV k="Current address" v={currentAddress} />
+        <KV k="Current address" v={<>{currentAddress}{badgeFor('address')}</>} />
+        {chipFor('address')}
         <KV
           k="Phone numbers"
           v={

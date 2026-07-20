@@ -18,6 +18,7 @@ export const SUGGESTION_TARGET_LABEL: Record<string, string> = {
   status: 'status',
   phone: 'phone',
   type: 'type',
+  address: 'current address',
 };
 
 /** The AI provenance stamp for a field, when its value came from an extraction. */

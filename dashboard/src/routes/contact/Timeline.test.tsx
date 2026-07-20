@@ -172,6 +172,74 @@ describe('Timeline', () => {
     expect(screen.queryByLabelText('Call recording')).not.toBeInTheDocument();
   });
 
+  it('downmixes recording playback to MONO on first play (dual-channel earbud fix)', () => {
+    // Bridge recordings are dual-channel (caller L, staff R) for transcript
+    // attribution; playback must fold both into every output so a one-earbud
+    // listener still hears BOTH parties.
+    const gain = {
+      channelCount: 2,
+      channelCountMode: 'max',
+      channelInterpretation: 'discrete',
+      connect: vi.fn(),
+    };
+    const source = { connect: vi.fn() };
+    const ctx = {
+      destination: { kind: 'destination' },
+      createMediaElementSource: vi.fn(() => source),
+      createGain: vi.fn(() => gain),
+      resume: vi.fn(() => Promise.resolve()),
+      close: vi.fn(() => Promise.resolve()),
+    };
+    vi.stubGlobal('AudioContext', vi.fn(() => ctx));
+    try {
+      renderTimeline({
+        items: [
+          {
+            kind: 'call',
+            id: 'ts#CA1',
+            at: '2026-06-08T11:00:00',
+            call_outcome: 'answered',
+            recording_s3_key: 'recordings/CA1/RE1',
+            call_sid: 'CA1',
+          },
+        ],
+      });
+      const player = screen.getByLabelText('Call recording');
+      fireEvent.play(player);
+      // The graph: element source -> mono gain -> destination.
+      expect(ctx.createMediaElementSource).toHaveBeenCalledWith(player);
+      expect(gain.channelCount).toBe(1);
+      expect(gain.channelCountMode).toBe('explicit');
+      expect(source.connect).toHaveBeenCalledWith(gain);
+      expect(gain.connect).toHaveBeenCalledWith(ctx.destination);
+      // Wired exactly once - a second play must not rebuild the graph.
+      fireEvent.play(player);
+      expect(ctx.createMediaElementSource).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('plays normally when Web Audio is unavailable (no crash, element untouched)', () => {
+    // jsdom has no AudioContext - firing play must not throw; the element just
+    // plays directly (stereo) as the degraded path.
+    renderTimeline({
+      items: [
+        {
+          kind: 'call',
+          id: 'ts#CA2',
+          at: '2026-06-08T11:00:00',
+          call_outcome: 'answered',
+          recording_s3_key: 'recordings/CA2/RE2',
+          call_sid: 'CA2',
+        },
+      ],
+    });
+    const player = screen.getByLabelText('Call recording');
+    expect(() => fireEvent.play(player)).not.toThrow();
+    expect(player).toHaveAttribute('src', '/api/calls/CA2/recording');
+  });
+
   it('renders a milestone pin that links out via refType/refId', () => {
     renderTimeline({ items: [MILESTONE] });
     const link = screen.getByRole('link', { name: /Placement opened/ });

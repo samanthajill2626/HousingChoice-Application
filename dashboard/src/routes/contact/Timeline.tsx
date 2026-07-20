@@ -501,6 +501,60 @@ function MessageBubble({
   );
 }
 
+/**
+ * An <audio> element whose playback is downmixed to MONO via the Web Audio API.
+ *
+ * Bridge recordings are DUAL-CHANNEL on purpose (caller on the left, staff on
+ * the right - that channel isolation is what gives the transcript clean
+ * per-speaker attribution), but hard L/R panning means a one-earbud / earpiece
+ * / single-speaker listener hears only ONE party (observed live 2026-07-20).
+ * Downmixing at PLAYBACK keeps the stored recording and the VI transcription
+ * untouched while making both voices audible on any output device.
+ *
+ * Wiring happens lazily on first 'play' (a user gesture, so the AudioContext
+ * is allowed to start) and exactly once per element (createMediaElementSource
+ * is one-shot). The GainNode's explicit channelCount=1 makes the Web Audio
+ * graph downmix L+R per the spec's 'speakers' interpretation. If Web Audio is
+ * unavailable the element just plays normally (stereo) - a degraded listen,
+ * never a broken player.
+ */
+function MonoAudio(props: React.ComponentProps<'audio'>): React.JSX.Element {
+  const elRef = useRef<HTMLAudioElement | null>(null);
+  const ctxRef = useRef<AudioContext | null>(null);
+
+  useEffect(() => {
+    const el = elRef.current;
+    if (!el) return undefined;
+    let wired = false;
+    const wire = () => {
+      if (wired) return;
+      wired = true;
+      try {
+        const ctx = new AudioContext();
+        const source = ctx.createMediaElementSource(el);
+        const mono = ctx.createGain();
+        mono.channelCount = 1;
+        mono.channelCountMode = 'explicit';
+        mono.channelInterpretation = 'speakers';
+        source.connect(mono);
+        mono.connect(ctx.destination);
+        void ctx.resume();
+        ctxRef.current = ctx;
+      } catch {
+        // No Web Audio (or graph refused): the element keeps playing directly.
+      }
+    };
+    el.addEventListener('play', wire);
+    return () => {
+      el.removeEventListener('play', wire);
+      void ctxRef.current?.close();
+      ctxRef.current = null;
+    };
+  }, []);
+
+  return <audio ref={elRef} {...props} />;
+}
+
 function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   const outcomeClass =
     call.call_outcome === 'answered'
@@ -529,7 +583,7 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
           BARE CallSid (call_sid), NOT `id` (the composite tsMsgId) which would 404
           at GET /api/calls/:callId/recording. Rendered only when both are present. */}
       {call.recording_s3_key && call.call_sid ? (
-        <audio
+        <MonoAudio
           className={styles.recordingPlayer}
           controls
           preload="none"

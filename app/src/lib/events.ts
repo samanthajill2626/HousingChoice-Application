@@ -249,6 +249,24 @@ export interface AppEventMap {
 
 export type AppEventName = keyof AppEventMap;
 
+// Every event name, as a VALUE (the bridge + internal route iterate/validate
+// at runtime; AppEventMap is types-only). Record<AppEventName, true> makes this
+// exhaustive BY CONSTRUCTION: adding an eighth event to AppEventMap without
+// listing it here is a compile error - which is what keeps a future event from
+// silently missing the cross-process bridge (lib/eventBridge.ts).
+const ALL_APP_EVENTS: Record<AppEventName, true> = {
+  'conversation.updated': true,
+  'message.persisted': true,
+  'broadcast.updated': true,
+  'placement.updated': true,
+  'scheduled.updated': true,
+  'tour.updated': true,
+  'suggestion.updated': true,
+};
+export const APP_EVENT_NAMES: readonly AppEventName[] = Object.keys(
+  ALL_APP_EVENTS,
+) as AppEventName[];
+
 /** Typed wrapper over EventEmitter — payloads are checked per event name. */
 export interface EventBus {
   emit<K extends AppEventName>(event: K, payload: AppEventMap[K]): void;

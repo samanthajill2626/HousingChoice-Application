@@ -179,6 +179,13 @@ const childEnv = {
   VITE_E2E_COMMIT: gitSha,
   // Pass the app port so the app process knows which port to bind.
   PORT: String(ports.app),
+  // Cross-process event bridge: the worker process forwards its bus emits to
+  // the app's POST /internal/events so SSE clients see worker-side writes live
+  // (the event-bridge e2e spec proves this path). WORKER_POLL_INTERVAL_MS is
+  // deliberately NOT lowered here: in-app dev ticks jump their clock past the
+  // debounce, the worker polls real time - a fast cadence would let the worker
+  // race tick-driven specs for due rows (tick.processed assertions).
+  EVENT_BRIDGE_URL: `http://127.0.0.1:${ports.app}`,
   // Pass the lane to child processes so they can self-identify if needed.
   E2E_LANE: String(lane),
 };

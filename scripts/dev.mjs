@@ -177,6 +177,12 @@ if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BAS
 // is never wired locally. Both are defaults: an explicit env value still wins.
 if (childEnv.NODE_ENV === undefined) childEnv.NODE_ENV = 'development';
 if (childEnv.OTEL_SDK_DISABLED === undefined) childEnv.OTEL_SDK_DISABLED = 'true';
+// Cross-process event bridge (lib/eventBridge.ts): the worker forwards its bus
+// emits to the app's POST /internal/events so live SSE surfaces update from
+// worker-side writes. 127.0.0.1 (not localhost) per the harness convention -
+// avoids undici's localhost/IPv6 ambiguity. Default only: a file-provided
+// EVENT_BRIDGE_URL (folded via overlay above) still wins.
+if (childEnv.EVENT_BRIDGE_URL === undefined) childEnv.EVENT_BRIDGE_URL = 'http://127.0.0.1:8080';
 
 // --mock points the app's messaging at the local fake-twilio host on :8889 so it
 // runs the REAL Twilio driver + signature middleware against an impersonator

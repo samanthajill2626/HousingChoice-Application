@@ -83,12 +83,47 @@ describe('joinViSentences role-aware rendering (voice-extraction Layer 1)', () =
     expect(joinViSentences(voicemail)).toBe('call me about the unit');
   });
 
-  it('a single distinct channel with no map joins UNPREFIXED (legacy/underivable call)', () => {
+  it('a single distinct channel with no map joins UNPREFIXED as ONE turn (legacy/underivable call)', () => {
     const sentences: ViSentence[] = [
       { text: 'please call me back', mediaChannel: 1 },
       { text: 'it is about the unit', mediaChannel: 1 },
     ];
-    expect(joinViSentences(sentences)).toBe('please call me back\nit is about the unit');
+    // One speaker -> one TURN -> one line (turn-grouping, 2026-07-20): a pause
+    // mid-voicemail must not fragment the message across lines.
+    expect(joinViSentences(sentences)).toBe('please call me back it is about the unit');
+  });
+
+  // TURN-GROUPING (operator feedback 2026-07-20): VI emits a new sentence at every
+  // small pause, so an uninterrupted speaker produced a stack of one-sentence lines.
+  // Consecutive same-channel sentences now merge into ONE labeled turn line; the
+  // line only breaks when the SPEAKER changes. Words stay verbatim (formatting
+  // only), and the one-prefix-per-line contract toUtterances parses is unchanged -
+  // an utterance is now a full turn, not a sentence fragment.
+  it('merges consecutive same-channel sentences into one Staff:/Client: turn line', () => {
+    const sentences: ViSentence[] = [
+      { text: 'hello there', mediaChannel: 2 },
+      { text: 'thanks for calling', mediaChannel: 2 },
+      { text: 'how can I help', mediaChannel: 2 },
+      { text: 'I am calling about the unit', mediaChannel: 1 },
+      { text: 'the two bedroom', mediaChannel: 1 },
+      { text: 'great, let me look', mediaChannel: 2 },
+    ];
+    const roles: ChannelRoles = { '1': 'client', '2': 'staff' };
+    expect(joinViSentences(sentences, roles)).toBe(
+      'Staff: hello there thanks for calling how can I help\n' +
+        'Client: I am calling about the unit the two bedroom\n' +
+        'Staff: great, let me look',
+    );
+  });
+
+  it('merges consecutive same-channel sentences in the legacy Speaker N path too', () => {
+    const sentences: ViSentence[] = [
+      { text: 'one', mediaChannel: 1 },
+      { text: 'two', mediaChannel: 1 },
+      { text: 'reply', mediaChannel: 2 },
+      { text: 'three', mediaChannel: 1 },
+    ];
+    expect(joinViSentences(sentences)).toBe('Speaker 1: one two\nSpeaker 2: reply\nSpeaker 1: three');
   });
 
   it('a single distinct channel WITH a full role map still joins UNPREFIXED (voicemail rides the role-stamped bridge item)', () => {
@@ -103,6 +138,6 @@ describe('joinViSentences role-aware rendering (voice-extraction Layer 1)', () =
       { text: 'it is about the unit', mediaChannel: 1 },
     ];
     const roles: ChannelRoles = { '1': 'client', '2': 'staff' };
-    expect(joinViSentences(sentences, roles)).toBe('please call me back\nit is about the unit');
+    expect(joinViSentences(sentences, roles)).toBe('please call me back it is about the unit');
   });
 });

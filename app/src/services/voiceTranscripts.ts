@@ -48,14 +48,28 @@ export type ChannelRoles = Record<string, 'staff' | 'client'>;
  * 1/2 or ordered).
  */
 export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): string {
-  // The joined blob uses '\n' as the per-sentence / speaker-line delimiter, and
+  // The joined blob uses '\n' as the per-TURN / speaker-line delimiter, and
   // toUtterances re-splits on '\n' (defaulting an unprefixed line to 'client').
   // A newline INSIDE one VI sentence's text would therefore orphan a fragment
   // onto its own line and mis-attribute it - on an attributed dual-channel call
   // a staff fragment would default to 'client' and, with no Speaker N line to
   // trip demotion, be silently direct-written. Flatten intra-sentence newlines
-  // so the invariant "one sentence -> exactly one line" holds in every branch.
+  // so the invariant "one turn -> exactly one line" holds in every branch.
   const flat = (t: string): string => t.replace(/[\r\n]+/g, ' ');
+  // TURN-GROUPING (operator feedback 2026-07-20): VI starts a new sentence at
+  // every small pause, so an uninterrupted speaker used to produce a stack of
+  // one-sentence lines. Merge CONSECUTIVE same-channel sentences into one turn -
+  // the line breaks only when the speaker changes. Words stay verbatim
+  // (formatting only), and toUtterances' one-prefix-per-line contract is
+  // unchanged: an utterance is now a full turn instead of a sentence fragment
+  // (better extraction context, same parsing).
+  const turns: Array<{ channel: number; texts: string[] }> = [];
+  for (const s of sentences) {
+    const last = turns[turns.length - 1];
+    if (last !== undefined && last.channel === s.mediaChannel) last.texts.push(flat(s.text));
+    else turns.push({ channel: s.mediaChannel, texts: [flat(s.text)] });
+  }
+  const turnText = (t: { texts: string[] }): string => t.texts.join(' ');
   const distinctChannels = new Set(sentences.map((s) => s.mediaChannel));
   // Source-attributed roles win when present AND total (every distinct channel
   // mapped) AND the recording is genuinely dual-channel (2+ distinct channels).
@@ -69,18 +83,19 @@ export function joinViSentences(sentences: ViSentence[], roles?: ChannelRoles): 
     distinctChannels.size >= 2 &&
     [...distinctChannels].every((c) => roles[String(c)] !== undefined)
   ) {
-    return sentences
-      .map((s) => `${roles[String(s.mediaChannel)] === 'staff' ? 'Staff' : 'Client'}: ${flat(s.text)}`)
+    return turns
+      .map((t) => `${roles[String(t.channel)] === 'staff' ? 'Staff' : 'Client'}: ${turnText(t)}`)
       .join('\n');
   }
   if (distinctChannels.size <= 1) {
-    return sentences.map((s) => flat(s.text)).join('\n');
+    // One speaker -> one turn -> ONE line (a voicemail is a single paragraph).
+    return turns.map(turnText).join('\n');
   }
   const speakerOrder = new Map<number, number>();
-  for (const s of sentences) {
-    if (!speakerOrder.has(s.mediaChannel)) speakerOrder.set(s.mediaChannel, speakerOrder.size + 1);
+  for (const t of turns) {
+    if (!speakerOrder.has(t.channel)) speakerOrder.set(t.channel, speakerOrder.size + 1);
   }
-  return sentences.map((s) => `Speaker ${speakerOrder.get(s.mediaChannel)}: ${flat(s.text)}`).join('\n');
+  return turns.map((t) => `Speaker ${speakerOrder.get(t.channel)}: ${turnText(t)}`).join('\n');
 }
 
 export interface PersistViTranscriptDeps {

@@ -3,7 +3,7 @@ id: extraction-writes-no-live-push
 title: Worker-side extraction results need a page refresh - no live SSE push
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-20
 refs: app/src/lib/events.ts:5, app/src/jobs/extraction.ts:10
@@ -29,3 +29,13 @@ event bridge (DynamoDB Streams on the touched tables -> app-process re-emit,
 or a lightweight worker->app HTTP notify). Scope it as its own small slice;
 it would also un-gap every other worker-side emit (tour reminders, placement
 nudges, voice transcript persistence via the reconcile job leg).
+
+**Resolution (2026-07-20).** Fixed by the cross-process event bridge
+(feat/event-bridge): the worker forwards every bus emit to the app process via
+authenticated POST /internal/events (lib/eventBridge.ts -> routes/internal.ts),
+which re-emits to its SSE clients - same names/payloads, zero dashboard change.
+Covers extraction suggestion.updated, tour-reminder/placement-nudge
+scheduled.updated, and relay-announcement message.persisted/conversation.updated.
+Design: docs/superpowers/specs/2026-07-20-event-bridge-design.md. Proven
+end-to-end (real worker process -> open page updates with no reload) by
+e2e/tests/flows/event-bridge.spec.ts.

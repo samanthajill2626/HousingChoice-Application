@@ -33,6 +33,29 @@ installProcessErrorHandlers(logger, bootContext);
 
 const config = loadConfig();
 
+// Cross-process event bridge (lib/eventBridge.ts): forward EVERY emit on this
+// worker's in-process bus to the app process, whose SSE clients are the ones
+// that matter. Attached ONLY here - the app never forwards (no echo path).
+// Unset EVENT_BRIDGE_URL (bare local runs) -> emits stay in-process, exactly
+// the pre-bridge behavior.
+if (config.eventBridgeUrl) {
+  const { attachEventBridge, deriveBridgeToken } = await import('./lib/eventBridge.js');
+  const { appEvents } = await import('./lib/events.js');
+  attachEventBridge(appEvents, {
+    targetUrl: config.eventBridgeUrl,
+    bridgeToken: deriveBridgeToken(config.sessionSecret),
+    originSecret: config.cfOriginSecret,
+    logger,
+  });
+  runWithContext(bootContext, () => {
+    // Operational, non-secret (the URL names a container/port, never a token).
+    logger.info(
+      { target: config.eventBridgeUrl },
+      'event bridge attached - worker emits forward to the app process',
+    );
+  });
+}
+
 // The shared A2P token bucket — ONE instance, sized from config
 // (a2pRateLimitPerSec, default ~1 msg/sec), shared across relay fan-out +
 // broadcast + missed-call auto-text so the COMBINED outbound rate stays under
@@ -129,7 +152,7 @@ runWithContext(bootContext, () => {
     void runDueTourReminders(now, tourReminderDeps).catch((err: unknown) => {
       logger.error({ err }, 'tour reminder poll error');
     });
-  }, 60_000).unref();
+  }, config.workerPollIntervalMs).unref();
 }
 
 // Placement application-nudge poll: same stateless 60s cadence as the
@@ -145,6 +168,7 @@ runWithContext(bootContext, () => {
   const { createUnitsRepo } = await import('./repos/unitsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
+  const { appEvents } = await import('./lib/events.js');
   const { runDuePlacementNudges } = await import('./jobs/placementNudges.js');
 
   const placementNudgeDeps = {
@@ -154,6 +178,9 @@ runWithContext(bootContext, () => {
     unitsRepo: createUnitsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
     sendMessageService: createSendMessageService({ config, logger }),
+    // The bridge (lib/eventBridge.ts) forwards these claim-skip pokes to app
+    // SSE clients when EVENT_BRIDGE_URL is set; an unbridged emit is a no-op.
+    events: appEvents,
     logger,
   };
 
@@ -162,7 +189,7 @@ runWithContext(bootContext, () => {
     void runDuePlacementNudges(now, placementNudgeDeps).catch((err: unknown) => {
       logger.error({ err }, 'placement nudge poll error');
     });
-  }, 60_000).unref();
+  }, config.workerPollIntervalMs).unref();
 }
 
 // Conversation-fact-extraction poll: same stateless 60s cadence (state is the
@@ -172,10 +199,10 @@ runWithContext(bootContext, () => {
 // (anthropic in prod / console in dev / fake in e2e). .unref()'d so it never
 // holds the process open on shutdown.
 //
-// SINGLE-INSTANCE SEAM: apply.ts's `suggestion.updated` emit here goes to the
-// WORKER's event bus and never reaches app SSE clients (lib/events.ts) - the
-// dashboard's live path is the in-app dev tick + accept/dismiss; a poll-driven
-// change appears on the next fetch. Intentional for v1 (see jobs/extraction.ts).
+// Cross-process bridge (lib/eventBridge.ts): apply.ts's `suggestion.updated`
+// emit lands on THIS worker's bus and - when EVENT_BRIDGE_URL is set (all
+// deployed envs + local runners) - forwards to the app process's SSE clients.
+// Bare unset-URL runs keep the old visible-on-next-fetch behavior.
 if (config.aiExtractionEnabled) {
   const { createExtractionRepo } = await import('./repos/extractionRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
@@ -216,7 +243,7 @@ if (config.aiExtractionEnabled) {
     void runDueExtractions(now, extractionDeps).catch((err: unknown) => {
       logger.error({ err }, 'extraction poll error');
     });
-  }, 60_000).unref();
+  }, config.workerPollIntervalMs).unref();
 }
 
 // Keep the process alive until a shutdown signal arrives (also covers the

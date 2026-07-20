@@ -16,6 +16,7 @@ import express, { type Express, type Request, type Router } from 'express';
 import { loadConfig, type AppConfig } from './lib/config.js';
 import { createExpressErrorHandler } from './lib/errors.js';
 import { logger as defaultLogger, type Logger } from './lib/logger.js';
+import { appEvents } from './lib/events.js';
 import { createSessionEpochCache, requireAuth, sessionMiddleware } from './middleware/auth.js';
 import { correlationMiddleware } from './middleware/correlation.js';
 import { csrfOriginMiddleware } from './middleware/csrfOrigin.js';
@@ -29,6 +30,7 @@ import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
+import { createInternalRouter } from './routes/internal.js';
 
 /** Request with the raw body buffer captured by the JSON parser's verify hook. */
 export interface RequestWithRawBody extends Request {
@@ -98,6 +100,12 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
 
   // (4) routes
   app.use('/webhooks', createWebhooksRouter({ config, logger: log, ...deps.webhooks }));
+  // Cross-process event bridge (routes/internal.ts): the worker's forwarder
+  // posts here. Route stage on purpose - BEHIND the origin-secret validator,
+  // NEVER under /api requireAuth. Emits on the SAME bus the SSE route serves
+  // (the injected test bus, or the appEvents singleton both default to).
+  const bridgeEvents = deps.api?.events ?? appEvents;
+  app.use('/internal', createInternalRouter({ config, events: bridgeEvents, logger: log }));
   // M1.5 PUBLIC, UNAUTHENTICATED intake surface — the ONE place requireAuth is
   // intentionally absent (housing-fair form + flyer have no session). Mounted
   // HERE in the route stage, so the locked chain is intact: it still sits
@@ -192,7 +200,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth', '/public', '/__dev'].some(
+      const reserved = ['/api', '/webhooks', '/auth', '/public', '/__dev', '/internal'].some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

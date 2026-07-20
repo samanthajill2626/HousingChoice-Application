@@ -135,10 +135,11 @@ function isTerminal(status: BroadcastRecipient['status'] | undefined): boolean {
  * AFTER the slot write + bumpStats have persisted, so the emitted stats reflect
  * the committed state.
  *
- * NOTE (accepted, documented seam): in DEPLOYED envs the fan-out runs in the
- * worker process, so these emits do NOT reach the app's SSE clients (see
- * lib/events.ts single-instance seam). Liveness there comes from S3 polling +
- * the DLR-rollup emits (which originate in webhooks = the app process).
+ * NOTE: in DEPLOYED envs the fan-out runs in the worker process; these emits
+ * cross the event bridge (lib/eventBridge.ts -> POST /internal/events) to the
+ * app's SSE clients whenever EVENT_BRIDGE_URL is set (all deployed envs +
+ * local runners). S3 polling + the DLR-rollup emits (webhooks = app process)
+ * remain the liveness backstop for bare unset-URL runs.
  */
 function emitBroadcastProgress(events: EventBus, broadcastId: string, item: BroadcastItem): void {
   events.emit('broadcast.updated', {

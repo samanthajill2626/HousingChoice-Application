@@ -7,14 +7,13 @@
 // the guarded apply service. Designed to be called by a setInterval in worker.ts
 // and by the deterministic dev tick (routes/dev.ts).
 //
-// *** SINGLE-INSTANCE SEAM (load-bearing) ***
+// *** CROSS-PROCESS BRIDGE (load-bearing) ***
 // When this poll runs in the WORKER process, apply.ts's `suggestion.updated`
-// emit goes to the worker's in-process event bus and NEVER reaches the app's SSE
-// clients (lib/events.ts single-instance assumption: only the app process serves
-// the SSE stream). So in v1 the dashboard's LIVE update path for suggestions is
-// the in-app dev tick (hermetic e2e) + the accept/dismiss round-trips; a
-// worker-poller-driven change simply appears on the next dashboard fetch. This is
-// intentional for v1 - do NOT try to bridge it here.
+// emit lands on the worker's in-process event bus and - when EVENT_BRIDGE_URL is
+// set (all deployed envs + local runners) - crosses to the app's SSE clients via
+// lib/eventBridge.ts (fire-and-forget POST /internal/events, routes/internal.ts
+// re-emits), so an open contact page updates live with no reload. Bare unset-URL
+// runs keep the old behavior: the change appears on the next dashboard fetch.
 //
 // PII (doc section 9): NEVER log message bodies or phone numbers. Log only
 // conversationId / contactId / counts.

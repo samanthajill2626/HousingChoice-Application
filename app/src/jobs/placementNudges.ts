@@ -195,8 +195,9 @@ export interface RunDuePlacementNudgesDeps {
   sendMessageService: SendMessageService;
   /** Live-update bus: a claim-skip retires a rung the panels show as upcoming,
    *  so poke them to refetch (best-effort; mirrors tourReminders' claimSkipRow).
-   *  Optional — the worker's emits never reach app SSE clients anyway (the
-   *  lib/events single-instance seam); this matters for the dev tick seam. */
+   *  Optional, but worker.ts now passes appEvents so these pokes cross the event
+   *  bridge (lib/eventBridge.ts) to app SSE clients when EVENT_BRIDGE_URL is set;
+   *  the dev tick seam continues to inject its own bus. */
   events?: EventBus;
   logger?: Logger;
 }

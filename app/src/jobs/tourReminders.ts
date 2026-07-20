@@ -189,11 +189,12 @@ export interface RunDueTourRemindersDeps {
   /**
    * Live-update bus (defaults to the appEvents singleton). A successful CLAIM
    * emits `scheduled.updated` so the tour page's Reminders panel / the contact
-   * timeline's Upcoming bucket refetch the ladder. NOTE the lib/events.ts
-   * single-instance seam: this reaches SSE clients only when the poll runs in
-   * the APP process (the hermetic dev tick / e2e); the deployed worker's emit
-   * goes nowhere until the seam is bridged — the panel's dueAt-anchored
-   * refetch covers that case client-side.
+   * timeline's Upcoming bucket refetch the ladder. In-app runs (dev tick /
+   * e2e) reach SSE clients directly; when the poll runs in the WORKER process
+   * the emit crosses the event bridge (lib/eventBridge.ts -> POST
+   * /internal/events) whenever EVENT_BRIDGE_URL is set - the panel's
+   * dueAt-anchored refetch remains the client-side backstop for bare
+   * unset-URL runs.
    */
   events?: EventBus;
   logger?: Logger;

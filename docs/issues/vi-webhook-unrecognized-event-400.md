@@ -1,0 +1,41 @@
+---
+id: vi-webhook-unrecognized-event-400
+title: Signed VI webhooks without transcript_sid are 400'd blind - unidentifiable payload, and the 400 keeps Twilio retrying (noise loop)
+type: bug
+severity: med
+status: open
+area: app
+created: 2026-07-20
+refs: app/src/routes/webhooks/voice.ts:1625, app/src/middleware/twilioSignature.ts:100
+---
+
+**Problem.** On 2026-07-20 the /webhooks/twilio/voice/intelligence endpoint
+received 14 requests total (its first day live): 1 valid transcript-completed
+webhook (processed fine) and 13 Twilio-SIGNED (bodySHA256-verified) JSON POSTs
+(~1.4KB) with NO top-level `transcript_sid`, each rejected 400 with
+`vi webhook: missing transcript_sid - rejected`. Because the handler never logs
+bodies (PII rule), the 13 payloads are unidentifiable from our side; Twilio's
+debugger alert detail was empty too.
+
+Context/evidence: the VI service was created 18:01Z with a broken webhook URL
+(`.../nowhere/webhooks/...` - webhook-base misconfig, since corrected; debugger
+95200 at 19:03Z). Four transcripts completed during the broken-URL window; the
+400s began right after the URL was fixed, in two bursts of exactly FOUR plus
+trailing singles at widening intervals - consistent with Twilio retrying the
+stranded events in some retry/event shape we do not parse. Ruled out: Event
+Streams (no sinks), Conversations (no webhooks configured), operator results
+(0 operators attached), a second VI service (only one exists). No data was
+lost - the voice.reconcileTranscript safety net fetched the stranded
+transcripts regardless.
+
+Open question the current code cannot answer: are these (a) a one-time retry
+backlog that will drain, or (b) a second event type fired for EVERY transcript?
+The next inbound-call test disambiguates - a fresh 400 arriving a minute after
+a successful transcript webhook means (b).
+
+**Suggested fix.** In the /intelligence handler, when a SIGNATURE-VERIFIED
+request lacks `transcript_sid`: log the payload's top-level KEY NAMES only
+(bounded count, never values - PII-safe) plus content-length, and ack 200
+instead of 400 so Twilio stops retrying an event we have chosen not to process.
+Keep 400 for unverifiable/shapeless requests. Once a logged key-set identifies
+the event type, decide whether to handle or keep ignoring it (documented).

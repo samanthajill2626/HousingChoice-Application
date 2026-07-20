@@ -2,15 +2,18 @@
 // conversation hub: mutation paths emit, the GET /api/events SSE route
 // subscribes and streams to dashboards.
 //
-// *** SINGLE-INSTANCE ASSUMPTION (load-bearing, on purpose) ***
-// The one app process on the one EC2 box serves BOTH the mutation paths
-// (Twilio webhooks, /api sends, delivery callbacks) AND the SSE stream, so an
-// in-process EventEmitter reaches every connected dashboard client. If the
-// app ever scales past a single instance — or webhooks ever move off the
-// SSE-serving process — THIS MODULE IS THE SEAM: replace the singleton with a
-// consumer of the DynamoDB streams already enabled on the messages table
-// (lib/tables.ts) and fan out from there. Emitters and the SSE route keep
-// their contracts; only this module's internals change.
+// *** SSE SPINE: ONE APP PROCESS SERVES; THE WORKER BRIDGES IN ***
+// The one app process on the one EC2 box serves the SSE stream, so an in-process
+// EventEmitter reaches every connected dashboard client directly from the app's
+// own mutation paths (Twilio webhooks, /api sends, delivery callbacks). Emits
+// raised in the WORKER process (extraction/reminder/nudge polls, reconcile) run
+// on the worker's own bus and reach these SSE clients via the CROSS-PROCESS
+// BRIDGE: lib/eventBridge.ts fire-and-forgets POST /internal/events and
+// routes/internal.ts re-emits here - same event names and payloads, zero
+// frontend change. If the app ever scales past a single instance, THIS MODULE IS
+// THE SEAM: replace the singleton with a consumer of the DynamoDB streams already
+// enabled on the messages table (lib/tables.ts) and fan out from there. Emitters
+// and the SSE route keep their contracts; only this module's internals change.
 //
 // PII note (doc §9): event payloads carry the denormalized inbox preview
 // (already truncated by toPreview). They are DATA for authenticated dashboard
@@ -228,10 +231,11 @@ export interface TourUpdatedEvent {
  * appended, or a suggestion was accepted/dismissed. The contact page's chips/
  * badges + the Today "AI suggestions" tile refetch on this. ID-only (never PII).
  *
- * SINGLE-INSTANCE seam (lib/events.ts): the extraction POLL runs in the WORKER
- * process, so a poll-driven emit does NOT reach app SSE clients; the dashboard's
- * live path is the in-app dev tick (e2e) + accept/dismiss round-trips, and a
- * poller-driven change surfaces on the next fetch. See jobs/extraction.ts.
+ * CROSS-PROCESS BRIDGE (lib/eventBridge.ts): the extraction POLL runs in the
+ * WORKER process; its poll-driven emit now crosses the bridge to the app's SSE
+ * clients when EVENT_BRIDGE_URL is set (all deployed envs + local runners), so an
+ * open contact page updates live. Bare unset-URL runs surface the change on the
+ * next fetch. See jobs/extraction.ts.
  */
 export interface SuggestionUpdatedEvent {
   contactId: string;

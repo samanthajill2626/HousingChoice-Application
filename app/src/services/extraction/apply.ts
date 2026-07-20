@@ -400,9 +400,11 @@ export async function applyExtraction(
   let notedLines = 0;
   // Addresses are a structured target now - a model that still narrates one into
   // noteLines is overridden deterministically (spec SS5); the prompt forbids it,
-  // this filter makes the ban belt-and-braces.
+  // this filter makes the ban belt-and-braces. The digit requirement keeps the
+  // filter to POSTAL lines (a street/zip always carries one) so digit-free
+  // housing-STATUS facts ("Current address is unstable, couch-surfing") survive.
   const rawNotes = [...(result.noteLines ?? []), ...noteStrings].filter(
-    (line) => !/^current address\b/i.test(line.trim()),
+    (line) => !(/^current address\b/i.test(line.trim()) && /\d/.test(line)),
   );
   const cleaned = rawNotes.map((line) => line.trim()).filter((line) => line.length > 0).slice(0, MAX_NOTE_LINES);
   if (cleaned.length > 0) {

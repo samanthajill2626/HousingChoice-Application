@@ -771,4 +771,23 @@ describe('applyExtraction - address (ninth target)', () => {
     expect(notes).toContain('Has a service dog');
     expect(notes).not.toContain('Current address');
   });
+
+  it('a digit-free "Current address ..." housing-status note is KEPT (filter drops postal lines only)', async () => {
+    // Planner review F4: the filter must not eat legitimate screening facts
+    // like housing instability - only lines that actually carry a postal
+    // address (which always contains a digit).
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      noteLines: [
+        'Current address is unstable, couch-surfing with family',
+        'Current address: 535 Seal Pl NE, Atlanta',
+      ],
+    });
+
+    expect(outcome.notedLines).toBe(1);
+    const notes = records.updates[0]!.patch['notes'] as string;
+    expect(notes).toContain('Current address is unstable, couch-surfing with family');
+    expect(notes).not.toContain('535 Seal Pl NE');
+  });
 });

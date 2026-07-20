@@ -111,7 +111,12 @@ async function main() {
   }
   let webhookUrl;
   try {
-    webhookUrl = new URL(WEBHOOK_PATH, `${wbBase}/`).toString();
+    // CONCATENATE, do not URL-resolve: new URL('/abs/path', base) DISCARDS the
+    // base's own path segments, so a --webhook-base ending in /nowhere silently
+    // produced the canonical URL and reported "in sync" (bit us 2026-07-20 when
+    // deliberately mis-pointing the webhook to exercise the reconcile fallback).
+    // Concat preserves any base path; new URL() then just validates/normalizes.
+    webhookUrl = new URL(`${wbBase}${WEBHOOK_PATH}`).toString();
   } catch {
     fail(`[twilio:vi] webhook base "${wbBase}" is not a valid URL.`);
   }
@@ -163,12 +168,22 @@ async function main() {
     return null;
   }
 
-  /** Emit the pasteable sid line (stdout) + operator next-steps (stderr). */
+  /** Emit the pasteable sid line (stdout) + operator next-steps (stderr).
+   * The push/deploy steps apply ONLY when the sid is not yet in .env.<env> -
+   * webhook changes live on the Twilio service and are effective immediately,
+   * with nothing app-side to push (a real operator confusion, 2026-07-20). */
   function report(sid) {
     console.error('');
-    console.error(`Paste this into .env.${env} (gitignored), then:`);
-    console.error(`  npm run secrets:push -- ${env}     # lands it in Parameter Store`);
-    console.error(`  npm run deploy:${env}              # hydrates it onto the instance`);
+    if (entries.TWILIO_VI_SERVICE_SID === sid) {
+      console.error(
+        `[twilio:vi] ${envFileName} already carries this sid. Twilio-side changes ` +
+          `(webhook URL) are live immediately - NO secrets:push / deploy needed.`,
+      );
+    } else {
+      console.error(`Paste this into .env.${env} (gitignored), then:`);
+      console.error(`  npm run secrets:push -- ${env}     # lands it in Parameter Store`);
+      console.error(`  npm run deploy:${env}              # hydrates it onto the instance`);
+    }
     console.log(`TWILIO_VI_SERVICE_SID=${sid}`);
   }
 

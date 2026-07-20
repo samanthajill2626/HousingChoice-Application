@@ -348,6 +348,39 @@ describe('PATCH /api/contacts/:contactId - human edit clears AI provenance + pen
     expect(await world.extractionRepo.getSuggestion(contactId, 'pets')).toBeUndefined();
   });
 
+  it('a human address edit clears address_source AND deletes the pending address suggestion', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world, {
+      address: { line1: '9 Old Rd', city: 'Macon' },
+      address_source: { source: 'ai', at: '2026-07-16T00:00:00.000Z', conversationId: 'conv-a' },
+    });
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      currentValue: '9 Old Rd, Macon',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      conversationId: 'conv-a',
+    });
+    const res = await request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ address: { line1: '2 New St', city: 'Decatur' } });
+    expect(res.status).toBe(200);
+    // Whole-object SET replace; only the non-empty parts stored.
+    expect(res.body.contact.address).toEqual({ line1: '2 New St', city: 'Decatur' });
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['address']).toEqual({
+      line1: '2 New St',
+      city: 'Decatur',
+    });
+    // Provenance REMOVED (human edit supersedes AI).
+    expect('address_source' in res.body.contact).toBe(false);
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['address_source']).toBeUndefined();
+    // Pending suggestion deleted.
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeUndefined();
+  });
+
   it('a type triage PATCH deletes the pending type suggestion', async () => {
     const { app, world } = makeWebhookHarness();
     const contactId = seedTenant(world, {

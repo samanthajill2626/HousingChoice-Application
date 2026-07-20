@@ -14,6 +14,9 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { buildExtractionSystemPrompt, buildExtractionUserContent } from '../services/extraction/prompt.js';
 import { EXTRACTION_SCHEMA, parseExtractionText } from '../services/extraction/schema.js';
 import { FakeExtractionDriver } from './extractionFake.js';
+// Type-only import (erased at runtime) keeps the fake-driver no-runtime-cycle
+// rule intact - address.ts is a pure leaf and nothing here imports it at runtime.
+import type { ExtractionAddressParts } from '../services/extraction/address.js';
 
 export interface TranscriptUtterance {
   // 'unknown' is a call line labeled `Speaker N:` (legacy/underivable role) -
@@ -41,11 +44,25 @@ export interface ExtractionFieldOp {
   reason?: string;
 }
 
+/** Re-export the parts shape so downstream (schema parse, apply, accept route,
+ *  dashboard types) has ONE import site for it. */
+export type { ExtractionAddressParts };
+
+/** The ninth extraction target: the client's CURRENT address as structured parts. */
+export interface ExtractionAddress {
+  op: 'write' | 'suggest';
+  parts: ExtractionAddressParts; // only non-empty trimmed parts
+  reason?: string;
+}
+
 export interface ExtractionResult {
   fields: Partial<Record<ExtractableField, ExtractionFieldOp>>;
   statusAdvance?: { suggest: boolean; reason?: string };
   typeSuggestion?: { value: 'tenant' | 'landlord'; reason?: string };
   phoneAddition?: { phone: string; label?: string; reason?: string };
+  /** The client's current address as structured parts (parsed from the wire's
+   *  all-required address block; absent when op "none" or no usable parts). */
+  address?: ExtractionAddress;
   noteLines?: string[];
   // The model's role attribution for `Speaker N`-labeled (unknown) call lines:
   // each Speaker label mapped to client/staff/uncertain (spec Layer 2). Keyed by

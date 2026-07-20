@@ -16,6 +16,7 @@ import type {
   ExtractionFieldOp,
   ExtractionResult,
 } from '../../adapters/extraction.js';
+import { cleanAddressParts } from './address.js';
 
 /** The eight client-profile fields the model may operate on. */
 export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
@@ -28,6 +29,13 @@ export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
   'tenure',
   'porting',
 ];
+
+/**
+ * Fields carrying `<field>_source` AI provenance a human PATCH must clear: the
+ * eight scalar extractables plus the compound `address`. ONE shared const so the
+ * apply layer and the contacts PATCH provenance-clear gate always agree.
+ */
+export const PROVENANCE_FIELDS: readonly string[] = [...EXTRACTABLE_FIELDS, 'address'];
 
 /**
  * Controlled vocabulary of housing-authority values - EXACT strings as stored
@@ -140,8 +148,27 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
         required: ['speaker', 'role'],
       },
     },
+    // The ninth target: the client's CURRENT address as structured PARTS. All
+    // keys required (sentinels for "nothing") so the schema-wide optional count
+    // stays 0 - the 24-optional grammar cap tripwire.
+    address: {
+      type: 'object',
+      additionalProperties: false,
+      properties: {
+        // op "none" (with every part "") is the sentinel for "no address to
+        // record"; an empty string in a part means that part was not mentioned.
+        op: { type: 'string', enum: ['none', 'write', 'suggest'] },
+        line1: { type: 'string' },
+        line2: { type: 'string' },
+        city: { type: 'string' },
+        state: { type: 'string' },
+        zip: { type: 'string' },
+        reason: { type: 'string' },
+      },
+      required: ['op', 'line1', 'line2', 'city', 'state', 'zip', 'reason'],
+    },
   },
-  required: ['fields', 'statusAdvance', 'typeSuggestion', 'phoneAddition', 'noteLines', 'speakerRoles'],
+  required: ['fields', 'statusAdvance', 'typeSuggestion', 'phoneAddition', 'noteLines', 'speakerRoles', 'address'],
 };
 
 const MAX_REASON_CHARS = 200;
@@ -226,6 +253,23 @@ export function parseExtractionText(text: string): ExtractionResult {
       value.reason = clamp(phoneAddition.reason, MAX_REASON_CHARS);
     }
     result.phoneAddition = value;
+  }
+
+  // Address target (ninth): op 'none' folds to absent; a write/suggest op with
+  // ZERO usable parts downgrades to absent (mirrors the value-less field-op
+  // downgrade). Parts are read flat off the raw op object - cleanAddressParts
+  // takes only the known part keys and ignores the op/reason keys.
+  const rawAddress = root.address;
+  if (isRecord(rawAddress) && (rawAddress.op === 'write' || rawAddress.op === 'suggest')) {
+    const op = rawAddress.op;
+    const parts = cleanAddressParts(rawAddress);
+    if (Object.keys(parts).length > 0) {
+      const value: NonNullable<ExtractionResult['address']> = { op, parts };
+      if (typeof rawAddress.reason === 'string' && rawAddress.reason.trim().length > 0) {
+        value.reason = clamp(rawAddress.reason, MAX_REASON_CHARS);
+      }
+      result.address = value;
+    }
   }
 
   if (Array.isArray(root.noteLines)) {

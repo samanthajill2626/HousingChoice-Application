@@ -2,7 +2,15 @@
 // docs/superpowers/specs/2026-07-20-event-bridge-design.md). The worker's
 // forwarder (lib/eventBridge.ts) is the ONLY intended caller.
 //
-// Trust posture (two independent fences, both required):
+// Trust posture (three independent fences):
+//   0. The CloudFront EDGE method allowlist (infra/modules/cloudfront/main.tf):
+//      POST is allowed only on the /api/*, /webhooks/*, /auth/* behaviors; the
+//      default behavior /internal/* falls to is GET/HEAD/OPTIONS-only, so a
+//      public POST dies at the edge and never reaches the origin. This fence
+//      is LOAD-BEARING but lives in Terraform - if a future behavior change
+//      lets the default (or a broader path) accept POST, this route becomes
+//      internet-reachable (still token-gated, but its 403-warn/log surface
+//      opens; see docs/issues/event-bridge-hardening-followups.md item 5).
 //   1. The locked middleware chain: this router mounts at the ROUTE stage, so
 //      the CloudFront origin-secret validator (stage 2) already ran - a
 //      direct-to-EC2 probe without CF_ORIGIN_SECRET died there.

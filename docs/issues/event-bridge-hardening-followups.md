@@ -35,7 +35,32 @@ follow-up pass rather than scope-creeping the feature branch:
    included, not just the three polls. Volume is A2P-paced (~1 send/sec) and
    poll-scale; a claim-skip backlog bursts at most one POST per listDue row.
 
+Items 5-7 were added by the planner's independent plan-blind adversarial
+review (2026-07-20, same day):
+
+5. The REAL public-edge fence for POST /internal/events is the CloudFront
+   method allowlist (infra/modules/cloudfront/main.tf: POST only on
+   /api/*, /webhooks/*, /auth/*; the default behavior is GET/HEAD/OPTIONS).
+   That coupling is load-bearing but lives in Terraform with no code/test
+   lock - a future behavior widening silently exposes the route (still
+   token-gated). The route header now documents it; a terraform-side comment
+   or an infra test pinning the default-behavior method list would close it.
+6. lib/eventBridge.ts builds `JSON.stringify({ name, payload })`
+   SYNCHRONOUSLY inside the bus listener, before the detached fetch's
+   .catch attaches - a non-serializable payload (BigInt/circular) would
+   throw out of the emit into the originating job, violating the stated
+   fire-and-forget contract. Theoretical today (all payloads are plain
+   typed objects); wrapping the body build in the same try/catch posture
+   would honor the contract fully.
+7. `Number('')` === 0: a BLANK `WORKER_POLL_INTERVAL_MS=` line in a
+   hand-edited .env fails loadConfig's positive-integer check in BOTH
+   processes - an app-boot crash from a worker-only knob. Consistent with
+   the PORT house style, but a `?.trim()`+length guard (the
+   EVENT_BRIDGE_URL pattern) would treat blank as unset.
+
 **Suggested fix.** Small standalone pass: add a createRateLimit instance in
 front of createInternalRouter's POST handler + consider a floor in the
-WORKER_POLL_INTERVAL_MS validation; fold items 3-4 into operator docs when a
-rotation runbook next gets touched. None of this blocks the bridge.
+WORKER_POLL_INTERVAL_MS validation (and the item-7 blank guard); pin the
+item-5 CloudFront method-allowlist coupling on the infra side; wrap the
+item-6 stringify; fold items 3-4 into operator docs when a rotation runbook
+next gets touched. None of this blocks the bridge.

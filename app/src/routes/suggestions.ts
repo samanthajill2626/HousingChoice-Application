@@ -17,6 +17,10 @@
 //   - the eight ExtractableField values: coerce like apply.ts (voucherSize int,
 //     porting boolean), write the value + `<field>_source` provenance carrying
 //     `accepted_by`, audit `ai_suggestion_accepted`, delete the suggestion.
+//   - 'address': write the item's cleaned parts as the contact `address` object
+//     + `address_source` provenance carrying `accepted_by`, audit
+//     `ai_suggestion_accepted` (FORMATTED from/to strings), delete the
+//     suggestion; 400 invalid_suggestion_value when the item carries no parts.
 //   - 'status': route through the ONE status-transition service
 //     (setTenantStatus, source 'ai'); a stale suggestion is still attempted and
 //     the service governs validity (a refusal surfaces 409 and KEEPS it).
@@ -55,6 +59,11 @@ import {
   type StatusTransitionService,
 } from '../services/statusTransition.js';
 import { EXTRACTABLE_FIELDS } from '../services/extraction/schema.js';
+import {
+  cleanAddressParts,
+  contactAddressToParts,
+  formatAddressParts,
+} from '../services/extraction/address.js';
 import type { ExtractableField } from '../adapters/extraction.js';
 import type { TenantStatus } from '../lib/statusModel.js';
 
@@ -227,6 +236,41 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (phone)');
+      res.json({ contact: serializeContact(updated), suggestions: remaining });
+      return;
+    }
+
+    // --- 'address' -> compound parts write (spec 2026-07-20 SS6) -------------
+    if (target === 'address') {
+      const parts = cleanAddressParts(suggestion.suggestedAddress);
+      const formatted = formatAddressParts(parts);
+      if (formatted.length === 0) {
+        // A malformed/legacy item (no usable parts) must never half-write an address.
+        res.status(400).json({ error: 'invalid_suggestion_value' });
+        return;
+      }
+      const from = formatAddressParts(contactAddressToParts(contact['address']));
+      const patch: Record<string, unknown> = {
+        address: parts,
+        address_source: {
+          source: 'ai',
+          at: now,
+          conversationId: suggestion.conversationId,
+          ...(suggestion.tsMsgId !== undefined && { tsMsgId: suggestion.tsMsgId }),
+          ...(actor !== undefined && { accepted_by: actor }),
+        },
+      };
+      const updated = await contacts.update(contactId, patch);
+      await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
+        ...(actor !== undefined && { actor }),
+        target,
+        ...(from.length > 0 && { from }),
+        to: formatted,
+      });
+      await extraction.deleteSuggestion(contactId, 'address');
+      events.emit('suggestion.updated', { contactId });
+      const remaining = await extraction.listSuggestionsByContact(contactId);
+      log.info({ contactId, target, actor }, 'ai suggestion accepted (address)');
       res.json({ contact: serializeContact(updated), suggestions: remaining });
       return;
     }

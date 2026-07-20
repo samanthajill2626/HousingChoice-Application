@@ -232,6 +232,64 @@ describe('POST /api/contacts/:contactId/suggestions/:target/accept', () => {
     const res = await accept(app, 'nope', 'pets');
     expect(res.status).toBe(404);
   });
+
+  it('accepts an address suggestion: writes parts + provenance, audits, deletes', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world); // no address yet
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      conversationId: 'conv-addr',
+      tsMsgId: 'ts-9',
+    });
+    const res = await accept(app, contactId, 'address');
+    expect(res.status).toBe(200);
+    // The contact carries the cleaned parts object (edit-form-identical shape).
+    expect(res.body.contact.address).toEqual({ line1: '1 Main St', city: 'Atlanta' });
+    // Provenance stamped source 'ai' + the accepting actor.
+    expect(res.body.contact.address_source).toMatchObject({
+      source: 'ai',
+      conversationId: 'conv-addr',
+      tsMsgId: 'ts-9',
+      accepted_by: ACTOR,
+    });
+    // Suggestion deleted -> not in the remaining list.
+    expect(res.body.suggestions).toEqual([]);
+    // Store side: the contact really carries the parts + the suggestion is gone.
+    expect(world.contacts.find((c) => c.contactId === contactId)?.address).toEqual({
+      line1: '1 Main St',
+      city: 'Atlanta',
+    });
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeUndefined();
+    // Audited ai_suggestion_accepted with the FORMATTED to string; no from (empty).
+    const audit = world.auditEvents.find((e) => e.event_type === 'ai_suggestion_accepted');
+    expect(audit?.entityKey).toBe(`contacts#${contactId}`);
+    expect(audit?.payload).toMatchObject({ target: 'address', to: '1 Main St, Atlanta' });
+    expect(audit?.payload?.['actor']).toBe(ACTOR);
+    expect(audit?.payload?.['from']).toBeUndefined();
+    // Emits suggestion.updated.
+    expect(world.emitted.some((e) => e.event === 'suggestion.updated')).toBe(true);
+  });
+
+  it('400s an address accept whose item carries no usable parts, KEEPING the suggestion', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    // Display string only, no suggestedAddress parts (malformed/legacy item).
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      conversationId: 'conv-addr',
+    });
+    const res = await accept(app, contactId, 'address');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid_suggestion_value' });
+    // Never half-writes: the suggestion is KEPT for the human to reconcile.
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeDefined();
+    expect(world.contacts.find((c) => c.contactId === contactId)?.address).toBeUndefined();
+  });
 });
 
 describe('POST /api/contacts/:contactId/suggestions/:target/dismiss', () => {

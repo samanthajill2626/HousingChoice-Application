@@ -1972,6 +1972,7 @@ export function createFakeWorld(): FakeWorld {
         target: s.target,
         ...(s.currentValue !== undefined && { currentValue: s.currentValue }),
         suggestedValue: s.suggestedValue,
+        ...(s.suggestedAddress !== undefined && { suggestedAddress: s.suggestedAddress }),
         ...(s.reason !== undefined && { reason: s.reason }),
         conversationId: s.conversationId,
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),

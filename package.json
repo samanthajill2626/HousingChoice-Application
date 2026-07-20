@@ -48,6 +48,7 @@
     "user:invite": "node scripts/userInvite.mjs",
     "user:role": "node scripts/userRole.mjs",
     "vapid:keys": "node scripts/vapidKeys.mjs",
+    "twilio:vi": "node scripts/twilioVi.mjs",
     "plan": "node scripts/tf.mjs plan",
     "apply": "node scripts/tf.mjs apply",
     "drift": "node scripts/tf.mjs drift"

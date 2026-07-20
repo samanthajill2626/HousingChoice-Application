@@ -1,10 +1,16 @@
 // JSON output schema + parser/clamp for conversation fact extraction.
 //
 // The schema is consumed by the Anthropic driver's structured-outputs call
-// (adapters/extraction.ts). Structured outputs impose two constraints we honor
-// here: EVERY object level must set `additionalProperties: false`, and the
+// (adapters/extraction.ts). Structured outputs impose three constraints we
+// honor here: EVERY object level must set `additionalProperties: false`; the
 // numeric/length keywords (minimum/maximum/minLength) are unsupported - so we
-// carry NO size bounds in the schema and instead CLAMP in parseExtractionText.
+// carry NO size bounds in the schema and instead CLAMP in parseExtractionText;
+// and the grammar compiler caps OPTIONAL parameters at 24 schema-wide (dev 400
+// on 2026-07-20: our original shape had 33). So the WIRE shape is ALL-REQUIRED:
+// every key is always present and "nothing" is spelled with sentinels
+// (op:"none", empty strings, value:"none", empty arrays). parseExtractionText
+// normalizes the sentinels away so the internal ExtractionResult - and
+// everything downstream of it - stays sparse and unchanged.
 import type {
   ExtractableField,
   ExtractionFieldOp,
@@ -52,7 +58,7 @@ const fieldOpSchema = {
     value: { type: 'string' },
     reason: { type: 'string' },
   },
-  required: ['op'],
+  required: ['op', 'value', 'reason'],
 } as const;
 
 /** Draft-07 subset compatible with structured outputs (json_schema format). */
@@ -73,6 +79,16 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
         tenure: fieldOpSchema,
         porting: fieldOpSchema,
       },
+      required: [
+        'firstName',
+        'lastName',
+        'voucherSize',
+        'housingAuthority',
+        'pets',
+        'evictions',
+        'tenure',
+        'porting',
+      ],
     },
     statusAdvance: {
       type: 'object',
@@ -81,26 +97,28 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
         suggest: { type: 'boolean' },
         reason: { type: 'string' },
       },
-      required: ['suggest'],
+      required: ['suggest', 'reason'],
     },
     typeSuggestion: {
       type: 'object',
       additionalProperties: false,
       properties: {
-        value: { type: 'string', enum: ['tenant', 'landlord'] },
+        // "none" is the required-key sentinel for "no suggestion".
+        value: { type: 'string', enum: ['tenant', 'landlord', 'none'] },
         reason: { type: 'string' },
       },
-      required: ['value'],
+      required: ['value', 'reason'],
     },
     phoneAddition: {
       type: 'object',
       additionalProperties: false,
       properties: {
+        // "" phone is the required-key sentinel for "no phone mentioned".
         phone: { type: 'string' },
         label: { type: 'string' },
         reason: { type: 'string' },
       },
-      required: ['phone'],
+      required: ['phone', 'label', 'reason'],
     },
     noteLines: {
       type: 'array',
@@ -123,7 +141,7 @@ export const EXTRACTION_SCHEMA: Record<string, unknown> = {
       },
     },
   },
-  required: ['fields'],
+  required: ['fields', 'statusAdvance', 'typeSuggestion', 'phoneAddition', 'noteLines', 'speakerRoles'],
 };
 
 const MAX_REASON_CHARS = 200;
@@ -157,8 +175,21 @@ export function parseExtractionText(text: string): ExtractionResult {
     const op = rawOp.op;
     if (op !== 'none' && op !== 'write' && op !== 'suggest') continue;
     const fieldOp: ExtractionFieldOp = { op };
-    if (typeof rawOp.value === 'string') fieldOp.value = rawOp.value;
-    if (typeof rawOp.reason === 'string') fieldOp.reason = clamp(rawOp.reason, MAX_REASON_CHARS);
+    // All-required wire sentinels: empty strings mean "not provided" - drop
+    // them so downstream sees the sparse shape it always has.
+    if (typeof rawOp.value === 'string' && rawOp.value.trim().length > 0) {
+      fieldOp.value = rawOp.value;
+    }
+    if (typeof rawOp.reason === 'string' && rawOp.reason.trim().length > 0) {
+      fieldOp.reason = clamp(rawOp.reason, MAX_REASON_CHARS);
+    }
+    // A write/suggest without a usable value is meaningless - downgrade to none
+    // (defense-in-depth; apply would skip it anyway, but a bare op keeps the
+    // audit/suggestion paths from ever seeing sentinel emptiness).
+    if (fieldOp.op !== 'none' && fieldOp.value === undefined) {
+      fields[field] = { op: 'none' };
+      continue;
+    }
     fields[field] = fieldOp;
   }
   result.fields = fields;
@@ -166,28 +197,40 @@ export function parseExtractionText(text: string): ExtractionResult {
   const statusAdvance = root.statusAdvance;
   if (isRecord(statusAdvance) && typeof statusAdvance.suggest === 'boolean') {
     const value: { suggest: boolean; reason?: string } = { suggest: statusAdvance.suggest };
-    if (typeof statusAdvance.reason === 'string') value.reason = clamp(statusAdvance.reason, MAX_REASON_CHARS);
+    if (typeof statusAdvance.reason === 'string' && statusAdvance.reason.trim().length > 0) {
+      value.reason = clamp(statusAdvance.reason, MAX_REASON_CHARS);
+    }
     result.statusAdvance = value;
   }
 
+  // "none" is the all-required wire sentinel for "no type suggestion" - any
+  // value other than the two real types folds to absent.
   const typeSuggestion = root.typeSuggestion;
   if (isRecord(typeSuggestion) && (typeSuggestion.value === 'tenant' || typeSuggestion.value === 'landlord')) {
     const value: { value: 'tenant' | 'landlord'; reason?: string } = { value: typeSuggestion.value };
-    if (typeof typeSuggestion.reason === 'string') value.reason = clamp(typeSuggestion.reason, MAX_REASON_CHARS);
+    if (typeof typeSuggestion.reason === 'string' && typeSuggestion.reason.trim().length > 0) {
+      value.reason = clamp(typeSuggestion.reason, MAX_REASON_CHARS);
+    }
     result.typeSuggestion = value;
   }
 
+  // An empty/whitespace phone is the all-required wire sentinel for "no phone
+  // mentioned" - folds to absent.
   const phoneAddition = root.phoneAddition;
-  if (isRecord(phoneAddition) && typeof phoneAddition.phone === 'string') {
+  if (isRecord(phoneAddition) && typeof phoneAddition.phone === 'string' && phoneAddition.phone.trim().length > 0) {
     const value: { phone: string; label?: string; reason?: string } = { phone: phoneAddition.phone };
-    if (typeof phoneAddition.label === 'string') value.label = clamp(phoneAddition.label, MAX_REASON_CHARS);
-    if (typeof phoneAddition.reason === 'string') value.reason = clamp(phoneAddition.reason, MAX_REASON_CHARS);
+    if (typeof phoneAddition.label === 'string' && phoneAddition.label.trim().length > 0) {
+      value.label = clamp(phoneAddition.label, MAX_REASON_CHARS);
+    }
+    if (typeof phoneAddition.reason === 'string' && phoneAddition.reason.trim().length > 0) {
+      value.reason = clamp(phoneAddition.reason, MAX_REASON_CHARS);
+    }
     result.phoneAddition = value;
   }
 
   if (Array.isArray(root.noteLines)) {
     const lines = root.noteLines
-      .filter((line): line is string => typeof line === 'string')
+      .filter((line): line is string => typeof line === 'string' && line.trim().length > 0)
       .slice(0, MAX_NOTE_LINES)
       .map((line) => clamp(line, MAX_NOTE_CHARS));
     if (lines.length > 0) result.noteLines = lines;

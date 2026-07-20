@@ -31,9 +31,33 @@ function walkSchema(node: unknown, path: string): void {
   }
 }
 
+// Anthropic's structured-outputs grammar compiler caps OPTIONAL parameters
+// (object properties not listed in the parent's required[]) at 24 across the
+// whole schema - exceeding it is a hard 400 at request time that no local test
+// exercises (the fake driver bypasses the real API). Count them here so the
+// gate catches the class forever (first hit: dev, 2026-07-20, 33 optionals).
+function countOptionalParams(node: unknown): number {
+  if (Array.isArray(node)) return node.reduce((n: number, child) => n + countOptionalParams(child), 0);
+  if (node === null || typeof node !== 'object') return 0;
+  const obj = node as Record<string, unknown>;
+  let count = 0;
+  if (obj.type === 'object' && obj.properties !== null && typeof obj.properties === 'object') {
+    const required = new Set(Array.isArray(obj.required) ? (obj.required as string[]) : []);
+    for (const key of Object.keys(obj.properties as Record<string, unknown>)) {
+      if (!required.has(key)) count += 1;
+    }
+  }
+  for (const value of Object.values(obj)) count += countOptionalParams(value);
+  return count;
+}
+
 describe('EXTRACTION_SCHEMA', () => {
   it('sets additionalProperties:false on every object and uses no unsupported constraint keys', () => {
     walkSchema(EXTRACTION_SCHEMA, 'schema');
+  });
+
+  it('stays within the structured-outputs optional-parameter limit (Anthropic caps at 24)', () => {
+    expect(countOptionalParams(EXTRACTION_SCHEMA)).toBeLessThanOrEqual(24);
   });
 });
 
@@ -104,6 +128,39 @@ describe('parseExtractionText', () => {
       JSON.stringify({ fields: { pets: { op: 'delete', value: 'x' } } }),
     );
     expect(parsed.fields.pets).toBeUndefined();
+  });
+
+  // The all-required wire shape (every key present, "nothing" spelled as
+  // op:"none" / "" / value:"none" / []) must NORMALIZE to the sparse internal
+  // ExtractionResult so the apply layer never sees sentinel emptiness.
+  it('normalizes the all-required wire shape: empty value/reason dropped, non-none op without a value downgrades to none', () => {
+    const payload = {
+      fields: {
+        firstName: { op: 'write', value: 'Maria', reason: '' },
+        lastName: { op: 'none', value: '', reason: '' },
+        voucherSize: { op: 'suggest', value: '', reason: 'said bigger' },
+        housingAuthority: { op: 'none', value: '', reason: '' },
+        pets: { op: 'none', value: '', reason: '' },
+        evictions: { op: 'none', value: '', reason: '' },
+        tenure: { op: 'none', value: '', reason: '' },
+        porting: { op: 'none', value: '', reason: '' },
+      },
+      statusAdvance: { suggest: false, reason: '' },
+      typeSuggestion: { value: 'none', reason: '' },
+      phoneAddition: { phone: '', label: '', reason: '' },
+      noteLines: [],
+      speakerRoles: [],
+    };
+    const result = parseExtractionText(JSON.stringify(payload));
+    expect(result.fields.firstName).toEqual({ op: 'write', value: 'Maria' }); // empty reason dropped
+    expect(result.fields.lastName).toEqual({ op: 'none' });
+    // suggest with an empty value is meaningless - downgraded to none.
+    expect(result.fields.voucherSize).toEqual({ op: 'none' });
+    expect(result.statusAdvance).toEqual({ suggest: false });
+    expect(result.typeSuggestion).toBeUndefined(); // "none" sentinel folds to absent
+    expect(result.phoneAddition).toBeUndefined(); // empty phone folds to absent
+    expect(result.noteLines).toBeUndefined();
+    expect(result.speakerRoles).toBeUndefined();
   });
 
   it('throws SyntaxError on unparseable text', () => {

@@ -47,6 +47,17 @@ Terraform module exists (sandboxed, sender-identity only).
 7. **Search ships separately.** Product-wide search is its own effort
    ([total-product-search](../../issues/total-product-search.md)); email v1's
    obligation is to store content search-ready (see B7).
+8. **Minimal 'partner' ContactType in v1** covering housing-authority staff
+   and caseworkers, so emailing the authority works with honest author
+   labeling. No deeper authority modeling (the housingAuthority string field
+   stays as-is).
+9. **The unmatched-email surface is its own nav item** (with an unread
+   badge), holding unmatched mail plus the spam-quarantine sub-view. The
+   general inbox is untouched.
+10. **CC lands in the primary (To) contact's thread only.** CC'd addresses
+    are recorded and displayed on the message; no mirroring into a known
+    CC'd contact's timeline in v1 - a follow-up registry issue for mirroring
+    is filed as part of delivering the feature.
 
 ## Use cases (mapped to the placement lifecycle)
 
@@ -189,17 +200,8 @@ Labels/folders/archive; read/open tracking; marketing campaigns; calendar
 invites; per-staff personal inboxes; rich-text composition; replacing
 DocuSign; automated/scheduled email sends (hooks only, see B12).
 
-## Open questions (to resolve at implementation-plan time)
+## Open questions
 
-- **Housing-authority/caseworker contact modeling.** Emailing authority staff
-  requires them to be contacts. Minimal path: a caseworker/partner
-  ContactType (issue already filed) and optionally linking a contact to the
-  housingAuthority string. Decide whether this lands inside email v1 or
-  immediately before it.
-- **Unmatched-email surface placement.** Where the side-door view lives in
-  navigation: an inbox-adjacent tab with a badge vs its own nav item. (The
-  behavior is decided - see Decisions 4; only the placement is open.)
-- **CC cross-thread semantics.** CC is in v1 (Decisions 5); open is only how
-  a CC to a second KNOWN contact reflects in that contact's own timeline.
-- **Which flows adopt email first operationally** (landlord welcome likely),
-  and whether any get catalog templates as a fast-follow.
+All plan-blocking questions were resolved 2026-07-20 (Decisions 8-10). Still
+open, operational only: which flows adopt email first (landlord welcome
+likely), and whether any get catalog templates as a fast-follow.

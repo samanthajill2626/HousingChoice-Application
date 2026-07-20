@@ -7,8 +7,8 @@
 // role while filing under its base type. Accessible records list (heading - search
 // - rows linking to the contact detail page); tokens + CSS Modules. See
 // 2026-06-18-extensible-contact-creation-design.md.
-import { useMemo, useState } from 'react';
-import { Link, useNavigate } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { type Contact } from '../../api/index.js';
 import { Button, Spinner, StatusBadge } from '../../ui/index.js';
 import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
@@ -88,7 +88,18 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
 
 export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   const { status, contacts } = useContacts(filter);
-  const [query, setQuery] = useState('');
+  // Deep-link filter: the Inbox/Today/conversation "unknown" links carry
+  // `?phone=<E.164>` (e.g. /contacts/unknown?phone=%2B1404...). Seed the search
+  // box from it — searchKey() indexes the raw phone, so the target row matches.
+  // The component stays MOUNTED across the four filter routes (same element
+  // position), so a mount-time-only read would miss later deep-links; the
+  // effect re-seeds whenever the param value changes.
+  const [searchParams] = useSearchParams();
+  const phoneParam = searchParams.get('phone') ?? '';
+  const [query, setQuery] = useState(phoneParam);
+  useEffect(() => {
+    if (phoneParam) setQuery(phoneParam);
+  }, [phoneParam]);
   const [createOpen, setCreateOpen] = useState(false);
   const navigate = useNavigate();
 

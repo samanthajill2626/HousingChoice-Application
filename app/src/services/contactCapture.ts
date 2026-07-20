@@ -41,14 +41,24 @@ export interface ContactCaptureDeps {
 }
 
 /**
+ * Which inbound channel triggered the capture. Drives the stub's
+ * `capture_source`, its automatic consent stamp (spec §3.2: a customer-initiated
+ * inbound SMS or CALL each confer consent — `inbound_text` / `inbound_call`
+ * respectively), and the audit entry's `source`.
+ */
+export type CaptureSource = 'inbound_sms' | 'inbound_call';
+
+/**
  * Resolve (creating/linking as needed) the contact for a conversation's
  * external participant. `knownContact` is the caller's already-resolved
  * findByPhone result, passed through so the steady state (contact exists and
- * is linked) costs ZERO extra DynamoDB calls.
+ * is linked) costs ZERO extra DynamoDB calls. `source` defaults to
+ * 'inbound_sms' (the original SMS-webhook caller).
  */
 export type ContactCaptureService = (
   conversation: ConversationItem,
   knownContact?: ContactItem,
+  source?: CaptureSource,
 ) => Promise<ContactItem>;
 
 export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCaptureService {
@@ -57,7 +67,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const log = deps.logger ?? defaultLogger;
 
-  function stubFor(contactId: string, phone: string): ContactItem {
+  function stubFor(contactId: string, phone: string, source: CaptureSource): ContactItem {
     const now = new Date().toISOString();
     return {
       contactId,
@@ -69,14 +79,17 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
       type: 'unknown',
       status: 'needs_review',
       phone,
-      capture_source: 'inbound_sms',
+      capture_source: source,
       captured_at: now,
       created_at: now,
-      // A2P/CTIA consent (spec §3.2): a first inbound text IS the consent basis
-      // — customer-initiated contact for an INFORMATIONAL/transactional program.
-      // Stamp `inbound_text` so replies never hit the JIT gate. hasSmsConsent()
-      // reads `consent_method`; this is the automatic (non-human) stamp.
-      consent_method: 'inbound_text',
+      // A2P/CTIA consent (spec §3.2): a first inbound text OR CALL is the
+      // consent basis — customer-initiated contact for an INFORMATIONAL/
+      // transactional program. Stamp the channel-matched automatic method
+      // (`inbound_text` / `inbound_call` — the same basis the voice webhook
+      // stamps on EXISTING contacts) so replies never hit the JIT gate.
+      // hasSmsConsent() reads `consent_method`; this is the automatic
+      // (non-human) stamp.
+      consent_method: source === 'inbound_call' ? 'inbound_call' : 'inbound_text',
       consent_at: now,
     };
   }
@@ -90,15 +103,16 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     contactId: string,
     phone: string,
     conversationId: string,
+    source: CaptureSource,
   ): Promise<ContactItem> {
     const existing = await contacts.getById(contactId);
     if (existing) return existing;
-    const stub = stubFor(contactId, phone);
+    const stub = stubFor(contactId, phone, source);
     const created = await contacts.createIfAbsent(stub);
     if (created) {
       await audit.append(`contacts#${contactId}`, 'contact_auto_captured', {
         conversationId,
-        source: 'inbound_sms',
+        source,
       });
       log.info({ contactId, conversationId }, 'contact auto-captured (stub created)');
       return stub;
@@ -107,7 +121,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     return (await contacts.getById(contactId)) ?? stub;
   }
 
-  return async function captureContact(conversation, knownContact) {
+  return async function captureContact(conversation, knownContact, source = 'inbound_sms') {
     const { conversationId, participant_phone: phone } = conversation;
 
     // (1) Already linked? The link is the race anchor — trust it over the
@@ -119,7 +133,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     const linked = conversation.participants?.find((p) => p.phone === phone);
     if (linked) {
       if (knownContact && knownContact.contactId === linked.contactId) return knownContact;
-      return ensureContact(linked.contactId, phone, conversationId);
+      return ensureContact(linked.contactId, phone, conversationId, source);
     }
 
     // (2) Known phone, missing link → backfill the link only. The contact
@@ -143,7 +157,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
       const fresh = await conversations.getById(conversationId);
       const adopted = fresh?.participants?.find((p) => p.phone === phone);
       if (adopted && adopted.contactId !== existing.contactId) {
-        return ensureContact(adopted.contactId, phone, conversationId);
+        return ensureContact(adopted.contactId, phone, conversationId, source);
       }
       return existing;
     }
@@ -154,7 +168,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     const claimed = await conversations.setParticipantsIfAbsent(conversationId, [
       { contactId, phone },
     ]);
-    if (claimed) return ensureContact(contactId, phone, conversationId);
+    if (claimed) return ensureContact(contactId, phone, conversationId, source);
     const fresh = await conversations.getById(conversationId);
     const winner = fresh?.participants?.find((p) => p.phone === phone);
     if (!winner) {
@@ -166,6 +180,6 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
         `contact capture: participants claim failed but no link for this phone is readable on ${conversationId}`,
       );
     }
-    return ensureContact(winner.contactId, phone, conversationId);
+    return ensureContact(winner.contactId, phone, conversationId, source);
   };
 }

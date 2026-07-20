@@ -203,6 +203,58 @@ describe('founder call-triage — the inbound bridge (M1.9b)', () => {
     expect(caller?.consent_at).toBe('2026-06-01T00:00:00.000Z');
   });
 
+  it('an UNKNOWN caller is auto-captured: needs_review stub + participants link + audit (voice parity with SMS intake)', async () => {
+    const world = createFakeWorld(); // no contact seeded — a brand-new number calls in
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    // inbound-call-skips-contact-capture: the caller now EXISTS as a triageable
+    // record — (type=unknown, status=needs_review) IS the human triage queue
+    // (Today's contacts pass + Contacts ▸ Unknown), with channel-matched
+    // capture/consent stamps (a customer-initiated CALL confers consent, §3.2).
+    expect(world.contacts).toHaveLength(1);
+    const stub = world.contacts[0]!;
+    expect(stub).toMatchObject({
+      type: 'unknown',
+      status: 'needs_review',
+      phone: CALLER,
+      capture_source: 'inbound_call',
+      consent_method: 'inbound_call',
+    });
+    // The conversation is LINKED to the stub — what the Inbox row's contact
+    // deep-link and Today's conversation branch key on.
+    const conv = [...world.conversations.values()].find((c) => c.participant_phone === CALLER);
+    expect(conv?.participants).toEqual([{ contactId: stub.contactId, phone: CALLER }]);
+    expect(world.auditEvents).toEqual([
+      expect.objectContaining({
+        entityKey: `contacts#${stub.contactId}`,
+        event_type: 'contact_auto_captured',
+        payload: expect.objectContaining({ source: 'inbound_call' }),
+      }),
+    ]);
+    // The capture must not change the bridge itself: still dials the holder.
+    expect(res.text).toContain(HOLDER_CELL);
+  });
+
+  it('a KNOWN caller is never re-captured — the existing contact gets the participants link, no stub, no audit', async () => {
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-caller', type: 'tenant', phone: CALLER, firstName: 'Jane', lastName: 'Doe' });
+    const { app } = founderHarness(world);
+
+    const res = await signedTwilioPost(app, '/webhooks/twilio/voice', bizVoiceParams());
+    expect(res.status).toBe(200);
+
+    // No-overwrite guarantee: the only contact is the pre-existing one.
+    expect(world.contacts).toHaveLength(1);
+    expect(world.contacts[0]!.type).toBe('tenant');
+    const conv = [...world.conversations.values()].find((c) => c.participant_phone === CALLER);
+    expect(conv?.participants).toEqual([{ contactId: 'c-caller', phone: CALLER }]);
+    // Backfill touches the conversation only — no contact_auto_captured audit.
+    expect(world.auditEvents).toEqual([]);
+  });
+
   it('the <Pause length> comes from the founder-editable OrgSettings preRingPauseSeconds', async () => {
     const world = createFakeWorld();
     // Founder edited the pause to 5s via the Settings panel (DB-backed setting).

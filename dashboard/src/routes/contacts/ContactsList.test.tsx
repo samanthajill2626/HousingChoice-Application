@@ -113,6 +113,23 @@ describe('ContactsList', () => {
     expect(screen.getByText(/no matches|nothing/i)).toBeInTheDocument();
   });
 
+  it('seeds the search box from a ?phone= deep-link and filters to that row (Inbox/Today unknown links)', () => {
+    state = { status: 'ready', contacts: CONTACTS };
+    render(
+      <MemoryRouter initialEntries={['/contacts/unknown?phone=%2B14040100009']}>
+        <ContactsList filter="unknown" />
+      </MemoryRouter>,
+    );
+    // The deep-linked phone prefills the search box...
+    expect(screen.getByRole('searchbox', { name: /search/i })).toHaveValue('+14040100009');
+    // ...and the list is filtered to the matching contact (a nameless unknown
+    // renders the phone as BOTH the name fallback and the phone chip).
+    const rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getAllByText(/\(404\) 010-0009/).length).toBeGreaterThan(0);
+    expect(within(rows[0]!).getByRole('link')).toHaveAttribute('href', '/contacts/c3');
+  });
+
   it('renders a "New contact" button in the list header', () => {
     state = { status: 'ready', contacts: CONTACTS };
     renderList('all');

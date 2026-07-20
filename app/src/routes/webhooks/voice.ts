@@ -81,6 +81,8 @@ import {
   roleWordForContact,
   UNKNOWN_CALLER_LABEL,
 } from '../../lib/voiceMasking.js';
+import type { AuditRepo } from '../../repos/auditRepo.js';
+import { createContactCapture } from '../../services/contactCapture.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
@@ -239,6 +241,8 @@ export interface TwilioVoiceWebhookDeps {
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   contactsRepo?: ContactsRepo;
+  /** Audit trail (contact auto-capture appends contact_auto_captured). */
+  auditRepo?: AuditRepo;
   /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_voice_contact). */
   placementsRepo?: PlacementsRepo;
   unitsRepo?: UnitsRepo;
@@ -274,6 +278,16 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const pushService =
     deps.pushService ?? createPushService({ config, logger: deps.logger, usersRepo: users });
   const events = deps.events ?? appEvents;
+  // Contact auto-capture (inbound-call-skips-contact-capture): the SAME
+  // idempotent, race-safe service the SMS webhook runs, so an unknown CALLER
+  // also gets a needs_review stub + a participants link (source 'inbound_call'
+  // stamps capture_source/consent to match the channel).
+  const captureContact = createContactCapture({
+    contactsRepo: contacts,
+    conversationsRepo: conversations,
+    auditRepo: deps.auditRepo,
+    logger: deps.logger,
+  });
   const ourNumbers = new Set(config.ourPhoneNumbers);
   const baseUrl = config.publicBaseUrl ?? '';
   // Founder-bridge caller ID: ALWAYS a number we own (the first business
@@ -477,6 +491,22 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       conversationTypeFor(callerContact),
     );
     mergeContext({ conversationId: conversation.conversationId });
+
+    // Contact auto-capture (M1.2 parity for VOICE — inbound-call-skips-contact-
+    // capture): an unknown caller gets a needs_review stub + the conversation's
+    // participants link, exactly like an unknown texter — that record is what
+    // puts the caller on Today's triage queue, in Contacts ▸ Unknown, and behind
+    // the Inbox row's contact deep-link. Idempotent + race-safe (the service's
+    // conditional claims), so redelivered webhooks are no-ops. BEST-EFFORT: a
+    // capture failure must never block the bridge (the call itself comes first).
+    try {
+      await captureContact(conversation, callerContact, 'inbound_call');
+    } catch (err) {
+      log.error(
+        { err, callSid: CallSid, conversationId: conversation.conversationId },
+        'inbound voice: contact auto-capture failed (best-effort) — bridging anyway',
+      );
+    }
 
     // Routing-decision SEAM (v2.17): hardcoded 'ring-founder' today.
     const decision = decideFounderRouting(conversation, callerContact);

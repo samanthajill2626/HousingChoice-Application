@@ -205,6 +205,30 @@ describe('contactCapture — unknown phone', () => {
     ]);
   });
 
+  it("source 'inbound_call' stamps channel-matched capture_source/consent and audits the call source", async () => {
+    const f = makeCaptureFakes();
+    const contact = await f.capture(f.conversation, undefined, 'inbound_call');
+
+    expect(f.contacts).toHaveLength(1);
+    expect(contact).toMatchObject({
+      type: 'unknown',
+      status: 'needs_review',
+      phone: PHONE,
+      capture_source: 'inbound_call',
+      // A2P/CTIA (spec §3.2): a customer-initiated inbound CALL confers the
+      // same consent basis as a text — the automatic stamp matches the channel.
+      consent_method: 'inbound_call',
+    });
+    expect(f.conversation.participants).toEqual([{ contactId: contact.contactId, phone: PHONE }]);
+    expect(f.auditEvents).toEqual([
+      {
+        entityKey: `contacts#${contact.contactId}`,
+        eventType: 'contact_auto_captured',
+        payload: { conversationId: 'conv-1', source: 'inbound_call' },
+      },
+    ]);
+  });
+
   it('a second capture (already linked + contact exists) is a pure read — no writes, no audit', async () => {
     const f = makeCaptureFakes();
     const first = await f.capture(f.conversation);

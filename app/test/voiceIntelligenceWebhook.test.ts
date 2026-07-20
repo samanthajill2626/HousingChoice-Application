@@ -105,7 +105,8 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     const res = await signedJsonPost(app, VI_PATH, { transcript_sid: 'GTvm' });
     expect(res.status).toBe(200);
     const call = world.messages.find((m) => m.provider_sid === 'CAbiz0001')!;
-    expect(call.transcript).toBe('Please call me back.\nThanks.');
+    // Turn-grouping (2026-07-20): one speaker -> ONE line, sentences space-joined.
+    expect(call.transcript).toBe('Please call me back. Thanks.');
   });
 
   it('a redelivered webhook never overwrites (transcript unchanged, 200)', async () => {

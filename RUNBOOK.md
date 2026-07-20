@@ -388,16 +388,22 @@ operator sets it up per env; recordings and voicemails still work regardless (th
 transcript). Masked relay calls are NEVER recorded or transcribed (standing privacy invariant).
 
 **Operator setup (per env - once for dev, once for prod; each env gets its OWN VI service so
-completion webhooks never cross environments):**
+completion webhooks never cross environments). THIS IS A PROD GO-LIVE STEP: prod has no VI service
+until an operator runs this, and transcription stays silently OFF there.**
 
-1. In the Twilio console create a Voice Intelligence **Service** (Voice Intelligence -> Services);
-   note its **`GAxxxx` service sid**.
-2. Set that service's **webhook URL** to `<env base URL>/webhooks/twilio/voice/intelligence` (the
-   transcript-available event), using the canonical custom-domain host - e.g.
-   `https://dev.app.housingchoice.org/webhooks/twilio/voice/intelligence`.
-3. Put the sid in **`TWILIO_VI_SERVICE_SID`** template-first: confirm the key in `.env.<env>.example`,
+1. `npm run twilio:vi -- <env> --webhook-base <canonical env host>` - idempotent
+   create-or-reconcile (`scripts/twilioVi.mjs`; add `--check` for a read-only drift report). Creates
+   the bare `hc-<env>-voice-transcription` service with our completion webhook wired, autoTranscribe
+   OFF, and NO operators/capture/Orchestrator, and prints the **`GAxxxx` sid**. Do NOT use the
+   Twilio console wizard instead: it steers into the Conversational-Intelligence Orchestrator
+   (capture rules + billed language operators) that we do not use - verified 2026-07-20; a leftover
+   Orchestrator configuration from a partial wizard run fires junk events at our webhook.
+2. Put the sid in **`TWILIO_VI_SERVICE_SID`** template-first: confirm the key in `.env.<env>.example`,
    `npm run secrets:sync -- <env>`, fill the real value in `.env.<env>`, `npm run secrets:push -- <env>`,
    then deploy (see [Secrets](#secrets)). Leaving it unset keeps transcription OFF for that env.
+   Webhook-only changes (re-pointing the URL) are Twilio-side and live IMMEDIATELY - no push/deploy.
+3. **When the env's canonical host changes** (staged-cutover phase 2), the VI service webhook is one
+   of the URLs that must re-point: re-run `npm run twilio:vi -- <env> --webhook-base <new host>`.
 
 **Cost:** VI is billed per transcribed hour. Only business-line bridge calls + voicemails are
 transcribed (masked relay never is), so the spend tracks real founder-line call/voicemail minutes.
@@ -1131,7 +1137,7 @@ The `custom_domain_phase` local in `infra/envs/<env>/main.tf` staircases the rol
 
 1. **Phase 0 → request the cert.** `custom_domain_phase = 0` (default). `npm run plan -- <env>` → `npm run apply -- <env>` creates the ACM cert (PENDING_VALIDATION). Read `acm_validation_records` from the apply output (or `$env:AWS_PROFILE='housingchoice'; terraform -chdir=infra/envs/<env> output acm_validation_records`), enter that CNAME in Namecheap, wait for ISSUED (`aws acm describe-certificate --certificate-arn <arn> --region us-east-1 --profile housingchoice --query Certificate.Status`).
 2. **Phase 1 → attach alias + cert.** Set `custom_domain_phase = 1`, plan + apply (validates, then attaches alias + cert to the distribution; SNI, TLS 1.2). **Now** add the app CNAME in Namecheap (`output app_cname_target`) and verify the new host (checklist below). The old `*.cloudfront.net` host still works and `PUBLIC_BASE_URL` is unchanged.
-3. **Phase 2 → flip canonical URL.** Set `custom_domain_phase = 2`, plan + apply (repoints `PUBLIC_BASE_URL` to the custom host), then **`npm run deploy:<env>`** so the app re-hydrates `.env` with the new `PUBLIC_BASE_URL`. In the same window, re-point Google OAuth redirect URIs and Twilio webhooks to the new host. (Prod holds phase 2 until the M1.11 ported-number cutover.)
+3. **Phase 2 → flip canonical URL.** Set `custom_domain_phase = 2`, plan + apply (repoints `PUBLIC_BASE_URL` to the custom host), then **`npm run deploy:<env>`** so the app re-hydrates `.env` with the new `PUBLIC_BASE_URL`. In the same window, re-point Google OAuth redirect URIs and Twilio webhooks to the new host - that includes the **Voice Intelligence service webhook**: `npm run twilio:vi -- <env> --webhook-base <new host>` (creates the env's VI service if it does not exist yet - a prod go-live prerequisite for transcription; see [Voice Intelligence transcription + platform voicemail]). (Prod holds phase 2 until the M1.11 ported-number cutover.)
 
 > **The CSRF origin gate is single-origin.** Once `PUBLIC_BASE_URL` flips (phase 2 + redeploy), state-changing requests through the OLD `*.cloudfront.net` host are rejected (GET/`/health` unaffected). Coordinate phase 2 with the user-facing switch.
 

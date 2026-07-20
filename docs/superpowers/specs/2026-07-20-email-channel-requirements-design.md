@@ -34,10 +34,27 @@ Terraform module exists (sandboxed, sender-identity only).
 3. **Threading: one interleaved thread per contact.** A contact has ONE
    conversation; email, SMS, and calls interleave chronologically in the
    existing timeline, each visually distinct (as calls are today). No separate
-   email inbox. This requires generalizing the phone-keyed conversation
-   resolver - the one structural data-model change.
+   email inbox for KNOWN contacts. This requires generalizing the phone-keyed
+   conversation resolver - the one structural data-model change.
+4. **Unknown-sender email does NOT auto-create contacts.** Unlike inbound SMS,
+   inbound email from unknown addresses lands in a separate "unmatched email"
+   surface (see "Inbound routing / capture" in section A), never in the
+   general inbox or Today notifications. The general inbox stays contacts +
+   unknown call/SMS.
+5. **CC is in scope for v1.**
+6. **Attachment size cap: 25 MB** (mainstream-provider interop limit, e.g.
+   Gmail), not the SES ceiling.
+7. **Search ships separately.** Product-wide search is its own effort
+   ([total-product-search](../../issues/total-product-search.md)); email v1's
+   obligation is to store content search-ready (see B7).
 
 ## Use cases (mapped to the placement lifecycle)
+
+**These use cases are illustrative, not exhaustive.** They motivate and
+sanity-check the requirements, but v1 is a general-purpose email channel:
+do not build or test ONLY for the flows listed here - there are certainly
+more we have not enumerated, and staff will use email in ways we have not
+predicted. Any inbound/outbound correspondence with any contact must work.
 
 Email-worthiness tracks the AUDIENCE more than the stage; the document-heavy
 later stages are where volume concentrates, but the first flow to pull
@@ -55,11 +72,12 @@ in-platform is early (landlord onboarding).
   formal packets. The inbound-documents flow is already flagged as unmodeled
   (rta-documents-mms-unmodeled), including the open question of a
   placement-level document surface.
-- **Approval & Move-in - the PHA.** RTA approval, inspection scheduling and
-  results, rent determination, HAP contract: all out-of-band today; staff
-  merely record milestones. PHAs and caseworkers are email-only third
-  parties. Prerequisite: the housing authority is a free-text string today
-  and caseworkers have no ContactType (see Open questions).
+- **Approval & Move-in - the housing authority.** RTA approval, inspection
+  scheduling and results, rent determination, HAP contract: all out-of-band
+  today; staff merely record milestones. Housing authorities (PHAs) and
+  caseworkers are email-only third parties. Prerequisite: the housing
+  authority is a free-text string today and caseworkers have no ContactType
+  (see Open questions).
 - **LIF eligibility / denial letters.** Documented today as email legwork
   outside the app.
 - **Later/ongoing.** Leases, move-in details, landlord invoicing (Track 7,
@@ -72,9 +90,23 @@ in-platform is early (landlord onboarding).
 - **Email addresses on contacts** (net-new; contacts have NO email field
   today). Multi-address with label + primary, mirroring the phones[] design;
   normalize/validate; byEmail resolver GSI + findByEmail.
-- **Unknown-sender capture parity.** Inbound email from an unknown address
-  creates a conversation AND a stub contact (needs_review triage), same as
-  inbound SMS.
+- **Inbound routing / capture (the side-door model).** Three tiers:
+  1. *Known sender* (address on an existing contact): append to their
+     interleaved thread; normal inbox and notification behavior.
+  2. *Token-routed reply from an unknown address*: a reply to a
+     per-conversation relay+token address arriving from an address we do not
+     have on file (e.g. landlord replies from an office address) routes into
+     that conversation via the token, flagged "new address - add to contact?".
+  3. *Unknown sender, no token*: NO contact, NO conversation, NO Today
+     notification. The message lands in a dedicated "unmatched email" surface
+     with its own new-mail badge - visible enough that real mail cannot die
+     silently, but outside the general inbox (which stays contacts + unknown
+     call/SMS only). Staff actions there: link to an existing contact (adds
+     the address and moves the message into their timeline), create a
+     contact, mark spam / block sender (persistent sender blocklist), delete.
+  Rationale: an email domain WILL accumulate spam/newsletters/cold email;
+  auto-creating needs_review contacts (the SMS pattern) would flood triage
+  and Today and hide real contacts.
 - **Thread resolution beyond phones.** Conversations are resolved by
   participant_phone today; email needs an email participant key on the SAME
   conversation so one contact = one interleaved thread across channels.
@@ -84,8 +116,9 @@ in-platform is early (landlord onboarding).
 - **Inbound pipeline.** SES receipt rules -> S3 raw MIME -> queue/worker ->
   MIME parse -> append message + attachments. Attachments go into the
   existing S3 MediaStore and are served only through the authed endpoint
-  (same as MMS media). Email-scale limits (SES inbound allows ~40 MB),
-  distinct from MMS carrier limits.
+  (same as MMS media). Size cap 25 MB per message both directions (the
+  mainstream-provider interop limit; SES allows more but recipients on
+  Gmail-class providers do not), distinct from MMS carrier limits.
 - **Outbound pipeline.** SES send from a dedicated subdomain with
   DKIM/SPF/DMARC; per-conversation plus-addressed reply-to token
   (relay+<token>@...) for deterministic reply routing; SES production-access
@@ -106,25 +139,32 @@ in-platform is early (landlord onboarding).
 3. **Quoted-reply trimming.** Collapse quoted history in replies (reply-
    delimiter parsing). Also required so fact extraction ingests only the new
    text, not the re-quoted thread every reply.
-4. **Composer.** Plain text; subject; To (CC deferred unless trivially
-   cheap); attachments via the existing presigned-POST upload; sender
-   signature convention ("<Staff name> at Housing Choice"); reply-vs-new-
-   thread semantics.
+4. **Composer.** Plain text; subject; To + CC (CC is in scope for v1 -
+   CC'd addresses are recorded and displayed on the message; exact
+   cross-thread semantics when a CC is itself a known contact are an
+   implementation-plan decision); attachments via the existing
+   presigned-POST upload; sender signature convention ("<Staff name> at
+   Housing Choice"); reply-vs-new-thread semantics.
 5. **Bounce/complaint handling.** Hard bounces auto-suppress the address
    (email_unreachable flag alongside sms_opt_out etc.); complaints set
    email_opt_out; failures surfaced like SMS delivery failures.
-6. **Spam posture.** Use SES inbound spam/virus verdicts; policy + a staff
-   review surface for quarantined mail so real mail cannot die silently.
-7. **Search.** No cross-message search exists platform-wide today; email
-   (subjects, bodies, attachment names) makes it acute. Scope: platform-wide
-   message search delivered with or alongside email v1 (Cameron's original
-   ask named search explicitly).
+6. **Spam posture.** SES inbound spam/virus verdicts route mail to a
+   quarantine sub-view of the unmatched-email surface (one click deeper than
+   unmatched mail), so real mail cannot die silently; sender blocklist for
+   recurring spam.
+7. **Search-ready storage (search itself ships separately).** Product-wide
+   search is deferred to [total-product-search](../../issues/total-product-search.md).
+   Email v1's obligation: persist content so future indexing is a backfill,
+   not a re-parse - extracted plain-text body, subject, and attachment
+   filenames stored as queryable attributes on the message.
 8. **Shared-mailbox semantics.** One org sending identity; outbound records
    which teammate sent it (existing author model extends); unread/SSE reuse;
    no per-conversation assignment (matches the removed-assignment decision).
 9. **Identity collisions.** One address mapping to multiple contacts (PM
-   office, PHA front desk) is common. v1 rule can be simple (most recent
-   contact + triage flag) but must exist.
+   office, housing-authority front desk) is common. v1 rule can be simple
+   (most recent contact + triage flag) but must exist - and if v1 ships the
+   simple rule, a follow-up registry issue for proper multi-contact address
+   handling MUST be filed as part of delivering the feature.
 10. **Attachment-to-record linking.** Use cases are document-shaped (RTA
     packet -> placement, lease -> placement, photos -> unit) while threads
     are contact-shaped. v1 must not preclude promoting an email attachment
@@ -151,16 +191,15 @@ DocuSign; automated/scheduled email sends (hooks only, see B12).
 
 ## Open questions (to resolve at implementation-plan time)
 
-- **PHA/caseworker contact modeling.** Emailing authority staff requires them
-  to be contacts. Minimal path: a caseworker/partner ContactType (issue
-  already filed) and optionally linking a contact to the housingAuthority
-  string. Decide whether this lands inside email v1 or immediately before it.
-- **CC support.** Cheap enough for v1, or defer? (Multi-party email that CCs
-  a second contact strains the 1:1 conversation model the way group MMS
-  would.)
-- **Search delivery.** Same branch as email or a parallel platform-wide
-  search feature that email v1 depends on.
-- **Spam quarantine UX.** Where the review surface lives (triage queue vs a
-  dedicated view).
+- **Housing-authority/caseworker contact modeling.** Emailing authority staff
+  requires them to be contacts. Minimal path: a caseworker/partner
+  ContactType (issue already filed) and optionally linking a contact to the
+  housingAuthority string. Decide whether this lands inside email v1 or
+  immediately before it.
+- **Unmatched-email surface placement.** Where the side-door view lives in
+  navigation: an inbox-adjacent tab with a badge vs its own nav item. (The
+  behavior is decided - see Decisions 4; only the placement is open.)
+- **CC cross-thread semantics.** CC is in v1 (Decisions 5); open is only how
+  a CC to a second KNOWN contact reflects in that contact's own timeline.
 - **Which flows adopt email first operationally** (landlord welcome likely),
   and whether any get catalog templates as a fast-follow.

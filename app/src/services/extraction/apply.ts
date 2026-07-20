@@ -20,6 +20,7 @@ import type { ExtractableField, ExtractionResult } from '../../adapters/extracti
 import { normalizeToE164 } from '../../lib/phone.js';
 import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB } from './schema.js';
 import {
+  ADDRESS_PART_KEYS,
   cleanAddressParts,
   contactAddressToParts,
   formatAddressParts,
@@ -221,9 +222,23 @@ export async function applyExtraction(
       if (formattedNew.length === 0) {
         logger.debug({ contactId }, 'extraction address skipped (no usable parts)');
       } else {
-        const formattedCurrent = formatAddressParts(contactAddressToParts(contact['address']));
+        const currentParts = contactAddressToParts(contact['address']);
+        const formattedCurrent = formatAddressParts(currentParts);
         const hasCurrent = formattedCurrent.length > 0;
-        if (result.address.op === 'write' && ctx.hasInferredRoleContent !== true) {
+        // LOSSY occupied write: a stored (non-empty) part that the cleaned new
+        // parts do NOT restate would be SILENTLY DROPPED by the whole-object SET
+        // replace. Spec 2026-07-20 SS5 allows occupied direct writes as
+        // "same-fact-better-form"; a write that would DROP stored parts cannot be
+        // better-form, so it is routed to human review instead (adversarial
+        // review F1). A key present with a DIFFERENT value is a correction (not a
+        // loss); a superset / same-key-set / no-current write is not lossy.
+        const lossy =
+          hasCurrent &&
+          ADDRESS_PART_KEYS.some((k) => {
+            const cur = currentParts[k];
+            return typeof cur === 'string' && cur.length > 0 && parts[k] === undefined;
+          });
+        if (result.address.op === 'write' && ctx.hasInferredRoleContent !== true && !lossy) {
           writePatch['address'] = parts;
           writePatch['address_source'] = sourceStamp;
           // from/to are FORMATTED single-line strings (never the raw object) so
@@ -236,7 +251,15 @@ export async function applyExtraction(
           });
           pendingWrites.push('address');
         } else {
-          if (result.address.op === 'write') demotedFields.push('address');
+          // A write reaches this suggest branch for one of two reasons. Only the
+          // Layer-3 inferred-role demotion feeds demotedFields (the
+          // ai_extraction_demoted audit is reserved for it); a lossy demotion
+          // gets its own PII-safe debug line ({ contactId } only - never parts).
+          if (result.address.op === 'write' && ctx.hasInferredRoleContent === true) {
+            demotedFields.push('address');
+          } else if (result.address.op === 'write' && lossy) {
+            logger.debug({ contactId }, 'extraction address write demoted to suggestion (would drop stored parts)');
+          }
           if (
             hasCurrent &&
             normalizeAddressForCompare(formattedCurrent) === normalizeAddressForCompare(formattedNew)

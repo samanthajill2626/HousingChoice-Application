@@ -513,4 +513,36 @@ describe('runDueExtractions', () => {
     expect(h.repo.fail).not.toHaveBeenCalled();
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', '2026-07-16T12:00:05.000Z#s5', NOW);
   });
+
+  it('profile carries the formatted current address when the contact has one', async () => {
+    const contact = {
+      ...tenantContact(),
+      address: { line1: '1 Main St', city: 'Atlanta', state: 'GA' },
+    } as ContactItem;
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(1, 'inbound', 'hi there')],
+      contact,
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.profile.address).toBe('1 Main St, Atlanta, GA');
+  });
+
+  it('profile omits address when the contact has none', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(1, 'inbound', 'hi there')],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.profile.address).toBeUndefined();
+  });
 });

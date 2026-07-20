@@ -30,6 +30,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import type { ExtractionAddressParts } from '../adapters/extraction.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 // ---------------------------------------------------------------------------
@@ -68,6 +69,9 @@ export interface SuggestionItem {
   target: string;
   currentValue?: string;
   suggestedValue: string;
+  /** Parts payload for the compound 'address' target - what accept writes
+   *  (suggestedValue stays the human-readable joined string the chip shows). */
+  suggestedAddress?: ExtractionAddressParts;
   reason?: string;
   conversationId: string;
   tsMsgId?: string;
@@ -314,6 +318,7 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         // Optional fields - undefined is dropped by the document client's
         // removeUndefinedValues, keeping the item clean.
         ...(s.currentValue !== undefined && { currentValue: s.currentValue }),
+        ...(s.suggestedAddress !== undefined && { suggestedAddress: s.suggestedAddress }),
         ...(s.reason !== undefined && { reason: s.reason }),
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
       };

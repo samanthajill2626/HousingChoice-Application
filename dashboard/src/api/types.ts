@@ -1033,10 +1033,13 @@ export interface FieldSource {
 export interface SuggestionItem {
   itemId: string;
   ownerContactId: string;
-  /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type'. */
+  /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
   target: string;
   currentValue?: string;
   suggestedValue: string;
+  /** Parts payload for the compound 'address' target (server-side accept uses it;
+   *  suggestedValue stays the human-readable joined string the chip shows). */
+  suggestedAddress?: Address;
   reason?: string;
   conversationId: string;
   tsMsgId?: string;

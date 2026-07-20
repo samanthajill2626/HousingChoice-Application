@@ -563,3 +563,231 @@ describe('applyExtraction - inferred-role demotion (spec Layer 3)', () => {
     expect(demoted!.payload!['speakerRoles']).toBeUndefined();
   });
 });
+
+describe('applyExtraction - address (ninth target)', () => {
+  it('writes address into an empty field with provenance + audit', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant' }); // no address yet
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta' }, reason: 'stated current address' },
+    });
+
+    expect(outcome.wrote).toEqual(['address']);
+    expect(records.updates).toHaveLength(1);
+    const patch = records.updates[0]!.patch;
+    // Stored exactly as the edit-form PATCH stores it: the cleaned parts object.
+    expect(patch['address']).toEqual({ line1: '1 Main St', city: 'Atlanta' });
+    expect(patch['address_source']).toEqual({ source: 'ai', at: NOW, conversationId: CONV, tsMsgId: 'ts-9' });
+    // Audit from/to are FORMATTED strings (never the raw object) - flat shape.
+    const applied = records.audits.find((a) => a.type === 'ai_extraction_applied');
+    expect(applied!.payload!['fields']).toEqual([
+      { field: 'address', from: undefined, to: '1 Main St, Atlanta', reason: 'stated current address' },
+    ]);
+  });
+
+  it('op write on an occupied address still writes (model-judged equivalent)', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant', address: { line1: '9 Old Rd', city: 'Macon' } });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta' } },
+    });
+
+    expect(outcome.wrote).toEqual(['address']);
+    expect(records.updates[0]!.patch['address']).toEqual({ line1: '1 Main St', city: 'Atlanta' });
+    const applied = records.audits.find((a) => a.type === 'ai_extraction_applied');
+    expect(applied!.payload!['fields']).toEqual([
+      { field: 'address', from: '9 Old Rd, Macon', to: '1 Main St, Atlanta' },
+    ]);
+  });
+
+  it('demotes a LOSSY occupied write (drops stored parts) to a suggestion (F1)', async () => {
+    const { deps, records } = makeDeps();
+    // Stored address has five parts; the model restates only two, so a
+    // whole-object SET replace would SILENTLY DROP line2/state/zip.
+    const contact = makeContact({
+      type: 'tenant',
+      address: { line1: '123 Main St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
+    });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'write', parts: { line1: '123 Main St', city: 'Atlanta' }, reason: 'restated address' },
+    });
+
+    // No direct write: address never enters an update patch, no provenance stamp.
+    expect(outcome.wrote).not.toContain('address');
+    const addrUpdate = records.updates.find((u) => 'address' in u.patch || 'address_source' in u.patch);
+    expect(addrUpdate).toBeUndefined();
+    // Routed to human review as a single address suggestion carrying BOTH the
+    // formatted display strings and the cleaned new parts.
+    expect(outcome.suggested).toEqual(['address']);
+    expect(records.suggestions).toHaveLength(1);
+    expect(records.suggestions[0]).toMatchObject({
+      ownerContactId: 'c1',
+      target: 'address',
+      currentValue: '123 Main St, Apt 4, Atlanta, GA, 30303',
+      suggestedValue: '123 Main St, Atlanta',
+      suggestedAddress: { line1: '123 Main St', city: 'Atlanta' },
+      reason: 'restated address',
+    });
+    // A lossy demotion is NOT the Layer-3 inferred-role demotion: it must NOT
+    // join demotedFields, so no ai_extraction_demoted audit fires.
+    expect(records.audits.find((a) => a.type === 'ai_extraction_demoted')).toBeUndefined();
+  });
+
+  it('still writes an occupied SAME-KEY-SET correction directly (F1: not lossy)', async () => {
+    const { deps, records } = makeDeps();
+    // Same three keys stored and restated, values corrected: no stored part is
+    // dropped, so this stays a direct "same-fact-better-form" write.
+    const contact = makeContact({ type: 'tenant', address: { line1: '9 Old Rd', city: 'Macon', state: 'GA' } });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta', state: 'GA' } },
+    });
+
+    expect(outcome.wrote).toEqual(['address']);
+    expect(records.updates[0]!.patch['address']).toEqual({ line1: '1 Main St', city: 'Atlanta', state: 'GA' });
+    expect(records.updates[0]!.patch['address_source']).toMatchObject({ source: 'ai', conversationId: CONV });
+    expect(records.suggestions).toHaveLength(0);
+  });
+
+  it('writes directly over a LEGACY STRING address (folds to line1 only; new parts a superset)', async () => {
+    const { deps, records } = makeDeps();
+    // Pre-contract dev record: address is a single plain string, which folds to
+    // { line1 } ONLY. Structured parts that restate line1 (+ more) are a
+    // superset, never lossy -> the legacy upgrade path writes directly.
+    const contact = makeContact({ type: 'tenant', address: '123 Main St, Atlanta, GA 30303' });
+    const parts = { line1: '123 Main St', city: 'Atlanta', state: 'GA', zip: '30303' };
+    const outcome = await run(deps, contact, { fields: {}, address: { op: 'write', parts } });
+
+    expect(outcome.wrote).toEqual(['address']);
+    expect(records.updates[0]!.patch['address']).toEqual(parts);
+    expect(records.suggestions).toHaveLength(0);
+  });
+
+  it('conflict suggests with display strings AND parts', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant', address: { line1: '9 Old Rd', city: 'Macon' } });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'suggest', parts: { line1: '1 Main St', city: 'Atlanta' }, reason: 'moved recently' },
+    });
+
+    expect(outcome.suggested).toEqual(['address']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      ownerContactId: 'c1',
+      target: 'address',
+      currentValue: '9 Old Rd, Macon',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      reason: 'moved recently',
+      conversationId: CONV,
+      tsMsgId: 'ts-9',
+    });
+  });
+
+  it('normalized-equal suggestion is skipped', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant', address: { line1: '535 Seal Pl NE', city: 'Atlanta' } });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      // Case + whitespace differ; normalized equal -> no suggestion.
+      address: { op: 'suggest', parts: { line1: '535  seal pl ne', city: 'ATLANTA' } },
+    });
+
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+  });
+
+  it('legacy plain-string stored address compares/normalizes correctly', async () => {
+    const { deps, records } = makeDeps();
+    // Pre-contract dev records carry `address` as a plain string.
+    const contact = makeContact({ type: 'tenant', address: '535 Seal Pl NE, Atlanta' });
+    const outcome = await run(deps, contact, {
+      fields: {},
+      address: { op: 'suggest', parts: { line1: '535 Seal Pl NE', city: 'Atlanta' } },
+    });
+
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+  });
+
+  it('inferred-role content demotes an address write to a suggestion', async () => {
+    const { deps, records } = makeDeps();
+    const contact = makeContact({ type: 'tenant' }); // no address yet
+    const outcome = await applyExtraction(deps, {
+      contact,
+      conversationId: CONV,
+      cursorTsMsgId: 'ts-9',
+      result: {
+        fields: {},
+        address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta' } },
+      },
+      hasInferredRoleContent: true,
+    });
+
+    // The write became a suggestion: nothing direct-written.
+    expect(outcome.wrote).toEqual([]);
+    expect(outcome.suggested).toEqual(['address']);
+    expect(records.updates).toHaveLength(0);
+    expect(records.suggestions[0]).toMatchObject({
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+    });
+    // 'address' joins the demotion audit's field list.
+    const demoted = records.audits.find((a) => a.type === 'ai_extraction_demoted');
+    expect(demoted).toBeDefined();
+    expect(demoted!.payload!['fields']).toEqual(['address']);
+    // No direct write happened, so no write-audit fires.
+    expect(records.audits.find((a) => a.type === 'ai_extraction_applied')).toBeUndefined();
+  });
+
+  it('address is ignored for non-tenant contacts', async () => {
+    for (const type of ['landlord', 'unknown'] as const) {
+      const { deps, records } = makeDeps();
+      const outcome = await run(deps, makeContact({ type }), {
+        fields: {},
+        address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta' } },
+      });
+      expect(outcome.wrote).toEqual([]);
+      expect(outcome.suggested).toEqual([]);
+      expect(records.updates).toHaveLength(0);
+      expect(records.suggestions).toHaveLength(0);
+    }
+  });
+
+  it('noteLines starting with "Current address" are dropped', async () => {
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      noteLines: ['Current address: 1 Main St', 'Has a service dog'],
+    });
+
+    expect(outcome.notedLines).toBe(1);
+    const notes = records.updates[0]!.patch['notes'] as string;
+    expect(notes).toContain('Has a service dog');
+    expect(notes).not.toContain('Current address');
+  });
+
+  it('a digit-free "Current address ..." housing-status note is KEPT (filter drops postal lines only)', async () => {
+    // Planner review F4: the filter must not eat legitimate screening facts
+    // like housing instability - only lines that actually carry a postal
+    // address (which always contains a digit).
+    const { deps, records } = makeDeps();
+    const outcome = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {},
+      noteLines: [
+        'Current address is unstable, couch-surfing with family',
+        'Current address: 535 Seal Pl NE, Atlanta',
+      ],
+    });
+
+    expect(outcome.notedLines).toBe(1);
+    const notes = records.updates[0]!.patch['notes'] as string;
+    expect(notes).toContain('Current address is unstable, couch-surfing with family');
+    expect(notes).not.toContain('535 Seal Pl NE');
+  });
+});

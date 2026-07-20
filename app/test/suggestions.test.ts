@@ -232,6 +232,64 @@ describe('POST /api/contacts/:contactId/suggestions/:target/accept', () => {
     const res = await accept(app, 'nope', 'pets');
     expect(res.status).toBe(404);
   });
+
+  it('accepts an address suggestion: writes parts + provenance, audits, deletes', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world); // no address yet
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      conversationId: 'conv-addr',
+      tsMsgId: 'ts-9',
+    });
+    const res = await accept(app, contactId, 'address');
+    expect(res.status).toBe(200);
+    // The contact carries the cleaned parts object (edit-form-identical shape).
+    expect(res.body.contact.address).toEqual({ line1: '1 Main St', city: 'Atlanta' });
+    // Provenance stamped source 'ai' + the accepting actor.
+    expect(res.body.contact.address_source).toMatchObject({
+      source: 'ai',
+      conversationId: 'conv-addr',
+      tsMsgId: 'ts-9',
+      accepted_by: ACTOR,
+    });
+    // Suggestion deleted -> not in the remaining list.
+    expect(res.body.suggestions).toEqual([]);
+    // Store side: the contact really carries the parts + the suggestion is gone.
+    expect(world.contacts.find((c) => c.contactId === contactId)?.address).toEqual({
+      line1: '1 Main St',
+      city: 'Atlanta',
+    });
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeUndefined();
+    // Audited ai_suggestion_accepted with the FORMATTED to string; no from (empty).
+    const audit = world.auditEvents.find((e) => e.event_type === 'ai_suggestion_accepted');
+    expect(audit?.entityKey).toBe(`contacts#${contactId}`);
+    expect(audit?.payload).toMatchObject({ target: 'address', to: '1 Main St, Atlanta' });
+    expect(audit?.payload?.['actor']).toBe(ACTOR);
+    expect(audit?.payload?.['from']).toBeUndefined();
+    // Emits suggestion.updated.
+    expect(world.emitted.some((e) => e.event === 'suggestion.updated')).toBe(true);
+  });
+
+  it('400s an address accept whose item carries no usable parts, KEEPING the suggestion', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    // Display string only, no suggestedAddress parts (malformed/legacy item).
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      suggestedValue: '1 Main St, Atlanta',
+      conversationId: 'conv-addr',
+    });
+    const res = await accept(app, contactId, 'address');
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid_suggestion_value' });
+    // Never half-writes: the suggestion is KEPT for the human to reconcile.
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeDefined();
+    expect(world.contacts.find((c) => c.contactId === contactId)?.address).toBeUndefined();
+  });
 });
 
 describe('POST /api/contacts/:contactId/suggestions/:target/dismiss', () => {
@@ -288,6 +346,39 @@ describe('PATCH /api/contacts/:contactId - human edit clears AI provenance + pen
     expect(world.contacts.find((c) => c.contactId === contactId)?.['pets_source']).toBeUndefined();
     // Pending suggestion deleted.
     expect(await world.extractionRepo.getSuggestion(contactId, 'pets')).toBeUndefined();
+  });
+
+  it('a human address edit clears address_source AND deletes the pending address suggestion', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world, {
+      address: { line1: '9 Old Rd', city: 'Macon' },
+      address_source: { source: 'ai', at: '2026-07-16T00:00:00.000Z', conversationId: 'conv-a' },
+    });
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'address',
+      currentValue: '9 Old Rd, Macon',
+      suggestedValue: '1 Main St, Atlanta',
+      suggestedAddress: { line1: '1 Main St', city: 'Atlanta' },
+      conversationId: 'conv-a',
+    });
+    const res = await request(app)
+      .patch(`/api/contacts/${contactId}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ address: { line1: '2 New St', city: 'Decatur' } });
+    expect(res.status).toBe(200);
+    // Whole-object SET replace; only the non-empty parts stored.
+    expect(res.body.contact.address).toEqual({ line1: '2 New St', city: 'Decatur' });
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['address']).toEqual({
+      line1: '2 New St',
+      city: 'Decatur',
+    });
+    // Provenance REMOVED (human edit supersedes AI).
+    expect('address_source' in res.body.contact).toBe(false);
+    expect(world.contacts.find((c) => c.contactId === contactId)?.['address_source']).toBeUndefined();
+    // Pending suggestion deleted.
+    expect(await world.extractionRepo.getSuggestion(contactId, 'address')).toBeUndefined();
   });
 
   it('a type triage PATCH deletes the pending type suggestion', async () => {

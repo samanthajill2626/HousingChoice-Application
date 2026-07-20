@@ -30,6 +30,7 @@ import type {
   TranscriptUtterance,
 } from '../adapters/extraction.js';
 import { applyExtraction, type ApplyDeps } from '../services/extraction/apply.js';
+import { contactAddressToParts, formatAddressParts } from '../services/extraction/address.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
 export const MAX_EXTRACTION_ATTEMPTS = 5;
@@ -83,6 +84,10 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   if (typeof contact.porting === 'boolean') profile.porting = contact.porting;
   const notes = str(contact['notes']);
   if (notes !== undefined) profile.notes = notes;
+  // Single-line current address for reconciliation (object doc -> formatted
+  // string; contactAddressToParts also tolerates a legacy plain-string address).
+  const address = formatAddressParts(contactAddressToParts(contact['address']));
+  if (address.length > 0) profile.address = address;
   return profile;
 }
 

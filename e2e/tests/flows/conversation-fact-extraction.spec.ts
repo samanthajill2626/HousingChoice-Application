@@ -137,6 +137,73 @@ test('conflict -> chip -> Accept: a suggestion applies in place with an Auto bad
   await expect(chip).toHaveCount(0);
 });
 
+test('address write: an extracted current address fills the Details row with an Auto badge', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'AddressWrite' });
+
+  // The fake driver bypasses parseExtractionText, so the marker carries the
+  // INTERNAL ExtractionAddress shape - parts NESTED (a flat wire shape no-ops).
+  await sendExtractSms(request, phone, {
+    address: { op: 'write', parts: { line1: '1 Main St', city: 'Atlanta', state: 'GA' } },
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  // Address is a DETAILS-card field (unlike pets, an Eligibility-intake field).
+  const details = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Details' }) });
+  await expect(details).toBeVisible();
+  // Row renders the server's all-comma formatted address; the write stamps ai provenance.
+  await expect(details.getByText('1 Main St, Atlanta, GA')).toBeVisible();
+  await expect(details.getByRole('img', { name: 'Auto' })).toBeVisible();
+});
+
+test('address conflict -> chip -> Accept: the suggested address applies in place with an Auto badge', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'AddressAccept' });
+
+  // Seed a DIFFERENT current address via a human edit so the extracted address
+  // conflicts -> a review chip. The create API takes no address; this PATCH is the
+  // same shape the Edit-contact form sends and leaves NO Auto provenance.
+  const seed = await page.request.patch(`${NEXT}/api/contacts/${contactId}`, {
+    data: { address: { line1: '9 Old Rd', city: 'Macon' } },
+  });
+  expect(seed.ok(), 'seed current address').toBeTruthy();
+
+  await sendExtractSms(request, phone, {
+    address: { op: 'suggest', parts: { line1: '1 Main St', city: 'Atlanta', state: 'GA' } },
+  });
+  const tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const details = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Details' }) });
+  const chip = page.getByRole('group', { name: 'AI suggestion for current address' });
+  await expect(chip).toBeVisible();
+  // Both values on screen: the chip shows the SUGGESTED address, the row the current one.
+  await expect(chip.getByText('AI heard "1 Main St, Atlanta, GA"')).toBeVisible();
+  await expect(details.getByText('9 Old Rd, Macon')).toBeVisible();
+
+  await chip.getByRole('button', { name: 'Accept' }).click();
+
+  // Wait for the chip to clear FIRST: its "AI heard" text contains the same address
+  // string as the row, so asserting the row while the chip lingers could match two
+  // nodes. Once the chip is gone the accepted row (value + Auto badge) is unambiguous.
+  await expect(chip).toHaveCount(0);
+  await expect(details.getByText('1 Main St, Atlanta, GA')).toBeVisible();
+  await expect(details.getByRole('img', { name: 'Auto' })).toBeVisible();
+});
+
 test('conflict -> chip -> Dismiss: the value is unchanged and the chip is gone', async ({
   page,
   request,

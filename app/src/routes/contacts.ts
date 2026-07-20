@@ -80,7 +80,7 @@ import {
   type ContactVocabularyRepo,
 } from '../repos/contactVocabularyRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
-import { EXTRACTABLE_FIELDS } from '../services/extraction/schema.js';
+import { PROVENANCE_FIELDS } from '../services/extraction/schema.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -771,9 +771,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
 
   const router = Router();
 
-  // conversation-fact-extraction (T8): the eight AI-extractable field names whose
-  // `<field>_source` provenance a human edit clears.
-  const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
+  // conversation-fact-extraction: the field names whose `<field>_source` provenance
+  // a human edit clears - the eight AI-extractable scalars plus the compound
+  // `address` (address-extraction slice 3).
+  const PROVENANCE = new Set<string>(PROVENANCE_FIELDS);
 
   // GET /api/contacts?type=&status=&phone=&limit=&cursor= — list/filter (M1.5).
   // ?phone= is an exact byPhone lookup (returns 0 or 1) and takes priority;
@@ -1232,7 +1233,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // REMOVE) so the AutoBadge disappears - UNLESS the incoming patch itself carries
     // the provenance (future-proofing; the dashboard never sends one today).
     for (const f of parsed.changedFields) {
-      if (EXTRACTABLE.has(f) && !(`${f}_source` in parsed.patch)) {
+      if (PROVENANCE.has(f) && !(`${f}_source` in parsed.patch)) {
         parsed.patch[`${f}_source`] = null;
       }
     }

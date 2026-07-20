@@ -668,6 +668,18 @@ debounce (so you need not wait it out) and responds `{ processed, failed }`. Thi
 `suggestion.updated` emits do not (single-instance seam) - poller-driven changes surface on the
 dashboard's next fetch.
 
+**Smoke test (address target).** The extracted fields are the eight scalar profile fields plus the
+client's structured **CURRENT address** (written into the contact's Details "Current address" row).
+Quick manual check on the dev stack once live: as a **TENANT**, text the business line a current
+address, run a tick (`POST /__dev/extraction/tick`) or wait out the debounce, and confirm the
+Details "Current address" row fills in with an **Auto** badge (a conflicting value surfaces a review
+chip instead). Address extraction is TENANT-only. **OWED dev LIVE retest:** the fake e2e driver
+proves the pipeline + UI end-to-end but CANNOT exercise real model judgement - the key risk is a
+property/unit address the client is asking about, touring, or applying to (or a previous/future
+address) being mis-written as their current address. Before trusting the address target in a
+deployed env, run one real extraction over a live conversation that mentions a unit/property address
+and confirm it does NOT land in the Current-address row.
+
 **Owed ops on deploy (in order).** The feature ships **DORMANT** in deployed envs - `AI_EXTRACTION_ENABLED`
 defaults **off** in production, so until these steps run nothing extracts and **nothing breaks** (the
 webhook and worker simply skip the extraction path). To turn it on in an env:

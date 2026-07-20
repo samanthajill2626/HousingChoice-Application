@@ -289,6 +289,11 @@ untouched. The fake-Twilio CallEngine seam gives the hermetic test path.
   dedicated review page.
 - v1 scope: facts + classification + phone signals (broadest option chosen).
 - No new enumerated contact fields; secondary facts go to notes.
+- Update: the "no new enumerated contact fields" decision above is superseded
+  for the client's CURRENT address only - address is promoted from a notes line
+  to a structured ninth extraction target (parts on the wire; a compound review
+  suggestion carrying both a display string and the parts). All other secondary
+  facts still go to notes. See 2026-07-20-address-extraction-design.md.
 - Voucher/RTA-in-hand -> status-advance suggestion via transition service;
   auto-advance is a deliberate one-line policy change away.
 - SMS-only sources in v1; transcript interface makes voice an adapter.

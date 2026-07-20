@@ -84,6 +84,8 @@ export interface ExtractionProfileSnapshot {
   tenure?: string;
   porting?: boolean;
   notes?: string;
+  /** Single-line formatted current address ("line1, line2, city, state, zip"). */
+  address?: string;
   phones: string[];
 }
 

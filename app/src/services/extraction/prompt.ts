@@ -42,8 +42,9 @@ export function buildExtractionSystemPrompt(): string {
     'when there is nothing to record for a field), statusAdvance (suggest false,',
     'reason "" when not applicable), typeSuggestion (value "none", reason "" when',
     'not applicable), phoneAddition (phone "", label "", reason "" when none),',
-    'noteLines (the empty array [] when none), and speakerRoles (the empty array',
-    '[] when the transcript has no Speaker N lines).',
+    'noteLines (the empty array [] when none), speakerRoles (the empty array []',
+    'when the transcript has no Speaker N lines), and address (op "none" with all',
+    'parts "" and reason "" when there is no current address to record).',
     '',
     'HARD RULES:',
     '- Only record facts stated by or about the CLIENT. A staff QUESTION is not a',
@@ -65,6 +66,14 @@ export function buildExtractionSystemPrompt(): string {
     '  (for example: stairs are OK or a problem, when they last moved, household',
     '  size, their rent portion, utility debt, other useful screening facts). Do',
     '  not restate facts already in the notes.',
+    '- address is the client\'s OWN CURRENT residential address ONLY - a place',
+    '  the client states they live at NOW. It is NEVER the address of a unit or',
+    '  property they are asking about, touring, applying to, or that staff sent',
+    '  or mentioned to them; NEVER a previous address; NEVER a prospective or',
+    '  future address. When unsure, use op "none". Put each component in its',
+    '  part (line1, line2, city, state, zip); leave unknown parts "".',
+    '- Addresses NEVER go in noteLines - the address output is the only place',
+    '  for address information.',
   ].join('\n');
 }
 

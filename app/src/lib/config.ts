@@ -312,6 +312,23 @@ export interface AppConfig {
    * stacks always use the real Anthropic endpoint.
    */
   anthropicApiBaseUrl?: string;
+  /**
+   * Cross-process event bridge target (lib/eventBridge.ts): the APP process's
+   * base URL the WORKER fire-and-forgets POST /internal/events to. Set to
+   * http://app:8080 by docker-compose (worker service) and to the lane's app
+   * URL by the local runners (scripts/dev.mjs, scripts/e2e-session.mjs).
+   * Unset -> the worker attaches no bridge (emits stay in-process). Non-secret;
+   * production-legal (unlike the dev-only overrides above) - it IS the prod path.
+   */
+  eventBridgeUrl?: string;
+  /**
+   * Cadence (ms) for the worker's three stateless polls (tour reminders,
+   * placement nudges, extraction - worker.ts). Default 60000. Lowering it is a
+   * QA/dev affordance; the e2e harness deliberately keeps the default (see the
+   * bridge e2e spec's race rationale in
+   * docs/superpowers/plans/2026-07-20-event-bridge.md). Positive integer.
+   */
+  workerPollIntervalMs: number;
 }
 
 /**
@@ -420,6 +437,20 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Cross-process event bridge target (non-secret; production-legal - compose
+  // and the local runners set it, unlike the dev-only overrides around it). No
+  // production rejection: it IS the production path. Validate the parse at boot
+  // so a malformed value fails fast here instead of as a raw TypeError when
+  // lib/eventBridge.ts builds the URL.
+  const eventBridgeUrl = env.EVENT_BRIDGE_URL?.trim();
+  if (eventBridgeUrl !== undefined && eventBridgeUrl.length > 0) {
+    try {
+      new URL(eventBridgeUrl);
+    } catch {
+      throw new Error(`EVENT_BRIDGE_URL must be a valid URL, got: ${eventBridgeUrl}`);
+    }
+  }
+
   // Dev-only S3 endpoint override (MinIO/local S3). MUST NOT be set in
   // production — same posture as TWILIO_API_BASE_URL above: prod must use the
   // real AWS S3 endpoint + instance-role credentials.
@@ -442,6 +473,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   const port = Number(env.PORT ?? 8080);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`PORT must be a valid TCP port, got: ${env.PORT}`);
+  }
+
+  // Worker poll cadence (ms) for the three stateless polls (worker.ts). Default
+  // 60000; fail-fast on a non-positive-integer so a QA typo never silently
+  // disables or hot-loops the polls.
+  const workerPollIntervalMs = Number(env.WORKER_POLL_INTERVAL_MS ?? 60000);
+  if (!Number.isInteger(workerPollIntervalMs) || workerPollIntervalMs <= 0) {
+    throw new Error(
+      `WORKER_POLL_INTERVAL_MS must be a positive integer (milliseconds), got: ${env.WORKER_POLL_INTERVAL_MS}`,
+    );
   }
 
   // Default: console for local NODE_ENVs (development/test), twilio when
@@ -906,5 +947,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     anthropicApiKey,
     anthropicApiBaseUrl:
       anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0 ? anthropicApiBaseUrl : undefined,
+    eventBridgeUrl: eventBridgeUrl !== undefined && eventBridgeUrl.length > 0 ? eventBridgeUrl : undefined,
+    workerPollIntervalMs,
   };
 }

@@ -15,6 +15,7 @@ import { test, expect, type Page, type APIRequestContext, type Locator } from '@
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
 import { fakeUrl } from '../support/urls.js';
 import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
+import { listEmails, type FakeEmail } from '../fixtures/fakeEmail.js';
 import {
   verifyCell,
   driveBridge,
@@ -365,6 +366,27 @@ export class Scenario {
           { timeout: 15_000 },
         )
         .toBe(true);
+    });
+  }
+
+  /** [App→SES] The outbound email reached the fake-SES surface, addressed to
+   *  `address` with a subject matching `subjectRe`. Returns the matched record so
+   *  the caller can assert on its raw MIME (Subject/To headers, attachment parts). */
+  expectEmailSentTo(address: string, subjectRe: RegExp): Promise<FakeEmail> {
+    return step(`App sends email to ${address} (proof-of-send)`, async () => {
+      let matched: FakeEmail | undefined;
+      await expect
+        .poll(
+          async () => {
+            const emails = await listEmails(this.request);
+            matched = emails.find((e) => e.to.includes(address) && subjectRe.test(e.subject));
+            return matched !== undefined;
+          },
+          { timeout: 15_000, message: `no email to ${address} matching ${String(subjectRe)}` },
+        )
+        .toBe(true);
+      // The poll only resolves true once `matched` is set to a record.
+      return matched as FakeEmail;
     });
   }
 

@@ -172,6 +172,19 @@ const childEnv = {
   // (playwright.config webServer.command = node scripts/e2e-session.mjs), so it
   // covers the fake driver in both e2e modes.
   EXTRACTION_DRIVER: 'fake',
+  // --- fake-SES (email-channel v1) ---
+  // The app runs the REAL SES driver (EMAIL_DRIVER=ses) but is pointed at the
+  // in-process fake host via SES_API_BASE_URL (= fakeUrl, exactly like
+  // TWILIO_API_BASE_URL) - so the production @aws-sdk/client-sesv2 send path runs
+  // unchanged against the fake's /v2/email/outbound-emails surface. The kill-switch
+  // is forced ON so sends actually reach the fake; the sender identity satisfies the
+  // ses-driver boot gate (EMAIL_SENDER_DOMAIN + EMAIL_FROM_ADDRESS required). The
+  // fake process inherits this SAME childEnv, so both sides agree automatically.
+  EMAIL_DRIVER: 'ses',
+  EMAIL_SENDING_ENABLED: 'true',
+  SES_API_BASE_URL: fakeUrl,
+  EMAIL_SENDER_DOMAIN: 'mail.local.test',
+  EMAIL_FROM_ADDRESS: 'team@mail.local.test',
   // Stale-stack guard (e2e/support/preflight.ts): stamp the launch commit on the
   // app (/__dev/ping → appCommit) AND the dashboard (index.html <meta>) so a
   // reused server booted at a different commit is caught with an actionable error.

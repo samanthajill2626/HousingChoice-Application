@@ -41,7 +41,9 @@ test.describe('Settings — admin path', () => {
 
     // --- Invite a (unique) teammate → it appears in the roster ---
     const inviteEmail = `teammate-${Date.now()}@example.com`;
-    await page.getByLabel('Email').fill(inviteEmail);
+    // Role-scoped: the nav's Email link (aria-label "Email") would also match a
+    // bare getByLabel('Email'); textbox can only be the invite form's input.
+    await page.getByRole('textbox', { name: 'Email' }).fill(inviteEmail);
     await page.getByRole('button', { name: 'Invite' }).click();
     await expect(page.getByRole('status')).toContainText(/Invited/i);
 
@@ -166,7 +168,8 @@ test.describe('Settings — admin path', () => {
     // Invite a throwaway VA (default role) -- not self, not an admin, no voice
     // line, so it is removable.
     const email = `removeme-${Date.now()}@example.com`;
-    await page.getByLabel('Email').fill(email);
+    // Role-scoped (see above): avoid the nav Email link collision.
+    await page.getByRole('textbox', { name: 'Email' }).fill(email);
     await page.getByRole('button', { name: 'Invite' }).click();
     await expect(page.getByRole('status')).toContainText(/Invited/i);
     await expect(page.getByLabel(`Role for ${email}`)).toBeVisible();

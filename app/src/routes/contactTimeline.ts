@@ -144,6 +144,10 @@ interface TimelineMessage extends TimelineBase {
    *  the field is declared now so the wire type is stable - the client renders a
    *  "New address" chip). Absent on outbound + known-address inbound. */
   email_new_address?: boolean;
+  /** Sanitized inbound HTML body (B2 stores it; B7 renders it in a sandboxed,
+   *  CSP-framed iframe behind "View original formatting"). Absent on outbound +
+   *  plain-text inbound. */
+  email_html_sanitized?: string;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message.
    *  Surfaces the "N member(s) opted out" note. (relay_group threads are
    *  excluded from THIS server timeline today, so this is carried for
@@ -364,12 +368,17 @@ function toTimelineMessage(
     ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
-    // Email channel v1: subject + addresses (HTML is B7; body is the trimmed text).
+    // Email channel v1: subject + addresses + sanitized HTML (body is the trimmed
+    // text; B7's EmailHtmlFrame renders email_html_sanitized in a sandboxed iframe).
     ...(isEmail && typeof m.subject === 'string' && { subject: m.subject }),
     ...(isEmail && typeof m.email_from === 'string' && { email_from: m.email_from }),
     ...(isEmail && Array.isArray(m.email_to) && { email_to: m.email_to }),
     ...(isEmail && Array.isArray(m.email_cc) && { email_cc: m.email_cc }),
     ...(isEmail && m.email_new_address === true && { email_new_address: true }),
+    ...(isEmail &&
+      typeof m.email_html_sanitized === 'string' && {
+        email_html_sanitized: m.email_html_sanitized,
+      }),
   };
 }
 

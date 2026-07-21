@@ -90,6 +90,48 @@ describe('contact timeline - email-only thread (invariant rule)', () => {
     expect(emailItems[0]!.fromPhone).toBeUndefined();
     expect(emailItems[0]!.toPhone).toBeUndefined();
   });
+
+  // B8 SCOPE 1: the serializer must carry the inbound-only render fields so the
+  // CONTACT-TIMELINE EmailCard can show the "New address" chip AND mount B7's
+  // sandboxed "View original formatting" iframe (email_html_sanitized was omitted
+  // by the A4 seam; email_new_address already flowed - both are asserted here).
+  it('carries email_html_sanitized + email_new_address through to the wire', async () => {
+    seedContact({
+      contactId: 'c-h',
+      type: 'landlord',
+      email: 'marcus@example.com',
+      emails: [{ email: 'marcus@example.com', primary: true }],
+    });
+    seedEmailConv('conv-h', 'marcus@example.com', { type: 'landlord_1to1' });
+    await world.messagesRepo.append({
+      conversationId: 'conv-h',
+      providerSid: '<in-html@sender.example.com>',
+      providerTs: '2026-07-12T11:00:00.000Z',
+      type: 'email',
+      direction: 'inbound',
+      author: 'landlord',
+      subject: 'Formatted reply',
+      body: 'Here is the lease.',
+      email_from: 'newphone@example.com',
+      email_to: ['team@mail.local.test'],
+      email_html_sanitized: '<p>Here is the <strong>lease</strong>.</p>',
+      email_new_address: true,
+      deliveryStatus: 'delivered',
+    });
+
+    const res = await auth(request(app).get('/api/contacts/c-h/timeline'));
+    expect(res.status).toBe(200);
+    const emailItems = (res.body.items as Array<Record<string, unknown>>).filter(
+      (i) => i.kind === 'message' && i.type === 'email',
+    );
+    expect(emailItems).toHaveLength(1);
+    expect(emailItems[0]).toMatchObject({
+      type: 'email',
+      subject: 'Formatted reply',
+      email_html_sanitized: '<p>Here is the <strong>lease</strong>.</p>',
+      email_new_address: true,
+    });
+  });
 });
 
 describe('GET /:contactId/media - email attachments (ADJ-1c)', () => {

@@ -569,6 +569,29 @@ describe('self cell verification (spec §7)', () => {
       expect(user.cell_pending).toBe('+14049824978');
     });
 
+    it('verify-start registers the code SMS as a SYSTEM send (syssid# marker) so its receipts never trip the unknown-SID error', async () => {
+      const world = createFakeWorld();
+      const harness = makeWebhookHarness({ world });
+
+      const start = await request(harness.app)
+        .post('/api/users/me/cell/verify-start')
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .send({ cell: '(404) 982-4978' });
+      expect(start.status).toBe(200);
+
+      // Exactly one marker, keyed by the provider SID the adapter minted for
+      // this send, kind 'cell_verification'
+      // (docs/issues/verification-sms-receipts-trip-error-alarm.md).
+      expect(world.sent).toHaveLength(1);
+      const entries = [...world.systemSidMarkers.entries()];
+      expect(entries).toHaveLength(1);
+      const [sid, kind] = entries[0]!;
+      expect(kind).toBe('cell_verification');
+      expect(typeof sid).toBe('string');
+      expect(sid.length).toBeGreaterThan(0);
+    });
+
     it('verify-start: "404" (too short) → 400 invalid_cell; nothing stored/sent', async () => {
       const world = createFakeWorld();
       const harness = makeWebhookHarness({ world });

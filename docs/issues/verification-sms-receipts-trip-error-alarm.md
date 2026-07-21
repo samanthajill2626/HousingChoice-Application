@@ -3,7 +3,8 @@ id: verification-sms-receipts-trip-error-alarm
 title: Cell-verification SMS delivery receipts trip the unknown-provider-SID ERROR backstop (3 false alarm-feeding errors per code sent)
 type: bug
 severity: med
-status: open
+status: resolved
+resolved: 2026-07-20
 area: app
 created: 2026-07-20
 refs: app/src/routes/voiceApi.ts:167, app/src/routes/webhooks/twilio.ts:1252, app/src/adapters/messaging.ts:19
@@ -34,3 +35,13 @@ INFO ("system send receipt - no message row by design") and acks 200. Keeps the
 backstop's guarantee (a genuinely orphaned conversation send still ERRORs)
 without alarm noise from by-design non-conversation sends. Any future direct-
 adapter send paths should use the same marker.
+
+**Resolution (2026-07-20).** Implemented as suggested: messagesRepo gained
+`putSystemSidMarker`/`getSystemSidMarker` (`syssid#<providerSid>` marker
+partition); verify-start registers its code SMS (`kind: cell_verification`,
+best-effort - a marker failure never fails the verify flow); the /status
+handler checks the marker alongside the message + relay-pointer lookups
+(including inside the one 2.5s retry, covering the marker's own
+write-after-send race) and acks a matching receipt at INFO. Covered by unit
+tests: marker written on verify-start (voiceOutbound), marked-SID receipt ->
+INFO + no unknown-SID ERROR (twilioStatusWebhook).

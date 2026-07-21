@@ -574,6 +574,19 @@ export interface MessagesRepo {
   getRelaySidPointer(
     providerSid: string,
   ): Promise<{ conversationId: string; tsMsgId: string; memberKey: string } | undefined>;
+  /**
+   * Mark a provider SID as a SYSTEM send: a real outbound SMS deliberately NOT
+   * persisted as a conversation message (e.g. the cell-verification code,
+   * routes/voiceApi.ts verify-start). The /status webhook checks this marker
+   * before its unknown-SID ERROR backstop so the send's delivery receipts ack
+   * at INFO instead of feeding the error alarm
+   * (docs/issues/verification-sms-receipts-trip-error-alarm.md). Same
+   * marker-partition convention as sid#/job#/relaysid# (`syssid#<sid>`).
+   * Unconditional put - a redelivered write is the same content.
+   */
+  putSystemSidMarker(providerSid: string, kind: string): Promise<void>;
+  /** The system-send marker for a provider SID, or undefined. */
+  getSystemSidMarker(providerSid: string): Promise<{ kind: string } | undefined>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -591,6 +604,11 @@ function jobPk(jobId: string): string {
 /** Pointer partition key for a relay-recipient provider SID (M1.7). */
 function relaySidPk(providerSid: string): string {
   return `relaysid#${providerSid}`;
+}
+
+/** Marker partition key for a system (non-conversation) send's provider SID. */
+function sysSidPk(providerSid: string): string {
+  return `syssid#${providerSid}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -1242,6 +1260,29 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         tsMsgId: ptr.ref_tsMsgId,
         memberKey: ptr.ref_member_key,
       };
+    },
+
+    async putSystemSidMarker(providerSid, kind) {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: sysSidPk(providerSid),
+            tsMsgId: 'ptr',
+            kind,
+            created_at: new Date().toISOString(),
+          },
+        }),
+      );
+      log.info({ providerSid, kind }, 'system-send SID marker written');
+    },
+
+    async getSystemSidMarker(providerSid) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: sysSidPk(providerSid), tsMsgId: 'ptr' } }),
+      );
+      if (!Item) return undefined;
+      return { kind: (Item as { kind?: string }).kind ?? 'unknown' };
     },
   };
 }

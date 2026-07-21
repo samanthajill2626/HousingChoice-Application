@@ -29,7 +29,7 @@ import { createUserRateLimit } from '../middleware/rateLimit.js';
 import { createUsersRepo, type UserItem, type UsersRepo } from '../repos/usersRepo.js';
 import { type ContactsRepo } from '../repos/contactsRepo.js';
 import { type ConversationsRepo } from '../repos/conversationsRepo.js';
-import { type MessagesRepo } from '../repos/messagesRepo.js';
+import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { type EventBus } from '../lib/events.js';
 import {
   createOriginateCallService,
@@ -169,6 +169,12 @@ export interface UsersMeRouterDeps {
    * opt-out/A2P-gated sendMessage service.
    */
   adapter?: MessagingAdapter;
+  /**
+   * System-send SID markers: verify-start registers the code SMS's provider SID
+   * (`syssid#`) so the /status webhook acks its delivery receipts at INFO
+   * instead of the unknown-SID ERROR backstop.
+   */
+  messagesRepo?: MessagesRepo;
 }
 
 export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
@@ -176,6 +182,7 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const adapter = deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger });
+  const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
 
   const router = Router();
 
@@ -233,12 +240,24 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
     // the consumer opt-out-gated sendMessage service). Best-effort: an adapter
     // throw (e.g. SMS disabled) → 503 so the UI can explain. NEVER log the code
     // or the cell (PII/secret, §9).
+    let providerSid: string | undefined;
     try {
-      await adapter.sendMessage({ to: cell, body: renderCellVerifySms(code) });
+      ({ providerSid } = await adapter.sendMessage({ to: cell, body: renderCellVerifySms(code) }));
     } catch (err) {
       log.error({ err, userId }, 'cell verify-start: sending the code failed — adapter unavailable');
       res.status(503).json({ error: 'sms_unavailable' });
       return;
+    }
+    // Register the SID as a SYSTEM send so the /status webhook's unknown-SID
+    // ERROR backstop recognizes this deliberately-unpersisted message's
+    // delivery receipts (3 false alarm-feeding errors per code otherwise -
+    // docs/issues/verification-sms-receipts-trip-error-alarm.md). Best-effort:
+    // a marker failure must never fail the verify flow (worst case = the old
+    // noisy errors for this one send).
+    try {
+      await messages.putSystemSidMarker(providerSid, 'cell_verification');
+    } catch (err) {
+      log.warn({ err, userId }, 'cell verify-start: system-SID marker write failed (best-effort)');
     }
     log.info({ userId }, 'cell verify-start: code sent');
     res.status(200).json({ ok: true });

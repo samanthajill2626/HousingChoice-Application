@@ -447,6 +447,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       adapter,
       ...(deps.usersRepo !== undefined && { usersRepo: deps.usersRepo }),
+      // verify-start registers the code SMS's SID as a system send (syssid#)
+      // so /status receipts for it never trip the unknown-SID ERROR backstop.
+      messagesRepo: messages,
     }),
   );
   // Admin user-management (requireRole admin on every route) + the inbound-voice-

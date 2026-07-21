@@ -265,6 +265,32 @@ describe('POST /webhooks/twilio/status — transitions', () => {
     expect(typeof err['correlationId']).toBe('string');
   });
 
+  it('SYSTEM-send SID (syssid# marker, e.g. a cell-verification code) → INFO ack, never the ERROR backstop', async () => {
+    const { app, world, capture } = makeWebhookHarness({ statusUnknownSidRetryDelayMs: 10 });
+    // verify-start registered its code SMS as a system send: a real outbound
+    // with NO message row by design.
+    world.systemSidMarkers.set('SMverify01', 'cell_verification');
+
+    const res = await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: 'SMverify01', MessageStatus: 'delivered' }),
+    );
+    expect(res.status).toBe(200);
+    // The receipt acks at INFO with the marker kind — and the alarm-feeding
+    // unknown-SID ERROR must NOT fire (the whole point of the marker:
+    // docs/issues/verification-sms-receipts-trip-error-alarm.md).
+    const info = capture.lines.find((l) =>
+      String(l['msg']).includes('delivery receipt for a system send'),
+    )!;
+    expect(info).toBeDefined();
+    expect(info['kind']).toBe('cell_verification');
+    expect(info['providerSid']).toBe('SMverify01');
+    expect(
+      capture.atLevel(ERROR).find((l) => String(l['msg']).includes('unknown provider SID')),
+    ).toBeUndefined();
+  });
+
   it('recovers conversation context by SID lookup — processing logs carry the conversationId (doc §9)', async () => {
     const { app, world, capture } = makeWebhookHarness();
     const seeded = await seedOutbound(world, 'SMout0001');

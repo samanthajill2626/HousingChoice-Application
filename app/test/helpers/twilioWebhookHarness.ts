@@ -135,6 +135,8 @@ export interface FakeWorld {
   jobExecutionMarkers: Map<string, string>;
   /** Relay-recipient SID pointers (M1.7): providerSid → source msg + member. */
   relaySidPointers: Map<string, { conversationId: string; tsMsgId: string; memberKey: string }>;
+  /** System-send SID markers (syssid#): providerSid → kind (e.g. cell_verification). */
+  systemSidMarkers: Map<string, string>;
   contacts: ContactItem[];
   flagWrites: { contactId: string; flag: ContactFlag; value: boolean }[];
   /** Conversation-level sms_opt_out writes (setSmsOptOut calls), in order. */
@@ -242,6 +244,8 @@ export function createFakeWorld(): FakeWorld {
     string,
     { conversationId: string; tsMsgId: string; memberKey: string }
   >();
+  // System-send SID markers (syssid#), providerSid -> kind.
+  const systemSidMarkers = new Map<string, string>();
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
@@ -723,6 +727,15 @@ export function createFakeWorld(): FakeWorld {
     },
     async getRelaySidPointer(providerSid) {
       return relaySidPointers.get(providerSid);
+    },
+    // System-send markers (syssid#): verify-start registers its code SMS here;
+    // the /status webhook checks it before the unknown-SID ERROR backstop.
+    async putSystemSidMarker(providerSid, kind) {
+      systemSidMarkers.set(providerSid, kind);
+    },
+    async getSystemSidMarker(providerSid) {
+      const kind = systemSidMarkers.get(providerSid);
+      return kind === undefined ? undefined : { kind };
     },
   };
 
@@ -2148,6 +2161,7 @@ export function createFakeWorld(): FakeWorld {
     messages,
     jobExecutionMarkers,
     relaySidPointers,
+    systemSidMarkers,
     contacts,
     flagWrites,
     optOutSets,

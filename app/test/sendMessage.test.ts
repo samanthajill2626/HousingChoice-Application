@@ -172,6 +172,8 @@ function makeFakes(
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},
     getRelaySidPointer: async () => undefined,
+    putSystemSidMarker: async () => {},
+    getSystemSidMarker: async () => undefined,
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {

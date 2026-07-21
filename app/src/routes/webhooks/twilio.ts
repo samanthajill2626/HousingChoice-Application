@@ -1220,23 +1220,42 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // correlation envelope — MessageSid → message → conversation.
     let message = await messages.getByProviderSid(MessageSid);
     let relayPtr = message ? undefined : await messages.getRelaySidPointer(MessageSid);
-    if (!message && !relayPtr) {
-      // Neither a persisted message nor a relay-leg pointer resolved on the
-      // first lookup. TWO independent write-after-send races land here, and the
-      // ONE retry below must cover BOTH — re-checking only one leaks the other:
+    // System sends (syssid# markers — e.g. the cell-verification code) are real
+    // outbound SMS deliberately NOT persisted as messages; their receipts must
+    // ack quietly, never trip the ERROR backstop below.
+    let systemMarker =
+      message || relayPtr ? undefined : await messages.getSystemSidMarker(MessageSid);
+    if (!message && !relayPtr && !systemMarker) {
+      // Nothing resolved on the first lookup. THREE independent write-after-send
+      // races land here, and the ONE retry below must cover ALL of them —
+      // re-checking only one leaks the others:
       //  - send/append: a 1:1 / broadcast callback outran the send wrapper's
       //    messages.append (Twilio can fire the first status before it commits).
       //  - relay fan-out: the relaysid pointer is written AFTER the provider
       //    send returns (relayFanOut send → markRecipient + putRelaySidPointer),
       //    so a fast delivery callback (fake-twilio fires 'sent' at +150ms; real
       //    Twilio can be just as fast) can arrive before the pointer lands.
-      // Wait once, then retry BOTH lookups before declaring the outcome lost.
+      //  - system sends: verify-start writes the syssid# marker AFTER the
+      //    adapter send returns — the same outrun window.
+      // Wait once, then retry the lookups before declaring the outcome lost.
       await delay(statusRetryDelayMs);
       message = await messages.getByProviderSid(MessageSid);
       if (!message) relayPtr = await messages.getRelaySidPointer(MessageSid);
+      if (!message && !relayPtr) systemMarker = await messages.getSystemSidMarker(MessageSid);
     }
     if (relayPtr) {
       await handleRelayRecipientStatus(relayPtr);
+      res.status(200).end();
+      return;
+    }
+    if (systemMarker) {
+      // A known system send (no message row BY DESIGN — e.g. a cell-verification
+      // code). INFO, never the alarm-feeding ERROR: the loop is closed, there is
+      // just nothing to attach the outcome to.
+      log.info(
+        { providerSid: MessageSid, providerStatus: MessageStatus, kind: systemMarker.kind },
+        'delivery receipt for a system send — acked (no message row by design)',
+      );
       res.status(200).end();
       return;
     }

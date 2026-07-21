@@ -100,9 +100,12 @@ resource "aws_ses_event_destination" "mail_events" {
 # (SNS denies a service principal by default; without this SES cannot deliver
 # and CreateReceiptRule / the event destination fail at apply). Confused-deputy
 # guarded by the account condition - mirrors the jobs module's aws:SourceAccount
-# pin. The condition KEY differs by SES subsystem: receipt-rule actions populate
-# the classic aws:Referer (= account id, same key the S3 bucket policy uses),
-# configuration-set event destinations populate aws:SourceAccount.
+# pin. BOTH topics condition on aws:SourceAccount: SES's SNS publishes
+# (receipt rules AND config-set event destinations) populate SourceAccount,
+# NOT aws:Referer - Referer is only populated by SES's S3 PutObject action
+# (the bucket policy below correctly keeps it). PROVEN at the 2026-07-21 dev
+# phase-1 apply: with Referer here, CreateReceiptRule failed InvalidSnsTopic
+# "Could not publish"; SourceAccount fixed it.
 # ---------------------------------------------------------------------------
 
 resource "aws_sns_topic" "mail_events" {
@@ -152,7 +155,7 @@ data "aws_iam_policy_document" "mail_inbound_publish" {
 
     condition {
       test     = "StringEquals"
-      variable = "aws:Referer"
+      variable = "aws:SourceAccount"
       values   = [data.aws_caller_identity.current.account_id]
     }
   }

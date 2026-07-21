@@ -449,6 +449,31 @@ describe('runDueExtractions', () => {
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', '2026-07-16T12:00:05.000Z#s5', NOW);
   });
 
+  it('triage due item: runs even with NOTHING newer than the cursor (post-triage re-read of the existing window)', async () => {
+    // The whole window is at/behind the cursor - an SMS row would early-exit
+    // (no new client content). The 'triage' channel bypasses the gate: a human
+    // just flipped the contact to tenant, so tenant-only facts the apply layer
+    // ignored for the unknown type are now applicable and the window must be
+    // re-read as-is.
+    const sms = msg(1, 'inbound', 'my voucher is a 3 bedroom');
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'triage', cursor: sms.tsMsgId })],
+      messages: [sms],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'client', text: 'my voucher is a 3 bedroom', at: sms.created_at, channel: 'sms' },
+    ]);
+    // The profile reflects the POST-triage type, so tenant-only fields apply.
+    expect(h.seen[0]!.profile.contactType).toBe('tenant');
+  });
+
   it('sms due item: still early-exits when only staff + an incomplete call are newer than the cursor', async () => {
     // The sole client message is AT the cursor; the only newer items are a staff
     // text and an outbound PENDING call - neither counts as new client content.

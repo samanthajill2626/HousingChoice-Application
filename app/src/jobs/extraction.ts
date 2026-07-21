@@ -202,15 +202,19 @@ async function processRow(
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const fresh = [...newestFirst].reverse().filter((m) => m.created_at >= cutoff);
 
-  // Freshness gate. A voice-triggered run (row.channel === 'voice') BYPASSES it
-  // entirely: a transcript persists minutes after the call row's tsMsgId, so an
-  // SMS-triggered run may already have advanced the cursor past the call row -
-  // the voice schedule is our signal that new transcript content exists. On an
-  // SMS-triggered run, a fresh COMPLETED-transcript call also counts as new
-  // client-side content: it carries the client's speech regardless of the call
-  // row's stored direction.
+  // Freshness gate. A voice- or triage-triggered run BYPASSES it entirely -
+  // both are signals for content the cursor logic can't see:
+  //   - voice: a transcript persists minutes after the call row's tsMsgId, so an
+  //     SMS-triggered run may already have advanced the cursor past the call row.
+  //   - triage: a human just flipped the contact to tenant, so tenant-only facts
+  //     (voucherSize/housingAuthority/...) the apply layer previously IGNORED
+  //     for the unknown type are now applicable - re-read the existing window.
+  // On an SMS-triggered run, a fresh COMPLETED-transcript call also counts as
+  // new client-side content: it carries the client's speech regardless of the
+  // call row's stored direction.
   const hasNewClient =
     row.channel === 'voice' ||
+    row.channel === 'triage' ||
     fresh.some(
       (m) =>
         m.tsMsgId > cursor &&
@@ -222,11 +226,11 @@ async function processRow(
     return 'skipped';
   }
 
-  // A voice-triggered run bypasses the client-freshness early-exit above, so an
-  // empty window (nothing survived the 30-day / newest-50 cutoff) would fall
-  // through to fresh[fresh.length - 1] and throw. Guard it explicitly: nothing to
-  // extract -> complete with the existing cursor. (An SMS run already early-exits
-  // on an empty window via hasNewClient=false.)
+  // A voice-/triage-triggered run bypasses the client-freshness early-exit
+  // above, so an empty window (nothing survived the 30-day / newest-50 cutoff)
+  // would fall through to fresh[fresh.length - 1] and throw. Guard it
+  // explicitly: nothing to extract -> complete with the existing cursor. (An
+  // SMS run already early-exits on an empty window via hasNewClient=false.)
   if (fresh.length === 0) {
     logger.debug({ conversationId }, 'extraction: empty transcript window - completing');
     await repo.complete(conversationId, cursor, nowIso);

@@ -117,6 +117,31 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     // D1: a freshly identified landlord is a LEAD -> 'interested', NOT 'active'
     // ('active' means their properties are onboarded).
     expect(res.body.contact.status).toBe('interested');
+    // NO triage re-extraction for a landlord: landlord contacts are ineligible
+    // in the extraction job, so a scheduled row would be a guaranteed no-op.
+    expect(world.extractionSchedules).toEqual([]);
+  });
+
+  it('a flip to TENANT schedules an immediate triage re-extraction on the linked thread', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant' });
+    expect(res.status).toBe(200);
+
+    // Tenant-only facts (voucherSize/housingAuthority/...) already in the
+    // conversation window were IGNORED while the contact was unknown - the
+    // triage flip schedules a 'triage'-channel run (freshness-gate bypass) so
+    // they land now, not on the next inbound.
+    expect(world.extractionSchedules).toHaveLength(1);
+    expect(world.extractionSchedules[0]).toMatchObject({
+      conversationId: 'conv-triage-1',
+      channel: 'triage',
+    });
   });
 
   it('E1: an explicit landlord status on triage wins over the interested auto-advance', async () => {

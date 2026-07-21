@@ -510,6 +510,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // conversation-fact-extraction (T8): a human field edit clears AI provenance
       // + supersedes any pending suggestion for that field (best-effort).
       extractionRepo: extraction,
+      // Triage re-extraction hook: a flip to tenant schedules an immediate
+      // 'triage' run (gated by the same kill switch as the other schedule sites).
+      aiExtractionEnabled: config.aiExtractionEnabled,
       events,
     }),
   );

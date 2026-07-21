@@ -42,7 +42,11 @@ export interface DueExtractionItem {
   /** PK - `due#<conversationId>`. */
   itemId: string;
   conversationId: string;
-  channel: 'sms' | 'voice';
+  /** What scheduled the run: an inbound text (sms), a fresh call transcript
+   *  (voice), or a human triage flip to tenant (triage). voice/triage runs
+   *  bypass the job's client-freshness gate - their signal is content the
+   *  cursor logic can't see (a late transcript / newly-applicable tenant facts). */
+  channel: 'sms' | 'voice' | 'triage';
   /** ISO - byDueAt GSI range key; present ONLY while a run is scheduled. */
   dueAt?: string;
   /** byDueAt GSI hash key (fixed 'due'); present ONLY while scheduled (sparse). */
@@ -88,7 +92,11 @@ export interface ExtractionRepo {
    * every fresh inbound message with dueAt = now + debounce, so a burst slides
    * the single item forward to the latest time.
    */
-  scheduleExtraction(conversationId: string, channel: 'sms' | 'voice', dueAt: string): Promise<void>;
+  scheduleExtraction(
+    conversationId: string,
+    channel: 'sms' | 'voice' | 'triage',
+    dueAt: string,
+  ): Promise<void>;
   /** All scheduled due items with dueAt <= now (byDueAt GSI; paginated). */
   listDue(nowIso: string): Promise<DueExtractionItem[]>;
   /**

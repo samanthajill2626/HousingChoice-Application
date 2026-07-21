@@ -227,6 +227,10 @@ export interface FakeWorld {
   placementNudgesRepo: PlacementNudgesRepo;
   /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
   suggestions: Map<string, SuggestionItem>;
+  /** scheduleExtraction calls through the world extraction repo, in order (the
+   *  API-side schedule sites, e.g. the triage re-extraction hook). The WEBHOOK
+   *  schedule path keeps asserting via opts.extractionRepo. */
+  extractionSchedules: { conversationId: string; channel: string; dueAt: string }[];
   extractionRepo: ExtractionRepo;
 }
 
@@ -1858,6 +1862,8 @@ export function createFakeWorld(): FakeWorld {
   // conversation-fact-extraction (T8): pending AI suggestions, keyed by itemId
   // (`sugg#<contactId>#<target>`).
   const suggestions = new Map<string, SuggestionItem>();
+  // API-side scheduleExtraction calls (triage re-extraction hook), in order.
+  const extractionSchedules: FakeWorld['extractionSchedules'] = [];
   const placementNudgesRepo: PlacementNudgesRepo = {
     async create(input: { placementId: string; kind: NudgeKind; dueAt: string }) {
       const now = new Date().toISOString();
@@ -1946,8 +1952,10 @@ export function createFakeWorld(): FakeWorld {
   // end-to-end against the SAME store the api router reads. Due-item methods are
   // minimal stubs (the webhook schedule path is covered by its own opts stub).
   const extractionRepo: ExtractionRepo = {
-    async scheduleExtraction() {
-      /* no-op: webhook scheduling asserted via opts.extractionRepo */
+    async scheduleExtraction(conversationId, channel, dueAt) {
+      // Recorded for API-side schedule-site assertions (triage re-extraction);
+      // the WEBHOOK schedule path keeps asserting via opts.extractionRepo.
+      extractionSchedules.push({ conversationId, channel, dueAt });
     },
     async listDue() {
       return [];
@@ -2198,6 +2206,7 @@ export function createFakeWorld(): FakeWorld {
     placementNudgesMap,
     placementNudgesRepo,
     suggestions,
+    extractionSchedules,
     extractionRepo,
   };
 }

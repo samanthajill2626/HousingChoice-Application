@@ -50,6 +50,7 @@ import {
   type ContactType,
   type ListContactsOpts,
 } from '../repos/contactsRepo.js';
+import { loadConfig } from '../lib/config.js';
 import { HUMAN_CONSENT_METHODS, type ConsentMethod } from '../lib/smsCompliance.js';
 import {
   createConversationsRepo,
@@ -114,6 +115,14 @@ export interface ContactsRouterDeps {
    * in tests (a no-network fake); defaults to the real repo.
    */
   extractionRepo?: ExtractionRepo;
+  /**
+   * Kill switch for the triage re-extraction hook (config.aiExtractionEnabled):
+   * a triage flip to tenant schedules an immediate 'triage' extraction run so
+   * tenant-only facts (voucherSize/housingAuthority/...) already present in the
+   * conversation window are picked up without waiting for the next inbound.
+   * Defaults to the config value when not injected.
+   */
+  aiExtractionEnabled?: boolean;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
 }
@@ -767,6 +776,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiExtractionEnabled = deps.aiExtractionEnabled ?? loadConfig().aiExtractionEnabled;
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -1332,6 +1342,28 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         });
         if (flipType) propagatedConversations += 1;
         events.emit('conversation.updated', toConversationUpdatedEvent(fresh));
+      }
+
+      // Triage re-extraction: a flip to TENANT makes the tenant-only facts
+      // (voucherSize/housingAuthority/pets/...) the apply layer IGNORED for the
+      // unknown type applicable — schedule an IMMEDIATE 'triage' run per linked
+      // thread so those facts land now, not on the next inbound. The 'triage'
+      // channel bypasses the job's client-freshness gate (the content is
+      // already behind the cursor). Tenant ONLY: landlord/team_member contacts
+      // are ineligible in the job, so a row would be a guaranteed no-op.
+      // Best-effort — a schedule failure never fails the triage response.
+      if (aiExtractionEnabled && newType === 'tenant') {
+        const nowIso = new Date().toISOString();
+        for (const conv of linked) {
+          try {
+            await extraction.scheduleExtraction(conv.conversationId, 'triage', nowIso);
+          } catch (err) {
+            log.warn(
+              { err, contactId, conversationId: conv.conversationId },
+              'triage re-extraction schedule failed (best-effort)',
+            );
+          }
+        }
       }
     }
 

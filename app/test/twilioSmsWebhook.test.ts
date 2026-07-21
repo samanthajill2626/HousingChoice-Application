@@ -1065,9 +1065,9 @@ describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (T
   // surfaces an accidental call as a test failure rather than a silent no-op).
   function stubExtractionRepo(overrides: Partial<ExtractionRepo> = {}): {
     repo: ExtractionRepo;
-    scheduleCalls: { conversationId: string; channel: 'sms' | 'voice'; dueAt: string }[];
+    scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage'; dueAt: string }[];
   } {
-    const scheduleCalls: { conversationId: string; channel: 'sms' | 'voice'; dueAt: string }[] = [];
+    const scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage'; dueAt: string }[] = [];
     const notImpl = (name: string) => async (): Promise<never> => {
       throw new Error(`extraction stub: ${name} must not be called by the webhook path`);
     };

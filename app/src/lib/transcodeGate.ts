@@ -5,5 +5,5 @@
 import { createSemaphore, type Semaphore } from './semaphore.js';
 import { MMS_TRANSCODE_MAX_CONCURRENT } from './outboundMediaLimits.js';
 
-// Test-safety of this process-wide singleton rests on release() staying inside a finally on every acquiring path (no cross-test slot leak) plus vitest isolate:true (a fresh module registry per test file).
+// Test-safety of this process-wide singleton rests on release() staying inside a finally on every acquiring path (no cross-test slot leak) plus a fresh module registry per test file - which vitest gives by DEFAULT (isolate defaults to true; app/vitest.config.ts does not pin it, so this leans on that default rather than an explicit setting).
 export const sharedTranscodeGate: Semaphore = createSemaphore(MMS_TRANSCODE_MAX_CONCURRENT);

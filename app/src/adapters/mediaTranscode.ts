@@ -123,7 +123,10 @@ export async function transcodeForMms(bytes: Buffer, sourceType: string): Promis
 }
 
 /** Convert a >5MB unit-photo source into the display rendition (2560/q-ladder
- *  jpeg). Images only - the photo allowlist has no pdf. */
+ *  jpeg). Images only - the photo allowlist has no pdf. A >5MB animated gif (or
+ *  transparent png) flattens to a single jpeg still - accepted for listing
+ *  photos per the design (spec D4); <=5MB sources never reach here (the confirm
+ *  route passes them through untouched). */
 export async function transcodeForUnitPhoto(bytes: Buffer, sourceType: string): Promise<TranscodeResult> {
   return transcodeImage(bytes, sourceType.trim().toLowerCase(), UNIT_PHOTO_PROFILE);
 }

@@ -133,7 +133,7 @@ function photoUploadMessage(err: unknown): string {
     case 'media_storage_unavailable':
       return "Photo storage isn't available right now - please try again later.";
     case 'transcode_busy':
-      return 'The server is busy fitting large photos - please try again in a moment.';
+      return 'The server is busy fitting large photos - wait a moment, then add just the large photo(s) again.';
     case 'transcode_failed':
       return "A large photo couldn't be processed - it may be corrupted. Re-export it and try again.";
     default:

@@ -298,8 +298,8 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     const { flyer } = res.body;
 
     // The shareable set is present and correct (voucher_size derived from beds).
-    // unit-photos: media is now the RESOLVED render-time presigned URL list (the
-    // two stored keys each presign fresh), not a raw key pass-through.
+    // unit-photos: media is now the RESOLVED same-origin URL list (each stored
+    // key becomes its stable /unit-media path), not a raw key pass-through.
     expect(flyer).toMatchObject({
       unitId: 'unit-1',
       beds: 2,
@@ -312,8 +312,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       rent_min: 1400,
       rent_max: 1600,
     });
-    expect(flyer.media).toHaveLength(2);
-    for (const url of flyer.media) expect(url).toMatch(/^https:\/\/fake-s3\.local\//);
+    expect(flyer.media).toEqual(['/unit-media/unit-1/photo1', '/unit-media/unit-1/photo2']);
     // The flyer now carries the FULL public payload upfront (no reveal tier)
     // plus contact_number - the main 1:1 business number from config.
     expect(flyer.contact_number).toBe(OUR_NUMBER);
@@ -363,11 +362,11 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     }
   });
 
-  it('review F2: a foreign media key never reaches the PUBLIC flyer (omitted, not presigned)', async () => {
+  it('review F2: a foreign media key never reaches the PUBLIC flyer (omitted, no URL)', async () => {
     // The private bucket is shared with the MMS namespaces; `media` stays
     // PATCH-writable. A foreign entry (an uploads/ MMS attachment or another
     // unit's key) must be OMITTED from the public flyer's resolved url list -
-    // never presigned onto an unauthenticated page.
+    // never given a display URL on an unauthenticated page.
     const { app, world } = makeWebhookHarness();
     seedFullUnit(world, {
       media: [
@@ -380,7 +379,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     expect(res.status).toBe(200);
     const media: string[] = res.body.flyer.media;
     expect(media).toHaveLength(1);
-    expect(media[0]).toMatch(/^https:\/\/fake-s3\.local\//);
+    expect(media[0]).toBe('/unit-media/unit-1/own-photo');
     expect(JSON.stringify(res.body)).not.toContain('private-mms-attachment');
     expect(JSON.stringify(res.body)).not.toContain('unit-OTHER');
   });
@@ -567,8 +566,8 @@ describe('/public sits behind the origin-secret validator (locked chain stage 2)
   });
 });
 
-// unit-photos: the flyer renders the unit's photos via render-time presigned
-// URLs (D1/D2/E1), inheriting the whole-flyer shareable gate.
+// unit-photos: the flyer renders the unit's photos via stable same-origin
+// /unit-media URLs (design 2026-07-21), inheriting the whole-flyer shareable gate.
 describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
   function seedShareable(world: ReturnType<typeof createFakeWorld>, overrides: Partial<UnitItem> = {}) {
     const unit: UnitItem = {
@@ -582,17 +581,17 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
     return unit;
   }
 
-  it('an AVAILABLE unit exposes its photos as presigned URLs (stored keys resolved)', async () => {
+  it('an AVAILABLE unit exposes its photos as same-origin URLs (stored keys resolved)', async () => {
     const { app, world } = makeWebhookHarness();
     seedShareable(world);
     const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);
-    expect(res.body.flyer.media).toHaveLength(2);
-    // Each entry is a signed URL (bearer signature), not a bare key.
-    for (const url of res.body.flyer.media) {
-      expect(url).toMatch(/^https:\/\/fake-s3\.local\//);
-      expect(url).toContain('X-Amz-Signature=');
-    }
+    // Each entry is the stable same-origin /unit-media path (the S3 key with a
+    // leading slash), not a presigned URL.
+    expect(res.body.flyer.media).toEqual([
+      '/unit-media/unit-photo/k1',
+      '/unit-media/unit-photo/k2',
+    ]);
   });
 
   it('E1: flipping the SAME unit to on_hold 404s the WHOLE flyer (photos included)', async () => {
@@ -603,15 +602,21 @@ describe('GET /public/units/:unitId/flyer - photo resolution + E1 gate', () => {
     expect(res.body).toEqual({ error: 'not_found', contact_number: OUR_NUMBER });
   });
 
-  it('omits unresolvable entries but keeps legacy absolute-URL photos (E2/E4)', async () => {
+  it('resolves own-namespace keys to relative URLs even with NO media store; legacy URLs pass through (E2/E4)', async () => {
     const { app, world } = makeWebhookHarness({ withoutMediaStore: true });
     seedShareable(world, {
       media: ['unit-media/unit-photo/stored', 'https://legacy.example/p.jpg'],
     });
-    // With no media store, the stored key can't presign (omitted); the legacy URL
-    // passes through - the flyer still renders, never 500s.
+    // Same-origin reads are STORE-INDEPENDENT (design 2026-07-21): the
+    // own-namespace key still resolves to its stable /unit-media path even with
+    // no media store (it may 404 at the serve route - the same visible outcome
+    // as the old url-absent degradation, an absent image); the legacy URL passes
+    // through - the flyer still renders, never 500s.
     const res = await request(app).get('/public/units/unit-photo/flyer').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);
-    expect(res.body.flyer.media).toEqual(['https://legacy.example/p.jpg']);
+    expect(res.body.flyer.media).toEqual([
+      '/unit-media/unit-photo/stored',
+      'https://legacy.example/p.jpg',
+    ]);
   });
 });

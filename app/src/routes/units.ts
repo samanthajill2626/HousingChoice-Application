@@ -413,9 +413,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    // unit-photos S3: resolve stored media keys to short-lived display URLs
-    // (presign-per-read) ALONGSIDE the raw `media` (the management handle).
-    const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+    // unit-photos: resolve stored media keys to stable same-origin /unit-media
+    // URLs (design 2026-07-21) ALONGSIDE the raw `media` (the management handle).
+    const mediaDisplay = resolveUnitMedia(unit, { logger: log });
     res.json({ unit: { ...unit, contacts: await enrichRoster(unit), mediaDisplay } });
   });
 
@@ -602,7 +602,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // append, no audit) so a client retry after a lost response is safe.
       // Only a body with no valid key AT ALL is an error.
       if (alreadyPresent > 0) {
-        const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+        const mediaDisplay = resolveUnitMedia(unit, { logger: log });
         res.json({ unit: { ...unit, mediaDisplay } });
         return;
       }
@@ -645,7 +645,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       log.warn({ err, unitId }, 'unit photos confirm: audit append failed - continuing (best-effort)');
     }
     log.info({ unitId, count: survivors.length, actor: req.user?.userId }, 'unit photos confirmed via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 
@@ -683,7 +683,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       remaining: Array.isArray(updated.media) ? updated.media.length : 0,
     });
     log.info({ unitId, actor: req.user?.userId }, 'unit photo removed via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 
@@ -718,7 +718,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       entryHash: entryHash(entry),
     });
     log.info({ unitId, actor: req.user?.userId }, 'unit photo cover set via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 

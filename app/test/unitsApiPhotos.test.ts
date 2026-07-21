@@ -1,7 +1,7 @@
 // unit-photos direct-upload route tests: POST /api/units/:unitId/photos/presign
 // (mint presigned-POST grants), POST /api/units/:unitId/photos/confirm (record
 // the keys the browser uploaded directly to S3), DELETE /api/units/:unitId/photos,
-// PUT /api/units/:unitId/photos/cover, and the mediaDisplay presign-per-read
+// PUT /api/units/:unitId/photos/cover, and the mediaDisplay same-origin
 // resolution on GET /api/units/:unitId. Drives the real routers through
 // makeWebhookHarness with the world's fake MediaStore (which records each minted
 // grant into world.presignPosts and reads back stored objects via head()).
@@ -182,10 +182,10 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     const res = await confirm(app, 'unit-1').send({ keys: [k1, k2] });
     expect(res.status).toBe(200);
     expect(res.body.unit.media).toEqual([k1, k2]);
-    // mediaDisplay resolves each stored key to a presigned URL alongside the raw entry.
+    // mediaDisplay resolves each stored key to a same-origin /unit-media URL alongside the raw entry.
     expect(res.body.unit.mediaDisplay).toHaveLength(2);
     expect(res.body.unit.mediaDisplay[0].entry).toBe(k1);
-    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
+    expect(res.body.unit.mediaDisplay[0].url).toBe('/' + k1);
     // The audit carries COUNT only (no key/filename).
     const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
     expect(added?.payload).toMatchObject({ count: 2 });
@@ -467,8 +467,8 @@ describe('PUT /api/units/:unitId/photos/cover', () => {
   });
 });
 
-describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
-  it('mints a DIFFERENT url on each read and NEVER persists a presigned url', async () => {
+describe('GET /api/units/:unitId - mediaDisplay same-origin URLs (design 2026-07-21)', () => {
+  it('emits a STABLE same-origin url on each read and NEVER persists a url', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { media: ['unit-media/unit-1/k1'] });
     const get = () =>
@@ -478,9 +478,10 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     expect(first.status).toBe(200);
     const url1: string = first.body.unit.mediaDisplay[0].url;
     const url2: string = second.body.unit.mediaDisplay[0].url;
-    expect(url1).toMatch(/^https:\/\/fake-s3\.local\//);
-    expect(url1).not.toBe(url2); // fresh signature each read
-    // The durable field still holds the raw key - no presigned URL persisted.
+    expect(url1).toBe('/unit-media/unit-1/k1');
+    expect(url1).toMatch(/^\/unit-media\//);
+    expect(url2).toBe(url1); // stable same-origin URL, not a per-read presign
+    // The durable field still holds the raw key - no URL persisted.
     expect(world.units.get('unit-1')?.media).toEqual(['unit-media/unit-1/k1']);
   });
 
@@ -498,11 +499,11 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     });
   });
 
-  it('review F2: presigns ONLY keys under this unit\'s own namespace (foreign keys degrade)', async () => {
+  it('review F2: emits URLs ONLY for keys under this unit\'s own namespace (foreign keys degrade)', async () => {
     // `media` stays PATCH-writable (E5) and the bucket is shared with the MMS
     // namespaces - a foreign key pasted into media (an uploads/ MMS attachment,
-    // or ANOTHER unit's photo) must NEVER presign (else the public flyer would
-    // expose a private object). Legacy URLs still pass through.
+    // or ANOTHER unit's photo) must NEVER get a display URL (else the public
+    // flyer would expose a private object). Legacy URLs still pass through.
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', {
       media: [
@@ -519,7 +520,7 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     expect(res.status).toBe(200);
     const display: { entry: string; url?: string }[] = res.body.unit.mediaDisplay;
     expect(display).toHaveLength(4);
-    expect(display[0]!.url).toMatch(/^https:\/\/fake-s3\.local\//); // own key: presigned
+    expect(display[0]!.url).toBe('/unit-media/unit-1/own-photo'); // own key: same-origin URL
     expect(display[1]!).toEqual({ entry: 'uploads/some-mms-attachment' }); // foreign: NO url
     expect(display[2]!).toEqual({ entry: 'unit-media/unit-OTHER/their-photo' }); // cross-unit: NO url
     expect(display[3]!.url).toBe('https://legacy.example/photo.jpg'); // legacy URL: pass-through

@@ -115,11 +115,10 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // /api requireAuth gate below. A per-IP rate limiter fronts ALL /public
   // routes (the abuse fence on an unauthenticated, SMS-spending surface); the
   // router itself re-validates everything and never logs PII.
-  // Media store for same-origin unit-photo serving. ONE instance feeds two
-  // mounts this slice: the /public flyer resolver (slice 2 retires that use)
-  // and the /unit-media serve route below. Built from config (undefined when
-  // MEDIA_BUCKET is unset); a test-injected deps.public (its own fake store)
-  // still overrides the /public spread.
+  // Media store for same-origin unit-photo serving: it feeds the /unit-media
+  // serve route below. The /public flyer resolver no longer needs it - photo
+  // reads are now stable relative /unit-media URLs (design 2026-07-21), resolved
+  // with no store. Built from config (undefined when MEDIA_BUCKET is unset).
   const mediaServeStore = createMediaStore({ config });
   app.use(
     '/public',
@@ -135,7 +134,6 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       // under noUncheckedIndexedAccess + the dep is optional, so spread it in
       // only when configured (empty list -> the page degrades to reply-prompt).
       ...(config.ourPhoneNumbers[0] !== undefined && { contactNumber: config.ourPhoneNumbers[0] }),
-      ...(mediaServeStore !== undefined && { mediaStore: mediaServeStore }),
       ...deps.public,
     }),
   );

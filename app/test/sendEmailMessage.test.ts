@@ -10,7 +10,7 @@ import type { EmailAdapter } from '../src/adapters/email.js';
 import type { MediaStore } from '../src/adapters/mediaStore.js';
 import type { ContactItem, ContactsRepo } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
-import type { MessagesRepo } from '../src/repos/messagesRepo.js';
+import type { MessageItem, MessagesRepo } from '../src/repos/messagesRepo.js';
 import type { EventBus } from '../src/lib/events.js';
 import { EMAIL_MAX_TOTAL_BYTES } from '../src/lib/mediaTypes.js';
 import {
@@ -45,6 +45,8 @@ interface Over {
   attachReturns?: string;
   mediaStore?: Partial<MediaStore> | null;
   parked?: ReturnType<typeof vi.fn>;
+  /** Prior messages listByConversation returns (newest-first) for reply threading. */
+  priorMessages?: MessageItem[];
 }
 
 function makeFakes(over: Over = {}) {
@@ -76,6 +78,7 @@ function makeFakes(over: Over = {}) {
     deduped: false,
     tsMsgId: `${m.providerTs}#${m.providerSid}`,
   }));
+  const listByConversation = vi.fn(async () => over.priorMessages ?? []);
   const recordProviderSidAlias = vi.fn(async () => {});
   const updateDeliveryStatus = vi.fn(async () => true);
   const send = over.send ?? vi.fn(async () => ({ providerMessageId: 'ses-1' }));
@@ -103,7 +106,12 @@ function makeFakes(over: Over = {}) {
       getReplyToken,
       touchLastActivity,
     } as unknown as ConversationsRepo,
-    messagesRepo: { append, recordProviderSidAlias, updateDeliveryStatus } as unknown as MessagesRepo,
+    messagesRepo: {
+      append,
+      listByConversation,
+      recordProviderSidAlias,
+      updateDeliveryStatus,
+    } as unknown as MessagesRepo,
     contactsRepo: {
       getById: async (id: string) => (contact?.contactId === id ? contact : undefined),
       touchEmailLastSeen,
@@ -117,6 +125,7 @@ function makeFakes(over: Over = {}) {
   return {
     service,
     append,
+    listByConversation,
     recordProviderSidAlias,
     updateDeliveryStatus,
     send,
@@ -389,5 +398,39 @@ describe('sendEmailMessage - m5: conversation belongs to the recipient contact',
     await expect(f.service(input())).rejects.toMatchObject({ code: 'conversation_contact_mismatch' });
     expect(f.append).not.toHaveBeenCalled();
     expect(f.attachEmailToConversation).not.toHaveBeenCalled();
+  });
+});
+
+describe('sendEmailMessage - conf-MED: outbound reply threading (In-Reply-To/References)', () => {
+  it('sets In-Reply-To + References from the most recent INBOUND email in the thread', async () => {
+    const f = makeFakes({
+      priorMessages: [
+        // newest-first: the outbound is ignored, the inbound is the reply target.
+        { type: 'email', direction: 'outbound', email_message_id: '<hc-out@mail.test>' },
+        {
+          type: 'email',
+          direction: 'inbound',
+          email_message_id: '<in-2@sender.test>',
+          email_references: ['<root@sender.test>', '<in-1@sender.test>'],
+        },
+      ] as unknown as MessageItem[],
+    });
+    await f.service(input());
+    const sent = f.send.mock.calls[0]![0] as { inReplyTo?: string; references?: string[] };
+    expect(sent.inReplyTo).toBe('<in-2@sender.test>');
+    // References = the inbound's own chain + itself (capped 10), newest last.
+    expect(sent.references).toEqual([
+      '<root@sender.test>',
+      '<in-1@sender.test>',
+      '<in-2@sender.test>',
+    ]);
+  });
+
+  it('sets no threading headers when the thread has no inbound email yet', async () => {
+    const f = makeFakes(); // listByConversation -> []
+    await f.service(input());
+    const sent = f.send.mock.calls[0]![0] as { inReplyTo?: string; references?: string[] };
+    expect(sent.inReplyTo).toBeUndefined();
+    expect(sent.references).toBeUndefined();
   });
 });

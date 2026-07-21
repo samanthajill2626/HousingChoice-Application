@@ -252,6 +252,13 @@ export interface NewMessage {
   email_cc?: string[];
   /** The RFC Message-ID (ours on outbound `<hc-...>`, the sender's on inbound). */
   email_message_id?: string;
+  /**
+   * INBOUND email: the References chain from the mail's headers (bracketed RFC
+   * ids), persisted so an outbound staff REPLY can build its own References (this
+   * chain + the inbound's own Message-ID, capped) for recipient-MUA threading.
+   * Absent on outbound + non-email.
+   */
+  email_references?: string[];
   /** Sanitized inbound HTML body (Phase B B7 renders it; absent on outbound). */
   email_html_sanitized?: string;
   /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
@@ -407,6 +414,8 @@ export interface MessageItem {
   email_cc?: string[];
   /** RFC Message-ID (ours on outbound, the sender's on inbound). */
   email_message_id?: string;
+  /** INBOUND email References chain (see NewMessage.email_references). */
+  email_references?: string[];
   /**
    * OUTBOUND email (A5): the SES MessageId returned by adapter.send, stamped by
    * recordProviderSidAlias AFTER send. Distinct from provider_sid (which is our
@@ -883,6 +892,8 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.email_to !== undefined && { email_to: message.email_to }),
         ...(message.email_cc !== undefined && { email_cc: message.email_cc }),
         ...(message.email_message_id !== undefined && { email_message_id: message.email_message_id }),
+        ...(message.email_references !== undefined &&
+          message.email_references.length > 0 && { email_references: message.email_references }),
         ...(message.email_html_sanitized !== undefined && {
           email_html_sanitized: message.email_html_sanitized,
         }),

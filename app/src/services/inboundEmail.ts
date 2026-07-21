@@ -548,6 +548,8 @@ export async function ingestInboundEmail(
       email_to: parsed.to.map(normalizeEmailAddress),
       email_cc: parsed.cc.map(normalizeEmailAddress),
       email_message_id: parsed.rfcMessageId, // bracketed RFC fidelity
+      // Persist the References chain so an outbound staff reply can thread on it.
+      ...(parsed.references.length > 0 && { email_references: parsed.references }),
       ...(sanitizedHtml !== undefined && { email_html_sanitized: sanitizedHtml }),
       email_raw_ref: { bucket, key },
       ...(flagNewAddress && { email_new_address: true }),

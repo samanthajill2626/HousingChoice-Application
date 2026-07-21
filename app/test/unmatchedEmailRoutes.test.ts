@@ -683,3 +683,37 @@ describe('POST /api/unmatched-email/:id/dismiss', () => {
     expect((await request(app).post('/api/unmatched-email/um-ghost/dismiss')).status).toBe(404);
   });
 });
+
+describe('DELETE /api/unmatched-email/block/:address', () => {
+  it('un-blocklists a blocked sender (isBlocked -> false) + returns { ok: true }', async () => {
+    const { app, repo } = makeApp();
+    await repo.putBlock('spammer@example.com');
+    expect(await repo.isBlocked('spammer@example.com')).toBe(true);
+
+    const res = await request(app).delete(
+      `/api/unmatched-email/block/${encodeURIComponent('spammer@example.com')}`,
+    );
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+    expect(await repo.isBlocked('spammer@example.com')).toBe(false);
+  });
+
+  it('normalizes the address before unblocking (upper/whitespace still matches)', async () => {
+    const { app, repo } = makeApp();
+    await repo.putBlock('spammer@example.com'); // stored normalized-lowercase
+    const res = await request(app).delete(
+      `/api/unmatched-email/block/${encodeURIComponent('  SPAMMER@Example.com  ')}`,
+    );
+    expect(res.status).toBe(200);
+    expect(await repo.isBlocked('spammer@example.com')).toBe(false);
+  });
+
+  it('404s not_blocked when the address is not on the blocklist', async () => {
+    const { app } = makeApp();
+    const res = await request(app).delete(
+      `/api/unmatched-email/block/${encodeURIComponent('never@example.com')}`,
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('not_blocked');
+  });
+});

@@ -20,14 +20,13 @@ import { dashboardUrl } from '../../support/urls.js';
 // spec), which runs in the SAME filtered batch as this file - re-running it green
 // against the full Phase-B tree IS the post-B re-verification. See the B8 report.
 //
-// THREADING NOTE (matrix 1): the plan's matrix asks the staff reply to carry
-// In-Reply-To. The shipped A5 send service (sendEmailMessage.ts) does NOT populate
-// In-Reply-To/References (the adapter composeRawMime supports both - the service
-// never sets them), so the system threads via the Reply-To: relay+<token> header
-// instead (proven end-to-end by matrix item 2's round-trip). This spec asserts that
-// real threading anchor; the outbound In-Reply-To gap is reported as an A5 follow-up
-// in the B8 report (not "bent" - the Reply-To token is the threading mechanism this
-// system ships).
+// THREADING NOTE (matrix 1): the staff reply carries BOTH threading signals now.
+// (a) Reply-To: relay+<token> is OUR inbound routing anchor - an inbound reply comes
+// back on it (matrix item 2 proves that round-trip). (b) In-Reply-To (+ References)
+// references the inbound mail's own Message-ID, so recipient MUAs (Gmail) visually
+// thread the reply (fix-wave conf-MED: sendEmailMessage now resolves the latest
+// inbound email in the thread and sets these; the adapter composeRawMime already
+// mapped them). This spec asserts both.
 const NEXT = dashboardUrl;
 
 // Seeded landlord (app/src/lib/seed/lean.ts): Marcus Bell has a primary email and
@@ -55,7 +54,12 @@ test.describe('Inbound email - contact timeline, threading, and bounce', () => {
     // (1) Marcus (a known contact) emails in. Tier-6 findByEmail threads it onto his
     //     contact, creating his email conversation.
     const subject = 'Following up on 1450 Boone';
-    await flow.partnerEmailsIn(MARCUS_EMAIL, subject, 'Is the unit still open? Please advise.');
+    // Pin the inbound Message-ID so we can assert the staff reply's In-Reply-To
+    // references it (recipient-MUA threading; fix-wave conf-MED).
+    const inboundMessageId = '<inbound-marcus-1@example.com>';
+    await flow.partnerEmailsIn(MARCUS_EMAIL, subject, 'Is the unit still open? Please advise.', {
+      messageId: inboundMessageId,
+    });
 
     // (2) Inbox: Marcus's row shows the "Email" channel label + an unread badge
     //     (the inbound bumped unread). Asserted BEFORE opening his contact, because
@@ -83,10 +87,12 @@ test.describe('Inbound email - contact timeline, threading, and bounce', () => {
     await expect(timeline.getByText('Re: 1450 Boone tour', { exact: true })).toBeVisible({ timeout: 20_000 });
     await expect(timeline.getByText('Sent', { exact: true })).toBeVisible({ timeout: 20_000 });
 
-    // (5) Threading proof: the outbound reply carries Reply-To: relay+<token> - the
-    //     anchor an inbound reply comes back on (matrix 2 proves that round-trip).
+    // (5) Threading proof: the outbound reply carries BOTH the Reply-To: relay+<token>
+    //     anchor (our inbound routing; matrix 2's round-trip) AND an In-Reply-To that
+    //     references the inbound mail's Message-ID (recipient-MUA threading, conf-MED).
     const reply = await flow.expectEmailSentTo(MARCUS_EMAIL, /Re: 1450 Boone tour/);
     expect(reply.rawMime).toMatch(/Reply-To:\s*relay\+[^@\s]+@mail\.local\.test/i);
+    expect(reply.rawMime).toMatch(/In-Reply-To:\s*<inbound-marcus-1@example\.com>/i);
   });
 
   test('a reply from a NEW address to the relay+token thread lands in-thread with a "New address" chip', async ({

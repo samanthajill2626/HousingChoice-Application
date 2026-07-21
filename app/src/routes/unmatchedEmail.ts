@@ -21,6 +21,8 @@
 //   POST /:id/spam               -> { row }  (blocklist sender + dismiss)
 //   POST /:id/release            -> { row }  (quarantined -> unmatched only)
 //   POST /:id/dismiss            -> { row }
+//   DELETE /block/:address       -> { ok: true }  (un-blocklist a sender; 404
+//                                when the address is not currently blocked)
 //   Unknown/pointer ids -> 404 { error: 'unmatched_not_found' }.
 //
 // The link/create-contact RE-INGEST (B2's recipe): addEmail the sender to the
@@ -37,6 +39,7 @@
 import { Router } from 'express';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { normalizeEmailAddress } from '../lib/email.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -520,6 +523,26 @@ export function createUnmatchedEmailRouter(deps: UnmatchedEmailRouterDeps = {}):
     events.emit('unmatched_email.updated', { unmatchedId: row.unmatchedId });
     log.info({ unmatchedId: row.unmatchedId }, 'unmatched email dismissed');
     res.json({ row: toDetailRow(updated) });
+  });
+
+  // DELETE /api/unmatched-email/block/:address -> { ok: true }. Un-blocklist a
+  // sender so their future mail routes normally again - the reversal for a
+  // mis-clicked /spam (or a spoofed-From block; see the follow-up issue). 404
+  // when the address is not currently blocked. Keyed on the normalized
+  // (lowercased) address, matching how B2 tier 3 + putBlock write it.
+  router.delete('/block/:address', async (req: AuthedRequest, res) => {
+    const address = normalizeEmailAddress(String(req.params['address'] ?? ''));
+    if (address.length === 0) {
+      res.status(400).json({ error: 'address is required' });
+      return;
+    }
+    if (!(await repo.isBlocked(address))) {
+      res.status(404).json({ error: 'not_blocked' });
+      return;
+    }
+    await repo.removeBlock(address);
+    log.info({}, 'sender un-blocklisted'); // PII: never the address
+    res.json({ ok: true });
   });
 
   return router;

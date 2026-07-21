@@ -9,7 +9,6 @@ import { useState } from 'react';
 import { getUnmatchedEmailDetail, type UnmatchedEmailItem, type UnmatchedEmailRow } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
 import { EmailHtmlFrame } from '../contact/EmailHtmlFrame.js';
-import { formatBroadcastDate } from '../broadcasts/broadcastFormat.js';
 import type { UnmatchedFilter } from './useUnmatchedEmail.js';
 import styles from './EmailTriage.module.css';
 
@@ -60,6 +59,22 @@ function formatBytes(bytes: number): string {
   const kb = bytes / 1024;
   if (kb < 1024) return `${Math.round(kb)} KB`;
   return `${(kb / 1024).toFixed(1)} MB`;
+}
+
+/** A dumb relative time for the row: "just now" / "5m" / "3h" / "2d" ago, then
+ *  an absolute "Mon D" past a week. The /email triage list wants relative times
+ *  (B6 page contract); no domain-neutral dashboard helper exists, so keep it local. */
+function relativeTime(iso: string): string {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return '';
+  const min = Math.floor((Date.now() - then) / 60_000);
+  if (min < 1) return 'just now';
+  if (min < 60) return `${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `${day}d ago`;
+  return new Date(then).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
 }
 
 export function UnmatchedRow({
@@ -119,7 +134,7 @@ export function UnmatchedRow({
             ) : null}
           </span>
           {row.snippet.length > 0 ? <span className={styles.snippet}>{row.snippet}</span> : null}
-          <span className={styles.time}>{formatBroadcastDate(row.received_at)}</span>
+          <span className={styles.time}>{relativeTime(row.received_at)}</span>
         </button>
 
         <div className={styles.actions}>

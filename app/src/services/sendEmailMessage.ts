@@ -201,6 +201,9 @@ export type SendEmailService = (input: SendEmailInput) => Promise<SendEmailOutco
 // local (a service must not import from routes/) so the key guard is self-contained.
 const EMAIL_MEDIA_KEY_RE = /^email-media\/[^/]+\/[0-9a-f-]+$/;
 
+/** RFC References chains are capped so a long/hostile thread can't bloat the header. */
+const OUTBOUND_REFERENCES_CAP = 10;
+
 /** Content-Type -> attachment filename extension. The confirm contract returns
  *  no original filename, so the send derives a stable, safe name per attachment. */
 const EMAIL_EXTENSIONS: Record<string, string> = {
@@ -386,6 +389,26 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       return touched;
     };
 
+    // Thread the reply to the most recent INBOUND email in this conversation so
+    // recipient MUAs (Gmail) visually thread it (conf-MED): In-Reply-To = that
+    // mail's RFC Message-ID, References = its own chain + itself (capped). Cheap:
+    // one newest-first page. The Reply-To relay token stays our INBOUND routing
+    // anchor - this only affects how the recipient's client groups the thread.
+    let inReplyTo: string | undefined;
+    let references: string[] | undefined;
+    const recentPage = await messages.listByConversation(effectiveConversationId, { limit: 50 });
+    const priorInbound = recentPage.find(
+      (m) => m.type === 'email' && m.direction === 'inbound' && typeof m.email_message_id === 'string',
+    );
+    if (priorInbound?.email_message_id !== undefined) {
+      inReplyTo = priorInbound.email_message_id;
+      const chain = [
+        ...(Array.isArray(priorInbound.email_references) ? priorInbound.email_references : []),
+        priorInbound.email_message_id,
+      ];
+      references = chain.slice(-OUTBOUND_REFERENCES_CAP); // keep the newest ids
+    }
+
     const mail: OutboundEmail = {
       from: { name: `${sentByName} at Housing Choice`, address: fromAddress },
       to: [toNormalized],
@@ -394,6 +417,8 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       subject,
       text: body,
       messageIdHeader,
+      ...(inReplyTo !== undefined && { inReplyTo }),
+      ...(references !== undefined && references.length > 0 && { references }),
       ...(attachments.length > 0 && { attachments }),
     };
 

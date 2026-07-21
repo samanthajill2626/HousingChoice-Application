@@ -201,6 +201,13 @@ export type SendEmailService = (input: SendEmailInput) => Promise<SendEmailOutco
 // local (a service must not import from routes/) so the key guard is self-contained.
 const EMAIL_MEDIA_KEY_RE = /^email-media\/[^/]+\/[0-9a-f-]+$/;
 
+/** Bound a caught error for a post-send bookkeeping log (PII: ids/counts only -
+ *  never addresses/subject/body): the error NAME + a 200-char message slice. */
+function errFields(err: unknown): { errName: string; errMessage: string } {
+  if (err instanceof Error) return { errName: err.name, errMessage: err.message.slice(0, 200) };
+  return { errName: 'NonError', errMessage: String(err).slice(0, 200) };
+}
+
 /** RFC References chains are capped so a long/hostile thread can't bloat the header. */
 const OUTBOUND_REFERENCES_CAP = 10;
 
@@ -299,7 +306,11 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
         if (!meta) throw new InvalidAttachmentError(key);
         const contentType = (meta.contentType ?? '').trim().toLowerCase();
         if (!isEmailAttachmentType(contentType)) throw new InvalidAttachmentError(key);
-        totalBytes += meta.size ?? 0;
+        // m5: an absent ContentLength is a REJECT, never a size-0 pass - a
+        // missing size would otherwise bypass the 25MB cap and let an unbounded
+        // getBytes pull the whole object into memory.
+        if (typeof meta.size !== 'number') throw new InvalidAttachmentError(key);
+        totalBytes += meta.size;
         if (totalBytes > EMAIL_MAX_TOTAL_BYTES) throw new EmailAttachmentsTooLargeError();
         const bytes = await mediaStore.getBytes(key);
         if (!bytes) throw new InvalidAttachmentError(key);
@@ -422,33 +433,90 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       ...(attachments.length > 0 && { attachments }),
     };
 
+    // M2: ONLY adapter.send() sits in the failure-mapping try. A throw HERE means
+    // the mail never reached SES, so mark queued->failed + rethrow (a visible
+    // failed bubble). Once send() returns a MessageId the mail is IRREVERSIBLY at
+    // SES: no post-send bookkeeping error may EVER mark the message failed or
+    // rethrow, or the operator would resend and DUPLICATE the email to the contact
+    // (and a lost alias also strands later bounce/delivery events). Every post-send
+    // write below is log-and-continue.
     let sesMessageId: string;
     try {
       const result = await adapter.send(mail);
       sesMessageId = result.providerMessageId;
-      // Post-send pointer write (ADJ-7): alias the SES id -> this message so B5
-      // events resolve it, advance queued->sent, THEN apply any parked event.
-      await messages.recordProviderSidAlias(sesMessageId, {
-        conversationId: effectiveConversationId,
-        tsMsgId: appended.tsMsgId,
-      });
-      await messages.updateDeliveryStatus(bareId, 'sent');
-      await applyParkedEmailEvents(sesMessageId);
     } catch (err) {
       // Adapter threw: advance queued->failed (the message REMAINS, visible as a
-      // failed send), surface it live, then rethrow so the caller knows.
+      // failed send), surface it live, then rethrow so the caller knows. These
+      // two writes are themselves best-effort - a failure to record the failure
+      // must not mask the original send error.
       const errorCode = err instanceof Error ? err.message.slice(0, 200) : 'send_failed';
-      await messages.updateDeliveryStatus(bareId, 'failed', errorCode);
-      await emitPersisted('failed');
+      await messages.updateDeliveryStatus(bareId, 'failed', errorCode).catch(() => {});
+      await emitPersisted('failed').catch(() => {});
       log.error({ conversationId: effectiveConversationId, providerSid: bareId }, 'email send failed at adapter');
       throw err;
     }
 
-    // Success: best-effort lastSeen bump + SSE + inbox touch.
+    // ---- POST-SEND bookkeeping (the mail is already at SES). Each step is
+    // independently log-and-continue: it NEVER marks the message failed and NEVER
+    // rethrows. The route still returns a 'sent' outcome even if a step failed.
+    let bookkeepingDegraded = false;
+
+    // (a) Alias the SES id -> this message so B5 delivery/bounce/complaint events
+    // (keyed on the SES MessageId) resolve it. A miss degrades later-event
+    // correlation (suppression), but the mail is sent - do not fail the send.
+    try {
+      await messages.recordProviderSidAlias(sesMessageId, {
+        conversationId: effectiveConversationId,
+        tsMsgId: appended.tsMsgId,
+      });
+    } catch (err) {
+      bookkeepingDegraded = true;
+      log.error(
+        { conversationId: effectiveConversationId, providerSid: bareId, sesMessageId, ...errFields(err) },
+        'email post-send alias write failed - mail sent; later delivery/bounce events may not correlate',
+      );
+    }
+
+    // (b) Advance queued->sent. If this write fails the DynamoDB item stays
+    // 'queued' even though the mail was sent; we STILL return status 'sent' (the
+    // send succeeded - the intended state), and the forward-only delivery machine
+    // self-heals it on the next SES callback (queued->sent->delivered). Never
+    // regress to failed.
+    try {
+      await messages.updateDeliveryStatus(bareId, 'sent');
+    } catch (err) {
+      bookkeepingDegraded = true;
+      log.error(
+        { conversationId: effectiveConversationId, providerSid: bareId, ...errFields(err) },
+        'email post-send status write failed - mail sent; item left queued, will advance on the delivery callback',
+      );
+    }
+
+    // (c) Apply any B5-parked bounce/complaint for this SES id (ADJ-7).
+    try {
+      await applyParkedEmailEvents(sesMessageId);
+    } catch (err) {
+      bookkeepingDegraded = true;
+      log.error(
+        { conversationId: effectiveConversationId, providerSid: bareId, sesMessageId, ...errFields(err) },
+        'email post-send parked-event apply failed - mail sent; a parked event stays for a later retry',
+      );
+    }
+
+    // (d) Best-effort lastSeen bump + SSE (surfaces the sent bubble live).
     await contacts.touchEmailLastSeen(contactId, toNormalized, nowIso).catch(() => {});
-    await emitPersisted('sent');
+    try {
+      await emitPersisted('sent');
+    } catch (err) {
+      bookkeepingDegraded = true;
+      log.error(
+        { conversationId: effectiveConversationId, providerSid: bareId, ...errFields(err) },
+        'email post-send SSE/touch failed - mail sent; the timeline may be briefly stale',
+      );
+    }
+
     log.info(
-      { conversationId: effectiveConversationId, providerSid: bareId, sesMessageId, redirected },
+      { conversationId: effectiveConversationId, providerSid: bareId, sesMessageId, redirected, bookkeepingDegraded },
       'outbound email sent',
     );
     return {
@@ -456,8 +524,10 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       tsMsgId: appended.tsMsgId,
       providerSid: bareId,
       sesMessageId,
-      emailMessageId: messageIdHeader,
+      // The send succeeded at SES; 'sent' is the intended state even if the
+      // queued->sent write above failed (logged, self-healing).
       status: 'sent',
+      emailMessageId: messageIdHeader,
       redirected,
     };
   };

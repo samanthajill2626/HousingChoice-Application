@@ -105,11 +105,18 @@ export function createEmailMediaRouter(deps: EmailMediaRouterDeps = {}): Router 
       return;
     }
     const contentType = (meta.contentType ?? '').trim().toLowerCase();
-    const size = meta.size ?? 0;
     if (!isEmailAttachmentType(contentType)) {
       res.status(400).json({ error: 'unsupported_media_type' });
       return;
     }
+    // m5: an absent ContentLength is a REJECT, never a size-0 pass - a sizeless
+    // object would bypass the 25MB cap here and let the send-time getBytes pull
+    // an unbounded object into memory. Treated like an unverifiable attachment.
+    if (typeof meta.size !== 'number') {
+      res.status(400).json({ error: 'unknown_attachment' });
+      return;
+    }
+    const size = meta.size;
     if (size > EMAIL_MAX_TOTAL_BYTES) {
       res.status(400).json({ error: 'too_large' });
       return;

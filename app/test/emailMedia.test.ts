@@ -132,6 +132,15 @@ describe('POST /api/email-media/confirm', () => {
     expect(res.body.error).toBe('unknown_attachment');
   });
 
+  it('400 when HEAD reports NO ContentLength (absent size is a REJECT, not a size-0 pass, m5)', async () => {
+    // An allowlisted type but a missing size: must NOT fall through as size 0
+    // (that bypasses the 25MB cap here AND lets send-time getBytes read unbounded).
+    const store = { head: vi.fn().mockResolvedValue({ contentType: 'application/pdf' }) };
+    const res = await request(harness(store)).post('/api/email-media/confirm').send({ key: KEY });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('unknown_attachment');
+  });
+
   it('400 when the stored object type is not allowlisted', async () => {
     const store = { head: vi.fn().mockResolvedValue({ contentType: 'text/html', size: 10 }) };
     const res = await request(harness(store)).post('/api/email-media/confirm').send({ key: KEY });

@@ -240,6 +240,16 @@ describe('sendEmailMessage - behavior 4: attachments', () => {
     await expect(f.service(input({ attachmentKeys: [KEY] }))).rejects.toBeInstanceOf(InvalidAttachmentError);
   });
 
+  it('refuses invalid_attachment when HEAD reports NO ContentLength (absent size, m5) - no unbounded getBytes', async () => {
+    const f = makeFakes();
+    f.head.mockResolvedValue({ contentType: 'application/pdf' }); // size ABSENT
+    await expect(f.service(input({ attachmentKeys: [KEY] }))).rejects.toBeInstanceOf(InvalidAttachmentError);
+    expect(f.append).not.toHaveBeenCalled();
+    // Rejected BEFORE the unbounded getBytes: an absent size must never fall
+    // through as size 0 and pull the whole object into memory.
+    expect(f.getBytes).not.toHaveBeenCalled();
+  });
+
   it('refuses invalid_attachment on a foreign key prefix', async () => {
     const f = makeFakes();
     await expect(
@@ -360,6 +370,51 @@ describe('sendEmailMessage - behavior 5: optimistic persist + provider ids', () 
     await expect(missing.service(input())).rejects.toMatchObject({ code: 'conversation_not_found' });
     const relay = makeFakes({ conversation: { type: 'relay_group' } });
     await expect(relay.service(input())).rejects.toMatchObject({ code: 'conversation_not_found' });
+  });
+});
+
+// M2: once adapter.send() returns a MessageId the mail is IRREVERSIBLY at SES.
+// A transient throw from ANY post-send bookkeeping write (alias / queued->sent /
+// parked-apply / SSE) must NOT mark the message failed and must NOT rethrow - or
+// the operator resends and DUPLICATES the email. The route still returns 'sent'.
+describe('sendEmailMessage - M2: post-send bookkeeping never fails a sent mail', () => {
+  it('alias-write throws: returns sent, never marks failed, never emits a failed SSE, never rethrows', async () => {
+    const f = makeFakes();
+    f.recordProviderSidAlias.mockRejectedValueOnce(new Error('dynamo alias boom'));
+    const out = await f.service(input()); // resolves (no rethrow)
+    expect(out.status).toBe('sent');
+    // The message is NEVER marked failed after a successful send.
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
+    // No 'failed' delivery SSE was emitted.
+    const failedEmits = f.emit.mock.calls.filter(
+      (c) => c[0] === 'message.persisted' && (c[1] as { deliveryStatus?: string }).deliveryStatus === 'failed',
+    );
+    expect(failedEmits).toHaveLength(0);
+  });
+
+  it('status-update (queued->sent) throws: returns sent (intended state), never failed, never rethrows', async () => {
+    const f = makeFakes();
+    f.updateDeliveryStatus.mockRejectedValueOnce(new Error('dynamo status boom'));
+    const out = await f.service(input()); // resolves (no rethrow)
+    // The send succeeded at SES, so the outcome carries the INTENDED state.
+    expect(out.status).toBe('sent');
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
+    // Log-and-continue does not short-circuit: alias ran before, parked after.
+    expect(f.recordProviderSidAlias).toHaveBeenCalled();
+    expect(f.parked).toHaveBeenCalledWith('ses-1');
+  });
+
+  it('parked-event apply throws: returns sent, never failed, never rethrows', async () => {
+    const parked = vi.fn(async () => {
+      throw new Error('parked apply boom');
+    });
+    const f = makeFakes({ parked });
+    const out = await f.service(input()); // resolves (no rethrow)
+    expect(out.status).toBe('sent');
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses).not.toContain('failed');
   });
 });
 

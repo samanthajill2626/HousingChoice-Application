@@ -390,14 +390,15 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
   });
 
-  it('MF-2a: meters the per-user confirm limiter: 429 past 20 confirms in a minute', async () => {
+  it('MF-2a: meters the per-user confirm limiter: 429 past 30 confirms in a minute', async () => {
     const { app } = makeWebhookHarness();
     // Confirm is now the EXPENSIVE endpoint (it downloads + transcodes >5MB
-    // sources behind the SHARED gate), so it carries the MMS-confirm 20/min fence
-    // (tighter than presign's 30/min mint fence). All to a ghost unit: the limiter
-    // runs BEFORE the handler, so the first 20 are admitted (each 404s) and the
-    // 21st is limited.
-    for (let i = 0; i < 20; i += 1) {
+    // sources behind the SHARED gate), so it carries a per-user fence. 30/min:
+    // sized so the dashboard's own serial one-confirm-per-big-file pace (a
+    // transcode-bearing confirm takes >=~2s) can never trip it, while scripted
+    // tight loops still 429. All to a ghost unit: the limiter runs BEFORE the
+    // handler, so the first 30 are admitted (each 404s) and the 31st is limited.
+    for (let i = 0; i < 30; i += 1) {
       const res = await confirm(app, 'ghost').send({ keys: ['unit-media/ghost/aaa'] });
       expect(res.status).toBe(404);
     }

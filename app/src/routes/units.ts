@@ -296,12 +296,18 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // >5MB source is downloaded + sharp-transcoded behind the SHARED process-wide
   // gate (one memory bound with MMS confirm). The gate bounds memory but is the
   // only backpressure - without a per-user fence one caller can keep both slots
-  // + both cores pinned and 503 everyone else (incl. MMS media confirm). Mirror
-  // the MMS confirm fence exactly: 20/min per user (tighter than the presign
-  // mint fence above). ONE instance per router.
+  // + both cores pinned and 503 everyone else (incl. MMS media confirm). The
+  // fence kills scripted tight loops, NOT the dashboard's own serial pace:
+  // D5 chunking deliberately sends each >5MB file in its OWN confirm, so a
+  // bulk big-photo drop is MANY requests, and a transcode-bearing confirm
+  // takes >=~2s end to end - a real serial client tops out around 30/min.
+  // 30/min (presign's mint pace, looser than MMS confirm's 20/min because MMS
+  // attaches 1-2 files per message while photos are bulk by design) admits any
+  // physically-realizable dashboard flow and still stops free-loop abuse.
+  // ONE instance per router.
   const photoConfirmLimiter = createUserRateLimit({
     routeKey: 'unit_photo_confirm',
-    max: 20,
+    max: 30,
     windowMs: 60_000,
     logger: log,
   });
@@ -573,8 +579,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // photos are stored). Returns the updated unit (with mediaDisplay). An
   // ordinary async handler - no busboy, no callback outside Express's
   // async-error capture, so the F3 hang class simply does not exist here.
-  // Behind the per-user confirm limiter (unit_photo_confirm, 20/min - confirm
-  // now transcodes). 503 when the store is unconfigured.
+  // Behind the per-user confirm limiter (unit_photo_confirm, 30/min - confirm
+  // now transcodes; sized for the dashboard's one-confirm-per-big-file pace).
+  // 503 when the store is unconfigured.
   router.post('/:unitId/photos/confirm', photoConfirmLimiter, async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     if (!mediaStore) {

@@ -136,6 +136,8 @@ function photoUploadMessage(err: unknown): string {
       return 'The server is busy fitting large photos - wait a moment, then add just the large photo(s) again.';
     case 'transcode_failed':
       return "A large photo couldn't be processed - it may be corrupted. Re-export it and try again.";
+    case 'rate_limited':
+      return 'Uploads are being rate limited - wait a minute, then add the remaining photos.';
     default:
       return "Couldn't upload the photos - please try again.";
   }

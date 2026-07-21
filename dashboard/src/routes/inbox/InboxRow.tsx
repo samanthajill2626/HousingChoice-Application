@@ -21,6 +21,7 @@ const CHANNEL_LABEL: Record<InboxChannel, string> = {
   sms: 'Text',
   mms: 'Photo',
   call: 'Call',
+  email: 'Email',
 };
 
 /** The deep-link target: contact rows → the contact page; relay_group rows → the

@@ -24,6 +24,8 @@ import type {
   ContactTimelinePage,
   ContactType,
   ContactVocabulary,
+  EmailMediaAttachment,
+  SendEmailResult,
   ConversationHeader,
   ConversationParticipant,
   ConversationsPage,
@@ -491,6 +493,57 @@ export async function confirmMmsMedia(key: string): Promise<MmsMediaAttachment> 
     { method: 'POST', body: { key } },
   );
   return res.attachment;
+}
+
+// --- Email channel v1 (A6) --------------------------------------------------
+// MIRRORS app/src/routes/api.ts (send) + app/src/routes/emailMedia.ts
+// (presign/confirm). Keep in sync; the dashboard cannot import from app/src.
+
+/** POST /api/conversations/:id/email - compose + send an email in the thread.
+ *  The recipient contact is resolved server-side by the To address. The route
+ *  wraps the outcome as 202 `{ message }` (UNLIKE sendMessage), so this UNWRAPS.
+ *  Refusals throw ApiError: 409 `email_sending_disabled` | `email_suppressed` |
+ *  `email_attachments_too_large` | `contact_email_missing`; 404
+ *  `conversation_not_found`; 400 `invalid_cc` | `invalid_attachment` (+ a plain
+ *  400 for missing to/subject/body); a 500 means the adapter send failed AFTER
+ *  the message persisted as `failed` (its SSE flips the optimistic bubble). */
+export async function sendEmail(
+  conversationId: string,
+  body: { to: string; cc?: string[]; subject: string; body: string; attachmentKeys?: string[] },
+): Promise<SendEmailResult> {
+  const res = await request<{ message: SendEmailResult }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/email`,
+    { method: 'POST', body },
+  );
+  return res.message;
+}
+
+/** POST /api/email-media/presign { contentType, sizeBytes } - mint a direct-to-S3
+ *  grant for one email attachment. DISTINCT from presignMmsMedia: wider allowlist
+ *  (docs/text/office), 25 MB cap, and `sizeBytes` is REQUIRED. Throws ApiError
+ *  (400 unsupported_media_type | invalid_size | too_large; 503
+ *  media_storage_unavailable). */
+export function presignEmailMedia(
+  contentType: string,
+  sizeBytes: number,
+): Promise<{ key: string; post: { url: string; fields: Record<string, string> } }> {
+  return request<{ key: string; post: { url: string; fields: Record<string, string> } }>(
+    '/api/email-media/presign',
+    { method: 'POST', body: { contentType, sizeBytes } },
+  );
+}
+
+/** POST /api/email-media/confirm { key } - HEAD-verify the uploaded object and
+ *  return it VERBATIM (no transcode, unlike confirmMmsMedia). Returns the
+ *  attachment DIRECTLY (the route does NOT wrap it). Throws ApiError (400
+ *  invalid_attachment_key | unknown_attachment | unsupported_media_type |
+ *  too_large; 503 media_storage_unavailable). Store the `s3Key` and send it as an
+ *  `attachmentKeys[]` entry. */
+export function confirmEmailMedia(key: string): Promise<EmailMediaAttachment> {
+  return request<EmailMediaAttachment>('/api/email-media/confirm', {
+    method: 'POST',
+    body: { key },
+  });
 }
 
 /** POST /api/conversations/:id/messages/:providerSid/retry - re-send a FAILED
@@ -1043,6 +1096,48 @@ export async function updateContactPhone(
 export async function removeContactPhone(contactId: string, phone: string): Promise<Contact> {
   const res = await request<{ contact: Contact }>(
     `/api/contacts/${encodeURIComponent(contactId)}/phones/${encodeURIComponent(phone)}`,
+    { method: 'DELETE' },
+  );
+  return res.contact;
+}
+
+// --- Email channel v1 (A6): contact-emails CRUD - the exact analog of the phone
+// trio above. MIRRORS app/src/routes/contacts.ts email endpoints. Errors:
+// 409 email_in_use / cannot_remove_primary; 404 contact_not_found; 400 invalid.
+
+/** POST /api/contacts/:id/emails - add an address to the contact's roster
+ *  (idempotent upsert). Returns the updated contact with the canonical `emails[]`. */
+export async function addContactEmail(
+  contactId: string,
+  email: string,
+  label?: string,
+): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/emails`,
+    { method: 'POST', body: { email, ...(label !== undefined && { label }) } },
+  );
+  return res.contact;
+}
+
+/** PATCH /api/contacts/:id/emails/:email - set an address primary and/or relabel it.
+ *  Returns the updated contact with the canonical `emails[]`. */
+export async function updateContactEmail(
+  contactId: string,
+  email: string,
+  opts: { primary?: boolean; label?: string },
+): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/emails/${encodeURIComponent(email)}`,
+    { method: 'PATCH', body: opts },
+  );
+  return res.contact;
+}
+
+/** DELETE /api/contacts/:id/emails/:email - remove a non-primary address. Returns
+ *  the updated contact with the canonical `emails[]`. */
+export async function removeContactEmail(contactId: string, email: string): Promise<Contact> {
+  const res = await request<{ contact: Contact }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/emails/${encodeURIComponent(email)}`,
     { method: 'DELETE' },
   );
   return res.contact;

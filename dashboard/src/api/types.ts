@@ -882,7 +882,7 @@ export type MessageDirection = 'inbound' | 'outbound';
 export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
-export type MessageType = 'sms' | 'mms' | 'call';
+export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** Coarse human-facing call outcome: `answered` (a leg connected), `missed`
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
@@ -1119,6 +1119,11 @@ export interface Contact {
   /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
    *  sms_opt_out. MIRRORS ContactItem.voice_opt_out. */
   voice_opt_out?: boolean;
+  /** Email channel v1 (B5): the contact complained (opt_out) or a message hard-
+   *  bounced (unreachable). Either suppresses outbound email (the composer refuses
+   *  with email_suppressed). Beside the sms_ flags; set by SES events. */
+  email_opt_out?: boolean;
+  email_unreachable?: boolean;
   /** Soft-delete marker (ISO 8601). Present → the contact is "deleted": hidden
    *  from the normal lists/inbox/today but fully retained (restore clears it). */
   deleted_at?: string;
@@ -1142,6 +1147,10 @@ export interface Contact {
   voucher_expiration_date?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
+  /** Email channel v1 (A1): the primary address (byEmail GSI hash) + the full
+   *  roster. Mirrors phone/phones[]. Absent on a contact with no email. */
+  email?: string;
+  emails?: ContactEmail[];
   /** Landlord/PM company name (editable). */
   company?: string;
   /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
@@ -1374,6 +1383,16 @@ export interface Message {
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
    *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  // --- Email channel v1 — present only on a type:'email' entry (A4) --------
+  /** Subject line (email only). */
+  subject?: string;
+  /** The From address (our sender on outbound; the contact on inbound). */
+  email_from?: string;
+  /** Recipient addresses. */
+  email_to?: string[];
+  email_cc?: string[];
+  /** Our RFC Message-ID (outbound) or theirs (inbound), with angle brackets. */
+  email_message_id?: string;
   // --- Voice call — present only on a type:'call' entry --------------------
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -1398,6 +1417,28 @@ export interface ContactPhone {
   primary: boolean; // exactly one true
   firstSeenAt?: string; // ISO; when first observed
   lastSeenAt?: string; // ISO; most recent inbound/outbound
+}
+
+// --- Email channel v1 -------------------------------------------------------
+// MIRRORS app/src/repos/contactsRepo.ts ContactEmail + the email send/CRUD wire
+// shapes (routes/contacts.ts email endpoints, routes/api.ts email send,
+// routes/emailMedia.ts). The dashboard cannot import from app/src, so this is
+// duplicated; keep it in sync. ContactEmail is the exact analog of ContactPhone.
+
+export interface ContactEmail {
+  email: string; // normalized (trim + lowercase); the byEmail GSI hash
+  label?: string; // "work", "personal", operator note
+  primary: boolean; // exactly one true
+  firstSeenAt?: string; // ISO; when first observed
+  lastSeenAt?: string; // ISO; most recent inbound/outbound
+}
+
+/** One outbound email attachment after presign+confirm (stored VERBATIM - no
+ *  transcode, unlike MmsMediaAttachment). Returned by confirmEmailMedia. */
+export interface EmailMediaAttachment {
+  s3Key: string;
+  contentType: string;
+  size: number;
 }
 
 // --- C2: Person-centric merged timeline (§API Contract C2) ------------------
@@ -1431,7 +1472,9 @@ export interface TimelineMessage extends TimelineBase {
   tsMsgId: string;
   direction: MessageDirection; // reuse legacy
   author: MessageAuthor; // reuse legacy
-  type: 'sms' | 'mms';
+  // NOTE: a NARROWER inline union than wire MessageType (no 'call' - calls are a
+  // separate TimelineCall kind). Email channel v1 (A6) adds 'email' here.
+  type: 'sms' | 'mms' | 'email';
   body?: string; // FULL body (no server truncation)
   media_attachments?: { s3Key: string; contentType: string }[];
   delivery_status: DeliveryStatus; // reuse legacy
@@ -1441,6 +1484,17 @@ export interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string; // which number this used
+  // --- Email channel v1 (A6/B7): present only on a type:'email' item --------
+  /** Subject line (semibold in the collapsed EmailCard). */
+  subject?: string;
+  /** From address (our sender on outbound; the contact on inbound). */
+  email_from?: string;
+  /** Recipient addresses (the EmailCard from/to line). */
+  email_to?: string[];
+  email_cc?: string[];
+  /** Inbound reply arrived from an address NOT yet on the contact (B7 "New
+   *  address" chip). Outbound email never sets this. */
+  email_new_address?: boolean;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
    *  keyed by member key. A `contact_opted_out` failed slot means that member
    *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
@@ -1545,6 +1599,22 @@ export interface SendMessageResult {
   providerSid: string;
   tsMsgId: string;
   status: DeliveryStatus;
+}
+
+/** Result of POST /api/conversations/:id/email (email-channel v1, A5). A
+ *  SUPERSET of SendMessageResult (the shared core fields let it resolve an
+ *  optimistic bubble the same way), plus the SES ids and `redirected` - true
+ *  when the address was already claimed so the message landed in
+ *  `conversationId`, which may DIFFER from the one posted to. The route wraps it
+ *  as `{ message }`; sendEmail() unwraps. */
+export interface SendEmailResult {
+  conversationId: string;
+  providerSid: string; // our bare RFC Message-ID (== message provider_sid)
+  tsMsgId: string;
+  status: DeliveryStatus;
+  sesMessageId?: string;
+  emailMessageId?: string; // the RFC Message-ID header, with angle brackets
+  redirected?: boolean;
 }
 
 /** One outbound MMS attachment after presign+confirm (server transcoded/validated). */
@@ -1857,7 +1927,7 @@ export interface BroadcastUpdatedEvent {
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
 export type InboxFilter = 'all' | 'unread' | 'unknown';
-export type InboxChannel = 'sms' | 'mms' | 'call';
+export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's
  *  `InboxRow` (app/src/routes/inbox.ts) VERBATIM: `channel`/`direction` are

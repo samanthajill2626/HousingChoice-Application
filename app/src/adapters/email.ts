@@ -14,7 +14,12 @@
 //            SESconsole-<uuid> id so `npm run dev` stays fully offline.
 import { randomUUID } from 'node:crypto';
 import { SESv2Client, SendEmailCommand, type SendEmailCommandOutput } from '@aws-sdk/client-sesv2';
-import MailComposer from 'nodemailer/lib/mail-composer';
+// The `/index.js` suffix is REQUIRED: plain-node ESM (the deployed `node
+// dist/index.js`) forbids directory imports (ERR_UNSUPPORTED_DIR_IMPORT, hit
+// at the 2026-07-21 dev deploy). tsx/esbuild resolve the bare directory like
+// a bundler, so every suite passes either way - only the compiled container
+// boot exercises this. Keep the ambient shim's module name in sync.
+import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import type { AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 

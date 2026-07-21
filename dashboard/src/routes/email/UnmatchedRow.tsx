@@ -8,6 +8,7 @@
 import { useState } from 'react';
 import { getUnmatchedEmailDetail, type UnmatchedEmailItem, type UnmatchedEmailRow } from '../../api/index.js';
 import { Spinner } from '../../ui/index.js';
+import { EmailHtmlFrame } from '../contact/EmailHtmlFrame.js';
 import { formatBroadcastDate } from '../broadcasts/broadcastFormat.js';
 import type { UnmatchedFilter } from './useUnmatchedEmail.js';
 import styles from './EmailTriage.module.css';
@@ -75,6 +76,9 @@ export function UnmatchedRow({
   const [expanded, setExpanded] = useState(false);
   const [detail, setDetail] = useState<UnmatchedEmailItem | null>(null);
   const [detailStatus, setDetailStatus] = useState<'idle' | 'loading' | 'error'>('idle');
+  // Lazy-mount gate for the sandboxed HTML frame: keep the iframe OUT of the DOM
+  // until the operator opens "View original formatting".
+  const [htmlOpen, setHtmlOpen] = useState(false);
 
   const unread = !row.read;
   const id = row.unmatchedId;
@@ -162,11 +166,16 @@ export function UnmatchedRow({
               </p>
               <div className={styles.body}>{detail.text}</div>
               {detail.html_sanitized !== undefined ? (
-                // TODO(B7): mount <EmailHtmlFrame html={detail.html_sanitized} /> here -
-                // a sandboxed CSP-framed iframe for the original HTML formatting. B6
-                // shows the plain-text body above; this is the SEAM where B7's frame
-                // (behind a "View original formatting" disclosure) will render.
-                <p className={styles.htmlSeam}>This message also has HTML formatting (shown as plain text for now).</p>
+                // B7: the plain-text body renders above; this discloses the
+                // ORIGINAL HTML formatting in a fully sandboxed, CSP-locked iframe
+                // (EmailHtmlFrame), mounted LAZILY only once the operator opens it.
+                <details
+                  className={styles.htmlDetails}
+                  onToggle={(e) => setHtmlOpen((e.currentTarget as HTMLDetailsElement).open)}
+                >
+                  <summary className={styles.htmlToggle}>View original formatting</summary>
+                  {htmlOpen ? <EmailHtmlFrame html={detail.html_sanitized} /> : null}
+                </details>
               ) : null}
               {row.attachments_meta.length > 0 ? (
                 <div className={styles.attachments}>

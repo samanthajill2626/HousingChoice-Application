@@ -288,11 +288,17 @@
   color: var(--c-text);
   line-height: var(--lh-normal);
 }
-.htmlSeam {
+.htmlDetails {
   margin: var(--sp-2) 0 0;
+}
+.htmlToggle {
+  cursor: pointer;
   font-size: var(--fs-xs);
-  font-style: italic;
-  color: var(--c-text-subtle);
+  color: var(--c-brand);
+}
+.htmlToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
 }
 .attachments {
   margin-top: var(--sp-3);

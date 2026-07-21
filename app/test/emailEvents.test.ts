@@ -282,6 +282,7 @@ describe('suppression end-to-end (bounce -> subsequent send 409)', () => {
       } as unknown as ConversationsRepo,
       messagesRepo: {
         append: async (m: { providerTs: string; providerSid: string }) => ({ deduped: false, tsMsgId: `${m.providerTs}#${m.providerSid}` }),
+        listByConversation: async () => [], // reply-threading read: no prior inbound
         recordProviderSidAlias: async () => {},
         updateDeliveryStatus: async () => true,
       } as unknown as MessagesRepo,

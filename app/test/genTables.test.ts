@@ -1,6 +1,7 @@
 // gen-tables generator contract: the in-memory tfvars object Terraform
 // consumes must carry all 9 tables with the contractual GSI names, the
-// matches TTL, streams on messages+placements only, and PITR on everything.
+// messages+matches+unmatched_email TTL, streams on messages+placements only,
+// and PITR on everything.
 // (tables.test.ts asserts the TABLES source itself; this asserts the
 // Terraform-facing projection of it.)
 import { describe, expect, it } from 'vitest';
@@ -197,11 +198,12 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
   });
 
-  it('TTL only on matches + unmatched_email (expires_at)', () => {
+  it('TTL on messages + matches + unmatched_email (expires_at)', () => {
+    expect(tables['messages']?.ttl_attribute).toBe('expires_at');
     expect(tables['matches']?.ttl_attribute).toBe('expires_at');
     expect(tables['unmatched_email']?.ttl_attribute).toBe('expires_at');
     const withTtl = Object.entries(tables).filter(([, t]) => t.ttl_attribute !== undefined);
-    expect(withTtl.map(([base]) => base)).toEqual(['matches', 'unmatched_email']);
+    expect(withTtl.map(([base]) => base)).toEqual(['matches', 'messages', 'unmatched_email']); // alphabetical keys
   });
 
   it('streams on messages and placements ONLY', () => {

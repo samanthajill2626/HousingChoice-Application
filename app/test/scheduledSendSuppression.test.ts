@@ -177,7 +177,7 @@ function makeSendFakes(
     putJobExecutionMarker: async () => true,
     getJobExecutionMarker: async () => false,
     putParkedEmailEvent: async () => {},
-    getParkedEmailEvent: async () => undefined,
+    listParkedEmailEvents: async () => [],
     deleteParkedEmailEvent: async () => {},
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,

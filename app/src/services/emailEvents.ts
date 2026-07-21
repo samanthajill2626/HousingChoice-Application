@@ -26,6 +26,13 @@
 // DELETE is the consume marker; we apply-THEN-conditional-delete (crash-safe: a
 // crash after apply re-applies harmlessly, the status machine being forward-only
 // and the flag sets idempotent - delete-first would lose the event on a crash).
+//   - m4: parked items are keyed per (sesMessageId, eventType), so a Delivery
+//     cannot overwrite a parked Bounce and silently lose the suppression. The
+//     drain lists + applies ALL parked events for the id, Delivery FIRST so the
+//     suppression side effects run last (see parkApplyRank).
+//   - m3: after a park, we RE-CHECK getByProviderSid - the A5 alias write can
+//     race in after our miss but before the park, so the single post-send drain
+//     would never see the just-parked item; the re-check applies + consumes it.
 //
 // PII (doc Sec 9): log ids/eventType only - never addresses/subject/body.
 import type { Logger } from '../lib/logger.js';
@@ -49,6 +56,23 @@ import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
  *  consumed (e.g. a bounce for a message this stack never actually sent) - the
  *  normal path deletes the item the moment A5's post-send seam applies it. */
 export const PARKED_EMAIL_EVENT_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Drain order for parked events (m4): Delivery FIRST, then Bounce/Complaint. The
+ * suppression side effects (setFlag email_unreachable / email_opt_out) are the
+ * durable "suppression wins" outcome, applied LAST so they are the final writes
+ * and can never be shadowed. Rationale for Delivery-first given the forward-only
+ * delivery machine (delivered/undelivered are mutually terminal - neither
+ * overwrites the other): the realistic double-event is Delivery+Complaint (a mail
+ * delivered, then the recipient marks it spam); Delivery-first keeps the truthful
+ * 'delivered' status while STILL recording the opt-out. A contradictory
+ * Delivery+permanent-Bounce pair does not occur from SES; if it did, the contact
+ * is still suppressed (the operational win). Unknown types apply in between.
+ */
+const PARK_APPLY_ORDER: Record<string, number> = { Delivery: 0, Bounce: 2, Complaint: 2 };
+function parkApplyRank(eventType: string): number {
+  return PARK_APPLY_ORDER[eventType] ?? 1;
+}
 
 export interface EmailEventDeps {
   messagesRepo?: MessagesRepo;
@@ -172,23 +196,38 @@ export function createApplyEmailEvent(deps: EmailEventDeps = {}): (event: SnsSes
   const ctx = buildContext(deps);
   return async function applyEmailEvent(event: SnsSesEvent): Promise<void> {
     const message = await ctx.messages.getByProviderSid(event.sesMessageId);
-    if (!message) {
-      const expiresAt = Math.floor((ctx.now().getTime() + PARKED_EMAIL_EVENT_TTL_MS) / 1000);
-      await ctx.messages.putParkedEmailEvent(
-        {
-          eventType: event.eventType,
-          sesMessageId: event.sesMessageId,
-          ...(event.bounceType !== undefined && { bounceType: event.bounceType }),
-        },
-        { receivedAt: ctx.now().toISOString(), expiresAt },
-      );
-      ctx.log.info(
-        { sesMessageId: event.sesMessageId, eventType: event.eventType },
-        'SES event has no message yet (orphan) - parked for A5 post-send apply',
-      );
+    if (message) {
+      await applyResolvedEvent(ctx, event, message);
       return;
     }
-    await applyResolvedEvent(ctx, event, message);
+    // Orphan: the sesMessageId has no message yet (a fast bounce before the A5
+    // post-send alias write). PARK it (keyed per eventType, m4).
+    const core: EmailEventCore = {
+      eventType: event.eventType,
+      sesMessageId: event.sesMessageId,
+      ...(event.bounceType !== undefined && { bounceType: event.bounceType }),
+    };
+    const expiresAt = Math.floor((ctx.now().getTime() + PARKED_EMAIL_EVENT_TTL_MS) / 1000);
+    await ctx.messages.putParkedEmailEvent(core, { receivedAt: ctx.now().toISOString(), expiresAt });
+    ctx.log.info(
+      { sesMessageId: event.sesMessageId, eventType: event.eventType },
+      'SES event has no message yet (orphan) - parked for A5 post-send apply',
+    );
+    // m3 (lost-update guard): the A5 alias write can RACE IN between our
+    // getByProviderSid miss above and the park write - in which case A5's single
+    // post-send drain already ran and did NOT see this just-parked item, so it
+    // would sit until the TTL. Re-check now; if the message resolves, apply +
+    // consume it here. The exactly-once conditional delete makes a concurrent
+    // drain benign (whoever deletes first wins; the loser no-ops).
+    const raced = await ctx.messages.getByProviderSid(event.sesMessageId);
+    if (raced) {
+      await applyResolvedEvent(ctx, core, raced);
+      await ctx.messages.deleteParkedEmailEvent(event.sesMessageId, event.eventType);
+      ctx.log.info(
+        { sesMessageId: event.sesMessageId, eventType: event.eventType },
+        'parked SES event resolved on re-check (alias raced in) - applied + consumed',
+      );
+    }
   };
 }
 
@@ -202,26 +241,34 @@ export function createApplyEmailEvent(deps: EmailEventDeps = {}): (event: SnsSes
 export function createApplyParkedEmailEvents(deps: EmailEventDeps = {}): (sesMessageId: string) => Promise<void> {
   const ctx = buildContext(deps);
   return async function applyParkedEmailEvents(sesMessageId: string): Promise<void> {
-    const parked = await ctx.messages.getParkedEmailEvent(sesMessageId);
-    if (!parked) return;
+    // m4: apply ALL parked events for this SES id (a Bounce AND a Delivery can
+    // both be parked), not just one. Common case: nothing parked -> a single
+    // cheap query. A second drain after consume no-ops (empty list).
+    const parked = await ctx.messages.listParkedEmailEvents(sesMessageId);
+    if (parked.length === 0) return;
     const message = await ctx.messages.getByProviderSid(sesMessageId);
     if (!message) {
       ctx.log.warn(
         { sesMessageId },
-        'parked SES event still has no resolvable message - leaving parked (will retry)',
+        'parked SES event(s) still have no resolvable message - leaving parked (will retry)',
       );
       return;
     }
-    await applyResolvedEvent(
-      ctx,
-      {
-        eventType: parked.eventType as SesEventType,
-        sesMessageId: parked.sesMessageId,
-        ...(parked.bounceType !== undefined && { bounceType: parked.bounceType }),
-      },
-      message,
-    );
-    await ctx.messages.deleteParkedEmailEvent(sesMessageId);
-    ctx.log.info({ sesMessageId, eventType: parked.eventType }, 'parked SES event applied + consumed');
+    // Delivery FIRST, then Bounce/Complaint - suppression side effects run LAST
+    // (see parkApplyRank). Apply-THEN-conditional-delete per item (exactly-once).
+    const ordered = [...parked].sort((a, b) => parkApplyRank(a.eventType) - parkApplyRank(b.eventType));
+    for (const p of ordered) {
+      await applyResolvedEvent(
+        ctx,
+        {
+          eventType: p.eventType as SesEventType,
+          sesMessageId: p.sesMessageId,
+          ...(p.bounceType !== undefined && { bounceType: p.bounceType }),
+        },
+        message,
+      );
+      await ctx.messages.deleteParkedEmailEvent(sesMessageId, p.eventType);
+    }
+    ctx.log.info({ sesMessageId, count: ordered.length }, 'parked SES event(s) applied + consumed');
   };
 }

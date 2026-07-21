@@ -51,6 +51,8 @@ interface Deps {
   message?: MessageItem | undefined;
   contact?: ContactItem | undefined;
   parked?: ParkedEmailEvent | undefined;
+  /** Seed MULTIPLE parked events for one SES id (m4 drain-all). */
+  parkedList?: ParkedEmailEvent[];
   updateReturns?: boolean;
   conversation?: ConversationItem | undefined;
 }
@@ -61,17 +63,22 @@ function makeApplier(over: Deps = {}) {
       ? over.contact
       : ({ contactId: 'c1', type: 'tenant', email: 'tenant@x.com', emails: [{ email: 'tenant@x.com', primary: true }] } as ContactItem);
 
+  // Keyed by `${sesMessageId}#${eventType}` (m4: multi-valued per SES id).
   const parkedStore = new Map<string, ParkedEmailEvent>();
-  if (over.parked) parkedStore.set(over.parked.sesMessageId, over.parked);
+  const seedParked = (e: ParkedEmailEvent) => parkedStore.set(`${e.sesMessageId}#${e.eventType}`, e);
+  if (over.parked) seedParked(over.parked);
+  for (const e of over.parkedList ?? []) seedParked(e);
 
   const getByProviderSid = vi.fn(async (_sid: string) => ('message' in over ? over.message : OUTBOUND));
   const updateDeliveryStatus = vi.fn(async () => over.updateReturns ?? true);
   const putParkedEmailEvent = vi.fn(async (e: ParkedEmailEvent, _opts: { receivedAt: string; expiresAt: number }) => {
-    parkedStore.set(e.sesMessageId, e);
+    seedParked(e);
   });
-  const getParkedEmailEvent = vi.fn(async (sid: string) => parkedStore.get(sid));
-  const deleteParkedEmailEvent = vi.fn(async (sid: string) => {
-    parkedStore.delete(sid);
+  const listParkedEmailEvents = vi.fn(async (sid: string) =>
+    [...parkedStore.values()].filter((e) => e.sesMessageId === sid),
+  );
+  const deleteParkedEmailEvent = vi.fn(async (sid: string, eventType: string) => {
+    parkedStore.delete(`${sid}#${eventType}`);
   });
 
   const setFlag = vi.fn(async () => {});
@@ -89,7 +96,7 @@ function makeApplier(over: Deps = {}) {
     getByProviderSid,
     updateDeliveryStatus,
     putParkedEmailEvent,
-    getParkedEmailEvent,
+    listParkedEmailEvents,
     deleteParkedEmailEvent,
   } as unknown as MessagesRepo;
   const contactsRepo = { findByEmail, getById, setFlag } as unknown as ContactsRepo;
@@ -104,7 +111,7 @@ function makeApplier(over: Deps = {}) {
     getByProviderSid,
     updateDeliveryStatus,
     putParkedEmailEvent,
-    getParkedEmailEvent,
+    listParkedEmailEvents,
     deleteParkedEmailEvent,
     setFlag,
     findByEmail,
@@ -199,7 +206,7 @@ describe('applyParkedEmailEvents - post-send consume (ADJ-7)', () => {
   it('no-ops (single read) when nothing is parked', async () => {
     const f = makeApplier();
     await f.applyParkedEmailEvents('ses-1');
-    expect(f.getParkedEmailEvent).toHaveBeenCalledWith('ses-1');
+    expect(f.listParkedEmailEvents).toHaveBeenCalledWith('ses-1');
     expect(f.updateDeliveryStatus).not.toHaveBeenCalled();
     expect(f.deleteParkedEmailEvent).not.toHaveBeenCalled();
   });
@@ -210,7 +217,7 @@ describe('applyParkedEmailEvents - post-send consume (ADJ-7)', () => {
     // Suppression landed via the parked event.
     expect(f.updateDeliveryStatus).toHaveBeenCalledWith('ses-1', 'undelivered', 'bounce:Permanent');
     expect(f.setFlag).toHaveBeenCalledWith('c1', 'email_unreachable');
-    expect(f.deleteParkedEmailEvent).toHaveBeenCalledWith('ses-1');
+    expect(f.deleteParkedEmailEvent).toHaveBeenCalledWith('ses-1', 'Bounce');
     // Second application no-ops (the item was consumed) - exactly-once.
     f.setFlag.mockClear();
     f.deleteParkedEmailEvent.mockClear();
@@ -224,7 +231,65 @@ describe('applyParkedEmailEvents - post-send consume (ADJ-7)', () => {
     await f.applyParkedEmailEvents('ses-1');
     expect(f.updateDeliveryStatus).not.toHaveBeenCalled();
     expect(f.deleteParkedEmailEvent).not.toHaveBeenCalled();
-    expect(f.parkedStore.has('ses-1')).toBe(true);
+    expect(f.parkedStore.has('ses-1#Delivery')).toBe(true);
+  });
+
+  it('drains ALL parked events (m4): Bounce + Delivery both apply, suppression set, Delivery FIRST; second drain no-ops', async () => {
+    // Seeded Bounce-then-Delivery; the drain must reorder to Delivery-first so
+    // the suppression side effects (setFlag) are the LAST, durable writes.
+    const f = makeApplier({
+      parkedList: [
+        { eventType: 'Bounce', sesMessageId: 'ses-1', bounceType: 'Permanent' },
+        { eventType: 'Delivery', sesMessageId: 'ses-1' },
+      ],
+    });
+    await f.applyParkedEmailEvents('ses-1');
+    // BOTH applied.
+    expect(f.updateDeliveryStatus).toHaveBeenCalledWith('ses-1', 'delivered');
+    expect(f.updateDeliveryStatus).toHaveBeenCalledWith('ses-1', 'undelivered', 'bounce:Permanent');
+    // Suppression flag set.
+    expect(f.setFlag).toHaveBeenCalledWith('c1', 'email_unreachable');
+    // Delivery applied BEFORE the Bounce (order rationale: suppression wins/last).
+    const statuses = f.updateDeliveryStatus.mock.calls.map((c) => (c as unknown[])[1]);
+    expect(statuses.indexOf('delivered')).toBeLessThan(statuses.indexOf('undelivered'));
+    // BOTH consumed.
+    expect(f.deleteParkedEmailEvent).toHaveBeenCalledWith('ses-1', 'Delivery');
+    expect(f.deleteParkedEmailEvent).toHaveBeenCalledWith('ses-1', 'Bounce');
+    expect(f.parkedStore.size).toBe(0);
+    // Second drain no-ops (the list is now empty).
+    f.updateDeliveryStatus.mockClear();
+    f.deleteParkedEmailEvent.mockClear();
+    await f.applyParkedEmailEvents('ses-1');
+    expect(f.updateDeliveryStatus).not.toHaveBeenCalled();
+    expect(f.deleteParkedEmailEvent).not.toHaveBeenCalled();
+  });
+});
+
+describe('applyEmailEvent - m3 lost-update re-check', () => {
+  it('re-checks after parking and applies + consumes when the alias raced in', async () => {
+    const f = makeApplier();
+    // The FIRST lookup misses (message not aliased yet) -> park; the m3 re-check
+    // then hits (the A5 alias write raced in) -> apply + consume here.
+    f.getByProviderSid.mockResolvedValueOnce(undefined);
+    await f.applyEmailEvent(event({ eventType: 'Bounce', bounceType: 'Permanent' }));
+    // Parked once...
+    expect(f.putParkedEmailEvent).toHaveBeenCalledTimes(1);
+    // ...then the re-check resolved it and applied the suppression.
+    expect(f.updateDeliveryStatus).toHaveBeenCalledWith('ses-1', 'undelivered', 'bounce:Permanent');
+    expect(f.setFlag).toHaveBeenCalledWith('c1', 'email_unreachable');
+    // The slot was consumed (exactly-once conditional delete).
+    expect(f.deleteParkedEmailEvent).toHaveBeenCalledWith('ses-1', 'Bounce');
+    expect(f.parkedStore.size).toBe(0);
+  });
+
+  it('leaves the parked item when the message still does not resolve on the re-check', async () => {
+    const f = makeApplier({ message: undefined }); // every lookup misses
+    await f.applyEmailEvent(event({ eventType: 'Delivery' }));
+    expect(f.putParkedEmailEvent).toHaveBeenCalledTimes(1);
+    // No resolve on re-check -> nothing applied/consumed; it waits for the drain.
+    expect(f.updateDeliveryStatus).not.toHaveBeenCalled();
+    expect(f.deleteParkedEmailEvent).not.toHaveBeenCalled();
+    expect(f.parkedStore.has('ses-1#Delivery')).toBe(true);
   });
 });
 

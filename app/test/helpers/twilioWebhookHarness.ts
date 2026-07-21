@@ -244,6 +244,7 @@ export function createFakeWorld(): FakeWorld {
   const conversations = new Map<string, ConversationItem>();
   const messages: MessageItem[] = [];
   const jobExecutionMarkers = new Map<string, string>();
+  // Keyed by `${sesMessageId}#${eventType}` (m4: multi-valued per SES id).
   const parkedEmailEvents = new Map<string, ParkedEmailEvent>();
   const relaySidPointers = new Map<
     string,
@@ -807,15 +808,15 @@ export function createFakeWorld(): FakeWorld {
       return jobExecutionMarkers.has(jobId);
     },
 
-    // --- Email orphan-event parking lot (B5) ---
+    // --- Email orphan-event parking lot (B5; m4 multi-valued per event type) ---
     async putParkedEmailEvent(event) {
-      parkedEmailEvents.set(event.sesMessageId, event);
+      parkedEmailEvents.set(`${event.sesMessageId}#${event.eventType}`, event);
     },
-    async getParkedEmailEvent(sesMessageId) {
-      return parkedEmailEvents.get(sesMessageId);
+    async listParkedEmailEvents(sesMessageId) {
+      return [...parkedEmailEvents.values()].filter((e) => e.sesMessageId === sesMessageId);
     },
-    async deleteParkedEmailEvent(sesMessageId) {
-      parkedEmailEvents.delete(sesMessageId);
+    async deleteParkedEmailEvent(sesMessageId, eventType) {
+      parkedEmailEvents.delete(`${sesMessageId}#${eventType}`);
     },
 
     // --- Relay groups (M1.7) ---

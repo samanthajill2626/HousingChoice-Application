@@ -675,22 +675,26 @@ export interface MessagesRepo {
 
   /**
    * Park a SES event whose sesMessageId has no message yet (a fast bounce before
-   * the A5 post-send alias write). Stored under `emailevent#<sesMessageId>` with
-   * an `expires_at` (epoch seconds) TTL backstop. Idempotent UPSERT: a redelivery
-   * before the alias exists overwrites the identical item (harmless). The
-   * authoritative cleanup is deleteParkedEmailEvent (the consume), NOT the TTL -
-   * the messages table has no TTL configured today; expires_at is forward-
-   * compatible (reaps only if/when TTL is enabled on the table).
+   * the A5 post-send alias write). Stored under `emailevent#<sesMessageId>` /
+   * `parked#<eventType>` (m4: keyed per event type so a Delivery cannot overwrite
+   * a parked Bounce and silently lose the suppression) with an `expires_at`
+   * (epoch seconds) TTL backstop. Idempotent UPSERT: a redelivery of the SAME
+   * event type overwrites the identical item (harmless). The authoritative
+   * cleanup is deleteParkedEmailEvent (the consume), NOT the TTL - the messages
+   * table has no TTL configured today; expires_at is forward-compatible (reaps
+   * only if/when TTL is enabled on the table).
    */
   putParkedEmailEvent(event: ParkedEmailEvent, opts: { receivedAt: string; expiresAt: number }): Promise<void>;
-  /** The parked event for a sesMessageId, or undefined (nothing parked). */
-  getParkedEmailEvent(sesMessageId: string): Promise<ParkedEmailEvent | undefined>;
+  /** ALL parked events for a sesMessageId (m4: one per eventType), or [] when
+   *  nothing is parked. The post-send drain applies + consumes every one. */
+  listParkedEmailEvents(sesMessageId: string): Promise<ParkedEmailEvent[]>;
   /**
-   * Consume (delete) the parked event - the exactly-once marker. Conditional on
-   * the item still existing (attribute_exists); a concurrent consumer that
-   * already deleted it makes this a no-op (ConditionalCheckFailed swallowed).
+   * Consume (delete) ONE parked event (by sesMessageId + eventType) - the
+   * exactly-once marker. Conditional on the item still existing (attribute_
+   * exists); a concurrent consumer that already deleted it makes this a no-op
+   * (ConditionalCheckFailed swallowed).
    */
-  deleteParkedEmailEvent(sesMessageId: string): Promise<void>;
+  deleteParkedEmailEvent(sesMessageId: string, eventType: string): Promise<void>;
 
   // --- Relay groups (M1.7) -------------------------------------------------
 
@@ -788,6 +792,14 @@ function sysSidPk(providerSid: string): string {
 /** Pointer partition key for a PARKED SES event (email-channel B5, plan F12). */
 function emailEventPk(sesMessageId: string): string {
   return `emailevent#${sesMessageId}`;
+}
+
+/** Sort key for a parked SES event, per EVENT TYPE (m4): a single sesMessageId
+ *  can have a Bounce AND a Delivery parked at once (a second park must not
+ *  overwrite the first and silently lose the suppression), so the sort key
+ *  carries the eventType discriminator instead of a fixed 'parked'. */
+function parkedSk(eventType: string): string {
+  return `parked#${eventType}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -1401,14 +1413,16 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async putParkedEmailEvent(event, opts) {
-      // Unconditional UPSERT: a redelivery before the alias exists overwrites the
-      // identical item (idempotent). The pointer-partition family (sid#/job#).
+      // Unconditional UPSERT keyed by (sesMessageId, eventType) (m4): a redelivery
+      // of the SAME event type before the alias exists overwrites the identical
+      // item (idempotent), but a DIFFERENT event type (e.g. a Delivery after a
+      // parked Bounce) lands in its own slot instead of clobbering the first.
       await doc.send(
         new PutCommand({
           TableName: table,
           Item: {
             conversationId: emailEventPk(event.sesMessageId),
-            tsMsgId: 'parked',
+            tsMsgId: parkedSk(event.eventType),
             event_type: event.eventType,
             ses_message_id: event.sesMessageId,
             ...(event.bounceType !== undefined && { bounce_type: event.bounceType }),
@@ -1420,31 +1434,37 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       log.info({ sesMessageId: event.sesMessageId, eventType: event.eventType }, 'SES event parked');
     },
 
-    async getParkedEmailEvent(sesMessageId) {
-      const { Item } = await doc.send(
-        new GetCommand({
+    async listParkedEmailEvents(sesMessageId) {
+      // ALL parked events for this SES id (the drain applies every one). The
+      // partition holds one item per eventType (parked#<eventType>).
+      const { Items } = await doc.send(
+        new QueryCommand({
           TableName: table,
-          Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: 'parked' },
+          KeyConditionExpression: 'conversationId = :pk AND begins_with(tsMsgId, :sk)',
+          ExpressionAttributeValues: { ':pk': emailEventPk(sesMessageId), ':sk': 'parked#' },
         }),
       );
-      if (!Item) return undefined;
-      const eventType = Item['event_type'];
-      const storedId = Item['ses_message_id'];
-      if (typeof eventType !== 'string' || typeof storedId !== 'string') return undefined;
-      const bounceType = Item['bounce_type'];
-      return {
-        eventType,
-        sesMessageId: storedId,
-        ...(typeof bounceType === 'string' && { bounceType }),
-      };
+      const out: ParkedEmailEvent[] = [];
+      for (const Item of Items ?? []) {
+        const eventType = Item['event_type'];
+        const storedId = Item['ses_message_id'];
+        if (typeof eventType !== 'string' || typeof storedId !== 'string') continue;
+        const bounceType = Item['bounce_type'];
+        out.push({
+          eventType,
+          sesMessageId: storedId,
+          ...(typeof bounceType === 'string' && { bounceType }),
+        });
+      }
+      return out;
     },
 
-    async deleteParkedEmailEvent(sesMessageId) {
+    async deleteParkedEmailEvent(sesMessageId, eventType) {
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
-            Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: 'parked' },
+            Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: parkedSk(eventType) },
             // The consume marker: exactly-once even under a concurrent double-apply.
             ConditionExpression: 'attribute_exists(tsMsgId)',
           }),
@@ -1453,7 +1473,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         if (err instanceof ConditionalCheckFailedException) return;
         throw err;
       }
-      log.info({ sesMessageId }, 'parked SES event consumed');
+      log.info({ sesMessageId, eventType }, 'parked SES event consumed');
     },
 
     async listByConversation(conversationId, opts = {}) {

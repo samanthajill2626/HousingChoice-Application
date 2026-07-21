@@ -166,6 +166,9 @@ const midIntakeTenant = {
     status: 'onboarding',
     status_source: 'manual',
     phone: PHONES.midIntakeTenant,
+    // Email-channel A1: scalar email on the tenant exemplar (full profile). Kept
+    // minimal (scalar only - contactEmails() serializes it), like cast phones.
+    email: 'destiny.holloway@example.com',
     firstName: 'Destiny',
     lastName: 'Holloway',
     housingAuthority: 'dekalb_housing',
@@ -874,6 +877,8 @@ const coldCallLandlord = {
     type: 'landlord',
     status: 'needs_review',
     phone: PHONES.coldCallLandlord,
+    // Email-channel A1: scalar email on the landlord exemplar (full profile).
+    email: 'theodore.vinson@example.com',
     firstName: 'Theodore',
     lastName: 'Vinson',
     voice_opt_out: false, // explicitly false — do-not-call flag demo target

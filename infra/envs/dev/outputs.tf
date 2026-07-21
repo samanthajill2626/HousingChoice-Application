@@ -81,3 +81,28 @@ output "app_cname_target" {
   description = "Value for the app CNAME in Namecheap (host=<sub> CNAME -> this). Cut ONLY after the cert is issued and attached as an alias (custom_domain_phase 1)."
   value       = module.cloudfront.domain_name
 }
+
+output "verification_record" {
+  description = "SES domain-verification TXT for Namecheap (strip the trailing .housingchoice.org from the Host - RUNBOOK 'Email (SES)')."
+  value       = module.inbound_mail.verification_record
+}
+
+output "dkim_records" {
+  description = "The 3 DKIM CNAMEs for Namecheap. Enter all three and LEAVE forever."
+  value       = module.inbound_mail.dkim_records
+}
+
+output "mx_record" {
+  description = "Inbound MX for the mail subdomain (10 inbound-smtp.us-east-1.amazonaws.com)."
+  value       = module.inbound_mail.mx_record
+}
+
+output "spf_record" {
+  description = "SPF TXT authorizing SES to send for the mail subdomain."
+  value       = module.inbound_mail.spf_record
+}
+
+output "dns_records" {
+  description = "Every Email (SES) record for Namecheap in one list (RUNBOOK 'Email (SES)' > Namecheap record inventory)."
+  value       = module.inbound_mail.dns_records
+}

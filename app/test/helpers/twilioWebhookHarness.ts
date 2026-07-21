@@ -11,6 +11,7 @@ import request, { type Test } from 'supertest';
 import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
+import type { Semaphore } from '../../src/lib/semaphore.js';
 import type {
   InitiateCallParams,
   MessagingAdapter,
@@ -2510,6 +2511,14 @@ export interface HarnessOptions {
    * calls without a real DynamoDB table. Omit to use the router's real default.
    */
   extractionRepo?: ExtractionRepo;
+  /**
+   * unit-photo-transcode (Task 4): inject a transcode gate into the units
+   * confirm route (threaded through buildApp -> createApiRouter ->
+   * createUnitsRouter). Tests pass a rejecting stub to drive the 503
+   * transcode_busy path without saturating the real shared gate. Omit for the
+   * real default.
+   */
+  transcodeGate?: Semaphore;
 }
 
 export interface Harness {
@@ -2604,6 +2613,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // streams the stored recording back out of the SAME media store the voice
       // recording callback wrote it into.
       ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
+      // unit-photo-transcode (Task 4): thread the injected gate through to the
+      // units confirm route (createApiRouter -> createUnitsRouter).
+      ...(opts.transcodeGate !== undefined && { transcodeGate: opts.transcodeGate }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

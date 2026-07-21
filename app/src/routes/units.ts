@@ -16,6 +16,7 @@
 // PII (doc §9): responses carry full unit docs to the authenticated client;
 // LOG LINES are IDs/counts only.
 import { createHash, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
@@ -23,8 +24,14 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
-import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
-import { UNIT_PHOTO_SOURCE_MAX_BYTES } from '../lib/unitPhotoLimits.js';
+import { transcodeForUnitPhoto } from '../adapters/mediaTranscode.js';
+import { MMS_TRANSCODE_WAIT_TIMEOUT_MS } from '../lib/outboundMediaLimits.js';
+import {
+  UNIT_PHOTO_PASSTHROUGH_MAX_BYTES,
+  UNIT_PHOTO_SOURCE_MAX_BYTES,
+} from '../lib/unitPhotoLimits.js';
+import { sharedTranscodeGate } from '../lib/transcodeGate.js';
+import type { Semaphore } from '../lib/semaphore.js';
 import { resolveUnitMedia, UNIT_MEDIA_MAX, unitMediaPrefix } from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
@@ -77,6 +84,12 @@ export interface UnitsRouterDeps {
    * url-absent (only legacy absolute URLs carry through).
    */
   mediaStore?: MediaStore;
+  /**
+   * unit-photo-transcode: the process-wide transcode gate (shared with MMS
+   * confirm - ONE memory bound). Injectable for tests; defaults to the shared
+   * instance.
+   */
+  transcodeGate?: Semaphore;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -245,6 +258,11 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
   }
 }
 
+// MediaStore.put wants a Readable; wrap the finished transcode buffer.
+function bufferToStream(buf: Buffer): Readable {
+  return Readable.from([buf]);
+}
+
 export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
@@ -254,6 +272,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
+  const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
 
   const router = Router();
 
@@ -508,13 +527,23 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // server-minted); (b) it is not a duplicate within the body and not ALREADY
   // on the unit (idempotent retries - see below); (c) HeadObject succeeds (the
   // object was actually uploaded); (d) the stored Content-Type is an allowed
-  // image type AND the size <= 5MB (re-verify what S3 stored). A key failing
-  // (a)/(c)/(d) is DROPPED with a logged warn (key + unitId only); if NO key
-  // survives -> 400, UNLESS every valid key was already present (a replayed
-  // confirm) -> 200 with the current unit. Survivors pass a friendly cap
-  // pre-check (existing + new <= 100 -> else 400 photo_cap_exceeded) and are
-  // committed via ONE atomic appendMedia - its ConditionExpression + batch
-  // bound re-guard the cap under a race (ConditionalCheckFailed -> same 400).
+  // image type (else dropped), then the stored SIZE is classified
+  // (unit-photo-transcode): <= 5MB is appended as-is (today's byte-identical
+  // path); > 20MB is dropped (the presign policy already forbids it - defense
+  // in depth); 5MB < size <= 20MB is FITTED at confirm - behind the SHARED
+  // process-wide transcode gate it is downloaded, transcoded to a 2560/q85
+  // jpeg, put at a FRESH uuid key, and that RENDITION key is appended in place
+  // of the oversize original (left as an accepted orphan). A key failing
+  // (a)/(c)/(d) or whose transcode fails is DROPPED with a logged warn (unitId
+  // + byte counts only, never keys); if NO key survives -> 400
+  // (transcode_failed when a >5MB source was undecodable, else no_valid_photos),
+  // UNLESS every valid key was already present (a replayed confirm) -> 200 with
+  // the current unit. Gate starvation aborts the WHOLE request with 503
+  // transcode_busy before any append (all-or-nothing; the dashboard sends each
+  // >5MB file in its own confirm). Survivors pass a friendly cap pre-check
+  // (existing + new <= 100 -> else 400 photo_cap_exceeded) and are committed
+  // via ONE atomic appendMedia - its ConditionExpression + batch bound re-guard
+  // the cap under a race (ConditionalCheckFailed -> same 400).
   // Audit unit_photos_added COUNT only, BEST-EFFORT (the media append has
   // already committed; a transient audit failure must not 500 a confirm whose
   // photos are stored). Returns the updated unit (with mediaDisplay). An
@@ -563,6 +592,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const ownPrefix = unitMediaPrefix(unitId);
     const seen = new Set<string>();
     const survivors: string[] = [];
+    const transcodePending: { key: string; sourceType: string }[] = [];
     let alreadyPresent = 0;
     for (const raw of rawKeys) {
       const key = typeof raw === 'string' ? raw : '';
@@ -581,7 +611,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         alreadyPresent += 1;
         continue;
       }
-      // (c) the object was actually uploaded; (d) re-check the stored type + size.
+      // (c) the object was actually uploaded; (d) re-check the stored type, then
+      // classify by size (unit-photo-transcode): <=5MB passthrough, >5MB fit.
       let head;
       try {
         head = await mediaStore.head(key);
@@ -593,11 +624,82 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         log.warn({ unitId }, 'unit photos confirm: object missing - key dropped');
         continue;
       }
-      if (!isImageMediaType(head.contentType) || (head.size ?? Infinity) > OUTBOUND_MMS_MAX_FILE_BYTES) {
-        log.warn({ unitId }, 'unit photos confirm: stored type/size re-check failed - key dropped');
+      if (!isImageMediaType(head.contentType)) {
+        log.warn({ unitId }, 'unit photos confirm: stored type re-check failed - key dropped');
         continue;
       }
-      survivors.push(key);
+      const size = head.size ?? Infinity;
+      if (size > UNIT_PHOTO_SOURCE_MAX_BYTES) {
+        // The presign policy already forbids this; defense in depth.
+        log.warn({ unitId }, 'unit photos confirm: stored size over the source cap - key dropped');
+        continue;
+      }
+      if (size <= UNIT_PHOTO_PASSTHROUGH_MAX_BYTES) {
+        // <=5MB: stored byte-identical - the pre-transcode behavior, unchanged.
+        survivors.push(key);
+        continue;
+      }
+      // >5MB: fit at confirm (design 2026-07-21) - transcoded below, behind the gate.
+      transcodePending.push({ key, sourceType: head.contentType!.trim().toLowerCase() });
+    }
+
+    // >5MB sources: download + fit to the photo rendition profile, behind the
+    // SHARED process-wide gate (one raster memory bound with MMS confirm). The
+    // rendition is appended under a FRESH uuid key - indistinguishable from a
+    // direct upload, so display/flyer/namespace-guard need no changes. The
+    // oversize ORIGINAL stays as an accepted orphan (issue
+    // unit-photo-removal-never-deletes-s3-objects). A per-key transcode failure
+    // drops THAT key (confirm's per-key posture); gate starvation is a
+    // request-level 503 (memory pressure, not this key's fault). PII: byte
+    // counts + unitId only - never keys/filenames.
+    let transcodeFailed = 0;
+    for (const pending of transcodePending) {
+      // Acquire in its own try so a gate timeout is a request-level 503
+      // (all-or-nothing), not a per-key drop. `release` is assigned before the
+      // work try/finally below, so it is definitely-assigned there and stays
+      // NON-optional (DEC-4) - release() ALWAYS runs after a successful acquire.
+      let release: () => void;
+      try {
+        release = await transcodeGate.acquire(MMS_TRANSCODE_WAIT_TIMEOUT_MS);
+      } catch {
+        res.status(503).json({ error: 'transcode_busy' });
+        return;
+      }
+      try {
+        const bytes = await mediaStore.getBytes(pending.key);
+        if (!bytes) {
+          transcodeFailed += 1;
+          log.warn({ unitId }, 'unit photo transcode: source vanished - key dropped');
+          continue;
+        }
+        const result = await transcodeForUnitPhoto(bytes, pending.sourceType);
+        if (result.bytes.length > UNIT_PHOTO_PASSTHROUGH_MAX_BYTES) {
+          // Practically unreachable at 2560px, but the stored-photo invariant holds.
+          transcodeFailed += 1;
+          log.warn(
+            { unitId, byteCount: result.bytes.length },
+            'unit photo transcode: rendition over the stored cap - key dropped',
+          );
+          continue;
+        }
+        const renditionKey = `${ownPrefix}${randomUUID()}`;
+        await mediaStore.put(renditionKey, bufferToStream(result.bytes), result.contentType);
+        log.info(
+          {
+            unitId,
+            sourceBytes: bytes.length,
+            renditionBytes: result.bytes.length,
+            transcodedFrom: result.transcodedFrom,
+          },
+          'unit photo transcoded',
+        );
+        survivors.push(renditionKey);
+      } catch (err) {
+        transcodeFailed += 1;
+        log.warn({ err, unitId }, 'unit photo transcode failed - key dropped');
+      } finally {
+        release();
+      }
     }
 
     if (survivors.length === 0) {
@@ -610,7 +712,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         res.json({ unit: { ...unit, mediaDisplay } });
         return;
       }
-      res.status(400).json({ error: 'no_valid_photos' });
+      res.status(400).json({ error: transcodeFailed > 0 ? 'transcode_failed' : 'no_valid_photos' });
       return;
     }
 

@@ -8,9 +8,10 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import sharp from 'sharp';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
-import { UNIT_PHOTO_SOURCE_MAX_BYTES } from '../src/lib/unitPhotoLimits.js';
+import { UNIT_PHOTO_PASSTHROUGH_MAX_BYTES, UNIT_PHOTO_SOURCE_MAX_BYTES } from '../src/lib/unitPhotoLimits.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -387,6 +388,101 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     expect(res.status).toBe(400);
     expect(res.body).toEqual({ error: 'photo_cap_exceeded' });
     expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
+  });
+});
+
+/** A REAL >5MB png (gaussian noise defeats compression) so the transcode branch
+ *  has decodable bytes. Built once - sharp runs ~1-2s for this size. */
+async function bigNoisePng(): Promise<Buffer> {
+  const buf = await sharp({
+    create: {
+      width: 1800,
+      height: 1800,
+      channels: 3,
+      background: { r: 128, g: 128, b: 128 },
+      noise: { type: 'gaussian', mean: 128, sigma: 30 },
+    },
+  })
+    .png()
+    .toBuffer();
+  expect(buf.length).toBeGreaterThan(UNIT_PHOTO_PASSTHROUGH_MAX_BYTES);
+  return buf;
+}
+
+describe('POST /api/units/:unitId/photos/confirm - >5MB transcode branch', () => {
+  it('transcodes an oversize source: appends a FRESH jpeg rendition key, not the original', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const key = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000001';
+    world.mediaObjects.set(key, { body: await bigNoisePng(), contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({ keys: [key] });
+    expect(res.status).toBe(200);
+    const media: string[] = res.body.unit.media;
+    expect(media).toHaveLength(1);
+    expect(media[0]).toMatch(KEY_RE);
+    expect(media[0]).not.toBe(key); // rendition, not the original
+    // The rendition was PUT under the unit prefix as a jpeg within the invariant.
+    expect(world.mediaPuts).toHaveLength(1);
+    expect(world.mediaPuts[0]!.key).toBe(media[0]);
+    expect(world.mediaPuts[0]!.contentType).toBe('image/jpeg');
+    expect(world.mediaPuts[0]!.bytes).toBeLessThanOrEqual(UNIT_PHOTO_PASSTHROUGH_MAX_BYTES);
+  });
+
+  it('passthrough (<=5MB) stays byte-identical: no download, no put, original key appended', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const key = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000002';
+    storeObject(world, key, { contentType: 'image/png', size: 64 });
+    const res = await confirm(app, 'unit-1').send({ keys: [key] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([key]);
+    expect(world.mediaPuts).toHaveLength(0);
+  });
+
+  it('503 transcode_busy when the gate cannot be acquired (nothing appended)', async () => {
+    const { app, world } = makeWebhookHarness({
+      transcodeGate: { acquire: () => Promise.reject(new Error('semaphore_timeout')) },
+    });
+    seedUnit(world, 'unit-1');
+    const key = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000003';
+    world.mediaObjects.set(key, { body: await bigNoisePng(), contentType: 'image/png' });
+    const res = await confirm(app, 'unit-1').send({ keys: [key] });
+    expect(res.status).toBe(503);
+    expect(res.body).toEqual({ error: 'transcode_busy' });
+    expect(world.units.get('unit-1')!.media ?? []).toEqual([]);
+  });
+
+  it('400 transcode_failed when an oversize object is not decodable', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const key = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000004';
+    // 6MB of garbage: passes the size classifier, fails sharp.
+    storeObject(world, key, { contentType: 'image/jpeg', size: 6 * 1024 * 1024 });
+    const res = await confirm(app, 'unit-1').send({ keys: [key] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('transcode_failed');
+  });
+
+  it('mixed body: small key passthrough + corrupt big key dropped -> 200 with the survivor only', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const good = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000005';
+    const bad = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000006';
+    storeObject(world, good, { contentType: 'image/png', size: 64 });
+    storeObject(world, bad, { contentType: 'image/jpeg', size: 6 * 1024 * 1024 });
+    const res = await confirm(app, 'unit-1').send({ keys: [good, bad] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([good]);
+  });
+
+  it('drops a stored object over the 20MB source cap (defense in depth)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const key = 'unit-media/unit-1/aaaaaaaa-0000-0000-0000-000000000007';
+    storeObject(world, key, { contentType: 'image/jpeg', size: 21 * 1024 * 1024 });
+    const res = await confirm(app, 'unit-1').send({ keys: [key] });
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('no_valid_photos');
   });
 });
 

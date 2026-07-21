@@ -111,6 +111,37 @@ describe('createEmailAdapter - ses driver', () => {
   });
 });
 
+describe('createEmailAdapter - ses driver ConfigurationSetName (email-channel B5)', () => {
+  it('sets ConfigurationSetName on SendEmail when config.emailConfigurationSet is present', async () => {
+    let captured: Parameters<SesSendClient['send']>[0] | undefined;
+    const stub: SesSendClient = {
+      send: async (command) => {
+        captured = command;
+        return { MessageId: 'ses-msg-cs', $metadata: {} };
+      },
+    };
+    const config = { ...sesConfig(), emailConfigurationSet: 'hc-dev-mail' };
+    const adapter = createEmailAdapter({ config, logger: silentLogger, sesClient: stub });
+    await adapter.send(baseMail);
+    // The configuration set routes bounce/complaint/delivery events to the SNS
+    // topic - without it the B5 event pipeline never receives anything.
+    expect(captured?.input.ConfigurationSetName).toBe('hc-dev-mail');
+  });
+
+  it('omits ConfigurationSetName when config.emailConfigurationSet is unset', async () => {
+    let captured: Parameters<SesSendClient['send']>[0] | undefined;
+    const stub: SesSendClient = {
+      send: async (command) => {
+        captured = command;
+        return { MessageId: 'ses-msg-nocs', $metadata: {} };
+      },
+    };
+    const adapter = createEmailAdapter({ config: sesConfig(), logger: silentLogger, sesClient: stub });
+    await adapter.send(baseMail);
+    expect(captured?.input.ConfigurationSetName).toBeUndefined();
+  });
+});
+
 describe('composeRawMime - header injection (Q1)', () => {
   it('never lets CR/LF in subject or from.name inject a header line', async () => {
     const raw = await composeRawMime({

@@ -80,9 +80,14 @@ class SesEmailDriver implements EmailAdapter {
   readonly kind = 'ses' as const;
   private readonly client: SesSendClient;
   private readonly log: Logger;
+  /** SES configuration set attached to each SendEmail (B5): it is what makes SES
+   *  fan out bounce/complaint/delivery events to the mail-events SNS topic.
+   *  Undefined locally (fake-SES) and until the inbound_mail apply provides it. */
+  private readonly configurationSet: string | undefined;
 
   constructor(opts: { config: AppConfig; logger?: Logger; client?: SesSendClient }) {
     this.log = opts.logger ?? defaultLogger;
+    this.configurationSet = opts.config.emailConfigurationSet;
     // Constructed ONCE per driver instance (mirrors the Twilio/Anthropic
     // adapters). The endpoint override redirects to the fake-SES host locally;
     // config rejects SES_API_BASE_URL in production, so it is undefined there.
@@ -96,7 +101,12 @@ class SesEmailDriver implements EmailAdapter {
 
   async send(mail: OutboundEmail): Promise<{ providerMessageId: string }> {
     const raw = await composeRawMime(mail);
-    const result = await this.client.send(new SendEmailCommand({ Content: { Raw: { Data: raw } } }));
+    const result = await this.client.send(
+      new SendEmailCommand({
+        Content: { Raw: { Data: raw } },
+        ...(this.configurationSet ? { ConfigurationSetName: this.configurationSet } : {}),
+      }),
+    );
     if (!result.MessageId) {
       // A 2xx SendEmail without a MessageId is anomalous; fail loudly rather
       // than persist an empty provider id (A5 marks the message failed).

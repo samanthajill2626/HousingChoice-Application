@@ -372,6 +372,15 @@ export interface AppConfig {
    */
   emailFromAddress?: string;
   /**
+   * SES configuration set name outbound sends attach so bounce/complaint/delivery
+   * events fan out to the mail-events SNS topic (EMAIL_CONFIGURATION_SET, e.g.
+   * hc-dev-mail). Non-secret naming value (Terraform params module, wired from the
+   * inbound_mail module's config_set_name output). OPTIONAL pass-through: unset
+   * locally (the fake-SES host ignores it) and until the inbound_mail apply lands;
+   * WITHOUT it SES never emits the events the B5 pipeline consumes.
+   */
+  emailConfigurationSet?: string;
+  /**
    * S3 bucket the SES inbound receipt rule writes raw MIME into
    * (INBOUND_MAIL_BUCKET, Phase B). Plain optional pass-through; unset locally.
    */
@@ -767,6 +776,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // required-vars block). Trimmed + undefined-collapsed.
   const emailSenderDomain = env.EMAIL_SENDER_DOMAIN?.trim() || undefined;
   const emailFromAddress = env.EMAIL_FROM_ADDRESS?.trim() || undefined;
+  // Outbound config set (bounce/complaint/delivery event routing). Optional
+  // pass-through; the ses driver attaches it to SendEmail when present.
+  const emailConfigurationSet = env.EMAIL_CONFIGURATION_SET?.trim() || undefined;
   if (emailDriver === 'ses') {
     const missingEmail: string[] = [];
     if (!emailSenderDomain) missingEmail.push('EMAIL_SENDER_DOMAIN');
@@ -1090,6 +1102,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     sesApiBaseUrl: sesApiBaseUrl !== undefined && sesApiBaseUrl.length > 0 ? sesApiBaseUrl : undefined,
     emailSenderDomain,
     emailFromAddress,
+    emailConfigurationSet,
     inboundMailBucket,
     inboundMailQueueUrl,
   };

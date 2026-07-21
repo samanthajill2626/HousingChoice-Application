@@ -142,6 +142,23 @@ describe('SES_API_BASE_URL (SECURITY-CRITICAL dev-only override)', () => {
   });
 });
 
+describe('EMAIL_CONFIGURATION_SET (outbound event routing, B5)', () => {
+  it('reads EMAIL_CONFIGURATION_SET when set', () => {
+    const cfg = loadConfig({ ...base, NODE_ENV: 'development', EMAIL_CONFIGURATION_SET: 'hc-dev-mail' });
+    expect(cfg.emailConfigurationSet).toBe('hc-dev-mail');
+  });
+
+  it('defaults to undefined when unset', () => {
+    const cfg = loadConfig({ ...base, NODE_ENV: 'development' });
+    expect(cfg.emailConfigurationSet).toBeUndefined();
+  });
+
+  it('trims and undefined-collapses a blank value', () => {
+    const cfg = loadConfig({ ...base, NODE_ENV: 'development', EMAIL_CONFIGURATION_SET: '   ' });
+    expect(cfg.emailConfigurationSet).toBeUndefined();
+  });
+});
+
 describe('inbound-mail pass-through (Phase B)', () => {
   it('reads INBOUND_MAIL_BUCKET + INBOUND_MAIL_QUEUE_URL when set', () => {
     const cfg = loadConfig({

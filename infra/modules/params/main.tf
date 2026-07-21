@@ -129,6 +129,13 @@ resource "aws_ssm_parameter" "email_from_address" {
   value       = var.email_from_address
 }
 
+resource "aws_ssm_parameter" "email_configuration_set" {
+  name        = "/hc/${var.env}/app/EMAIL_CONFIGURATION_SET"
+  description = "SES configuration set (inbound_mail module) outbound sends attach so bounce/complaint/delivery events fan out to the mail-events topic (email-channel-v1)."
+  type        = "String"
+  value       = var.email_configuration_set
+}
+
 resource "aws_ssm_parameter" "inbound_mail_bucket" {
   name        = "/hc/${var.env}/app/INBOUND_MAIL_BUCKET"
   description = "S3 bucket the SES receipt rule writes raw inbound MIME to (inbound_mail module); the worker GetObjects it (email-channel-v1)."

@@ -88,10 +88,11 @@ module "params" {
 
   # Email channel v1: the sender domain + default From address the outbound
   # adapter composes with, and the inbound bucket/queue the app + worker read.
-  email_sender_domain    = local.mail_domain
-  email_from_address     = "team@${local.mail_domain}"
-  inbound_mail_bucket    = module.inbound_mail.bucket_name
-  inbound_mail_queue_url = module.inbound_mail.queue_url
+  email_sender_domain     = local.mail_domain
+  email_from_address      = "team@${local.mail_domain}"
+  email_configuration_set = module.inbound_mail.config_set_name
+  inbound_mail_bucket     = module.inbound_mail.bucket_name
+  inbound_mail_queue_url  = module.inbound_mail.queue_url
 }
 
 module "ec2" {

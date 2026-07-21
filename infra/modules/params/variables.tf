@@ -55,6 +55,11 @@ variable "email_from_address" {
   type        = string
 }
 
+variable "email_configuration_set" {
+  description = "SES configuration set name (inbound_mail module) outbound sends attach so bounce/complaint/delivery events fan out - EMAIL_CONFIGURATION_SET (email-channel-v1)."
+  type        = string
+}
+
 variable "inbound_mail_bucket" {
   description = "Inbound-mail S3 bucket name (inbound_mail module) - INBOUND_MAIL_BUCKET (email-channel-v1)."
   type        = string

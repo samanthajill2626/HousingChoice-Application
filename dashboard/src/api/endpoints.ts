@@ -977,7 +977,7 @@ export async function uploadToPresignedPost(
  *  appends the survivors under the 100-cap re-guard, and returns the updated unit
  *  (WITH mediaDisplay). A plain JSON call. Throws ApiError (400 no_valid_photos /
  *  photo_cap_exceeded / transcode_failed / too_many_large_photos, 503
- *  media_storage_unavailable / transcode_busy). */
+ *  media_storage_unavailable / transcode_busy, 429 rate_limited). */
 export async function confirmUnitPhotos(unitId: string, keys: string[]): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/photos/confirm`,

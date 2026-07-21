@@ -277,6 +277,33 @@ resource "aws_s3_bucket_public_access_block" "inbound" {
   restrict_public_buckets = true
 }
 
+# Retention lifecycle (adv M5): raw inbound MIME (full bodies + attachments =
+# the most sensitive PII in the feature, deliberately never served) must NOT
+# accrue forever. Current objects expire after 180 days; because the bucket is
+# versioned, that writes a delete marker, so noncurrent versions are reaped 30
+# days after they become noncurrent (versioning would otherwise retain PII
+# behind delete markers indefinitely). Retention is adjudicated - Cameron may
+# adjust the day counts pre-apply (RUNBOOK "Email (SES)").
+resource "aws_s3_bucket_lifecycle_configuration" "inbound" {
+  bucket     = aws_s3_bucket.inbound.id
+  depends_on = [aws_s3_bucket_versioning.inbound]
+
+  rule {
+    id     = "expire-raw-mime"
+    status = "Enabled"
+
+    filter {} # all objects
+
+    expiration {
+      days = 180
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
 # SES receipt-rule S3 action write grant. The classic pattern: principal =
 # ses.amazonaws.com, action = s3:PutObject, with aws:Referer pinned to THIS
 # account (the documented SES receipt-rule condition key). A service-principal

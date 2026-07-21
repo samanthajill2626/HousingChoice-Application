@@ -252,11 +252,14 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('only messages and placements have streams; only matches + unmatched_email have TTL', () => {
+  it('only messages and placements have streams; messages + matches + unmatched_email have TTL', () => {
     expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'placements']);
-    // matches: volatile engine output. unmatched_email: F19 retention on
-    // linked/dismissed/quarantined rows (email-channel B3).
+    // messages: reaps orphan F12 parked SES events (email-channel fix-wave adv
+    // M3) - real conversation messages never set expires_at. matches: volatile
+    // engine output. unmatched_email: F19 retention on linked/dismissed/
+    // quarantined rows (email-channel B3).
     expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual([
+      'messages',
       'matches',
       'unmatched_email',
     ]);

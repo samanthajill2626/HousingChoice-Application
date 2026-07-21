@@ -181,6 +181,13 @@ export const TABLES: readonly TableSpec[] = [
     rangeKey: { name: 'tsMsgId', type: 'S' },
     gsis: [],
     stream: 'NEW_AND_OLD_IMAGES', // feeds side effects (doc §5)
+    // TTL (adv M3): the ONLY messages items carrying `expires_at` are the F12
+    // parked SES events (`emailevent#<sesId>`, a 7d backstop) - real
+    // conversation messages never set it (verified: putParkedEmailEvent is the
+    // sole writer), so enabling TTL reaps only an orphan parked event the
+    // post-send consumer never claimed (e.g. a bounce for a send this stack
+    // never made), closing the unbounded-accrual gap.
+    ttlAttribute: 'expires_at',
   },
   {
     // Volatile engine output; bulk-regenerated; stale rows TTL away.

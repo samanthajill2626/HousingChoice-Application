@@ -64,7 +64,7 @@ import {
   createPlacementDeadlinesRepo,
   type PlacementDeadlinesRepo,
 } from '../repos/placementDeadlinesRepo.js';
-import { displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
+import { createUsersRepo, displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
@@ -441,6 +441,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // from config. The email send route also resolves the recipient contact by
   // address, so a contacts repo is shared with it.
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  // The email From line renders "<name> at Housing Choice" to the RECIPIENT;
+  // the session user carries no `name`, so resolve the full user record
+  // (best-effort - a users-table blip falls back to the session identity).
+  const usersForEmail = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const sendEmail =
     deps.sendEmailService ??
     createSendEmailMessageService({
@@ -1074,6 +1078,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
 
     // Resolve the recipient contact by address (the service re-validates on-file).
     const contact = await contacts.findByEmail(normalizeEmailAddress(to));
+    // Sender display name: the session user has no `name` field, so the From
+    // line ("<name> at Housing Choice") must come from the users table; fall
+    // back to the session identity (email) if the lookup fails or is empty.
+    const senderRecord = await usersForEmail.findById(user.userId).catch(() => undefined);
 
     try {
       const outcome = await sendEmail({
@@ -1085,7 +1093,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         body,
         ...(attachments !== undefined && { attachments }),
         sentByUserId: user.userId,
-        sentByName: displayNameOf(user),
+        sentByName: displayNameOf(senderRecord ?? user),
       });
       res.status(202).json({ message: outcome });
     } catch (err) {

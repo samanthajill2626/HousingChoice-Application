@@ -24,13 +24,18 @@ import { createLogCapture } from './helpers/logCapture.js';
 const SECRET = 'test-origin-secret';
 const logger = createLogger({ destination: createLogCapture().stream });
 
-function makeApp(behavior?: (input: SendEmailInput) => never) {
+function makeApp(behavior?: (input: SendEmailInput) => never, senderName?: string) {
   const calls: SendEmailInput[] = [];
+  const userItem = senderName !== undefined ? testUserItem({ name: senderName }) : testUserItem();
+  const usersRepo = makeFakeUsersRepo([userItem]).repo;
   const app = buildApp({
     config: loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: SECRET }),
     logger,
-    auth: { usersRepo: makeFakeUsersRepo([testUserItem()]).repo },
+    auth: { usersRepo },
     api: {
+      // The email route resolves the sender's display name from the users
+      // table (the session user carries no `name`).
+      usersRepo,
       contactsRepo: {
         async findByEmail(email: string) {
           return { contactId: 'c1', type: 'tenant', email, emails: [{ email, primary: true }] };
@@ -58,7 +63,7 @@ const OK_BODY = { to: 'tenant@x.com', subject: 'Hi', body: 'A body' };
 
 describe('POST /api/conversations/:conversationId/email', () => {
   it('202 { message } on success, threading the resolved contact + session identity', async () => {
-    const { app, calls } = makeApp();
+    const { app, calls } = makeApp(undefined, 'Sam Rivera');
     const res = await request(app)
       .post('/api/conversations/conv-1/email')
       .set('x-origin-verify', SECRET)
@@ -78,8 +83,21 @@ describe('POST /api/conversations/:conversationId/email', () => {
       // Back-compat: a legacy attachmentKeys[] body normalizes to {key} attachments.
       attachments: [{ key: 'email-media/u/aaaa-0000' }],
       sentByUserId: TEST_SESSION_USER.userId,
-      sentByName: TEST_SESSION_USER.email, // displayNameOf falls back to email
+      // Resolved from the USERS TABLE record (the session has no name field);
+      // recipient-visible From line reads "Sam Rivera at Housing Choice".
+      sentByName: 'Sam Rivera',
     });
+  });
+
+  it('falls back to the session email for sentByName when the user record has no name', async () => {
+    const { app, calls } = makeApp(); // testUserItem() has no name
+    const res = await request(app)
+      .post('/api/conversations/conv-1/email')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send(OK_BODY);
+    expect(res.status).toBe(202);
+    expect(calls[0]).toMatchObject({ sentByName: TEST_SESSION_USER.email });
   });
 
   it('threads {key, filename} attachments through to the service (m4)', async () => {

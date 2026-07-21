@@ -255,6 +255,7 @@ export interface TodayResponse {
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
+  | 'partner_1to1'
   | 'unknown_1to1'
   | 'relay_group';
 
@@ -878,7 +879,7 @@ export type MessageDirection = 'inbound' | 'outbound';
 /** Who authored a message. `unknown` = from an un-triaged contact (never
  *  guessed); `system` = an app-authored relay announcement (group intro /
  *  tour reminder rung). */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
+export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
 export type MessageType = 'sms' | 'mms' | 'call';
@@ -888,7 +889,7 @@ export type MessageType = 'sms' | 'mms' | 'call';
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
-export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
+export type ContactType = 'tenant' | 'landlord' | 'partner' | 'team_member' | 'unknown';
 
 /**
  * A2P/CTIA consent method (spec §2 + client_inbound/inbound_call). MIRROR of the
@@ -1869,7 +1870,7 @@ export interface InboxRow {
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
-  role?: 'tenant' | 'landlord' | 'unknown';
+  role?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
   preview: string; // latest item's text as a preview (relay: last_message_preview)

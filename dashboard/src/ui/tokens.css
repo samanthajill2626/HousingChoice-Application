@@ -40,6 +40,7 @@
   /* Contacts filter dots */
   --c-dot-tenant: #34d399;
   --c-dot-landlord: #60a5fa;
+  --c-dot-partner: #a78bfa;
   --c-dot-unknown: #fbbf24;
 
   /* --- Typography --------------------------------------------------------- */
@@ -90,10 +91,12 @@
   --c-header-btn-bg: #2563eb;
   --c-header-kebab-bg: #374151;
 
-  /* Type pills (audience: tenant blue / landlord teal / unknown amber — the same
-   * amber family as the nav's Unknown dot, darkened for white-text contrast). */
+  /* Type pills (audience: tenant blue / landlord teal / partner violet / unknown
+   * amber - the same amber family as the nav's Unknown dot, darkened for
+   * white-text contrast). */
   --c-pill-tenant-bg: #1d4ed8;
   --c-pill-landlord-bg: #0e7490;
+  --c-pill-partner-bg: #6d28d9;
   --c-pill-unknown-bg: #b45309;
 
   /* Timeline surfaces. */

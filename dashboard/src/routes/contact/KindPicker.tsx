@@ -1,6 +1,7 @@
 // KindPicker — unified "What kind of contact is this?" control.
-// Segments: Tenant / Landlord / Property Manager / Other.
-// Picking Tenant/Landlord resolves directly to {type, role:''}.
+// Segments: Tenant / Landlord / Partner / Property Manager / Other.
+// Picking Tenant/Landlord/Partner resolves directly to {type, role:''} (partner
+// is a first-class ContactType, not a preset).
 // Picking Property Manager is a preset: {type:'landlord', role:PM_ROLE}.
 // Picking Other reveals a Role text input + a base-type sub-choice.
 import { useEffect, useId, useState } from 'react';
@@ -19,7 +20,7 @@ export interface KindPickerProps {
   roleSuggestions?: string[];
 }
 
-type PrimarySegment = 'tenant' | 'landlord' | 'pm' | 'other';
+type PrimarySegment = 'tenant' | 'landlord' | 'partner' | 'pm' | 'other';
 
 /** The two record shapes a custom kind can be based on. The description spells
  *  out the data shape (fields + behaviour) the new kind inherits, so picking one
@@ -53,6 +54,7 @@ function activePrimarySegment(
   if (inOtherMode) return 'other';
   if (value.type === 'tenant') return 'tenant';
   if (value.type === 'landlord') return 'landlord';
+  if (value.type === 'partner') return 'partner';
   return null;
 }
 
@@ -102,9 +104,10 @@ export function KindPicker({
       onChange({ type: 'landlord', role: PM_ROLE });
     } else {
       setOtherSelected(false);
-      const typeMap: Record<'tenant' | 'landlord', ContactType> = {
+      const typeMap: Record<'tenant' | 'landlord' | 'partner', ContactType> = {
         tenant: 'tenant',
         landlord: 'landlord',
+        partner: 'partner',
       };
       onChange({ type: typeMap[seg], role: '' });
     }
@@ -122,15 +125,17 @@ export function KindPicker({
     <div className={styles.picker}>
       {/* Primary segment bar */}
       <div className={styles.segmentBar} role="group" aria-label="Contact kind">
-        {(['tenant', 'landlord', 'pm', 'other'] as PrimarySegment[]).map((seg) => {
+        {(['tenant', 'landlord', 'partner', 'pm', 'other'] as PrimarySegment[]).map((seg) => {
           const label =
             seg === 'tenant'
               ? 'Tenant'
               : seg === 'landlord'
                 ? 'Landlord'
-                : seg === 'pm'
-                  ? 'Property Manager'
-                  : 'Other';
+                : seg === 'partner'
+                  ? 'Partner'
+                  : seg === 'pm'
+                    ? 'Property Manager'
+                    : 'Other';
           return (
             <button
               key={seg}

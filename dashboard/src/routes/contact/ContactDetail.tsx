@@ -52,6 +52,7 @@ import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { UnknownFile } from './UnknownFile.js';
+import { PartnerFile } from './PartnerFile.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
@@ -187,22 +188,27 @@ export function ContactDetail(): React.JSX.Element {
     );
   }
 
-  // Three-way by audience: landlord → landlord, unknown → untriaged, everything
-  // else (tenant + team_member) → tenant. `pill`/file are chosen from this.
-  const kind: 'tenant' | 'landlord' | 'unknown' =
+  // Four-way by audience: landlord -> landlord, partner -> partner (a resolved
+  // third party; generic pane, no housing pipeline), unknown -> untriaged,
+  // everything else (tenant + team_member) -> tenant. `pill`/file chosen from this.
+  const kind: 'tenant' | 'landlord' | 'partner' | 'unknown' =
     contact.type === 'landlord'
       ? 'landlord'
-      : contact.type === 'unknown'
-        ? 'unknown'
-        : 'tenant';
+      : contact.type === 'partner'
+        ? 'partner'
+        : contact.type === 'unknown'
+          ? 'unknown'
+          : 'tenant';
   const isLandlord = kind === 'landlord';
   const kindLabel = displayKind(contact, (t) => CONTACT_TYPE_LABEL[t]);
   const pill =
     kind === 'landlord'
       ? { label: kindLabel, cls: styles.pillLandlord }
-      : kind === 'unknown'
-        ? { label: kindLabel, cls: styles.pillUnknown }
-        : { label: kindLabel, cls: styles.pillTenant };
+      : kind === 'partner'
+        ? { label: kindLabel, cls: styles.pillPartner }
+        : kind === 'unknown'
+          ? { label: kindLabel, cls: styles.pillUnknown }
+          : { label: kindLabel, cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
@@ -650,6 +656,19 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
+              />
+              <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
+              <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
+            </>
+          ) : kind === 'partner' ? (
+            <>
+              <PartnerFile
+                contact={contact}
+                phones={phones}
+                media={media}
+                mediaLoading={mediaLoading}
+                onEdit={() => setEditing(true)}
+                onManagePhones={() => setManagingPhones(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />

@@ -15,6 +15,7 @@ export const PM_ROLE = 'Property Manager';
 export const CONTACT_TYPE_LABEL: Record<ContactType, string> = {
   tenant: 'Tenant',
   landlord: 'Landlord',
+  partner: 'Partner',
   team_member: 'Team',
   unknown: 'Unknown',
 };

@@ -64,6 +64,10 @@
   background: var(--c-pill-landlord-bg);
 }
 
+.pillPartner {
+  background: var(--c-pill-partner-bg);
+}
+
 .pillUnknown {
   background: var(--c-pill-unknown-bg);
 }

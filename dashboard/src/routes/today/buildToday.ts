@@ -61,6 +61,7 @@ const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
 const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
   tenant_1to1: 'Tenant',
   landlord_1to1: 'Landlord',
+  partner_1to1: 'Partner',
   unknown_1to1: 'Unknown',
   relay_group: 'Group',
 };

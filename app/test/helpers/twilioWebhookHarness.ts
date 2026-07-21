@@ -168,6 +168,8 @@ export interface FakeWorld {
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
   presignPosts: { key: string; contentType: string }[];
+  /** Keys removed via mediaStore.deleteObject (D1 best-effort removal), in order. */
+  deletedMediaKeys: string[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -270,6 +272,7 @@ export function createFakeWorld(): FakeWorld {
   let viCreateError: Error | undefined;
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const presignPosts: FakeWorld['presignPosts'] = [];
+  const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
   const failMediaUrls = new Set<string>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
@@ -2384,6 +2387,13 @@ export function createFakeWorld(): FakeWorld {
         },
       };
     },
+    async deleteObject(key) {
+      // D1 best-effort removal: drop the stored object (idempotent - a missing
+      // key is a no-op, mirroring S3 DeleteObject) and record the key so the
+      // delete-on-removal tests can assert exactly which objects were removed.
+      mediaObjects.delete(key);
+      deletedMediaKeys.push(key);
+    },
   };
 
   return {
@@ -2403,6 +2413,7 @@ export function createFakeWorld(): FakeWorld {
     initiatedCalls,
     mediaPuts,
     presignPosts,
+    deletedMediaKeys,
     failMediaUrls,
     failRecordingUrls,
     mediaObjects,

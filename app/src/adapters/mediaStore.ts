@@ -5,7 +5,7 @@
 // guideline 1): @aws-sdk/lib-storage's Upload consumes the Readable in
 // bounded parts — no whole-body buffering, ever.
 import { Readable } from 'node:stream';
-import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
@@ -86,6 +86,13 @@ export interface MediaStore {
    * OWN client so endpoint/forcePathStyle/creds/region are inherited.
    */
   createPresignedPost(key: string, opts: { contentType: string; maxBytes?: number }): Promise<PresignedPost>;
+  /**
+   * Best-effort object removal (unit-photo removal, design spec 2026-07-21
+   * D1). S3 DeleteObject is idempotent - deleting an absent key succeeds -
+   * so callers need no absent-object handling. Throws only on transport /
+   * access errors; callers degrade failures to a WARN, never a 500.
+   */
+  deleteObject(key: string): Promise<void>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -188,6 +195,10 @@ export class S3MediaStore implements MediaStore {
       }
       throw err;
     }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
   }
 
   async createPresignedPost(

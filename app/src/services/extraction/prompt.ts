@@ -18,7 +18,7 @@ export function buildExtractionSystemPrompt(): string {
     'The user message contains a CURRENT PROFILE JSON block (what we already know',
     'about this contact) and a TRANSCRIPT of the conversation in chronological',
     'order. Each transcript line is "<timestamp> [<speaker>/<channel>] <text>"',
-    'where <speaker> is staff, client, or unknown and <channel> is sms or voice.',
+    'where <speaker> is staff, client, or unknown and <channel> is sms, email, or voice.',
     '[unknown] lines come from a two-party phone call whose speakers are labeled',
     'Speaker 1 / Speaker 2 with no role attribution. FIRST decide who is the',
     'client and output speakerRoles: for each Speaker label, an entry giving its',

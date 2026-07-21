@@ -95,6 +95,10 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
  * Map a stored message to zero or more channel-tagged transcript utterances.
  *
  * - sms/mms: exactly one utterance - speaker from direction, channel 'sms'.
+ * - email: exactly one utterance - speaker from direction (inbound -> client,
+ *   outbound teammate -> staff, exactly the sms mapping), channel 'email',
+ *   text = the message BODY ONLY (already quote-trimmed at ingest by
+ *   visibleReplyText; the subject is metadata and NEVER transcript content).
  * - call WITH a completed, non-empty transcript: one utterance per NON-EMPTY
  *   line, all sharing the call row's timestamp, channel 'voice'. Per-line
  *   speaker attribution (the prefixes are baked in by joinViSentences at save
@@ -130,6 +134,16 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
       utterances.push({ speaker: 'client', text: line, at, channel: 'voice' });
     }
     return utterances;
+  }
+  if (m.type === 'email') {
+    return [
+      {
+        speaker: m.direction === 'inbound' ? 'client' : 'staff',
+        text: m.body ?? '',
+        at: m.created_at,
+        channel: 'email',
+      },
+    ];
   }
   return [
     {

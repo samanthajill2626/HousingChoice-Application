@@ -21,9 +21,11 @@ import { Modal } from './Modal.js';
 import { ConsentFields, type ConsentValue } from './ConsentFields.js';
 import { consentAtFromDate, todayISODate } from '../../lib/consentCopy.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
+import { isValidEmail, normalizeEmail } from './contactEmails.js';
 import styles from './ContactCreateForm.module.css';
 
 const PHONE_ERROR = 'Enter a 10-digit US number, or a full international number starting with +';
+const EMAIL_ERROR = 'Enter a valid email address, like name@example.com';
 
 export interface ContactCreateFormProps {
   candidates: Contact[];
@@ -48,6 +50,10 @@ export function ContactCreateForm({
   const [lastName, setLastName] = useState('');
   const [phone, setPhone] = useState('');
   const [phoneError, setPhoneError] = useState<string | null>(null);
+  // Optional email (email-channel v1, A6). Type-agnostic - every contact type may
+  // have an address (spec Decision 1). Validated on blur, mirroring the phone field.
+  const [email, setEmail] = useState('');
+  const [emailError, setEmailError] = useState<string | null>(null);
   const [voucher, setVoucher] = useState('');
   // Tenant-only voucher expiration DATE (YYYY-MM-DD from the date input). Empty →
   // nothing sent. On submit it's converted to an ISO instant.
@@ -92,6 +98,17 @@ export function ContactCreateForm({
     }
   }
 
+  function onEmailBlur(): void {
+    const raw = email.trim();
+    if (raw === '') { setEmailError(null); return; }
+    if (isValidEmail(raw)) {
+      setEmail(normalizeEmail(raw));
+      setEmailError(null);
+    } else {
+      setEmailError(EMAIL_ERROR);
+    }
+  }
+
   function handleShowRelationships(): void {
     setShowRelationships(true);
     // Pre-add one empty row so the editor is immediately useful
@@ -130,6 +147,16 @@ export function ContactCreateForm({
         return;
       }
       body['phone'] = e164;
+    }
+
+    if (email.trim()) {
+      const normalized = normalizeEmail(email.trim());
+      if (!isValidEmail(normalized)) {
+        setEmailError(EMAIL_ERROR);
+        setBusy(false);
+        return;
+      }
+      body['email'] = normalized;
     }
 
     if (isTenant && voucher.trim()) {
@@ -187,7 +214,8 @@ export function ContactCreateForm({
           const existing = (b as Record<string, unknown>)['contact'] as Contact;
           setConflictContact(existing);
         } else {
-          setError('That number already belongs to another contact.');
+          const noun = phone.trim() ? 'number' : email.trim() ? 'email address' : 'contact';
+          setError(`That ${noun} already belongs to another contact.`);
         }
       } else {
         setError("Couldn't create contact — please try again.");
@@ -200,6 +228,10 @@ export function ContactCreateForm({
   const conflictName = conflictContact
     ? contactDisplayName(conflictContact.firstName, conflictContact.lastName, conflictContact.phone)
     : null;
+  // The create route dedupes on phone OR email and returns the same
+  // `contact_exists` either way; name the identifier the operator actually
+  // entered so the notice reads sensibly for an email dupe too.
+  const conflictNoun = phone.trim() ? 'number' : email.trim() ? 'email address' : 'contact';
 
   return (
     <Modal
@@ -262,6 +294,24 @@ export function ContactCreateForm({
         {phoneError !== null ? (
           <p role="alert" className={styles.error}>
             {phoneError}
+          </p>
+        ) : null}
+
+        <label className={styles.field}>
+          <span className={styles.label}>Email</span>
+          <input
+            className={styles.input}
+            type="email"
+            value={email}
+            onChange={(e) => { setEmail(e.target.value); setEmailError(null); }}
+            onBlur={onEmailBlur}
+            placeholder="name@example.com"
+            autoComplete="off"
+          />
+        </label>
+        {emailError !== null ? (
+          <p role="alert" className={styles.error}>
+            {emailError}
           </p>
         ) : null}
 
@@ -356,7 +406,7 @@ export function ContactCreateForm({
         {conflictContact !== null && conflictName !== null ? (
           <div role="alert" className={styles.conflict}>
             <span>
-              That number already belongs to <strong>{conflictName}</strong>.
+              That {conflictNoun} already belongs to <strong>{conflictName}</strong>.
             </span>
             <Button
               variant="secondary"

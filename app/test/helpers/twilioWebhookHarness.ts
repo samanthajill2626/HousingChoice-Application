@@ -685,6 +685,14 @@ export function createFakeWorld(): FakeWorld {
         messages.find((m) => m.email_message_id === messageId) ?? findBySid(messageId)
       );
     },
+    async recordProviderSidAlias(providerSid, ref) {
+      // Working mirror (email A5): stamp the SES id on the message so a later
+      // resolve-by-SES-id (B5) can find it; no separate pointer table in-memory.
+      const msg = messages.find(
+        (m) => m.conversationId === ref.conversationId && m.tsMsgId === ref.tsMsgId,
+      );
+      if (msg) msg.ses_message_id = providerSid;
+    },
     async updateDeliveryStatus(sid, status, errorCode) {
       const existing = findBySid(sid);
       if (!existing) return false;

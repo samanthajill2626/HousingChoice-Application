@@ -168,6 +168,7 @@ function makeFakes(
     },
     getByProviderSid: async () => undefined,
     getByRfcMessageId: async () => undefined,
+    recordProviderSidAlias: async () => {},
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
     setCallRecording: async () => true,

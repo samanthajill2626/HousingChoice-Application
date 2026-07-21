@@ -385,6 +385,13 @@ export interface MessageItem {
   email_cc?: string[];
   /** RFC Message-ID (ours on outbound, the sender's on inbound). */
   email_message_id?: string;
+  /**
+   * OUTBOUND email (A5): the SES MessageId returned by adapter.send, stamped by
+   * recordProviderSidAlias AFTER send. Distinct from provider_sid (which is our
+   * own RFC id, known before send) - the correlation key SES delivery/bounce/
+   * complaint events (B5) arrive under. Absent on inbound + non-email messages.
+   */
+  ses_message_id?: string;
   /** Sanitized inbound HTML body (Phase B rendering; absent on outbound). */
   email_html_sanitized?: string;
   /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
@@ -487,6 +494,20 @@ export interface MessagesRepo {
    * callbacks arrive out of order and redelivered (doc §7.1).
    */
   updateDeliveryStatus(sid: string, status: DeliveryStatus, errorCode?: string): Promise<boolean>;
+  /**
+   * Email channel v1 (A5): alias a provider SID to an ALREADY-persisted message.
+   * An outbound email persists under our own RFC Message-ID as `provider_sid`
+   * (we do not know the SES MessageId until adapter.send returns), so this writes
+   * a second `sid#<providerSid>` pointer to that message AND stamps
+   * `ses_message_id`. A later SES delivery/bounce/complaint event (B5) - keyed on
+   * the SES MessageId - then resolves the message via getByProviderSid(sesId) and
+   * runs the SAME forward-only updateDeliveryStatus machine. Idempotent: a
+   * duplicate alias writes the same pointer + field (harmless).
+   */
+  recordProviderSidAlias(
+    providerSid: string,
+    ref: { conversationId: string; tsMsgId: string },
+  ): Promise<void>;
   /**
    * Voice call (M1.9a): apply a call status-callback transition to a
    * `type:'call'` item, found by CallSid (== provider_sid). Forward-only on
@@ -916,6 +937,34 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
       log.info({ providerSid: sid, status, errorCode }, 'delivery status updated');
       return true;
+    },
+
+    async recordProviderSidAlias(providerSid, ref) {
+      // (1) sid#<providerSid> -> the message: the SAME pointer shape append
+      // writes, so getByProviderSid(sesMessageId) / updateDeliveryStatus resolve
+      // it. Unconditional Put: a redelivery writes the identical ref (harmless).
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: sidPk(providerSid),
+            tsMsgId: 'ptr',
+            ref_conversationId: ref.conversationId,
+            ref_tsMsgId: ref.tsMsgId,
+          },
+        }),
+      );
+      // (2) Stamp the SES id on the message for correlation/display. Best-effort
+      // idempotent SET (no condition - re-writing the same id is a no-op).
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId: ref.conversationId, tsMsgId: ref.tsMsgId },
+          UpdateExpression: 'SET ses_message_id = :m',
+          ExpressionAttributeValues: { ':m': providerSid },
+        }),
+      );
+      log.info({ providerSid, conversationId: ref.conversationId }, 'email provider-sid alias recorded');
     },
 
     async updateCallStatus(callSid, fields) {

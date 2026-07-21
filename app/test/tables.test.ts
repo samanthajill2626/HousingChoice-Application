@@ -38,7 +38,24 @@ describe('tables.ts — the table contract', () => {
       'placementDeadlines',
       'tours',
       'ai_extraction',
+      'unmatched_email',
     ]);
+  });
+
+  it('unmatched_email (email-channel B3): PK unmatchedId; sparse byStatus (status + received_at); TTL expires_at; no stream', () => {
+    const t = spec('unmatched_email');
+    expect(t.hashKey.name).toBe('unmatchedId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byStatus']);
+    const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
+    expect(byStatus?.hashKey.name).toBe('status');
+    expect(byStatus?.rangeKey?.name).toBe('received_at');
+    // Sparse: block#<address> pointer items carry neither key attr, so the
+    // blocklist never appears in the triage feeds.
+    expect(byStatus?.sparse).toBe(true);
+    expect(t.stream).toBeUndefined();
+    // F19 retention: linked/dismissed/quarantined rows expire via expires_at.
+    expect(t.ttlAttribute).toBe('expires_at');
   });
 
   it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs/stream/TTL', () => {
@@ -235,9 +252,14 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('only messages and placements have streams; only matches has TTL', () => {
+  it('only messages and placements have streams; only matches + unmatched_email have TTL', () => {
     expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'placements']);
-    expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual(['matches']);
+    // matches: volatile engine output. unmatched_email: F19 retention on
+    // linked/dismissed/quarantined rows (email-channel B3).
+    expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual([
+      'matches',
+      'unmatched_email',
+    ]);
   });
 
   it('getTableSpec throws on unknown base names', () => {

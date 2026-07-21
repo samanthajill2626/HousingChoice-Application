@@ -29,8 +29,25 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'tourReminders',
       'tours',
       'units',
+      'unmatched_email',
       'users',
     ]);
+  });
+
+  it('unmatched_email (email-channel B3): PK unmatchedId; byStatus GSI (status + received_at); TTL expires_at', () => {
+    expect(tables['unmatched_email']).toEqual({
+      hash_key: { name: 'unmatchedId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byStatus',
+          hash_key: { name: 'status', type: 'S' },
+          range_key: { name: 'received_at', type: 'S' },
+        },
+      ],
+      stream: false,
+      ttl_attribute: 'expires_at',
+      pitr: true,
+    });
   });
 
   it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs, no stream/TTL', () => {
@@ -180,10 +197,11 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
   });
 
-  it('TTL only on matches (expires_at)', () => {
+  it('TTL only on matches + unmatched_email (expires_at)', () => {
     expect(tables['matches']?.ttl_attribute).toBe('expires_at');
+    expect(tables['unmatched_email']?.ttl_attribute).toBe('expires_at');
     const withTtl = Object.entries(tables).filter(([, t]) => t.ttl_attribute !== undefined);
-    expect(withTtl.map(([base]) => base)).toEqual(['matches']);
+    expect(withTtl.map(([base]) => base)).toEqual(['matches', 'unmatched_email']);
   });
 
   it('streams on messages and placements ONLY', () => {

@@ -508,6 +508,34 @@ export const TABLES: readonly TableSpec[] = [
       },
     ],
   },
+  {
+    // NEW in email-channel v1 B3 (README deviation): the unknown-sender inbound
+    // email side-door. Mail that matches no contact/thread (or is quarantined by
+    // spam/virus verdicts) lands HERE - never in conversations, never in the
+    // inbox or Today (spec Decision 4). Two kinds of item share the table,
+    // disjoint by key prefix:
+    //   um-<uuid>        an unmatched/quarantined/linked/dismissed mail row.
+    //   block#<address>  a sender-blocklist pointer (B2 tier 3 isBlocked). These
+    //                    carry NO status/received_at, so they never index in
+    //                    byStatus (sparse) and never surface in the feeds.
+    // byStatus powers the triage page's two tabs (Unmatched / Quarantine),
+    // newest-first by received_at - single-partition per status is adjudicated
+    // fine at staff-tool volumes (plan B3; revisit only past ~1k rows/day).
+    // TTL (review F19): expires_at (epoch seconds) is set on linked/dismissed/
+    // quarantined rows (+90 days); unmatched rows never expire (awaiting a
+    // human) and blocklist pointers are permanent.
+    baseName: 'unmatched_email',
+    hashKey: { name: 'unmatchedId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byStatus',
+        hashKey: { name: 'status', type: 'S' },
+        rangeKey: { name: 'received_at', type: 'S' },
+        sparse: true,
+      },
+    ],
+    ttlAttribute: 'expires_at',
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

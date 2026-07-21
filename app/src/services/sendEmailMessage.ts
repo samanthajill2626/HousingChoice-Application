@@ -30,9 +30,15 @@ import { createConversationsRepo, type ConversationsRepo } from '../repos/conver
 import {
   createMessagesRepo,
   type DeliveryStatus,
+  type MediaAttachment,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
-import { contactEmails, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import {
+  contactEmails,
+  contactPhones,
+  createContactsRepo,
+  type ContactsRepo,
+} from '../repos/contactsRepo.js';
 import { isKillSwitchOff } from './scheduledSendSuppression.js';
 
 // --- Typed refusals (route maps these to HTTP statuses) --------------------
@@ -49,7 +55,8 @@ export class EmailSendRefusedError extends Error {
       | 'contact_email_missing'
       | 'invalid_cc'
       | 'invalid_attachment'
-      | 'conversation_not_found',
+      | 'conversation_not_found'
+      | 'conversation_contact_mismatch',
   ) {
     super(message);
     this.name = new.target.name;
@@ -72,6 +79,19 @@ export class EmailSendingDisabledError extends EmailSendRefusedError {
 export class EmailConversationNotFoundError extends EmailSendRefusedError {
   constructor(conversationId: string) {
     super(`conversation not found or not email-capable: ${conversationId}`, 'conversation_not_found');
+  }
+}
+
+/**
+ * The URL conversation does not belong to the To-derived contact (m5): its
+ * participants roster lacks the contact, and neither its participant_phone nor its
+ * participant_email is on that contact's file. Refused before attaching so a
+ * hand-crafted authed POST cannot stamp contact A's address onto contact B's
+ * thread. Route maps to 409.
+ */
+export class ConversationContactMismatchError extends EmailSendRefusedError {
+  constructor() {
+    super('conversation does not belong to the recipient contact - send refused', 'conversation_contact_mismatch');
   }
 }
 
@@ -121,7 +141,17 @@ export interface SendEmailInput {
   cc?: string[];
   subject: string;
   body: string;
-  /** email-media/<userId>/<uuid> keys from the A5 presign/confirm pair. */
+  /**
+   * Attachments to send: each an email-media/<userId>/<uuid> key (from the A5
+   * presign/confirm pair) plus the original client filename. The filename rides
+   * the outbound MIME part and is persisted on the message so the timeline gallery
+   * shows the real document name.
+   */
+  attachments?: { key: string; filename?: string }[];
+  /**
+   * @deprecated Back-compat: bare keys with no filenames (the pre-filename route
+   * body). Normalized to `attachments` with a derived name. Prefer `attachments`.
+   */
   attachmentKeys?: string[];
   sentByUserId: string;
   sentByName: string;
@@ -244,16 +274,23 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       throw new EmailSuppressedError();
     }
 
-    // (4) Attachments: validate each key, HEAD it, sum <= cap, fetch bytes. The
-    // stored object is used VERBATIM (no transcode).
-    const attachmentKeys = input.attachmentKeys ?? [];
+    // (4) Attachments: normalize {key, filename?}, validate each key (own prefix +
+    // the key's <userId> segment MUST be this sender), HEAD it, sum <= cap, fetch
+    // bytes. Stored object is used VERBATIM (no transcode). The original filename
+    // rides the outbound MIME part AND is persisted on the message.
+    const attachmentInputs: { key: string; filename?: string }[] =
+      input.attachments ?? (input.attachmentKeys ?? []).map((key) => ({ key }));
     const attachments: { filename: string; contentType: string; content: Buffer }[] = [];
-    if (attachmentKeys.length > 0) {
+    const persistedAttachments: MediaAttachment[] = [];
+    if (attachmentInputs.length > 0) {
       if (!mediaStore) throw new Error('email attachments require media storage (MEDIA_BUCKET unset)');
       let totalBytes = 0;
-      for (let i = 0; i < attachmentKeys.length; i++) {
-        const key = attachmentKeys[i]!;
+      for (let i = 0; i < attachmentInputs.length; i++) {
+        const { key, filename } = attachmentInputs[i]!;
         if (!EMAIL_MEDIA_KEY_RE.test(key)) throw new InvalidAttachmentError(key);
+        // The key's user segment (email-media/<userId>/<uuid>) MUST be this sender -
+        // never let an authed user attach another user's uploaded object by key.
+        if (key.split('/')[1] !== input.sentByUserId) throw new InvalidAttachmentError(key);
         const meta = await mediaStore.head(key);
         if (!meta) throw new InvalidAttachmentError(key);
         const contentType = (meta.contentType ?? '').trim().toLowerCase();
@@ -262,10 +299,18 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
         if (totalBytes > EMAIL_MAX_TOTAL_BYTES) throw new EmailAttachmentsTooLargeError();
         const bytes = await mediaStore.getBytes(key);
         if (!bytes) throw new InvalidAttachmentError(key);
-        attachments.push({
-          filename: `attachment-${i + 1}${EMAIL_EXTENSIONS[contentType] ?? '.bin'}`,
+        // Prefer the client's original filename (CR/LF stripped); else a stable
+        // synthesized name so the recipient still gets a typed file.
+        const cleanName = filename?.replace(/[\r\n]+/g, ' ').trim();
+        const outName =
+          cleanName && cleanName.length > 0
+            ? cleanName
+            : `attachment-${i + 1}${EMAIL_EXTENSIONS[contentType] ?? '.bin'}`;
+        attachments.push({ filename: outName, contentType, content: bytes });
+        persistedAttachments.push({
+          s3Key: key,
           contentType,
-          content: bytes,
+          ...(cleanName && cleanName.length > 0 && { filename: cleanName }),
         });
       }
     }
@@ -274,6 +319,23 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
     const conversation = await conversations.getById(conversationId);
     if (!conversation || conversation.type === 'relay_group') {
       throw new EmailConversationNotFoundError(conversationId);
+    }
+    // (5a) The URL conversation MUST belong to the To-derived contact (m5). It does
+    // when: its participants roster names the contact (an email-only thread just
+    // created for this contact carries the roster), OR its participant_phone is on
+    // the contact's file, OR its participant_email is one of the contact's
+    // addresses. Otherwise refuse BEFORE attaching - a hand-crafted authed POST
+    // with a mismatched (conversationId, to) pair must never stamp this address
+    // onto a foreign thread.
+    const rosterHasContact = (conversation.participants ?? []).some((p) => p.contactId === contactId);
+    const phoneOnFile =
+      conversation.participant_phone !== undefined &&
+      contactPhones(contact).some((p) => p.phone === conversation.participant_phone);
+    const emailOnFile =
+      conversation.participant_email !== undefined && onFile.includes(conversation.participant_email);
+    if (!rosterHasContact && !phoneOnFile && !emailOnFile) {
+      log.warn({ conversationId, contactId }, 'email send refused: conversation does not belong to contact');
+      throw new ConversationContactMismatchError();
     }
     // The claim arbiter (A4): claim the To address for this conversation. If it is
     // already claimed ELSEWHERE, thread into THAT conversation instead.
@@ -306,6 +368,7 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       ...(ccNormalized.length > 0 && { email_cc: ccNormalized }),
       email_message_id: messageIdHeader,
       rfcMessageIdPointer: bareId,
+      ...(persistedAttachments.length > 0 && { mediaAttachments: persistedAttachments }),
     });
 
     // Touch + SSE, reused by both the failed and sent paths so a failed send is

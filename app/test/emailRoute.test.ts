@@ -75,9 +75,24 @@ describe('POST /api/conversations/:conversationId/email', () => {
       cc: ['peer@x.com'],
       subject: 'Hi',
       body: 'A body',
-      attachmentKeys: ['email-media/u/aaaa-0000'],
+      // Back-compat: a legacy attachmentKeys[] body normalizes to {key} attachments.
+      attachments: [{ key: 'email-media/u/aaaa-0000' }],
       sentByUserId: TEST_SESSION_USER.userId,
       sentByName: TEST_SESSION_USER.email, // displayNameOf falls back to email
+    });
+  });
+
+  it('threads {key, filename} attachments through to the service (m4)', async () => {
+    const { app, calls } = makeApp();
+    const res = await request(app)
+      .post('/api/conversations/conv-1/email')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ ...OK_BODY, attachments: [{ key: 'email-media/u/bbbb-1111', filename: 'lease.pdf' }] });
+
+    expect(res.status).toBe(202);
+    expect(calls[0]).toMatchObject({
+      attachments: [{ key: 'email-media/u/bbbb-1111', filename: 'lease.pdf' }],
     });
   });
 

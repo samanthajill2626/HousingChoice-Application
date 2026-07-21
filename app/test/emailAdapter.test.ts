@@ -1,7 +1,12 @@
 // app/test/emailAdapter.test.ts
 import { describe, expect, it, vi } from 'vitest';
 import { loadConfig } from '../src/lib/config.js';
-import { createEmailAdapter, type OutboundEmail, type SesSendClient } from '../src/adapters/email.js';
+import {
+  composeRawMime,
+  createEmailAdapter,
+  type OutboundEmail,
+  type SesSendClient,
+} from '../src/adapters/email.js';
 import type { Logger } from '../src/lib/logger.js';
 
 // A ses-driver config (dev NODE_ENV + explicit driver + sender identity so the
@@ -103,6 +108,25 @@ describe('createEmailAdapter - ses driver', () => {
     const stub: SesSendClient = { send: async () => ({ $metadata: {} }) };
     const adapter = createEmailAdapter({ config: sesConfig(), logger: silentLogger, sesClient: stub });
     await expect(adapter.send(baseMail)).rejects.toThrow(/MessageId/);
+  });
+});
+
+describe('composeRawMime - header injection (Q1)', () => {
+  it('never lets CR/LF in subject or from.name inject a header line', async () => {
+    const raw = await composeRawMime({
+      from: { name: 'A\r\nX-Evil: 1', address: 'team@mail.local.test' },
+      to: ['a@b.co'],
+      subject: 'Hi\r\nBcc: victim@x.com',
+      text: 'x',
+      messageIdHeader: '<i@mail.local.test>',
+    });
+    const mime = raw.toString('utf8');
+    // No line in the built MIME may START with an injected header the attacker
+    // tried to smuggle in via a bare CR/LF in a header value.
+    for (const line of mime.split(/\r?\n/)) {
+      expect(line.startsWith('Bcc:')).toBe(false);
+      expect(line.startsWith('X-Evil:')).toBe(false);
+    }
   });
 });
 

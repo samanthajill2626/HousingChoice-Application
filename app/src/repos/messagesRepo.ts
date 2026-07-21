@@ -292,6 +292,13 @@ export interface MediaAttachment {
    * legacy attachments (they carry only the delivered key).
    */
   originalKey?: string;
+  /**
+   * The original client-supplied filename (email-channel v1). Carried from the
+   * composer through the send so the outbound MIME part and the timeline gallery
+   * show `lease.pdf` rather than a synthesized `attachment-1.pdf`. Optional -
+   * MMS/inbound/legacy attachments have none.
+   */
+  filename?: string;
 }
 
 export interface MessageItem {

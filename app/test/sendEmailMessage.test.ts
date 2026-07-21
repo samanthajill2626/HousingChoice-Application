@@ -61,6 +61,9 @@ function makeFakes(over: Over = {}) {
   const conversation: ConversationItem = {
     conversationId: 'conv-1',
     participant_phone: '+15550100001',
+    // A real 1:1 thread carries the contact in its participants roster - the m5
+    // cross-check resolves ownership through it (or phone/email on file).
+    participants: [{ contactId: 'c1', phone: '+15550100001' }],
     status: 'open',
     last_activity_at: NOW,
     type: 'tenant_1to1',
@@ -235,6 +238,46 @@ describe('sendEmailMessage - behavior 4: attachments', () => {
     ).rejects.toBeInstanceOf(InvalidAttachmentError);
     expect(f.append).not.toHaveBeenCalled();
   });
+
+  it('carries the ORIGINAL filename into the MIME part AND persists it on the message (m4)', async () => {
+    const f = makeFakes();
+    f.head.mockResolvedValue({ contentType: 'application/pdf', size: 1000 });
+    f.getBytes.mockResolvedValue(Buffer.from('%PDF-1.4 bytes'));
+    await f.service(input({ attachments: [{ key: KEY, filename: 'lease agreement.pdf' }] }));
+    // MIME part uses the client's real filename, not a synthesized attachment-1.pdf.
+    expect(f.send.mock.calls[0]![0]).toMatchObject({
+      attachments: [{ filename: 'lease agreement.pdf', contentType: 'application/pdf' }],
+    });
+    // Persisted on the outbound message so the timeline gallery shows the document.
+    expect(f.append).toHaveBeenCalledWith(
+      expect.objectContaining({
+        mediaAttachments: [{ s3Key: KEY, contentType: 'application/pdf', filename: 'lease agreement.pdf' }],
+      }),
+    );
+  });
+
+  it('refuses invalid_attachment when the key user-segment is NOT the sender (cross-user ref, NIT)', async () => {
+    const f = makeFakes();
+    f.head.mockResolvedValue({ contentType: 'application/pdf', size: 1000 });
+    // sentByUserId is 'u1'; this key belongs to 'u2' - never attachable by u1.
+    await expect(
+      f.service(input({ attachments: [{ key: 'email-media/u2/bbbbbbbb-0000-0000-0000-000000000000' }] })),
+    ).rejects.toBeInstanceOf(InvalidAttachmentError);
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.getBytes).not.toHaveBeenCalled();
+  });
+
+  it('sums bytes ACROSS files and refuses when the TOTAL exceeds the cap (each file under it, NIT)', async () => {
+    const f = makeFakes();
+    const KEY2 = 'email-media/u1/bbbbbbbb-0000-0000-0000-000000000000';
+    // Each file is 60% of the cap (individually fine); together they exceed it.
+    f.head.mockResolvedValue({ contentType: 'application/pdf', size: Math.ceil(EMAIL_MAX_TOTAL_BYTES * 0.6) });
+    f.getBytes.mockResolvedValue(Buffer.from('x'));
+    await expect(
+      f.service(input({ attachments: [{ key: KEY }, { key: KEY2 }] })),
+    ).rejects.toBeInstanceOf(EmailAttachmentsTooLargeError);
+    expect(f.append).not.toHaveBeenCalled();
+  });
 });
 
 describe('sendEmailMessage - behavior 5: optimistic persist + provider ids', () => {
@@ -324,5 +367,27 @@ describe('sendEmailMessage - behavior 6 + ADJ-7 seam', () => {
     expect(events).toContain('conversation.updated');
     // ADJ-7: the B5 parking-lot applier is called with the SES MessageId post-send.
     expect(parked).toHaveBeenCalledWith('ses-1');
+  });
+});
+
+describe('sendEmailMessage - m5: conversation belongs to the recipient contact', () => {
+  it('ACCEPTS a thread that owns the To address via participant_email (empty roster, no phone match)', async () => {
+    const f = makeFakes({
+      conversation: { participants: [], participant_email: 'tenant@x.com' },
+    });
+    const out = await f.service(input());
+    expect(out.status).toBe('sent');
+    expect(f.append).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses conversation_contact_mismatch when roster, phone, and email all miss the contact', async () => {
+    const f = makeFakes({
+      // The thread belongs to someone else: roster names another contact, its phone
+      // is not on this contact's file, and it carries no participant_email match.
+      conversation: { participants: [{ contactId: 'someone-else', phone: '+15550100001' }] },
+    });
+    await expect(f.service(input())).rejects.toMatchObject({ code: 'conversation_contact_mismatch' });
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.attachEmailToConversation).not.toHaveBeenCalled();
   });
 });

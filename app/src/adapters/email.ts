@@ -50,8 +50,9 @@ export interface SesSendClient {
 /** Compose the full raw MIME message. Threading + Reply-To headers are set
  *  EXPLICITLY via mail-composer's options (it maps them to Message-ID /
  *  In-Reply-To / References / Reply-To headers); From renders as the display
- *  name + address; attachments carry filename + content-type + bytes. */
-async function composeRawMime(mail: OutboundEmail): Promise<Buffer> {
+ *  name + address; attachments carry filename + content-type + bytes.
+ *  Exported so the header-injection test (Q1) can exercise the real composer. */
+export async function composeRawMime(mail: OutboundEmail): Promise<Buffer> {
   const composer = new MailComposer({
     from: { name: mail.from.name, address: mail.from.address },
     to: mail.to,

@@ -1534,6 +1534,42 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ conversation });
   });
 
+  // POST /api/contacts/:contactId/email-conversation → 200 { conversation }.
+  // Create-or-get the 1:1 EMAIL thread for the contact's PRIMARY address — the
+  // email analog of /conversation, so the dashboard can email an email-ONLY contact
+  // (no phone) who has never messaged us. The phone /conversation route 400s
+  // (contact_has_no_phone) for them; this uses the createOrGetByParticipantEmail
+  // claim arbiter (idempotent — a racing send resolves to the same thread). It sets
+  // participants + display name AT CREATE (ADJ-9) so channel-agnostic readers
+  // (Today/inbox) resolve an email-only thread that carries no participant_phone.
+  // 400 contact_has_no_email when no address is on file.
+  router.post('/:contactId/email-conversation', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    const emails = contactEmails(contact);
+    const primary = emails.find((e) => e.primary) ?? emails[0];
+    if (!primary) {
+      res.status(400).json({ error: 'contact_has_no_email' });
+      return;
+    }
+
+    const type = conversationTypeFor(contact.type) ?? 'unknown_1to1';
+    const displayName = displayNameOf(contact);
+    const conversation = await conversations.createOrGetByParticipantEmail(primary.email, type, {
+      contactId,
+      ...(displayName !== null && { displayName }),
+    });
+    mergeContext({ conversationId: conversation.conversationId });
+    res.json({ conversation });
+  });
+
   // Manually mark a contact Do-Not-Contact (sms_opt_out=true) or clear it. The
   // contact-level flag is authoritative for send suppression — the send wrapper
   // refuses on contact.sms_opt_out (sendMessage.ts gate) — so setting it here

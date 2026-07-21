@@ -862,6 +862,14 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // We own the claim — stamp participant_email onto this conversation's row
       // (the byParticipantEmail GSI HASH). Guard on existence so an unknown id
       // never creates a row.
+      //
+      // NOTE (m7): participant_email is SINGLE-VALUED, so this SET overwrites any
+      // prior address when a thread spans several of a contact's addresses. It is a
+      // best-effort LAST-WRITER hint for the byParticipantEmail GSI, NOT the source
+      // of truth: the per-address email#<addr> claim rows (claimEmail) are the
+      // authoritative owner map, and contact-side readers (conversationsForContact)
+      // iterate ALL of a contact's addresses. A future reader that queries the GSI by
+      // a specific (non-current) address may miss the thread - resolve via the claim.
       await doc.send(
         new UpdateCommand({
           TableName: table,

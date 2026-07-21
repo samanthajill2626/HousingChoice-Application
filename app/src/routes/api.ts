@@ -139,6 +139,7 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
  */
 const EMAIL_REFUSAL_STATUS: Record<EmailSendRefusedError['code'], number> = {
   conversation_not_found: 404,
+  conversation_contact_mismatch: 409,
   email_sending_disabled: 409,
   email_suppressed: 409,
   email_attachments_too_large: 409,
@@ -994,6 +995,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       cc?: unknown;
       subject?: unknown;
       body?: unknown;
+      attachments?: unknown;
       attachmentKeys?: unknown;
     };
     const to = typeof payload.to === 'string' ? payload.to : '';
@@ -1007,12 +1009,28 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       Array.isArray(payload.cc) && payload.cc.every((c): c is string => typeof c === 'string')
         ? payload.cc
         : undefined;
-    const attachmentKeys =
-      Array.isArray(payload.attachmentKeys) &&
-      payload.attachmentKeys.length > 0 &&
-      payload.attachmentKeys.every((k): k is string => typeof k === 'string')
-        ? payload.attachmentKeys
-        : undefined;
+    // Attachments: prefer the {key, filename?} shape (carries the original filename
+    // to the MIME part + timeline gallery); accept the legacy attachmentKeys
+    // string[] for back-compat. Both normalize to a single `attachments` list.
+    const attachments = ((): { key: string; filename?: string }[] | undefined => {
+      if (Array.isArray(payload.attachments)) {
+        const mapped = payload.attachments
+          .filter(
+            (a): a is { key: string; filename?: unknown } =>
+              typeof a === 'object' && a !== null && typeof (a as { key?: unknown }).key === 'string',
+          )
+          .map((a) => ({ key: a.key, ...(typeof a.filename === 'string' && { filename: a.filename }) }));
+        return mapped.length > 0 ? mapped : undefined;
+      }
+      if (
+        Array.isArray(payload.attachmentKeys) &&
+        payload.attachmentKeys.length > 0 &&
+        payload.attachmentKeys.every((k): k is string => typeof k === 'string')
+      ) {
+        return payload.attachmentKeys.map((key) => ({ key }));
+      }
+      return undefined;
+    })();
 
     // Resolve the recipient contact by address (the service re-validates on-file).
     const contact = await contacts.findByEmail(normalizeEmailAddress(to));
@@ -1025,7 +1043,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         ...(cc !== undefined && { cc }),
         subject,
         body,
-        ...(attachmentKeys !== undefined && { attachmentKeys }),
+        ...(attachments !== undefined && { attachments }),
         sentByUserId: user.userId,
         sentByName: displayNameOf(user),
       });
@@ -1065,6 +1083,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
     if (original.direction !== 'outbound') {
       res.status(400).json({ error: 'not_outbound' });
+      return;
+    }
+    // Email is NOT retryable through this route (email-channel v1): it re-sends via
+    // the SMS sendMessage path, which would text the email body to participant_phone.
+    // A failed email carries provider_sid = hc-<uuid>@<domain>, direction outbound,
+    // delivery_status failed - so it would otherwise pass every check below. Refuse
+    // it up front (re-compose to resend an email; there is no email-retry route yet).
+    if (original.type === 'email') {
+      res.status(409).json({ error: 'not_retryable' });
       return;
     }
     // Only a FAILED/UNDELIVERED send is retryable — refuse re-sending a message

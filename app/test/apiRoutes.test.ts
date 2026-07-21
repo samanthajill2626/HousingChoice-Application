@@ -331,6 +331,25 @@ describe('POST /api/conversations/:conversationId/messages/:providerSid/retry', 
     }
   });
 
+  it('409 not_retryable when the original is an email (never re-send an email down the SMS path)', async () => {
+    // A failed outbound email otherwise passes every check below (outbound + failed),
+    // so it would text the email body to participant_phone. The type guard refuses it.
+    const { app, calls } = makeRetryApp({
+      ...FAILED_ORIGINAL,
+      type: 'email',
+      provider_sid: 'hc-abc@mail.test',
+      tsMsgId: '2026-06-12T09:00:00.000Z#hc-abc@mail.test',
+    });
+    const res = await request(app)
+      .post('/api/conversations/conv-1/messages/hc-abc@mail.test/retry')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send();
+    expect(res.status).toBe(409);
+    expect(res.body).toEqual({ error: 'not_retryable' });
+    expect(calls).toHaveLength(0);
+  });
+
   // THE Cameron rule (design Sec 5 / spec S5+S12): a retry of a message with
   // media_attachments RE-PRESIGNS each s3Key FRESH - it must never replay the
   // stored (expired) mediaUrls. Pinned: the retried URLs DIFFER from the

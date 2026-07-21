@@ -40,11 +40,11 @@ import {
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
-  contactPhones,
   createContactsRepo,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   createConversationsRepo,
   type ConversationItem,
@@ -121,7 +121,7 @@ interface TimelineMessage extends TimelineBase {
   tsMsgId: string;
   direction: MessageDirection;
   author: MessageAuthor;
-  type: 'sms' | 'mms';
+  type: 'sms' | 'mms' | 'email';
   body?: string;
   media_attachments?: MediaAttachment[];
   delivery_status: DeliveryStatus;
@@ -131,6 +131,19 @@ interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string;
+  // --- Email channel v1 (type:'email' items) -----------------------------------
+  /** Email subject line. */
+  subject?: string;
+  /** RFC From address. */
+  email_from?: string;
+  /** RFC To addresses. */
+  email_to?: string[];
+  /** RFC Cc addresses. */
+  email_cc?: string[];
+  /** Inbound reply arrived from an address not yet on the contact (B2 sets it;
+   *  the field is declared now so the wire type is stable — the client renders a
+   *  "New address" chip). Absent on outbound + known-address inbound. */
+  email_new_address?: boolean;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message.
    *  Surfaces the "N member(s) opted out" note. (relay_group threads are
    *  excluded from THIS server timeline today, so this is carried for
@@ -324,13 +337,15 @@ function toTimelineMessage(
   conversation: ConversationItem | undefined,
   ourNumber: string | undefined,
 ): TimelineMessage {
-  // The contact's OWN number on this 1:1 thread (participant_phone) + our org
-  // number are the ONLY phones we expose — never another counterpart (PII).
+  // Email channel v1: an email item carries NO phones (subject + addresses
+  // instead). The contact's OWN number on a phone thread (participant_phone) +
+  // our org number are the ONLY phones we expose — never another counterpart.
+  const isEmail = m.type === 'email';
   const contactPhone = conversation?.participant_phone;
-  const fromPhone =
-    m.direction === 'inbound' ? contactPhone : ourNumber;
-  const toPhone = m.direction === 'inbound' ? ourNumber : contactPhone;
+  const fromPhone = isEmail ? undefined : m.direction === 'inbound' ? contactPhone : ourNumber;
+  const toPhone = isEmail ? undefined : m.direction === 'inbound' ? ourNumber : contactPhone;
   const media = mediaAttachmentsOf(m);
+  const type: 'sms' | 'mms' | 'email' = isEmail ? 'email' : m.type === 'mms' ? 'mms' : 'sms';
   return {
     kind: 'message',
     id: m.tsMsgId,
@@ -339,7 +354,7 @@ function toTimelineMessage(
     tsMsgId: m.tsMsgId,
     direction: m.direction,
     author: m.author,
-    type: m.type === 'mms' ? 'mms' : 'sms',
+    type,
     ...(m.body !== undefined && { body: m.body }),
     ...(media.length > 0 && { media_attachments: media }),
     delivery_status: m.delivery_status,
@@ -349,6 +364,12 @@ function toTimelineMessage(
     ...(typeof m.via_closed_group === 'string' && { via_closed_group: m.via_closed_group }),
     ...(fromPhone !== undefined && { fromPhone }),
     ...(toPhone !== undefined && { toPhone }),
+    // Email channel v1: subject + addresses (HTML is B7; body is the trimmed text).
+    ...(isEmail && typeof m.subject === 'string' && { subject: m.subject }),
+    ...(isEmail && typeof m.email_from === 'string' && { email_from: m.email_from }),
+    ...(isEmail && Array.isArray(m.email_to) && { email_to: m.email_to }),
+    ...(isEmail && Array.isArray(m.email_cc) && { email_cc: m.email_cc }),
+    ...(isEmail && m.email_new_address === true && { email_new_address: true }),
   };
 }
 
@@ -745,18 +766,16 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       }
     }
 
-    // 3. Resolve the contact's numbers (BE1) → the deduped set of 1:1
-    // conversationIds. relay_group threads front a pool number (never the
-    // contact's real phone), so they are naturally excluded — group-text
-    // activity surfaces as milestones, never inlined content.
-    const phones = contactPhones(contact).map((p) => p.phone);
+    // 3. Resolve the contact's threads (BE1) → the deduped set of 1:1
+    // conversationIds. Email channel v1 (invariant rule): resolve across BOTH
+    // their phone numbers AND email addresses, so an email-only thread's
+    // messages appear in the merged timeline. relay_group threads front a pool
+    // number (never the contact's real phone/email), so they are excluded —
+    // group-text activity surfaces as milestones, never inlined content.
     const convById = new Map<string, ConversationItem>();
-    for (const phone of phones) {
-      const linked = await conversations.findByParticipantPhone(phone);
-      for (const conv of linked) {
-        if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
-        if (!convById.has(conv.conversationId)) convById.set(conv.conversationId, conv);
-      }
+    for (const conv of await conversationsForContact(contact, conversations)) {
+      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      convById.set(conv.conversationId, conv);
     }
 
     const wantMessage = kinds.has('message');

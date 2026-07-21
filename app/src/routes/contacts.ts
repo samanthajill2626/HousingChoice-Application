@@ -58,11 +58,13 @@ import { HUMAN_CONSENT_METHODS, type ConsentMethod } from '../lib/smsCompliance.
 import {
   createConversationsRepo,
   getOwner,
+  type ConversationItem,
   type ConversationParticipant,
   type ConversationsRepo,
   type ConversationType,
   type RelayOwner,
 } from '../repos/conversationsRepo.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   createMessagesRepo,
   mediaAttachmentsOf,
@@ -1126,17 +1128,15 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
-    // Resolve the contact's 1:1 conversations across ALL their numbers — exactly
-    // like the merged timeline. relay_group threads front a pool number (never
-    // the contact's real phone), so they are excluded purely on type.
-    const phones = contactPhones(contact).map((p) => p.phone);
+    // Resolve the contact's 1:1 conversations across ALL their numbers AND email
+    // addresses (email channel v1, ADJ-1c) — exactly like the merged timeline, so
+    // inbound EMAIL attachments (the document-exchange core use case) appear in
+    // the Media panel too. relay_group threads front a pool number (never the
+    // contact's real phone/email), so they are excluded purely on type.
     const convById = new Map<string, string>(); // conversationId → (presence)
-    for (const phone of phones) {
-      const linked = await conversations.findByParticipantPhone(phone);
-      for (const conv of linked) {
-        if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
-        convById.set(conv.conversationId, conv.conversationId);
-      }
+    for (const conv of await conversationsForContact(contact, conversations)) {
+      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      convById.set(conv.conversationId, conv.conversationId);
     }
 
     // Single pass: collect every attachment of every media-bearing message.
@@ -1378,11 +1378,27 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // so connected inboxes update without a reload (Cluster C).
     let propagatedConversations = 0;
     const phone = typeof updated.phone === 'string' ? updated.phone : undefined;
+    // Gather the contact's linked 1:1 threads: the scalar-primary phone thread
+    // (unchanged) PLUS any EMAIL threads on the contact's addresses (email
+    // channel v1, ADJ-1d) — so triage flips an email-only thread's type +
+    // denormalizes the name onto it too.
+    const linked: ConversationItem[] = [];
+    const seenLinked = new Set<string>();
+    const pushLinked = (conv: ConversationItem): void => {
+      if (seenLinked.has(conv.conversationId)) return;
+      seenLinked.add(conv.conversationId);
+      linked.push(conv);
+    };
+    if (phone !== undefined) {
+      for (const conv of await conversations.findByParticipantPhone(phone)) pushLinked(conv);
+    }
+    for (const ce of contactEmails(updated)) {
+      for (const conv of await conversations.findByParticipantEmail(ce.email)) pushLinked(conv);
+    }
     // Touch threads when EITHER identity resolved (flip unknown_1to1) OR a name
     // is known to denormalize (so naming a contact without typing it still
     // surfaces in the inbox).
-    if (phone !== undefined && (convType !== undefined || displayName !== null)) {
-      const linked = await conversations.findByParticipantPhone(phone);
+    if (linked.length > 0 && (convType !== undefined || displayName !== null)) {
       for (const conv of linked) {
         // Only FLIP an UNKNOWN thread — never re-type a thread already resolved
         // to a different identity (a triage conflict the human must reconcile,
@@ -1628,13 +1644,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     contact: ContactItem,
   ): Promise<void> => {
     try {
-      const seen = new Set<string>();
-      for (const p of contactPhones(contact)) {
-        for (const conv of await conversations.findByParticipantPhone(p.phone)) {
-          if (seen.has(conv.conversationId)) continue;
-          seen.add(conv.conversationId);
-          events.emit('conversation.updated', toConversationUpdatedEvent(conv));
-        }
+      // Email channel v1 (ADJ-1e): fan out across BOTH phones AND emails so an
+      // email-only thread's inbox/Today card also refreshes on delete/restore
+      // (conversationsForContact dedupes, so each thread emits once).
+      for (const conv of await conversationsForContact(contact, conversations)) {
+        events.emit('conversation.updated', toConversationUpdatedEvent(conv));
       }
     } catch (err) {
       log.warn({ err, contactId }, 'contact presence change: conversation fan-out failed (best-effort)');

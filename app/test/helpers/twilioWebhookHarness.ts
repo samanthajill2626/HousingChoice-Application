@@ -662,6 +662,17 @@ export function createFakeWorld(): FakeWorld {
         ...(message.transcriptChannelRoles !== undefined && {
           transcript_channel_roles: message.transcriptChannelRoles,
         }),
+        // Email channel v1: preserve the email fields so timeline/media readers
+        // observe them (mirrors the real repo's append passthrough).
+        ...(message.subject !== undefined && { subject: message.subject }),
+        ...(message.email_from !== undefined && { email_from: message.email_from }),
+        ...(message.email_to !== undefined && { email_to: message.email_to }),
+        ...(message.email_cc !== undefined && { email_cc: message.email_cc }),
+        ...(message.email_message_id !== undefined && { email_message_id: message.email_message_id }),
+        ...(message.email_html_sanitized !== undefined && {
+          email_html_sanitized: message.email_html_sanitized,
+        }),
+        ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
       });
       return { deduped: false, tsMsgId };
     },

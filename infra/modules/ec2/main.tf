@@ -99,6 +99,34 @@ data "aws_iam_policy_document" "app" {
     resources = [var.jobs_queue_arn]
   }
 
+  # Email channel v1 (SES). Outbound send is scoped to the domain identity; the
+  # worker consumes the inbound-mail queue (Receive/Delete/GetQueueAttributes -
+  # NO SendMessage, SNS delivers the notifications) and GetObjects raw inbound
+  # MIME from the inbound-mail bucket. All least-privilege to this stack's
+  # inbound_mail resources.
+  statement {
+    sid = "SesSend"
+    actions = [
+      "ses:SendEmail",
+      "ses:SendRawEmail",
+    ]
+    resources = [var.ses_identity_arn]
+  }
+  statement {
+    sid = "InboundMailQueue"
+    actions = [
+      "sqs:ReceiveMessage",
+      "sqs:DeleteMessage",
+      "sqs:GetQueueAttributes",
+    ]
+    resources = [var.inbound_mail_queue_arn]
+  }
+  statement {
+    sid       = "InboundMailObjects"
+    actions   = ["s3:GetObject"]
+    resources = ["${var.inbound_mail_bucket_arn}/*"]
+  }
+
   # jobs.enqueue() creates one-off EventBridge schedules ONLY for >12min
   # long-horizon delays (dormant in Phase 1; <=12min jobs go direct-to-queue
   # above). ActionAfterCompletion DELETE — the service deletes fired schedules

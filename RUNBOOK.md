@@ -96,6 +96,15 @@ In the regenerated `tables.auto.tfvars.json` files. **Online** operations, but t
 
 Rehearsed end-to-end on DynamoDB Local 2026-07-08 (GSI add → backfill 4 rows → re-run skipped 4 → GSI drops → dashboard verified team-wide). **Local stacks:** a persisted DynamoDB Local table predating this change lacks `byCreated` (`db:create` never retrofits GSIs — docs/issues/e2e-lane-tables-stale-schema.md) and the Broadcasts list 500s; either redo the dev-stack sequence above by hand (as rehearsed) or just delete the stale `hc-local-…-broadcasts` table and reboot the stack (recreate + reseed). Mind the lane-key trap: e2e lane tables are namespaced by ACCESS KEY (no `-sharedDb`), so aws-cli must use the lane's `accessKeyId=hclane<L>` (printed at boot) or the table is invisible — this cost two red e2e runs on 2026-07-08.
 
+**Email channel v1 schema (SES two-way email) - NOT YET APPLIED (feature branch `feat/email-channel`, Phase A merged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| Inbound address -> contact | `contacts` (existing) | **GSI add** - `byEmail` (sparse by data, hash `email`) | resolve an inbound sender + manage a contact's email addresses (the `byPhone` analog) |
+| Email thread identity | `conversations` (existing) | **GSI add** - `byParticipantEmail` (sparse, hash `participant_email`) | the `email#<addr>` claim arbiter + `createOrGetByParticipantEmail` find the ONE email 1:1 thread for an address |
+
+Both GSIs are already in both `tables.auto.tfvars.json` files (regenerated in Phase A). **Online** operations - no recreate, **no backfill**: both indexes are sparse and populate as email participation is written (existing phone-only threads and contacts without an email never carry the indexed attribute, so they never index). Post-merge on **dev**: `npm run plan -- dev` (review the two GSI adds) -> `npm run apply -- dev`. **Prod** rides M1.11 (`npm run plan -- prod` / `npm run apply -- prod` at the cutover). NOTE: the inbound `unmatched_email` table (unknown-sender side-door) is authored in a later slice (B3) and is NOT in the tfvars yet - it lands as a **new table** row here when B3 merges (PK `unmatchedId`, GSI `byStatus`).
+
 ### Unit photos: direct-upload CORS (apply BEFORE the upload path works)
 
 **Infra change - `feat/unit-photos` MERGED to main (@05aba86). DEV: CORS APPLIED 2026-07-16 (upload path live on dev). PROD: rides the M1.11 cutover (still to apply).**
@@ -1183,6 +1192,49 @@ Then exercise the app paths: OAuth login completes on the new host; an inbound t
 - **After phase 2:** set `custom_domain_phase = 1` (or `0`), apply, redeploy — `PUBLIC_BASE_URL` returns to the `*.cloudfront.net` host, which never stopped serving. The custom-host CNAME can stay or be removed in Namecheap; with no alias attached, CloudFront stops serving that host.
 - The default `*.cloudfront.net` hostname + cert stay valid throughout — always the safety net.
 - The phase-2 OAuth/Twilio re-point doesn't need undoing: the original `*.cloudfront.net` OAuth callback URIs and Twilio webhooks were never removed (Change Order 3 adds the custom-host ones alongside), so login and webhooks keep working after a rollback. Leave the custom-host registrations in place.
+
+## Email (SES)
+
+Email channel v1 puts two-way email (send + receive, interleaved in the conversation timeline) on AWS SES. The `infra/modules/inbound_mail` module authors the classic-SES DOMAIN family per stack (`aws_ses_domain_identity` + DKIM + configuration set + the receipt-rule pipeline: S3 raw-MIME bucket + two SNS topics -> ONE inbound-mail SQS queue the worker consumes). It is SEPARATE from `module "ses"` (that is the single sandboxed sender ADDRESS `cameron@abt-industries.com`, unrelated).
+
+| | dev | prod |
+|---|---|---|
+| Mail domain | `mail.dev.housingchoice.org` | `mail.housingchoice.org` |
+| Inbound bucket | `hc-dev-inbound-mail-<account>` | `hc-prod-inbound-mail-<account>` |
+| Inbound queue / DLQ | `hc-dev-inbound-mail` / `hc-dev-inbound-mail-dlq` | `hc-prod-inbound-mail` / `hc-prod-inbound-mail-dlq` |
+| Rule-set owner (`manage_mail_rule_set`) | **true** (owns `hc-inbound-mail`) | false (adds its rule into dev's set) |
+
+**What's in Terraform vs. by hand.** The SES identity/DKIM/config-set, SNS topics, SQS queue+DLQ, the inbound S3 bucket + its `ses.amazonaws.com` PutObject policy, and the receipt rules are Terraform. **DNS is NOT** - the `housingchoice.org` zone lives at **Namecheap**, so the DKIM/MX/SPF/verification records below are entered by hand (same deliberate deviation as Custom domain & TLS). The `mail_domain_phase` local in `infra/envs/<env>/main.tf` staircases the rollout exactly like `custom_domain_phase`.
+
+### Namecheap record inventory
+
+WARNING: **Namecheap auto-appends the base domain.** Strip the trailing `.housingchoice.org` (and any trailing dot) from the Host before pasting - e.g. ACM/SES gives `_amazonses.mail.dev.housingchoice.org` -> Namecheap **Host = `_amazonses.mail.dev`**. Exact values print at the end of `npm run apply`, or read them ad-hoc: `$env:AWS_PROFILE='housingchoice'; terraform -chdir=infra/envs/<env> output dns_records` (a single list of every record below).
+
+| Env | Type | Host (Namecheap) | Value | Notes |
+|---|---|---|---|---|
+| dev | TXT | `_amazonses.mail.dev` | SES verification token | Domain verification (`output verification_record`). Enables send + receive. |
+| dev | CNAME (x3) | `<token>._domainkey.mail.dev` | `<token>.dkim.amazonses.com` | DKIM, one row per token (`output dkim_records`). **Leave forever.** |
+| dev | MX | `mail.dev` | `10 inbound-smtp.us-east-1.amazonaws.com` | Inbound routing to SES (`output mx_record`). Without it no mail arrives. |
+| dev | TXT | `mail.dev` | `v=spf1 include:amazonses.com ~all` | SPF (`output spf_record`) - authorizes SES to send for the domain. |
+| prod | TXT | `_amazonses.mail` | SES verification token | as dev, on `mail.housingchoice.org`. |
+| prod | CNAME (x3) | `<token>._domainkey.mail` | `<token>.dkim.amazonses.com` | DKIM x3. Leave forever. |
+| prod | MX | `mail` | `10 inbound-smtp.us-east-1.amazonaws.com` | Inbound routing. |
+| prod | TXT | `mail` | `v=spf1 include:amazonses.com ~all` | SPF. |
+
+### Staged cutover (per stack)
+
+1. **Phase 0 -> create identity + plumbing, emit records.** `mail_domain_phase = 0` (default). `npm run plan -- <env>` -> `npm run apply -- <env>` creates the SES domain identity, DKIM, configuration set, SNS topics, SQS queue+DLQ, and the inbound S3 bucket - and emits the DNS records. Nothing blocks (unlike ACM, classic SES has no verification-wait resource). Enter ALL records above in Namecheap, then wait for the domain to verify + DKIM to enable: `aws ses get-identity-verification-attributes --identities mail.dev.housingchoice.org --region us-east-1 --profile housingchoice --query 'VerificationAttributes.*.VerificationStatus'` (expect `Success`).
+2. **Phase 1 -> turn on inbound + activate the shared rule set.** Set `mail_domain_phase = 1`, plan + apply. This creates THIS env's receipt rule (routes the domain's inbound mail to S3 + the mail-inbound topic). On the **managing env (dev)** it ALSO creates the shared receipt rule set `hc-inbound-mail` and ACTIVATES it.
+   - WARNING - **account-singleton active set.** `aws ses set-active-receipt-rule-set` is account-scoped: SES allows exactly ONE active receipt rule set per account+region, and dev+prod SHARE the account (938565869261). dev owns it (`manage_mail_rule_set = true`); the active set carries BOTH envs' rules. **Order: apply DEV at phase 1 FIRST** (creates + activates the set), **THEN apply PROD at phase 1** (prod's rule references the set by name and requires it to already exist). **Never `terraform destroy` the managing env (dev) without first migrating set ownership** - tearing down dev DEACTIVATES the shared set and stops PROD inbound. Coordinate any dev teardown with prod.
+3. **SES production-access request.** A new SES account is in the sandbox (send only to verified addresses, low quota). Request production access for the account/region before real outbound - see [`ses-sandbox-exit`](docs/issues/ses-sandbox-exit.md). Until granted, outbound reaches verified addresses only; inbound is unaffected.
+4. **`npm install` on deploy.** Email adds app-workspace runtime deps (`@aws-sdk/client-sesv2`, `nodemailer`, `mailparser`, `sanitize-html`, `email-reply-parser`); the `fake-twilio` workspace gains `@aws-sdk/client-s3` when slice B4 lands. The arm64 `npm ci` rides the deploy build (same pattern as the MMS `sharp` deps).
+5. **Flip `EMAIL_SENDING_ENABLED`.** The kill-switch defaults OFF on deployed stacks (the `SMS_SENDING_ENABLED` pattern) - email is dormant until then. Once 1-4 are done (domain verified, inbound live, production access granted), set `EMAIL_SENDING_ENABLED=true` in `.env.<env>` (template-first: `.env.<env>.example`) and `npm run secrets:push -- <env>`; the next deploy hydrates it. The 4 SES params (`EMAIL_SENDER_DOMAIN`, `EMAIL_FROM_ADDRESS`, `INBOUND_MAIL_BUCKET`, `INBOUND_MAIL_QUEUE_URL`) are Terraform-owned (params module) and hydrate automatically - do NOT put them in `.env.<env>`.
+6. **Dev reseed (seed emails).** Reseed a LOCAL / e2e stack to pick up the seeded email personas (`npm run e2e:reseed`, or `db:seed`) - `db:seed` targets DynamoDB Local only, so deployed dev accrues email data naturally rather than from a reseed.
+
+### Rollback
+
+- **Before phase 1:** nothing routes mail yet - drop `mail_domain_phase` back to 0 and apply. The DNS records can stay in Namecheap (harmless, and reused when you re-advance).
+- **After phase 1:** set `mail_domain_phase = 0` and apply to remove this env's receipt rule (stops inbound routing for the env). On the managing env this also deactivates + removes the shared set - which stops PROD inbound too, so coordinate (see the phase-1 warning). `EMAIL_SENDING_ENABLED=false` + `secrets:push` + redeploy is the instant outbound kill-switch, independent of any apply.
 
 ## Security / hardening
 

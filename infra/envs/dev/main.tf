@@ -66,4 +66,16 @@ locals {
   # here. Applying this (via the s3_media CORS rule) is what unblocks the upload
   # path in the deployed env - see RUNBOOK "Unit photos: direct-upload CORS".
   dashboard_origins = ["https://${local.custom_domain}"]
+
+  # Email channel v1 (SES, inbound_mail module). mail_domain = the SES
+  # sender/receiver domain (dev uses the mail.dev.<zone> subdomain); DNS is
+  # manual in Namecheap, so mail_domain_phase staircases the cutover exactly like
+  # custom_domain_phase: 0 = create the identity/DKIM/plumbing + emit the DNS
+  # records; flip to 1 after the records are entered + the domain verifies to
+  # turn on the inbound receipt rule. manage_mail_rule_set = true: DEV owns the
+  # ACCOUNT-SINGLETON receipt rule set + its activation (prod is false; exactly
+  # one env may be true - see the inbound_mail module header + RUNBOOK).
+  mail_domain          = "mail.dev.housingchoice.org"
+  mail_domain_phase    = 0
+  manage_mail_rule_set = true
 }

@@ -44,3 +44,23 @@ variable "scheduler_role_arn" {
   description = "IAM role ARN EventBridge Scheduler assumes to deliver to the jobs queue (M1.2)."
   type        = string
 }
+
+variable "email_sender_domain" {
+  description = "SES sender/receiver domain (inbound_mail module) - EMAIL_SENDER_DOMAIN (email-channel-v1)."
+  type        = string
+}
+
+variable "email_from_address" {
+  description = "Default From address for outbound email - EMAIL_FROM_ADDRESS (email-channel-v1)."
+  type        = string
+}
+
+variable "inbound_mail_bucket" {
+  description = "Inbound-mail S3 bucket name (inbound_mail module) - INBOUND_MAIL_BUCKET (email-channel-v1)."
+  type        = string
+}
+
+variable "inbound_mail_queue_url" {
+  description = "Inbound-mail SQS queue URL (inbound_mail module) - INBOUND_MAIL_QUEUE_URL the worker long-polls (email-channel-v1)."
+  type        = string
+}

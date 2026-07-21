@@ -99,6 +99,8 @@ import { createPlacementNudgesRouter } from './placementNudges.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
+import { createUnmatchedEmailRouter } from './unmatchedEmail.js';
+import { type UnmatchedEmailRepo } from '../repos/unmatchedEmailRepo.js';
 import { createMmsMediaRouter } from './mmsMedia.js';
 import { createEmailMediaRouter } from './emailMedia.js';
 import { createPushRouter } from './push.js';
@@ -240,6 +242,11 @@ export interface ApiRouterDeps {
   /** M1.8a share-broadcast — injected in tests; default to the real repo/service. */
   broadcastsRepo?: BroadcastsRepo;
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * email-channel B3: the unmatched_email side-door store (triage routes +
+   * B2's ingestion dep). Injected in tests; defaults to the real repo.
+   */
+  unmatchedEmailRepo?: UnmatchedEmailRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -851,6 +858,29 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
+    }),
+  );
+  // Unmatched-email triage (email-channel B3; requireAuth via the /api mount -
+  // VAs triage the side-door, no admin gate). List/detail + read/link/create-
+  // contact/spam/release/dismiss; every mutation emits unmatched_email.updated
+  // on this bus. The link flows re-ingest the stored raw mail through the REAL
+  // ingestion service (default-constructed inside the router over the shared
+  // repos below; 503 when INBOUND_MAIL_BUCKET is unset).
+  router.use(
+    '/unmatched-email',
+    createUnmatchedEmailRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.unmatchedEmailRepo !== undefined && {
+        unmatchedEmailRepo: deps.unmatchedEmailRepo,
+      }),
+      contactsRepo: contacts,
+      auditRepo: audit,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      extractionRepo: extraction,
+      ...(mediaStore !== undefined && { mediaStore }),
+      events,
     }),
   );
 

@@ -127,30 +127,46 @@ if (config.inboundMailQueueUrl) {
     const { createContactsRepo } = await import('./repos/contactsRepo.js');
     const { createExtractionRepo } = await import('./repos/extractionRepo.js');
     const { createUnmatchedEmailRepo } = await import('./repos/unmatchedEmailRepo.js');
+    const { createAuditRepo } = await import('./repos/auditRepo.js');
     const { appEvents } = await import('./lib/events.js');
     const { ingestInboundEmail } = await import('./services/inboundEmail.js');
     const { createInboundMailDispatch } = await import('./services/inboundMailConsumer.js');
+    const { createApplyEmailEvent } = await import('./services/emailEvents.js');
     const { SQSClient } = await import('@aws-sdk/client-sqs');
     const { SqsJobConsumer } = await import('./adapters/sqsJobConsumer.js');
 
     const mediaStore = createMediaStore({ config });
+    const conversations = createConversationsRepo({ logger });
+    const messages = createMessagesRepo({ logger });
+    const contacts = createContactsRepo({ logger });
     const ingestDeps = {
       config,
       logger,
       rawStore,
       unmatchedStore: createUnmatchedEmailRepo({ logger }),
-      conversations: createConversationsRepo({ logger }),
-      messages: createMessagesRepo({ logger }),
-      contacts: createContactsRepo({ logger }),
+      conversations,
+      messages,
+      contacts,
       extraction: createExtractionRepo({ logger }),
       events: appEvents,
       ...(mediaStore !== undefined && { mediaStore }),
     };
+    // B5: bounce/complaint/delivery events -> delivery status + suppression (+ the
+    // F12 orphan parking lot). Shares the consumer's repos so the SES-id alias and
+    // the parking-lot writes see one table view.
+    const applyEmailEvent = createApplyEmailEvent({
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      auditRepo: createAuditRepo({ logger }),
+      logger,
+    });
     inboundMailConsumer = new SqsJobConsumer({
       client: new SQSClient({ region: config.awsRegion }),
       queueUrl: config.inboundMailQueueUrl,
       dispatch: createInboundMailDispatch({
         ingest: (notice) => ingestInboundEmail(notice, ingestDeps),
+        applyEmailEvent,
         logger,
       }),
       baseContext: bootContext,

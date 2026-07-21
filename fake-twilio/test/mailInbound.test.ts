@@ -202,3 +202,63 @@ describe('POST /control/send-inbound-email', () => {
     expect(res.body.error).toContain('minio');
   });
 });
+
+describe('MailEngine.emailDeliveryOutcome + POST /control/email-delivery-outcome', () => {
+  function appWith(inbound: Record<string, unknown>) {
+    const engine = new MailEngine({ hub: new EventHub(), inbound: inbound as never });
+    const app = express();
+    app.use(express.json());
+    app.use(createSesControlRouter(engine));
+    return app;
+  }
+
+  it('POSTs a Bounce SNS event (default Permanent) with x-origin-verify, no MinIO write', async () => {
+    const s = stubInbound();
+    const engine = new MailEngine({ hub: new EventHub(), inbound: s.inbound });
+    const result = await engine.emailDeliveryOutcome({ sesMessageId: 'ses-fake-7', outcome: 'bounce' });
+
+    expect(s.puts).toHaveLength(0); // an event carries no raw MIME
+    expect(s.posts).toHaveLength(1);
+    expect(s.posts[0]!.url).toBe('http://app.local:8080/webhooks/ses/inbound');
+    expect(s.posts[0]!.headers['x-origin-verify']).toBe('the-secret');
+    const inner = JSON.parse((JSON.parse(s.posts[0]!.body) as { Message: string }).Message) as {
+      eventType: string;
+      mail: { messageId: string };
+      bounce: { bounceType: string };
+    };
+    expect(inner.eventType).toBe('Bounce');
+    expect(inner.mail.messageId).toBe('ses-fake-7');
+    expect(inner.bounce.bounceType).toBe('Permanent');
+    expect(result).toEqual({ posted: true, appStatus: 200 });
+  });
+
+  it('honors an explicit bounceType and maps delivered/complaint to the right eventType', async () => {
+    const s = stubInbound();
+    const engine = new MailEngine({ hub: new EventHub(), inbound: s.inbound });
+    await engine.emailDeliveryOutcome({ sesMessageId: 'ses-1', outcome: 'bounce', bounceType: 'Transient' });
+    await engine.emailDeliveryOutcome({ sesMessageId: 'ses-2', outcome: 'delivered' });
+    await engine.emailDeliveryOutcome({ sesMessageId: 'ses-3', outcome: 'complaint' });
+    const types = s.posts.map((p) => (JSON.parse((JSON.parse(p.body) as { Message: string }).Message) as { eventType: string }).eventType);
+    expect(types).toEqual(['Bounce', 'Delivery', 'Complaint']);
+    const bounceInner = JSON.parse((JSON.parse(s.posts[0]!.body) as { Message: string }).Message) as { bounce: { bounceType: string } };
+    expect(bounceInner.bounce.bounceType).toBe('Transient');
+  });
+
+  it('route returns 200 { posted, appStatus }', async () => {
+    const s = stubInbound();
+    const res = await request(appWith(s.inbound))
+      .post('/control/email-delivery-outcome')
+      .send({ sesMessageId: 'ses-fake-1', outcome: 'bounce' });
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ posted: true, appStatus: 200 });
+  });
+
+  it('route 400s on a missing sesMessageId or a bad outcome', async () => {
+    const s = stubInbound();
+    const bad1 = await request(appWith(s.inbound)).post('/control/email-delivery-outcome').send({ outcome: 'bounce' });
+    expect(bad1.status).toBe(400);
+    const bad2 = await request(appWith(s.inbound)).post('/control/email-delivery-outcome').send({ sesMessageId: 'ses-1', outcome: 'nope' });
+    expect(bad2.status).toBe(400);
+    expect(s.posts).toHaveLength(0);
+  });
+});

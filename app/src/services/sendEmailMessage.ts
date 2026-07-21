@@ -226,9 +226,11 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
   const events = deps.events ?? appEvents;
   const applyParkedEmailEvents =
     deps.applyParkedEmailEvents ??
-    // TODO(B5): default no-op. B5 implements the orphan-event parking lot + the
-    // real applier and injects it here; A5 only guarantees it is CALLED with the
-    // SES MessageId right after the post-send pointer write (ADJ-7).
+    // Default no-op keeps unit tests hermetic. B5 shipped the real applier
+    // (services/emailEvents.createApplyParkedEmailEvents); the production
+    // composition root (routes/api.ts createApiRouter) injects it over THIS
+    // router's repos, so a fast parked bounce is applied right after the
+    // post-send alias write (ADJ-7).
     (async () => {});
   const now = deps.now ?? (() => new Date());
 

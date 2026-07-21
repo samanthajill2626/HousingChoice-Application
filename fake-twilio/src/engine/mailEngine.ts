@@ -67,6 +67,23 @@ export interface SendInboundResult {
   sesMessageId: string;
 }
 
+/** A simulated SES delivery/bounce/complaint outcome (email-channel B5). */
+export type EmailDeliveryOutcomeKind = 'delivered' | 'bounce' | 'complaint';
+
+export interface EmailDeliveryOutcomeOptions {
+  /** The SES MessageId the outbound send returned - correlates the app message. */
+  sesMessageId: string;
+  outcome: EmailDeliveryOutcomeKind;
+  /** Only used for 'bounce'; defaults to 'Permanent'. */
+  bounceType?: string;
+}
+
+export interface EmailDeliveryOutcomeResult {
+  posted: boolean;
+  /** The app webhook's response status to the SNS event POST. */
+  appStatus: number;
+}
+
 /** Minimal fetch shape (only .status is read) so a stub is injectable in tests. */
 export type FetchLike = (
   url: string,
@@ -202,6 +219,36 @@ function buildSnsReceiptNotification(args: {
     Type: 'Notification',
     MessageId: randomUUID(),
     TopicArn: 'arn:aws:sns:us-east-1:000000000000:fake-mail-inbound',
+    Message: JSON.stringify(inner),
+    Timestamp: now,
+  };
+}
+
+/** Build the SNS-shaped EVENT notification (bounce/complaint/delivery) the app's
+ *  parseSnsSesNotification reads (email-channel B5). Mirrors the config-set event
+ *  shape: { eventType, mail: { messageId }, bounce?: { bounceType } }. */
+function buildSnsEventNotification(args: {
+  sesMessageId: string;
+  outcome: EmailDeliveryOutcomeKind;
+  bounceType: string;
+}): Record<string, unknown> {
+  const now = new Date().toISOString();
+  const eventType = args.outcome === 'delivered' ? 'Delivery' : args.outcome === 'bounce' ? 'Bounce' : 'Complaint';
+  const inner: Record<string, unknown> = {
+    eventType,
+    mail: { messageId: args.sesMessageId, timestamp: now },
+  };
+  if (eventType === 'Bounce') {
+    inner['bounce'] = { bounceType: args.bounceType, bouncedRecipients: [] };
+  } else if (eventType === 'Complaint') {
+    inner['complaint'] = { complainedRecipients: [] };
+  } else {
+    inner['delivery'] = { recipients: [] };
+  }
+  return {
+    Type: 'Notification',
+    MessageId: randomUUID(),
+    TopicArn: 'arn:aws:sns:us-east-1:000000000000:fake-mail-events',
     Message: JSON.stringify(inner),
     Timestamp: now,
   };
@@ -398,6 +445,30 @@ export class MailEngine {
     this.store.addInbound(record);
     this.hub.emit({ type: 'mail.inbound', mail: record });
     return { bucket, key, posted: true, appStatus: res.status, sesMessageId };
+  }
+
+  /**
+   * Deliver ONE simulated SES delivery/bounce/complaint EVENT (email-channel B5):
+   * build the SES event JSON wrapped in the SNS envelope and POST it to the app
+   * webhook (with x-origin-verify), the way sendInbound POSTs the receipt. No
+   * MinIO write (an event carries no raw MIME). Returns the app's response status.
+   * Throws when inbound is not configured (the control route -> 502).
+   */
+  async emailDeliveryOutcome(opts: EmailDeliveryOutcomeOptions): Promise<EmailDeliveryOutcomeResult> {
+    const inbound = this.inbound;
+    if (inbound === undefined) throw new Error('mail engine inbound is not configured');
+    const snsBody = buildSnsEventNotification({
+      sesMessageId: opts.sesMessageId,
+      outcome: opts.outcome,
+      bounceType: opts.bounceType ?? 'Permanent',
+    });
+    const fetchImpl = inbound.fetchImpl ?? defaultFetch;
+    const res = await fetchImpl(`${inbound.appBaseUrl}/webhooks/ses/inbound`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', 'x-origin-verify': inbound.originSecret },
+      body: JSON.stringify(snsBody),
+    });
+    return { posted: true, appStatus: res.status };
   }
 
   /** Clear the mail store - the DISJOINT `POST /control/reset-mail` surface. */

@@ -95,3 +95,35 @@ export async function listInboundEmails(request: APIRequestContext): Promise<
   if (!res.ok()) throw new Error(`list inbound emails failed: ${res.status()}`);
   return (await res.json()).emails;
 }
+
+/** A simulated SES delivery/bounce/complaint outcome (email-channel B5). */
+export interface EmailDeliveryOutcomeOpts {
+  /** The SES MessageId the outbound send returned (read from the FakeEmail). */
+  sesMessageId: string;
+  outcome: 'delivered' | 'bounce' | 'complaint';
+  /** Bounce only; defaults to 'Permanent' (which suppresses the address). */
+  bounceType?: 'Permanent' | 'Transient';
+}
+
+/** The fake's response after posting one SES event (email-channel B5). */
+export interface EmailDeliveryOutcomeResult {
+  posted: boolean;
+  /** The app webhook's response status to the SNS event POST (assert 200). */
+  appStatus: number;
+}
+
+/**
+ * Simulate a SES delivery/bounce/complaint EVENT for an already-sent message
+ * (email-channel B5): the fake builds the SES event JSON wrapped in the SNS
+ * envelope and POSTs it to the app's /webhooks/ses/inbound (with x-origin-verify)
+ * - the whole prod event path minus real SES. A permanent Bounce lands
+ * email_unreachable + fails the delivery chip; a Complaint lands email_opt_out.
+ */
+export async function emailDeliveryOutcome(
+  request: APIRequestContext,
+  opts: EmailDeliveryOutcomeOpts,
+): Promise<EmailDeliveryOutcomeResult> {
+  const res = await request.post(`${FAKE_BASE}/control/email-delivery-outcome`, { data: opts });
+  if (!res.ok()) throw new Error(`email-delivery-outcome failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as EmailDeliveryOutcomeResult;
+}

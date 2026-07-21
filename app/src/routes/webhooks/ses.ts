@@ -37,14 +37,15 @@ import {
   createUnmatchedEmailRepo,
   type UnmatchedEmailRepo,
 } from '../../repos/unmatchedEmailRepo.js';
+import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import { ingestInboundEmail, type InboundEmailNotice, type IngestResult } from '../../services/inboundEmail.js';
 import { parseSnsSesNotification } from '../../services/sesNotifications.js';
+import { createApplyEmailEvent } from '../../services/emailEvents.js';
 import {
   createSemaphore,
 } from '../../lib/semaphore.js';
 import {
   runSnsSesNotification,
-  defaultApplyEmailEvent,
   INBOUND_MAIL_INGEST_CONCURRENCY,
   type ApplyEmailEvent,
   type IngestInbound,
@@ -70,6 +71,7 @@ export interface SesWebhookDeps {
   contactsRepo?: ContactsRepo;
   extractionRepo?: ExtractionRepo;
   unmatchedEmailRepo?: UnmatchedEmailRepo;
+  auditRepo?: AuditRepo;
   mediaStore?: MediaStore;
   events?: EventBus;
 }
@@ -100,11 +102,29 @@ function buildDefaultIngest(deps: SesWebhookDeps, config: AppConfig): IngestInbo
     });
 }
 
+/**
+ * Build the default (real) B5 event applier - bounce/complaint/delivery ->
+ * delivery status + suppression + the F12 parking lot. The dev route uses the
+ * REAL applier by default (mirroring buildDefaultIngest): app.ts mounts this
+ * router with no injected deps, so without a real default the running dev/e2e
+ * stack would only log-and-ack events and suppression would never land. Tests
+ * inject their own applyEmailEvent for hermetic event assertions.
+ */
+function buildDefaultApplyEmailEvent(deps: SesWebhookDeps): ApplyEmailEvent {
+  return createApplyEmailEvent({
+    ...(deps.conversationsRepo !== undefined && { conversationsRepo: deps.conversationsRepo }),
+    ...(deps.messagesRepo !== undefined && { messagesRepo: deps.messagesRepo }),
+    ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
+    ...(deps.auditRepo !== undefined && { auditRepo: deps.auditRepo }),
+    ...(deps.logger !== undefined && { logger: deps.logger }),
+  });
+}
+
 export function createSesWebhookRouter(deps: SesWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const logger = deps.logger ?? defaultLogger;
   const ingest = deps.ingest ?? buildDefaultIngest(deps, config);
-  const applyEmailEvent = deps.applyEmailEvent ?? defaultApplyEmailEvent(logger);
+  const applyEmailEvent = deps.applyEmailEvent ?? buildDefaultApplyEmailEvent(deps);
   // One gate per router instance (per app process) - see inboundMailConsumer.
   const gate = createSemaphore(INBOUND_MAIL_INGEST_CONCURRENCY);
 

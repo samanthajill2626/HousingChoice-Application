@@ -75,6 +75,7 @@ import {
   EmailSendRefusedError,
   type SendEmailService,
 } from '../services/sendEmailMessage.js';
+import { createApplyParkedEmailEvents } from '../services/emailEvents.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
@@ -450,6 +451,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       contactsRepo: contacts,
       ...(mediaStore !== undefined && { mediaStore }),
       events,
+      // B5/ADJ-7: the post-send orphan-event consumer. Shares THIS router's repos
+      // so the parking-lot read + the alias write see one table view (a fast
+      // bounce parked before the send returns is applied the moment it lands).
+      applyParkedEmailEvents: createApplyParkedEmailEvents({
+        messagesRepo: messages,
+        contactsRepo: contacts,
+        conversationsRepo: conversations,
+        logger: deps.logger,
+      }),
     });
 
   const router = Router();

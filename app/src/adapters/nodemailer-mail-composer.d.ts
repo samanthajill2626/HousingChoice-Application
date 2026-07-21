@@ -17,7 +17,10 @@
 // outbound composer needs (plain-text body, explicit threading headers,
 // attachments). Widen deliberately if a future slice needs more.
 
-declare module 'nodemailer/lib/mail-composer' {
+// NOTE: the module name carries the explicit `/index.js` because the runtime
+// import must too - plain-node ESM forbids directory imports (see the import
+// site in email.ts, ERR_UNSUPPORTED_DIR_IMPORT at the 2026-07-21 dev deploy).
+declare module 'nodemailer/lib/mail-composer/index.js' {
   interface MailComposerAddress {
     name?: string;
     address: string;

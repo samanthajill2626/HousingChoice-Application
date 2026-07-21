@@ -184,12 +184,27 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     // as inline styles. frame-ancestors 'none' + X-Frame-Options DENY
     // (legacy UAs) forbid framing; Referrer-Policy keeps paths out of
     // cross-origin referrers; nosniff is already set app-wide above.
+    //
+    // The SECOND allowance (unit-photos, 2026-07-21): when a media store is
+    // configured, the browser talks to the bucket DIRECTLY — presigned-POST
+    // upload and presigned-GET <img> display — so the bucket origin joins
+    // connect-src + img-src (ONLY those two). Derived exactly as the store's
+    // S3 client resolves it (adapters/mediaStore.ts): MEDIA_S3_ENDPOINT
+    // (local MinIO, path-style → the endpoint origin) or the virtual-hosted
+    // AWS URL. Without this, deployed photo upload/display dies in the
+    // browser on CSP ("Uploaded 0 of 3").
+    const mediaOrigin = config.mediaBucket
+      ? config.mediaS3Endpoint
+        ? new URL(config.mediaS3Endpoint).origin
+        : `https://${config.mediaBucket}.s3.${config.awsRegion}.amazonaws.com`
+      : undefined;
+    const withMedia = (directive: string) => (mediaOrigin ? `${directive} ${mediaOrigin}` : directive);
     const spaCsp = [
       "default-src 'self'",
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
-      "img-src 'self' data:",
-      "connect-src 'self'",
+      withMedia("img-src 'self' data:"),
+      withMedia("connect-src 'self'"),
       "frame-ancestors 'none'",
     ].join('; ');
     app.use((_req, res, next) => {

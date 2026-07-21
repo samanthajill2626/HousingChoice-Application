@@ -131,6 +131,24 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     async findByParticipantPhone() {
       return [];
     },
+    async findByParticipantEmail() {
+      return [];
+    },
+    async claimEmailForConversation(_email, conversationId) {
+      return { conversationId };
+    },
+    async attachEmailToConversation(conversationId) {
+      return { conversationId };
+    },
+    async createOrGetByParticipantEmail() {
+      return conversation;
+    },
+    async getReplyToken() {
+      return 'faketoken';
+    },
+    async findByReplyToken() {
+      return undefined;
+    },
     async setType() {
       return conversation;
     },

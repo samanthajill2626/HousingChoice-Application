@@ -145,6 +145,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(gsiNames('units')).toEqual(['byLandlord', 'byStatus', 'byJurisdiction', 'byProperty']);
     expect(gsiNames('conversations')).toEqual([
       'byParticipantPhone',
+      'byParticipantEmail',
       'byLastActivity',
       'byPoolNumber',
       'byRelayStatus',

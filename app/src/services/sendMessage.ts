@@ -229,14 +229,20 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
       throw new SmsSendingDisabledError();
     }
 
-    // (0) Relay guard (FIX 2): this 1:1 wrapper would text participant_phone —
-    // the pool number for a relay_group. Refuse so no caller can misuse it.
+    // (0) Channel guard (FIX 2): this 1:1 wrapper texts participant_phone.
+    // Refuse a relay_group (participant_phone is the pool number) AND any thread
+    // with no phone participant — an email-channel thread carries
+    // participant_email and NO phone, and sends via the dedicated email service,
+    // never this SMS path. Both misroutes throw so no caller can misuse it; the
+    // guard also narrows participant_phone to a definite string below.
     if (conversation.type === 'relay_group') throw new RelaySendNotSupportedError(conversationId);
+    const participantPhone = conversation.participant_phone;
+    if (participantPhone === undefined) throw new RelaySendNotSupportedError(conversationId);
 
     // (1) Opt-out gate — suppression beats everything (doc §7.1 / 21610).
     // EITHER flag refuses: the conversation-level flag covers STOPs from
     // phones with no contact record yet (auto-capture is M1.2).
-    const contact = await contacts.findByPhone(conversation.participant_phone);
+    const contact = await contacts.findByPhone(participantPhone);
     if (isOptedOut(conversation.sms_opt_out, contact?.sms_opt_out)) {
       log.warn(
         {
@@ -292,7 +298,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
     // (3) Provider send — synchronous single send (M1.1; no fan-out exists).
     // M1.7: an explicit `from` pins the sender to a pool number (relay path).
     const result = await adapter.sendMessage({
-      to: conversation.participant_phone,
+      to: participantPhone,
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
       ...(from !== undefined && { from }),

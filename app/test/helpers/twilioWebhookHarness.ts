@@ -292,6 +292,11 @@ export function createFakeWorld(): FakeWorld {
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
     new ConditionalCheckFailedException({ message, $metadata: {} });
 
+  // Email channel v1 fake state: the email#<addr> claim arbiter + token pointers.
+  const emailClaims = new Map<string, string>(); // normalized address -> conversationId
+  const replyTokens = new Map<string, string>(); // token -> conversationId
+  let emailTokenCounter = 0;
+
   const conversationsRepo: ConversationsRepo = {
     async createOrGetByParticipantPhone(phone: string, type: ConversationType) {
       for (const conv of conversations.values()) {
@@ -353,6 +358,71 @@ export function createFakeWorld(): FakeWorld {
     async findByParticipantPhone(phone) {
       return [...conversations.values()].filter((c) => c.participant_phone === phone);
     },
+
+    // --- Email channel v1 (claim arbiter + reply tokens) ---
+    async claimEmailForConversation(email, conversationId) {
+      const existing = emailClaims.get(email);
+      if (existing !== undefined) return { conversationId: existing };
+      emailClaims.set(email, conversationId);
+      return { conversationId };
+    },
+    async attachEmailToConversation(conversationId, email) {
+      const existing = emailClaims.get(email);
+      if (existing !== undefined && existing !== conversationId) {
+        return { conversationId: existing };
+      }
+      emailClaims.set(email, conversationId);
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`attachEmailToConversation: no conversation ${conversationId}`);
+      conv.participant_email = email;
+      return { conversationId };
+    },
+    async createOrGetByParticipantEmail(email, type, opts) {
+      for (const conv of conversations.values()) {
+        if (conv.participant_email === email && conv.status === 'open') return conv;
+      }
+      const claimed = emailClaims.get(email);
+      if (claimed !== undefined) {
+        const conv = conversations.get(claimed);
+        if (conv) return conv;
+      }
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId: `conv-${++convCounter}`,
+        participant_email: email,
+        status: 'open',
+        last_activity_at: now,
+        type,
+        ai_mode: 'auto',
+        created_at: now,
+        ...(opts?.contactId !== undefined && {
+          participants: [{ contactId: opts.contactId, phone: '' }],
+        }),
+        ...(opts?.displayName !== undefined && { participant_display_name: opts.displayName }),
+      };
+      conversations.set(item.conversationId, item);
+      emailClaims.set(email, item.conversationId);
+      return item;
+    },
+    async findByParticipantEmail(email) {
+      return [...conversations.values()].filter((c) => c.participant_email === email);
+    },
+    async getReplyToken(conversationId) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`getReplyToken: no conversation ${conversationId}`);
+      if (typeof conv.email_reply_token === 'string' && conv.email_reply_token.length > 0) {
+        return conv.email_reply_token;
+      }
+      const token = `faketoken${++emailTokenCounter}abcdefghij`;
+      conv.email_reply_token = token;
+      replyTokens.set(token, conversationId);
+      return token;
+    },
+    async findByReplyToken(token) {
+      const id = replyTokens.get(token);
+      return id !== undefined ? conversations.get(id) : undefined;
+    },
+
     async setType(conversationId, type) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setType: no conversation ${conversationId}`);
@@ -597,6 +667,12 @@ export function createFakeWorld(): FakeWorld {
     },
     async getByProviderSid(sid) {
       return findBySid(sid);
+    },
+    async getByRfcMessageId(messageId) {
+      // OUTBOUND: our own email_message_id; INBOUND: provider_sid IS the RFC id.
+      return (
+        messages.find((m) => m.email_message_id === messageId) ?? findBySid(messageId)
+      );
     },
     async updateDeliveryStatus(sid, status, errorCode) {
       const existing = findBySid(sid);

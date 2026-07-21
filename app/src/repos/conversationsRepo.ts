@@ -15,7 +15,7 @@
 //
 // PII: message bodies/previews must NEVER be logged (doc §9) — log lines here
 // carry IDs and lengths only; correlation context is attached by the pino mixin.
-import { randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   type DynamoDBDocumentClient,
@@ -68,9 +68,27 @@ export interface ConversationItem {
    * External participant's phone, E.164 (byParticipantPhone GSI). 1:1 threads
    * carry a real phone; relay_group threads have no single counterparty, so
    * this is a synthetic placeholder (the pool number) — relay routing goes
-   * through pool_number / byPoolNumber, never this field.
+   * through pool_number / byPoolNumber, never this field. OPTIONAL (email
+   * channel v1): an email-only 1:1 thread carries `participant_email` and NO
+   * phone — channel-agnostic readers fall back to `participant_display_name`.
    */
-  participant_phone: string;
+  participant_phone?: string;
+  /**
+   * External participant's email address, normalized (byParticipantEmail GSI
+   * HASH; email channel v1). Set ONLY on email-participating conversations by
+   * the email#<addr> claim arbiter (attachEmailToConversation /
+   * createOrGetByParticipantEmail) — the single writer. Absent on phone-only
+   * 1:1 threads and relay groups (keeps the GSI sparse).
+   */
+  participant_email?: string;
+  /**
+   * URL-safe reply token (email channel v1): minted once by getReplyToken and
+   * embedded in an outbound email's Reply-To (`relay+<token>@<domain>`), so an
+   * inbound reply routes back to THIS conversation via the token#<tok> reverse
+   * pointer even when the sender replies from a new address. Absent until the
+   * first outbound email on the thread.
+   */
+  email_reply_token?: string;
   /**
    * byLastActivity GSI HASH. 1:1 threads only ever write `open`. relay_group
    * threads use `open` | `closed`. Closing KEEPS the pool number (a closed
@@ -293,6 +311,22 @@ function phoneClaimPk(phone: string): string {
   return `phone#${phone}`;
 }
 
+/**
+ * Claim-item partition key for an email address (the per-address create lock,
+ * email channel v1). The email#<addr> claim maps address -> conversationId and
+ * is the SINGLE arbiter of which conversation owns an address; it carries ONLY
+ * the key + ref_conversationId (no participant_email/status), so it never
+ * indexes into the sparse GSIs. Never collides with real `conv-…` partitions.
+ */
+function emailClaimPk(email: string): string {
+  return `email#${email}`;
+}
+
+/** Reverse-lookup pointer key for an email reply token (token#<tok>). */
+function tokenPk(token: string): string {
+  return `token#${token}`;
+}
+
 export interface RepoDeps {
   /** Injectable for tests (throwaway prefixes against DynamoDB Local). */
   doc?: DynamoDBDocumentClient;
@@ -322,6 +356,57 @@ export interface ConversationsRepo {
    * but the filter is defensive). Returns [] when none.
    */
   findByParticipantPhone(phone: string): Promise<ConversationItem[]>;
+  /**
+   * Email channel v1 — THE CLAIM ARBITER (plan F13). Conditionally put the
+   * email#<addr> claim (attribute_not_exists) mapping the address to
+   * `conversationId`. On a claim conflict this RESOLVES: it GETs the existing
+   * claim and returns THAT conversationId (never errors, never orphans). The
+   * single arbiter both email writers go through.
+   */
+  claimEmailForConversation(
+    email: string,
+    conversationId: string,
+  ): Promise<{ conversationId: string }>;
+  /**
+   * Email channel v1 — attach an address to an EXISTING conversation (e.g. a
+   * known contact's inbound email joining their 1:1 thread). Claims first: if
+   * the claim points ELSEWHERE, returns that other conversation's id (the
+   * caller threads there instead) and leaves this conversation untouched; if
+   * the claim is won, SET participant_email on this conversation's row.
+   */
+  attachEmailToConversation(
+    conversationId: string,
+    email: string,
+  ): Promise<{ conversationId: string }>;
+  /**
+   * Email channel v1 — the one active email 1:1 conversation for an address,
+   * created (status `open`, ai_mode `auto`) when none exists. Mirrors
+   * createOrGetByParticipantPhone's two-write claim + self-heal SEQUENCE
+   * verbatim on the byParticipantEmail GSI + email#<addr> claim: the winner
+   * creates the row, a crash between claim and create self-heals under the
+   * claimed id. `opts` (ADJ-9) seed a participants roster + display name at
+   * CREATE time so channel-agnostic readers can resolve an email-only thread.
+   */
+  createOrGetByParticipantEmail(
+    email: string,
+    type: ConversationType,
+    opts?: { contactId?: string; displayName?: string },
+  ): Promise<ConversationItem>;
+  /**
+   * All conversations for an email address via the byParticipantEmail GSI —
+   * the email analog of findByParticipantPhone (returns an array; the readers
+   * iterate a contact's addresses alongside their phones). [] when none.
+   */
+  findByParticipantEmail(email: string): Promise<ConversationItem[]>;
+  /**
+   * Email channel v1 — mint (once) + persist the URL-safe email_reply_token for
+   * a conversation and write its token#<tok> reverse pointer. Idempotent: a
+   * conversation that already carries a token returns it WITHOUT new writes.
+   * Throws ConditionalCheckFailedException for an unknown conversation.
+   */
+  getReplyToken(conversationId: string): Promise<string>;
+  /** Resolve an email reply token to its conversation via the token#<tok> pointer. */
+  findByReplyToken(token: string): Promise<ConversationItem | undefined>;
   /**
    * Set a conversation's type (M1.4 contact triage: unknown_1to1 →
    * tenant_1to1/landlord_1to1 once a human resolves the contact's identity).
@@ -574,6 +659,41 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
   }
 
   /**
+   * Email channel v1 — the email#<addr> claim arbiter (plan F13). Conditionally
+   * put the claim; on conflict GET it and return the existing owner. Shared by
+   * the interface method + attachEmailToConversation (a factory closure, so no
+   * `this`-binding — same pattern as getById/createConversationRow).
+   */
+  async function claimEmail(
+    email: string,
+    conversationId: string,
+  ): Promise<{ conversationId: string }> {
+    try {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: { conversationId: emailClaimPk(email), ref_conversationId: conversationId },
+          ConditionExpression: 'attribute_not_exists(conversationId)',
+        }),
+      );
+      return { conversationId };
+    } catch (err) {
+      if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      // Claim taken (now or in the past): resolve to the existing owner.
+      const claim = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: emailClaimPk(email) } }),
+      );
+      const ref = (claim.Item as { ref_conversationId?: unknown } | undefined)?.ref_conversationId;
+      if (typeof ref !== 'string' || ref.length === 0) {
+        throw new Error(
+          'claimEmailForConversation: email claim exists but carries no ref_conversationId',
+        );
+      }
+      return { conversationId: ref };
+    }
+  }
+
+  /**
    * FIX 3 — roster read-modify-write under optimistic concurrency. `mutate`
    * returns the NEW roster, or undefined for an idempotent no-op (member
    * already present / already absent). On a real change the write is
@@ -727,6 +847,177 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         }),
       );
       return (Items as ConversationItem[] | undefined) ?? [];
+    },
+
+    // --- Email channel v1 (the claim arbiter + reply tokens) -----------------
+
+    claimEmailForConversation: claimEmail,
+
+    async attachEmailToConversation(conversationId, email) {
+      // Claim first: if the address already belongs to a DIFFERENT conversation,
+      // return THAT one (the caller threads there) and leave this row untouched —
+      // never two conversations for one address.
+      const { conversationId: owner } = await claimEmail(email, conversationId);
+      if (owner !== conversationId) return { conversationId: owner };
+      // We own the claim — stamp participant_email onto this conversation's row
+      // (the byParticipantEmail GSI HASH). Guard on existence so an unknown id
+      // never creates a row.
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId },
+          UpdateExpression: 'SET participant_email = :e',
+          ConditionExpression: 'attribute_exists(conversationId)',
+          ExpressionAttributeValues: { ':e': email },
+        }),
+      );
+      log.info({ conversationId }, 'email attached to conversation');
+      return { conversationId };
+    },
+
+    async createOrGetByParticipantEmail(email, type, opts) {
+      // Fast path: the byParticipantEmail GSI. Eventually consistent — a miss
+      // here is NOT proof the conversation doesn't exist (the claim below is the
+      // correctness backstop, exactly like createOrGetByParticipantPhone).
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byParticipantEmail',
+          KeyConditionExpression: 'participant_email = :e',
+          ExpressionAttributeValues: { ':e': email },
+        }),
+      );
+      const active = (Items as ConversationItem[] | undefined)?.find((c) => c.status === 'open');
+      if (active) return active;
+
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId: `conv-${randomUUID()}`,
+        // Email-only thread: participant_email is the routing key; NO
+        // participant_phone (channel-agnostic readers fall back to the display
+        // name). ADJ-9: seed a participants roster + display name so
+        // whoOfConversation / involvesContact can resolve an email-only thread.
+        participant_email: email,
+        status: 'open',
+        last_activity_at: now,
+        type,
+        ai_mode: 'auto',
+        created_at: now,
+        ...(opts?.contactId !== undefined && {
+          // Mirror the phone path's participant shape ({contactId, phone}); an
+          // email participant has no phone, so `phone` is empty (readers key on
+          // contactId first — jobs/extraction.ts, today.ts whoContactId).
+          participants: [{ contactId: opts.contactId, phone: '' }],
+        }),
+        ...(opts?.displayName !== undefined && { participant_display_name: opts.displayName }),
+      };
+      // Correctness backstop: conditionally claim the address before creating.
+      // The claim item carries ONLY the key + ref (no participant_email/status),
+      // so the sparse GSIs never index it.
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: { conversationId: emailClaimPk(email), ref_conversationId: item.conversationId },
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Claim taken: adopt the claimed id; if the winner crashed before
+        // creating the row, the conditional create below self-heals it.
+        const claim = await doc.send(
+          new GetCommand({ TableName: table, Key: { conversationId: emailClaimPk(email) } }),
+        );
+        const ref = (claim.Item as { ref_conversationId?: unknown } | undefined)?.ref_conversationId;
+        if (typeof ref !== 'string' || ref.length === 0) {
+          throw new Error(
+            'createOrGetByParticipantEmail: email claim exists but carries no ref_conversationId',
+          );
+        }
+        const existing = await getById(ref);
+        if (existing) return existing;
+        return createConversationRow({ ...item, conversationId: ref });
+      }
+      return createConversationRow(item);
+    },
+
+    async findByParticipantEmail(email) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byParticipantEmail',
+          KeyConditionExpression: 'participant_email = :e',
+          ExpressionAttributeValues: { ':e': email },
+        }),
+      );
+      return (Items as ConversationItem[] | undefined) ?? [];
+    },
+
+    async getReplyToken(conversationId) {
+      const existing = await getById(conversationId);
+      if (!existing) {
+        throw new ConditionalCheckFailedException({
+          message: `getReplyToken: conversation ${conversationId} not found`,
+          $metadata: {},
+        });
+      }
+      // Idempotent: a thread that already minted a token returns it, no writes.
+      if (
+        typeof existing.email_reply_token === 'string' &&
+        existing.email_reply_token.length > 0
+      ) {
+        return existing.email_reply_token;
+      }
+      // 16 random bytes -> 22 url-safe chars. Write the reverse pointer FIRST so a
+      // crash after it still leaves the token resolvable, then claim the canonical
+      // slot on the row (attribute_not_exists) — a concurrent minter loses that
+      // claim and returns the winner's token (its own pointer is a harmless extra
+      // that still resolves to this conversation).
+      const token = randomBytes(16).toString('base64url');
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: { conversationId: tokenPk(token), ref_conversationId: conversationId },
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Astronomically unlikely token collision — nothing to do, the pointer
+        // already exists (and points somewhere); fall through to the row claim.
+      }
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET email_reply_token = :t',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND attribute_not_exists(email_reply_token)',
+            ExpressionAttributeValues: { ':t': token },
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Lost the race: another minter set the canonical token. Return theirs.
+        const fresh = await getById(conversationId);
+        const tok = fresh?.email_reply_token;
+        if (typeof tok === 'string' && tok.length > 0) return tok;
+        throw new Error('getReplyToken: token write lost the race but no token is present');
+      }
+      log.info({ conversationId }, 'email reply token minted');
+      return token;
+    },
+
+    async findByReplyToken(token) {
+      const pointer = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: tokenPk(token) } }),
+      );
+      const ref = (pointer.Item as { ref_conversationId?: unknown } | undefined)?.ref_conversationId;
+      if (typeof ref !== 'string' || ref.length === 0) return undefined;
+      return getById(ref);
     },
 
     async setType(conversationId, type) {

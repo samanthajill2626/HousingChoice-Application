@@ -125,16 +125,21 @@ describe('tables.ts — the table contract', () => {
     expect(byProperty?.sparse).toBe(true);
   });
 
-  it('conversations: PK conversationId; GSIs byParticipantPhone, byLastActivity, byPoolNumber, byRelayStatus', () => {
+  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus', () => {
     const t = spec('conversations');
     expect(t.hashKey.name).toBe('conversationId');
     expect(t.rangeKey).toBeUndefined();
     expect(gsiNames(t)).toEqual([
       'byParticipantPhone',
+      'byParticipantEmail',
       'byLastActivity',
       'byPoolNumber',
       'byRelayStatus',
     ]);
+    // byParticipantEmail: sparse email-participant index (email channel v1).
+    const byParticipantEmail = t.gsis.find((g) => g.indexName === 'byParticipantEmail');
+    expect(byParticipantEmail?.sparse).toBe(true);
+    expect(byParticipantEmail?.hashKey.name).toBe('participant_email');
     expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.sparse).toBe(true);
     expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.hashKey.name).toBe('pool_number');
     // byRelayStatus: sparse relay-group index (relay-inbox-open-groups-truncation fix).

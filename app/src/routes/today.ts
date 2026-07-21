@@ -781,12 +781,13 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
   return router;
 }
 
-/** Conversation `who`: the resolved display name, else the participant phone. */
+/** Conversation `who`: the resolved display name, else the participant phone
+ *  (email-only threads carry neither a phone nor, absent triage, a name -> ''). */
 function whoOfConversation(conv: ConversationItem): string {
   if (typeof conv.participant_display_name === 'string' && conv.participant_display_name.length > 0) {
     return conv.participant_display_name;
   }
-  return conv.participant_phone;
+  return conv.participant_phone ?? '';
 }
 
 /** A 1:1 thread's external contact id (its single participant), or undefined when

@@ -171,7 +171,9 @@ function makeFakeConversationsRepo(seed: ConversationItem[] = []): Conversations
   const byId = new Map<string, ConversationItem>(seed.map((c) => [c.conversationId, c]));
   // The active claim: phone → conversationId (only OPEN conversations claim).
   const claimByPhone = new Map<string, string>();
-  for (const c of seed) if (c.status === 'open') claimByPhone.set(c.participant_phone, c.conversationId);
+  for (const c of seed)
+    if (c.status === 'open' && c.participant_phone !== undefined)
+      claimByPhone.set(c.participant_phone, c.conversationId);
   return {
     async findByParticipantPhone(phone: string) {
       return [...byId.values()].filter((c) => c.participant_phone === phone);

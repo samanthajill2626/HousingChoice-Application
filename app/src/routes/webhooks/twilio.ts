@@ -1391,8 +1391,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
-            const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact && conversation?.participant_phone === contact.phone) {
+            const convPhone = conversation?.participant_phone;
+            const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
+            if (contact && convPhone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_unreachable');
             } else if (contact) {
               log.warn(
@@ -1422,8 +1423,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — a 21610 on a SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
-            const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact && conversation?.participant_phone === contact.phone) {
+            const convPhone = conversation?.participant_phone;
+            const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
+            if (contact && convPhone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_opt_out');
               await audit.append(`contacts#${contact.contactId}`, 'sms_opt_out_recorded', {
                 providerSid: MessageSid,

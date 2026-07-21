@@ -87,6 +87,12 @@ function makeFakes(
     createOrGetByParticipantPhone: async () => conversation,
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
     findByParticipantPhone: async () => [conversation],
+    findByParticipantEmail: async () => [],
+    claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),
+    attachEmailToConversation: async (conversationId) => ({ conversationId }),
+    createOrGetByParticipantEmail: async () => conversation,
+    getReplyToken: async () => 'faketoken',
+    findByReplyToken: async () => undefined,
     setType: async (_id, type) => {
       conversation.type = type;
       return conversation;
@@ -161,6 +167,7 @@ function makeFakes(
       return { deduped: false, tsMsgId: buildTsMsgId(message.providerTs, message.providerSid) };
     },
     getByProviderSid: async () => undefined,
+    getByRfcMessageId: async () => undefined,
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
     setCallRecording: async () => true,

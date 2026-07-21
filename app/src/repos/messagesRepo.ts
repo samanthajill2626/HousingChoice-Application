@@ -28,7 +28,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-export type MessageType = 'sms' | 'mms' | 'call';
+export type MessageType = 'sms' | 'mms' | 'call' | 'email';
 export type MessageDirection = 'inbound' | 'outbound';
 
 /**
@@ -234,6 +234,34 @@ export interface NewMessage {
    * "Landlord"/"Team") or contact name — NEVER the raw counterpart phone (PII).
    */
   callPartyLabel?: string;
+
+  // --- Email channel v1 (type:'email' items) -------------------------------
+  // Provider-id convention (plan F5/F14): INBOUND providerSid = the RFC
+  // Message-ID (the sid# pointer IS the threading lookup); OUTBOUND providerSid
+  // = the SES MessageId and `email_message_id` is our own <hc-…@domain> id —
+  // set `rfcMessageIdPointer` to that RFC id and append() writes a THIRD
+  // emailmsgid#<rfcId> pointer so getByRfcMessageId can follow it.
+  /** Email subject line. */
+  subject?: string;
+  /** RFC From address (normalized). */
+  email_from?: string;
+  /** RFC To addresses (normalized). */
+  email_to?: string[];
+  /** RFC Cc addresses (normalized). */
+  email_cc?: string[];
+  /** The RFC Message-ID (ours on outbound `<hc-…>`, the sender's on inbound). */
+  email_message_id?: string;
+  /** Sanitized inbound HTML body (Phase B B7 renders it; absent on outbound). */
+  email_html_sanitized?: string;
+  /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
+  email_raw_ref?: { bucket: string; key: string };
+  /**
+   * OUTBOUND email only: our own RFC Message-ID (`<hc-…@domain>`). When set,
+   * append() adds a THIRD emailmsgid#<rfcId> pointer to the transaction so an
+   * inbound reply's In-Reply-To/References can resolve this message via
+   * getByRfcMessageId (the SES providerSid differs from our RFC id).
+   */
+  rfcMessageIdPointer?: string;
   /**
    * Recording/transcript seams (later decision; UNUSED for masked calls —
    * masked calls never record). Included so M1.9b/founder-bridge can populate
@@ -345,6 +373,22 @@ export interface MessageItem {
   masked?: boolean;
   /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
   call_party_label?: string;
+
+  // --- Email channel v1 — present only on type:'email' items ---------------
+  /** Email subject line. */
+  subject?: string;
+  /** RFC From address (normalized). */
+  email_from?: string;
+  /** RFC To addresses (normalized). */
+  email_to?: string[];
+  /** RFC Cc addresses (normalized). */
+  email_cc?: string[];
+  /** RFC Message-ID (ours on outbound, the sender's on inbound). */
+  email_message_id?: string;
+  /** Sanitized inbound HTML body (Phase B rendering; absent on outbound). */
+  email_html_sanitized?: string;
+  /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
+  email_raw_ref?: { bucket: string; key: string };
   /**
    * S3 key of the mirrored recording (M1.9c founder-bridge calls only; UNUSED
    * for masked calls, which are never recorded). Set by the recording callback.
@@ -429,6 +473,14 @@ export interface MessagesRepo {
   append(message: NewMessage): Promise<AppendResult>;
   /** Resolve a provider SID to its message via the pointer item (doc §9). */
   getByProviderSid(sid: string): Promise<MessageItem | undefined>;
+  /**
+   * Email channel v1 — resolve an RFC Message-ID to its message. Checks the
+   * emailmsgid#<id> pointer (OUTBOUND: our own <hc-…> id, distinct from the SES
+   * providerSid) FIRST, then falls back to sid#<id> (INBOUND: providerSid IS the
+   * RFC Message-ID). The In-Reply-To/References threading lookup for inbound
+   * replies. Undefined when neither pointer resolves.
+   */
+  getByRfcMessageId(messageId: string): Promise<MessageItem | undefined>;
   /**
    * Apply a status-callback transition. Returns false (no-op) when the
    * message is unknown or the transition would move backwards — delivery
@@ -596,6 +648,16 @@ function sidPk(providerSid: string): string {
   return `sid#${providerSid}`;
 }
 
+/**
+ * Pointer partition key for an OUTBOUND email's own RFC Message-ID (email
+ * channel v1). Written as a THIRD append item when rfcMessageIdPointer is set;
+ * getByRfcMessageId checks it before the sid# fallback. Never collides with
+ * real conversation partitions.
+ */
+function emailMsgIdPk(rfcMessageId: string): string {
+  return `emailmsgid#${rfcMessageId}`;
+}
+
 /** Marker partition key for a job execution (see putJobExecutionMarker). */
 function jobPk(jobId: string): string {
   return `job#${jobId}`;
@@ -640,6 +702,28 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
   return {
     getByProviderSid,
+
+    async getByRfcMessageId(messageId) {
+      // OUTBOUND: emailmsgid#<rfcId> maps our own RFC id -> the message (the SES
+      // providerSid differs). INBOUND: no emailmsgid pointer — providerSid IS the
+      // RFC id, so fall back to sid#<rfcId>. Both pointer shapes are
+      // {ref_conversationId, ref_tsMsgId}.
+      const emailPtrRes = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: emailMsgIdPk(messageId), tsMsgId: 'ptr' } }),
+      );
+      const emailPtr = emailPtrRes.Item as
+        | { ref_conversationId: string; ref_tsMsgId: string }
+        | undefined;
+      const ptr = emailPtr ?? (await getSidPointer(messageId));
+      if (!ptr) return undefined;
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { conversationId: ptr.ref_conversationId, tsMsgId: ptr.ref_tsMsgId },
+        }),
+      );
+      return Item as MessageItem | undefined;
+    },
 
     async append(message) {
       const tsMsgId = buildTsMsgId(message.providerTs, message.providerSid);
@@ -695,6 +779,18 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.transcriptChannelRoles !== undefined && {
           transcript_channel_roles: message.transcriptChannelRoles,
         }),
+        // Email channel v1 (type:'email'): the email fields land beside the
+        // broadcastId pattern above. Only-when-present so non-email messages are
+        // byte-identical to before.
+        ...(message.subject !== undefined && { subject: message.subject }),
+        ...(message.email_from !== undefined && { email_from: message.email_from }),
+        ...(message.email_to !== undefined && { email_to: message.email_to }),
+        ...(message.email_cc !== undefined && { email_cc: message.email_cc }),
+        ...(message.email_message_id !== undefined && { email_message_id: message.email_message_id }),
+        ...(message.email_html_sanitized !== undefined && {
+          email_html_sanitized: message.email_html_sanitized,
+        }),
+        ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
       };
       try {
         await doc.send(
@@ -721,6 +817,28 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                   ConditionExpression: 'attribute_not_exists(tsMsgId)',
                 },
               },
+              // Email channel v1: an OUTBOUND email carries its own RFC
+              // Message-ID (distinct from the SES providerSid) — write a THIRD
+              // emailmsgid#<rfcId> pointer so an inbound reply's In-Reply-To
+              // resolves this message via getByRfcMessageId. Only when set
+              // (INBOUND uses providerSid == the RFC id, so its sid# pointer is
+              // already the threading lookup — no third item).
+              ...(message.rfcMessageIdPointer !== undefined
+                ? [
+                    {
+                      Put: {
+                        TableName: table,
+                        Item: {
+                          conversationId: emailMsgIdPk(message.rfcMessageIdPointer),
+                          tsMsgId: 'ptr',
+                          ref_conversationId: message.conversationId,
+                          ref_tsMsgId: tsMsgId,
+                        },
+                        ConditionExpression: 'attribute_not_exists(tsMsgId)',
+                      },
+                    },
+                  ]
+                : []),
             ],
           }),
         );

@@ -277,26 +277,23 @@ resource "aws_s3_bucket_public_access_block" "inbound" {
   restrict_public_buckets = true
 }
 
-# Retention lifecycle (adv M5): raw inbound MIME (full bodies + attachments =
-# the most sensitive PII in the feature, deliberately never served) must NOT
-# accrue forever. Current objects expire after 180 days; because the bucket is
-# versioned, that writes a delete marker, so noncurrent versions are reaped 30
-# days after they become noncurrent (versioning would otherwise retain PII
-# behind delete markers indefinitely). Retention is adjudicated - Cameron may
-# adjust the day counts pre-apply (RUNBOOK "Email (SES)").
+# Retention lifecycle: raw inbound MIME is kept INDEFINITELY (Cameron's
+# 2026-07-21 ruling: email history matches the SMS/voice posture - message
+# rows and extracted attachments already persist forever, and the raw
+# original is the only copy of quoted history / original headers, so it must
+# not expire either). The adv-M5 180-day current-object expiration was
+# removed on that ruling. The ONLY reaping left is noncurrent versions 30
+# days after an overwrite (same-key re-delivery duplicates - the current
+# version retains the content), which loses nothing unique.
 resource "aws_s3_bucket_lifecycle_configuration" "inbound" {
   bucket     = aws_s3_bucket.inbound.id
   depends_on = [aws_s3_bucket_versioning.inbound]
 
   rule {
-    id     = "expire-raw-mime"
+    id     = "expire-noncurrent-duplicates"
     status = "Enabled"
 
     filter {} # all objects
-
-    expiration {
-      days = 180
-    }
 
     noncurrent_version_expiration {
       noncurrent_days = 30

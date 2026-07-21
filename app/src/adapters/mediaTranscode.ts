@@ -12,6 +12,12 @@ import {
   TRANSCODE_JPEG_QUALITY_LADDER,
   SHARP_MAX_INPUT_PIXELS,
 } from '../lib/outboundMediaLimits.js';
+import {
+  UNIT_PHOTO_TRANSCODE_MAX_EDGE,
+  UNIT_PHOTO_TRANSCODE_QUALITY_LADDER,
+  UNIT_PHOTO_TRANSCODE_TARGET_BYTES,
+  UNIT_PHOTO_SHARP_MAX_INPUT_PIXELS,
+} from '../lib/unitPhotoLimits.js';
 
 // Configure sharp ONCE at module load: single libvips thread (no per-op thread
 // pool each holding buffers) so the semaphore is the only concurrency knob.
@@ -24,6 +30,29 @@ export interface TranscodeResult {
   transcodedFrom: string;
 }
 
+/** The per-consumer knobs of the shared image pipeline. MMS outputs must stay
+ *  byte-identical, so its profile is built verbatim from the MMS constants. */
+export interface TranscodeProfile {
+  maxEdge: number;
+  qualityLadder: readonly number[];
+  targetMaxBytes: number;
+  maxInputPixels: number;
+}
+
+const MMS_PROFILE: TranscodeProfile = {
+  maxEdge: TRANSCODE_TARGET_MAX_EDGE,
+  qualityLadder: TRANSCODE_JPEG_QUALITY_LADDER,
+  targetMaxBytes: TRANSCODE_TARGET_MAX_BYTES,
+  maxInputPixels: SHARP_MAX_INPUT_PIXELS,
+};
+
+const UNIT_PHOTO_PROFILE: TranscodeProfile = {
+  maxEdge: UNIT_PHOTO_TRANSCODE_MAX_EDGE,
+  qualityLadder: UNIT_PHOTO_TRANSCODE_QUALITY_LADDER,
+  targetMaxBytes: UNIT_PHOTO_TRANSCODE_TARGET_BYTES,
+  maxInputPixels: UNIT_PHOTO_SHARP_MAX_INPUT_PIXELS,
+};
+
 // pdfium is a heavy WASM init; keep one library instance for the process.
 let pdfiumLib: Awaited<ReturnType<typeof PDFiumLibrary.init>> | undefined;
 async function getPdfium(): Promise<Awaited<ReturnType<typeof PDFiumLibrary.init>>> {
@@ -33,22 +62,22 @@ async function getPdfium(): Promise<Awaited<ReturnType<typeof PDFiumLibrary.init
 
 /** Resize (never enlarge) to the max edge, then walk the quality ladder to land
  *  under the target bytes; if none qualifies, keep the lowest-quality result. */
-async function encodeJpeg(pipeline: Sharp): Promise<Buffer> {
+async function encodeJpeg(pipeline: Sharp, profile: TranscodeProfile): Promise<Buffer> {
   const base = pipeline
     .rotate() // honor EXIF orientation before metadata is stripped
-    .resize({ width: TRANSCODE_TARGET_MAX_EDGE, height: TRANSCODE_TARGET_MAX_EDGE, fit: 'inside', withoutEnlargement: true });
+    .resize({ width: profile.maxEdge, height: profile.maxEdge, fit: 'inside', withoutEnlargement: true });
   let last: Buffer | undefined;
-  for (const quality of TRANSCODE_JPEG_QUALITY_LADDER) {
+  for (const quality of profile.qualityLadder) {
     last = await base.clone().jpeg({ quality, mozjpeg: true }).toBuffer();
-    if (last.length <= TRANSCODE_TARGET_MAX_BYTES) return last;
+    if (last.length <= profile.targetMaxBytes) return last;
   }
   return last as Buffer;
 }
 
-async function transcodeImage(bytes: Buffer, transcodedFrom: string): Promise<TranscodeResult> {
-  const pipeline = sharp(bytes, { limitInputPixels: SHARP_MAX_INPUT_PIXELS });
+async function transcodeImage(bytes: Buffer, transcodedFrom: string, profile: TranscodeProfile): Promise<TranscodeResult> {
+  const pipeline = sharp(bytes, { limitInputPixels: profile.maxInputPixels });
   await pipeline.metadata(); // throws on a non-image / over-limit input
-  return { bytes: await encodeJpeg(pipeline), contentType: 'image/jpeg', transcodedFrom };
+  return { bytes: await encodeJpeg(pipeline, profile), contentType: 'image/jpeg', transcodedFrom };
 }
 
 /**
@@ -77,7 +106,7 @@ async function transcodePdf(bytes: Buffer): Promise<TranscodeResult> {
     const scale = pdfRenderScale(Math.max(originalWidth || 612, originalHeight || 792));
     const r = await page.render({ scale, render: 'bitmap' });
     const pipeline = sharp(Buffer.from(r.data), { raw: { width: r.width, height: r.height, channels: 4 }, limitInputPixels: SHARP_MAX_INPUT_PIXELS });
-    return { bytes: await encodeJpeg(pipeline), contentType: 'image/jpeg', pdfPageCount, transcodedFrom: 'application/pdf' };
+    return { bytes: await encodeJpeg(pipeline, MMS_PROFILE), contentType: 'image/jpeg', pdfPageCount, transcodedFrom: 'application/pdf' };
   } finally {
     // doc.destroy() frees the whole document incl. its pages (PDFiumPage has no
     // own destroy in 2.1.13) - this is the complete cleanup.
@@ -90,5 +119,11 @@ async function transcodePdf(bytes: Buffer): Promise<TranscodeResult> {
 export async function transcodeForMms(bytes: Buffer, sourceType: string): Promise<TranscodeResult> {
   const t = sourceType.trim().toLowerCase();
   if (t === 'application/pdf') return transcodePdf(bytes);
-  return transcodeImage(bytes, t);
+  return transcodeImage(bytes, t, MMS_PROFILE);
+}
+
+/** Convert a >5MB unit-photo source into the display rendition (2560/q-ladder
+ *  jpeg). Images only - the photo allowlist has no pdf. */
+export async function transcodeForUnitPhoto(bytes: Buffer, sourceType: string): Promise<TranscodeResult> {
+  return transcodeImage(bytes, sourceType.trim().toLowerCase(), UNIT_PHOTO_PROFILE);
 }

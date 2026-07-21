@@ -24,7 +24,12 @@ import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
-import { resolveUnitMedia, UNIT_MEDIA_MAX, unitMediaPrefix } from '../lib/unitMedia.js';
+import {
+  deleteRemovedUnitMedia,
+  resolveUnitMedia,
+  UNIT_MEDIA_MAX,
+  unitMediaPrefix,
+} from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -650,10 +655,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   });
 
   // DELETE /api/units/:unitId/photos  body { entry } - drop one media entry
-  // (unit-photos S4). Removes the array entry only (NO S3 object deletion; the
-  // object decays as an accepted orphan, the MMS posture). 404 on unknown unit
-  // or unknown entry; audits unit_photo_removed (entry-HASH + count only, never
-  // the key/URL). Returns the updated unit (with mediaDisplay).
+  // (unit-photos S4). Removes the array entry AND best-effort-deletes its S3
+  // object when it is an own-namespace stored key (design 2026-07-21, D1; legacy
+  // absolute URLs + foreign keys are never deleted). The delete is fire-and-
+  // forget - a failure is a WARN, never a 500 - and a removed photo may keep
+  // serving from CloudFront edge caches up to the 7-day TTL (accepted; manual
+  // invalidation is the operator escape hatch). 404 on unknown unit or unknown
+  // entry; audits unit_photo_removed (entry-HASH + count only, never the
+  // key/URL). Returns the updated unit (with mediaDisplay).
   router.delete('/:unitId/photos', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const body = req.body;
@@ -677,6 +686,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       throw err;
     }
+    // D1: best-effort-delete the S3 object for the removed entry (own-namespace
+    // stored keys only; the helper skips legacy URLs + foreign keys). Fire-and-
+    // forget - never affects this response.
+    deleteRemovedUnitMedia(mediaStore, unitId, [entry], log);
     await audit.append(`units#${unitId}`, 'unit_photo_removed', {
       actor: req.user?.userId,
       entryHash: entryHash(entry),
@@ -1061,6 +1074,23 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
+    // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
+    // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
+    // write - as a COPY, because a read-modify-write repo can return the SAME
+    // object from getById and update, so reading prev.media AFTER the update
+    // could observe the already-mutated value. Read-then-write is NOT atomic: an
+    // append racing between this getById and the update can orphan its object
+    // (the replace drops it without it appearing in prevMedia) - the same
+    // accepted orphan class that existed before D1. An unknown unit yields no
+    // prior state here; the update below still owns the 404 (ConditionalCheckFailed).
+    const hasMediaPatch = Object.prototype.hasOwnProperty.call(validation.fields, 'media');
+    let prevMedia: string[] = [];
+    if (hasMediaPatch) {
+      const prevMediaValue = (await units.getById(unitId))?.media;
+      prevMedia = Array.isArray(prevMediaValue)
+        ? prevMediaValue.filter((e): e is string => typeof e === 'string')
+        : [];
+    }
     let unit;
     try {
       unit = await units.update(unitId, validation.fields);
@@ -1070,6 +1100,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
       throw err; // Express 5 forwards async throws to the error handler.
+    }
+    if (hasMediaPatch) {
+      // Diff prior vs next by set membership (string entries only); best-effort-
+      // delete the removed own-namespace stored keys (the helper skips legacy
+      // URLs + foreign keys). Fire-and-forget - never affects this response.
+      const next = new Set(Array.isArray(unit.media) ? unit.media : []);
+      const removed = prevMedia.filter((e) => !next.has(e));
+      deleteRemovedUnitMedia(mediaStore, unitId, removed, log);
     }
     await audit.append(`units#${unitId}`, 'unit_updated', {
       actor: req.user?.userId,

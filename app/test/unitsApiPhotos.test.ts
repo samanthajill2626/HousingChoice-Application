@@ -60,6 +60,23 @@ function confirm(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: stri
     .set('cookie', TEST_SESSION_COOKIE);
 }
 
+function del(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+  return request(app)
+    .delete(`/api/units/${unitId}/photos`)
+    .set('x-origin-verify', SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
+
+function patchUnit(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+  return request(app)
+    .patch(`/api/units/${unitId}`)
+    .set('x-origin-verify', SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
+
+/** Best-effort deletes are fire-and-forget - drain the immediate queue before asserting. */
+const drainDeletes = () => new Promise((resolve) => setImmediate(resolve));
+
 const KEY_RE = /^unit-media\/unit-1\/[0-9a-f-]+$/;
 
 describe('POST /api/units/:unitId/photos/presign', () => {
@@ -524,5 +541,111 @@ describe('GET /api/units/:unitId - mediaDisplay same-origin URLs (design 2026-07
     expect(display[1]!).toEqual({ entry: 'uploads/some-mms-attachment' }); // foreign: NO url
     expect(display[2]!).toEqual({ entry: 'unit-media/unit-OTHER/their-photo' }); // cross-unit: NO url
     expect(display[3]!.url).toBe('https://legacy.example/photo.jpg'); // legacy URL: pass-through
+  });
+});
+
+describe('delete-on-removal (D1) - best-effort S3 cleanup of removed unit photos', () => {
+  const K1 = 'unit-media/unit-1/k1';
+  const K2 = 'unit-media/unit-1/k2';
+  const LEGACY = 'https://legacy.example/photo.jpg';
+
+  // --- DELETE /api/units/:unitId/photos ---
+
+  it('DELETE: best-effort-deletes the removed own-namespace object', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await del(app, 'unit-1').send({ entry: K1 });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([K1]);
+    expect(world.mediaObjects.has(K1)).toBe(false); // object gone
+    expect(world.mediaObjects.has(K2)).toBe(true); // survivor untouched
+  });
+
+  it('DELETE: never deletes a removed legacy absolute-URL entry (own-namespace keys only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [LEGACY, K2] });
+    const res = await del(app, 'unit-1').send({ entry: LEGACY });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  it('DELETE: a rejecting deleteObject stays best-effort - still 200 (WARN, not 500); key not recorded', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    world.failMediaDeletes.add(K1); // force the fake deleteObject to reject
+    const res = await del(app, 'unit-1').send({ entry: K1 });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([]);
+    await drainDeletes();
+    // The delete threw (WARN path): the key never lands in deletedMediaKeys.
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  // --- PATCH /api/units/:unitId (the raw E5 seam) ---
+
+  it('PATCH: replacing media [k1,k2] -> [k2] deletes ONLY the removed k1', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [K2] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([K1]);
+    expect(world.mediaObjects.has(K2)).toBe(true);
+  });
+
+  it('PATCH: clearing media to [] deletes every prior own-namespace key, never the legacy URL', async () => {
+    // NOTE: `media: null` (the plan's literal "attribute removal") is rejected by
+    // validateUnitBody (kind string[]; isStringArray(null) is false -> 400), so the
+    // route-reachable "remove all photos" is `media: []`. It drives the same helper
+    // path: an empty next-set means every prior stored key counts as removed.
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2, LEGACY] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect([...world.deletedMediaKeys].sort()).toEqual([K1, K2].sort());
+    expect(world.deletedMediaKeys).not.toContain(LEGACY);
+  });
+
+  it('PATCH: keeping media identical deletes nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [K1, K2] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  it('PATCH: a removed FOREIGN-namespace key (planted in the prior list) is never deleted', async () => {
+    // The raw seam can leave a foreign key on unit.media; removing it must NOT
+    // delete a cross-unit / uploads object (own-namespace guard in the helper).
+    const OWN = 'unit-media/unit-1/own';
+    const FOREIGN = 'unit-media/unit-OTHER/theirs';
+    const UPLOAD = 'uploads/mms-attachment';
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [OWN, FOREIGN, UPLOAD] });
+    storeObject(world, OWN, { contentType: 'image/png' });
+    storeObject(world, FOREIGN, { contentType: 'image/png' });
+    storeObject(world, UPLOAD, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([OWN]); // only the own-namespace key
+    expect(world.mediaObjects.has(FOREIGN)).toBe(true);
+    expect(world.mediaObjects.has(UPLOAD)).toBe(true);
   });
 });

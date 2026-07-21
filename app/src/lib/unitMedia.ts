@@ -10,8 +10,8 @@
 // it everywhere else. Deterministic and cache-friendly: no media store, no async
 // S3 call, no TTL, never a presigned/expiring URL (presign-per-read is retired).
 // A foreign / out-of-namespace key still degrades to url-absent with a WARN.
-// MediaStore stays imported for slice 3's deleteRemovedUnitMedia helper (added to
-// this file next); resolveUnitMedia below no longer needs it.
+// resolveUnitMedia below is store-independent; the MediaStore import feeds the
+// deleteRemovedUnitMedia helper (best-effort S3 cleanup on photo removal, D1).
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 import type { UnitItem } from '../repos/unitsRepo.js';
@@ -82,4 +82,33 @@ export function resolveUnitMedia(
     // presigned, expiring URL.
     return { entry, url: `/${entry}` };
   });
+}
+
+/**
+ * Best-effort S3 cleanup for entries REMOVED from unit.media (design 2026-07-21,
+ * D1). Deletes ONLY stored keys inside THIS unit's own namespace - legacy
+ * absolute URLs and foreign keys (an MMS uploads/ attachment, another unit's
+ * photo) are never deleted. Fire-and-forget: every failure is a WARN and the
+ * caller's response is never affected. A removed photo may keep serving from
+ * CloudFront edge caches up to the 7-day TTL (accepted; manual invalidation is
+ * the operator escape hatch). No-op when no media store is configured.
+ *
+ * PII posture (matches units.ts): the WARN logs { err, unitId } ONLY - never the
+ * key or URL.
+ */
+export function deleteRemovedUnitMedia(
+  mediaStore: MediaStore | undefined,
+  unitId: string,
+  removedEntries: string[],
+  logger?: Logger,
+): void {
+  const log = logger ?? defaultLogger;
+  if (!mediaStore) return;
+  const ownPrefix = unitMediaPrefix(unitId);
+  for (const entry of removedEntries) {
+    if (isAbsoluteUrl(entry) || !entry.startsWith(ownPrefix)) continue;
+    void mediaStore.deleteObject(entry).catch((err: unknown) => {
+      log.warn({ err, unitId }, 'unit media: best-effort object delete failed (orphan remains)');
+    });
+  }
 }

@@ -1,8 +1,10 @@
 // Email-channel B3 integration tests against DynamoDB Local - the
 // unmatched_email store (the unknown-sender side-door) + sender blocklist:
-//   - putUnmatched stamps `um-<uuid>` + read:false and applies the F19 TTL
-//     matrix at insert (quarantined/dismissed -> expires_at now+90d epoch
-//     seconds; unmatched -> NO expires_at: rows awaiting action never expire).
+//   - putUnmatched stamps a DETERMINISTIC `um-<sha256(raw_ref)>` id + read:false
+//     (a conditional put: a redelivery of the same object is idempotent,
+//     created:false) and applies the F19 TTL matrix at insert
+//     (quarantined/dismissed -> expires_at now+90d epoch seconds; unmatched ->
+//     NO expires_at: rows awaiting action never expire).
 //   - setStatus transitions re-apply the matrix (linked/dismissed -> +90d;
 //     quarantined->unmatched release REMOVES expires_at).
 //   - listByStatus pages the byStatus GSI newest-first (received_at DESC) with
@@ -58,7 +60,9 @@ function baseRow(overrides: Partial<NewUnmatchedEmail> = {}): NewUnmatchedEmail 
     subject: 'About the listing',
     snippet: 'Hi, is the unit still available?',
     text: 'Hi, is the unit still available?\n\nThanks,\nPat',
-    raw_ref: { bucket: 'inbound-bucket', key: 'raw/key-1' },
+    // Unique per call: the id is now DETERMINISTIC on raw_ref, so distinct
+    // logical mails must carry distinct object keys to store as distinct rows.
+    raw_ref: { bucket: 'inbound-bucket', key: `raw/${randomUUID()}` },
     attachments_meta: [{ filename: 'doc.pdf', contentType: 'application/pdf', size: 1234 }],
     received_at: '2026-07-20T10:00:00.000Z',
     ...overrides,
@@ -90,10 +94,11 @@ describe.skipIf(!reachable)('unmatchedEmailRepo rows + F19 TTL matrix (DynamoDB 
     client.destroy();
   }, 120_000);
 
-  it('putUnmatched stamps um-<uuid> + read:false and round-trips the row; unmatched rows get NO expires_at', async () => {
+  it('putUnmatched stamps a deterministic um-<hash> id + read:false and round-trips the row; unmatched rows get NO expires_at', async () => {
     const row = baseRow();
-    const { unmatchedId } = await repo.putUnmatched(row);
-    expect(unmatchedId).toMatch(/^um-/);
+    const { unmatchedId, created } = await repo.putUnmatched(row);
+    expect(unmatchedId).toMatch(/^um-[0-9a-f]+$/); // deterministic sha256 hex
+    expect(created).toBe(true);
 
     const stored = await repo.getById(unmatchedId);
     expect(stored).toBeDefined();
@@ -103,13 +108,29 @@ describe.skipIf(!reachable)('unmatchedEmailRepo rows + F19 TTL matrix (DynamoDB 
       from: { name: 'Pat Doe', address: 'pat@example.com' },
       subject: 'About the listing',
       snippet: 'Hi, is the unit still available?',
-      raw_ref: { bucket: 'inbound-bucket', key: 'raw/key-1' },
+      raw_ref: row.raw_ref,
       received_at: '2026-07-20T10:00:00.000Z',
       read: false,
     });
     expect(stored?.attachments_meta).toEqual(row.attachments_meta);
     // F19: rows awaiting action never expire.
     expect(stored?.expires_at).toBeUndefined();
+  });
+
+  it('is idempotent on redelivery: same raw_ref -> same id + created:false (one row untouched); a new object -> created:true', async () => {
+    const row = baseRow();
+    const first = await repo.putUnmatched(row);
+    expect(first.created).toBe(true);
+    // A redelivery of the SAME object (same raw_ref) is a conditional-put no-op.
+    const again = await repo.putUnmatched({ ...row, status: 'quarantined' });
+    expect(again.created).toBe(false);
+    expect(again.unmatchedId).toBe(first.unmatchedId);
+    // The first write wins - the row is untouched (still 'unmatched').
+    expect((await repo.getById(first.unmatchedId))?.status).toBe('unmatched');
+    // A DIFFERENT object gets its own row.
+    const other = await repo.putUnmatched(baseRow());
+    expect(other.created).toBe(true);
+    expect(other.unmatchedId).not.toBe(first.unmatchedId);
   });
 
   it('quarantined at insert -> expires_at = now+90d (epoch seconds)', async () => {

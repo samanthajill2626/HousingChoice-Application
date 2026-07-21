@@ -5,17 +5,26 @@
 // Routing tiers, IN ORDER (plan Task B2; each pinned by a test):
 //   0. HEAD the S3 object: > 30 MB -> quarantine row `parse_skipped:'oversize'`
 //      - the raw bytes are NEVER loaded (DoS F17-1).
-//   1. Idempotency, TWO LEVELS:
-//      - Level 1 (delivery): an execution marker on the S3 OBJECT KEY
-//        (`job#email#obj#<sha256(bucket/key)>`), claimed AFTER the fetch but
-//        BEFORE parse - so a hostile mail that crashes the parser can never
-//        drive an SQS redelivery loop (F17-3), while a TRANSIENT S3 failure
-//        (head/fetch throw) stays retryable because nothing was claimed yet.
-//      - Level 2 (mail identity): the RFC Message-ID. A fast-path
-//        getByRfcMessageId pre-check catches the same mail redelivered under a
-//        DIFFERENT object key; the append()'s transactional sid# pointer is
-//        the authoritative arbiter for two CONCURRENT deliveries (the loser's
-//        append dedupes and this returns 'duplicate').
+//   1. Idempotency - DURABLE-WRITE-FIRST; the object marker is a fast path ONLY
+//      (fix-wave B; the old claim-before-write traded a retry-loop guard for
+//      silent mail loss on any post-claim store failure). The terminal durable
+//      write is the source of truth and each is INDEPENDENTLY idempotent:
+//        - threaded: append()'s transactional sid# pointer (INBOUND providerSid
+//          == the RFC id) dedupes a redelivery; side effects run only on a
+//          fresh append (deduped=false).
+//        - side-door: putUnmatched writes a DETERMINISTIC id
+//          (um-<sha256(bucket/key)>) via a conditional put; a redelivery is a
+//          no-op (created=false) and the SSE is skipped.
+//      The S3 OBJECT-KEY marker (`job#email#obj#<sha256(bucket/key)>`) is
+//      claimed AFTER that terminal write (terminal-write-THEN-marker) and only
+//      lets a clean redelivery skip the head/fetch/parse work. Correctness
+//      NEVER rests on it: a process kill BETWEEN the durable write and the
+//      marker leaves no marker, so the redelivery re-runs and CONVERGES on the
+//      idempotent write (no double side effect, no lost mail); a kill BEFORE
+//      the durable write also leaves no marker -> up to maxReceiveCount(5)
+//      receives -> the DLQ (visible + alarmed), never a silent drop.
+//      Level-2 fast path: a getByRfcMessageId pre-check still short-circuits the
+//      same mail redelivered under a DIFFERENT object key.
 //   2. virusVerdict FAIL -> quarantined (row stored; attachments NEVER copied).
 //   3. Sender blocklist -> 'blocked' (row stored dismissed).
 //   4. spamVerdict FAIL/GRAY -> quarantined UNLESS tier 5/6 matches (a known
@@ -70,12 +79,18 @@ export const INBOUND_EMAIL_MAX_REFERENCE_LOOKUPS = 10;
 /** Unmatched-row snippet bound (B3 list rendering). */
 export const UNMATCHED_SNIPPET_MAX_CHARS = 180;
 /**
- * DynamoDB items cap at 400 KB, so stored TEXT bodies are bounded (the raw
- * MIME ref keeps full fidelity) and an over-limit sanitized HTML is DROPPED
- * rather than truncated mid-markup (renderers fall back to the text body).
+ * DynamoDB items cap at 400 KB. Stored content is bounded by UTF-8 BYTE size,
+ * never character length: a multibyte (e.g. CJK) body is ~3x its char count, so
+ * a char-length cap can still overflow 400 KB and make the put THROW - the
+ * fix-wave BLOCKER, where a thrown put dropped mail on redelivery. `text` is
+ * truncated at a safe char boundary; an over-cap sanitized HTML is DROPPED
+ * (never cut mid-markup) with a stored `html_skipped:'oversize'` note; `subject`
+ * is truncated. The three caps sum to ~302 KB, leaving margin under 400 KB for
+ * the row's other fields. The raw MIME ref always keeps full fidelity.
  */
-export const INBOUND_EMAIL_MAX_STORED_TEXT_CHARS = 100_000;
-export const INBOUND_EMAIL_MAX_STORED_HTML_CHARS = 200_000;
+export const INBOUND_EMAIL_MAX_STORED_TEXT_BYTES = 100 * 1024;
+export const INBOUND_EMAIL_MAX_STORED_HTML_BYTES = 200 * 1024;
+export const INBOUND_EMAIL_MAX_STORED_SUBJECT_BYTES = 2 * 1024;
 
 /** The SQS/dev-route notification the delivery mechanisms (B4) hand us. */
 export interface InboundEmailNotice {
@@ -110,9 +125,10 @@ export interface InboundRawStore {
 /**
  * The row this service stores for every non-threaded outcome. B3's
  * unmatchedEmailRepo implements `UnmatchedEmailStore` VERBATIM: putUnmatched
- * stamps unmatchedId/read:false (+ any TTL policy) and returns the id;
- * isBlocked resolves the `block#<address>` pointer rows (input is already
- * normalized lowercase).
+ * stores under a DETERMINISTIC id derived from raw_ref (a conditional put) so a
+ * redelivery of the same S3 object is idempotent, stamps read:false (+ any TTL
+ * policy), and returns { unmatchedId, created }; isBlocked resolves the
+ * `block#<address>` pointer rows (input is already normalized lowercase).
  */
 export interface NewUnmatchedEmail {
   status: 'unmatched' | 'quarantined' | 'dismissed';
@@ -120,9 +136,12 @@ export interface NewUnmatchedEmail {
   subject: string;
   /** First line(s) of the visible reply text, <= 180 chars, whitespace-collapsed. */
   snippet: string;
-  /** Full plain-text body (bounded); '' for unparseable mail. */
+  /** Full plain-text body (bounded by UTF-8 bytes); '' for unparseable mail. */
   text: string;
   html_sanitized?: string;
+  /** Set when the sanitized HTML was over the byte cap and DROPPED (renderers
+   *  fall back to `text`; the raw MIME keeps the original formatting). */
+  html_skipped?: 'oversize';
   raw_ref: { bucket: string; key: string };
   /** Metadata ONLY - unmatched mail never copies bytes to the media bucket. */
   attachments_meta: { filename: string; contentType: string; size: number }[];
@@ -134,7 +153,14 @@ export interface NewUnmatchedEmail {
 }
 
 export interface UnmatchedEmailStore {
-  putUnmatched(row: NewUnmatchedEmail): Promise<{ unmatchedId: string }>;
+  /**
+   * Store one non-threaded row under a DETERMINISTIC id derived from raw_ref (a
+   * conditional put) so a redelivery of the SAME S3 object is idempotent.
+   * `created` is false when the row already existed - the caller then skips the
+   * SSE and reports 'duplicate'. This is what makes a marker-less crash
+   * redelivery converge instead of double-writing (or dropping) the mail.
+   */
+  putUnmatched(row: NewUnmatchedEmail): Promise<{ unmatchedId: string; created: boolean }>;
   isBlocked(address: string): Promise<boolean>;
 }
 
@@ -154,7 +180,10 @@ export interface InboundEmailDeps {
     | 'incrementUnread'
     | 'touchLastActivity'
   >;
-  messages: Pick<MessagesRepo, 'append' | 'getByRfcMessageId' | 'putJobExecutionMarker'>;
+  messages: Pick<
+    MessagesRepo,
+    'append' | 'getByRfcMessageId' | 'putJobExecutionMarker' | 'getJobExecutionMarker'
+  >;
   contacts: Pick<ContactsRepo, 'findByEmail' | 'getById' | 'touchEmailLastSeen'>;
   extraction: Pick<ExtractionRepo, 'scheduleExtraction'>;
   events: EventBus;
@@ -193,6 +222,36 @@ function rfcIdSafe(id: string): string {
   return id.replace(/[^A-Za-z0-9._-]/g, '_');
 }
 
+/** UTF-8 byte length of a string. */
+function byteLength(s: string): number {
+  return Buffer.byteLength(s, 'utf8');
+}
+
+/**
+ * Truncate `s` to at most `maxBytes` UTF-8 bytes WITHOUT splitting a multibyte
+ * code point - back up over any trailing continuation bytes (10xxxxxx) so the
+ * cut lands on a whole-character boundary. Bounds every stored text field so an
+ * assembled item can never overflow DynamoDB's 400 KB ceiling (the fix-wave
+ * BLOCKER: a char-length cap let a CJK body exceed 400 KB and throw on put).
+ */
+function truncateToBytes(s: string, maxBytes: number): string {
+  const buf = Buffer.from(s, 'utf8');
+  if (buf.length <= maxBytes) return s;
+  let end = maxBytes;
+  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
+  return buf.subarray(0, end).toString('utf8');
+}
+
+/**
+ * Bound a caught error for logging (plan F18 hardening): the error NAME plus a
+ * 200-char message slice, never the raw third-party object - a library error
+ * could echo input bytes (addresses/subject/body) into its message/fields.
+ */
+function errFields(err: unknown): { errName: string; errMessage: string } {
+  if (err instanceof Error) return { errName: err.name, errMessage: err.message.slice(0, 200) };
+  return { errName: 'NonError', errMessage: String(err).slice(0, 200) };
+}
+
 /** The author-honesty rule (mirrors the twilio inbound append + A2 partner). */
 function authorForContactType(type: string | undefined): MessageAuthor {
   return type === 'tenant' || type === 'landlord' || type === 'partner' ? type : 'unknown';
@@ -229,11 +288,12 @@ function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise
 }
 
 /**
- * Ingest one inbound mail notice end-to-end. Throws ONLY on transient
- * infrastructure failures BEFORE the idempotency claim (S3 head/fetch, marker
- * write) - those are safe for SQS to redeliver. Everything after the claim
- * resolves to an outcome (quarantine rows for hostile input), never a retry
- * loop.
+ * Ingest one inbound mail notice end-to-end. Terminal durable writes come FIRST
+ * and are each idempotent; the object marker is claimed only AFTER (a fast-path
+ * dedupe). A throw (transient S3/DynamoDB error) BEFORE the terminal write
+ * propagates to SQS - redelivered, and after maxReceiveCount to the DLQ - so
+ * mail is NEVER silently dropped. Hostile input (parse crash/timeout, verdicts)
+ * still resolves to a quarantine row, not a retry loop.
  */
 export async function ingestInboundEmail(
   notice: InboundEmailNotice,
@@ -247,14 +307,34 @@ export async function ingestInboundEmail(
   const receivedAt = now().toISOString();
   const objMarkerId = `email#obj#${createHash('sha256').update(`${bucket}/${key}`).digest('hex')}`;
 
+  // The object marker is a FAST-PATH dedupe, claimed ONLY after a terminal
+  // durable write (terminal-write-THEN-marker). Correctness rests on the
+  // durable writes' own idempotency, so a crash before this call just re-runs
+  // the redelivery (which converges). Reingest deliberately re-enters the tiers
+  // and never touches the marker.
+  const claimObjectMarker = async (): Promise<void> => {
+    if (opts.reingest) return;
+    await deps.messages.putJobExecutionMarker(objMarkerId, '');
+  };
+
   const quarantineRow = async (
     row: NewUnmatchedEmail,
     outcome: 'quarantined' | 'blocked' | 'unmatched',
   ): Promise<IngestResult> => {
-    const { unmatchedId } = await deps.unmatchedStore.putUnmatched(row);
-    // Dismissed (blocked) rows are invisible to the B6 feeds - no refetch hint.
-    if (row.status !== 'dismissed') {
+    // Terminal durable write FIRST - idempotent by the deterministic id.
+    const { unmatchedId, created } = await deps.unmatchedStore.putUnmatched(row);
+    // SSE only on a FRESH row (created) and only for feed-visible statuses:
+    // dismissed (blocked) rows never surface, and an existing row already
+    // emitted on its first delivery.
+    if (created && row.status !== 'dismissed') {
       deps.events.emit('unmatched_email.updated', { unmatchedId });
+    }
+    // THEN the fast-path marker (a crash before this simply re-runs; the
+    // deterministic id makes the re-put a no-op, so no double row / SSE).
+    await claimObjectMarker();
+    if (!created) {
+      log.info({ bucket, key, outcome }, 'inbound email row already stored - idempotent redelivery');
+      return { outcome: 'duplicate', unmatchedId };
     }
     log.info({ bucket, key, outcome }, 'inbound email stored outside the timeline');
     return { outcome, unmatchedId };
@@ -274,24 +354,25 @@ export async function ingestInboundEmail(
     parse_skipped: parseSkipped,
   });
 
+  // ---- Fast-path dedupe: the marker exists ONLY after a prior delivery
+  // resolved to a terminal write, so skip straight to 'duplicate' (no head /
+  // fetch / parse). A reingest bypasses it to re-enter the tiers deliberately.
+  if (!opts.reingest && (await deps.messages.getJobExecutionMarker(objMarkerId))) {
+    log.info({ bucket, key }, 'inbound email duplicate delivery suppressed (object marker fast path)');
+    return { outcome: 'duplicate' };
+  }
+
   // ---- Tier 0: HEAD size cap - the raw bytes of an oversize mail are never
-  // loaded into this process (F17-1). Claim the object marker BEFORE the row
-  // write so a redelivered oversize notice no-ops instead of double-rowing.
+  // loaded into this process (F17-1). The terminal quarantine row is idempotent
+  // (deterministic id), so a redelivered oversize notice no-ops on re-put.
   const head = await deps.rawStore.head(key);
   if (head?.size !== undefined && head.size > INBOUND_EMAIL_MAX_RAW_BYTES) {
-    if (!opts.reingest) {
-      const first = await deps.messages.putJobExecutionMarker(objMarkerId, '');
-      if (!first) {
-        log.info({ bucket, key }, 'inbound email duplicate delivery suppressed (object marker)');
-        return { outcome: 'duplicate' };
-      }
-    }
     log.warn({ bucket, key, size: head.size }, 'inbound email oversize - quarantined unfetched');
     return quarantineRow(preParseRow('oversize'), 'quarantined');
   }
 
-  // ---- Fetch (still BEFORE the marker: a transient S3 failure must stay
-  // retryable; nothing has been claimed yet).
+  // ---- Fetch. A transient S3 failure throws here BEFORE any durable write, so
+  // SQS redelivers (and eventually DLQs) - never a silent drop.
   const raw = await deps.rawStore.getBytes(key);
   if (raw === undefined) {
     // SES wrote this object; a missing read is transient/misconfig - throw so
@@ -299,22 +380,14 @@ export async function ingestInboundEmail(
     throw new Error('inbound email raw object missing');
   }
 
-  // ---- Tier 1 level 1: claim the delivery (object key) marker BEFORE parse.
-  // From here on, hostile input resolves to an outcome - never an SQS retry.
-  if (!opts.reingest) {
-    const first = await deps.messages.putJobExecutionMarker(objMarkerId, '');
-    if (!first) {
-      log.info({ bucket, key }, 'inbound email duplicate delivery suppressed (object marker)');
-      return { outcome: 'duplicate' };
-    }
-  }
-
-  // ---- Parse, bounded (30s race + the in-parser 2MB HTML cap; F17-2/3).
+  // ---- Parse, bounded (30s race + the in-parser 2MB HTML cap; F17-2/3). A
+  // parser crash/timeout resolves to a quarantine row (idempotent), never a
+  // retry loop.
   let parsed: ParsedInboundEmail;
   try {
     parsed = await withTimeout(parse(raw), INBOUND_EMAIL_PARSE_TIMEOUT_MS, 'inbound email parse timeout');
   } catch (err) {
-    log.error({ bucket, key, err }, 'inbound email parse failed - quarantined');
+    log.error({ bucket, key, ...errFields(err) }, 'inbound email parse failed - quarantined');
     return quarantineRow(preParseRow('parse_failed'), 'quarantined');
   }
 
@@ -326,12 +399,16 @@ export async function ingestInboundEmail(
 
   const rfcId = bareRfcId(parsed.rfcMessageId);
   const fromNorm = normalizeEmailAddress(parsed.from.address);
-  const bodyText = visibleReplyText(parsed.text).slice(0, INBOUND_EMAIL_MAX_STORED_TEXT_CHARS);
+  // Every stored text field is bounded by UTF-8 BYTES (never char length) so an
+  // assembled item can never overflow DynamoDB's 400 KB ceiling and throw.
+  const bodyText = truncateToBytes(visibleReplyText(parsed.text), INBOUND_EMAIL_MAX_STORED_TEXT_BYTES);
+  const subjectCapped = truncateToBytes(parsed.subject, INBOUND_EMAIL_MAX_STORED_SUBJECT_BYTES);
   const sanitizedHtmlRaw = parsed.html !== undefined ? sanitizeEmailHtml(parsed.html) : undefined;
-  const sanitizedHtml =
-    sanitizedHtmlRaw !== undefined && sanitizedHtmlRaw.length <= INBOUND_EMAIL_MAX_STORED_HTML_CHARS
-      ? sanitizedHtmlRaw
-      : undefined;
+  // Over-cap HTML is DROPPED whole (never cut mid-markup) with a stored note;
+  // renderers fall back to `text` and the raw MIME keeps the original.
+  const htmlOversize =
+    sanitizedHtmlRaw !== undefined && byteLength(sanitizedHtmlRaw) > INBOUND_EMAIL_MAX_STORED_HTML_BYTES;
+  const sanitizedHtml = sanitizedHtmlRaw !== undefined && !htmlOversize ? sanitizedHtmlRaw : undefined;
 
   const parsedRow = (status: NewUnmatchedEmail['status']): NewUnmatchedEmail => ({
     status,
@@ -339,10 +416,11 @@ export async function ingestInboundEmail(
       address: fromNorm,
       ...(parsed.from.name !== undefined && { name: parsed.from.name }),
     },
-    subject: parsed.subject,
+    subject: subjectCapped,
     snippet: bodyText.replace(/\s+/g, ' ').trim().slice(0, UNMATCHED_SNIPPET_MAX_CHARS),
-    text: parsed.text.slice(0, INBOUND_EMAIL_MAX_STORED_TEXT_CHARS),
+    text: truncateToBytes(parsed.text, INBOUND_EMAIL_MAX_STORED_TEXT_BYTES),
     ...(sanitizedHtml !== undefined && { html_sanitized: sanitizedHtml }),
+    ...(htmlOversize && { html_skipped: 'oversize' as const }),
     raw_ref: { bucket, key },
     attachments_meta: attachments.map((a) => ({
       filename: a.filename,
@@ -359,6 +437,9 @@ export async function ingestInboundEmail(
   // for concurrent races (see the threaded path below).
   const existing = await deps.messages.getByRfcMessageId(rfcId);
   if (existing) {
+    // The mail is already durably threaded (a prior delivery under another
+    // key) - claim THIS object's marker so its own redeliveries fast-path.
+    await claimObjectMarker();
     log.info({ bucket, key }, 'inbound email duplicate rfc id suppressed (already threaded)');
     return { outcome: 'duplicate' };
   }
@@ -443,7 +524,10 @@ export async function ingestInboundEmail(
             // Degrade per-attachment (the twilio mirror precedent): the mail
             // must still thread; the raw ref keeps fidelity.
             truncated = true;
-            log.error({ bucket, key, conversationId, index: i, err }, 'inbound email attachment store failed - skipped');
+            log.error(
+              { bucket, key, conversationId, index: i, ...errFields(err) },
+              'inbound email attachment store failed - skipped',
+            );
           }
         }
       }
@@ -459,7 +543,7 @@ export async function ingestInboundEmail(
       author,
       deliveryStatus: 'delivered',
       ...(bodyText.length > 0 && { body: bodyText }),
-      subject: parsed.subject,
+      subject: subjectCapped,
       email_from: fromNorm,
       email_to: parsed.to.map(normalizeEmailAddress),
       email_cc: parsed.cc.map(normalizeEmailAddress),
@@ -473,7 +557,9 @@ export async function ingestInboundEmail(
     const appended = await deps.messages.append(message);
     if (appended.deduped) {
       // A concurrent delivery of the same rfc id won the sid#-pointer race -
-      // the winner runs the side effects; this delivery is a duplicate.
+      // the winner runs the side effects; this delivery is a duplicate. The
+      // mail is durably threaded, so claim this object's fast-path marker.
+      await claimObjectMarker();
       log.info({ bucket, key, conversationId }, 'inbound email append deduped (concurrent delivery)');
       return { outcome: 'duplicate' };
     }
@@ -490,7 +576,10 @@ export async function ingestInboundEmail(
         providerTs,
       );
     } catch (err) {
-      log.error({ bucket, key, conversationId, err }, 'inbound email unread/touch failed - message persisted, inbox stale');
+      log.error(
+        { bucket, key, conversationId, ...errFields(err) },
+        'inbound email unread/touch failed - message persisted, inbox stale',
+      );
     }
     deps.events.emit('message.persisted', {
       conversationId,
@@ -507,7 +596,10 @@ export async function ingestInboundEmail(
       try {
         await deps.contacts.touchEmailLastSeen(threadContact.contactId, fromNorm, providerTs);
       } catch (err) {
-        log.error({ bucket, key, conversationId, err }, 'inbound email lastSeen touch failed - stale');
+        log.error(
+          { bucket, key, conversationId, ...errFields(err) },
+          'inbound email lastSeen touch failed - stale',
+        );
       }
     }
 
@@ -524,10 +616,16 @@ export async function ingestInboundEmail(
           new Date(now().getTime() + deps.config.aiExtractionDebounceMs).toISOString(),
         );
       } catch (err) {
-        log.warn({ bucket, key, conversationId, err }, 'inbound email extraction schedule failed');
+        log.warn(
+          { bucket, key, conversationId, ...errFields(err) },
+          'inbound email extraction schedule failed',
+        );
       }
     }
 
+    // Terminal-write-THEN-marker: all durable writes + side effects are done,
+    // so claim the object marker to fast-path this object's future redeliveries.
+    await claimObjectMarker();
     log.info({ bucket, key, conversationId, outcome: 'threaded' }, 'inbound email threaded');
     return { outcome: 'threaded', conversationId, tsMsgId: appended.tsMsgId };
   };

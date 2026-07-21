@@ -3,8 +3,12 @@
 //
 // Two kinds of item share the single-key table, disjoint by key prefix:
 //
-//   um-<uuid>        one non-threaded inbound mail (B2's NewUnmatchedEmail +
-//                    the stamps added here: unmatchedId, read, TTL). Lifecycle
+//   um-<hash>        one non-threaded inbound mail (B2's NewUnmatchedEmail +
+//                    the stamps added here: unmatchedId, read, TTL). The id is
+//                    DETERMINISTIC - `um-<sha256(raw_ref)>` - so a redelivery of
+//                    the same S3 object dedupes via a conditional put (created
+//                    flag), the side-door analog of append's sid# idempotency.
+//                    Lifecycle
 //                    status: unmatched -> linked | dismissed, or quarantined ->
 //                    unmatched (release) | dismissed; blocked senders' mail
 //                    arrives as 'dismissed' (invisible to the feeds).
@@ -27,7 +31,7 @@
 //
 // PII (plan F18): addresses/subjects/bodies never appear in logs - ids,
 // statuses, and counts only.
-import { randomUUID } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
@@ -85,7 +89,7 @@ export interface UnmatchedEmailPage {
  * implemented VERBATIM) plus what the /api/unmatched-email routes need.
  */
 export interface UnmatchedEmailRepo extends UnmatchedEmailStore {
-  putUnmatched(row: NewUnmatchedEmail): Promise<{ unmatchedId: string }>;
+  putUnmatched(row: NewUnmatchedEmail): Promise<{ unmatchedId: string; created: boolean }>;
   isBlocked(address: string): Promise<boolean>;
   /** The row by id; undefined for unknown ids AND for blocklist pointer items. */
   getById(unmatchedId: string): Promise<UnmatchedEmailItem | undefined>;
@@ -114,6 +118,16 @@ export interface UnmatchedEmailRepo extends UnmatchedEmailStore {
 
 const blockId = (address: string): string => `block#${address}`;
 
+/**
+ * Deterministic side-door id from the raw S3 ref: `um-<sha256(bucket/key)[:32]>`.
+ * Same object -> same id, so putUnmatched's conditional put dedupes a redelivery
+ * (the fix-wave B idempotency that lets the object marker be a fast path only).
+ */
+function deterministicUnmatchedId(rawRef: { bucket: string; key: string }): string {
+  const hash = createHash('sha256').update(`${rawRef.bucket}/${rawRef.key}`).digest('hex');
+  return `um-${hash.slice(0, 32)}`;
+}
+
 /** The F19 matrix: epoch-seconds TTL for statuses that expire, else undefined. */
 function expiresAtFor(status: UnmatchedStatus, nowMs: number): number | undefined {
   if (status === 'unmatched') return undefined;
@@ -127,7 +141,12 @@ export function createUnmatchedEmailRepo(deps: RepoDeps = {}): UnmatchedEmailRep
 
   return {
     async putUnmatched(row) {
-      const unmatchedId = `um-${randomUUID()}`;
+      // DETERMINISTIC id from the raw S3 ref + a conditional put: a redelivery
+      // of the SAME object is a no-op (created:false), the side-door analog of
+      // append's sid# idempotency. This - not the object marker - is what makes
+      // a marker-less crash redelivery converge instead of double-writing or
+      // dropping the row (fix-wave B).
+      const unmatchedId = deterministicUnmatchedId(row.raw_ref);
       const expiresAt = expiresAtFor(row.status, Date.now());
       const item: UnmatchedEmailItem = {
         ...row,
@@ -135,9 +154,23 @@ export function createUnmatchedEmailRepo(deps: RepoDeps = {}): UnmatchedEmailRep
         read: false,
         ...(expiresAt !== undefined && { expires_at: expiresAt }),
       };
-      await doc.send(new PutCommand({ TableName: table, Item: item }));
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(unmatchedId)',
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          log.info({ unmatchedId, status: row.status }, 'unmatched email row already stored (idempotent)');
+          return { unmatchedId, created: false };
+        }
+        throw err;
+      }
       log.info({ unmatchedId, status: row.status }, 'unmatched email row stored');
-      return { unmatchedId };
+      return { unmatchedId, created: true };
     },
 
     async isBlocked(address) {

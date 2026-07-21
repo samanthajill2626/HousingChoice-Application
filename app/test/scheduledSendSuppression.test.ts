@@ -175,6 +175,7 @@ function makeSendFakes(
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
+    getJobExecutionMarker: async () => false,
     putParkedEmailEvent: async () => {},
     getParkedEmailEvent: async () => undefined,
     deleteParkedEmailEvent: async () => {},

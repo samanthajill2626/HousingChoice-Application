@@ -642,6 +642,13 @@ export interface MessagesRepo {
    * redelivery — suppress the side effect).
    */
   putJobExecutionMarker(jobId: string, conversationId: string): Promise<boolean>;
+  /**
+   * READ a job-execution marker (the inbound-email object-key dedupe FAST PATH,
+   * email-channel fix-wave B): true = this jobId already ran to a terminal
+   * durable write. Correctness never rests on it - the durable writes are
+   * independently idempotent - it only lets a clean redelivery skip the work.
+   */
+  getJobExecutionMarker(jobId: string): Promise<boolean>;
 
   // --- Email orphan-event parking lot (email-channel B5, plan F12) ----------
 
@@ -1360,6 +1367,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       return true;
+    },
+
+    async getJobExecutionMarker(jobId) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: jobPk(jobId), tsMsgId: 'ran' } }),
+      );
+      return Item !== undefined;
     },
 
     async putParkedEmailEvent(event, opts) {

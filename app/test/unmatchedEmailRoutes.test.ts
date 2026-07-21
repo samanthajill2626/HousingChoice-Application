@@ -63,7 +63,7 @@ function createMemoryUnmatchedRepo(): MemoryUnmatchedRepo {
         read: false,
         ...(expiresAt !== undefined && { expires_at: expiresAt }),
       });
-      return { unmatchedId };
+      return { unmatchedId, created: true };
     },
     async isBlocked(address: string) {
       return blocks.has(address);

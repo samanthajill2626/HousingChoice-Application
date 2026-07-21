@@ -174,7 +174,18 @@ function makeWorld(over: WorldOver = {}) {
   const markerCalls: string[] = [];
   const appended: NewMessage[] = [];
 
-  const putUnmatched = vi.fn(async (_row: NewUnmatchedEmail) => ({ unmatchedId: 'um-1' }));
+  // Idempotent by raw_ref, modelling the real repo's deterministic-id
+  // conditional put: same object -> same id + created:false; a NEW object ->
+  // created:true (the first distinct object is 'um-1', preserving prior asserts).
+  const unmatchedByRef = new Map<string, string>();
+  const putUnmatched = vi.fn(async (row: NewUnmatchedEmail) => {
+    const ref = `${row.raw_ref.bucket}/${row.raw_ref.key}`;
+    const existing = unmatchedByRef.get(ref);
+    if (existing !== undefined) return { unmatchedId: existing, created: false };
+    const unmatchedId = `um-${unmatchedByRef.size + 1}`;
+    unmatchedByRef.set(ref, unmatchedId);
+    return { unmatchedId, created: true };
+  });
   const isBlocked = vi.fn(async (_a: string) => over.isBlocked ?? false);
 
   const head = vi.fn(async (_key: string) => ({ size: over.rawSize ?? raw.length }));
@@ -214,6 +225,8 @@ function makeWorld(over: WorldOver = {}) {
     markers.add(jobId);
     return true;
   });
+  // The fix-wave fast-path READ (claimed only AFTER a terminal write).
+  const getJobExecutionMarker = vi.fn(async (jobId: string) => markers.has(jobId));
   const append = vi.fn(async (m: NewMessage) => {
     if (over.appendDeduped) return { deduped: true, tsMsgId: 'dup#ts' };
     appended.push(m);
@@ -274,7 +287,7 @@ function makeWorld(over: WorldOver = {}) {
       incrementUnread,
       touchLastActivity,
     },
-    messages: { append, getByRfcMessageId, putJobExecutionMarker },
+    messages: { append, getByRfcMessageId, putJobExecutionMarker, getJobExecutionMarker },
     contacts: { findByEmail, getById, touchEmailLastSeen },
     extraction: { scheduleExtraction },
     events: { emit } as unknown as EventBus,
@@ -299,6 +312,7 @@ function makeWorld(over: WorldOver = {}) {
     incrementUnread,
     touchLastActivity,
     putJobExecutionMarker,
+    getJobExecutionMarker,
     append,
     getByRfcMessageId,
     findByEmail,
@@ -310,6 +324,9 @@ function makeWorld(over: WorldOver = {}) {
     setContact: (c: Partial<ContactItem> | undefined) => {
       contactRef.current = c === undefined ? undefined : ({ contactId: 'c1', type: 'tenant', ...c } as ContactItem);
     },
+    /** Model a crash-before-marker window: wipe the object marker while the
+     *  durable writes (sid# pointer / unmatched row) survive. */
+    clearMarkers: () => markers.clear(),
   };
 }
 
@@ -366,7 +383,7 @@ describe('tier 0: oversize head-skip', () => {
 // ---------------------------------------------------------------------------
 
 describe('tier 1: two-level idempotency', () => {
-  it('claims the object-key marker (job email#obj#sha256(bucket/key)) BEFORE parse; a same-key redelivery duplicates with no second append', async () => {
+  it('claims the object-key marker (job email#obj#sha256(bucket/key)) AFTER the durable write; a same-key redelivery duplicates via the fast path with no second append', async () => {
     const w = makeWorld({});
     const first = await ingestInboundEmail(notice(), w.deps);
     expect(first.outcome).toBe('threaded');
@@ -392,6 +409,90 @@ describe('tier 1: two-level idempotency', () => {
     expect(out.outcome).toBe('duplicate');
     expect(w.incrementUnread).not.toHaveBeenCalled();
     expect(w.emit).not.toHaveBeenCalledWith('message.persisted', expect.anything());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix-wave B - durable-write-first idempotency (the BLOCKER rework): the object
+// marker is claimed AFTER a terminal durable write, so a store failure (or a
+// process kill) can never convert a safe SQS redelivery into silent mail loss.
+// ---------------------------------------------------------------------------
+
+describe('fix-wave B: durable-write-first idempotency', () => {
+  it('putUnmatched throwing once does NOT lose the mail - the redelivery stores it (no pre-write marker)', async () => {
+    const w = makeWorld({ contact: null });
+    w.putUnmatched.mockRejectedValueOnce(new Error('throttled'));
+    // The throw propagates (transient DynamoDB error) - SQS keeps the message.
+    await expect(ingestInboundEmail(notice(), w.deps)).rejects.toThrow('throttled');
+    // No marker was claimed (the throw beat the marker), so the redelivery re-runs.
+    const again = await ingestInboundEmail(notice(), w.deps);
+    expect(again.outcome).toBe('unmatched');
+    expect(w.putUnmatched).toHaveBeenCalledTimes(2); // retried, NOT suppressed as duplicate
+  });
+
+  it('append throwing once does NOT lose the mail - the redelivery threads it', async () => {
+    const w = makeWorld({});
+    w.append.mockRejectedValueOnce(new Error('throttled'));
+    await expect(ingestInboundEmail(notice(), w.deps)).rejects.toThrow('throttled');
+    const again = await ingestInboundEmail(notice(), w.deps);
+    expect(again.outcome).toBe('threaded');
+    expect(w.append).toHaveBeenCalledTimes(2);
+  });
+
+  it('a marker-less redelivery (crash after the durable write) converges via level-2 rfc dedupe - no doubled side effects, no loss', async () => {
+    const w = makeWorld({});
+    const first = await ingestInboundEmail(notice(), w.deps);
+    expect(first.outcome).toBe('threaded');
+    // Model the crash window: the sid# pointer (append) survived, the marker did not.
+    w.clearMarkers();
+    const again = await ingestInboundEmail(notice(), w.deps);
+    expect(again.outcome).toBe('duplicate'); // getByRfcMessageId catches it
+    expect(w.append).toHaveBeenCalledTimes(1); // no second append
+    expect(w.incrementUnread).toHaveBeenCalledTimes(1); // side effects NOT doubled
+  });
+
+  it('a same-key redelivery does NOT double side effects (marker fast path short-circuits)', async () => {
+    const w = makeWorld({});
+    await ingestInboundEmail(notice(), w.deps);
+    await ingestInboundEmail(notice(), w.deps);
+    expect(w.append).toHaveBeenCalledTimes(1);
+    expect(w.incrementUnread).toHaveBeenCalledTimes(1);
+    expect(w.emit.mock.calls.filter((c) => c[0] === 'message.persisted')).toHaveLength(1);
+  });
+
+  it('claims the object marker only AFTER the durable append (terminal-write-then-marker)', async () => {
+    const w = makeWorld({});
+    await ingestInboundEmail(notice(), w.deps);
+    const appendOrder = w.append.mock.invocationCallOrder[0]!;
+    const markerOrder = w.putJobExecutionMarker.mock.invocationCallOrder[0]!;
+    expect(markerOrder).toBeGreaterThan(appendOrder);
+  });
+
+  it('claims the object marker only AFTER the durable putUnmatched (quarantine terminal write)', async () => {
+    const w = makeWorld({ contact: null });
+    await ingestInboundEmail(notice(), w.deps);
+    const putOrder = w.putUnmatched.mock.invocationCallOrder[0]!;
+    const markerOrder = w.putJobExecutionMarker.mock.invocationCallOrder[0]!;
+    expect(markerOrder).toBeGreaterThan(putOrder);
+  });
+
+  it('a multibyte HTML body over the byte cap degrades to absent (html_skipped) without throwing', async () => {
+    // 200k CJK chars ~ 600 KB UTF-8: under a 200k CHAR cap, over the 200 KB BYTE
+    // cap AND the DynamoDB 400 KB item ceiling - the exact BLOCKER trigger.
+    // (U+4E2D built via String.fromCodePoint so the added source line is ASCII.)
+    const cjk = String.fromCodePoint(0x4e2d); // one CJK char, 3 UTF-8 bytes
+    const bigHtml = '<p>' + cjk.repeat(200_000) + '</p>';
+    const w = makeWorld({
+      contact: null,
+      parseMime: async () => fakeParsed({ html: bigHtml, text: 'short body' }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('unmatched');
+    const row = unmatchedRows(w)[0]!;
+    expect(row.html_sanitized).toBeUndefined(); // dropped, not stored oversize
+    expect(row.html_skipped).toBe('oversize'); // with the honest note
+    // The assembled row stays well under the DynamoDB 400 KB item ceiling.
+    expect(Buffer.byteLength(JSON.stringify(row), 'utf8')).toBeLessThan(400 * 1024);
   });
 });
 

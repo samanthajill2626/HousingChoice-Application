@@ -803,6 +803,9 @@ export function createFakeWorld(): FakeWorld {
       jobExecutionMarkers.set(jobId, conversationId);
       return true;
     },
+    async getJobExecutionMarker(jobId) {
+      return jobExecutionMarkers.has(jobId);
+    },
 
     // --- Email orphan-event parking lot (B5) ---
     async putParkedEmailEvent(event) {

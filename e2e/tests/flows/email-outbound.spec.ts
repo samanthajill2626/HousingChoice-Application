@@ -2,6 +2,7 @@ import { fileURLToPath } from 'node:url';
 import { test, expect } from '@playwright/test';
 import { Scenario } from '../../scenarios/steps.js';
 import { resetMail } from '../../fixtures/fakeEmail.js';
+import { reseed } from '../../fixtures/reseed.js';
 import { dashboardUrl } from '../../support/urls.js';
 
 // Outbound email (email-channel v1, A7) - compose + send email from a contact page
@@ -25,6 +26,13 @@ const MARCUS_ID = 'contact-landlord-0001';
 const MARCUS_EMAIL = 'marcus.bell@example.com';
 
 test.describe('Outbound email - contact composer', () => {
+  // Reseed BEFORE each run so the timeline starts with NO email cards. Since B8, the
+  // email-inbound spec runs first (alphabetical) and leaves Marcus with email
+  // messages; without a reseed the single-EMAIL-tag assertion below sees 2+ cards.
+  test.beforeEach(async ({ request }) => {
+    await reseed(request);
+  });
+
   test('compose + send an email with an image attachment: EmailCard + fake-SES record', async ({
     page,
     request,

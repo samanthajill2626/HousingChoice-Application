@@ -15,7 +15,13 @@ import { test, expect, type Page, type APIRequestContext, type Locator } from '@
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
 import { fakeUrl } from '../support/urls.js';
 import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
-import { listEmails, type FakeEmail } from '../fixtures/fakeEmail.js';
+import {
+  listEmails,
+  sendInboundEmail,
+  type FakeEmail,
+  type SendInboundEmailOpts,
+  type SentInboundEmail,
+} from '../fixtures/fakeEmail.js';
 import {
   verifyCell,
   driveBridge,
@@ -387,6 +393,64 @@ export class Scenario {
         .toBe(true);
       // The poll only resolves true once `matched` is set to a record.
       return matched as FakeEmail;
+    });
+  }
+
+  /**
+   * [Counterparty->App] A counterparty emails IN (the fake-SES inbound seam: MIME
+   * to MinIO + an SNS-shaped POST to /webhooks/ses/inbound). `body` is the plain
+   * text; `opts` overrides the routing inputs (To for a relay+token reply, inReplyTo/
+   * references for In-Reply-To threading, html for a script-bearing body, spam/virus
+   * verdicts for quarantine). Named for the diagram's canonical case (a Partner
+   * replying) but role-agnostic - it drives every inbound sender in the B8 matrix.
+   * Asserts the app accepted the delivery (webhook 200) and returns the fake's
+   * receipt (bucket/key + sesMessageId) for follow-on assertions.
+   */
+  partnerEmailsIn(
+    from: string,
+    subject: string,
+    body: string,
+    opts: Omit<SendInboundEmailOpts, 'from' | 'subject' | 'text'> = {},
+  ): Promise<SentInboundEmail> {
+    return step(`Partner emails in: "${subject}" (from ${from})`, async () => {
+      const res = await sendInboundEmail(this.request, { from, subject, text: body, ...opts });
+      expect(res.appStatus, `inbound webhook rejected the delivery from ${from}`).toBe(200);
+      return res;
+    });
+  }
+
+  /**
+   * [App->Team] An inbound (or outbound) email is interleaved in the OPEN contact
+   * timeline: the EmailCard shows its `EMAIL` transport tag and a subject matching
+   * `subjectRe`. Reloads inside a retry so a just-delivered inbound (persisted before
+   * the fake POST returned) is picked up even if SSE has not yet appended it live.
+   * The caller must already be on the contact page (goto /contacts/<id> first).
+   */
+  expectEmailInTimeline(subjectRe: RegExp): Promise<void> {
+    return step(`Email appears in the contact timeline (subject ${String(subjectRe)})`, async () => {
+      const region = this.page.getByRole('region', { name: 'Communications and activity' });
+      await expect(async () => {
+        await this.page.reload();
+        await expect(region.getByText('EMAIL', { exact: true }).first()).toBeVisible({
+          timeout: 5_000,
+        });
+        await expect(region.getByText(subjectRe).first()).toBeVisible({ timeout: 5_000 });
+      }).toPass({ timeout: 30_000 });
+    });
+  }
+
+  /**
+   * [App->Team] An unknown-sender inbound landed in the Email nav surface's Unmatched
+   * tab (NOT the general inbox, NOT Today - Decision 4). Navigates to /email and
+   * asserts a row whose sender address matches `fromRe`. Fresh navigation fetches the
+   * list on mount, so no reload loop is needed (ingest completes before the seam
+   * returns). Absence assertions (inbox/Today) stay in the spec.
+   */
+  expectUnmatchedRow(fromRe: RegExp): Promise<void> {
+    return step(`Unmatched-email row present (from ${String(fromRe)})`, async () => {
+      await this.page.goto(`${NEXT}/email`);
+      const list = this.page.getByRole('list', { name: 'Unmatched email' });
+      await expect(list.getByText(fromRe).first()).toBeVisible({ timeout: 20_000 });
     });
   }
 

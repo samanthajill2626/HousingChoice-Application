@@ -278,6 +278,16 @@ export interface NewMessage {
    */
   attachments_truncated?: boolean;
   /**
+   * INBOUND email (B2 DoS caps): a sender-controlled stored array was capped so
+   * the assembled item stays under DynamoDB's 400 KB ceiling - the To/Cc
+   * recipient lists (count + summed bytes), the References chain (last-N), or an
+   * attachment filename (summed bytes). Long Cc/References are ROUTINE on
+   * forwarded / mailing-list mail, so this is not just an adversarial guard. The
+   * raw MIME (email_raw_ref) keeps the full header set. Absent when nothing
+   * capped.
+   */
+  headers_truncated?: boolean;
+  /**
    * OUTBOUND email only: our own RFC Message-ID (`<hc-...@domain>`). When set,
    * append() adds a THIRD emailmsgid#<rfcId> pointer to the transaction so an
    * inbound reply's In-Reply-To/References can resolve this message via
@@ -431,6 +441,8 @@ export interface MessageItem {
   email_new_address?: boolean;
   /** Inbound attachment-cap note (see NewMessage.attachments_truncated). */
   attachments_truncated?: boolean;
+  /** Inbound stored-array cap note (see NewMessage.headers_truncated). */
+  headers_truncated?: boolean;
   /**
    * S3 key of the mirrored recording (M1.9c founder-bridge calls only; UNUSED
    * for masked calls, which are never recorded). Set by the recording callback.
@@ -900,6 +912,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
         ...(message.email_new_address === true && { email_new_address: true }),
         ...(message.attachments_truncated === true && { attachments_truncated: true }),
+        ...(message.headers_truncated === true && { headers_truncated: true }),
       };
       try {
         await doc.send(

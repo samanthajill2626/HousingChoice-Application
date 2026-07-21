@@ -123,20 +123,33 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundEm
  * Sanitize inbound HTML ONCE, at ingest (plan F16 defense-in-depth: the stored
  * `email_html_sanitized` is already safe; B7's sandboxed iframe + CSP is the
  * render-time guarantee). The config: sanitize-html defaults plus `img`, with
- * allowedSchemes ['data','cid'] - strips <script>, event handlers (never in any
- * allow-list) and javascript: hrefs. For images ONLY data:/cid: inline sources
- * survive; every REMOTE form is dropped so no tracker can fetch off the stored
- * copy: http(s) src by the scheme allow-list, PROTOCOL-RELATIVE `//host/x` src
- * by allowProtocolRelative:false (a scheme-less URL otherwise bypasses the
- * scheme check), and `srcset` by dropping it from img's allowed attributes (a
- * second place a remote ref hides). Note: the default allowedAttributes strip
- * `style` entirely, so no inline styling is retained here (the render CSP's
- * style-src is therefore moot - see EmailHtmlFrame).
+ * PER-TAG schemes (n6) - strips <script>, event handlers (never in any
+ * allow-list) and javascript: hrefs. Schemes are scoped by tag, NOT global:
+ *   - img: ONLY data:/cid: inline sources survive; every REMOTE form is dropped
+ *     so no tracker can fetch off the stored copy: http(s) src by the per-tag
+ *     scheme list, PROTOCOL-RELATIVE `//host/x` src by allowProtocolRelative:
+ *     false (a scheme-less URL otherwise bypasses the scheme check), and
+ *     `srcset` by dropping it from img's allowed attributes (a second place a
+ *     remote ref hides).
+ *   - a: ONLY http/https/mailto hrefs - a `data:`/`javascript:` anchor is a
+ *     latent PHISHING vector if the sanitized HTML is ever rendered outside the
+ *     exact B7 sandbox, so data: is granted to img ALONE, never to anchors.
+ *   - the GLOBAL default (any other tag) is the restrictive http/https/mailto
+ *     set: no data: anywhere unless a per-tag rule grants it.
+ * Note: the default allowedAttributes strip `style` entirely, so no inline
+ * styling is retained here (the render CSP's style-src is therefore moot - see
+ * EmailHtmlFrame).
  */
 export function sanitizeEmailHtml(html: string): string {
   return sanitizeHtmlLib(html, {
     allowedTags: sanitizeHtmlLib.defaults.allowedTags.concat(['img']),
-    allowedSchemes: ['data', 'cid'],
+    // Global default: restrictive (no data:/cid: anywhere). Per-tag overrides
+    // below grant data:/cid: to img ONLY and keep anchors to safe schemes.
+    allowedSchemes: ['http', 'https', 'mailto'],
+    allowedSchemesByTag: {
+      img: ['data', 'cid'],
+      a: ['http', 'https', 'mailto'],
+    },
     allowProtocolRelative: false,
     allowedAttributes: {
       ...sanitizeHtmlLib.defaults.allowedAttributes,

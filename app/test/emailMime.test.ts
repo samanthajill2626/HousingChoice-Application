@@ -178,6 +178,23 @@ describe('sanitizeEmailHtml', () => {
     expect(clean).not.toContain('tracker.evil');
     expect(clean).not.toContain('srcset');
   });
+
+  it('scopes schemes PER TAG (n6): a data: anchor loses its href while a data: image + https/mailto anchors survive', () => {
+    const clean = sanitizeEmailHtml(
+      '<a href="data:text/html,<script>alert(1)</script>">click</a>' +
+        '<a href="https://good.test/page">link</a>' +
+        '<a href="mailto:x@y.z">mail</a>' +
+        '<img src="data:image/png;base64,AAAA">',
+    );
+    // The anchor keeps its text but the data: href is dropped (not in a's schemes).
+    expect(clean).not.toContain('data:text/html');
+    expect(clean).toContain('click');
+    // Safe anchor schemes survive.
+    expect(clean).toContain('https://good.test/page');
+    expect(clean).toContain('mailto:x@y.z');
+    // data: images still survive - the scheme is granted to img ALONE.
+    expect(clean).toContain('data:image/png;base64,AAAA');
+  });
 });
 
 describe('visibleReplyText', () => {

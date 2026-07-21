@@ -124,10 +124,13 @@ function contactRefId(conv: ConversationSummary): string {
 }
 
 /** 1:1 conversation types (one external contact) — these route to the contact
- *  page. relay_group has no single contact, so it keeps a conversation ref. */
+ *  page. relay_group has no single contact, so it keeps a conversation ref.
+ *  partner_1to1 is a 1:1 too (n8): omitting it dropped an unread partner thread
+ *  onto the dead /conversations/:id 404 fallback instead of /contacts/:id. */
 const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
   'tenant_1to1',
   'landlord_1to1',
+  'partner_1to1',
   'unknown_1to1',
 ]);
 

@@ -975,6 +975,62 @@ describe('threaded attachments', () => {
 });
 
 // ---------------------------------------------------------------------------
+// M1: sender-controlled stored-array caps (To/Cc/References/attachment
+// filenames) - long Cc headers + References chains are ROUTINE on forwarded /
+// mailing-list mail; an uncapped stored item would overflow DynamoDB's 400 KB
+// ceiling and THROW on append, DLQ'ing legitimate mail. Overflow NEVER throws.
+// ---------------------------------------------------------------------------
+
+const CC_500 = Array.from({ length: 500 }, (_, i) => `cc${i}@example.com`);
+const REFS_200 = Array.from({ length: 200 }, (_, i) => `<ref${i}@example.com>`);
+const LONG_FILENAME = `${'x'.repeat(20_000)}.pdf`;
+const FILENAME_BYTE_CAP = 8 * 1024;
+
+describe('M1: stored-array caps', () => {
+  it('threaded path: caps To/Cc + References (last-N) + attachment filenames, marks headers_truncated, never throws', async () => {
+    const w = makeWorld({
+      parseMime: async () =>
+        fakeParsed({
+          cc: CC_500,
+          references: REFS_200,
+          attachments: [
+            { filename: LONG_FILENAME, contentType: 'application/pdf', content: Buffer.from('x'), size: 1 },
+          ],
+        }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded'); // stored successfully - no throw
+    const m = w.appended[0]!;
+    // Cc bounded by the element-count cap (50); the byte cap is not reached.
+    expect(m.email_cc!.length).toBe(50);
+    // References keeps the LAST N ids (the direct-parent end the lookup walks).
+    expect(m.email_references).toEqual(REFS_200.slice(-10));
+    // The long attachment filename is byte-bounded on the stored mediaAttachment.
+    expect(Buffer.byteLength(m.mediaAttachments![0]!.filename ?? '', 'utf8')).toBeLessThanOrEqual(FILENAME_BYTE_CAP);
+    expect(m.headers_truncated).toBe(true);
+  });
+
+  it('unmatched path: caps attachment-filename bytes on the stored row + marks headers_truncated, never throws', async () => {
+    const w = makeWorld({
+      contact: null, // unknown sender -> tier 7 unmatched side-door
+      parseMime: async () =>
+        fakeParsed({
+          cc: CC_500,
+          references: REFS_200,
+          attachments: [
+            { filename: LONG_FILENAME, contentType: 'application/pdf', content: Buffer.from('x'), size: 1 },
+          ],
+        }),
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('unmatched'); // stored successfully - no throw
+    const row = w.putUnmatched.mock.calls[0]![0] as NewUnmatchedEmail;
+    expect(Buffer.byteLength(row.attachments_meta[0]!.filename, 'utf8')).toBeLessThanOrEqual(FILENAME_BYTE_CAP);
+    expect(row.headers_truncated).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Parse hardening (DoS 3)
 // ---------------------------------------------------------------------------
 

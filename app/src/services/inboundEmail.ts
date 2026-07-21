@@ -85,12 +85,32 @@ export const UNMATCHED_SNIPPET_MAX_CHARS = 180;
  * fix-wave BLOCKER, where a thrown put dropped mail on redelivery. `text` is
  * truncated at a safe char boundary; an over-cap sanitized HTML is DROPPED
  * (never cut mid-markup) with a stored `html_skipped:'oversize'` note; `subject`
- * is truncated. The three caps sum to ~302 KB, leaving margin under 400 KB for
- * the row's other fields. The raw MIME ref always keeps full fidelity.
+ * is truncated. The raw MIME ref always keeps full fidelity.
+ *
+ * The SAME budget bounds the sender-controlled STORED ARRAYS (M1): the To/Cc
+ * recipient lists and the References chain are unbounded on forwarded /
+ * mailing-list mail, so each is capped by element count AND summed bytes, and
+ * attachment filenames by summed bytes (never thrown; a cap sets the
+ * `headers_truncated` marker, mirroring attachments_truncated / html_skipped).
+ * Overall safety check: the caps sum to text 100 + html 200 + subject 2 + to 8
+ * + cc 8 + references ~2 + attachment filenames 8 = ~328 KB, leaving margin
+ * under 400 KB for the item's other fields.
  */
 export const INBOUND_EMAIL_MAX_STORED_TEXT_BYTES = 100 * 1024;
 export const INBOUND_EMAIL_MAX_STORED_HTML_BYTES = 200 * 1024;
 export const INBOUND_EMAIL_MAX_STORED_SUBJECT_BYTES = 2 * 1024;
+/** Per-list cap on stored To/Cc recipients: element count AND summed bytes. */
+export const INBOUND_EMAIL_MAX_STORED_RECIPIENTS = 50;
+export const INBOUND_EMAIL_MAX_STORED_RECIPIENT_BYTES = 8 * 1024;
+/**
+ * Stored References chain keeps the LAST N ids (the direct-parent end - the ids
+ * the tier-5 lookup actually walks). Storage and lookup now SHARE the same cap
+ * (INBOUND_EMAIL_MAX_REFERENCE_LOOKUPS) - we never store an id we would never
+ * look up. Also bounded by summed bytes against a handful of hostile giant ids.
+ */
+export const INBOUND_EMAIL_MAX_STORED_REFERENCES = INBOUND_EMAIL_MAX_REFERENCE_LOOKUPS;
+/** Summed cap on stored attachment-filename bytes (count is 50-bounded at parse). */
+export const INBOUND_EMAIL_MAX_ATTACHMENT_FILENAME_BYTES = 8 * 1024;
 
 /** The SQS/dev-route notification the delivery mechanisms (B4) hand us. */
 export interface InboundEmailNotice {
@@ -145,6 +165,9 @@ export interface NewUnmatchedEmail {
   raw_ref: { bucket: string; key: string };
   /** Metadata ONLY - unmatched mail never copies bytes to the media bucket. */
   attachments_meta: { filename: string; contentType: string; size: number }[];
+  /** Set when a stored array was capped (attachment filenames here; the message
+   *  path also caps To/Cc/References). See MessageItem.headers_truncated. */
+  headers_truncated?: true;
   spam_verdict?: 'PASS' | 'FAIL' | 'GRAY';
   virus_verdict?: 'PASS' | 'FAIL';
   received_at: string;
@@ -240,6 +263,93 @@ function truncateToBytes(s: string, maxBytes: number): string {
   let end = maxBytes;
   while (end > 0 && (buf[end]! & 0xc0) === 0x80) end--;
   return buf.subarray(0, end).toString('utf8');
+}
+
+/** Take the leading elements of `list` that fit BOTH an element-count cap and a
+ *  summed-UTF-8-byte cap; stop at the first element that would breach either.
+ *  Returns the kept prefix and whether anything was dropped. Never throws. */
+function capListByCountAndBytes(
+  list: string[],
+  maxCount: number,
+  maxBytes: number,
+): { kept: string[]; truncated: boolean } {
+  const kept: string[] = [];
+  let bytes = 0;
+  for (const item of list) {
+    if (kept.length >= maxCount) break;
+    const b = byteLength(item);
+    if (bytes + b > maxBytes) break;
+    kept.push(item);
+    bytes += b;
+  }
+  return { kept, truncated: kept.length < list.length };
+}
+
+/**
+ * Cap the sender-controlled STORED header arrays (M1) so the assembled message
+ * item can never overflow DynamoDB's 400 KB ceiling and THROW on append (the
+ * fix-wave BLOCKER, now extended from the text fields to these arrays). Long
+ * To/Cc lists and References chains are ROUTINE on forwarded / mailing-list
+ * mail. To/Cc are bounded by element count AND summed bytes; References keeps
+ * the LAST N ids (the direct-parent end the tier-5 lookup walks - storage and
+ * lookup share INBOUND_EMAIL_MAX_STORED_REFERENCES) then the same byte bound.
+ * Returns the capped arrays plus a single `truncated` flag (the caller sets
+ * headers_truncated). Never throws; the raw MIME keeps the full header set.
+ */
+function capStoredHeaders(
+  to: string[],
+  cc: string[],
+  references: string[],
+): { to: string[]; cc: string[]; references: string[]; truncated: boolean } {
+  const cappedTo = capListByCountAndBytes(
+    to,
+    INBOUND_EMAIL_MAX_STORED_RECIPIENTS,
+    INBOUND_EMAIL_MAX_STORED_RECIPIENT_BYTES,
+  );
+  const cappedCc = capListByCountAndBytes(
+    cc,
+    INBOUND_EMAIL_MAX_STORED_RECIPIENTS,
+    INBOUND_EMAIL_MAX_STORED_RECIPIENT_BYTES,
+  );
+  // References: keep the LAST N (newest / direct-parent end), then byte-bound.
+  const lastN =
+    references.length > INBOUND_EMAIL_MAX_STORED_REFERENCES
+      ? references.slice(-INBOUND_EMAIL_MAX_STORED_REFERENCES)
+      : references;
+  const cappedRefs = capListByCountAndBytes(
+    lastN,
+    INBOUND_EMAIL_MAX_STORED_REFERENCES,
+    INBOUND_EMAIL_MAX_STORED_RECIPIENT_BYTES,
+  );
+  return {
+    to: cappedTo.kept,
+    cc: cappedCc.kept,
+    references: cappedRefs.kept,
+    truncated:
+      cappedTo.truncated ||
+      cappedCc.truncated ||
+      cappedRefs.truncated ||
+      lastN.length < references.length,
+  };
+}
+
+/** Bound the SUMMED attachment-filename bytes (count is 50-bounded at parse):
+ *  truncate each filename to the remaining budget so the stored metadata array
+ *  cannot itself overflow the item. Returns the rewritten metas + a truncated
+ *  flag. Generic over any {filename} record. Never throws. */
+function capAttachmentFilenames<T extends { filename: string }>(
+  metas: T[],
+): { metas: T[]; truncated: boolean } {
+  let truncated = false;
+  let used = 0;
+  const out = metas.map((m) => {
+    const budget = Math.max(0, INBOUND_EMAIL_MAX_ATTACHMENT_FILENAME_BYTES - used);
+    const name = truncateToBytes(m.filename, budget);
+    if (name.length !== m.filename.length) truncated = true;
+    used += byteLength(name);
+    return { ...m, filename: name };
+  });
+  return { metas: out, truncated };
 }
 
 /**
@@ -396,6 +506,12 @@ export async function ingestInboundEmail(
   const attachments = truncatedByCount
     ? parsed.attachments.slice(0, INBOUND_EMAIL_MAX_ATTACHMENTS)
     : parsed.attachments;
+  // M1: bound the SUMMED filename bytes of the stored metadata (the count is
+  // already 50-bounded above). Deterministic, so both the unmatched row and any
+  // logging share one result. `truncated` folds into headers_truncated below.
+  const attachmentMetaCapped = capAttachmentFilenames(
+    attachments.map((a) => ({ filename: a.filename, contentType: a.contentType, size: a.size })),
+  );
 
   const rfcId = bareRfcId(parsed.rfcMessageId);
   const fromNorm = normalizeEmailAddress(parsed.from.address);
@@ -422,11 +538,8 @@ export async function ingestInboundEmail(
     ...(sanitizedHtml !== undefined && { html_sanitized: sanitizedHtml }),
     ...(htmlOversize && { html_skipped: 'oversize' as const }),
     raw_ref: { bucket, key },
-    attachments_meta: attachments.map((a) => ({
-      filename: a.filename,
-      contentType: a.contentType,
-      size: a.size,
-    })),
+    attachments_meta: attachmentMetaCapped.metas,
+    ...(attachmentMetaCapped.truncated && { headers_truncated: true as const }),
     ...(notice.spamVerdict !== undefined && { spam_verdict: notice.spamVerdict }),
     ...(notice.virusVerdict !== undefined && { virus_verdict: notice.virusVerdict }),
     received_at: receivedAt,
@@ -500,6 +613,10 @@ export async function ingestInboundEmail(
     // durable keys in one write. Caps: 50 (above) + 25MB total per message.
     const stored: MediaAttachment[] = [];
     let truncated = truncatedByCount;
+    // M1: a sender-controlled stored array (To/Cc/References/attachment filename)
+    // was capped so the assembled item stays under DynamoDB's 400 KB ceiling.
+    let headersTruncated = false;
+    let filenameBytesUsed = 0;
     if (attachments.length > 0) {
       if (deps.mediaStore === undefined) {
         truncated = true;
@@ -519,7 +636,12 @@ export async function ingestInboundEmail(
           try {
             await deps.mediaStore.put(s3Key, Readable.from(a.content), contentType);
             totalBytes += a.content.length;
-            stored.push({ s3Key, contentType, filename: a.filename });
+            // M1: bound the SUMMED stored-filename bytes (a hostile long name).
+            const budget = Math.max(0, INBOUND_EMAIL_MAX_ATTACHMENT_FILENAME_BYTES - filenameBytesUsed);
+            const filename = truncateToBytes(a.filename, budget);
+            if (filename.length !== a.filename.length) headersTruncated = true;
+            filenameBytesUsed += byteLength(filename);
+            stored.push({ s3Key, contentType, filename });
           } catch (err) {
             // Degrade per-attachment (the twilio mirror precedent): the mail
             // must still thread; the raw ref keeps fidelity.
@@ -533,6 +655,16 @@ export async function ingestInboundEmail(
       }
     }
 
+    // M1: cap the sender-controlled header arrays (To/Cc element+byte, References
+    // last-N) so the append can never overflow 400 KB and THROW (DLQ'ing real
+    // mail). The raw MIME (email_raw_ref) keeps the full header set.
+    const headers = capStoredHeaders(
+      parsed.to.map(normalizeEmailAddress),
+      parsed.cc.map(normalizeEmailAddress),
+      parsed.references,
+    );
+    if (headers.truncated) headersTruncated = true;
+
     const providerTs = receivedAt; // inbound receipt time (twilio precedent)
     const message: NewMessage = {
       conversationId,
@@ -545,16 +677,17 @@ export async function ingestInboundEmail(
       ...(bodyText.length > 0 && { body: bodyText }),
       subject: subjectCapped,
       email_from: fromNorm,
-      email_to: parsed.to.map(normalizeEmailAddress),
-      email_cc: parsed.cc.map(normalizeEmailAddress),
+      email_to: headers.to,
+      email_cc: headers.cc,
       email_message_id: parsed.rfcMessageId, // bracketed RFC fidelity
       // Persist the References chain so an outbound staff reply can thread on it.
-      ...(parsed.references.length > 0 && { email_references: parsed.references }),
+      ...(headers.references.length > 0 && { email_references: headers.references }),
       ...(sanitizedHtml !== undefined && { email_html_sanitized: sanitizedHtml }),
       email_raw_ref: { bucket, key },
       ...(flagNewAddress && { email_new_address: true }),
       ...(stored.length > 0 && { mediaAttachments: stored }),
       ...(truncated && { attachments_truncated: true }),
+      ...(headersTruncated && { headers_truncated: true }),
     };
     const appended = await deps.messages.append(message);
     if (appended.deduped) {

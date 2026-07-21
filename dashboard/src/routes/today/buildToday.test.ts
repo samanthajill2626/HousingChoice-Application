@@ -221,6 +221,30 @@ describe('buildTodayFromSources', () => {
     expect(u?.tag).toBe('Contact - Landlord');
   });
 
+  it('routes an unread partner_1to1 to the contact page, not the dead conversation link (n8)', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({
+          conversationId: 'unrep-p',
+          type: 'partner_1to1',
+          participant_phone: '+14042220191',
+          participants: [{ contactId: 'P1', phone: '+14042220191' }],
+          unread_count: 1,
+          participant_display_name: 'Nadia Partner',
+          preview: 'Referral packet attached',
+        }),
+      ],
+      NOW,
+    );
+    const u = items.find((i) => i.group === 'unreplied');
+    // partner_1to1 is a 1:1 -> refType 'contact' (/contacts/P1), NOT the dead
+    // /conversations/:id 404 fallback a missing ONE_TO_ONE entry would produce.
+    expect(u?.refType).toBe('contact');
+    expect(u?.refId).toBe('P1');
+    expect(u?.tag).toBe('Contact - Partner');
+  });
+
   it('does not put a read conversation anywhere', () => {
     const items = buildTodayFromSources(
       [],

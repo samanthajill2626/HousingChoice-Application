@@ -169,6 +169,15 @@ describe('sanitizeEmailHtml', () => {
     expect(clean).toContain('data:image/png;base64,AAAA');
     expect(clean).toContain('cid:part1@x.yz');
   });
+
+  it('strips PROTOCOL-RELATIVE image src and srcset (no remote tracker survives sanitize) - adv M1', () => {
+    const clean = sanitizeEmailHtml(
+      '<img src="//tracker.evil/pixel.png">' +
+        '<img srcset="//tracker.evil/1x.png 1x, https://tracker.evil/2x.png 2x">',
+    );
+    expect(clean).not.toContain('tracker.evil');
+    expect(clean).not.toContain('srcset');
+  });
 });
 
 describe('visibleReplyText', () => {

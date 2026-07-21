@@ -169,6 +169,11 @@ if (config.inboundMailQueueUrl) {
         applyEmailEvent,
         logger,
       }),
+      // Pull at most 2 per poll (adv Q3): ingest shares a semaphore(2) with a
+      // 60s gate + 30s parse, so a default batch of 10 on a 120s visibility
+      // timeout could see a queued message redeliver WHILE in-flight. Matching
+      // the poll size to the concurrency closes that visibility-overrun window.
+      maxMessagesPerPoll: 2,
       baseContext: bootContext,
       logger,
     });

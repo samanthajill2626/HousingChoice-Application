@@ -122,16 +122,27 @@ export async function parseInboundMime(rawMime: Buffer): Promise<ParsedInboundEm
 /**
  * Sanitize inbound HTML ONCE, at ingest (plan F16 defense-in-depth: the stored
  * `email_html_sanitized` is already safe; B7's sandboxed iframe + CSP is the
- * render-time guarantee). The spike-verified config: sanitize-html defaults
- * plus `img`, with allowedSchemes ['data','cid'] - strips <script>, event
- * handlers (never in any allow-list), javascript: hrefs, and REMOTE http(s)
- * image sources (the src attribute is dropped, so no tracker fetch is
- * possible), while inline data:/cid: images survive.
+ * render-time guarantee). The config: sanitize-html defaults plus `img`, with
+ * allowedSchemes ['data','cid'] - strips <script>, event handlers (never in any
+ * allow-list) and javascript: hrefs. For images ONLY data:/cid: inline sources
+ * survive; every REMOTE form is dropped so no tracker can fetch off the stored
+ * copy: http(s) src by the scheme allow-list, PROTOCOL-RELATIVE `//host/x` src
+ * by allowProtocolRelative:false (a scheme-less URL otherwise bypasses the
+ * scheme check), and `srcset` by dropping it from img's allowed attributes (a
+ * second place a remote ref hides). Note: the default allowedAttributes strip
+ * `style` entirely, so no inline styling is retained here (the render CSP's
+ * style-src is therefore moot - see EmailHtmlFrame).
  */
 export function sanitizeEmailHtml(html: string): string {
   return sanitizeHtmlLib(html, {
     allowedTags: sanitizeHtmlLib.defaults.allowedTags.concat(['img']),
     allowedSchemes: ['data', 'cid'],
+    allowProtocolRelative: false,
+    allowedAttributes: {
+      ...sanitizeHtmlLib.defaults.allowedAttributes,
+      // img keeps `src` (data:/cid: only) + harmless descriptors; NO `srcset`.
+      img: ['src', 'alt', 'title', 'width', 'height'],
+    },
   });
 }
 

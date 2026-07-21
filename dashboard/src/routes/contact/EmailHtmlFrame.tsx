@@ -17,9 +17,13 @@
 //     the sandbox alone does NOT stop remote image/tracker loads.
 //     `default-src 'none'` forbids every network origin; `img-src data:` permits
 //     ONLY inline data: images, so a `<img src="https://tracker/pixel">` never
-//     loads (no open-tracking, no IP leak); `style-src 'unsafe-inline'` keeps
-//     the mail's inline styling readable. sanitize-html's scheme strip at ingest
-//     is defense-in-depth; THIS CSP is the render-time guarantee.
+//     loads (no open-tracking, no IP leak). `style-src 'unsafe-inline'` is a
+//     belt-and-braces directive only: the ingest sanitize STRIPS inline `style`
+//     attributes (they are not in sanitize-html's allowedAttributes), so no
+//     inline styling actually reaches this frame - it is retained purely as
+//     harmless defense-in-depth. sanitize-html's scheme + protocol-relative +
+//     srcset strip at ingest is the first layer; THIS CSP is the render-time
+//     guarantee.
 //
 // HEIGHT (adjudicated divergence from the plan's "auto-height via onLoad
 // measurement capped at 480px"): an empty sandbox (no allow-same-origin) makes

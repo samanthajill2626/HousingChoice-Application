@@ -20,7 +20,7 @@ describe('reseed clears unmatched_email (ADJ-8, F23)', () => {
     expect(clearSet).toContain('unmatched_email');
   });
 
-  it('unmatched_email is NOT part of any seed profile (never re-created on reseed)', () => {
+  it('unmatched_email is a plain PK (unmatchedId) table - no seed-tied hash/range key a profile would populate', () => {
     // F23: the side-door store must never enter a byte-asserted seed snapshot, so a
     // reseed leaves it empty (cleared above, and nothing re-seeds it). We assert the
     // table carries no seed-tied hash/range default that a seed would populate - it

@@ -23,6 +23,18 @@
 //     function NEVER throws (a throw in the consumer dispatch would DLQ real
 //     mail; a throw in the route would 5xx and drive an SNS retry loop).
 //
+// TRUST BOUNDARY (adv Q1 - stated explicitly): this parser does NO SNS
+// signature verification, BY DESIGN. In PROD the SOLE authenticator is the SQS
+// queue policy - it accepts messages only from the two SES mail topics
+// (ArnEquals aws:SourceArn, infra/modules/inbound_mail/main.tf), so nothing
+// unsigned can reach the worker's inbound consumer. LOCALLY / e2e the dev
+// webhook route is gated by the x-origin-verify origin secret PLUS the triple
+// prod-safety gate (config boot-throw on SES_API_BASE_URL in prod + conditional
+// mount + request-time 404); the parser even accepts a direct/unwrapped SES
+// shape for that dev path. If the queue policy were ever loosened off the topic
+// SourceArn, spoofed unsigned notifications would be trusted - so that policy
+// is load-bearing and must stay SourceArn-scoped.
+//
 // PII (plan F18): addresses/subjects/bodies never appear in logs; only the
 // bucket/key/ids/verdicts/subscribe-URL do (none are message content).
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';

@@ -91,7 +91,7 @@ export function allowedPriorCallStatuses(next: CallStatus): CallStatus[] {
  * services/relayAnnouncements.ts): no human wrote it, so neither `teammate`
  * nor `ai` would be honest.
  */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
+export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /**
  * Outbound delivery status machine (doc §7.1):

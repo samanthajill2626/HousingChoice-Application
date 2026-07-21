@@ -179,14 +179,15 @@ async function processRow(
     }
   }
 
-  // Nothing to extract for: a missing conversation/contact, a landlord/team_member
-  // contact, or a bare phone-ref pointer item. Complete with the EXISTING cursor
-  // (never fail forever) so the row leaves the due index.
+  // Nothing to extract for: a missing conversation/contact, a landlord/partner/
+  // team_member contact, or a bare phone-ref pointer item. Complete with the
+  // EXISTING cursor (never fail forever) so the row leaves the due index.
   if (
     !conv ||
     !contact ||
     contact.contactId.startsWith(PHONE_REF_PREFIX) ||
     contact.type === 'landlord' ||
+    contact.type === 'partner' ||
     contact.type === 'team_member'
   ) {
     logger.debug({ conversationId }, 'extraction: nothing to extract (missing/ineligible contact) - completing');

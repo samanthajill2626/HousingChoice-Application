@@ -122,6 +122,28 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     expect(world.extractionSchedules).toEqual([]);
   });
 
+  it('setting type=partner propagates -> partner_1to1 and auto-advances to active (a resolved NON_TENANT identity)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnknownContactAndThread(world);
+    const res = await request(app)
+      .patch('/api/contacts/contact-triage-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'partner' });
+    expect(res.status).toBe(200);
+    expect(res.body.contact.type).toBe('partner');
+    // PROPAGATION: the linked thread's type flips to partner_1to1.
+    expect(world.conversations.get('conv-triage-1')?.type).toBe('partner_1to1');
+    // partner has NO rich lifecycle (NON_TENANT_STATUSES: needs_review|active);
+    // resolving identity clears the needs_review front door -> 'active' (a valid
+    // partner status; NEVER the landlord 'interested', which would be invalid).
+    expect(res.body.contact.status).toBe('active');
+    // NO triage re-extraction for a partner (excluded like landlord in the job).
+    expect(world.extractionSchedules).toEqual([]);
+    const audit = world.auditEvents.find((e) => e.event_type === 'contact_updated');
+    expect(audit?.payload).toMatchObject({ propagatedConversations: 1, conversationType: 'partner_1to1' });
+  });
+
   it('a flip to TENANT schedules an immediate triage re-extraction on the linked thread', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnknownContactAndThread(world);

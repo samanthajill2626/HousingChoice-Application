@@ -181,6 +181,7 @@ const MEDIA_SCAN_PAGE_LIMIT = 200;
 const CONTACT_TYPES: readonly ContactType[] = [
   'tenant',
   'landlord',
+  'partner',
   'team_member',
   'unknown',
 ] as const;
@@ -364,6 +365,7 @@ function decodeEmailParam(raw: unknown): string | undefined {
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
   if (contactType === 'landlord') return 'landlord_1to1';
+  if (contactType === 'partner') return 'partner_1to1';
   // team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
 }
@@ -1219,21 +1221,24 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
-    // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord moves the
-    // contact off the needs_review triage front door at the moment the identity
-    // is known — but only when the caller didn't set status itself (an explicit
-    // status always wins). Type-scoped (status-model unification — one `status`
-    // field): tenant -> 'onboarding' (the section 5 lifecycle starts past the
-    // front door); landlord -> 'interested' (a freshly identified landlord is a
+    // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord|partner
+    // moves the contact off the needs_review triage front door at the moment the
+    // identity is known — but only when the caller didn't set status itself (an
+    // explicit status always wins). Type-scoped (status-model unification — one
+    // `status` field): tenant -> 'onboarding' (the section 5 lifecycle starts past
+    // the front door); landlord -> 'interested' (a freshly identified landlord is a
     // LEAD; 'active' means their properties are onboarded -
-    // landlord-status-onboarding design D1). We do NOT stamp status_source -
+    // landlord-status-onboarding design D1); partner -> 'active' (partner has no
+    // rich lifecycle — NON_TENANT_STATUSES needs_review|active — so a resolved
+    // partner is simply off the front door). We do NOT stamp status_source -
     // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
     // placement transition (a 'manual' pin would block it: the create-pin
     // regression - docs/issues/status-pin-vs-terminal-derivation.md). We never
     // auto-advance for unknown/team_member (no 1:1 identity) - and never
     // fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
-      parsed.patch['status'] = newType === 'tenant' ? 'onboarding' : 'interested';
+      parsed.patch['status'] =
+        newType === 'tenant' ? 'onboarding' : newType === 'landlord' ? 'interested' : 'active';
       parsed.changedFields.push('status');
     }
 

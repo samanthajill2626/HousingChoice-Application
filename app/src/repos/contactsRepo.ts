@@ -37,7 +37,7 @@ export type ContactFlag = 'sms_opt_out' | 'sms_unreachable' | 'voice_opt_out';
  * status=needs_review) IS the human triage queue, resolved by the M1.4/M1.5
  * review flows.
  */
-export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
+export type ContactType = 'tenant' | 'landlord' | 'partner' | 'team_member' | 'unknown';
 
 /**
  * One phone number a contact owns (BE1/C1 — contract verbatim; the frontend

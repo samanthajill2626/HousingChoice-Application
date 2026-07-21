@@ -262,6 +262,22 @@ describe('runDueExtractions', () => {
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', '', NOW);
   });
 
+  it('partner contact: completes without a driver call (excluded like landlord)', async () => {
+    const partner = { contactId: 'c1', type: 'partner', phone: '+15551230001' } as ContactItem;
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
+      contact: partner,
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 0 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.complete).toHaveBeenCalledWith('conv1', '', NOW);
+  });
+
   it('no new client messages since the cursor: completes with the same cursor, no driver', async () => {
     // Only a staff message is newer than the cursor; the sole client message
     // is AT the cursor (not newer).

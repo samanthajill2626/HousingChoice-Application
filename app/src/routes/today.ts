@@ -590,8 +590,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
               at: now,
             });
           }
-        } else if (conv.type === 'tenant_1to1' || conv.type === 'landlord_1to1') {
-          // Unreplied is anchored to a 1:1 tenant/landlord thread only. A
+        } else if (
+          conv.type === 'tenant_1to1' ||
+          conv.type === 'landlord_1to1' ||
+          conv.type === 'partner_1to1'
+        ) {
+          // Unreplied is anchored to a 1:1 tenant/landlord/partner thread only. A
           // relay_group's participant_phone is the synthetic POOL number (no
           // display name) — surfacing it as an Unreplied row whose `who` is an
           // internal pool number violates "anchored to a placement/contact". Skip it

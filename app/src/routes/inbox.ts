@@ -74,7 +74,7 @@ export interface InboxRow {
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
-  role?: 'tenant' | 'landlord' | 'unknown';
+  role?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
   preview: string; // latest item's text as a preview (relay: last_message_preview)
@@ -194,10 +194,13 @@ function nameFromContact(contact: ContactItem | undefined): string | undefined {
   return name.length > 0 ? name : undefined;
 }
 
-/** A contact's audience role for the row chip (tenant/landlord, else unknown). */
-function roleFromContact(contact: ContactItem | undefined): 'tenant' | 'landlord' | 'unknown' {
+/** A contact's audience role for the row chip (tenant/landlord/partner, else unknown). */
+function roleFromContact(
+  contact: ContactItem | undefined,
+): 'tenant' | 'landlord' | 'partner' | 'unknown' {
   if (contact?.type === 'tenant') return 'tenant';
   if (contact?.type === 'landlord') return 'landlord';
+  if (contact?.type === 'partner') return 'partner';
   return 'unknown';
 }
 

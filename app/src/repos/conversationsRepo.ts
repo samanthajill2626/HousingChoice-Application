@@ -39,6 +39,7 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
+  | 'partner_1to1'
   | 'unknown_1to1'
   | 'relay_group';
 

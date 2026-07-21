@@ -370,6 +370,17 @@ describe('POST /webhooks/twilio/sms — conversation resolution', () => {
     expect(conv.type).toBe('tenant_1to1');
   });
 
+  it('routes a known partner phone into a partner_1to1 conversation with author partner (A2 honesty)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-P', type: 'partner', phone: TENANT_PHONE });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('partner_1to1');
+    expect(world.messages[0]).toMatchObject({ author: 'partner' });
+  });
+
   it('unknown phones get an unknown_1to1 conversation (type is never guessed) and a touch with the body preview + 200', async () => {
     const { app, world } = makeWebhookHarness();
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams());

@@ -633,6 +633,29 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(stuckRow.why).toBe('Stuck — needs a check');
   });
 
+  // --- A2: partner_1to1 joins the Unreplied gate (parity with tenant/landlord) ---
+  it('a partner_1to1 conversation with unread surfaces in unreplied (A2 parity)', async () => {
+    seedConversation({
+      conversationId: 'conv-partner',
+      participant_phone: '+15550105555',
+      participant_display_name: 'Case Worker',
+      status: 'open',
+      last_activity_at: iso(-70_000),
+      type: 'partner_1to1',
+      ai_mode: 'auto',
+      created_at: iso(-200_000),
+      unread_count: 2,
+    });
+
+    const items = await getItems();
+    const unrep = items.filter((i) => i.group === 'unreplied');
+    expect(unrep.map((i) => i.refId)).toContain('conv-partner');
+    expect(unrep.find((i) => i.refId === 'conv-partner')).toMatchObject({
+      who: 'Case Worker',
+      why: 'Unreplied',
+    });
+  });
+
   // --- FIX B: relay_group threads never surface in unreplied --------------------
   it('a relay_group conversation with unread does NOT appear in unreplied (a tenant_1to1 still does)', async () => {
     seedConversation({

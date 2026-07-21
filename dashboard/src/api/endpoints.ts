@@ -26,6 +26,8 @@ import type {
   ContactVocabulary,
   EmailMediaAttachment,
   SendEmailResult,
+  UnmatchedEmailPage,
+  UnmatchedEmailItem,
   ConversationHeader,
   ConversationParticipant,
   ConversationsPage,
@@ -553,6 +555,104 @@ export function confirmEmailMedia(key: string): Promise<EmailMediaAttachment> {
     method: 'POST',
     body: { key },
   });
+}
+
+// --- Email channel v1: unmatched-email triage (B3 routes -> B6 UI) ----------
+// MIRRORS app/src/routes/unmatchedEmail.ts. The side-door feed for inbound mail
+// from unknown senders (never a contact/conversation until triaged here). The
+// list carries no bodies - fetch the detail on expand. Every mutation emits the
+// SSE `unmatched_email.updated` (the nav badge + the /email page refetch).
+
+/** GET /api/unmatched-email?filter=unmatched|quarantine[&cursor] - one triage
+ *  page (newest-first). `unreadCount` (capped) rides every response for the nav
+ *  badge. Throws ApiError 400 on a bad filter/cursor/limit. */
+export function getUnmatchedEmail(
+  filter: 'unmatched' | 'quarantine',
+  cursor?: string,
+  signal?: AbortSignal,
+): Promise<UnmatchedEmailPage> {
+  return request<UnmatchedEmailPage>('/api/unmatched-email', {
+    query: { filter, ...(cursor !== undefined && { cursor }) },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/unmatched-email/:id - the full row incl. body text (+ sanitized HTML
+ *  when present). Fetched lazily when a row expands. Throws ApiError 404. */
+export async function getUnmatchedEmailDetail(id: string): Promise<UnmatchedEmailItem> {
+  const res = await request<{ row: UnmatchedEmailItem }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}`,
+  );
+  return res.row;
+}
+
+/** POST /api/unmatched-email/:id/read - mark a row read (clears its contribution
+ *  to the badge). Returns the updated row. Throws ApiError 404. */
+export async function markUnmatchedRead(id: string): Promise<UnmatchedEmailItem> {
+  const res = await request<{ row: UnmatchedEmailItem }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/read`,
+    { method: 'POST' },
+  );
+  return res.row;
+}
+
+/** POST /api/unmatched-email/:id/link { contactId } - add the sender address to
+ *  that contact + re-ingest the stored mail into their thread; returns the
+ *  conversationId it landed in. Throws ApiError: 409 email_in_use (body.contact =
+ *  the owning contact) | virus_flagged | already_threaded; 404 unmatched_not_found
+ *  | contact_not_found; 400 no_sender_address; 503 email_ingest_unavailable. */
+export function linkUnmatched(
+  id: string,
+  contactId: string,
+): Promise<{ conversationId: string }> {
+  return request<{ conversationId: string }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/link`,
+    { method: 'POST', body: { contactId } },
+  );
+}
+
+/** POST /api/unmatched-email/:id/create-contact { name, type } - create the
+ *  contact (sender address = its primary email) then link (as above); returns the
+ *  new contactId + the conversationId. Throws ApiError: 409 email_in_use
+ *  (body.contact); 400 name/type invalid; then the same link-tail errors. */
+export function createContactFromUnmatched(
+  id: string,
+  body: { name: string; type: 'tenant' | 'landlord' | 'partner' },
+): Promise<{ conversationId: string; contactId: string }> {
+  return request<{ conversationId: string; contactId: string }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/create-contact`,
+    { method: 'POST', body },
+  );
+}
+
+/** POST /api/unmatched-email/:id/spam - blocklist the sender + dismiss the row.
+ *  Returns the updated row. Throws ApiError 404. */
+export async function spamUnmatched(id: string): Promise<UnmatchedEmailItem> {
+  const res = await request<{ row: UnmatchedEmailItem }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/spam`,
+    { method: 'POST' },
+  );
+  return res.row;
+}
+
+/** POST /api/unmatched-email/:id/release - move a quarantined row back to
+ *  Unmatched. Returns the updated row. Throws ApiError 404 | 409 not_quarantined. */
+export async function releaseUnmatched(id: string): Promise<UnmatchedEmailItem> {
+  const res = await request<{ row: UnmatchedEmailItem }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/release`,
+    { method: 'POST' },
+  );
+  return res.row;
+}
+
+/** POST /api/unmatched-email/:id/dismiss - dismiss a row (the "Delete" action on
+ *  quarantine; "Dismiss" on unmatched). Returns the updated row. Throws 404. */
+export async function dismissUnmatched(id: string): Promise<UnmatchedEmailItem> {
+  const res = await request<{ row: UnmatchedEmailItem }>(
+    `/api/unmatched-email/${encodeURIComponent(id)}/dismiss`,
+    { method: 'POST' },
+  );
+  return res.row;
 }
 
 /** POST /api/conversations/:id/messages/:providerSid/retry - re-send a FAILED

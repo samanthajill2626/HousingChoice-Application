@@ -1017,6 +1017,16 @@ export interface SuggestionUpdatedEvent {
   contactId: string;
 }
 
+/** GET /api/events 'unmatched_email.updated' payload (email-channel-v1 B2/B3).
+ *  An unmatched-email row was created (inbound from an unknown sender) or
+ *  transitioned (linked / spam / release / dismiss / read) - the Email nav badge
+ *  and the /email triage page refetch. ID-only + OPTIONAL (advisory): consumers
+ *  refetch the feed regardless, and the payload NEVER carries the address /
+ *  subject / body (PII). Mirrors app/src/lib/events.ts UnmatchedEmailUpdatedEvent. */
+export interface UnmatchedEmailUpdatedEvent {
+  unmatchedId?: string;
+}
+
 // --- Conversation fact extraction (AI review UI) -----------------------------
 // The pending-review record the extraction pipeline writes (one per contact +
 // target). The dashboard reads these to render AutoBadges / SuggestionChips and
@@ -1442,6 +1452,57 @@ export interface EmailMediaAttachment {
   s3Key: string;
   contentType: string;
   size: number;
+}
+
+// --- Email channel v1: unmatched-email side-door (B3 store/routes -> B6 UI) --
+// MIRRORS app/src/routes/unmatchedEmail.ts wire shapes (ListRow / DetailRow) +
+// app/src/repos/unmatchedEmailRepo.ts. The dashboard cannot import from app/src,
+// so these are duplicated; keep in sync. Optionals are OMITTED (not nulled) when
+// absent. A `parse_skipped` row has from.address '' + empty subject/snippet.
+
+export type UnmatchedEmailStatus = 'unmatched' | 'quarantined' | 'linked' | 'dismissed';
+
+/** One attachment's metadata on an unmatched row (never the bytes; the raw MIME
+ *  is never presigned or served - PII posture). */
+export interface UnmatchedEmailAttachmentMeta {
+  filename: string;
+  contentType: string;
+  size: number;
+}
+
+/** The list-row shape (GET /api/unmatched-email rows[]). Carries NO body text -
+ *  fetch the detail (GET /:id) when a row expands. */
+export interface UnmatchedEmailRow {
+  unmatchedId: string;
+  status: UnmatchedEmailStatus;
+  from: { name?: string; address: string };
+  subject: string;
+  snippet: string; // <= 180 chars
+  attachments_meta: UnmatchedEmailAttachmentMeta[];
+  spam_verdict?: 'PASS' | 'FAIL' | 'GRAY';
+  virus_verdict?: 'PASS' | 'FAIL';
+  received_at: string; // ISO
+  read: boolean;
+  linked_contact_id?: string;
+  /** Set when the MIME could not be parsed - render "Unparseable mail". */
+  parse_skipped?: 'oversize' | 'parse_failed';
+}
+
+/** The detail shape (GET /:id, and POST /:id/read|spam|release|dismiss return
+ *  { row }). ListRow + the full text (+ sanitized HTML when the mail had an HTML
+ *  part; B7 renders it in a sandboxed frame - B6 shows the plain text only). */
+export interface UnmatchedEmailItem extends UnmatchedEmailRow {
+  text: string;
+  html_sanitized?: string;
+}
+
+/** GET /api/unmatched-email?filter=unmatched|quarantine envelope. `unreadCount`
+ *  is the capped UNMATCHED-unread count (both tabs carry it; it feeds the nav
+ *  badge - treat 100 as "100+"). */
+export interface UnmatchedEmailPage {
+  rows: UnmatchedEmailRow[];
+  nextCursor: string | null;
+  unreadCount: number;
 }
 
 // --- C2: Person-centric merged timeline (§API Contract C2) ------------------

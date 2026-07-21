@@ -69,7 +69,11 @@ export function createSystemRouter(deps: SystemRouterDeps = {}): Router {
       }
       window = rawSince;
     }
-    const result = await service.getErrors(window);
+    // Opt-in "include warnings" firehose (?warnings=true|1). Any other value =
+    // off (errors-only, the default). Twilio delivery failures show either way.
+    const rawWarnings = req.query['warnings'];
+    const includeWarnings = rawWarnings === 'true' || rawWarnings === '1';
+    const result = await service.getErrors(window, { includeWarnings });
     if (result.available) {
       res.json({ available: true, events: result.events });
       return;

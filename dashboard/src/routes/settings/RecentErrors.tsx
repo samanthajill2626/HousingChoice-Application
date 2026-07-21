@@ -26,19 +26,27 @@ function formatWhen(iso: string): string {
   return d.toLocaleString();
 }
 
-/** pino numeric level → a short human label (50 error, 60 fatal). */
+/** pino numeric level → a short human label (40 warn, 50 error, 60 fatal). */
 function levelLabel(level: number): string {
   if (level >= 60) return 'fatal';
   if (level >= 50) return 'error';
+  if (level >= 40) return 'warn';
   return String(level);
 }
 
 function ErrorRow({ event }: { event: SystemErrorEvent }): React.JSX.Element {
+  const isWarn = event.level < 50;
+  const code = event.errorCode;
   return (
     <li className={styles.errorRow}>
       <div className={styles.errorMeta}>
         <span className={styles.errorWhen}>{formatWhen(event.timestamp)}</span>
-        <span className={styles.errorLevel}>{levelLabel(event.level)}</span>
+        <span className={`${styles.errorLevel} ${isWarn ? (styles.errorLevelWarn ?? '') : ''}`}>
+          {levelLabel(event.level)}
+        </span>
+        {code !== null && code !== undefined && code.length > 0 ? (
+          <span className={styles.errorCode}>error {code}</span>
+        ) : null}
       </div>
       <p className={styles.errorMessage}>{event.message}</p>
       {event.correlationId !== null ? (
@@ -49,7 +57,8 @@ function ErrorRow({ event }: { event: SystemErrorEvent }): React.JSX.Element {
 }
 
 export function RecentErrors(): React.JSX.Element {
-  const { status, result, refreshing, window, setWindow, refresh } = useSystemErrors();
+  const { status, result, refreshing, window, setWindow, includeWarnings, setIncludeWarnings, refresh } =
+    useSystemErrors();
 
   const available = result?.available === true;
   const events = result?.events ?? [];
@@ -76,6 +85,15 @@ export function RecentErrors(): React.JSX.Element {
               </option>
             ))}
           </select>
+          <label className={styles.warnToggle} htmlFor="system-errors-warnings">
+            <input
+              id="system-errors-warnings"
+              type="checkbox"
+              checked={includeWarnings}
+              onChange={(e) => setIncludeWarnings(e.target.checked)}
+            />
+            Include warnings
+          </label>
           <Button
             variant="secondary"
             size="sm"

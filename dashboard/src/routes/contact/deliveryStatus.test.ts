@@ -36,14 +36,49 @@ describe('presentRelayDelivery', () => {
     ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
   });
 
-  it('turns danger and counts the failures when a leg hard-fails', () => {
+  it('turns danger and counts the failures when a leg hard-fails, surfacing the code(s)', () => {
     expect(
       presentRelayDelivery([{ status: 'delivered' }, { status: 'failed', errorCode: '30005' }]),
-    ).toEqual({ label: 'delivered 1/2 - 1 failed', tone: 'danger', isFailure: true });
+    ).toEqual({
+      label: 'delivered 1/2 - 1 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Number is invalid (error 30005)',
+    });
     // undelivered is a hard failure too; the still-in-flight leg keeps counting.
+    // No code on the failed leg → no reason field.
     expect(
       presentRelayDelivery([{ status: 'undelivered' }, { status: 'queued' }]),
     ).toEqual({ label: 'delivered 0/2 - 1 failed', tone: 'danger', isFailure: true });
+  });
+
+  it('surfaces the A2P-unregistered code (30034) and dedupes repeated codes across legs', () => {
+    // Both intro legs bounce 30034 (the group-text bug): one reason, not two.
+    expect(
+      presentRelayDelivery([
+        { status: 'undelivered', errorCode: '30034' },
+        { status: 'undelivered', errorCode: '30034' },
+      ]),
+    ).toEqual({
+      label: 'delivered 0/2 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Number not registered for A2P 10DLC (error 30034)',
+    });
+  });
+
+  it('joins distinct failure reasons when legs fail for different codes', () => {
+    expect(
+      presentRelayDelivery([
+        { status: 'failed', errorCode: '30005' },
+        { status: 'undelivered', errorCode: '30034' },
+      ]),
+    ).toEqual({
+      label: 'delivered 0/2 - 2 failed',
+      tone: 'danger',
+      isFailure: true,
+      reason: 'Number is invalid (error 30005); Number not registered for A2P 10DLC (error 30034)',
+    });
   });
 
   it('excludes opted-out members from the count — the opt-out note explains them, and N/M must stay reachable', () => {
@@ -65,9 +100,10 @@ describe('presentRelayDelivery', () => {
 });
 
 describe('deliveryReason', () => {
-  it('maps known Twilio error codes to human reasons', () => {
-    expect(deliveryReason('30007')).toBe('Carrier filtered the message');
-    expect(deliveryReason('21610')).toBe('Recipient has opted out (STOP)');
+  it('maps known Twilio error codes to human reasons AND always surfaces the code number', () => {
+    expect(deliveryReason('30007')).toBe('Carrier filtered the message (error 30007)');
+    expect(deliveryReason('21610')).toBe('Recipient has opted out (STOP) (error 21610)');
+    expect(deliveryReason('30034')).toBe('Number not registered for A2P 10DLC (error 30034)');
   });
 
   it('falls back to a generic line that still surfaces the raw code', () => {

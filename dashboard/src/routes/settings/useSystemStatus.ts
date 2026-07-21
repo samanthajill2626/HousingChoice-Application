@@ -168,6 +168,9 @@ export interface SystemErrorsState {
   refreshing: boolean;
   window: ErrorWindow;
   setWindow: (w: ErrorWindow) => void;
+  /** The "include warnings" (level≥40) toggle state + setter. */
+  includeWarnings: boolean;
+  setIncludeWarnings: (v: boolean) => void;
   refresh: () => void;
 }
 
@@ -176,16 +179,17 @@ export function useSystemErrors(): SystemErrorsState {
   const [result, setResult] = useState<SystemErrorsResult | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [window, setWindowState] = useState<ErrorWindow>('24h');
+  const [includeWarnings, setIncludeWarningsState] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const load = useCallback(async (w: ErrorWindow, background: boolean) => {
+  const load = useCallback(async (w: ErrorWindow, warnings: boolean, background: boolean) => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
     if (background) setRefreshing(true);
     else setStatus('loading');
     try {
-      const next = await getSystemErrors(w, controller.signal);
+      const next = await getSystemErrors(w, warnings, controller.signal);
       if (controller.signal.aborted) return;
       setResult(next);
       setStatus('ready');
@@ -199,18 +203,32 @@ export function useSystemErrors(): SystemErrorsState {
     }
   }, []);
 
+  // Re-fetch when the window OR the warnings toggle changes.
   useEffect(() => {
-    void load(window, false);
+    void load(window, includeWarnings, false);
     return () => abortRef.current?.abort();
-  }, [load, window]);
+  }, [load, window, includeWarnings]);
 
   const setWindow = useCallback((w: ErrorWindow) => {
     setWindowState(w);
   }, []);
 
-  const refresh = useCallback(() => {
-    void load(window, true);
-  }, [load, window]);
+  const setIncludeWarnings = useCallback((v: boolean) => {
+    setIncludeWarningsState(v);
+  }, []);
 
-  return { status, result, refreshing, window, setWindow, refresh };
+  const refresh = useCallback(() => {
+    void load(window, includeWarnings, true);
+  }, [load, window, includeWarnings]);
+
+  return {
+    status,
+    result,
+    refreshing,
+    window,
+    setWindow,
+    includeWarnings,
+    setIncludeWarnings,
+    refresh,
+  };
 }

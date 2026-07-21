@@ -287,6 +287,39 @@
   font-family: var(--font-mono, monospace);
 }
 
+/* Warn-level events (shown when "Include warnings" is on, or for a pinned Twilio
+ * delivery failure) get an amber chip so they don't read as hard errors. */
+.errorLevelWarn {
+  background: #fdf0d5;
+  border-color: #f0d089;
+  color: #9a6700;
+}
+
+/* The provider error code (e.g. Twilio 30034) — a compact mono chip so an
+ * operator can read the code straight off the row. */
+.errorCode {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-alt, #f1f1f1);
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-family: var(--font-mono, monospace);
+}
+
+/* The "Include warnings" checkbox + label in the errors controls row. */
+.warnToggle {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+
 /* Visually-hidden polite status line — announces alarm-state changes to AT on
  * each successful (auto-)refresh without showing visually or stealing focus. */
 .srOnly {

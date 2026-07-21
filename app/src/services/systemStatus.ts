@@ -18,9 +18,11 @@
 import {
   classifyCloudWatchError,
   createCloudWatchClient,
+  DELIVERY_FAILURE_INSIGHTS_FILTER,
   OOM_APP_INSIGHTS_FILTER,
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
+  PINO_WARN_INSIGHTS_FILTER,
   type AlarmView,
   type CloudWatchClientSeam,
   type ErrorEventView,
@@ -85,8 +87,19 @@ export interface SystemStatusService {
   getFlags(): SystemFlags;
   /** CloudWatch alarms (ALARM-first), or a degraded reason. */
   getAlarms(): Promise<AlarmsResult>;
-  /** Recent error events for the window (default 24h), or a degraded reason. */
-  getErrors(window?: SystemErrorWindow): Promise<ErrorsResult>;
+  /**
+   * Recent error events for the window (default 24h), or a degraded reason.
+   * `includeWarnings` widens the pino query from level ≥ 50 to level ≥ 40 (the
+   * opt-in "include warnings" firehose); Twilio delivery failures are ALWAYS
+   * included regardless (they log at warn).
+   */
+  getErrors(window?: SystemErrorWindow, opts?: GetErrorsOptions): Promise<ErrorsResult>;
+}
+
+/** Options for {@link SystemStatusService.getErrors}. */
+export interface GetErrorsOptions {
+  /** Widen the pino query to level ≥ 40 (warn+). Default false (errors only). */
+  includeWarnings?: boolean;
 }
 
 export interface SystemStatusServiceDeps {
@@ -162,22 +175,29 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       }
     },
 
-    async getErrors(window = '24h') {
+    async getErrors(window = '24h', opts = {}) {
       if (isLocalEnv(config)) {
         return { available: false, reason: 'unavailable_local' };
       }
       const sinceMs = Date.now() - WINDOW_MS[window];
+      // The pino query is level≥50 by default; the "include warnings" toggle
+      // widens it to level≥40. Twilio delivery failures are pinned in by a
+      // SEPARATE query regardless (they log at warn), so operators always see
+      // the failing code without opting into the whole warn firehose.
+      const pinoFilter = opts.includeWarnings ? PINO_WARN_INSIGHTS_FILTER : PINO_ERROR_INSIGHTS_FILTER;
       try {
-        // Three Insights queries in parallel:
-        //   appErrors    — pino level≥50 lines in the app log group
+        // Four Insights queries in parallel:
+        //   appErrors      — pino level≥50 (or ≥40 with warnings) in app+worker
+        //   deliveryFails  — Twilio send/delivery failures (event=delivery_failed), always
         //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
-        //   systemOom    — kernel OOM-killer lines in the system log group
-        const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
+        //   systemOom      — kernel OOM-killer lines in the system log group
+        const [appErrors, deliveryFails, appWorkerV8Oom, systemOom] = await Promise.all([
           // BOTH process log groups: worker-side errors (extraction poll, tour
           // reminder + placement nudge polls, voice transcript jobs) were
           // invisible to this panel when only the app group was queried
           // (found live 2026-07-20: an extraction 400 surfaced nowhere).
-          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], PINO_ERROR_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
+          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], pinoFilter, sinceMs, ERROR_EVENT_LIMIT),
+          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], DELIVERY_FAILURE_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);
@@ -186,11 +206,14 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         // already collapses to "(unparseable log line)" for kernel/V8 OOM lines).
         const relabeledV8 = appWorkerV8Oom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
         const relabeledSystem = systemOom.map((e) => ({ ...e, message: OOM_SYSTEM_LABEL }));
-        // Merge, dedup by timestamp+message, sort newest-first, cap at limit.
+        // Merge, dedup by timestamp+message+errorCode, sort newest-first, cap at
+        // limit. errorCode is in the key so a delivery failure surfaced by BOTH
+        // the warn-widened pino query and the delivery query collapses to one,
+        // while two distinct-code failures at the same instant both survive.
         const seen = new Set<string>();
-        const events = [...appErrors, ...relabeledV8, ...relabeledSystem]
+        const events = [...appErrors, ...deliveryFails, ...relabeledV8, ...relabeledSystem]
           .filter((e) => {
-            const key = `${e.timestamp}|${e.message}`;
+            const key = `${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
             if (seen.has(key)) return false;
             seen.add(key);
             return true;

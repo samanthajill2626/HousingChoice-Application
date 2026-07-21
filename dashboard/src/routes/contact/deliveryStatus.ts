@@ -17,6 +17,13 @@ export interface DeliveryPresentation {
   tone: DeliveryTone;
   /** undelivered/failed — the caller surfaces a Retry action. */
   isFailure: boolean;
+  /**
+   * Human-readable failure reason(s), ALWAYS carrying the raw Twilio error code
+   * so an operator can debug (e.g. "Number not registered for A2P 10DLC (error
+   * 30034)"). Present only on a failure that carried a code; absent otherwise.
+   * For a relay rollup, distinct per-leg reasons are joined with "; ".
+   */
+  reason?: string;
 }
 
 const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
@@ -70,10 +77,22 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
   ).length;
   const total = fanned.length;
   if (failed > 0) {
+    // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
+    // group-text bug read as a bare "0/2 - 2 failed" with no code). Distinct
+    // reasons joined; a repeated code collapses to one.
+    const reasons = Array.from(
+      new Set(
+        fanned
+          .filter((s) => s.status === 'failed' || s.status === 'undelivered')
+          .map((s) => deliveryReason(s.errorCode))
+          .filter((r): r is string => r !== undefined),
+      ),
+    );
     return {
       label: `delivered ${delivered}/${total} - ${failed} failed`,
       tone: 'danger',
       isFailure: true,
+      ...(reasons.length > 0 && { reason: reasons.join('; ') }),
     };
   }
   if (delivered === total) {
@@ -92,10 +111,19 @@ const ERROR_CODE_REASONS: Record<string, string> = {
   '30005': 'Number is invalid',
   '30006': 'That number is a landline',
   '30007': 'Carrier filtered the message',
+  '30034': 'Number not registered for A2P 10DLC',
   '21610': 'Recipient has opted out (STOP)',
 };
 
+/**
+ * Twilio error code → a human reason that ALWAYS surfaces the raw code number
+ * (mapped or not), so an operator never has to leave the thread to learn WHY a
+ * send failed. Absent code ⇒ undefined (caller shows just the "Failed" label).
+ */
 export function deliveryReason(errorCode: string | undefined): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
-  return ERROR_CODE_REASONS[errorCode] ?? `Delivery failed (error ${errorCode})`;
+  const mapped = ERROR_CODE_REASONS[errorCode];
+  return mapped !== undefined
+    ? `${mapped} (error ${errorCode})`
+    : `Delivery failed (error ${errorCode})`;
 }

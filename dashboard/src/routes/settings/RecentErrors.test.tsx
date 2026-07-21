@@ -47,6 +47,17 @@ describe('RecentErrors — window selector', () => {
     await userEvent.setup().selectOptions(select, '7d');
     await waitFor(() => expect(getSystemErrors.mock.calls.some((c) => c[0] === '7d')).toBe(true));
   });
+
+  it('defaults to warnings OFF, and toggling "Include warnings" re-queries with the flag on', async () => {
+    getSystemErrors.mockResolvedValue(available([]));
+    render(<RecentErrors />);
+    await waitFor(() => expect(getSystemErrors).toHaveBeenCalled());
+    // 2nd arg is includeWarnings — off by default.
+    expect(getSystemErrors.mock.calls[0]![1]).toBe(false);
+
+    await userEvent.setup().click(screen.getByLabelText('Include warnings'));
+    await waitFor(() => expect(getSystemErrors.mock.calls.some((c) => c[1] === true)).toBe(true));
+  });
 });
 
 describe('RecentErrors — available:true rendering (PII-safe)', () => {
@@ -68,6 +79,25 @@ describe('RecentErrors — available:true rendering (PII-safe)', () => {
     expect(screen.getByText(/id:\s*corr-9/)).toBeInTheDocument();
     // Only ONE correlation line (the null one renders none).
     expect(screen.getAllByText(/^id:/)).toHaveLength(1);
+  });
+
+  it('renders a warn-level Twilio delivery failure with its error code (30034) and a "warn" label', async () => {
+    getSystemErrors.mockResolvedValue(
+      available([
+        {
+          timestamp: '2026-07-21T20:04:31.000Z',
+          level: 40,
+          message: 'twilio relay-recipient delivery failed (undelivered/failed)',
+          correlationId: 'c-30034',
+          errorCode: '30034',
+        },
+      ]),
+    );
+    render(<RecentErrors />);
+    expect(await screen.findByText(/twilio relay-recipient delivery failed/)).toBeInTheDocument();
+    // warn label (not "error") + the raw code chip so it's debuggable.
+    expect(screen.getByText('warn')).toBeInTheDocument();
+    expect(screen.getByText('error 30034')).toBeInTheDocument();
   });
 
   it('renders a friendly empty state for an empty window', async () => {

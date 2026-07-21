@@ -513,8 +513,12 @@ function MessageBubble({
           </span>
         ) : null}
         {deliveredSummary !== null ? (
-          <span className={`${styles.status} ${TONE_CLASS[deliveredSummary.tone] ?? ''}`}>
+          <span
+            className={`${styles.status} ${TONE_CLASS[deliveredSummary.tone] ?? ''}`}
+            {...(deliveredSummary.reason !== undefined && { title: deliveredSummary.reason })}
+          >
             {deliveredSummary.label}
+            {deliveredSummary.reason !== undefined ? ` - ${deliveredSummary.reason}` : ''}
           </span>
         ) : null}
       </div>

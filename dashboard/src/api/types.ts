@@ -178,6 +178,8 @@ export interface SystemErrorEvent {
   message: string;
   /** The correlation id, or null when the event carried none. */
   correlationId: string | null;
+  /** The provider error code (e.g. Twilio "30034"), when the event carried one. */
+  errorCode?: string | null;
 }
 
 /** GET /api/system/alarms response — degrades to { available: false, reason }. */

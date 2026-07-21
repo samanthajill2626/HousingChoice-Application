@@ -20,9 +20,11 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createCloudWatchClient,
+  DELIVERY_FAILURE_INSIGHTS_FILTER,
   OOM_APP_INSIGHTS_FILTER,
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
+  PINO_WARN_INSIGHTS_FILTER,
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
@@ -156,6 +158,41 @@ describe('cloudwatch adapter — queryInsights', () => {
     expect(events[0]!.message).toBe('boom');
     expect(events[0]!.correlationId).toBe('c1');
     expect(events[0]!.timestamp).toBe('2026-07-01T12:00:00.000Z');
+    // No errorCode field on this line → null (not undefined-noise).
+    expect(events[0]!.errorCode).toBeNull();
+  });
+
+  it('projects a Twilio delivery-failure line — errorCode surfaced (string or number)', async () => {
+    const sinceMs = Date.parse('2026-07-21T20:00:00.000Z');
+    const send = vi
+      .fn()
+      .mockResolvedValueOnce({ queryId: 'q1' })
+      .mockResolvedValueOnce({
+        status: 'Complete',
+        results: [
+          [
+            { field: '@timestamp', value: '2026-07-21 20:04:31.000' },
+            {
+              field: '@message',
+              value:
+                '{"level":40,"event":"delivery_failed","errorCode":"30034","msg":"twilio relay-recipient delivery failed (undelivered/failed)","correlationId":"c9"}',
+            },
+          ],
+          [
+            { field: '@timestamp', value: '2026-07-21 20:04:32.000' },
+            // errorCode as a NUMBER — coerced to string.
+            { field: '@message', value: '{"level":40,"errorCode":30007,"msg":"carrier filtered"}' },
+          ],
+        ],
+      });
+    const logs = { send };
+    const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
+
+    const events = await seam.queryInsights(['/hc/dev/app'], DELIVERY_FAILURE_INSIGHTS_FILTER, sinceMs, 25);
+    expect(events).toHaveLength(2);
+    expect(events[0]!.errorCode).toBe('30034');
+    expect(events[0]!.level).toBe(40);
+    expect(events[1]!.errorCode).toBe('30007'); // number → string
   });
 
   it('rejects when GetQueryResults returns status Failed', async () => {
@@ -273,5 +310,10 @@ describe('cloudwatch adapter — queryInsights', () => {
     expect(OOM_SYSTEM_INSIGHTS_FILTER).toContain('Out of memory: Killed process');
     expect(OOM_SYSTEM_INSIGHTS_FILTER).toContain('oom-kill:');
     expect(OOM_SYSTEM_INSIGHTS_FILTER).toContain('oom_reaper');
+    // PINO_WARN_INSIGHTS_FILTER widens to warn+ (level ≥ 40)
+    expect(PINO_WARN_INSIGHTS_FILTER).toContain('level');
+    expect(PINO_WARN_INSIGHTS_FILTER).toContain('40');
+    // DELIVERY_FAILURE_INSIGHTS_FILTER pins Twilio failures by their event marker
+    expect(DELIVERY_FAILURE_INSIGHTS_FILTER).toContain('delivery_failed');
   });
 });

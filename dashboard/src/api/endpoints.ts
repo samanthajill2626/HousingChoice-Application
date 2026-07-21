@@ -1702,13 +1702,18 @@ export function getSystemAlarms(signal?: AbortSignal): Promise<SystemAlarmsResul
   });
 }
 
-/** GET /api/system/errors?since= — recent error events (PII-safe) or { available:false, reason }. */
+/**
+ * GET /api/system/errors?since=&warnings= — recent error events (PII-safe) or
+ * { available:false, reason }. `includeWarnings` opts into the level≥40 firehose;
+ * Twilio delivery failures show either way.
+ */
 export function getSystemErrors(
   since: '1h' | '24h' | '7d',
+  includeWarnings = false,
   signal?: AbortSignal,
 ): Promise<SystemErrorsResult> {
   return request<SystemErrorsResult>('/api/system/errors', {
-    query: { since },
+    query: { since, ...(includeWarnings && { warnings: 'true' }) },
     ...(signal !== undefined && { signal }),
   });
 }

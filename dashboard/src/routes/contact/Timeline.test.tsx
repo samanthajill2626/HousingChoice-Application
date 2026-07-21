@@ -779,7 +779,24 @@ describe('Timeline relay-group annotations', () => {
       },
     };
     renderTimeline({ items: [oneFailed], relayRoster: ROSTER });
-    const chip = screen.getByText('delivered 1/2 - 1 failed');
+    // The chip now surfaces the failing code inline so it's debuggable (30005).
+    const chip = screen.getByText(/delivered 1\/2 - 1 failed - Number is invalid \(error 30005\)/);
+    expect(chip.className).toMatch(/toneDanger/);
+    expect(chip).toHaveAttribute('title', expect.stringContaining('error 30005'));
+  });
+
+  it('surfaces the A2P-unregistered code (30034) on the rollup — the group-text bug now shows WHY', () => {
+    const bothFailed: TimelineItem = {
+      ...RELAY_OUT,
+      delivery_recipients: {
+        c1: { status: 'undelivered', errorCode: '30034' },
+        c2: { status: 'undelivered', errorCode: '30034' },
+      },
+    };
+    renderTimeline({ items: [bothFailed], relayRoster: ROSTER });
+    const chip = screen.getByText(
+      /delivered 0\/2 - 2 failed - Number not registered for A2P 10DLC \(error 30034\)/,
+    );
     expect(chip.className).toMatch(/toneDanger/);
   });
 

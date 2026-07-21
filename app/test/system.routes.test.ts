@@ -146,6 +146,25 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
       available: true,
       events: [{ timestamp: '2026-06-29T00:00:00.000Z', level: 50, message: 'boom', correlationId: 'c1' }],
     });
-    expect(getErrors).toHaveBeenCalledWith('7d');
+    expect(getErrors).toHaveBeenCalledWith('7d', { includeWarnings: false });
+  });
+
+  it('passes ?warnings=true through as includeWarnings (default off otherwise)', async () => {
+    const getErrors = fakeService.getErrors as ReturnType<typeof vi.fn>;
+    const { app } = makeWebhookHarness({ systemStatusService: fakeService });
+
+    getErrors.mockClear();
+    await request(app)
+      .get('/api/system/errors?since=24h&warnings=true')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(getErrors).toHaveBeenCalledWith('24h', { includeWarnings: true });
+
+    getErrors.mockClear();
+    await request(app)
+      .get('/api/system/errors?since=24h')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE);
+    expect(getErrors).toHaveBeenCalledWith('24h', { includeWarnings: false });
   });
 });

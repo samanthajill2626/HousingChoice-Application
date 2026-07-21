@@ -57,6 +57,15 @@ function boundedClientConfig(region: string): {
 /** Insights filter for pino error/fatal lines. Insights parses JSON, so `level`
  *  is a field; non-JSON lines have no `level` and are excluded (as before). */
 export const PINO_ERROR_INSIGHTS_FILTER = 'level >= 50';
+/** Insights filter for pino warn+ lines (level ≥ 40) — the opt-in "include
+ *  warnings" firehose. Off by default (warns are noisy: best-effort degradations,
+ *  benign "…ignored" events); the operator toggles it on to widen the panel. */
+export const PINO_WARN_INSIGHTS_FILTER = 'level >= 40';
+/** Insights filter for Twilio send/delivery FAILURES — surfaced on the errors
+ *  panel REGARDLESS of the warn toggle. These are logged at warn (level 40, e.g.
+ *  a 30034 undelivered) so `level >= 50` alone misses them; this pins them in by
+ *  their structured `event` marker so an operator always sees the failing code. */
+export const DELIVERY_FAILURE_INSIGHTS_FILTER = 'event = "delivery_failed"';
 /** Insights filter for V8 heap-OOM (Node stderr, non-JSON). */
 export const OOM_APP_INSIGHTS_FILTER = '@message like /JavaScript heap out of memory/ or @message like /Reached heap limit/';
 /** Insights filter for kernel OOM-killer lines (shipped from /var/log/messages). */
@@ -81,6 +90,12 @@ export interface ErrorEventView {
   message: string;
   /** The correlation id, when the event carried one; null otherwise. */
   correlationId: string | null;
+  /**
+   * The provider error code the event carried (pino `errorCode`), when present —
+   * e.g. a Twilio "30034". PII-SAFE (a numeric/short code, never a body). Absent
+   * (undefined) on events that carried no code.
+   */
+  errorCode?: string | null;
 }
 
 /** The narrow surface the systemStatus service depends on. */
@@ -115,6 +130,7 @@ function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorE
   let level = 50;
   let message = '(unparseable log line)';
   let correlationId: string | null = null;
+  let errorCode: string | null = null;
   try {
     const parsed: unknown = JSON.parse(rawMessage);
     if (typeof parsed === 'object' && parsed !== null) {
@@ -125,11 +141,15 @@ function projectErrorEvent(rawMessage: string, eventTimestampMs: number): ErrorE
       if (typeof msg === 'string' && msg.length > 0) message = msg;
       const cid = obj['correlationId'];
       if (typeof cid === 'string' && cid.length > 0) correlationId = cid;
+      // A provider error code (Twilio 30034 etc.) — PII-safe; string or number.
+      const ec = obj['errorCode'];
+      if (typeof ec === 'string' && ec.length > 0) errorCode = ec;
+      else if (typeof ec === 'number') errorCode = String(ec);
     }
   } catch {
     // Non-JSON line — keep the generic message; never surface the raw text.
   }
-  return { timestamp, level, message, correlationId };
+  return { timestamp, level, message, correlationId, errorCode };
 }
 
 /**

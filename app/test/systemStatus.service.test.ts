@@ -15,9 +15,11 @@ import {
 } from '../src/services/systemStatus.js';
 import {
   type CloudWatchClientSeam,
+  DELIVERY_FAILURE_INSIGHTS_FILTER,
   OOM_APP_INSIGHTS_FILTER,
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
+  PINO_WARN_INSIGHTS_FILTER,
 } from '../src/adapters/cloudwatch.js';
 import { loadConfig, type AppConfig } from '../src/lib/config.js';
 
@@ -240,10 +242,70 @@ describe('systemStatus.getErrors — degradation + window', () => {
     expect(sinceMs1h).toBe(now - 60 * 60 * 1000);
 
     await service.getErrors('7d');
-    // 3 calls for 1h + 3 calls for 7d = 6 total; get the 4th call (first of 7d batch)
-    const sinceMs7d = seam.queryInsights.mock.calls[3]![2] as number;
+    // 4 calls for 1h + 4 calls for 7d = 8 total; get the 5th call (first of 7d batch)
+    const sinceMs7d = seam.queryInsights.mock.calls[4]![2] as number;
     expect(sinceMs7d).toBe(now - 7 * 24 * 60 * 60 * 1000);
     vi.restoreAllMocks();
+  });
+
+  it('ALWAYS issues the Twilio delivery-failure query (event=delivery_failed) over app+worker — so a warn-level 30034 reaches the panel even with warnings off', async () => {
+    const config = deployedConfig();
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    await makeService({ config, cloudwatch: seam }).getErrors('24h'); // warnings OFF
+    expect(seam.queryInsights).toHaveBeenCalledWith(
+      [config.errorLogGroupName, config.workerLogGroupName],
+      DELIVERY_FAILURE_INSIGHTS_FILTER,
+      expect.any(Number),
+      25,
+    );
+  });
+
+  it('includeWarnings=false (default) uses the pino ERROR filter (level≥50), not the warn filter', async () => {
+    const config = deployedConfig();
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    await makeService({ config, cloudwatch: seam }).getErrors('24h');
+    const filters = seam.queryInsights.mock.calls.map((c) => c[1]);
+    expect(filters).toContain(PINO_ERROR_INSIGHTS_FILTER);
+    expect(filters).not.toContain(PINO_WARN_INSIGHTS_FILTER);
+  });
+
+  it('includeWarnings=true widens the pino query to the WARN filter (level≥40) and drops the error-only filter', async () => {
+    const config = deployedConfig();
+    const seam = fakeSeam({ queryInsights: async () => [] });
+    await makeService({ config, cloudwatch: seam }).getErrors('24h', { includeWarnings: true });
+    const filters = seam.queryInsights.mock.calls.map((c) => c[1]);
+    expect(filters).toContain(PINO_WARN_INSIGHTS_FILTER);
+    expect(filters).not.toContain(PINO_ERROR_INSIGHTS_FILTER);
+    // delivery-failure query is still issued regardless of the toggle
+    expect(filters).toContain(DELIVERY_FAILURE_INSIGHTS_FILTER);
+  });
+
+  it('surfaces a Twilio delivery failure with its errorCode, and dedupes the same failure seen by both the warn + delivery queries', async () => {
+    const config = deployedConfig();
+    const fail = {
+      timestamp: '2026-07-21T20:04:31.000Z',
+      level: 40,
+      message: 'twilio relay-recipient delivery failed (undelivered/failed)',
+      correlationId: 'c-30034',
+      errorCode: '30034',
+    };
+    const seam = fakeSeam({
+      queryInsights: async (_groups, filterExpr) => {
+        // With warnings ON, the SAME failure is returned by both the widened pino
+        // (level≥40) query and the delivery query → must collapse to one row.
+        if (filterExpr === PINO_WARN_INSIGHTS_FILTER) return [fail];
+        if (filterExpr === DELIVERY_FAILURE_INSIGHTS_FILTER) return [fail];
+        return [];
+      },
+    });
+    const result = await makeService({ config, cloudwatch: seam }).getErrors('24h', {
+      includeWarnings: true,
+    });
+    expect(result.available).toBe(true);
+    if (!result.available) throw new Error('unreachable');
+    expect(result.events).toHaveLength(1);
+    expect(result.events[0]!.errorCode).toBe('30034');
+    expect(result.events[0]!.message).toContain('delivery failed');
   });
 
   it('merges pino errors + OOM (app/worker V8 + system kernel), newest-first, synthesized labels', async () => {
@@ -274,8 +336,8 @@ describe('systemStatus.getErrors — degradation + window', () => {
       'V8 heap out of memory',  // 02Z — V8 OOM (combined app+worker query)
       'pino error',             // 01Z — pino, unchanged
     ]);
-    // Exactly 3 Insights queries are issued (Promise.all): pino + V8 OOM (2 groups) + system OOM
-    expect(seam.queryInsights).toHaveBeenCalledTimes(3);
+    // Exactly 4 Insights queries are issued (Promise.all): pino + delivery-failures + V8 OOM (2 groups) + system OOM
+    expect(seam.queryInsights).toHaveBeenCalledTimes(4);
     // Pino query: BOTH process groups (app + worker) - worker-side errors
     // (extraction/reminder pollers) must reach the panel (2026-07-20 fix).
     expect(seam.queryInsights).toHaveBeenCalledWith(

@@ -3,7 +3,8 @@ id: vi-webhook-unrecognized-event-400
 title: Signed VI webhooks without transcript_sid are 400'd blind - unidentifiable payload, and the 400 keeps Twilio retrying (noise loop)
 type: bug
 severity: med
-status: open
+status: resolved
+resolved: 2026-07-20
 area: app
 created: 2026-07-20
 refs: app/src/routes/webhooks/voice.ts:1625, app/src/middleware/twilioSignature.ts:100
@@ -39,3 +40,13 @@ request lacks `transcript_sid`: log the payload's top-level KEY NAMES only
 instead of 400 so Twilio stops retrying an event we have chosen not to process.
 Keep 400 for unverifiable/shapeless requests. Once a logged key-set identifies
 the event type, decide whether to handle or keep ignoring it (documented).
+
+**Resolution (2026-07-20).** Implemented as suggested: a signature-verified
+JSON OBJECT without `transcript_sid` now acks 200 and WARN-logs
+`keys` (first 32 top-level key names, never values) + `keyCount` +
+content-length; a shapeless (non-object) body keeps the 400; unverified
+requests keep the middleware 403. Unit-covered (voiceIntelligenceWebhook:
+ack + key-names-only including a value-leak assertion; shapeless 400).
+FOLLOW-UP TRIGGER: the next occurrence's `keys` log line identifies the
+event type - if fresh transcripts keep producing these (scenario (b) in the
+evidence above), file a new issue to handle that event type explicitly.

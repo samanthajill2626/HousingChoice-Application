@@ -1655,6 +1655,30 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   router.post('/intelligence', verifyJsonSignature, async (req, res) => {
     const transcriptSid = (req.body as { transcript_sid?: unknown } | undefined)?.transcript_sid;
     if (typeof transcriptSid !== 'string' || transcriptSid.length === 0) {
+      // vi-webhook-unrecognized-event-400: Twilio sends SIGNED VI events beyond
+      // the transcript-completed shape we process (observed live 2026-07-20:
+      // ~1.4KB JSON bodies with no top-level transcript_sid, retried on every
+      // 4xx - a noise loop). The signature middleware already proved the sender,
+      // so for a JSON OBJECT we don't recognize: log the top-level KEY NAMES
+      // only (bounded, never values - PII rule) so the next occurrence
+      // identifies its event type, and ack 200 so Twilio stops retrying an
+      // event we have chosen not to process. A shapeless (non-object) body
+      // keeps the 400.
+      const body: unknown = req.body;
+      if (typeof body === 'object' && body !== null) {
+        const keys = Object.keys(body as Record<string, unknown>);
+        log.warn(
+          {
+            hasTranscriptSid: false,
+            keyCount: keys.length,
+            keys: keys.slice(0, 32),
+            contentLength: req.headers['content-length'] ?? null,
+          },
+          'vi webhook: unrecognized signed event (no transcript_sid) - acked and ignored',
+        );
+        res.status(200).end();
+        return;
+      }
       log.warn({ hasTranscriptSid: false }, 'vi webhook: missing transcript_sid - rejected');
       res.status(400).json({ error: 'bad request' });
       return;

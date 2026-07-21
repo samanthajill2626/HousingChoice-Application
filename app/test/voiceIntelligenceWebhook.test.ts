@@ -58,11 +58,41 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     expect(res.status).toBe(403);
   });
 
-  it('400s when transcript_sid is missing', async () => {
+  it('acks (200) a SIGNED JSON event without transcript_sid and logs its top-level KEY NAMES only (never values)', async () => {
+    // vi-webhook-unrecognized-event-400: Twilio sends signed VI events beyond
+    // the transcript-completed shape; a 400 makes it RETRY them forever (the
+    // observed noise loop). Signed + object + no transcript_sid -> ack 200 and
+    // log the key names so the event identifies itself next time.
+    const world = createFakeWorld();
+    const { app, capture } = await seedFounderBridge(world);
+    const res = await signedJsonPost(app, VI_PATH, {
+      event_type: 'mystery_event',
+      service_sid: 'GAfake',
+      secret_value: 'NEVER-LOGGED',
+    });
+    expect(res.status).toBe(200);
+    const line = capture.lines.find((l) =>
+      String(l['msg']).includes('unrecognized signed event'),
+    )!;
+    expect(line).toBeDefined();
+    expect(line['keys']).toEqual(['event_type', 'service_sid', 'secret_value']);
+    expect(line['keyCount']).toBe(3);
+    // PII rule: key NAMES only - no value from the body may appear in the log.
+    expect(JSON.stringify(capture.lines)).not.toContain('NEVER-LOGGED');
+    expect(JSON.stringify(capture.lines)).not.toContain('mystery_event');
+  });
+
+  it('an ARRAY body (signed, parseable, not our shape) is acked too - the 400 branch stays for unparseable bodies only', async () => {
+    // express.json(strict) only ever yields objects/arrays, so the handler's
+    // non-object 400 branch is defensive; primitives/null die in the body
+    // parser before reaching it. An array IS object-typed -> acked + key-logged
+    // (numeric index keys), never retried.
     const world = createFakeWorld();
     const { app } = await seedFounderBridge(world);
-    const res = await signedJsonPost(app, VI_PATH, { not_it: 'x' });
-    expect(res.status).toBe(400);
+    const res = await signedJsonPost(app, VI_PATH, [
+      { event: 'x' },
+    ] as unknown as Record<string, unknown>);
+    expect(res.status).toBe(200);
   });
 
   it('persists joined sentences on a completed transcript and emits message.persisted', async () => {

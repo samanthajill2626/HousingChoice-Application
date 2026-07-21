@@ -51,13 +51,18 @@ esModule default export: `require('email-reply-parser').default`),
   world) may ONLY change alongside the specs that assert it - keep lean
   edits minimal and deliberate.
 
-## INVARIANT RULE enumeration - "one 1:1 thread per contact, resolved by
-## participant key" (the structural change of this feature)
+## INVARIANT RULE enumeration - thread identity (the structural change)
 
-The conversation resolver invariant changes from phone-only to
-phone-or-email. Every mutation surface AND reader/renderer of thread
-identity, enumerated (builders and reviewers: treat unlisted-surface
-discoveries as findings):
+PRECISE MODEL (corrected by plan review): the system keeps one conversation
+PER PARTICIPANT KEY (today: per phone; a multi-phone contact already has N
+conversations MERGED AT READ TIME by the phone-iterating readers). Email
+adds one more participant key (`participant_email` + `email#` claim). The
+danger zone is therefore the READ MERGE, not just the write key: every
+reader that iterates a contact's PHONES to find conversations will silently
+drop email-only conversations unless it also iterates emails. Tasks A4
+(inbox + timeline readers) fix the two known ones; builders and reviewers:
+treat any OTHER phone-iterating reader you find as a finding.
+Every mutation surface AND reader/renderer of thread identity, enumerated:
 
 Writers/mutators:
 1. `conversationsRepo.createOrGetByParticipantPhone` (+ `phone#` claim) -
@@ -152,11 +157,21 @@ primitives first):**
 - Test: `app/test/` union/exhaustiveness + conversationTypeFor tests;
   dashboard type mirror is compile-checked by `npm run typecheck`
 
+**Scope note (plan review F24/F10):** property-manager shipped as a
+CUSTOM-KIND (role on landlord base), NOT a union member - so 'partner' as a
+first-class ContactType is deliberately heavier than that precedent (per
+spec Decision 8). Budget the fallout: `app/src/services/extraction/apply.ts`
++ `schema.ts` map contact types explicitly; seed coherence tests
+(`app/test/seedMatrixCoherence.test.ts`, `seedData.test.ts`,
+`seedMatrix.test.ts`) assert type/author matrices and WILL ripple.
+
 **Steps:**
-- [ ] Failing test: `conversationTypeFor({type:'partner'})` -> 'partner_1to1';
-      author honesty: inbound from partner contact -> author 'partner'.
+- [ ] Failing test: `conversationTypeFor({type:'partner'})` -> 'partner_1to1'
+      (verified location `app/src/routes/webhooks/twilio.ts:124`, 3 call
+      sites); author honesty: inbound from partner contact -> author 'partner'.
 - [ ] Widen unions everywhere the compiler forces (exhaustive switches are
-      the map; do NOT add default-cases to silence them).
+      the map; do NOT add default-cases to silence them). Include the
+      extraction apply/schema type maps and the seed coherence matrices.
 - [ ] Extraction eligibility: partner threads EXCLUDED (same as landlord) -
       assert in the extraction scheduling test.
 - [ ] KindPicker + labels + pill; typecheck-driven mirror sweep.
@@ -195,7 +210,11 @@ export function createEmailAdapter(deps: {config: AppConfig; logger: Logger}): E
 **Steps:**
 - [ ] Config tests first: driver gate (ses in prod requires
       EMAIL_SENDER_DOMAIN+EMAIL_FROM_ADDRESS present else boot throw),
-      kill-switch default matrix, sesApiBaseUrl prod rejection.
+      kill-switch default matrix, and - SECURITY-CRITICAL (review F15) -
+      `SES_API_BASE_URL` set under NODE_ENV=production MUST throw at boot,
+      replicating `config.ts:421-427` (twilioApiBaseUrl) verbatim. The B4
+      dev inbound route's prod-safety rests ENTIRELY on this throw; it gets
+      its own explicit test.
 - [ ] Adapter: compose raw MIME with `nodemailer/lib/mail-composer` (set
       Message-ID, In-Reply-To, References, Reply-To headers explicitly),
       send via `SESv2Client` `SendEmailCommand` with `Content: {Raw: {Data}}`;
@@ -217,43 +236,88 @@ export function createEmailAdapter(deps: {config: AppConfig; logger: Logger}): E
 
 **Interfaces (produces):**
 ```ts
-// conversationsRepo
-attachEmailToConversation(conversationId, email): Promise<void>       // writes participant_email + email#<addr> claim; conflict -> email_claimed_elsewhere error
-createOrGetByParticipantEmail(email, type: ConversationType): Promise<ConversationItem>
+// conversationsRepo - THE CLAIM ARBITER (review F13): the email#<addr>
+// claim item maps address -> conversationId and is the SINGLE arbiter of
+// which conversation owns an address. BOTH writers below go through
+// claimEmailForConversation; on claim conflict they RESOLVE TO the already-
+// claimed conversation instead of erroring or creating an orphan.
+claimEmailForConversation(email, conversationId): Promise<{ conversationId }> // conditional put email#<addr>; on conflict returns the existing claim's conversationId
+attachEmailToConversation(conversationId, email): Promise<{ conversationId }> // claim first; if claim points elsewhere, return THAT conversation (caller uses it)
+createOrGetByParticipantEmail(email, type: ConversationType): Promise<ConversationItem> // claim-put-then-create-row-with-self-heal SEQUENCE (mirror createOrGetByParticipantPhone at conversationsRepo.ts:660-717 - it is two writes with self-heal, NOT one transact)
 findByParticipantEmail(email): Promise<ConversationItem | undefined>
 getReplyToken(conversationId): Promise<string>                        // mints+persists email_reply_token once; token#<tok> pointer item for reverse lookup
 findByReplyToken(token): Promise<ConversationItem | undefined>
 // messagesRepo: MessageType adds 'email'; MessageItem email fields:
 subject?: string; email_from?: string; email_to?: string[]; email_cc?: string[];
 email_message_id?: string;            // RFC Message-ID (ours on outbound, theirs on inbound)
-email_text?: never                    // NOT a new field - body stays `body` (trimmed visible text)
 email_html_sanitized?: string         // inbound only (Phase B)
 email_raw_ref?: {bucket: string; key: string}  // inbound only
-// append() reuses sid pointer: outbound sid = SES providerMessageId; ALSO write emailmsgid#<rfc-message-id> pointer in the same transaction (reply threading lookup)
-getByRfcMessageId(messageId: string): Promise<MessageItem | undefined>
+// PROVIDER-ID CONVENTION (review F5/F14, pinned):
+//   INBOUND email: providerSid = the RFC Message-ID (or synthesized id).
+//     sid#<rfcId> pointer IS the threading lookup - no second pointer.
+//   OUTBOUND email: providerSid = SES MessageId (event correlation);
+//     email_message_id = our own <hc-<ulid>@domain>. append() gains an
+//     optional input `rfcMessageIdPointer?: string` in NewMessage; when set
+//     it adds a THIRD item emailmsgid#<rfcId> to the existing 2-item
+//     TransactWriteCommand (messagesRepo.ts append :626-742).
+getByRfcMessageId(messageId: string): Promise<MessageItem | undefined> // checks emailmsgid# then sid#
 ```
 
+**Reader fixes (review F2/F3 - BLOCKERS, both in this task):**
+- `app/src/routes/inbox.ts`: `rowForConversation` (:360-373) resolves the
+  contact ONLY via `findByPhone(participant_phone)` - an email-only
+  conversation would surface as a phantom `unknown` needsTriage row,
+  violating spec Decision 4. Fix: resolve via participant_phone OR
+  participant_email (`contacts.findByEmail`); a conversation with an email
+  participant resolving to a known contact renders as that contact's row; a
+  phoneless conversation resolving to NO contact must NOT render as an
+  unknown-triage row (email unknowns live in the unmatched surface only -
+  in practice this cannot occur since ingestion never creates contactless
+  conversations, but the reader must be defensive). `deriveLatest`
+  (:225-249) gains the 'email' channel.
+- `app/src/routes/contactTimeline.ts`: conversation gathering (:752-760)
+  iterates contactPhones only - ALSO iterate contact emails via
+  `findByParticipantEmail`. `toTimelineMessage` (:342) hard-codes
+  `type: mms?'mms':'sms'` - add the email branch emitting `type:'email'` +
+  subject/email_* fields; widen the wire TimelineMessage type (:124).
+
 **Steps:**
-- [ ] Failing tests: attach claim + conflict; email-only conversation
-      create-or-get race (two concurrent creates -> one item, claim-anchored
-      like the phone path - read `createOrGetByParticipantPhone` and mirror
-      its transact pattern exactly); reply-token mint idempotent; append
-      `type:'email'` with both pointers; dedupe on same providerMessageId.
-- [ ] Implement; tables.ts GSI; inbox rows carry channel 'email' when the
-      newest message is email (extend the existing channel mapping);
-      timeline items emit `kind:'message', type:'email'` with subject +
-      email fields.
+- [ ] Failing tests: claim arbiter (concurrent attach + create-or-get for
+      the SAME address converge on ONE conversation - write the
+      interleaving as a test with two racing calls); attach returning the
+      elsewhere-claimed conversation; reply-token mint idempotent; append
+      `type:'email'` outbound with third pointer / inbound with sid-only;
+      dedupe on same providerSid; getByRfcMessageId both pointer kinds.
+- [ ] Reader tests: email-only contact (no phones) shows its thread in the
+      contact timeline; inbox shows it as a CONTACT row with channel
+      'email'; NO unknown-triage row for phoneless conversations; a contact
+      with phone+email threads gets ONE inbox row (newest-conversation rule
+      unchanged).
+- [ ] Implement repo + tables.ts GSI + both readers.
 - [ ] Gates green; commit.
 
 ### Task A5: SendEmailService + API route
 
 **Files:**
-- Create: `app/src/services/sendEmailMessage.ts`
-- Modify: `app/src/routes/api.ts` (route), `app/src/routes/mmsMedia.ts`
-  (accept `purpose: 'email'` on presign: cap 25 MB total / per-file 25 MB,
-  allowed types = images + pdf + txt/csv + docx/xlsx MIME ids; email
-  attachments SKIP transcode), `app/src/index.ts` wiring
-- Test: `app/test/sendEmailMessage.test.ts`, route test
+- Create: `app/src/services/sendEmailMessage.ts`,
+  `app/src/routes/emailMedia.ts` (DISTINCT presign/confirm pair - review F1:
+  the MMS pipeline is NOT reusable: `mmsMedia.ts` presign hard-gates on
+  `isInlineMediaType` (images+pdf only) and confirm ALWAYS runs
+  `planMmsMedia`, which RASTERIZES PDFs to JPEG page-1 - that would destroy
+  document exchange, the core email use case)
+- Modify: `app/src/routes/api.ts` (route), `app/src/index.ts` wiring,
+  `app/src/lib/mediaTypes.ts` (new `EMAIL_ATTACHMENT_TYPES` allowlist:
+  jpeg/png/gif/webp, application/pdf, text/plain, text/csv, docx + xlsx
+  OOXML MIME ids)
+- Test: `app/test/sendEmailMessage.test.ts`, `app/test/emailMedia.test.ts`,
+  route test
+
+**emailMedia contract:** `POST /api/email-media/presign` {contentType,
+sizeBytes} -> presigned POST (reject type outside EMAIL_ATTACHMENT_TYPES or
+size > 25 MB); `POST /api/email-media/confirm` {key} -> HEAD the object,
+verify size/type match the mint, store ORIGINAL VERBATIM (no transcode, no
+planMmsMedia), return {s3Key, contentType, size}. Key prefix
+`email-media/<userId>/<ulid>` in the existing media bucket.
 
 **Interfaces (produces):**
 ```ts
@@ -273,7 +337,9 @@ Behavior (each a unit test):
    `<hc-<messageUlid>@<emailSenderDomain>>`; persist message (author
    'teammate', delivery queued) BEFORE adapter send (optimistic parity with
    SMS), then adapter.send -> update status 'sent' + record providerMessageId
-   pointer; adapter throw -> status 'failed' + surfaced error.
+   pointer + check the B5 orphan-event parking lot for that sesMessageId and
+   apply any parked bounce/complaint immediately; adapter throw -> status
+   'failed' + surfaced error.
 6. SSE `message.persisted` + conversation touch (reuse SMS emit path).
 
 **Steps:** failing tests -> implement -> gates green -> commit.
@@ -311,11 +377,17 @@ Behavior (each a unit test):
   from/to line; `<details>` expands full body text + attachments block
   (reuse MessageBubble attachment rendering); NO dangerouslySetInnerHTML
   anywhere (outbound is plain text; inbound HTML handled in B7 via iframe).
-- Optimistic send: construct optimistic TimelineMessage `type:'email'`
-  through the existing addOptimistic/resolve/fail path.
+- Optimistic send (review F4/F9): `useContactTimeline.addOptimistic`
+  (:178-217) hard-codes `type: hasMedia?'mms':'sms'` and a phone-shaped
+  signature - WIDEN it (options-object param carrying `type:'email'` +
+  subject/email fields, defaulting to today's behavior) rather than a
+  parallel path, and compile-sweep ALL callers: `ConversationDetail.tsx`,
+  `useRelayThread.ts`, `TourConversation.tsx`, `PlacementConversation.tsx`.
+  `buildTimelineFallback.ts` (the 404-fallback assembler) also needs the
+  email branch or email-only contacts render empty on fallback.
 
-**Steps:** implement -> typecheck green -> visual self-check happens in A7
-live QA -> commit.
+**Steps:** implement -> typecheck green (the compiler sweep IS the caller
+map) -> visual self-check happens in A7 live QA -> commit.
 
 ### Task A7: fake-SES outbound + e2e + PHASE A GATE
 
@@ -379,18 +451,35 @@ with Sent chip -> `expectEmailSentTo(landlordEmail, /Welcome/)` via
   offline via `npm run plan -- dev` DRY reading only - do NOT apply; at
   minimum `terraform fmt -check`
 
-**Module contents (inbound_mail):** per-env SESv2 domain identity
-(`aws_sesv2_email_identity` on `var.mail_domain`) + DKIM tokens output;
-configuration set + event destination -> SNS topic `mail-events`; receipt
-rule set + rule (S3 write to the new bucket `${name_prefix}inbound-mail-
-<account>` with ses.amazonaws.com PutObject bucket policy + SNS notify topic
-`mail-inbound`); both topics -> ONE SQS queue `${name_prefix}inbound-mail`
+**Module contents (inbound_mail) - CLASSIC SES resource family throughout
+(review F21: receipt rules exist only in classic; keep identity/DKIM/config
+set consistent - `aws_ses_domain_identity` + `aws_ses_domain_dkim` +
+`aws_ses_configuration_set` + event destination):** per-env domain identity
+on `var.mail_domain` + DKIM tokens output; configuration set + event
+destination -> SNS topic `mail-events`; S3 write to the new bucket
+`${name_prefix}inbound-mail-<account>` with ses.amazonaws.com PutObject
+bucket policy (aws:Referer account condition) + SNS notify topic
+`mail-inbound`; both topics -> ONE SQS queue `${name_prefix}inbound-mail`
 (+DLQ, redrive 5, visibility 120, raw_message_delivery = false); everything
 DNS-dependent gated behind `var.mail_domain_phase` (ACM/custom_domain_phase
-staircase pattern - phase 0 creates identity + rules + outputs the DKIM
+staircase pattern - phase 0 creates identity + outputs the DKIM
 CNAMEs/MX/SPF records for manual Namecheap entry; phase 1 enables any
 verification waits). Outputs: queue_url/arn, bucket_name/arn, dkim/mx/spf
 record instructions.
+
+**RECEIPT-RULE-SET STRUCTURE (review F20 - this is an account-level
+singleton, NOT per-env):** SES allows exactly ONE ACTIVE receipt rule set
+per account+region, and dev+prod share the account. A per-env rule set
+would mean whichever env activated last silently drops the other env's
+inbound mail. Structure: ONE shared rule-set name `hc-inbound-mail`; the
+`aws_ses_receipt_rule_set` + `aws_ses_active_receipt_rule_set` resources
+are created ONLY by the env whose `local.manage_mail_rule_set = true`
+(exactly one env - set dev=true initially, documented flip procedure in
+RUNBOOK); EACH env creates its OWN `aws_ses_receipt_rule` (recipients =
+that env's `var.mail_domain`) referencing the shared set name. stack.tf
+stays byte-identical because the differing values are locals. RUNBOOK must
+state: never destroy the managing env without migrating set ownership, and
+a dev-only teardown deactivates prod inbound - coordinate.
 
 **RUNBOOK section records the owed ops sequence:** apply -> Namecheap
 records (DKIM x3, MX -> inbound-smtp.us-east-1.amazonaws.com, SPF) -> phase
@@ -450,6 +539,20 @@ MediaStore `media/<conversationId>/<rfcMessageIdSafe>/<i>` with
 normalizeStoredMediaType; per-message 25 MB total cap -> oversized
 attachments skipped with a stored `attachments_truncated: true` note.
 
+**DoS + hostile-input hardening (review F17 - REQUIRED, each a test):**
+1. HEAD the S3 object BEFORE fetching: > 30 MB -> quarantine row with
+   `parse_skipped: 'oversize'`, raw never loaded into memory.
+2. `simpleParser` invoked with `maxHtmlLengthToParse` bounded (2 MB) and the
+   result capped: > 50 attachments -> keep first 50 + truncated note.
+3. Parser throw / timeout (wrap in 30s Promise.race) -> quarantine row with
+   `parse_skipped: 'parse_failed'` - NEVER a crash, NEVER an SQS retry loop
+   (the idempotency marker is claimed before parse, so redelivery no-ops).
+4. Parse concurrency: semaphore(2) around ingest in the worker dispatch
+   (mirror the transcode semaphore pattern, mmsMedia.ts:45).
+**PII (review F18):** raw MIME refs (`email_raw_ref`, unmatched `raw_ref`)
+are NEVER presigned and NEVER served unauthed; raw bodies/addresses stay
+out of logs (ids only, existing posture).
+
 **Steps:** exhaustive failing tests (all 7 tiers + content rules) ->
 implement -> gates -> commit. Then extraction seam: failing test that an
 email message maps to utterances channel 'email' with TRIMMED text only ->
@@ -482,6 +585,14 @@ Blocklist lives as pointer items `block#<address>` in the same table;
 `isBlocked(address)` consumed by B2 tier 3.
 Today non-regression: unit test builds Today inputs with unmatched rows
 present -> output identical to without.
+Retention (review F19): DynamoDB TTL attribute `expires_at` set on
+linked/dismissed rows (+90 days) and quarantined rows (+90 days); unmatched
+rows never expire (they await action). ADJUDICATION (planner): the
+single-partition byStatus GSI is accepted at staff-tool volumes (far below
+partition limits) - a `status#yyyymm` shard is deliberate over-engineering
+here; revisit only if the unmatched feed ever exceeds ~1k rows/day.
+unreadCount = capped first-page count (the inbox-unread 100-cap pattern),
+not a table scan.
 
 ### Task B4: Delivery mechanisms - worker consumer + dev route + fake inbound
 
@@ -491,8 +602,12 @@ present -> output identical to without.
 - Modify: `app/src/worker.ts` (second SqsJobConsumer on
   `config.inboundMailQueueUrl` with dispatch = parse -> ingest/route),
   `app/src/routes/webhooks/index.ts` (mount `/webhooks/ses/inbound` ONLY
-  when `config.sesApiBaseUrl` set - the twilioApiBaseUrl dev-gating
-  pattern; guarded by the existing x-origin-verify middleware),
+  when `config.sesApiBaseUrl` is set. Review F15 correction: there is NO
+  existing conditional-mount precedent - twilio webhooks are always
+  mounted; the prod-safety of this route rests ENTIRELY on the A3 boot
+  throw rejecting SES_API_BASE_URL in production, plus the x-origin-verify
+  middleware. State this in a code comment at the mount site; prod inbound
+  is SQS-only),
   `fake-twilio/src/engine/mailEngine.ts` (inbound: write raw MIME to MinIO
   INBOUND_MAIL_BUCKET via an S3 client built from inherited env with FIXED
   local creds - never ambient AWS_*; then POST the SNS-shaped notification
@@ -502,7 +617,14 @@ present -> output identical to without.
   base64}], spamVerdict?, virusVerdict?} - composes MIME with a minimal
   hand-rolled builder or mail-composer if already in the fake's reach),
   `app/scripts/s3-create.ts` (+ inbound bucket), `scripts/e2e-session.mjs`
-  childEnv (`INBOUND_MAIL_BUCKET=hc-local-inbound-mail-<lane>`)
+  childEnv (`INBOUND_MAIL_BUCKET=hc-local-inbound-mail-<lane>`; lane
+  isolation holds because each session launcher spawns ITS OWN fake process
+  with lane-scoped env - the fake is per-lane, only MinIO :9000 is shared,
+  and the per-lane bucket is the isolation boundary - review F22 verified),
+  `app/src/routes/dev.ts` reseed: clear the `unmatched_email` table in
+  `/__dev/reseed` (review F23; inbound-bucket keys are run-unique so
+  best-effort bucket cleanup is acceptable; `unmatched_email` must never
+  enter any byte-asserted seed snapshot)
 - Test: `app/test/sesNotifications.test.ts` (SNS envelope + receipt shapes
   incl. bounce/complaint/delivery discrimination), worker consumer test with
   stub SQS
@@ -530,9 +652,17 @@ the dev route alike. NEVER route these through dispatchJob/the jobs queue
 **Behavior:** Delivery -> delivery_status 'delivered' via sid pointer
 (forward-only machine reused). Bounce bounceType 'Permanent' -> status
 'undelivered' + set `email_unreachable` on the contact owning that address;
-'Transient' -> 'undelivered' only. Complaint -> `email_opt_out`. Unknown
-sesMessageId -> log + ignore (idempotent). Suppressed sends then 409 (A5
-test extended: end-to-end unit test bounce -> subsequent send refused).
+'Transient' -> 'undelivered' only. Complaint -> `email_opt_out`. Suppressed
+sends then 409 (A5 test extended: end-to-end unit test bounce -> subsequent
+send refused).
+**Orphan-event parking (review F12 - REQUIRED):** the SES MessageId is only
+knowable AFTER send, so a fast bounce (or a crash between send-return and
+pointer-write) can arrive before the sid pointer exists. An event whose
+sesMessageId resolves to no message is PARKED as an
+`emailevent#<sesMessageId>` item (payload + receivedAt, TTL 7d) instead of
+ignored; A5's post-send pointer write then CHECKS the parking lot and
+applies any parked event immediately. Tests: bounce-before-pointer ->
+suppression still lands; parked event applied exactly once.
 
 ### Task B6: Unmatched-email UI - nav item, badge, page
 
@@ -573,13 +703,21 @@ unread only (not quarantine).
 - Test: e2e assertion in B8 that a script-bearing inbound email renders
   inert
 
-**EmailHtmlFrame contract:** `<iframe sandbox="" srcDoc={html} title="Email
-message">` - sandbox EMPTY (no scripts, no same-origin), html is the
-SERVER-sanitized `email_html_sanitized` (defense in depth: sanitized once at
-ingest, framed at render; the no-dangerouslySetInnerHTML rule is honored -
-srcDoc into a fully sandboxed iframe is the sanctioned pattern, add a code
-comment saying exactly why). Auto-height via onLoad measurement capped at
-480px with inner scroll. EmailCard inbound: collapsed = subject + trimmed-
+**EmailHtmlFrame contract:** `<iframe sandbox="" srcDoc={framedHtml}
+title="Email message">` - sandbox EMPTY (no scripts, no same-origin);
+`framedHtml` = a CSP meta PREPENDED to the server-sanitized
+`email_html_sanitized`:
+`<meta http-equiv="Content-Security-Policy" content="default-src 'none';
+img-src data:; style-src 'unsafe-inline'">` - review F16: the sandbox alone
+does NOT stop remote image/tracker fetches; the CSP inside the srcDoc is
+what enforces the spec's remote-image block (sanitize-html's scheme strip
+is defense-in-depth, the CSP is the guarantee). Defense in depth: sanitized
+once at ingest, CSP-framed at render; the no-dangerouslySetInnerHTML rule
+is honored - srcDoc into a fully sandboxed iframe is the sanctioned
+pattern; code comment at the component saying exactly why. Auto-height via
+onLoad measurement capped at 480px with inner scroll. Unit-assert the CSP
+meta is present in framedHtml; e2e asserts no dialog fires from a
+script-bearing email. EmailCard inbound: collapsed = subject + trimmed-
 text snippet + "New address" chip when email_new_address; expanded =
 trimmed text; "Show quoted text" <details> reveals full text; "View
 original formatting" <details> mounts EmailHtmlFrame only when

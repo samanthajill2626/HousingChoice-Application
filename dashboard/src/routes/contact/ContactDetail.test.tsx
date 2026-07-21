@@ -756,7 +756,7 @@ describe('ContactDetail', () => {
     });
   });
 
-  // ── Emailing an email-ONLY contact (M1) ─────────────────────────────────────
+  // --- Emailing an email-only contact (M1) ---
   describe('emailing an email-only contact', () => {
     it('a phoneless contact emails via ensureEmailConversation, NOT the phone ensure route', async () => {
       const { default: userEvent } = await import('@testing-library/user-event');

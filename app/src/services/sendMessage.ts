@@ -231,7 +231,7 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
 
     // (0) Channel guard (FIX 2): this 1:1 wrapper texts participant_phone.
     // Refuse a relay_group (participant_phone is the pool number) AND any thread
-    // with no phone participant — an email-channel thread carries
+    // with no phone participant - an email-channel thread carries
     // participant_email and NO phone, and sends via the dedicated email service,
     // never this SMS path. Both misroutes throw so no caller can misuse it; the
     // guard also narrows participant_phone to a definite string below.

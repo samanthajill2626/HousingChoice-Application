@@ -8,7 +8,7 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 
 const partner = { contactId: 'c-partner', type: 'partner' } as ContactItem;
 
-describe('voiceMasking — partner honesty mapping (A2)', () => {
+describe('voiceMasking - partner honesty mapping (A2)', () => {
   it('conversationTypeFor(partner) -> partner_1to1', () => {
     expect(conversationTypeFor(partner)).toBe('partner_1to1');
   });

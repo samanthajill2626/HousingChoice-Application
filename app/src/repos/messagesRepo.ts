@@ -238,7 +238,7 @@ export interface NewMessage {
   // --- Email channel v1 (type:'email' items) -------------------------------
   // Provider-id convention (plan F5/F14): INBOUND providerSid = the RFC
   // Message-ID (the sid# pointer IS the threading lookup); OUTBOUND providerSid
-  // = the SES MessageId and `email_message_id` is our own <hc-…@domain> id —
+  // = the SES MessageId and `email_message_id` is our own <hc-...@domain> id -
   // set `rfcMessageIdPointer` to that RFC id and append() writes a THIRD
   // emailmsgid#<rfcId> pointer so getByRfcMessageId can follow it.
   /** Email subject line. */
@@ -249,14 +249,14 @@ export interface NewMessage {
   email_to?: string[];
   /** RFC Cc addresses (normalized). */
   email_cc?: string[];
-  /** The RFC Message-ID (ours on outbound `<hc-…>`, the sender's on inbound). */
+  /** The RFC Message-ID (ours on outbound `<hc-...>`, the sender's on inbound). */
   email_message_id?: string;
   /** Sanitized inbound HTML body (Phase B B7 renders it; absent on outbound). */
   email_html_sanitized?: string;
   /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
   email_raw_ref?: { bucket: string; key: string };
   /**
-   * OUTBOUND email only: our own RFC Message-ID (`<hc-…@domain>`). When set,
+   * OUTBOUND email only: our own RFC Message-ID (`<hc-...@domain>`). When set,
    * append() adds a THIRD emailmsgid#<rfcId> pointer to the transaction so an
    * inbound reply's In-Reply-To/References can resolve this message via
    * getByRfcMessageId (the SES providerSid differs from our RFC id).
@@ -381,7 +381,7 @@ export interface MessageItem {
   /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
   call_party_label?: string;
 
-  // --- Email channel v1 — present only on type:'email' items ---------------
+  // --- Email channel v1 - present only on type:'email' items ---------------
   /** Email subject line. */
   subject?: string;
   /** RFC From address (normalized). */
@@ -488,8 +488,8 @@ export interface MessagesRepo {
   /** Resolve a provider SID to its message via the pointer item (doc §9). */
   getByProviderSid(sid: string): Promise<MessageItem | undefined>;
   /**
-   * Email channel v1 — resolve an RFC Message-ID to its message. Checks the
-   * emailmsgid#<id> pointer (OUTBOUND: our own <hc-…> id, distinct from the SES
+   * Email channel v1 - resolve an RFC Message-ID to its message. Checks the
+   * emailmsgid#<id> pointer (OUTBOUND: our own <hc-...> id, distinct from the SES
    * providerSid) FIRST, then falls back to sid#<id> (INBOUND: providerSid IS the
    * RFC Message-ID). The In-Reply-To/References threading lookup for inbound
    * replies. Undefined when neither pointer resolves.
@@ -733,7 +733,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
     async getByRfcMessageId(messageId) {
       // OUTBOUND: emailmsgid#<rfcId> maps our own RFC id -> the message (the SES
-      // providerSid differs). INBOUND: no emailmsgid pointer — providerSid IS the
+      // providerSid differs). INBOUND: no emailmsgid pointer - providerSid IS the
       // RFC id, so fall back to sid#<rfcId>. Both pointer shapes are
       // {ref_conversationId, ref_tsMsgId}.
       const emailPtrRes = await doc.send(
@@ -846,11 +846,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                 },
               },
               // Email channel v1: an OUTBOUND email carries its own RFC
-              // Message-ID (distinct from the SES providerSid) — write a THIRD
+              // Message-ID (distinct from the SES providerSid) - write a THIRD
               // emailmsgid#<rfcId> pointer so an inbound reply's In-Reply-To
               // resolves this message via getByRfcMessageId. Only when set
               // (INBOUND uses providerSid == the RFC id, so its sid# pointer is
-              // already the threading lookup — no third item).
+              // already the threading lookup - no third item).
               ...(message.rfcMessageIdPointer !== undefined
                 ? [
                     {

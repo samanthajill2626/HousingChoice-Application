@@ -1386,7 +1386,7 @@ export interface Message {
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
    *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
-  // --- Email channel v1 — present only on a type:'email' entry (A4) --------
+  // --- Email channel v1 - present only on a type:'email' entry (A4) --------
   /** Subject line (email only). */
   subject?: string;
   /** The From address (our sender on outbound; the contact on inbound). */

@@ -348,7 +348,7 @@ describe('POST /api/contacts/:id/conversation — start a thread with a new cont
   });
 });
 
-describe('POST /api/contacts/:id/email-conversation — email-only contact thread (M1)', () => {
+describe('POST /api/contacts/:id/email-conversation - email-only contact thread (M1)', () => {
   it('creates the 1:1 email thread for the primary address (participant_email + participants + name, NO phone)', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({

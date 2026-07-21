@@ -141,7 +141,7 @@ interface TimelineMessage extends TimelineBase {
   /** RFC Cc addresses. */
   email_cc?: string[];
   /** Inbound reply arrived from an address not yet on the contact (B2 sets it;
-   *  the field is declared now so the wire type is stable — the client renders a
+   *  the field is declared now so the wire type is stable - the client renders a
    *  "New address" chip). Absent on outbound + known-address inbound. */
   email_new_address?: boolean;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message.
@@ -339,7 +339,7 @@ function toTimelineMessage(
 ): TimelineMessage {
   // Email channel v1: an email item carries NO phones (subject + addresses
   // instead). The contact's OWN number on a phone thread (participant_phone) +
-  // our org number are the ONLY phones we expose — never another counterpart.
+  // our org number are the ONLY phones we expose - never another counterpart.
   const isEmail = m.type === 'email';
   const contactPhone = conversation?.participant_phone;
   const fromPhone = isEmail ? undefined : m.direction === 'inbound' ? contactPhone : ourNumber;
@@ -766,11 +766,11 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
       }
     }
 
-    // 3. Resolve the contact's threads (BE1) → the deduped set of 1:1
+    // 3. Resolve the contact's threads (BE1) -> the deduped set of 1:1
     // conversationIds. Email channel v1 (invariant rule): resolve across BOTH
     // their phone numbers AND email addresses, so an email-only thread's
     // messages appear in the merged timeline. relay_group threads front a pool
-    // number (never the contact's real phone/email), so they are excluded —
+    // number (never the contact's real phone/email), so they are excluded -
     // group-text activity surfaces as milestones, never inlined content.
     const convById = new Map<string, ConversationItem>();
     for (const conv of await conversationsForContact(contact, conversations)) {

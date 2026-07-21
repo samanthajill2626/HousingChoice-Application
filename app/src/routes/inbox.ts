@@ -384,12 +384,12 @@ export async function aggregateInbox(
 
     if (!contact) {
       // No contact. A phoneless conversation (an email thread that resolved to no
-      // contact) must NOT render as a phantom unknown-triage row — email unknowns
+      // contact) must NOT render as a phantom unknown-triage row - email unknowns
       // live in the unmatched-email surface only (spec Decision 4). In practice
       // ingestion never creates a contactless email conversation, but be
       // defensive: with no phone there is no unknown identity to show, so skip.
       if (phone === undefined) return undefined;
-      // Unknown NUMBER → an untriaged unknown row, keyed by phone.
+      // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
       return {
         kind: 'unknown',
@@ -435,7 +435,7 @@ export async function aggregateInbox(
     const role = roleFromContact(contact);
     // Name fallback when the contact has no resolved name: the formatted phone
     // for a phone thread, else the email address for an email-only thread (never
-    // undefined — email-only contacts lack a phone).
+    // undefined - email-only contacts lack a phone).
     const fallbackLabel =
       phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
     return {

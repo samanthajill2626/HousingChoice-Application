@@ -125,7 +125,7 @@ export function createContactCapture(deps: ContactCaptureDeps = {}): ContactCapt
     const { conversationId, participant_phone: phone } = conversation;
     // contactCapture is the PHONE auto-capture path only (plan Decision 4: email
     // ingestion never creates contacts). An email-only conversation carries
-    // participant_email and NO phone — it must never reach here. Guard so `phone`
+    // participant_email and NO phone - it must never reach here. Guard so `phone`
     // narrows to a definite string for the claim + findByPhone calls below.
     if (phone === undefined) {
       throw new Error(

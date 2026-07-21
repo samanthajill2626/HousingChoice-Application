@@ -1129,7 +1129,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     }
 
     // Resolve the contact's 1:1 conversations across ALL their numbers AND email
-    // addresses (email channel v1, ADJ-1c) — exactly like the merged timeline, so
+    // addresses (email channel v1, ADJ-1c) - exactly like the merged timeline, so
     // inbound EMAIL attachments (the document-exchange core use case) appear in
     // the Media panel too. relay_group threads front a pool number (never the
     // contact's real phone/email), so they are excluded purely on type.
@@ -1223,13 +1223,13 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
 
     // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord|partner
     // moves the contact off the needs_review triage front door at the moment the
-    // identity is known — but only when the caller didn't set status itself (an
-    // explicit status always wins). Type-scoped (status-model unification — one
+    // identity is known - but only when the caller didn't set status itself (an
+    // explicit status always wins). Type-scoped (status-model unification - one
     // `status` field): tenant -> 'onboarding' (the section 5 lifecycle starts past
     // the front door); landlord -> 'interested' (a freshly identified landlord is a
     // LEAD; 'active' means their properties are onboarded -
     // landlord-status-onboarding design D1); partner -> 'active' (partner has no
-    // rich lifecycle — NON_TENANT_STATUSES needs_review|active — so a resolved
+    // rich lifecycle - NON_TENANT_STATUSES needs_review|active - so a resolved
     // partner is simply off the front door). We do NOT stamp status_source -
     // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
     // placement transition (a 'manual' pin would block it: the create-pin
@@ -1380,7 +1380,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     const phone = typeof updated.phone === 'string' ? updated.phone : undefined;
     // Gather the contact's linked 1:1 threads: the scalar-primary phone thread
     // (unchanged) PLUS any EMAIL threads on the contact's addresses (email
-    // channel v1, ADJ-1d) — so triage flips an email-only thread's type +
+    // channel v1, ADJ-1d) - so triage flips an email-only thread's type +
     // denormalizes the name onto it too.
     const linked: ConversationItem[] = [];
     const seenLinked = new Set<string>();
@@ -1534,12 +1534,12 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ conversation });
   });
 
-  // POST /api/contacts/:contactId/email-conversation → 200 { conversation }.
-  // Create-or-get the 1:1 EMAIL thread for the contact's PRIMARY address — the
+  // POST /api/contacts/:contactId/email-conversation -> 200 { conversation }.
+  // Create-or-get the 1:1 EMAIL thread for the contact's PRIMARY address - the
   // email analog of /conversation, so the dashboard can email an email-ONLY contact
   // (no phone) who has never messaged us. The phone /conversation route 400s
   // (contact_has_no_phone) for them; this uses the createOrGetByParticipantEmail
-  // claim arbiter (idempotent — a racing send resolves to the same thread). It sets
+  // claim arbiter (idempotent - a racing send resolves to the same thread). It sets
   // participants + display name AT CREATE (ADJ-9) so channel-agnostic readers
   // (Today/inbox) resolve an email-only thread that carries no participant_phone.
   // 400 contact_has_no_email when no address is on file.

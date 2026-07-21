@@ -369,7 +369,7 @@ export class Scenario {
     });
   }
 
-  /** [App→SES] The outbound email reached the fake-SES surface, addressed to
+  /** [App->SES] The outbound email reached the fake-SES surface, addressed to
    *  `address` with a subject matching `subjectRe`. Returns the matched record so
    *  the caller can assert on its raw MIME (Subject/To headers, attachment parts). */
   expectEmailSentTo(address: string, subjectRe: RegExp): Promise<FakeEmail> {

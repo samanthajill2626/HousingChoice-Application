@@ -1217,7 +1217,7 @@ export async function ensureContactConversation(contactId: string): Promise<stri
   return res.conversation.conversationId;
 }
 
-/** POST /api/contacts/:id/email-conversation — create-or-get the 1:1 EMAIL thread
+/** POST /api/contacts/:id/email-conversation - create-or-get the 1:1 EMAIL thread
  *  for the contact's PRIMARY address (idempotent). The email analog of
  *  ensureContactConversation, for an email-only contact (no phone) whose phone
  *  thread the composer cannot fall back to. Throws ApiError 400

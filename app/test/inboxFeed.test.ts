@@ -189,7 +189,7 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(page.rows[0]!.contactId).toBeUndefined();
   });
 
-  it('a partner CONTACT → kind:"contact", role:"partner", needsTriage:false (A2 parity)', async () => {
+  it('a partner CONTACT -> kind:"contact", role:"partner", needsTriage:false (A2 parity)', async () => {
     const contact: ContactItem = {
       contactId: 'c-partner',
       type: 'partner',

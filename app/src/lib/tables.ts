@@ -127,7 +127,7 @@ export const TABLES: readonly TableSpec[] = [
       },
       // Email channel v1: participant_email -> the ONE email 1:1 thread. Written
       // ONLY on email-participating conversations (the email#<addr> claim arbiter
-      // is the single writer), so this GSI is sparse — phone-only 1:1 threads and
+      // is the single writer), so this GSI is sparse - phone-only 1:1 threads and
       // relay groups never carry participant_email and never index here. Mirrors
       // byParticipantPhone (the email claim + createOrGetByParticipantEmail fast
       // path both query it).

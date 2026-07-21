@@ -70,14 +70,14 @@ export interface ConversationItem {
    * this is a synthetic placeholder (the pool number) — relay routing goes
    * through pool_number / byPoolNumber, never this field. OPTIONAL (email
    * channel v1): an email-only 1:1 thread carries `participant_email` and NO
-   * phone — channel-agnostic readers fall back to `participant_display_name`.
+   * phone - channel-agnostic readers fall back to `participant_display_name`.
    */
   participant_phone?: string;
   /**
    * External participant's email address, normalized (byParticipantEmail GSI
    * HASH; email channel v1). Set ONLY on email-participating conversations by
    * the email#<addr> claim arbiter (attachEmailToConversation /
-   * createOrGetByParticipantEmail) — the single writer. Absent on phone-only
+   * createOrGetByParticipantEmail) - the single writer. Absent on phone-only
    * 1:1 threads and relay groups (keeps the GSI sparse).
    */
   participant_email?: string;
@@ -316,7 +316,7 @@ function phoneClaimPk(phone: string): string {
  * email channel v1). The email#<addr> claim maps address -> conversationId and
  * is the SINGLE arbiter of which conversation owns an address; it carries ONLY
  * the key + ref_conversationId (no participant_email/status), so it never
- * indexes into the sparse GSIs. Never collides with real `conv-…` partitions.
+ * indexes into the sparse GSIs. Never collides with real `conv-...` partitions.
  */
 function emailClaimPk(email: string): string {
   return `email#${email}`;
@@ -357,7 +357,7 @@ export interface ConversationsRepo {
    */
   findByParticipantPhone(phone: string): Promise<ConversationItem[]>;
   /**
-   * Email channel v1 — THE CLAIM ARBITER (plan F13). Conditionally put the
+   * Email channel v1 - THE CLAIM ARBITER (plan F13). Conditionally put the
    * email#<addr> claim (attribute_not_exists) mapping the address to
    * `conversationId`. On a claim conflict this RESOLVES: it GETs the existing
    * claim and returns THAT conversationId (never errors, never orphans). The
@@ -368,7 +368,7 @@ export interface ConversationsRepo {
     conversationId: string,
   ): Promise<{ conversationId: string }>;
   /**
-   * Email channel v1 — attach an address to an EXISTING conversation (e.g. a
+   * Email channel v1 - attach an address to an EXISTING conversation (e.g. a
    * known contact's inbound email joining their 1:1 thread). Claims first: if
    * the claim points ELSEWHERE, returns that other conversation's id (the
    * caller threads there instead) and leaves this conversation untouched; if
@@ -379,7 +379,7 @@ export interface ConversationsRepo {
     email: string,
   ): Promise<{ conversationId: string }>;
   /**
-   * Email channel v1 — the one active email 1:1 conversation for an address,
+   * Email channel v1 - the one active email 1:1 conversation for an address,
    * created (status `open`, ai_mode `auto`) when none exists. Mirrors
    * createOrGetByParticipantPhone's two-write claim + self-heal SEQUENCE
    * verbatim on the byParticipantEmail GSI + email#<addr> claim: the winner
@@ -393,13 +393,13 @@ export interface ConversationsRepo {
     opts?: { contactId?: string; displayName?: string },
   ): Promise<ConversationItem>;
   /**
-   * All conversations for an email address via the byParticipantEmail GSI —
+   * All conversations for an email address via the byParticipantEmail GSI -
    * the email analog of findByParticipantPhone (returns an array; the readers
    * iterate a contact's addresses alongside their phones). [] when none.
    */
   findByParticipantEmail(email: string): Promise<ConversationItem[]>;
   /**
-   * Email channel v1 — mint (once) + persist the URL-safe email_reply_token for
+   * Email channel v1 - mint (once) + persist the URL-safe email_reply_token for
    * a conversation and write its token#<tok> reverse pointer. Idempotent: a
    * conversation that already carries a token returns it WITHOUT new writes.
    * Throws ConditionalCheckFailedException for an unknown conversation.
@@ -659,10 +659,10 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
   }
 
   /**
-   * Email channel v1 — the email#<addr> claim arbiter (plan F13). Conditionally
+   * Email channel v1 - the email#<addr> claim arbiter (plan F13). Conditionally
    * put the claim; on conflict GET it and return the existing owner. Shared by
    * the interface method + attachEmailToConversation (a factory closure, so no
-   * `this`-binding — same pattern as getById/createConversationRow).
+   * `this`-binding - same pattern as getById/createConversationRow).
    */
   async function claimEmail(
     email: string,
@@ -855,11 +855,11 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
     async attachEmailToConversation(conversationId, email) {
       // Claim first: if the address already belongs to a DIFFERENT conversation,
-      // return THAT one (the caller threads there) and leave this row untouched —
+      // return THAT one (the caller threads there) and leave this row untouched -
       // never two conversations for one address.
       const { conversationId: owner } = await claimEmail(email, conversationId);
       if (owner !== conversationId) return { conversationId: owner };
-      // We own the claim — stamp participant_email onto this conversation's row
+      // We own the claim - stamp participant_email onto this conversation's row
       // (the byParticipantEmail GSI HASH). Guard on existence so an unknown id
       // never creates a row.
       //
@@ -884,7 +884,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
     },
 
     async createOrGetByParticipantEmail(email, type, opts) {
-      // Fast path: the byParticipantEmail GSI. Eventually consistent — a miss
+      // Fast path: the byParticipantEmail GSI. Eventually consistent - a miss
       // here is NOT proof the conversation doesn't exist (the claim below is the
       // correctness backstop, exactly like createOrGetByParticipantPhone).
       const { Items } = await doc.send(
@@ -914,7 +914,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         ...(opts?.contactId !== undefined && {
           // Mirror the phone path's participant shape ({contactId, phone}); an
           // email participant has no phone, so `phone` is empty (readers key on
-          // contactId first — jobs/extraction.ts, today.ts whoContactId).
+          // contactId first - jobs/extraction.ts, today.ts whoContactId).
           participants: [{ contactId: opts.contactId, phone: '' }],
         }),
         ...(opts?.displayName !== undefined && { participant_display_name: opts.displayName }),
@@ -979,7 +979,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       }
       // 16 random bytes -> 22 url-safe chars. Write the reverse pointer FIRST so a
       // crash after it still leaves the token resolvable, then claim the canonical
-      // slot on the row (attribute_not_exists) — a concurrent minter loses that
+      // slot on the row (attribute_not_exists) - a concurrent minter loses that
       // claim and returns the winner's token (its own pointer is a harmless extra
       // that still resolves to this conversation).
       const token = randomBytes(16).toString('base64url');
@@ -993,7 +993,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         );
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
-        // Astronomically unlikely token collision — nothing to do, the pointer
+        // Astronomically unlikely token collision - nothing to do, the pointer
         // already exists (and points somewhere); fall through to the row claim.
       }
       try {

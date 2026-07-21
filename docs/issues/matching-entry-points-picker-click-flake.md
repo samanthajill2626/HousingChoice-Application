@@ -31,6 +31,11 @@ Provenance points at a load-sensitive UI race, not a regression:
 - The unit-photo-transcode diff touches ListingDetail photos only - no
   matching-page or unit-search code.
 
+**Second sighting (2026-07-21, final gate battery).** Failed again in the
+full-suite run on the merged tip (f16285d4) with the identical interception
+signature, then passed solo (3/3) minutes later on the same commit. Pattern
+holds: full-suite load only.
+
 **Suggested fix.** In the test (or the picker), commit the typeahead selection
 and wait for the option list to CLOSE (e.g. expect the listbox to be hidden)
 before clicking the unit row; alternatively the picker could close its

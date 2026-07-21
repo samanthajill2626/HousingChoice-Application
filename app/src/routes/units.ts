@@ -29,6 +29,7 @@ import { MMS_TRANSCODE_WAIT_TIMEOUT_MS } from '../lib/outboundMediaLimits.js';
 import {
   UNIT_PHOTO_PASSTHROUGH_MAX_BYTES,
   UNIT_PHOTO_SOURCE_MAX_BYTES,
+  UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST,
 } from '../lib/unitPhotoLimits.js';
 import { sharedTranscodeGate } from '../lib/transcodeGate.js';
 import type { Semaphore } from '../lib/semaphore.js';
@@ -282,11 +283,25 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // browser->S3, never through here - so there is NO memory concern and no
   // concurrency gate). ONE request mints MANY grants, so staff never feel it.
   // ONE instance per router (per-request creation would reset the window). The
-  // confirm + manage routes (remove/cover) match the unit PATCH posture: no
-  // limiter (design S4).
+  // manage routes (remove/cover) match the unit PATCH posture: no limiter
+  // (design S4); confirm now carries its OWN, heavier fence below.
   const photoPresignLimiter = createUserRateLimit({
     routeKey: 'unit_photo_presign',
     max: 30,
+    windowMs: 60_000,
+    logger: log,
+  });
+
+  // Confirm is now the EXPENSIVE unit-photo endpoint (unit-photo-transcode): a
+  // >5MB source is downloaded + sharp-transcoded behind the SHARED process-wide
+  // gate (one memory bound with MMS confirm). The gate bounds memory but is the
+  // only backpressure - without a per-user fence one caller can keep both slots
+  // + both cores pinned and 503 everyone else (incl. MMS media confirm). Mirror
+  // the MMS confirm fence exactly: 20/min per user (tighter than the presign
+  // mint fence above). ONE instance per router.
+  const photoConfirmLimiter = createUserRateLimit({
+    routeKey: 'unit_photo_confirm',
+    max: 20,
     windowMs: 60_000,
     logger: log,
   });
@@ -533,24 +548,34 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // in depth); 5MB < size <= 20MB is FITTED at confirm - behind the SHARED
   // process-wide transcode gate it is downloaded, transcoded to a 2560/q85
   // jpeg, put at a FRESH uuid key, and that RENDITION key is appended in place
-  // of the oversize original (left as an accepted orphan). A key failing
-  // (a)/(c)/(d) or whose transcode fails is DROPPED with a logged warn (unitId
-  // + byte counts only, never keys); if NO key survives -> 400
+  // of the oversize original (left as an accepted orphan). REPLAY CAVEAT
+  // (spec D4): the idempotent-replay skip in guard (b) matches on the appended
+  // entry, so a replayed >5MB SOURCE key (whose appended entry is a fresh
+  // rendition uuid, never the source key) never matches and mints a SECOND
+  // rendition - accepted per the design; the per-user confirm limiter fences the
+  // replay-as-DoS angle (issue unit-photo-confirm-replay-duplicate-renditions).
+  // A key failing (a)/(c)/(d) or whose transcode fails is DROPPED with a logged
+  // warn (unitId + byte counts only, never keys); if NO key survives -> 400
   // (transcode_failed when a >5MB source was undecodable, else no_valid_photos),
   // UNLESS every valid key was already present (a replayed confirm) -> 200 with
   // the current unit. Gate starvation aborts the WHOLE request with 503
   // transcode_busy before any append (all-or-nothing; the dashboard sends each
-  // >5MB file in its own confirm). Survivors pass a friendly cap pre-check
-  // (existing + new <= 100 -> else 400 photo_cap_exceeded) and are committed
-  // via ONE atomic appendMedia - its ConditionExpression + batch bound re-guard
-  // the cap under a race (ConditionalCheckFailed -> same 400).
+  // >5MB file in its own confirm). Before the transcode loop the >5MB count is
+  // bounded (> UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST -> 400 too_many_large_photos)
+  // and an EARLY cap pre-check (existing + survivors + pending > 100 -> 400
+  // photo_cap_exceeded) rejects an at-cap request BEFORE paying any transcode.
+  // Surviving keys then pass a friendly post-loop cap pre-check (existing + new
+  // <= 100 -> else 400 photo_cap_exceeded) and are committed via ONE atomic
+  // appendMedia - its ConditionExpression + batch bound re-guard the cap under a
+  // race (ConditionalCheckFailed -> same 400).
   // Audit unit_photos_added COUNT only, BEST-EFFORT (the media append has
   // already committed; a transient audit failure must not 500 a confirm whose
   // photos are stored). Returns the updated unit (with mediaDisplay). An
   // ordinary async handler - no busboy, no callback outside Express's
   // async-error capture, so the F3 hang class simply does not exist here.
-  // 503 when the store is unconfigured.
-  router.post('/:unitId/photos/confirm', async (req: AuthedRequest, res) => {
+  // Behind the per-user confirm limiter (unit_photo_confirm, 20/min - confirm
+  // now transcodes). 503 when the store is unconfigured.
+  router.post('/:unitId/photos/confirm', photoConfirmLimiter, async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     if (!mediaStore) {
       res.status(503).json({ error: 'media_storage_unavailable' });
@@ -604,7 +629,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // (b) idempotency: a key repeated within the body appends ONCE, and a key
       // ALREADY on the unit (a replayed confirm after a lost response) is
       // skipped rather than double-appended. Already-present keys skip the
-      // HeadObject too - they were verified when first confirmed.
+      // HeadObject too - they were verified when first confirmed. CAVEAT
+      // (spec D4): this holds for PASSTHROUGH (<=5MB) keys, whose submitted key
+      // IS the appended entry; a replayed >5MB SOURCE key never matches here
+      // (its appended entry is a fresh rendition uuid), so a replay re-transcodes
+      // and mints a SECOND rendition - accepted per the design (the confirm
+      // limiter fences the replay-as-DoS angle; issue
+      // unit-photo-confirm-replay-duplicate-renditions tracks the dedupe option).
       if (seen.has(key)) continue;
       seen.add(key);
       if (existingSet.has(key)) {
@@ -641,6 +672,27 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       // >5MB: fit at confirm (design 2026-07-21) - transcoded below, behind the gate.
       transcodePending.push({ key, sourceType: head.contentType!.trim().toLowerCase() });
+    }
+
+    // P-2: bound the number of >5MB transcodes ONE request may drive. The
+    // dashboard confirms each oversize file alone (D5), so a real client submits
+    // 1; this caps the worst-case occupancy a hand-crafted body can impose on the
+    // SHARED gate. Reject BEFORE any download/transcode so no work is paid.
+    if (transcodePending.length > UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST) {
+      res.status(400).json({ error: 'too_many_large_photos' });
+      return;
+    }
+
+    // MF-2b: EARLY cap pre-check BEFORE the transcode loop. Each pending
+    // transcode yields at most one rendition survivor, so if existing +
+    // passthrough survivors + pending already exceeds the cap the request cannot
+    // fit - reject now rather than paying the transcode(s) and orphaning their
+    // renditions (an at-cap unit otherwise pays a full download+sharp+put before
+    // the post-loop 400). The post-loop check below still re-guards the committed
+    // survivor count, and appendMedia re-guards atomically under a race.
+    if (existingMedia.length + survivors.length + transcodePending.length > UNIT_MEDIA_MAX) {
+      res.status(400).json({ error: 'photo_cap_exceeded' });
+      return;
     }
 
     // >5MB sources: download + fit to the photo rendition profile, behind the

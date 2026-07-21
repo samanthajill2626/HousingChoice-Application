@@ -28,3 +28,14 @@ export const UNIT_PHOTO_TRANSCODE_TARGET_BYTES = 3 * 1024 * 1024;
  *  (~200MB peak RGBA raster per gate slot, bounded by the SHARED 2-slot gate
  *  on the 2GB box). MMS keeps its tighter 24MP cap. */
 export const UNIT_PHOTO_SHARP_MAX_INPUT_PIXELS = 50_000_000;
+
+/**
+ * Max >5MB sources ONE confirm request may transcode. The dashboard sends each
+ * oversize file in its OWN confirm (D5 chunking), so a real client submits 1;
+ * this bounds the WORST case a hand-crafted body can impose on the SHARED 2-slot
+ * transcode gate. Without it a single 100-big-key body would hold a gate slot
+ * for tens of minutes (up to 100 serial downloads + sharp runs), starving MMS
+ * confirm and every other photo confirm. Over this -> 400 too_many_large_photos,
+ * rejected BEFORE any download/transcode.
+ */
+export const UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST = 4;

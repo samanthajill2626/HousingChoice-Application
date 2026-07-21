@@ -21,9 +21,25 @@ export interface StoredEmail {
   state: 'sent';
 }
 
-/** In-memory outbound-email store, keyed by sesMessageId. */
+/** One INBOUND email the fake delivered (email-channel B4): the raw MIME was
+ *  written to MinIO INBOUND_MAIL_BUCKET at `key`, and an SNS-shaped receipt was
+ *  POSTed to the app's /webhooks/ses/inbound. `appStatus` is that POST's response
+ *  code (surfaced for debuggability). Test-observability only. */
+export interface InboundEmailRecord {
+  key: string;
+  bucket: string;
+  from: string;
+  to: string[];
+  subject: string;
+  /** The app webhook's HTTP response status to the SNS POST. */
+  appStatus: number;
+  receivedAt: string;
+}
+
+/** In-memory outbound-email store, keyed by sesMessageId (+ an inbound log). */
 export class MailStore {
   private readonly emails = new Map<string, StoredEmail>();
+  private readonly inbound: InboundEmailRecord[] = [];
 
   add(email: StoredEmail): void {
     this.emails.set(email.sesMessageId, email);
@@ -33,12 +49,23 @@ export class MailStore {
     return this.emails.get(sesMessageId);
   }
 
-  /** All captured emails, NEWEST FIRST (insertion order reversed). */
+  /** All captured OUTBOUND emails, NEWEST FIRST (insertion order reversed). */
   list(): StoredEmail[] {
     return [...this.emails.values()].reverse();
   }
 
+  /** Record an INBOUND delivery (email-channel B4). */
+  addInbound(record: InboundEmailRecord): void {
+    this.inbound.push(record);
+  }
+
+  /** All INBOUND deliveries, NEWEST FIRST. */
+  listInbound(): InboundEmailRecord[] {
+    return [...this.inbound].reverse();
+  }
+
   reset(): void {
     this.emails.clear();
+    this.inbound.length = 0;
   }
 }

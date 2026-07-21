@@ -5,7 +5,7 @@
 // shared EventHub, so the union lives here, decoupled from any single engine.
 import type { GroupSnapshot, Persona, ThreadMessage } from './types.js';
 import type { CallState } from './voiceTypes.js';
-import type { StoredEmail } from './mailStore.js';
+import type { InboundEmailRecord, StoredEmail } from './mailStore.js';
 
 export type EngineEvent =
   // ---- messaging (SMS/MMS) variants ----
@@ -26,11 +26,14 @@ export type EngineEvent =
   | { type: 'call.completed'; call: CallState }
   | { type: 'call.recording'; call: CallState }
   | { type: 'call.transcript'; call: CallState }
-  // ---- email (fake-SES outbound) variant ----
+  // ---- email (fake-SES) variants ----
   // Emitted when the app sends an outbound email through the fake-SES REST surface
-  // (mailEngine.recordOutbound). The fake-phones UI does NOT consume it (no mail
-  // panel this slice), so it is intentionally ABSENT from the web SSE EVENT_TYPES
-  // allowlist + web type mirror - EventSource silently drops it there, by design.
-  | { type: 'mail.outbound'; mail: StoredEmail };
+  // (mailEngine.recordOutbound), and when the fake delivers an inbound email
+  // (mailEngine.sendInbound, email-channel B4). The fake-phones UI does NOT consume
+  // either (no mail panel this slice), so both are intentionally ABSENT from the web
+  // SSE EVENT_TYPES allowlist + web type mirror - EventSource silently drops them
+  // there, by design.
+  | { type: 'mail.outbound'; mail: StoredEmail }
+  | { type: 'mail.inbound'; mail: InboundEmailRecord };
 
 export type EngineListener = (event: EngineEvent) => void;

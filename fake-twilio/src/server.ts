@@ -109,8 +109,22 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
 
   // The fake-SES MailEngine - shares the SAME hub (so its `mail.outbound` events
   // reach the SSE stream by construction, like the CallEngine above). It captures
-  // the app's outbound SESv2 SendEmail and stores the raw MIME in memory.
-  const mailEngine = deps.mailEngine ?? new MailEngine({ hub: engine.hub });
+  // the app's outbound SESv2 SendEmail and stores the raw MIME in memory. The
+  // INBOUND path (email-channel B4) writes to MinIO INBOUND_MAIL_BUCKET and POSTs
+  // an SNS-shaped receipt to the app's /webhooks/ses/inbound - so it needs the
+  // app's address, the origin secret, the inbound bucket, and the MinIO endpoint
+  // (all from the SAME childEnv the app/worker inherit).
+  const mailEngine =
+    deps.mailEngine ??
+    new MailEngine({
+      hub: engine.hub,
+      inbound: {
+        appBaseUrl: deps.config.appBaseUrl,
+        originSecret: deps.config.originSecret,
+        ...(deps.config.inboundMailBucket !== undefined && { bucket: deps.config.inboundMailBucket }),
+        ...(deps.config.mediaS3Endpoint !== undefined && { s3Endpoint: deps.config.mediaS3Endpoint }),
+      },
+    });
 
   const app = express();
   // Twilio posts application/x-www-form-urlencoded; the control API uses JSON.

@@ -41,6 +41,14 @@ export interface FakeTwilioConfig {
    * the SAME value on the app), so the two agree without extra plumbing.
    */
   viServiceSid: string;
+  /**
+   * Inbound-email (email-channel B4): the MinIO bucket the fake writes raw inbound
+   * MIME to (INBOUND_MAIL_BUCKET, the SES receipt-rule S3 target) + the shared MinIO
+   * endpoint (MEDIA_S3_ENDPOINT). Both come from the SAME childEnv the app/worker
+   * see. Unset when the inbound path is not exercised.
+   */
+  inboundMailBucket?: string;
+  mediaS3Endpoint?: string;
 }
 
 /** The app's local CF_ORIGIN_SECRET default (app/src/lib/config.ts) + the value
@@ -74,5 +82,7 @@ export function loadFakeConfig(env: NodeJS.ProcessEnv = process.env): FakeTwilio
     publicBaseUrl,
     viServiceSid,
     ...(env.FAKE_TWILIO_UI_DIST ? { uiDistDir: env.FAKE_TWILIO_UI_DIST } : {}),
+    ...(env.INBOUND_MAIL_BUCKET ? { inboundMailBucket: env.INBOUND_MAIL_BUCKET } : {}),
+    ...(env.MEDIA_S3_ENDPOINT ? { mediaS3Endpoint: env.MEDIA_S3_ENDPOINT } : {}),
   };
 }

@@ -22,6 +22,7 @@ import {
   UPLOAD_KEY_PATTERN,
 } from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { normalizeEmailAddress } from '../lib/email.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
@@ -52,7 +53,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
@@ -63,12 +64,17 @@ import {
   createPlacementDeadlinesRepo,
   type PlacementDeadlinesRepo,
 } from '../repos/placementDeadlinesRepo.js';
-import { type UsersRepo } from '../repos/usersRepo.js';
+import { displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import {
+  createSendEmailMessageService,
+  EmailSendRefusedError,
+  type SendEmailService,
+} from '../services/sendEmailMessage.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
@@ -124,6 +130,23 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   sms_sending_disabled: 503,
 };
 
+/**
+ * Email refusal code -> HTTP status for POST /api/conversations/:id/email.
+ * NOTE (worklist ADJ-6 divergence 1, DELIBERATE): email_sending_disabled maps
+ * to 409, NOT the 503 the SMS kill-switch uses - do not "fix" it to 503. The
+ * two 400-class codes (invalid_cc / invalid_attachment) are request-validation
+ * refusals A6 should also surface as friendly copy.
+ */
+const EMAIL_REFUSAL_STATUS: Record<EmailSendRefusedError['code'], number> = {
+  conversation_not_found: 404,
+  email_sending_disabled: 409,
+  email_suppressed: 409,
+  email_attachments_too_large: 409,
+  contact_email_missing: 409,
+  invalid_cc: 400,
+  invalid_attachment: 400,
+};
+
 
 /** Page-size bounds shared by the inbox and thread endpoints. */
 const DEFAULT_PAGE_LIMIT = 50;
@@ -149,6 +172,8 @@ export interface ApiRouterDeps {
   logger?: Logger;
   /** Test seam: injected service (no DynamoDB/provider). */
   sendMessageService?: SendMessageService;
+  /** Email-channel A5: injected email send service (test seam). */
+  sendEmailService?: SendEmailService;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   auditRepo?: AuditRepo;
@@ -399,6 +424,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       conversationsRepo: conversations,
       messagesRepo: messages,
       auditRepo: audit,
+      events,
+    });
+  // Email-channel A5: the outbound email send service. Default-constructed HERE
+  // (the sendMessage precedent lives in this router, not index.ts) so the
+  // production composition root needs no change; it builds its own EmailAdapter
+  // from config. The email send route also resolves the recipient contact by
+  // address, so a contacts repo is shared with it.
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  const sendEmail =
+    deps.sendEmailService ??
+    createSendEmailMessageService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      ...(mediaStore !== undefined && { mediaStore }),
       events,
     });
 
@@ -927,6 +969,70 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     } catch (err) {
       if (err instanceof SendRefusedError) {
         res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
+        return;
+      }
+      throw err; // Express 5 forwards async throws to the error handler.
+    }
+  });
+
+  // POST /api/conversations/:conversationId/email  { to, cc?, subject, body, attachmentKeys? }
+  // Email-channel v1 (A5): compose + send an email in the thread. The recipient
+  // contact is resolved by the To address (the service re-validates it is one of
+  // that contact's emails). 202 { message } on success; typed refusals map via
+  // EMAIL_REFUSAL_STATUS (ADJ-6: email_sending_disabled is 409, NOT 503). Shares
+  // the manual-send per-user fence (an email is a real send).
+  router.post('/conversations/:conversationId/email', manualSendLimiter, async (req, res) => {
+    const conversationId = String(req.params['conversationId'] ?? '');
+    mergeContext({ conversationId });
+    const user = (req as AuthedRequest).user;
+    if (!user) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const payload = (req.body ?? {}) as {
+      to?: unknown;
+      cc?: unknown;
+      subject?: unknown;
+      body?: unknown;
+      attachmentKeys?: unknown;
+    };
+    const to = typeof payload.to === 'string' ? payload.to : '';
+    const subject = typeof payload.subject === 'string' ? payload.subject : '';
+    const body = typeof payload.body === 'string' ? payload.body : '';
+    if (to.trim() === '' || subject.trim() === '' || body.trim() === '') {
+      res.status(400).json({ error: 'to, subject, and body are required' });
+      return;
+    }
+    const cc =
+      Array.isArray(payload.cc) && payload.cc.every((c): c is string => typeof c === 'string')
+        ? payload.cc
+        : undefined;
+    const attachmentKeys =
+      Array.isArray(payload.attachmentKeys) &&
+      payload.attachmentKeys.length > 0 &&
+      payload.attachmentKeys.every((k): k is string => typeof k === 'string')
+        ? payload.attachmentKeys
+        : undefined;
+
+    // Resolve the recipient contact by address (the service re-validates on-file).
+    const contact = await contacts.findByEmail(normalizeEmailAddress(to));
+
+    try {
+      const outcome = await sendEmail({
+        conversationId,
+        contactId: contact?.contactId ?? '',
+        to,
+        ...(cc !== undefined && { cc }),
+        subject,
+        body,
+        ...(attachmentKeys !== undefined && { attachmentKeys }),
+        sentByUserId: user.userId,
+        sentByName: displayNameOf(user),
+      });
+      res.status(202).json({ message: outcome });
+    } catch (err) {
+      if (err instanceof EmailSendRefusedError) {
+        res.status(EMAIL_REFUSAL_STATUS[err.code]).json({ error: err.code });
         return;
       }
       throw err; // Express 5 forwards async throws to the error handler.

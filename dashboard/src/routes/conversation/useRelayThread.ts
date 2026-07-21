@@ -39,10 +39,13 @@ function messageInstant(m: Message): string {
   return /^\d{4}-\d{2}-\d{2}T/.test(prefix) ? prefix : '';
 }
 
-/** Map a persisted Message → a TimelineMessage bubble. Call records (type
- *  'call') are dropped — a relay thread carries only sms/mms. */
+/** Map a persisted Message -> a TimelineMessage bubble. Call records (type
+ *  'call') are dropped - a relay thread carries only sms/mms. Email (type
+ *  'email') is defensively dropped too (ADJ-12): a relay/group thread must never
+ *  carry email, so an email message that somehow reached here is not rendered as
+ *  a relay bubble (email lives only on the 1:1 contact timeline). */
 export function toTimelineMessage(m: Message): TimelineMessage | null {
-  if (m.type === 'call') return null;
+  if (m.type === 'call' || m.type === 'email') return null;
   const at = messageInstant(m);
   const retryOf = typeof m['retry_of'] === 'string' ? (m['retry_of'] as string) : undefined;
   return {

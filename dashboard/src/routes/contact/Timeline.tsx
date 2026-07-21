@@ -11,6 +11,7 @@
 import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import type {
+  ContactEmail,
   ConversationParticipant,
   TimelineCall,
   TimelineItem,
@@ -29,6 +30,7 @@ import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
+import { EmailComposer, type EmailComposerSendInput } from './EmailComposer.js';
 import styles from './Timeline.module.css';
 
 /** A send refusal → a clear, human reason. The server returns a machine-readable
@@ -213,6 +215,23 @@ export interface TimelineProps {
    *  by the tour page's create-on-demand 1:1 tab ("No messages with <name> yet").
    *  Optional + defaulted - contact/relay timelines are unchanged. */
   emptyLabel?: string;
+  /** Email channel (email-channel v1, A6). Present ONLY on a 1:1 contact page -
+   *  NEVER on a relay/tour/placement thread (those use useRelayThread and pass no
+   *  emailChannel). Its presence renders the [Text | Email] composer toggle: when
+   *  the contact has an address the Email segment swaps in the EmailComposer; when
+   *  it has none the segment is disabled (tooltip) and an "Add email" affordance
+   *  opens the EmailManager. */
+  emailChannel?: {
+    /** The contact's addresses (the EmailComposer To select). */
+    emails: ContactEmail[];
+    /** Compose + send an email (the parent owns the optimistic bubble + which
+     *  conversation to send into). Rejects on an A5 refusal. */
+    onSendEmail: (input: EmailComposerSendInput) => Promise<void>;
+    /** Open the "Manage email" dialog (the disabled/Add-email affordance). */
+    onManageEmails: () => void;
+    /** Contact is suppressed for email (opt-out/unreachable) - standing note. */
+    suppressed?: boolean;
+  };
 }
 
 /** The relay member key convention (MIRRORS app relayMemberKey): the member's
@@ -328,6 +347,57 @@ const TONE_CLASS: Record<DeliveryTone, string | undefined> = {
   danger: styles.toneDanger,
 };
 
+/** The mirrored-attachment gallery for a message (MMS bubble AND email card).
+ *  Images render inline (open full-size in a new tab); PDFs/other files are links
+ *  to the authed serve endpoint. Without a derivable provider SID there's no
+ *  servable URL, so it falls back to a count chip. Factored so MessageBubble and
+ *  EmailCard render attachments identically. `stopPropagation` keeps opening media
+ *  from also toggling a parent bubble's meta. */
+function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element | null {
+  const attachments = msg.media_attachments ?? [];
+  if (attachments.length === 0) return null;
+  const sid = messageSid(msg);
+  if (!sid) {
+    return (
+      <div className={styles.media}>
+        📎 {attachments.length === 1 ? '1 attachment' : `${attachments.length} attachments`}
+      </div>
+    );
+  }
+  return (
+    <div className={styles.mediaGallery} onClick={(e) => e.stopPropagation()}>
+      {attachments.map((att, i) => {
+        const src = messageMediaSrc(sid, i);
+        if (att.contentType.startsWith('image/')) {
+          return (
+            <a
+              key={i}
+              className={styles.mediaLink}
+              href={src}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />
+            </a>
+          );
+        }
+        const isPdf = att.contentType === 'application/pdf';
+        return (
+          <a
+            key={i}
+            className={styles.mediaFile}
+            href={src}
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            {isPdf ? `📄 PDF attachment ${i + 1}` : `📎 Attachment ${i + 1}`}
+          </a>
+        );
+      })}
+    </div>
+  );
+}
+
 function MessageBubble({
   msg,
   onRetry,
@@ -349,12 +419,6 @@ function MessageBubble({
   ]
     .filter(Boolean)
     .join(' - ');
-  const attachments = msg.media_attachments ?? [];
-  // Mirrored MMS attachments are served by the AUTHED same-origin endpoint
-  // (the session cookie rides along) — never the provider URL or a data: URI.
-  // Without a derivable provider SID there's no servable URL → fall back to a
-  // count chip. (Same helpers feed the file pane's "Media from comms" gallery.)
-  const sid = messageSid(msg);
 
   // Delivery state is meaningful only for OUTBOUND; seed/legacy rows (no status)
   // show no chip. Failures expose a reason (when error_code is present) + Retry.
@@ -412,51 +476,7 @@ function MessageBubble({
         </Link>
       ) : null}
       {msg.body ? <div className={styles.body}>{msg.body}</div> : null}
-      {attachments.length > 0 ? (
-        sid ? (
-          // Render by type: images inline, PDFs as a viewer link, else download.
-          // stopPropagation so opening media doesn't also toggle the bubble meta.
-          <div className={styles.mediaGallery} onClick={(e) => e.stopPropagation()}>
-            {attachments.map((att, i) => {
-              const src = messageMediaSrc(sid, i);
-              if (att.contentType.startsWith('image/')) {
-                return (
-                  <a
-                    key={i}
-                    className={styles.mediaLink}
-                    href={src}
-                    target="_blank"
-                    rel="noopener noreferrer"
-                  >
-                    <img
-                      className={styles.mediaImg}
-                      src={src}
-                      alt={`Attachment ${i + 1}`}
-                      loading="lazy"
-                    />
-                  </a>
-                );
-              }
-              const isPdf = att.contentType === 'application/pdf';
-              return (
-                <a
-                  key={i}
-                  className={styles.mediaFile}
-                  href={src}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                >
-                  {isPdf ? `📄 PDF attachment ${i + 1}` : `📎 Attachment ${i + 1}`}
-                </a>
-              );
-            })}
-          </div>
-        ) : (
-          <div className={styles.media}>
-            📎 {attachments.length === 1 ? '1 attachment' : `${attachments.length} attachments`}
-          </div>
-        )
-      ) : null}
+      <AttachmentGallery msg={msg} />
       <div className={styles.meta}>
         <span className={styles.metaText}>{meta}</span>
         {delivery && deliveredSummary === null ? (
@@ -607,6 +627,65 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   );
 }
 
+/** A collapsed OUTBOUND email card (email-channel v1, A6). Visually DISTINCT from
+ *  an SMS/MMS bubble - the CallCard treatment: an "EMAIL" transport tag, a
+ *  semibold subject, a ~140-char snippet, a from/to line, and a delivery chip;
+ *  a <details> discloses the full plain-text body, any Cc, and attachments.
+ *  Message text renders as TEXT (React escapes) - NEVER dangerouslySetInnerHTML.
+ *  Outbound email is plain text; inbound HTML rendering is B7 (a sandboxed iframe,
+ *  not this card). */
+const EMAIL_SNIPPET_CHARS = 140;
+function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
+  const outbound = msg.direction === 'outbound';
+  const delivery = outbound ? presentDeliveryStatus(msg.delivery_status) : null;
+  const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
+  const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
+  const subject = msg.subject && msg.subject.trim().length > 0 ? msg.subject : '(no subject)';
+  const bodyText = msg.body ?? '';
+  const truncated = bodyText.length > EMAIL_SNIPPET_CHARS;
+  const snippet = truncated ? `${bodyText.slice(0, EMAIL_SNIPPET_CHARS).trimEnd()}...` : bodyText;
+  const cc = msg.email_cc ?? [];
+  const fromTo = [
+    msg.email_from ? `from ${msg.email_from}` : null,
+    msg.email_to && msg.email_to.length > 0 ? `to ${msg.email_to.join(', ')}` : null,
+  ]
+    .filter(Boolean)
+    .join(' - ');
+  const hasMore = truncated || cc.length > 0 || (msg.media_attachments ?? []).length > 0;
+
+  return (
+    <div className={`${styles.emailCard ?? ''} ${outbound ? styles.emailOut ?? '' : styles.emailIn ?? ''}`}>
+      <div className={styles.emailTop}>
+        <span className={styles.emailTag}>EMAIL</span>
+        <span className={styles.emailSubject}>{subject}</span>
+        {msg.email_new_address ? <span className={styles.emailNewAddr}>New address</span> : null}
+        <span className={styles.emailTime}>{formatTime(msg.at)}</span>
+      </div>
+      {fromTo ? <div className={styles.emailAddrLine}>{fromTo}</div> : null}
+      {snippet ? <div className={styles.emailSnippet}>{snippet}</div> : null}
+      {hasMore ? (
+        <details className={styles.emailDetails}>
+          <summary className={styles.emailToggle}>View full email</summary>
+          {cc.length > 0 ? <div className={styles.emailAddrLine}>cc {cc.join(', ')}</div> : null}
+          {bodyText ? <p className={styles.emailBody}>{bodyText}</p> : null}
+          <AttachmentGallery msg={msg} />
+        </details>
+      ) : null}
+      {delivery ? (
+        <div className={styles.emailFoot}>
+          <span
+            className={`${styles.status} ${toneClass}`}
+            {...(reason !== undefined && { title: reason })}
+          >
+            {delivery.label}
+            {reason !== undefined ? ` - ${reason}` : ''}
+          </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
 function StreamItem({
   item,
   onRetry,
@@ -618,7 +697,12 @@ function StreamItem({
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
-      return <MessageBubble msg={item} onRetry={onRetry} {...(relayRoster !== undefined && { relayRoster })} />;
+      // Email renders a DISTINCT collapsed card (A6); sms/mms stay bubbles.
+      return item.type === 'email' ? (
+        <EmailCard msg={item} />
+      ) : (
+        <MessageBubble msg={item} onRetry={onRetry} {...(relayRoster !== undefined && { relayRoster })} />
+      );
     case 'call':
       return <CallCard call={item} />;
     case 'milestone':
@@ -651,6 +735,14 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     resetScrollKey,
     emptyLabel,
   } = props;
+  const emailChannel = props.emailChannel;
+  const hasEmail = (emailChannel?.emails.length ?? 0) > 0;
+  const [channel, setChannel] = useState<'text' | 'email'>('text');
+  // The [Text | Email] toggle exists ONLY on a 1:1 contact page (emailChannel
+  // present) and NEVER on a relay/group thread. With no address on file the Email
+  // segment is disabled, so the effective channel stays 'text' until one exists.
+  const showChannelToggle = emailChannel !== undefined && relayRoster === undefined;
+  const effectiveChannel: 'text' | 'email' = showChannelToggle && hasEmail ? channel : 'text';
   const [commsOnly, setCommsOnly] = useState(false);
   const [draft, setDraft] = useState('');
   const [sending, setSending] = useState(false);
@@ -1048,6 +1140,49 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       ) : null}
 
       <div className={styles.reply}>
+        {showChannelToggle ? (
+          <div className={styles.channelSeg} role="group" aria-label="Message channel">
+            <button
+              type="button"
+              className={`${styles.channelBtn} ${effectiveChannel === 'text' ? styles.channelOn ?? '' : ''}`}
+              aria-pressed={effectiveChannel === 'text'}
+              onClick={() => setChannel('text')}
+            >
+              Text
+            </button>
+            <button
+              type="button"
+              className={`${styles.channelBtn} ${effectiveChannel === 'email' ? styles.channelOn ?? '' : ''}`}
+              aria-pressed={hasEmail ? effectiveChannel === 'email' : undefined}
+              {...(hasEmail
+                ? {}
+                : { 'aria-disabled': true, title: 'No email on file - add one' })}
+              onClick={() => {
+                if (hasEmail) setChannel('email');
+                else emailChannel?.onManageEmails();
+              }}
+            >
+              Email
+            </button>
+            {!hasEmail ? (
+              <button
+                type="button"
+                className={styles.channelAdd}
+                onClick={() => emailChannel?.onManageEmails()}
+              >
+                Add email
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {emailChannel !== undefined && effectiveChannel === 'email' ? (
+          <EmailComposer
+            emails={emailChannel.emails}
+            onSend={emailChannel.onSendEmail}
+            {...(emailChannel.suppressed !== undefined && { suppressed: emailChannel.suppressed })}
+          />
+        ) : (
+          <>
         {optedOut ? (
           <p className={styles.optOutNote} role="note">
             ⛔ On the Do-Not-Contact list — texting is disabled for this contact.
@@ -1187,6 +1322,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
+          </>
+        )}
       </div>
     </section>
   );

@@ -124,6 +124,43 @@ describe('buildTimelineFallback', () => {
     expect((items[0] as TimelineMessage).tsMsgId).toBe('sms');
   });
 
+  it('maps an email message to type email with subject/email_* and NO phone attach', () => {
+    // Email channel (A6): an email row has no participant_phone, so the fallback
+    // must NOT coerce it to 'sms' nor stamp from/toPhone from the conversation.
+    const conversations = [convOf({ conversationId: 'c1', participant_phone: '+14705550148' })];
+    const messagesByConvId = new Map<string, Message[]>([
+      [
+        'c1',
+        [
+          msgOf({
+            conversationId: 'c1',
+            tsMsgId: 'em',
+            type: 'email',
+            direction: 'outbound',
+            author: 'teammate',
+            delivery_status: 'sent',
+            subject: 'Welcome',
+            body: 'Hi there',
+            email_from: 'team@mail.local.test',
+            email_to: ['marcus@example.com'],
+            email_cc: ['boss@example.com'],
+          }),
+        ],
+      ],
+    ]);
+
+    const item = buildTimelineFallback(conversations, messagesByConvId)[0] as TimelineMessage;
+    expect(item.type).toBe('email');
+    expect(item.subject).toBe('Welcome');
+    expect(item.email_from).toBe('team@mail.local.test');
+    expect(item.email_to).toEqual(['marcus@example.com']);
+    expect(item.email_cc).toEqual(['boss@example.com']);
+    expect(item.body).toBe('Hi there');
+    // No phone attach on an email item (would be wrong - it has no participant_phone).
+    expect(item.fromPhone).toBeUndefined();
+    expect(item.toPhone).toBeUndefined();
+  });
+
   it('carries delivery_recipients through (so a relay source message can show the opted-out note)', () => {
     const conversations = [convOf({ conversationId: 'c-relay', type: 'relay_group' })];
     const messagesByConvId = new Map<string, Message[]>([

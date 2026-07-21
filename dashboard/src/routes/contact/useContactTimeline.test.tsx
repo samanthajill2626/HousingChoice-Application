@@ -242,7 +242,7 @@ describe('useContactTimeline — optimistic send', () => {
     await waitFor(() => expect(screen.getAllByTestId('item')).toHaveLength(1));
 
     act(() => {
-      api!.addOptimistic('c1', 'on my way', '+14040100007');
+      api!.addOptimistic('c1', 'on my way', { toPhone: '+14040100007' });
     });
 
     // Appears immediately (no await), outbound, status queued → "Sending…".

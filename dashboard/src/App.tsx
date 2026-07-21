@@ -20,6 +20,7 @@ import { ListingDetail } from './routes/listing/ListingDetail.js';
 import { PlacementsPage } from './routes/placements/PlacementsPage.js';
 import { PlacementDetail } from './routes/placements/PlacementDetail.js';
 import { Inbox } from './routes/inbox/Inbox.js';
+import { EmailTriage } from './routes/email/EmailTriage.js';
 import { BroadcastsList } from './routes/broadcasts/BroadcastsList.js';
 import { BroadcastComposer } from './routes/broadcasts/BroadcastComposer.js';
 import { BroadcastResults } from './routes/broadcasts/BroadcastResults.js';
@@ -57,6 +58,9 @@ const IMPLEMENTED = new Set<string>([
   '/contacts/unknown',
   '/listings',
   '/inbox',
+  // Communications > Email (the unmatched-email side-door). /email/quarantine is
+  // a second tab (NOT a nav target), mounted as its own <Route> below.
+  '/email',
   // Broadcasts now has a REAL list page + the static composer route (the
   // /broadcasts/:broadcastId Results route is a dynamic <Route> below). Exclude
   // them from the placeholder generator so they aren't double-mounted.
@@ -145,6 +149,12 @@ function AuthedApp(): React.JSX.Element {
 
             {/* Communications ▸ Inbox (replaces the generated placeholder). */}
             <Route path="inbox" element={<Inbox />} />
+
+            {/* Communications - Email (the unmatched-email side-door). Two
+                URL-backed tabs: /email (Unmatched) + /email/quarantine. Both
+                static; neither collides with a dynamic segment. */}
+            <Route path="email" element={<EmailTriage />} />
+            <Route path="email/quarantine" element={<EmailTriage tab="quarantine" />} />
 
             {/* Communications ▸ Broadcasts (replaces the generated placeholder):
                 the list, the composer, and the live Results view. The static

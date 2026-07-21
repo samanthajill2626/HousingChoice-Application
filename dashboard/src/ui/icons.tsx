@@ -91,7 +91,7 @@ export function InboxIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
-/** Email — an envelope. */
+/** Email - an envelope. */
 export function EmailIcon({ size }: IconProps): React.JSX.Element {
   return (
     <Svg size={size}>

@@ -3,9 +3,10 @@ id: unit-photo-confirm-headobject-amplification
 title: "Unit-photo confirm route has no rate limiter; up to 100 HeadObjects per authed call"
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-15
+resolved: 2026-07-21
 refs: app/src/routes/units.ts
 ---
 
@@ -25,3 +26,18 @@ limiter indirectly paces confirms - but a direct confirm caller bypasses that.
 **Suggested fix.** Add a matching `createUserRateLimit` (routeKey
 `unit_photo_confirm`, ~30/min) to the confirm route, mirroring presign. Cheap,
 symmetric, closes the direct-caller gap. Not merge-blocking.
+
+**Update (2026-07-21, unit-photo-transcode).** The "HeadObject is cheap ... not
+an availability risk today" premise no longer holds: the transcode feature makes
+confirm the app's MOST expensive endpoint - a >5MB source is downloaded and
+sharp-transcoded behind the SHARED 2-slot gate (now shared with MMS confirm), so
+an unfenced caller can pin both slots + both cores and 503 everyone else. The
+limiter went from "not merge-blocking" to load-bearing.
+
+**Resolution (2026-07-21).** Added `createUserRateLimit` (routeKey
+`unit_photo_confirm`) to `POST /api/units/:id/photos/confirm` in
+app/src/routes/units.ts, mounted before the handler like the presign limiter.
+It mirrors the MMS CONFIRM fence (20/min per user - the expensive-endpoint
+ceiling) rather than presign's 30/min mint fence, since confirm now shares the
+transcode gate with MMS confirm. Covered by the `MF-2a` limiter test in
+app/test/unitsApiPhotos.test.ts.

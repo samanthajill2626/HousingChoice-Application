@@ -30,6 +30,19 @@ Any future cleanup should sweep both classes: removed-photo keys and
 never-appended oversize originals (bucket contents not present in any
 unit.media list).
 
+**Update (2026-07-21, review - unit-photo-transcode).** The transcode confirm
+path also creates a SECOND, server-CREATED orphan class on top of the oversize
+originals noted above. The full set a future sweep must reconcile is now:
+(a) >5MB oversize ORIGINALS - left in place after their jpeg rendition is
+appended (the class noted above); and (b) mid-loop RENDITIONS - when a confirm
+body carries multiple >5MB keys and the shared transcode gate times out on a
+later key, the whole request 503s (all-or-nothing, nothing appended), yet the
+jpeg renditions PUT for the EARLIER keys are already in the bucket, referenced by
+no unit.media list. Both are unreferenced `unit-media/<unitId>/...` objects, so
+the same reconcile-against-stored-lists sweep in the suggested fix covers them;
+class (b) is rarer (it needs gate contention AND a multi-big-key body, which the
+dashboard never sends - it confirms each >5MB file alone).
+
 **Suggested fix.** On photo removal, best-effort DeleteObject the removed
 `unit-media/<unitId>/...` keys (never legacy absolute-URL entries, never keys
 outside the unit's own namespace - reuse the `unitMediaPrefix` guard). Failure

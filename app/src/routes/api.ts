@@ -94,6 +94,7 @@ import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
 import { createMmsMediaRouter } from './mmsMedia.js';
+import { createEmailMediaRouter } from './emailMedia.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -422,6 +423,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/media',
     createMmsMediaRouter({
+      config,
+      logger: deps.logger,
+      ...(mediaStore !== undefined && { mediaStore }),
+    }),
+  );
+  // Email attachment media (POST /api/email-media/presign + /confirm) - a
+  // DISTINCT pair from /media above (review F1): it stores documents VERBATIM
+  // (no transcode/planMmsMedia), on the EMAIL_ATTACHMENT_TYPES allowlist with a
+  // 25 MB cap. The email send route resolves these keys straight to attachments.
+  router.use(
+    '/email-media',
+    createEmailMediaRouter({
       config,
       logger: deps.logger,
       ...(mediaStore !== undefined && { mediaStore }),

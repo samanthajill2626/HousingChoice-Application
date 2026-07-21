@@ -1,3 +1,7 @@
+/* Needs-review (amber) treatment - the same --c-evt-amber-* trio the inbox
+   "Needs triage" chip and amber StatusBadge use, so every human-review-pending
+   surface shares one look. Deliberately NOT the danger red: a suggestion is
+   attention, not an error. */
 .chip {
   display: flex;
   flex-wrap: wrap;
@@ -5,24 +9,28 @@
   gap: var(--sp-2);
   margin: var(--sp-1) 0 var(--sp-2);
   padding: var(--sp-1) var(--sp-2);
-  border: 1px dashed var(--c-border, #d0d5dd);
+  border: 1px solid var(--c-evt-amber-border, #fde68a);
   border-radius: var(--radius-sm, 4px);
-  background: var(--c-surface-muted, #f8f9fc);
+  background: var(--c-evt-amber-bg, #fef3c7);
   font-size: var(--fs-sm);
 }
 
 .heard {
   font-weight: 600;
-  color: var(--c-text);
+  color: var(--c-evt-amber-text, #92400e);
 }
 
+/* Dark amber (not muted gray) for the secondary text: the gray tokens sit
+   below AA contrast on the amber background at these sizes. */
 .date {
-  color: var(--c-text-muted);
+  color: var(--c-evt-amber-text, #92400e);
+  opacity: 0.85;
   font-size: var(--fs-xs, 0.75rem);
 }
 
 .reason {
-  color: var(--c-text-muted);
+  color: var(--c-evt-amber-text, #92400e);
+  opacity: 0.85;
 }
 
 .view {

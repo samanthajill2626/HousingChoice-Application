@@ -29,6 +29,7 @@ import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
+import { createUnitMediaServeRouter } from './routes/unitMediaServe.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
 import { createInternalRouter } from './routes/internal.js';
 
@@ -114,11 +115,12 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // /api requireAuth gate below. A per-IP rate limiter fronts ALL /public
   // routes (the abuse fence on an unauthenticated, SMS-spending surface); the
   // router itself re-validates everything and never logs PII.
-  // unit-photos (D1): the public flyer resolves stored photo keys to render-time
-  // presigned URLs, so the /public router needs the media store. Built from
-  // config (undefined when MEDIA_BUCKET is unset); a test-injected deps.public
-  // (which may carry its own fake store) still overrides via the spread.
-  const publicMediaStore = createMediaStore({ config });
+  // Media store for same-origin unit-photo serving. ONE instance feeds two
+  // mounts this slice: the /public flyer resolver (slice 2 retires that use)
+  // and the /unit-media serve route below. Built from config (undefined when
+  // MEDIA_BUCKET is unset); a test-injected deps.public (its own fake store)
+  // still overrides the /public spread.
+  const mediaServeStore = createMediaStore({ config });
   app.use(
     '/public',
     createRateLimit({
@@ -133,9 +135,22 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       // under noUncheckedIndexedAccess + the dep is optional, so spread it in
       // only when configured (empty list -> the page degrades to reply-prompt).
       ...(config.ourPhoneNumbers[0] !== undefined && { contactNumber: config.ourPhoneNumbers[0] }),
-      ...(publicMediaStore !== undefined && { mediaStore: publicMediaStore }),
+      ...(mediaServeStore !== undefined && { mediaStore: mediaServeStore }),
       ...deps.public,
     }),
+  );
+  // Same-origin unit-photo serving (unit-media-cloudfront design 2026-07-21).
+  // Unauthenticated BY DESIGN (spec D5) - public-flyer content on unguessable
+  // uuid keys; in deployed envs CloudFront serves this path from S3 (OAC)
+  // before it ever reaches the app, so this route is the non-CloudFront
+  // fallback (local MinIO, hermetic e2e, live-mode local dev). Its own generous
+  // per-IP limiter: a gallery load is up to ~100 images, so the /public
+  // limiter's small config cannot be reused. Mounted before the SPA fallback
+  // and reserved in it (below) so an unmatched shape 404s, never index.html.
+  app.use(
+    '/unit-media',
+    createRateLimit({ max: 1000, windowMs: 60_000, logger: log }),
+    createUnitMediaServeRouter({ mediaStore: mediaServeStore, logger: log }),
   );
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by
@@ -217,7 +232,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth', '/public', '/__dev', '/internal'].some(
+      const reserved = ['/api', '/webhooks', '/auth', '/public', '/unit-media', '/__dev', '/internal'].some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

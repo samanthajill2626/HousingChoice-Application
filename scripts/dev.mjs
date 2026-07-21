@@ -329,6 +329,17 @@ if (mode === 'local') {
   try {
     const identity = await assertHousingChoiceAccount();
     console.log(`dev — account guard OK: ${identity.Arn} (${identity.Account})`);
+    // Live mode targets the REAL dev media bucket (design 2026-07-21, D4 -
+    // closes live-mode-local-dev-has-no-media-store): photo display flows
+    // through the app's /unit-media route and uploads go browser->S3 via the
+    // presigned POST + the dev CORS localhost origin. MEDIA_S3_ENDPOINT is
+    // deliberately NOT set - that is the MinIO-only override; leaving it unset
+    // means real S3 via the housingchoice profile credentials. Guarded so an
+    // explicit operator MEDIA_BUCKET still wins.
+    if (!childEnv.MEDIA_BUCKET) {
+      childEnv.MEDIA_BUCKET = `hc-dev-media-${identity.Account}`;
+      console.log(`dev - live mode media store: ${childEnv.MEDIA_BUCKET}`);
+    }
   } catch (err) {
     console.error(`dev — ${err.message}`);
     process.exit(1);

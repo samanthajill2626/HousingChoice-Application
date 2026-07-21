@@ -661,6 +661,95 @@ describe('ListingDetail', () => {
     await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/past the 100-photo limit/i));
   });
 
+  /** jsdom File.size derives from content; override it so a 1-byte body can
+   *  stand in for a 26MB photo. */
+  function photoOfSize(name: string, bytes: number): File {
+    const f = new File(['x'], name, { type: 'image/jpeg' });
+    Object.defineProperty(f, 'size', { value: bytes });
+    return f;
+  }
+
+  it('drops a >20MB file with a NAMED message and uploads the rest', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const ok = photoOfSize('ok.jpg', 1 * 1024 * 1024);
+    const huge = photoOfSize('backyard.jpg', 27262976); // 26.0MB
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [ok, huge] } });
+
+    await waitFor(() =>
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        'backyard.jpg is 26.0MB - the limit is 20MB per photo.',
+      ),
+    );
+    // Only the in-limit file was presigned + uploaded.
+    expect(presignUnitPhotos).toHaveBeenCalledTimes(1);
+    expect((presignUnitPhotos.mock.calls[0]![1] as File[]).map((f) => f.name)).toEqual(['ok.jpg']);
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(1));
+  });
+
+  it('confirms >5MB files in their OWN requests (one transcode per request) and small files as a batch', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const files = [
+      photoOfSize('a.jpg', 1 * 1024 * 1024),
+      photoOfSize('b.jpg', 8 * 1024 * 1024), // > 5MB -> its own confirm
+      photoOfSize('c.jpg', 2 * 1024 * 1024),
+    ];
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    await waitFor(() => expect(uploadToPresignedPost).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(2));
+    const batches = confirmUnitPhotos.mock.calls.map((c) => (c[1] as string[]).slice().sort());
+    // One batch with BOTH small keys (indexes 0 + 2), one singleton with the big key (index 1).
+    expect(batches).toContainEqual(['unit-media/u1/key-0', 'unit-media/u1/key-2']);
+    expect(batches).toContainEqual(['unit-media/u1/key-1']);
+    // Unit state applied after EACH confirm (progressive rendering).
+    expect(setUnit).toHaveBeenCalledTimes(2);
+  });
+
+  it('combines the partial-failure "Uploaded N of M" text with the named oversize message (DEC-5c)', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    // First in-limit file reaches S3; the second in-limit file's direct POST fails.
+    uploadToPresignedPost
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new ApiError(403, 's3_upload_failed', 's3_upload_failed'));
+    confirmUnitPhotos.mockResolvedValue(READY.unit!);
+    renderAt();
+
+    const ok = photoOfSize('ok.jpg', 1 * 1024 * 1024);
+    const fail = photoOfSize('sideyard.jpg', 2 * 1024 * 1024);
+    const huge = photoOfSize('backyard.jpg', 27262976); // 26.0MB - dropped pre-presign
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files: [ok, fail, huge] } });
+
+    // The named oversize message is NOT lost behind the partial-failure text -
+    // the alert carries BOTH (DEC-5c combined precedence).
+    await waitFor(() => {
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent('Uploaded 1 of 2 photos');
+      expect(alert).toHaveTextContent('backyard.jpg is 26.0MB - the limit is 20MB per photo.');
+    });
+    // The oversize file was never presigned; only the two in-limit files were.
+    expect((presignUnitPhotos.mock.calls[0]![1] as File[]).map((f) => f.name)).toEqual([
+      'ok.jpg',
+      'sideyard.jpg',
+    ]);
+  });
+
   it('disables "+ Add" with a note at the 100-photo cap', () => {
     const full = Array.from({ length: 100 }, (_, i) => ({
       entry: `units/u1/p-${i}.jpg`,

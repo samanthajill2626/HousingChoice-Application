@@ -241,6 +241,18 @@ export interface SuggestionUpdatedEvent {
   contactId: string;
 }
 
+/**
+ * An unmatched-email row changed (email-channel B2/B3): a mail from an unknown
+ * sender landed in (or left) the unmatched/quarantine feeds. B2's ingestion
+ * emits it when a row is stored; B3's triage routes emit it on status flips;
+ * B6's nav badge + Email page refetch on it. ID-only, best-effort payload -
+ * NEVER the address/subject/body (PII, doc section 9); consumers refetch the
+ * feed regardless, so `unmatchedId` is advisory.
+ */
+export interface UnmatchedEmailUpdatedEvent {
+  unmatchedId?: string;
+}
+
 export interface AppEventMap {
   'conversation.updated': ConversationUpdatedEvent;
   'message.persisted': MessagePersistedEvent;
@@ -249,6 +261,7 @@ export interface AppEventMap {
   'scheduled.updated': ScheduledUpdatedEvent;
   'tour.updated': TourUpdatedEvent;
   'suggestion.updated': SuggestionUpdatedEvent;
+  'unmatched_email.updated': UnmatchedEmailUpdatedEvent;
 }
 
 export type AppEventName = keyof AppEventMap;
@@ -266,6 +279,7 @@ const ALL_APP_EVENTS: Record<AppEventName, true> = {
   'scheduled.updated': true,
   'tour.updated': true,
   'suggestion.updated': true,
+  'unmatched_email.updated': true,
 };
 export const APP_EVENT_NAMES: readonly AppEventName[] = Object.keys(
   ALL_APP_EVENTS,

@@ -673,6 +673,8 @@ export function createFakeWorld(): FakeWorld {
           email_html_sanitized: message.email_html_sanitized,
         }),
         ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
+        ...(message.email_new_address === true && { email_new_address: true }),
+        ...(message.attachments_truncated === true && { attachments_truncated: true }),
       });
       return { deduped: false, tsMsgId };
     },

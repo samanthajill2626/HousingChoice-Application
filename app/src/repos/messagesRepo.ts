@@ -256,6 +256,20 @@ export interface NewMessage {
   /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
   email_raw_ref?: { bucket: string; key: string };
   /**
+   * INBOUND email (B2 tier 5): the message threaded via a reply token or
+   * References match, but the From-address is NOT on the resolved contact -
+   * the UI renders a "New address" chip; ADDING the address to the contact
+   * stays a staff action (Decision 4 - never auto-attached). Absent otherwise.
+   */
+  email_new_address?: boolean;
+  /**
+   * INBOUND email (B2 DoS caps): some parsed attachments were NOT stored -
+   * over the 50-attachment cap, past the 25MB per-message total, or no media
+   * store was configured. The raw MIME (email_raw_ref) remains the full-
+   * fidelity record. Absent when every attachment stored.
+   */
+  attachments_truncated?: boolean;
+  /**
    * OUTBOUND email only: our own RFC Message-ID (`<hc-...@domain>`). When set,
    * append() adds a THIRD emailmsgid#<rfcId> pointer to the transaction so an
    * inbound reply's In-Reply-To/References can resolve this message via
@@ -403,6 +417,10 @@ export interface MessageItem {
   email_html_sanitized?: string;
   /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
   email_raw_ref?: { bucket: string; key: string };
+  /** Inbound tier-5 "new address" flag (see NewMessage.email_new_address). */
+  email_new_address?: boolean;
+  /** Inbound attachment-cap note (see NewMessage.attachments_truncated). */
+  attachments_truncated?: boolean;
   /**
    * S3 key of the mirrored recording (M1.9c founder-bridge calls only; UNUSED
    * for masked calls, which are never recorded). Set by the recording callback.
@@ -819,6 +837,8 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           email_html_sanitized: message.email_html_sanitized,
         }),
         ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
+        ...(message.email_new_address === true && { email_new_address: true }),
+        ...(message.attachments_truncated === true && { attachments_truncated: true }),
       };
       try {
         await doc.send(

@@ -301,7 +301,7 @@ describe('voice transcript jobs (voice-transcription 3.2 / 3.4)', () => {
   describe('persistViTranscript T2 hook: fresh save schedules a voice extraction run', () => {
     /** Minimal extraction stub: scheduleExtraction records its args (or throws). */
     function spyExtraction(throwErr?: Error) {
-      const calls: { conversationId: string; channel: 'sms' | 'voice' | 'triage'; dueAt: string }[] = [];
+      const calls: { conversationId: string; channel: 'sms' | 'voice' | 'triage' | 'email'; dueAt: string }[] = [];
       const extraction: Pick<ExtractionRepo, 'scheduleExtraction'> = {
         async scheduleExtraction(conversationId, channel, dueAt) {
           calls.push({ conversationId, channel, dueAt });

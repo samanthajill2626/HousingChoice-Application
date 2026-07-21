@@ -128,11 +128,13 @@ class AnthropicExtractionDriver implements ExtractionDriver {
   readonly kind = 'anthropic' as const;
   private readonly client: Anthropic;
   private readonly model: string;
+  private readonly log: Logger;
 
-  constructor(opts: { apiKey: string; apiBaseUrl?: string; model: string }) {
+  constructor(opts: { apiKey: string; apiBaseUrl?: string; model: string; logger?: Logger }) {
     // Constructed once per driver instance (mirrors the Twilio adapter).
     this.client = new Anthropic({ apiKey: opts.apiKey, ...(opts.apiBaseUrl ? { baseURL: opts.apiBaseUrl } : {}) });
     this.model = opts.model;
+    this.log = opts.logger ?? defaultLogger;
   }
 
   async extract(input: ExtractionInput): Promise<ExtractionResult> {
@@ -143,6 +145,16 @@ class AnthropicExtractionDriver implements ExtractionDriver {
       system: buildExtractionSystemPrompt(),
       messages: [{ role: 'user', content: buildExtractionUserContent(input) }],
     });
+    // Per-run token spend (cost observability for the input caps). Counts
+    // only - never transcript text (PII).
+    this.log.info(
+      {
+        inputTokens: message.usage.input_tokens,
+        outputTokens: message.usage.output_tokens,
+        transcriptUtterances: input.transcript.length,
+      },
+      'anthropic extraction usage',
+    );
     if (message.stop_reason === 'refusal') {
       throw new ExtractionRefusedError('Anthropic declined to extract (stop_reason: refusal)');
     }
@@ -161,6 +173,7 @@ export function createExtractionDriver(cfg: {
   model: string;
   apiKey?: string;
   apiBaseUrl?: string;
+  logger?: Logger;
 }): ExtractionDriver {
   switch (cfg.driver) {
     case 'console':
@@ -174,6 +187,7 @@ export function createExtractionDriver(cfg: {
       return new AnthropicExtractionDriver({
         apiKey: cfg.apiKey,
         ...(cfg.apiBaseUrl ? { apiBaseUrl: cfg.apiBaseUrl } : {}),
+        ...(cfg.logger ? { logger: cfg.logger } : {}),
         model: cfg.model,
       });
     }

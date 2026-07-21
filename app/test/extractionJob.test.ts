@@ -15,6 +15,10 @@
 import { describe, expect, it, vi } from 'vitest';
 import {
   MAX_EXTRACTION_ATTEMPTS,
+  NEW_MESSAGE_CHAR_CAP,
+  SEEN_MESSAGE_CHAR_CAP,
+  TRUNCATION_MARKER,
+  WINDOW_CHAR_BUDGET,
   runDueExtractions,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
@@ -569,5 +573,121 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.profile.address).toBeUndefined();
+  });
+});
+
+// Input-size caps (2026-07-20 cost-control slice): tiered per-MESSAGE char caps
+// keyed off the cursor (unprocessed = generous, already-seen = tight) plus a
+// whole-window budget, so one long transcript/email cannot re-bill its full
+// text on every subsequent run.
+describe('transcript input caps', () => {
+  const pad = (label: string, len: number): string => label + 'x'.repeat(len - label.length);
+
+  it('a NEW (post-cursor) long sms is clamped to NEW_MESSAGE_CHAR_CAP head+tail with a marker', async () => {
+    const body = 'H'.repeat(20_000) + 'M'.repeat(15_000) + 'T'.repeat(10_000); // 45k
+    const m = msg(1, 'inbound', body);
+    const h = makeHarness({
+      dueRows: [dueRow()], // no cursor -> everything is unprocessed (tier 1)
+      messages: [m],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    const text = h.seen[0]!.transcript[0]!.text;
+    expect(text.length).toBeLessThanOrEqual(NEW_MESSAGE_CHAR_CAP);
+    expect(text).toContain(TRUNCATION_MARKER);
+    expect(text.startsWith('H'.repeat(100))).toBe(true);
+    expect(text.endsWith('T'.repeat(100))).toBe(true);
+  });
+
+  it('a NEW sms under the cap passes through untouched', async () => {
+    const body = 'A'.repeat(25_000);
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(1, 'inbound', body)],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen[0]!.transcript[0]!.text).toBe(body);
+  });
+
+  it('an already-processed (at/below cursor) long sms is clamped to SEEN_MESSAGE_CHAR_CAP', async () => {
+    const old = msg(1, 'inbound', 'H'.repeat(6_000) + 'T'.repeat(4_000)); // 10k, seen
+    const fresh = msg(2, 'inbound', 'new short message');
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: old.tsMsgId })],
+      messages: [fresh, old], // listByConversation returns newest-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    const [oldUtt, freshUtt] = h.seen[0]!.transcript;
+    expect(oldUtt!.text.length).toBeLessThanOrEqual(SEEN_MESSAGE_CHAR_CAP);
+    expect(oldUtt!.text).toContain(TRUNCATION_MARKER);
+    expect(oldUtt!.text.startsWith('H'.repeat(50))).toBe(true);
+    expect(oldUtt!.text.endsWith('T'.repeat(50))).toBe(true);
+    expect(freshUtt!.text).toBe('new short message'); // tier 1, untouched
+  });
+
+  it('an already-processed call transcript clamps at LINE granularity, keeping attribution', async () => {
+    const lines: string[] = [];
+    for (let i = 1; i <= 60; i += 1) {
+      const role = i % 2 === 1 ? 'Staff' : 'Client';
+      lines.push(`${role}: ${pad(`line-${i} `, 90)}`);
+    }
+    const call = callMsg(1, 'inbound', lines.join('\n'), 'completed'); // ~5.9k chars of text
+    const fresh = msg(2, 'inbound', 'hello again');
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: call.tsMsgId })],
+      messages: [fresh, call],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    const callUtts = h.seen[0]!.transcript.filter((u) => u.channel === 'voice');
+    const total = callUtts.reduce((n, u) => n + u.text.length, 0);
+    expect(total).toBeLessThanOrEqual(SEEN_MESSAGE_CHAR_CAP);
+    expect(callUtts.length).toBeGreaterThan(2); // line granularity, not one blob
+    // Head kept from the start, tail kept from the end, middle dropped.
+    expect(callUtts[0]!.text).toContain('line-1 ');
+    expect(callUtts[callUtts.length - 1]!.text).toContain('line-60');
+    // Attribution survives: every kept line still parsed to a known speaker.
+    expect(callUtts.every((u) => u.speaker === 'staff' || u.speaker === 'client')).toBe(true);
+    // Exactly one marker.
+    expect(callUtts.filter((u) => u.text.includes(TRUNCATION_MARKER))).toHaveLength(1);
+  });
+
+  it('the whole-window budget drops the OLDEST messages beyond WINDOW_CHAR_BUDGET', async () => {
+    const olds: MessageItem[] = [];
+    for (let i = 1; i <= 35; i += 1) {
+      olds.push(msg(i, 'inbound', pad(`B${i} `, 2_000))); // exactly at the seen-cap, no clamp
+    }
+    const newest = msg(36, 'inbound', 'hi');
+    const h = makeHarness({
+      dueRows: [dueRow({ cursor: olds[olds.length - 1]!.tsMsgId })],
+      messages: [newest, ...[...olds].reverse()], // newest-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    const transcript = h.seen[0]!.transcript;
+    // Newest-first fill: 'hi' (2) + 29 * 2000 = 58,002 fits; the 30th old would
+    // exceed 60,000 -> the oldest 6 messages drop.
+    expect(transcript).toHaveLength(30);
+    expect(transcript[0]!.text.startsWith('B7 ')).toBe(true); // chronological, oldest kept = B7
+    expect(transcript[transcript.length - 1]!.text).toBe('hi');
   });
 });

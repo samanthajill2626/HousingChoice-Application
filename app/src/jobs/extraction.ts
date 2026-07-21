@@ -39,6 +39,22 @@ export const MAX_TRANSCRIPT_MESSAGES = 50;
 /** Messages older than this are dropped from the transcript window. */
 export const MAX_TRANSCRIPT_AGE_DAYS = 30;
 
+// Input-size caps (cost control, 2026-07-20). The window is re-sent on EVERY
+// run, so one long transcript/email would otherwise re-bill its full text for
+// up to 49 subsequent runs. Tiered per-MESSAGE caps keyed off the cursor:
+// a message NEWER than the cursor is being extracted for the first time - this
+// run is its one full-fidelity read; a message at/below the cursor was already
+// extracted and stays only as reconciliation context. A whole-window budget
+// bounds pathological pileups (worst-case run input ~15k tokens).
+/** Per-message char cap for not-yet-extracted (post-cursor) messages. */
+export const NEW_MESSAGE_CHAR_CAP = 30_000;
+/** Per-message char cap for already-extracted (at/below-cursor) messages. */
+export const SEEN_MESSAGE_CHAR_CAP = 2_000;
+/** Whole-window char budget - oldest messages drop first (newest-first fill). */
+export const WINDOW_CHAR_BUDGET = 60_000;
+/** Marker inserted where clamped text was removed. */
+export const TRUNCATION_MARKER = '[... truncated ...]';
+
 /** Backoff is never longer than one hour. */
 const MAX_BACKOFF_MS = 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -141,6 +157,68 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
   ];
 }
 
+/** `head [marker] tail` with total length <= cap (facts cluster at the edges). */
+function clampHeadTail(text: string, cap: number): string {
+  if (text.length <= cap) return text;
+  const usable = cap - TRUNCATION_MARKER.length - 2; // two joining spaces
+  const head = Math.floor(usable * 0.7);
+  const tail = usable - head;
+  return `${text.slice(0, head)} ${TRUNCATION_MARKER} ${text.slice(text.length - tail)}`;
+}
+
+/**
+ * Cap ONE message's utterances to `cap` total chars. Single-utterance messages
+ * (sms/mms/voicemail) clamp head+tail inside the string. Multi-utterance
+ * messages (call transcripts, one utterance per line) clamp at LINE
+ * granularity - whole head lines + whole tail lines, middle dropped - so the
+ * per-line speaker attribution (Layer 1) is never orphaned mid-line. The
+ * marker is appended to the last kept head utterance.
+ */
+function capUtterances(utterances: TranscriptUtterance[], cap: number): TranscriptUtterance[] {
+  const total = utterances.reduce((n, u) => n + u.text.length, 0);
+  if (total <= cap) return utterances;
+  if (utterances.length === 1) {
+    const u = utterances[0]!;
+    return [{ ...u, text: clampHeadTail(u.text, cap) }];
+  }
+  const usable = cap - TRUNCATION_MARKER.length - 1; // one joining space
+  const headBudget = Math.floor(usable * 0.7);
+  const tailBudget = usable - headBudget;
+
+  const head: TranscriptUtterance[] = [];
+  let used = 0;
+  let i = 0;
+  while (i < utterances.length && used + utterances[i]!.text.length <= headBudget) {
+    head.push(utterances[i]!);
+    used += utterances[i]!.text.length;
+    i += 1;
+  }
+  if (head.length === 0) {
+    // The first utterance alone exceeds the head budget - keep its head slice
+    // (attribution intact) so a clamp can never empty a message.
+    const u = utterances[0]!;
+    head.push({ ...u, text: u.text.slice(0, headBudget) });
+    i = 1;
+  }
+
+  const tail: TranscriptUtterance[] = [];
+  used = 0;
+  let j = utterances.length - 1;
+  while (j >= i && used + utterances[j]!.text.length <= tailBudget) {
+    tail.unshift(utterances[j]!);
+    used += utterances[j]!.text.length;
+    j -= 1;
+  }
+  if (tail.length === 0 && utterances.length - 1 >= i) {
+    const u = utterances[utterances.length - 1]!;
+    tail.unshift({ ...u, text: u.text.slice(u.text.length - tailBudget) });
+  }
+
+  const last = head[head.length - 1]!;
+  head[head.length - 1] = { ...last, text: `${last.text} ${TRUNCATION_MARKER}` };
+  return [...head, ...tail];
+}
+
 /**
  * Process ONE due row end-to-end. Throws on driver/apply failure so the caller
  * can route it through the backoff/park failure path; returns a discriminator
@@ -238,7 +316,32 @@ async function processRow(
   }
 
   const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
-  const transcript = fresh.flatMap(toUtterances);
+  // Tiered per-message caps (see the constants' header comment): post-cursor
+  // messages get their one generous full-fidelity read; already-extracted ones
+  // stay as tightly-capped reconciliation context.
+  const perMessage = fresh.map((m) => ({
+    tsMsgId: m.tsMsgId,
+    utterances: capUtterances(
+      toUtterances(m),
+      m.tsMsgId > cursor ? NEW_MESSAGE_CHAR_CAP : SEEN_MESSAGE_CHAR_CAP,
+    ),
+  }));
+  // Whole-window budget: fill newest-first and STOP at the first overflow, so
+  // the newest (unprocessed) content always wins and the window stays a
+  // contiguous newest-N slice - the oldest context drops first. A capped
+  // message is at most NEW_MESSAGE_CHAR_CAP < budget, so the newest message
+  // always fits.
+  const included = new Set<string>();
+  let windowChars = 0;
+  for (let k = perMessage.length - 1; k >= 0; k -= 1) {
+    const size = perMessage[k]!.utterances.reduce((n, u) => n + u.text.length, 0);
+    if (windowChars + size > WINDOW_CHAR_BUDGET) break;
+    windowChars += size;
+    included.add(perMessage[k]!.tsMsgId);
+  }
+  const transcript = perMessage
+    .filter((p) => included.has(p.tsMsgId))
+    .flatMap((p) => p.utterances);
   // Spec Layer 3: any unknown-speaker (Speaker N) call line demotes the whole
   // run to suggest-only in apply.
   const hasInferredRoleContent = transcript.some((u) => u.speaker === 'unknown');

@@ -23,6 +23,7 @@ import {
   ApiError,
   deleteContact,
   ensureContactConversation,
+  ensureEmailConversation,
   restoreContact,
   retryMessage,
   sendEmail,
@@ -364,7 +365,23 @@ export function ContactDetail(): React.JSX.Element {
   const onSendEmail = async (input: EmailComposerSendInput): Promise<void> => {
     let convId = existingEmailConvId ?? sendConvId;
     if (convId === null) {
-      convId = await ensureContactConversation(contact.contactId);
+      // A phoneless (email-only) contact has no phone thread to fall back to, and
+      // the phone ensure route 400s (contact_has_no_phone) for them - use the
+      // email-conversation route instead. Also fall through to it if the phone
+      // ensure fails that way (defensive), so the composer never dead-ends.
+      if (phones.length === 0) {
+        convId = await ensureEmailConversation(contact.contactId);
+      } else {
+        try {
+          convId = await ensureContactConversation(contact.contactId);
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'contact_has_no_phone') {
+            convId = await ensureEmailConversation(contact.contactId);
+          } else {
+            throw err;
+          }
+        }
+      }
     }
     const cId = convId;
     const tempId = timeline.addOptimistic(cId, input.body, {
@@ -378,7 +395,7 @@ export function ContactDetail(): React.JSX.Element {
       ...(input.cc.length > 0 && { cc: input.cc }),
       subject: input.subject,
       body: input.body,
-      ...(input.attachmentKeys.length > 0 && { attachmentKeys: input.attachmentKeys }),
+      ...(input.attachments.length > 0 && { attachments: input.attachments }),
     })
       .then((result) => {
         timeline.resolveOptimistic(tempId, result);

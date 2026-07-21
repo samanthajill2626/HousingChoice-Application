@@ -19,6 +19,8 @@ const deleteContact = vi.fn();
 const restoreContact = vi.fn();
 const sendMessage = vi.fn();
 const ensureContactConversation = vi.fn();
+const ensureEmailConversation = vi.fn();
+const sendEmail = vi.fn();
 // Used by the "Start placement" dialog (PlacementCreateForm) when opened.
 const getPlacementsBy = vi.fn();
 const createPlacement = vi.fn();
@@ -49,6 +51,8 @@ vi.mock('../../api/index.js', async () => {
     restoreContact: (...a: unknown[]) => restoreContact(...a),
     sendMessage: (...a: unknown[]) => sendMessage(...a),
     ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
+    ensureEmailConversation: (...a: unknown[]) => ensureEmailConversation(...a),
+    sendEmail: (...a: unknown[]) => sendEmail(...a),
     getPlacementsBy: (...a: unknown[]) => getPlacementsBy(...a),
     createPlacement: (...a: unknown[]) => createPlacement(...a),
     getTours: (...a: unknown[]) => getTours(...a),
@@ -132,6 +136,8 @@ beforeEach(() => {
   getContacts.mockReset();
   sendMessage.mockReset();
   ensureContactConversation.mockReset();
+  ensureEmailConversation.mockReset();
+  sendEmail.mockReset();
   updateContact.mockReset();
   setTenantStatus.mockReset();
   getPlacementsBy.mockReset();
@@ -747,6 +753,53 @@ describe('ContactDetail', () => {
       await waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(1));
       expect(sendMessage.mock.calls[0]![0]).toBe('conv-k1');
       expect(ensureContactConversation).not.toHaveBeenCalled();
+    });
+  });
+
+  // ── Emailing an email-ONLY contact (M1) ─────────────────────────────────────
+  describe('emailing an email-only contact', () => {
+    it('a phoneless contact emails via ensureEmailConversation, NOT the phone ensure route', async () => {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      // An email-only PARTNER: no phone, one address on file, no existing thread.
+      getContact.mockResolvedValue({
+        contactId: 'p1',
+        type: 'partner',
+        firstName: 'Ed',
+        lastName: 'Only',
+        status: 'Active',
+        emails: [{ email: 'ed@partner.example', primary: true }],
+      });
+      ensureEmailConversation.mockResolvedValue('conv-email');
+      sendEmail.mockResolvedValue({
+        conversationId: 'conv-email',
+        tsMsgId: '2026-07-20T10:00:00.000Z#hc-x@mail.test',
+        providerSid: 'hc-x@mail.test',
+        sesMessageId: 'ses-1',
+        emailMessageId: '<hc-x@mail.test>',
+        status: 'sent',
+        redirected: false,
+      });
+
+      renderAt('p1');
+      await waitFor(() => expect(screen.getByText('Ed Only')).toBeInTheDocument());
+
+      // Switch the composer to Email, fill Subject + Message, send.
+      await user.click(screen.getByRole('button', { name: 'Email' }));
+      await user.type(screen.getByLabelText('Subject'), 'Your documents');
+      await user.type(screen.getByLabelText('Message'), 'Please see the info below.');
+      await user.click(screen.getByRole('button', { name: 'Send email' }));
+
+      // M1 fix: the email-conversation route creates the thread (the phone ensure
+      // route is NOT used - it would 400 for a phoneless contact), then the send runs.
+      await waitFor(() => expect(ensureEmailConversation).toHaveBeenCalledWith('p1'));
+      expect(ensureContactConversation).not.toHaveBeenCalled();
+      await waitFor(() => expect(sendEmail).toHaveBeenCalledTimes(1));
+      expect(sendEmail.mock.calls[0]![0]).toBe('conv-email');
+      expect(sendEmail.mock.calls[0]![1]).toMatchObject({
+        to: 'ed@partner.example',
+        subject: 'Your documents',
+      });
     });
   });
 

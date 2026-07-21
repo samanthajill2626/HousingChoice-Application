@@ -72,8 +72,12 @@ export function buildTimelineFallback(
         // The participant phone is the EXTERNAL party. Inbound: they're the
         // sender (fromPhone); outbound: they're the recipient (toPhone). The
         // platform-side number isn't on the summary, so we leave the other side
-        // undefined rather than guess.
-        ...(inbound ? { fromPhone: conv.participant_phone } : { toPhone: conv.participant_phone }),
+        // undefined rather than guess. participant_phone is optional (email-only
+        // threads carry none) - only attach it when present.
+        ...(conv.participant_phone !== undefined &&
+          (inbound
+            ? { fromPhone: conv.participant_phone }
+            : { toPhone: conv.participant_phone })),
         ...(m.body !== undefined && { body: m.body }),
         ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
         // Relay group (M1.7): carry the per-recipient delivery map so a relay

@@ -104,6 +104,13 @@ function sendFailureMessage(err: unknown): string {
         return 'An attachment could not be verified. Remove it and try again.';
       case 'conversation_not_found':
         return 'This conversation cannot receive email.';
+      case 'conversation_contact_mismatch':
+        return 'This conversation does not belong to this contact.';
+      // Backstop: the ensure-conversation step failed before the send could run.
+      case 'contact_has_no_email':
+        return 'Add an email address for this contact first.';
+      case 'contact_has_no_phone':
+        return 'Add an email address for this contact first.';
     }
     if (err.status === 500) return 'The email could not be sent - see the failed message above.';
   }
@@ -115,7 +122,10 @@ export interface EmailComposerSendInput {
   cc: string[];
   subject: string;
   body: string;
-  attachmentKeys: string[];
+  /** Uploaded attachments: the durable email-media key + the original filename
+   *  (carried so the outbound MIME part and the timeline gallery show the real
+   *  document name, not a synthesized one). */
+  attachments: { key: string; filename: string }[];
 }
 
 export interface EmailComposerProps {
@@ -147,7 +157,7 @@ export function EmailComposer({ emails, onSend, suppressed }: EmailComposerProps
   const attachSeqRef = useRef(0);
 
   const doneAttachments = attachments.filter((a) => a.status === 'done' && a.key !== undefined);
-  const uploadedKeys = doneAttachments.map((a) => a.key as string);
+  const uploadedAttachments = doneAttachments.map((a) => ({ key: a.key as string, filename: a.name }));
   const totalBytes = doneAttachments.reduce((n, a) => n + a.size, 0);
   const overCap = totalBytes > EMAIL_MAX_TOTAL_BYTES;
   const hasUploading = attachments.some((a) => a.status === 'uploading');
@@ -262,7 +272,7 @@ export function EmailComposer({ emails, onSend, suppressed }: EmailComposerProps
     if (to === '' || subjectT === '' || bodyT === '' || sending || hasUploading || hasErrored || overCap) {
       return;
     }
-    const keys = uploadedKeys;
+    const atts = uploadedAttachments;
     const snapshot = { subject, body, cc: finalCc, attachments };
     setSending(true);
     setSendError(null);
@@ -276,7 +286,7 @@ export function EmailComposer({ emails, onSend, suppressed }: EmailComposerProps
     setAttachments([]);
     setAttachError(null);
     try {
-      await onSend({ to, cc: finalCc, subject: subjectT, body: bodyT, attachmentKeys: keys });
+      await onSend({ to, cc: finalCc, subject: subjectT, body: bodyT, attachments: atts });
       for (const a of snapshot.attachments) {
         if (a.previewUrl !== undefined) URL.revokeObjectURL(a.previewUrl);
       }

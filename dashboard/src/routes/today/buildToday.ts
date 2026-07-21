@@ -97,7 +97,9 @@ function formatPhone(phone: string): string {
 
 /** A conversation's display name, falling back to the formatted phone. */
 function conversationWho(conv: ConversationSummary): string {
-  return conv.participant_display_name ?? formatPhone(conv.participant_phone);
+  // participant_phone is optional (email-only threads carry none); `?? ''` keeps
+  // phone-row behavior identical and yields '' when there is no phone to format.
+  return conv.participant_display_name ?? formatPhone(conv.participant_phone ?? '');
 }
 
 /** The external participant's contact id (match by phone, else the first
@@ -113,8 +115,11 @@ function participantContactId(conv: ConversationSummary): string | undefined {
  *  `refType:'conversation'` ref — /conversations/:id is an unrouted placeholder
  *  ("Not found"), which is the dead-link this fixes. */
 function contactRefId(conv: ConversationSummary): string {
+  // An email-only thread resolves via participantContactId (its participants roster
+  // carries the contact); the phone fallback guards the now-optional participant_phone
+  // with `?? ''` so it never encodes the literal string "undefined".
   return (
-    participantContactId(conv) ?? `unknown?phone=${encodeURIComponent(conv.participant_phone)}`
+    participantContactId(conv) ?? `unknown?phone=${encodeURIComponent(conv.participant_phone ?? '')}`
   );
 }
 

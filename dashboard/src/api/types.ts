@@ -272,8 +272,9 @@ export interface ConversationParticipant {
 export interface ConversationSummary {
   conversationId: string;
   type: ConversationType;
-  /** External participant's phone, E.164. */
-  participant_phone: string;
+  /** External participant's phone, E.164. Optional (email-channel v1): an
+   *  email-only thread carries participant_email, NOT participant_phone. */
+  participant_phone?: string;
   participants: ConversationParticipant[];
   /** Latest-message preview (truncated) or null. */
   preview: string | null;
@@ -315,8 +316,9 @@ export interface ConversationHeader {
   type: ConversationType;
   /** relay_group: 'open' | 'closed'; 1:1: 'open'. */
   status: string;
-  /** External participant's phone / synthetic pool placeholder (E.164). */
-  participant_phone: string;
+  /** External participant's phone / synthetic pool placeholder (E.164). Optional
+   *  (email-channel v1): an email-only thread carries participant_email instead. */
+  participant_phone?: string;
   participants?: ConversationParticipant[];
   /** The masked pool number fronting a relay_group (absent once closed / on 1:1). */
   pool_number?: string;
@@ -1372,8 +1374,9 @@ export interface Message {
   body?: string;
   /** Provider media URLs (MMS, inbound). */
   mediaUrls?: string[];
-  /** Mirrored MMS attachments (key + stored content-type, together). */
-  media_attachments?: { s3Key: string; contentType: string }[];
+  /** Mirrored MMS attachments (key + stored content-type, together). Email
+   *  attachments also carry the original filename (email-channel v1). */
+  media_attachments?: { s3Key: string; contentType: string; filename?: string }[];
   /** @deprecated Legacy parallel key array (pre-media_attachments). */
   media_s3_keys?: string[];
   provider_sid: string;
@@ -1476,7 +1479,7 @@ export interface TimelineMessage extends TimelineBase {
   // separate TimelineCall kind). Email channel v1 (A6) adds 'email' here.
   type: 'sms' | 'mms' | 'email';
   body?: string; // FULL body (no server truncation)
-  media_attachments?: { s3Key: string; contentType: string }[];
+  media_attachments?: { s3Key: string; contentType: string; filename?: string }[];
   delivery_status: DeliveryStatus; // reuse legacy
   error_code?: string; // Twilio error code on a failure → human-readable reason
   /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline

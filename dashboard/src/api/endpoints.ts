@@ -509,7 +509,16 @@ export async function confirmMmsMedia(key: string): Promise<MmsMediaAttachment> 
  *  the message persisted as `failed` (its SSE flips the optimistic bubble). */
 export async function sendEmail(
   conversationId: string,
-  body: { to: string; cc?: string[]; subject: string; body: string; attachmentKeys?: string[] },
+  body: {
+    to: string;
+    cc?: string[];
+    subject: string;
+    body: string;
+    /** Attachments to send: durable email-media key + original filename. */
+    attachments?: { key: string; filename?: string }[];
+    /** @deprecated Back-compat bare-keys shape; prefer `attachments`. */
+    attachmentKeys?: string[];
+  },
 ): Promise<SendEmailResult> {
   const res = await request<{ message: SendEmailResult }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/email`,
@@ -1203,6 +1212,19 @@ export async function deleteContact(contactId: string): Promise<Contact> {
 export async function ensureContactConversation(contactId: string): Promise<string> {
   const res = await request<{ conversation: { conversationId: string } }>(
     `/api/contacts/${encodeURIComponent(contactId)}/conversation`,
+    { method: 'POST' },
+  );
+  return res.conversation.conversationId;
+}
+
+/** POST /api/contacts/:id/email-conversation — create-or-get the 1:1 EMAIL thread
+ *  for the contact's PRIMARY address (idempotent). The email analog of
+ *  ensureContactConversation, for an email-only contact (no phone) whose phone
+ *  thread the composer cannot fall back to. Throws ApiError 400
+ *  contact_has_no_email when no address is on file. Returns the conversationId. */
+export async function ensureEmailConversation(contactId: string): Promise<string> {
+  const res = await request<{ conversation: { conversationId: string } }>(
+    `/api/contacts/${encodeURIComponent(contactId)}/email-conversation`,
     { method: 'POST' },
   );
   return res.conversation.conversationId;

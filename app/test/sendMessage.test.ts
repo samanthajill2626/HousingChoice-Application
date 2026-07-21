@@ -180,6 +180,10 @@ function makeFakes(
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
+    // Email orphan-event parking lot (B5) - unused by the SMS send service:
+    putParkedEmailEvent: async () => {},
+    getParkedEmailEvent: async () => undefined,
+    deleteParkedEmailEvent: async () => {},
     // Relay groups (M1.7) — unused by the send service:
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,

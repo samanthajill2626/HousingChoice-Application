@@ -265,11 +265,10 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
       ccNormalized.push(normalizeEmailAddress(raw));
     }
 
-    // (3) Suppression: B5 sets email_opt_out / email_unreachable on the contact.
-    // Read them off the item DIRECTLY - they are not yet in the ContactFlag union
-    // (do NOT widen it here). Absent flags = allowed.
-    const flags = contact as { email_opt_out?: boolean; email_unreachable?: boolean };
-    if (flags.email_opt_out === true || flags.email_unreachable === true) {
+    // (3) Suppression: B5's SES event pipeline sets email_opt_out (Complaint) /
+    // email_unreachable (permanent Bounce) on the contact (typed ContactItem
+    // fields since B5). Either refuses the send. Absent flags = allowed.
+    if (contact.email_opt_out === true || contact.email_unreachable === true) {
       log.warn({ conversationId, contactId }, 'email send refused: contact suppressed');
       throw new EmailSuppressedError();
     }

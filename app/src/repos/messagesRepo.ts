@@ -17,6 +17,7 @@
 // PII: message bodies must NEVER be logged (doc §9) — IDs and lengths only.
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -500,6 +501,22 @@ export interface ListByConversationOptions {
   before?: string;
 }
 
+/**
+ * A parked SES delivery event (email-channel B5 orphan parking, plan F12). An
+ * outbound email persists under our OWN RFC id and only gets a `sid#<sesId>`
+ * alias AFTER adapter.send returns - so a fast Bounce/Complaint/Delivery can
+ * arrive before that alias exists (getByProviderSid(sesId) misses). Rather than
+ * drop it, applyEmailEvent PARKS it under the `emailevent#<sesId>` pointer
+ * partition; A5's post-send applyParkedEmailEvents then applies + consumes it.
+ * Only the three fields the applier needs are stored (never message content).
+ */
+export interface ParkedEmailEvent {
+  /** 'Bounce' | 'Complaint' | 'Delivery'. */
+  eventType: string;
+  sesMessageId: string;
+  bounceType?: string;
+}
+
 export interface MessagesRepo {
   /** Conditional append + SID pointer in one transaction; dedupe is a no-op. */
   append(message: NewMessage): Promise<AppendResult>;
@@ -626,6 +643,27 @@ export interface MessagesRepo {
    */
   putJobExecutionMarker(jobId: string, conversationId: string): Promise<boolean>;
 
+  // --- Email orphan-event parking lot (email-channel B5, plan F12) ----------
+
+  /**
+   * Park a SES event whose sesMessageId has no message yet (a fast bounce before
+   * the A5 post-send alias write). Stored under `emailevent#<sesMessageId>` with
+   * an `expires_at` (epoch seconds) TTL backstop. Idempotent UPSERT: a redelivery
+   * before the alias exists overwrites the identical item (harmless). The
+   * authoritative cleanup is deleteParkedEmailEvent (the consume), NOT the TTL -
+   * the messages table has no TTL configured today; expires_at is forward-
+   * compatible (reaps only if/when TTL is enabled on the table).
+   */
+  putParkedEmailEvent(event: ParkedEmailEvent, opts: { receivedAt: string; expiresAt: number }): Promise<void>;
+  /** The parked event for a sesMessageId, or undefined (nothing parked). */
+  getParkedEmailEvent(sesMessageId: string): Promise<ParkedEmailEvent | undefined>;
+  /**
+   * Consume (delete) the parked event - the exactly-once marker. Conditional on
+   * the item still existing (attribute_exists); a concurrent consumer that
+   * already deleted it makes this a no-op (ConditionalCheckFailed swallowed).
+   */
+  deleteParkedEmailEvent(sesMessageId: string): Promise<void>;
+
   // --- Relay groups (M1.7) -------------------------------------------------
 
   /**
@@ -717,6 +755,11 @@ function relaySidPk(providerSid: string): string {
 /** Marker partition key for a system (non-conversation) send's provider SID. */
 function sysSidPk(providerSid: string): string {
   return `syssid#${providerSid}`;
+}
+
+/** Pointer partition key for a PARKED SES event (email-channel B5, plan F12). */
+function emailEventPk(sesMessageId: string): string {
+  return `emailevent#${sesMessageId}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -1317,6 +1360,62 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       return true;
+    },
+
+    async putParkedEmailEvent(event, opts) {
+      // Unconditional UPSERT: a redelivery before the alias exists overwrites the
+      // identical item (idempotent). The pointer-partition family (sid#/job#).
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: emailEventPk(event.sesMessageId),
+            tsMsgId: 'parked',
+            event_type: event.eventType,
+            ses_message_id: event.sesMessageId,
+            ...(event.bounceType !== undefined && { bounce_type: event.bounceType }),
+            received_at: opts.receivedAt,
+            expires_at: opts.expiresAt,
+          },
+        }),
+      );
+      log.info({ sesMessageId: event.sesMessageId, eventType: event.eventType }, 'SES event parked');
+    },
+
+    async getParkedEmailEvent(sesMessageId) {
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: 'parked' },
+        }),
+      );
+      if (!Item) return undefined;
+      const eventType = Item['event_type'];
+      const storedId = Item['ses_message_id'];
+      if (typeof eventType !== 'string' || typeof storedId !== 'string') return undefined;
+      const bounceType = Item['bounce_type'];
+      return {
+        eventType,
+        sesMessageId: storedId,
+        ...(typeof bounceType === 'string' && { bounceType }),
+      };
+    },
+
+    async deleteParkedEmailEvent(sesMessageId) {
+      try {
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: 'parked' },
+            // The consume marker: exactly-once even under a concurrent double-apply.
+            ConditionExpression: 'attribute_exists(tsMsgId)',
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return;
+        throw err;
+      }
+      log.info({ sesMessageId }, 'parked SES event consumed');
     },
 
     async listByConversation(conversationId, opts = {}) {

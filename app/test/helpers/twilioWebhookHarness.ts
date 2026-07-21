@@ -51,6 +51,7 @@ import {
   buildTsMsgId,
   type MessageItem,
   type MessagesRepo,
+  type ParkedEmailEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemovePrimaryLandlordError,
@@ -243,6 +244,7 @@ export function createFakeWorld(): FakeWorld {
   const conversations = new Map<string, ConversationItem>();
   const messages: MessageItem[] = [];
   const jobExecutionMarkers = new Map<string, string>();
+  const parkedEmailEvents = new Map<string, ParkedEmailEvent>();
   const relaySidPointers = new Map<
     string,
     { conversationId: string; tsMsgId: string; memberKey: string }
@@ -800,6 +802,17 @@ export function createFakeWorld(): FakeWorld {
       if (jobExecutionMarkers.has(jobId)) return false;
       jobExecutionMarkers.set(jobId, conversationId);
       return true;
+    },
+
+    // --- Email orphan-event parking lot (B5) ---
+    async putParkedEmailEvent(event) {
+      parkedEmailEvents.set(event.sesMessageId, event);
+    },
+    async getParkedEmailEvent(sesMessageId) {
+      return parkedEmailEvents.get(sesMessageId);
+    },
+    async deleteParkedEmailEvent(sesMessageId) {
+      parkedEmailEvents.delete(sesMessageId);
     },
 
     // --- Relay groups (M1.7) ---

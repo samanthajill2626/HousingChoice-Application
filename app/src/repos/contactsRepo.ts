@@ -25,10 +25,19 @@ import type { RepoDeps } from './conversationsRepo.js';
  * sms_unreachable — 30005/30006 (invalid number / landline); prompt voice.
  * voice_opt_out — staff-set company do-not-call; originate paths REFUSE.
  *   INDEPENDENT of sms_opt_out (someone may allow texts but not calls).
+ * email_opt_out - SES Complaint (recipient marked spam); email sends REFUSE.
+ * email_unreachable - SES permanent Bounce (bad address); email sends REFUSE.
+ *   Both email flags are set by the B5 event pipeline (services/emailEvents.ts)
+ *   and gate the A5 send -> 409 email_suppressed. INDEPENDENT of the sms flags.
  * setFlag/clearFlag handle any value generically (the flag IS the attribute
  * name), so this union is the single place a new suppression flag is added.
  */
-export type ContactFlag = 'sms_opt_out' | 'sms_unreachable' | 'voice_opt_out';
+export type ContactFlag =
+  | 'sms_opt_out'
+  | 'sms_unreachable'
+  | 'voice_opt_out'
+  | 'email_opt_out'
+  | 'email_unreachable';
 
 /**
  * Contact types (doc §5, plus `unknown` — 2026-06-12 deviation): auto-capture
@@ -141,6 +150,15 @@ export interface ContactItem {
   emails?: ContactEmail[];
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
+  /**
+   * Email suppression (email-channel B5): set by the SES event pipeline
+   * (services/emailEvents.ts). email_opt_out = a Complaint (recipient marked our
+   * mail as spam); email_unreachable = a permanent Bounce (undeliverable address).
+   * Either REFUSES the A5 email send (409 email_suppressed). Set via the generic
+   * setFlag/clearFlag('email_opt_out'|'email_unreachable'). Absent = allowed.
+   */
+  email_opt_out?: boolean;
+  email_unreachable?: boolean;
   /**
    * Voice Phase 1 (spec §8): staff-set company do-not-call. Honored by every
    * outbound originate path (409 contact_voice_opted_out) and the CallMenu.

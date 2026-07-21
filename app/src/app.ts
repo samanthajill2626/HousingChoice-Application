@@ -198,14 +198,17 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     // (legacy UAs) forbid framing; Referrer-Policy keeps paths out of
     // cross-origin referrers; nosniff is already set app-wide above.
     //
-    // The SECOND allowance (unit-photos, 2026-07-21): when a media store is
-    // configured, the browser talks to the bucket DIRECTLY — presigned-POST
-    // upload and presigned-GET <img> display — so the bucket origin joins
-    // connect-src + img-src (ONLY those two). Derived exactly as the store's
-    // S3 client resolves it (adapters/mediaStore.ts): MEDIA_S3_ENDPOINT
-    // (local MinIO, path-style → the endpoint origin) or the virtual-hosted
-    // AWS URL. Without this, deployed photo upload/display dies in the
-    // browser on CSP ("Uploaded 0 of 3").
+    // The SECOND allowance (unit-photos): when a media store is configured, the
+    // browser talks to the bucket DIRECTLY for the presigned-POST UPLOAD, so the
+    // bucket origin joins connect-src ONLY. Photo READS are same-origin now
+    // (design 2026-07-21): the dashboard/flyer render `/unit-media/<unitId>/...`
+    // paths served by CloudFront's /unit-media/* behavior (or the app's GET
+    // /unit-media fallback), so the bucket origin is NO LONGER in img-src -
+    // img-src is back to 'self' data: blob:. The origin is derived exactly as
+    // the store's S3 client resolves it (adapters/mediaStore.ts):
+    // MEDIA_S3_ENDPOINT (local MinIO, path-style -> the endpoint origin) or the
+    // virtual-hosted AWS URL. Without the connect-src allowance, deployed photo
+    // UPLOAD dies in the browser on CSP ("Uploaded 0 of 3").
     const mediaOrigin = config.mediaBucket
       ? config.mediaS3Endpoint
         ? new URL(config.mediaS3Endpoint).origin
@@ -218,7 +221,10 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       "style-src 'self' 'unsafe-inline'",
       // blob: = URL.createObjectURL previews (MMS composer image chip,
       // dashboard Timeline) — document-created in-memory content, no network.
-      withMedia("img-src 'self' data: blob:"),
+      // img-src: same-origin reads (design 2026-07-21) mean the bucket origin is
+      // NO LONGER appended here - back to 'self' data: blob:. connect-src keeps
+      // the bucket origin below for presigned-POST uploads.
+      "img-src 'self' data: blob:",
       withMedia("connect-src 'self'"),
       "frame-ancestors 'none'",
     ].join('; ');

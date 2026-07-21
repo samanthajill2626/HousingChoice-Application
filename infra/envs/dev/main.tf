@@ -65,7 +65,9 @@ locals {
   # custom domain once cut over (phase 2). Add any additional deployed origins
   # here. Applying this (via the s3_media CORS rule) is what unblocks the upload
   # path in the deployed env - see RUNBOOK "Unit photos: direct-upload CORS".
-  dashboard_origins = ["https://${local.custom_domain}"]
+  # + localhost:5174 (unit-media-cloudfront design 2026-07-21, D4): live-mode
+  # local dev uploads direct to the real dev bucket from the local dashboard.
+  dashboard_origins = ["https://${local.custom_domain}", "http://localhost:5174"]
 
   # Email channel v1 (SES, inbound_mail module). mail_domain = the SES
   # sender/receiver domain (dev uses the mail.dev.<zone> subdomain); DNS is

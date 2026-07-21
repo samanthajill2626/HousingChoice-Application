@@ -57,3 +57,40 @@ resource "aws_s3_bucket_cors_configuration" "media" {
     max_age_seconds = 3000
   }
 }
+
+# CloudFront OAC read access to the PUBLIC unit-photo namespace ONLY
+# (unit-media-cloudfront design 2026-07-21). unit-media/* is public-flyer
+# content served on stable same-origin URLs; the PII namespaces (media/,
+# recordings/, uploads/) are deliberately NOT granted - no CloudFront
+# behavior routes to them, and this policy must never widen past
+# unit-media/*. A service-principal grant conditioned on one distribution
+# ARN is NOT a public policy, so block_public_policy above does not reject
+# it. This is the bucket's FIRST policy document (nothing to merge).
+data "aws_iam_policy_document" "media_cloudfront_read" {
+  count = var.cloudfront_distribution_arn == null ? 0 : 1
+
+  statement {
+    sid       = "AllowCloudFrontOACReadUnitMedia"
+    effect    = "Allow"
+    actions   = ["s3:GetObject"]
+    resources = ["${aws_s3_bucket.media.arn}/unit-media/*"]
+
+    principals {
+      type        = "Service"
+      identifiers = ["cloudfront.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "aws:SourceArn"
+      values   = [var.cloudfront_distribution_arn]
+    }
+  }
+}
+
+resource "aws_s3_bucket_policy" "media" {
+  count = var.cloudfront_distribution_arn == null ? 0 : 1
+
+  bucket = aws_s3_bucket.media.id
+  policy = data.aws_iam_policy_document.media_cloudfront_read[0].json
+}

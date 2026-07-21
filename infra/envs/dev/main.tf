@@ -76,6 +76,6 @@ locals {
   # ACCOUNT-SINGLETON receipt rule set + its activation (prod is false; exactly
   # one env may be true - see the inbound_mail module header + RUNBOOK).
   mail_domain          = "mail.dev.housingchoice.org"
-  mail_domain_phase    = 0
+  mail_domain_phase    = 1
   manage_mail_rule_set = true
 }

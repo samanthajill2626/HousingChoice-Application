@@ -181,7 +181,15 @@ describe('config fail-fast', () => {
 
   describe('job-delivery wiring (M1.2)', () => {
     // Production-shaped base that clears every OTHER fail-fast gate.
-    const prodBase = { NODE_ENV: 'production', CF_ORIGIN_SECRET: 's', MESSAGING_DRIVER: 'console' };
+    // EMAIL_DRIVER=console neutralizes the email-channel-v1 ses sender-identity
+    // gate (ses is the email default in production), the same way
+    // MESSAGING_DRIVER=console neutralizes the twilio-secrets gate.
+    const prodBase = {
+      NODE_ENV: 'production',
+      CF_ORIGIN_SECRET: 's',
+      MESSAGING_DRIVER: 'console',
+      EMAIL_DRIVER: 'console',
+    };
     const jobDelivery = {
       JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
       SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',

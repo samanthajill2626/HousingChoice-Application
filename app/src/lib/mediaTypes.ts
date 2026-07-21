@@ -96,3 +96,45 @@ export function planMmsMedia(sourceType: string, sizeBytes: number): MmsMediaPla
   }
   return 'reject';
 }
+
+// --- Email channel v1 (attachments) -----------------------------------------
+// A SEPARATE, WIDER allowlist than the MMS one above, and DELIBERATELY not
+// reused by it. Email exchanges DOCUMENTS (its core use case), so the presign +
+// confirm pair for email attachments (routes/emailMedia.ts) stores the ORIGINAL
+// VERBATIM - there is NO planMmsMedia/transcode step that would rasterize a PDF
+// or re-encode a spreadsheet. These types are what a browser/mail client can
+// render or download safely for staff-only, authed serving; SVG/HTML stay
+// excluded (script-capable) exactly as they are for MMS.
+
+/**
+ * Content-Types acceptable as an OUTBOUND email attachment (email-channel v1):
+ * raster images + PDF + plain text/CSV + the two OOXML office documents
+ * (docx / xlsx). Distinct from INLINE_MEDIA_TYPES (MMS) - wider, and used ONLY
+ * by the email attachment presign/confirm gate.
+ */
+export const EMAIL_ATTACHMENT_TYPES: ReadonlySet<string> = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+  'text/plain',
+  'text/csv',
+  // docx
+  'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+  // xlsx
+  'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+]);
+
+/** True when `type` is an allowlisted email-attachment type (case-insensitive). */
+export function isEmailAttachmentType(type: string | undefined): boolean {
+  return typeof type === 'string' && EMAIL_ATTACHMENT_TYPES.has(type.trim().toLowerCase());
+}
+
+/**
+ * Max bytes for email attachments - the per-file presign cap AND the summed
+ * per-message total the send service enforces (spec: 25 MB total, both
+ * directions). Deliberately separate from the carrier-tight MMS caps in
+ * outboundMediaLimits.ts (those are unrelated and MUST NOT be reused here).
+ */
+export const EMAIL_MAX_TOTAL_BYTES = 25 * 1024 * 1024;

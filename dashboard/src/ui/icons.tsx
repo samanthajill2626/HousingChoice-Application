@@ -91,6 +91,16 @@ export function InboxIcon({ size }: IconProps): React.JSX.Element {
   );
 }
 
+/** Email - an envelope. */
+export function EmailIcon({ size }: IconProps): React.JSX.Element {
+  return (
+    <Svg size={size}>
+      <rect x="3" y="5" width="18" height="14" rx="2" />
+      <path d="M3.5 6.5 12 12.5 20.5 6.5" />
+    </Svg>
+  );
+}
+
 /** Broadcasts — a megaphone. */
 export function BroadcastsIcon({ size }: IconProps): React.JSX.Element {
   return (
@@ -151,6 +161,7 @@ export const NAV_ICONS: Record<string, (p: IconProps) => React.JSX.Element> = {
   contacts: ContactsIcon,
   listings: ListingsIcon,
   inbox: InboxIcon,
+  email: EmailIcon,
   broadcasts: BroadcastsIcon,
   settings: SettingsIcon,
 };

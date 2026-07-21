@@ -240,25 +240,47 @@ export const LOCAL_S3_SECRET_KEY = 'locallocal';
 export function createMediaStore(deps: CreateMediaStoreDeps = {}): MediaStore | undefined {
   const config = deps.config ?? loadConfig();
   if (!config.mediaBucket) return undefined;
-  // Defense-in-depth (belt to loadConfig's MEDIA_S3_ENDPOINT prod guard): NEVER
-  // attach the local endpoint + fixed dev credentials in production, even if a
-  // caller hands in a config that bypassed loadConfig. The fixed creds must never
-  // reach a real AWS S3Client.
+  return new S3MediaStore(config.mediaBucket, deps.client ?? buildS3Client(config, 'createMediaStore'));
+}
+
+/**
+ * The S3 client construction shared by the media-bucket store and the inbound
+ * mail raw store. Defense-in-depth (belt to loadConfig's MEDIA_S3_ENDPOINT prod
+ * guard): NEVER attach the local endpoint + fixed dev credentials in
+ * production, even if a caller hands in a config that bypassed loadConfig. The
+ * fixed creds must never reach a real AWS S3Client.
+ */
+function buildS3Client(config: AppConfig, caller: string): S3Client {
   const useLocalEndpoint = Boolean(config.mediaS3Endpoint) && config.nodeEnv !== 'production';
   if (config.mediaS3Endpoint && config.nodeEnv === 'production') {
-    throw new Error('createMediaStore: refusing local S3 endpoint + dev credentials in production.');
+    throw new Error(`${caller}: refusing local S3 endpoint + dev credentials in production.`);
   }
-  const client =
-    deps.client ??
-    new S3Client({
-      region: config.awsRegion,
-      ...(useLocalEndpoint
-        ? {
-            endpoint: config.mediaS3Endpoint,
-            forcePathStyle: true,
-            credentials: { accessKeyId: LOCAL_S3_ACCESS_KEY, secretAccessKey: LOCAL_S3_SECRET_KEY },
-          }
-        : {}),
-    });
-  return new S3MediaStore(config.mediaBucket, client);
+  return new S3Client({
+    region: config.awsRegion,
+    ...(useLocalEndpoint
+      ? {
+          endpoint: config.mediaS3Endpoint,
+          forcePathStyle: true,
+          credentials: { accessKeyId: LOCAL_S3_ACCESS_KEY, secretAccessKey: LOCAL_S3_SECRET_KEY },
+        }
+      : {}),
+  });
+}
+
+/**
+ * The RAW inbound-mail bucket reader (email-channel B2/B4): the same
+ * S3MediaStore over `config.inboundMailBucket` (SES receipt-rule S3 action
+ * target; MinIO locally, same endpoint override). Returns undefined when the
+ * bucket is unconfigured - the worker's inbound consumer then no-ops (ADJ-11).
+ * The ingestion service consumes only the head/getBytes subset
+ * (services/inboundEmail.ts InboundRawStore); B4 wires this factory in.
+ * PII (plan F18): objects here are raw MIME - never presign or serve them.
+ */
+export function createInboundMailRawStore(deps: CreateMediaStoreDeps = {}): MediaStore | undefined {
+  const config = deps.config ?? loadConfig();
+  if (!config.inboundMailBucket) return undefined;
+  return new S3MediaStore(
+    config.inboundMailBucket,
+    deps.client ?? buildS3Client(config, 'createInboundMailRawStore'),
+  );
 }

@@ -80,6 +80,11 @@ export const TABLES: readonly TableSpec[] = [
     gsis: [
       // Hottest lookup in the system: inbound phone -> person.
       { indexName: 'byPhone', hashKey: { name: 'phone', type: 'S' } },
+      // Email-channel A1: inbound email address -> person (the byPhone analog).
+      // Naturally sparse (only contacts with an address, plus email-pointer
+      // items for non-primary addresses, carry the `email` scalar). NOTE: the
+      // `users` table has an UNRELATED GSI also named byEmail - distinct table.
+      { indexName: 'byEmail', hashKey: { name: 'email', type: 'S' } },
       // Composite: all contacts of a type, optionally narrowed by status
       // (e.g. landlords by lead_status value).
       {
@@ -119,6 +124,17 @@ export const TABLES: readonly TableSpec[] = [
       {
         indexName: 'byParticipantPhone',
         hashKey: { name: 'participant_phone', type: 'S' },
+      },
+      // Email channel v1: participant_email -> the ONE email 1:1 thread. Written
+      // ONLY on email-participating conversations (the email#<addr> claim arbiter
+      // is the single writer), so this GSI is sparse - phone-only 1:1 threads and
+      // relay groups never carry participant_email and never index here. Mirrors
+      // byParticipantPhone (the email claim + createOrGetByParticipantEmail fast
+      // path both query it).
+      {
+        indexName: 'byParticipantEmail',
+        hashKey: { name: 'participant_email', type: 'S' },
+        sparse: true,
       },
       // Inbox: open threads newest-first — partition by conversation status,
       // sort on the denormalized last-activity timestamp (ISO 8601).
@@ -165,6 +181,13 @@ export const TABLES: readonly TableSpec[] = [
     rangeKey: { name: 'tsMsgId', type: 'S' },
     gsis: [],
     stream: 'NEW_AND_OLD_IMAGES', // feeds side effects (doc §5)
+    // TTL (adv M3): the ONLY messages items carrying `expires_at` are the F12
+    // parked SES events (`emailevent#<sesId>`, a 7d backstop) - real
+    // conversation messages never set it (verified: putParkedEmailEvent is the
+    // sole writer), so enabling TTL reaps only an orphan parked event the
+    // post-send consumer never claimed (e.g. a bounce for a send this stack
+    // never made), closing the unbounded-accrual gap.
+    ttlAttribute: 'expires_at',
   },
   {
     // Volatile engine output; bulk-regenerated; stale rows TTL away.
@@ -491,6 +514,34 @@ export const TABLES: readonly TableSpec[] = [
         sparse: true,
       },
     ],
+  },
+  {
+    // NEW in email-channel v1 B3 (README deviation): the unknown-sender inbound
+    // email side-door. Mail that matches no contact/thread (or is quarantined by
+    // spam/virus verdicts) lands HERE - never in conversations, never in the
+    // inbox or Today (spec Decision 4). Two kinds of item share the table,
+    // disjoint by key prefix:
+    //   um-<uuid>        an unmatched/quarantined/linked/dismissed mail row.
+    //   block#<address>  a sender-blocklist pointer (B2 tier 3 isBlocked). These
+    //                    carry NO status/received_at, so they never index in
+    //                    byStatus (sparse) and never surface in the feeds.
+    // byStatus powers the triage page's two tabs (Unmatched / Quarantine),
+    // newest-first by received_at - single-partition per status is adjudicated
+    // fine at staff-tool volumes (plan B3; revisit only past ~1k rows/day).
+    // TTL (review F19): expires_at (epoch seconds) is set on linked/dismissed/
+    // quarantined rows (+90 days); unmatched rows never expire (awaiting a
+    // human) and blocklist pointers are permanent.
+    baseName: 'unmatched_email',
+    hashKey: { name: 'unmatchedId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byStatus',
+        hashKey: { name: 'status', type: 'S' },
+        rangeKey: { name: 'received_at', type: 'S' },
+        sparse: true,
+      },
+    ],
+    ttlAttribute: 'expires_at',
   },
 ] as const;
 

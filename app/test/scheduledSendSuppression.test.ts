@@ -91,6 +91,12 @@ function makeSendFakes(
     createOrGetByParticipantPhone: async () => conversation,
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
     findByParticipantPhone: async () => [conversation],
+    findByParticipantEmail: async () => [],
+    claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),
+    attachEmailToConversation: async (conversationId) => ({ conversationId }),
+    createOrGetByParticipantEmail: async () => conversation,
+    getReplyToken: async () => 'faketoken',
+    findByReplyToken: async () => undefined,
     setType: async (_id, type) => {
       conversation.type = type;
       return conversation;
@@ -144,6 +150,11 @@ function makeSendFakes(
     setPhone: async () => contact!,
     removePhone: async () => contact!,
     touchPhoneLastSeen: async () => {},
+    findByEmail: async () => undefined,
+    addEmail: async () => contact!,
+    setPrimaryEmail: async () => contact!,
+    removeEmail: async () => contact!,
+    touchEmailLastSeen: async () => {},
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
@@ -151,6 +162,8 @@ function makeSendFakes(
       return { deduped: false, tsMsgId: buildTsMsgId(message.providerTs, message.providerSid) };
     },
     getByProviderSid: async () => undefined,
+    getByRfcMessageId: async () => undefined,
+    recordProviderSidAlias: async () => {},
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
     setCallRecording: async () => true,
@@ -162,6 +175,10 @@ function makeSendFakes(
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
+    getJobExecutionMarker: async () => false,
+    putParkedEmailEvent: async () => {},
+    listParkedEmailEvents: async () => [],
+    deleteParkedEmailEvent: async () => {},
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,
     putRelaySidPointer: async () => {},

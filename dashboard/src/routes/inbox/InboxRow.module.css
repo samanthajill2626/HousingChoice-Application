@@ -53,6 +53,9 @@
 .dot_landlord {
   background: var(--c-dot-landlord);
 }
+.dot_partner {
+  background: var(--c-dot-partner);
+}
 .dot_unknown {
   background: var(--c-dot-unknown);
 }

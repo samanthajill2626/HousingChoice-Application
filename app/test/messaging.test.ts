@@ -26,8 +26,11 @@ const TWILIO_ENV = {
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
 };
 
-// NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring and
-// the M1.3 auth wiring — production-shaped configs in this suite carry both.
+// NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring and the
+// M1.3 auth wiring; email-channel-v1 also gates the ses driver (the email
+// default in production) on a sender identity. Production-shaped configs in
+// this suite carry the job/auth wiring and set EMAIL_DRIVER=console to
+// neutralize the email gate (this suite tests the messaging driver, not email).
 const JOB_DELIVERY_ENV = {
   JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
   SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
@@ -36,6 +39,7 @@ const JOB_DELIVERY_ENV = {
   GOOGLE_CLIENT_ID: 'cid.apps.googleusercontent.com',
   GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
   OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
+  EMAIL_DRIVER: 'console',
 };
 
 function makeFakeTwilioClient() {

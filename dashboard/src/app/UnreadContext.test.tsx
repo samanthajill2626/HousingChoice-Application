@@ -4,6 +4,7 @@ import type { EventStreamHandlers, InboxPage, InboxRow } from '../api/index.js';
 import { ApiError } from '../api/index.js';
 
 const getInbox = vi.fn();
+const getUnmatchedEmail = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../api/index.js', async () => {
@@ -11,6 +12,7 @@ vi.mock('../api/index.js', async () => {
   return {
     ...actual,
     getInbox: (...a: unknown[]) => getInbox(...a),
+    getUnmatchedEmail: (...a: unknown[]) => getUnmatchedEmail(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
     },
@@ -36,8 +38,15 @@ function pageOf(n: number): InboxPage {
   return { rows: Array.from({ length: n }, row), nextCursor: null };
 }
 function Probe(): React.JSX.Element {
-  const { unread } = useUnread();
-  return <span data-testid="unread">{unread === null ? 'null' : String(unread)}</span>;
+  const { unread, unmatchedUnread } = useUnread();
+  return (
+    <>
+      <span data-testid="unread">{unread === null ? 'null' : String(unread)}</span>
+      <span data-testid="unmatched">
+        {unmatchedUnread === null ? 'null' : String(unmatchedUnread)}
+      </span>
+    </>
+  );
 }
 function renderProvider(): void {
   render(
@@ -49,6 +58,9 @@ function renderProvider(): void {
 
 beforeEach(() => {
   getInbox.mockReset();
+  // Benign default so the provider's SECOND (unmatched) fetch never rejects in the
+  // inbox-focused tests; the unmatched tests below override it.
+  getUnmatchedEmail.mockReset().mockResolvedValue({ rows: [], nextCursor: null, unreadCount: 0 });
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -81,5 +93,39 @@ describe('UnreadProvider', () => {
       });
     });
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('5'));
+  });
+
+  it('fetches the unmatched-email feed and exposes the server unreadCount', async () => {
+    getUnmatchedEmail.mockResolvedValue({ rows: [], nextCursor: null, unreadCount: 4 });
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId('unmatched')).toHaveTextContent('4'));
+    // First positional arg is the 'unmatched' filter (never 'quarantine').
+    expect(getUnmatchedEmail.mock.calls[0]?.[0]).toBe('unmatched');
+  });
+
+  it('exposes null (no unmatched badge) when the unmatched feed 404s', async () => {
+    getUnmatchedEmail.mockRejectedValue(new ApiError(404, 'http_404', 'nope'));
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId('unmatched')).toHaveTextContent('null'));
+  });
+
+  it('refetches the unmatched count on an SSE unmatched_email.updated', async () => {
+    getUnmatchedEmail
+      .mockResolvedValueOnce({ rows: [], nextCursor: null, unreadCount: 1 })
+      .mockResolvedValueOnce({ rows: [], nextCursor: null, unreadCount: 6 });
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId('unmatched')).toHaveTextContent('1'));
+    act(() => {
+      sse.onUnmatchedEmailUpdated?.({ unmatchedId: 'um-1' });
+    });
+    await waitFor(() => expect(screen.getByTestId('unmatched')).toHaveTextContent('6'));
+  });
+
+  it('keeps the inbox and unmatched counts independent', async () => {
+    getInbox.mockResolvedValue(pageOf(2));
+    getUnmatchedEmail.mockResolvedValue({ rows: [], nextCursor: null, unreadCount: 7 });
+    renderProvider();
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    expect(screen.getByTestId('unmatched')).toHaveTextContent('7');
   });
 });

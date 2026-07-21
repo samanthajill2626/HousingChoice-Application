@@ -90,6 +90,8 @@ describe('dev gating — router', () => {
       recordOutbox: config.recordOutbox,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
+      emailDriver: config.emailDriver,
+      emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,
       // The preflight's stale-stack freshness guard reads this (launch commit,
       // stamped by scripts/e2e-session.mjs); null when unstamped, as in this test.

@@ -14,6 +14,9 @@ import { logger } from './logger.js';
 /** Outbound messaging driver: real Twilio REST vs the local console fake. */
 export type MessagingDriverName = 'twilio' | 'console';
 
+/** Outbound email driver: real AWS SES send vs the local console fake. */
+export type EmailDriverName = 'ses' | 'console';
+
 export interface AppConfig {
   nodeEnv: string;
   /** Dev-only test/QA endpoints (dev-login, outbox, reseed) are gated on this.
@@ -329,6 +332,66 @@ export interface AppConfig {
    * docs/superpowers/plans/2026-07-20-event-bridge.md). Positive integer.
    */
   workerPollIntervalMs: number;
+  /**
+   * Email channel driver (email-channel-v1): ses (real AWS SES send via
+   * SESv2) | console (offline one-line log, no PII). EMAIL_DRIVER env; default
+   * ses when deployed (NODE_ENV=production), console for local NODE_ENVs -
+   * mirrors MESSAGING_DRIVER. The ses driver additionally REQUIRES
+   * emailSenderDomain + emailFromAddress (loadConfig gates them at boot).
+   */
+  emailDriver: EmailDriverName;
+  /**
+   * Outbound-email kill-switch (parity with smsSendingEnabled). When false the
+   * send service refuses before the adapter call. EMAIL_SENDING_ENABLED; when
+   * unset DEFAULTS to (emailDriver === 'console') - ON locally/test (console,
+   * no real send), OFF when deployed (ses driver) so no real email is sent
+   * before SES production access is granted. Boolean parse mirrors
+   * SMS_SENDING_ENABLED (true|1|yes / false|0|no; warn + default otherwise).
+   */
+  emailSendingEnabled: boolean;
+  /**
+   * Dev-only override of the SES REST base URL (the fake-SES host, e.g.
+   * http://localhost:8890). REJECTED in production (fail-closed) -
+   * SECURITY-CRITICAL: the Phase B dev inbound webhook route is mounted only
+   * when this is set and has NO other prod guard, so its production safety
+   * rests ENTIRELY on this boot throw. Mirror TWILIO_API_BASE_URL; deployed
+   * stacks always use the real SES endpoint.
+   */
+  sesApiBaseUrl?: string;
+  /**
+   * Sender domain the SES identity is verified on (EMAIL_SENDER_DOMAIN, e.g.
+   * mail.housingchoice.org). Non-secret naming value (Terraform params
+   * module). REQUIRED by the ses driver (gated at boot); the Reply-To relay
+   * address is built on it in Phase A5.
+   */
+  emailSenderDomain?: string;
+  /**
+   * The From address outbound email is sent as (EMAIL_FROM_ADDRESS, e.g.
+   * team@mail.housingchoice.org). Non-secret naming value (Terraform params
+   * module). REQUIRED by the ses driver (gated at boot).
+   */
+  emailFromAddress?: string;
+  /**
+   * SES configuration set name outbound sends attach so bounce/complaint/delivery
+   * events fan out to the mail-events SNS topic (EMAIL_CONFIGURATION_SET, e.g.
+   * hc-dev-mail). Non-secret naming value (Terraform params module, wired from the
+   * inbound_mail module's config_set_name output). OPTIONAL pass-through: unset
+   * locally (the fake-SES host ignores it) and until the inbound_mail apply lands;
+   * WITHOUT it SES never emits the events the B5 pipeline consumes.
+   */
+  emailConfigurationSet?: string;
+  /**
+   * S3 bucket the SES inbound receipt rule writes raw MIME into
+   * (INBOUND_MAIL_BUCKET, Phase B). Plain optional pass-through; unset locally.
+   */
+  inboundMailBucket?: string;
+  /**
+   * SQS queue URL the worker's second consumer long-polls for inbound-mail
+   * notifications (INBOUND_MAIL_QUEUE_URL, Phase B). Plain optional
+   * pass-through; unset locally (no local SQS - the fake-SES POSTs the dev
+   * inbound route instead).
+   */
+  inboundMailQueueUrl?: string;
 }
 
 /**
@@ -674,6 +737,91 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // === Email channel (SES) config - email-channel-v1 A3 =====================
+  // Dev-only SES REST redirect (fake-SES host). MUST NOT be set in production.
+  // SECURITY-CRITICAL (review F15): the Phase B dev inbound webhook route is
+  // mounted ONLY when this is set and has NO other production guard, so its
+  // prod-safety rests ENTIRELY on this throw. Same posture/shape as
+  // TWILIO_API_BASE_URL / ANTHROPIC_API_BASE_URL above. Checked FIRST in the
+  // email block so the prod-rejection fires before the driver/identity gates.
+  const sesApiBaseUrl = env.SES_API_BASE_URL?.trim();
+  if (sesApiBaseUrl !== undefined && sesApiBaseUrl.length > 0 && nodeEnv === 'production') {
+    throw new Error(
+      'SES_API_BASE_URL is set while NODE_ENV=production - refusing to start. It is a dev-only ' +
+        'override that redirects SES REST calls to a fake host; production must use the real SES endpoint.',
+    );
+  }
+  // Non-production: validate it parses so a malformed override fails fast here
+  // instead of as a raw TypeError when adapters/email.ts builds the endpoint.
+  if (sesApiBaseUrl !== undefined && sesApiBaseUrl.length > 0) {
+    try {
+      new URL(sesApiBaseUrl);
+    } catch {
+      throw new Error(`SES_API_BASE_URL must be a valid URL, got: ${sesApiBaseUrl}`);
+    }
+  }
+
+  // Email driver: ses (real AWS SES send) | console (offline one-line log).
+  // Default ses when deployed (NODE_ENV=production), console for local
+  // NODE_ENVs - mirrors MESSAGING_DRIVER. Invalid value -> boot throw.
+  const emailDriverRaw = env.EMAIL_DRIVER ?? (nodeEnv === 'production' ? 'ses' : 'console');
+  if (emailDriverRaw !== 'ses' && emailDriverRaw !== 'console') {
+    throw new Error(`EMAIL_DRIVER must be 'ses' or 'console', got: ${emailDriverRaw}`);
+  }
+  const emailDriver: EmailDriverName = emailDriverRaw;
+
+  // Sender identity (non-secret naming values; Terraform params module in AWS).
+  // The ses driver REQUIRES both - a send with no From identity is
+  // undeliverable - so gate at boot (mirror the MESSAGING_DRIVER=twilio
+  // required-vars block). Trimmed + undefined-collapsed.
+  const emailSenderDomain = env.EMAIL_SENDER_DOMAIN?.trim() || undefined;
+  const emailFromAddress = env.EMAIL_FROM_ADDRESS?.trim() || undefined;
+  // Outbound config set (bounce/complaint/delivery event routing). Optional
+  // pass-through; the ses driver attaches it to SendEmail when present.
+  const emailConfigurationSet = env.EMAIL_CONFIGURATION_SET?.trim() || undefined;
+  if (emailDriver === 'ses') {
+    const missingEmail: string[] = [];
+    if (!emailSenderDomain) missingEmail.push('EMAIL_SENDER_DOMAIN');
+    if (!emailFromAddress) missingEmail.push('EMAIL_FROM_ADDRESS');
+    if (missingEmail.length > 0) {
+      throw new Error(
+        `EMAIL_DRIVER=ses requires ${missingEmail.join(', ')} (sender identity, Terraform params ` +
+          'module -> Parameter Store) or set EMAIL_DRIVER=console. Refusing to start without them.',
+      );
+    }
+  }
+
+  // Outbound-email kill-switch (A2P/SES safety) - same shape/posture as
+  // SMS_SENDING_ENABLED. DEFAULT: ON with the console driver (local/test - no
+  // real send), OFF with the ses driver (deployed) so a deployed stack sends
+  // NO real email before SES production access is granted. Flip
+  // EMAIL_SENDING_ENABLED=true once granted. NOT fail-fast: an unparseable
+  // value WARNs (a boolean flag, no PII) and uses the default. true:
+  // 'true'|'1'|'yes'; false: 'false'|'0'|'no'.
+  const emailSendingEnabledDefault = emailDriver === 'console';
+  let emailSendingEnabled = emailSendingEnabledDefault;
+  const emailSendingEnabledRaw = env.EMAIL_SENDING_ENABLED;
+  if (emailSendingEnabledRaw !== undefined && emailSendingEnabledRaw.trim().length > 0) {
+    const normalized = emailSendingEnabledRaw.trim().toLowerCase();
+    if (normalized === 'true' || normalized === '1' || normalized === 'yes') {
+      emailSendingEnabled = true;
+    } else if (normalized === 'false' || normalized === '0' || normalized === 'no') {
+      emailSendingEnabled = false;
+    } else {
+      logger.warn(
+        { default: emailSendingEnabledDefault },
+        'EMAIL_SENDING_ENABLED is not one of true/1/yes/false/0/no - using the default',
+      );
+    }
+  }
+
+  // Inbound-mail plumbing (Phase B): the S3 bucket the SES receipt rule writes
+  // raw MIME into (INBOUND_MAIL_BUCKET) and the SQS queue the worker's second
+  // consumer long-polls (INBOUND_MAIL_QUEUE_URL). Plain optional pass-through -
+  // unset locally (no local SQS; the fake-SES POSTs the dev inbound route).
+  const inboundMailBucket = env.INBOUND_MAIL_BUCKET?.trim() || undefined;
+  const inboundMailQueueUrl = env.INBOUND_MAIL_QUEUE_URL?.trim() || undefined;
+
   const sendBreakerMaxPerMinute = Number(env.SEND_BREAKER_MAX_PER_MINUTE ?? 10);
   if (!Number.isInteger(sendBreakerMaxPerMinute) || sendBreakerMaxPerMinute <= 0) {
     throw new Error(
@@ -949,5 +1097,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       anthropicApiBaseUrl !== undefined && anthropicApiBaseUrl.length > 0 ? anthropicApiBaseUrl : undefined,
     eventBridgeUrl: eventBridgeUrl !== undefined && eventBridgeUrl.length > 0 ? eventBridgeUrl : undefined,
     workerPollIntervalMs,
+    emailDriver,
+    emailSendingEnabled,
+    sesApiBaseUrl: sesApiBaseUrl !== undefined && sesApiBaseUrl.length > 0 ? sesApiBaseUrl : undefined,
+    emailSenderDomain,
+    emailFromAddress,
+    emailConfigurationSet,
+    inboundMailBucket,
+    inboundMailQueueUrl,
   };
 }

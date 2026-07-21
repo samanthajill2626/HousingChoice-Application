@@ -5,19 +5,23 @@
 // useInbox so there is ONE authoritative count (no divergent-count bugs).
 // Degrades to null (no badge) until the C8 backend lands.
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { getInbox, useEventStream } from '../api/index.js';
+import { getInbox, getUnmatchedEmail, useEventStream } from '../api/index.js';
 
 interface UnreadValue {
   /** Count of unread rows, or null when unknown/pending (render no badge). */
   unread: number | null;
+  /** Count of unread UNMATCHED-email rows (the Email side-door badge), or null
+   *  when unknown/pending (render no badge). NEVER counts quarantine. */
+  unmatchedUnread: number | null;
 }
 
-const UnreadCtx = createContext<UnreadValue>({ unread: null });
+const UnreadCtx = createContext<UnreadValue>({ unread: null, unmatchedUnread: null });
 const REFETCH_DEBOUNCE_MS = 300;
 const BADGE_LIMIT = 100;
 
 export function UnreadProvider({ children }: { children: React.ReactNode }): React.JSX.Element {
   const [unread, setUnread] = useState<number | null>(null);
+  const [unmatchedUnread, setUnmatchedUnread] = useState<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const fetchCount = useCallback(async () => {
@@ -61,9 +65,60 @@ export function UnreadProvider({ children }: { children: React.ReactNode }): Rea
     [],
   );
 
-  useEventStream({ onConversationUpdated: scheduleRefetch });
+  // --- The UNMATCHED-email badge: a SECOND independent count (the Email side-
+  // door), fetched + kept-live exactly like the inbox count above but off its OWN
+  // SSE event. Reads the server-computed capped `unreadCount` (NOT rows.length -
+  // the server owns the unmatched-unread math; both tabs carry it). Degrades to
+  // null (no badge) on 404/error, mirroring the inbox catch. ---
+  const unmatchedAbortRef = useRef<AbortController | null>(null);
+  const fetchUnmatchedCount = useCallback(async () => {
+    unmatchedAbortRef.current?.abort();
+    const controller = new AbortController();
+    unmatchedAbortRef.current = controller;
+    try {
+      const page = await getUnmatchedEmail('unmatched', undefined, controller.signal);
+      if (controller.signal.aborted) return;
+      setUnmatchedUnread(page.unreadCount);
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        return;
+      }
+      // 404 (slice not live) or any error -> no badge rather than a wrong number.
+      setUnmatchedUnread(null);
+    }
+  }, []);
 
-  return <UnreadCtx.Provider value={{ unread }}>{children}</UnreadCtx.Provider>;
+  useEffect(() => {
+    // Same fetch-on-mount posture as the inbox count (state set only after await).
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void fetchUnmatchedCount();
+    return () => unmatchedAbortRef.current?.abort();
+  }, [fetchUnmatchedCount]);
+
+  const unmatchedDebounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const scheduleUnmatchedRefetch = useCallback(() => {
+    if (unmatchedDebounceRef.current !== undefined) clearTimeout(unmatchedDebounceRef.current);
+    unmatchedDebounceRef.current = setTimeout(() => {
+      unmatchedDebounceRef.current = undefined;
+      void fetchUnmatchedCount();
+    }, REFETCH_DEBOUNCE_MS);
+  }, [fetchUnmatchedCount]);
+
+  useEffect(
+    () => () => {
+      if (unmatchedDebounceRef.current !== undefined) clearTimeout(unmatchedDebounceRef.current);
+    },
+    [],
+  );
+
+  useEventStream({
+    onConversationUpdated: scheduleRefetch,
+    onUnmatchedEmailUpdated: scheduleUnmatchedRefetch,
+  });
+
+  return (
+    <UnreadCtx.Provider value={{ unread, unmatchedUnread }}>{children}</UnreadCtx.Provider>
+  );
 }
 
 export function useUnread(): UnreadValue {

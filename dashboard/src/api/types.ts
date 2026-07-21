@@ -255,6 +255,7 @@ export interface TodayResponse {
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
+  | 'partner_1to1'
   | 'unknown_1to1'
   | 'relay_group';
 
@@ -271,8 +272,9 @@ export interface ConversationParticipant {
 export interface ConversationSummary {
   conversationId: string;
   type: ConversationType;
-  /** External participant's phone, E.164. */
-  participant_phone: string;
+  /** External participant's phone, E.164. Optional (email-channel v1): an
+   *  email-only thread carries participant_email, NOT participant_phone. */
+  participant_phone?: string;
   participants: ConversationParticipant[];
   /** Latest-message preview (truncated) or null. */
   preview: string | null;
@@ -314,8 +316,9 @@ export interface ConversationHeader {
   type: ConversationType;
   /** relay_group: 'open' | 'closed'; 1:1: 'open'. */
   status: string;
-  /** External participant's phone / synthetic pool placeholder (E.164). */
-  participant_phone: string;
+  /** External participant's phone / synthetic pool placeholder (E.164). Optional
+   *  (email-channel v1): an email-only thread carries participant_email instead. */
+  participant_phone?: string;
   participants?: ConversationParticipant[];
   /** The masked pool number fronting a relay_group (absent once closed / on 1:1). */
   pool_number?: string;
@@ -878,17 +881,17 @@ export type MessageDirection = 'inbound' | 'outbound';
 /** Who authored a message. `unknown` = from an un-triaged contact (never
  *  guessed); `system` = an app-authored relay announcement (group intro /
  *  tour reminder rung). */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
+export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /** Message transport. `call` is a metadata-only voice-call timeline entry. */
-export type MessageType = 'sms' | 'mms' | 'call';
+export type MessageType = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** Coarse human-facing call outcome: `answered` (a leg connected), `missed`
  *  (nobody answered / busy / failed), `voicemail` (founder-bridge seam). */
 export type CallOutcome = 'answered' | 'missed' | 'voicemail';
 
 /** Contact identity type. `unknown` = auto-captured, awaiting human triage. */
-export type ContactType = 'tenant' | 'landlord' | 'team_member' | 'unknown';
+export type ContactType = 'tenant' | 'landlord' | 'partner' | 'team_member' | 'unknown';
 
 /**
  * A2P/CTIA consent method (spec §2 + client_inbound/inbound_call). MIRROR of the
@@ -1014,6 +1017,16 @@ export interface SuggestionUpdatedEvent {
   contactId: string;
 }
 
+/** GET /api/events 'unmatched_email.updated' payload (email-channel-v1 B2/B3).
+ *  An unmatched-email row was created (inbound from an unknown sender) or
+ *  transitioned (linked / spam / release / dismiss / read) - the Email nav badge
+ *  and the /email triage page refetch. ID-only + OPTIONAL (advisory): consumers
+ *  refetch the feed regardless, and the payload NEVER carries the address /
+ *  subject / body (PII). Mirrors app/src/lib/events.ts UnmatchedEmailUpdatedEvent. */
+export interface UnmatchedEmailUpdatedEvent {
+  unmatchedId?: string;
+}
+
 // --- Conversation fact extraction (AI review UI) -----------------------------
 // The pending-review record the extraction pipeline writes (one per contact +
 // target). The dashboard reads these to render AutoBadges / SuggestionChips and
@@ -1118,6 +1131,11 @@ export interface Contact {
   /** Voice Phase 1 (spec §8): staff-set company do-not-call. INDEPENDENT of
    *  sms_opt_out. MIRRORS ContactItem.voice_opt_out. */
   voice_opt_out?: boolean;
+  /** Email channel v1 (B5): the contact complained (opt_out) or a message hard-
+   *  bounced (unreachable). Either suppresses outbound email (the composer refuses
+   *  with email_suppressed). Beside the sms_ flags; set by SES events. */
+  email_opt_out?: boolean;
+  email_unreachable?: boolean;
   /** Soft-delete marker (ISO 8601). Present → the contact is "deleted": hidden
    *  from the normal lists/inbox/today but fully retained (restore clears it). */
   deleted_at?: string;
@@ -1141,6 +1159,10 @@ export interface Contact {
   voucher_expiration_date?: string;
   /** C1: when the backend ships multiple numbers (BE1). Absent on legacy. */
   phones?: ContactPhone[];
+  /** Email channel v1 (A1): the primary address (byEmail GSI hash) + the full
+   *  roster. Mirrors phone/phones[]. Absent on a contact with no email. */
+  email?: string;
+  emails?: ContactEmail[];
   /** Landlord/PM company name (editable). */
   company?: string;
   /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
@@ -1362,8 +1384,9 @@ export interface Message {
   body?: string;
   /** Provider media URLs (MMS, inbound). */
   mediaUrls?: string[];
-  /** Mirrored MMS attachments (key + stored content-type, together). */
-  media_attachments?: { s3Key: string; contentType: string }[];
+  /** Mirrored MMS attachments (key + stored content-type, together). Email
+   *  attachments also carry the original filename (email-channel v1). */
+  media_attachments?: { s3Key: string; contentType: string; filename?: string }[];
   /** @deprecated Legacy parallel key array (pre-media_attachments). */
   media_s3_keys?: string[];
   provider_sid: string;
@@ -1373,6 +1396,23 @@ export interface Message {
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message
    *  (keyed by member key). Present on relay-thread messages; absent on 1:1. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  // --- Email channel v1 - present only on a type:'email' entry (A4) --------
+  /** Subject line (email only). */
+  subject?: string;
+  /** The From address (our sender on outbound; the contact on inbound). */
+  email_from?: string;
+  /** Recipient addresses. */
+  email_to?: string[];
+  email_cc?: string[];
+  /** Our RFC Message-ID (outbound) or theirs (inbound), with angle brackets. */
+  email_message_id?: string;
+  /** Inbound reply arrived from an address NOT yet on the contact (B2 sets it;
+   *  the client renders a "New address" chip). Absent otherwise. */
+  email_new_address?: boolean;
+  /** Sanitized inbound HTML body (bounded at ingest; may be ABSENT even when the
+   *  mail had HTML). Rendered ONLY inside the CSP-framed sandboxed iframe (B7) -
+   *  never dangerouslySetInnerHTML. */
+  email_html_sanitized?: string;
   // --- Voice call — present only on a type:'call' entry --------------------
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -1397,6 +1437,79 @@ export interface ContactPhone {
   primary: boolean; // exactly one true
   firstSeenAt?: string; // ISO; when first observed
   lastSeenAt?: string; // ISO; most recent inbound/outbound
+}
+
+// --- Email channel v1 -------------------------------------------------------
+// MIRRORS app/src/repos/contactsRepo.ts ContactEmail + the email send/CRUD wire
+// shapes (routes/contacts.ts email endpoints, routes/api.ts email send,
+// routes/emailMedia.ts). The dashboard cannot import from app/src, so this is
+// duplicated; keep it in sync. ContactEmail is the exact analog of ContactPhone.
+
+export interface ContactEmail {
+  email: string; // normalized (trim + lowercase); the byEmail GSI hash
+  label?: string; // "work", "personal", operator note
+  primary: boolean; // exactly one true
+  firstSeenAt?: string; // ISO; when first observed
+  lastSeenAt?: string; // ISO; most recent inbound/outbound
+}
+
+/** One outbound email attachment after presign+confirm (stored VERBATIM - no
+ *  transcode, unlike MmsMediaAttachment). Returned by confirmEmailMedia. */
+export interface EmailMediaAttachment {
+  s3Key: string;
+  contentType: string;
+  size: number;
+}
+
+// --- Email channel v1: unmatched-email side-door (B3 store/routes -> B6 UI) --
+// MIRRORS app/src/routes/unmatchedEmail.ts wire shapes (ListRow / DetailRow) +
+// app/src/repos/unmatchedEmailRepo.ts. The dashboard cannot import from app/src,
+// so these are duplicated; keep in sync. Optionals are OMITTED (not nulled) when
+// absent. A `parse_skipped` row has from.address '' + empty subject/snippet.
+
+export type UnmatchedEmailStatus = 'unmatched' | 'quarantined' | 'linked' | 'dismissed';
+
+/** One attachment's metadata on an unmatched row (never the bytes; the raw MIME
+ *  is never presigned or served - PII posture). */
+export interface UnmatchedEmailAttachmentMeta {
+  filename: string;
+  contentType: string;
+  size: number;
+}
+
+/** The list-row shape (GET /api/unmatched-email rows[]). Carries NO body text -
+ *  fetch the detail (GET /:id) when a row expands. */
+export interface UnmatchedEmailRow {
+  unmatchedId: string;
+  status: UnmatchedEmailStatus;
+  from: { name?: string; address: string };
+  subject: string;
+  snippet: string; // <= 180 chars
+  attachments_meta: UnmatchedEmailAttachmentMeta[];
+  spam_verdict?: 'PASS' | 'FAIL' | 'GRAY';
+  virus_verdict?: 'PASS' | 'FAIL';
+  received_at: string; // ISO
+  read: boolean;
+  linked_contact_id?: string;
+  /** Set when the MIME could not be parsed - render "Unparseable mail". */
+  parse_skipped?: 'oversize' | 'parse_failed';
+}
+
+/** The detail shape (GET /:id, and POST /:id/read|spam|release|dismiss return
+ *  { row }). ListRow + the full text (+ sanitized HTML when the mail had an HTML
+ *  part; B7 renders it in a sandboxed frame - B6 shows the plain text only). */
+export interface UnmatchedEmailItem extends UnmatchedEmailRow {
+  text: string;
+  html_sanitized?: string;
+}
+
+/** GET /api/unmatched-email?filter=unmatched|quarantine envelope. `unreadCount`
+ *  is the capped UNMATCHED-unread count (both tabs carry it; it feeds the nav
+ *  badge - treat 100 as "100+"). */
+export interface UnmatchedEmailPage {
+  rows: UnmatchedEmailRow[];
+  nextCursor: string | null;
+  unreadCount: number;
 }
 
 // --- C2: Person-centric merged timeline (§API Contract C2) ------------------
@@ -1430,9 +1543,11 @@ export interface TimelineMessage extends TimelineBase {
   tsMsgId: string;
   direction: MessageDirection; // reuse legacy
   author: MessageAuthor; // reuse legacy
-  type: 'sms' | 'mms';
+  // NOTE: a NARROWER inline union than wire MessageType (no 'call' - calls are a
+  // separate TimelineCall kind). Email channel v1 (A6) adds 'email' here.
+  type: 'sms' | 'mms' | 'email';
   body?: string; // FULL body (no server truncation)
-  media_attachments?: { s3Key: string; contentType: string }[];
+  media_attachments?: { s3Key: string; contentType: string; filename?: string }[];
   delivery_status: DeliveryStatus; // reuse legacy
   error_code?: string; // Twilio error code on a failure → human-readable reason
   /** tsMsgId of the FAILED message this one supersedes (a retry). The timeline
@@ -1440,6 +1555,21 @@ export interface TimelineMessage extends TimelineBase {
   retry_of?: string;
   fromPhone?: string;
   toPhone?: string; // which number this used
+  // --- Email channel v1 (A6/B7): present only on a type:'email' item --------
+  /** Subject line (semibold in the collapsed EmailCard). */
+  subject?: string;
+  /** From address (our sender on outbound; the contact on inbound). */
+  email_from?: string;
+  /** Recipient addresses (the EmailCard from/to line). */
+  email_to?: string[];
+  email_cc?: string[];
+  /** Inbound reply arrived from an address NOT yet on the contact (B7 "New
+   *  address" chip). Outbound email never sets this. */
+  email_new_address?: boolean;
+  /** Sanitized inbound HTML body (bounded at ingest; may be ABSENT even when the
+   *  mail had HTML - fall back to the trimmed text body). Rendered ONLY inside the
+   *  CSP-framed, fully sandboxed EmailHtmlFrame (B7) - never dangerouslySetInnerHTML. */
+  email_html_sanitized?: string;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
    *  keyed by member key. A `contact_opted_out` failed slot means that member
    *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
@@ -1544,6 +1674,22 @@ export interface SendMessageResult {
   providerSid: string;
   tsMsgId: string;
   status: DeliveryStatus;
+}
+
+/** Result of POST /api/conversations/:id/email (email-channel v1, A5). A
+ *  SUPERSET of SendMessageResult (the shared core fields let it resolve an
+ *  optimistic bubble the same way), plus the SES ids and `redirected` - true
+ *  when the address was already claimed so the message landed in
+ *  `conversationId`, which may DIFFER from the one posted to. The route wraps it
+ *  as `{ message }`; sendEmail() unwraps. */
+export interface SendEmailResult {
+  conversationId: string;
+  providerSid: string; // our bare RFC Message-ID (== message provider_sid)
+  tsMsgId: string;
+  status: DeliveryStatus;
+  sesMessageId?: string;
+  emailMessageId?: string; // the RFC Message-ID header, with angle brackets
+  redirected?: boolean;
 }
 
 /** One outbound MMS attachment after presign+confirm (server transcoded/validated). */
@@ -1856,7 +2002,7 @@ export interface BroadcastUpdatedEvent {
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
 export type InboxFilter = 'all' | 'unread' | 'unknown';
-export type InboxChannel = 'sms' | 'mms' | 'call';
+export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's
  *  `InboxRow` (app/src/routes/inbox.ts) VERBATIM: `channel`/`direction` are
@@ -1869,7 +2015,7 @@ export interface InboxRow {
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
-  role?: 'tenant' | 'landlord' | 'unknown';
+  role?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
   preview: string; // latest item's text as a preview (relay: last_message_preview)

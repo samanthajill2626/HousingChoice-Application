@@ -1,6 +1,7 @@
 // gen-tables generator contract: the in-memory tfvars object Terraform
 // consumes must carry all 9 tables with the contractual GSI names, the
-// matches TTL, streams on messages+placements only, and PITR on everything.
+// messages+matches+unmatched_email TTL, streams on messages+placements only,
+// and PITR on everything.
 // (tables.test.ts asserts the TABLES source itself; this asserts the
 // Terraform-facing projection of it.)
 import { describe, expect, it } from 'vitest';
@@ -29,8 +30,25 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'tourReminders',
       'tours',
       'units',
+      'unmatched_email',
       'users',
     ]);
+  });
+
+  it('unmatched_email (email-channel B3): PK unmatchedId; byStatus GSI (status + received_at); TTL expires_at', () => {
+    expect(tables['unmatched_email']).toEqual({
+      hash_key: { name: 'unmatchedId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byStatus',
+          hash_key: { name: 'status', type: 'S' },
+          range_key: { name: 'received_at', type: 'S' },
+        },
+      ],
+      stream: false,
+      ttl_attribute: 'expires_at',
+      pitr: true,
+    });
   });
 
   it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs, no stream/TTL', () => {
@@ -141,10 +159,11 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
 
   it('carries the contractual GSI names per table', () => {
     const gsiNames = (base: string) => tables[base]?.gsis.map((g) => g.index_name);
-    expect(gsiNames('contacts')).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
+    expect(gsiNames('contacts')).toEqual(['byPhone', 'byEmail', 'byTypeStatus', 'byHousingAuthority']);
     expect(gsiNames('units')).toEqual(['byLandlord', 'byStatus', 'byJurisdiction', 'byProperty']);
     expect(gsiNames('conversations')).toEqual([
       'byParticipantPhone',
+      'byParticipantEmail',
       'byLastActivity',
       'byPoolNumber',
       'byRelayStatus',
@@ -179,10 +198,12 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
   });
 
-  it('TTL only on matches (expires_at)', () => {
+  it('TTL on messages + matches + unmatched_email (expires_at)', () => {
+    expect(tables['messages']?.ttl_attribute).toBe('expires_at');
     expect(tables['matches']?.ttl_attribute).toBe('expires_at');
+    expect(tables['unmatched_email']?.ttl_attribute).toBe('expires_at');
     const withTtl = Object.entries(tables).filter(([, t]) => t.ttl_attribute !== undefined);
-    expect(withTtl.map(([base]) => base)).toEqual(['matches']);
+    expect(withTtl.map(([base]) => base)).toEqual(['matches', 'messages', 'unmatched_email']); // alphabetical keys
   });
 
   it('streams on messages and placements ONLY', () => {

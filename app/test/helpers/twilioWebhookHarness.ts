@@ -22,9 +22,12 @@ import { createEventBus, type AppEventName, type EventBus } from '../../src/lib/
 import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import {
+  emailRefId,
   isDeleted,
   phoneRefId,
+  PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
+  type ContactEmail,
   type ContactFlag,
   type ContactItem,
   type ContactPhone,
@@ -48,6 +51,7 @@ import {
   buildTsMsgId,
   type MessageItem,
   type MessagesRepo,
+  type ParkedEmailEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemovePrimaryLandlordError,
@@ -240,6 +244,8 @@ export function createFakeWorld(): FakeWorld {
   const conversations = new Map<string, ConversationItem>();
   const messages: MessageItem[] = [];
   const jobExecutionMarkers = new Map<string, string>();
+  // Keyed by `${sesMessageId}#${eventType}` (m4: multi-valued per SES id).
+  const parkedEmailEvents = new Map<string, ParkedEmailEvent>();
   const relaySidPointers = new Map<
     string,
     { conversationId: string; tsMsgId: string; memberKey: string }
@@ -288,6 +294,11 @@ export function createFakeWorld(): FakeWorld {
   /** The real repos throw the SDK's conditional-check error — mirror it. */
   const conditionalCheckFailed = (message: string): ConditionalCheckFailedException =>
     new ConditionalCheckFailedException({ message, $metadata: {} });
+
+  // Email channel v1 fake state: the email#<addr> claim arbiter + token pointers.
+  const emailClaims = new Map<string, string>(); // normalized address -> conversationId
+  const replyTokens = new Map<string, string>(); // token -> conversationId
+  let emailTokenCounter = 0;
 
   const conversationsRepo: ConversationsRepo = {
     async createOrGetByParticipantPhone(phone: string, type: ConversationType) {
@@ -350,6 +361,71 @@ export function createFakeWorld(): FakeWorld {
     async findByParticipantPhone(phone) {
       return [...conversations.values()].filter((c) => c.participant_phone === phone);
     },
+
+    // --- Email channel v1 (claim arbiter + reply tokens) ---
+    async claimEmailForConversation(email, conversationId) {
+      const existing = emailClaims.get(email);
+      if (existing !== undefined) return { conversationId: existing };
+      emailClaims.set(email, conversationId);
+      return { conversationId };
+    },
+    async attachEmailToConversation(conversationId, email) {
+      const existing = emailClaims.get(email);
+      if (existing !== undefined && existing !== conversationId) {
+        return { conversationId: existing };
+      }
+      emailClaims.set(email, conversationId);
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`attachEmailToConversation: no conversation ${conversationId}`);
+      conv.participant_email = email;
+      return { conversationId };
+    },
+    async createOrGetByParticipantEmail(email, type, opts) {
+      for (const conv of conversations.values()) {
+        if (conv.participant_email === email && conv.status === 'open') return conv;
+      }
+      const claimed = emailClaims.get(email);
+      if (claimed !== undefined) {
+        const conv = conversations.get(claimed);
+        if (conv) return conv;
+      }
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId: `conv-${++convCounter}`,
+        participant_email: email,
+        status: 'open',
+        last_activity_at: now,
+        type,
+        ai_mode: 'auto',
+        created_at: now,
+        ...(opts?.contactId !== undefined && {
+          participants: [{ contactId: opts.contactId, phone: '' }],
+        }),
+        ...(opts?.displayName !== undefined && { participant_display_name: opts.displayName }),
+      };
+      conversations.set(item.conversationId, item);
+      emailClaims.set(email, item.conversationId);
+      return item;
+    },
+    async findByParticipantEmail(email) {
+      return [...conversations.values()].filter((c) => c.participant_email === email);
+    },
+    async getReplyToken(conversationId) {
+      const conv = conversations.get(conversationId);
+      if (!conv) throw conditionalCheckFailed(`getReplyToken: no conversation ${conversationId}`);
+      if (typeof conv.email_reply_token === 'string' && conv.email_reply_token.length > 0) {
+        return conv.email_reply_token;
+      }
+      const token = `faketoken${++emailTokenCounter}abcdefghij`;
+      conv.email_reply_token = token;
+      replyTokens.set(token, conversationId);
+      return token;
+    },
+    async findByReplyToken(token) {
+      const id = replyTokens.get(token);
+      return id !== undefined ? conversations.get(id) : undefined;
+    },
+
     async setType(conversationId, type) {
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`setType: no conversation ${conversationId}`);
@@ -589,11 +665,38 @@ export function createFakeWorld(): FakeWorld {
         ...(message.transcriptChannelRoles !== undefined && {
           transcript_channel_roles: message.transcriptChannelRoles,
         }),
+        // Email channel v1: preserve the email fields so timeline/media readers
+        // observe them (mirrors the real repo's append passthrough).
+        ...(message.subject !== undefined && { subject: message.subject }),
+        ...(message.email_from !== undefined && { email_from: message.email_from }),
+        ...(message.email_to !== undefined && { email_to: message.email_to }),
+        ...(message.email_cc !== undefined && { email_cc: message.email_cc }),
+        ...(message.email_message_id !== undefined && { email_message_id: message.email_message_id }),
+        ...(message.email_html_sanitized !== undefined && {
+          email_html_sanitized: message.email_html_sanitized,
+        }),
+        ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
+        ...(message.email_new_address === true && { email_new_address: true }),
+        ...(message.attachments_truncated === true && { attachments_truncated: true }),
       });
       return { deduped: false, tsMsgId };
     },
     async getByProviderSid(sid) {
       return findBySid(sid);
+    },
+    async getByRfcMessageId(messageId) {
+      // OUTBOUND: our own email_message_id; INBOUND: provider_sid IS the RFC id.
+      return (
+        messages.find((m) => m.email_message_id === messageId) ?? findBySid(messageId)
+      );
+    },
+    async recordProviderSidAlias(providerSid, ref) {
+      // Working mirror (email A5): stamp the SES id on the message so a later
+      // resolve-by-SES-id (B5) can find it; no separate pointer table in-memory.
+      const msg = messages.find(
+        (m) => m.conversationId === ref.conversationId && m.tsMsgId === ref.tsMsgId,
+      );
+      if (msg) msg.ses_message_id = providerSid;
     },
     async updateDeliveryStatus(sid, status, errorCode) {
       const existing = findBySid(sid);
@@ -701,6 +804,20 @@ export function createFakeWorld(): FakeWorld {
       jobExecutionMarkers.set(jobId, conversationId);
       return true;
     },
+    async getJobExecutionMarker(jobId) {
+      return jobExecutionMarkers.has(jobId);
+    },
+
+    // --- Email orphan-event parking lot (B5; m4 multi-valued per event type) ---
+    async putParkedEmailEvent(event) {
+      parkedEmailEvents.set(`${event.sesMessageId}#${event.eventType}`, event);
+    },
+    async listParkedEmailEvents(sesMessageId) {
+      return [...parkedEmailEvents.values()].filter((e) => e.sesMessageId === sesMessageId);
+    },
+    async deleteParkedEmailEvent(sesMessageId, eventType) {
+      parkedEmailEvents.delete(`${sesMessageId}#${eventType}`);
+    },
 
     // --- Relay groups (M1.7) ---
     async setRecipientDelivery(conversationId, tsMsgId, memberKey, delivery) {
@@ -779,9 +896,52 @@ export function createFakeWorld(): FakeWorld {
     if (idx >= 0) contacts.splice(idx, 1);
   };
   const fakeRequireContact = (contactId: string): ContactItem => {
-    const contact = contacts.find((c) => c.contactId === contactId && c.phone_ref !== true);
+    const contact = contacts.find(
+      (c) => c.contactId === contactId && c.phone_ref !== true && c.email_ref !== true,
+    );
     if (!contact) throw conditionalCheckFailed(`no contact ${contactId}`);
     return contact;
+  };
+
+  // Email-channel A1: the fake mirrors the real repo's email invariants exactly
+  // as it does for phones - emails[] seeded from the scalar when absent,
+  // exactly-one-primary, and email-pointer items stored AS ENTRIES in the same
+  // `contacts` array (email_ref/email_ref_owner) so findByEmail resolves a
+  // non-primary address to its owner.
+  const fakeSeededEmails = (contact: ContactItem): ContactEmail[] => {
+    if (Array.isArray(contact.emails) && contact.emails.length > 0) {
+      return contact.emails.map((e) => ({ ...e }));
+    }
+    if (typeof contact.email === 'string' && contact.email.length > 0) {
+      return [
+        {
+          email: contact.email,
+          primary: true,
+          ...(typeof contact.created_at === 'string' && { firstSeenAt: contact.created_at }),
+          lastSeenAt: new Date().toISOString(),
+        },
+      ];
+    }
+    return [];
+  };
+  const fakePutEmailPointer = (email: string, owner: string): void => {
+    const id = emailRefId(email);
+    if (contacts.some((c) => c.contactId === id)) return;
+    // A pointer carries NO real type/status (invisible to byTypeStatus) - the
+    // ContactItem type requires `type`, so use a non-listed sentinel; listByType
+    // filters email_ref items out either way.
+    contacts.push({
+      contactId: id,
+      type: 'unknown',
+      email,
+      email_ref: true,
+      email_ref_owner: owner,
+    } as ContactItem);
+  };
+  const fakeDeleteEmailPointer = (email: string): void => {
+    const id = emailRefId(email);
+    const idx = contacts.findIndex((c) => c.contactId === id);
+    if (idx >= 0) contacts.splice(idx, 1);
   };
 
   const contactsRepo: ContactsRepo = {
@@ -795,13 +955,23 @@ export function createFakeWorld(): FakeWorld {
       }
       return hit;
     },
+    async findByEmail(email) {
+      const hit = contacts.find((c) => c.email === email);
+      if (!hit) return undefined;
+      if (hit.email_ref === true) {
+        const owner = typeof hit.email_ref_owner === 'string' ? hit.email_ref_owner : undefined;
+        if (owner === undefined) return undefined;
+        return contacts.find((c) => c.contactId === owner);
+      }
+      return hit;
+    },
     async getById(contactId) {
       return contacts.find((c) => c.contactId === contactId);
     },
     async listByType(type, opts = {}) {
       const items = contacts
-        // BE1: pointer items carry no real type/status → invisible to this GSI.
-        .filter((c) => c.phone_ref !== true)
+        // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.
+        .filter((c) => c.phone_ref !== true && c.email_ref !== true)
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
@@ -814,7 +984,7 @@ export function createFakeWorld(): FakeWorld {
       // attribute). The service defends the type invariant either way. BE1:
       // pointer items carry no housingAuthority → never indexed here.
       const items = contacts
-        .filter((c) => c.phone_ref !== true)
+        .filter((c) => c.phone_ref !== true && c.email_ref !== true)
         .filter((c) => c['housingAuthority'] === housingAuthority)
         // Broadcast targeting never reaches a soft-deleted contact.
         .filter((c) => !isDeleted(c))
@@ -934,6 +1104,66 @@ export function createFakeWorld(): FakeWorld {
       const contact = contacts.find((c) => c.contactId === contactId);
       if (!contact || !Array.isArray(contact.phones) || contact.phones.length === 0) return;
       const target = contact.phones.find((p) => p.phone === phone);
+      if (!target) return;
+      target.lastSeenAt = at;
+    },
+
+    // --- Email-channel A1 email primitives (mirror the real repo's invariants) ---
+    async addEmail(contactId, { email, label }) {
+      const contact = fakeRequireContact(contactId);
+      const emails = fakeSeededEmails(contact);
+      if (emails.some((e) => e.email === email)) {
+        if (!Array.isArray(contact.emails)) contact.emails = emails;
+        return contact;
+      }
+      const now = new Date().toISOString();
+      contact.emails = [
+        ...emails,
+        {
+          email,
+          primary: false,
+          firstSeenAt: now,
+          lastSeenAt: now,
+          ...(label !== undefined && { label }),
+        },
+      ];
+      fakePutEmailPointer(email, contactId);
+      return contact;
+    },
+    async setPrimaryEmail(contactId, email, { primary, label }) {
+      const contact = fakeRequireContact(contactId);
+      const emails = fakeSeededEmails(contact);
+      const target = emails.find((e) => e.email === email);
+      if (!target) throw conditionalCheckFailed(`contact ${contactId} has no email ${email}`);
+      if (label !== undefined) target.label = label;
+      const oldPrimary = emails.find((e) => e.primary && e.email !== email);
+      if (primary === true && !target.primary) {
+        // Mirror the real repo's crash-safe promote ordering: putPointer(old)
+        // FIRST, THEN swap scalar+emails[], THEN deletePointer(new).
+        if (oldPrimary) fakePutEmailPointer(oldPrimary.email, contactId);
+        for (const e of emails) e.primary = e.email === email;
+        contact.email = email; // scalar swap
+        contact.emails = emails;
+        fakeDeleteEmailPointer(email);
+        return contact;
+      }
+      contact.emails = emails;
+      return contact;
+    },
+    async removeEmail(contactId, email) {
+      const contact = fakeRequireContact(contactId);
+      const emails = fakeSeededEmails(contact);
+      const target = emails.find((e) => e.email === email);
+      if (!target) throw conditionalCheckFailed(`contact ${contactId} has no email ${email}`);
+      if (target.primary) throw new PrimaryEmailRemovalError();
+      contact.emails = emails.filter((e) => e.email !== email);
+      fakeDeleteEmailPointer(email);
+      return contact;
+    },
+    async touchEmailLastSeen(contactId, email, at) {
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact || !Array.isArray(contact.emails) || contact.emails.length === 0) return;
+      const target = contact.emails.find((e) => e.email === email);
       if (!target) return;
       target.lastSeenAt = at;
     },

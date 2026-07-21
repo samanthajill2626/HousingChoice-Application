@@ -38,6 +38,24 @@ interface TimelineData {
   source: TimelineSource;
 }
 
+/** Options for `addOptimistic` (ADJ-12). An options object (not positional
+ *  args) so the email channel can carry subject/email_* alongside the SMS/MMS
+ *  toPhone/attachmentKeys. Omitting `type` keeps the legacy SMS/MMS behavior
+ *  (type derived from whether attachmentKeys are present). */
+export interface AddOptimisticOptions {
+  /** SMS/MMS: the recipient number shown on the bubble. */
+  toPhone?: string;
+  /** SMS/MMS: uploaded attachment keys (their presence => an MMS bubble). */
+  attachmentKeys?: string[];
+  /** Email channel: render an optimistic EmailCard (type 'email') - NO toPhone,
+   *  NO media placeholder (email attachments reconcile on the SSE refetch). */
+  type?: 'email';
+  subject?: string;
+  email_from?: string;
+  email_to?: string[];
+  email_cc?: string[];
+}
+
 export interface ContactTimelineState extends TimelineData {
   /**
    * Refetch the timeline now (debounced with the SSE-driven refetches). Call
@@ -48,13 +66,9 @@ export interface ContactTimelineState extends TimelineData {
    */
   refetch: () => void;
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
-   *  temp id to reconcile with. */
-  addOptimistic: (
-    conversationId: string,
-    body: string,
-    toPhone?: string,
-    attachmentKeys?: string[],
-  ) => string;
+   *  temp id to reconcile with. The options object (ADJ-12) defaults to today's
+   *  SMS/MMS behavior; `type:'email'` renders an optimistic EmailCard instead. */
+  addOptimistic: (conversationId: string, body: string, opts?: AddOptimisticOptions) => string;
   /** POST succeeded: stamp the real tsMsgId + status so the SSE refetch reconciles
    *  the bubble by id (then it advances Sending… → Sent → Delivered on its own). */
   resolveOptimistic: (tempId: string, result: SendMessageResult) => void;
@@ -176,14 +190,36 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
   const abortRef = useRef<AbortController | null>(null);
 
   const addOptimistic = useCallback(
-    (
-      conversationId: string,
-      body: string,
-      toPhone?: string,
-      attachmentKeys?: string[],
-    ): string => {
+    (conversationId: string, body: string, opts?: AddOptimisticOptions): string => {
       tempIdRef.current += 1;
       const tempId = `optimistic:${tempIdRef.current}`;
+      const { toPhone, attachmentKeys, type, subject, email_from, email_to, email_cc } = opts ?? {};
+      const shared = {
+        kind: 'message' as const,
+        id: tempId,
+        at: new Date().toISOString(),
+        conversationId,
+        tsMsgId: tempId,
+        direction: 'outbound' as const,
+        author: 'teammate' as const,
+        body,
+        // 'queued' renders as "Sending..." (deliveryStatus) - the in-progress state.
+        delivery_status: 'queued' as const,
+      };
+      // Email channel (A6): an optimistic EmailCard. No toPhone, no media
+      // placeholder - an email attachment reconciles when the refetch lands.
+      if (type === 'email') {
+        const item: TimelineMessage = {
+          ...shared,
+          type: 'email',
+          ...(subject !== undefined && { subject }),
+          ...(email_from !== undefined && { email_from }),
+          ...(email_to !== undefined && { email_to }),
+          ...(email_cc !== undefined && { email_cc }),
+        };
+        setPending((p) => [...p, { tempId, item }]);
+        return tempId;
+      }
       // Optimistic MMS: carry placeholder media_attachments so the bubble shows
       // an attachment count immediately. The temp tsMsgId has no provider sid, so
       // MessageBubble renders the count chip (real thumbnails land on refetch).
@@ -191,17 +227,8 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
       // is no servable sid.
       const hasMedia = attachmentKeys !== undefined && attachmentKeys.length > 0;
       const item: TimelineMessage = {
-        kind: 'message',
-        id: tempId,
-        at: new Date().toISOString(),
-        conversationId,
-        tsMsgId: tempId,
-        direction: 'outbound',
-        author: 'teammate',
+        ...shared,
         type: hasMedia ? 'mms' : 'sms',
-        body,
-        // 'queued' renders as "Sending…" (deliveryStatus) — the in-progress state.
-        delivery_status: 'queued',
         ...(toPhone !== undefined && { toPhone }),
         ...(hasMedia && {
           media_attachments: attachmentKeys.map((k) => ({

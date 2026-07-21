@@ -39,7 +39,8 @@ describe('attachEventBridge', () => {
   it('subscribes exactly one listener per AppEventMap name', () => {
     const bus = createEventBus();
     attachEventBridge(bus, { ...OPTS, logger: silentLogger(), fetchImpl: okFetch() });
-    expect(APP_EVENT_NAMES).toHaveLength(7);
+    // 8 = the 7 pre-email events + unmatched_email.updated (email-channel B2).
+    expect(APP_EVENT_NAMES).toHaveLength(8);
     for (const name of APP_EVENT_NAMES) {
       expect(bus.listenerCount(name)).toBe(1);
     }

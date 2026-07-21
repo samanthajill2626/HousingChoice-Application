@@ -19,7 +19,9 @@ export const UNKNOWN_CALLER_LABEL = 'Unknown caller';
  * reviewed tenant/landlord claims a role; everything else is `unknown`).
  */
 export function authorForContact(contact: ContactItem | undefined): MessageAuthor {
-  return contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown';
+  return contact?.type === 'landlord' || contact?.type === 'tenant' || contact?.type === 'partner'
+    ? contact.type
+    : 'unknown';
 }
 
 /** The 1:1 conversation type for a (reviewed) contact — mirrors the SMS path. */
@@ -29,6 +31,8 @@ export function conversationTypeFor(contact: ContactItem | undefined): Conversat
       return 'landlord_1to1';
     case 'tenant':
       return 'tenant_1to1';
+    case 'partner':
+      return 'partner_1to1';
     default:
       return 'unknown_1to1';
   }

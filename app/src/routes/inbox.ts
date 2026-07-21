@@ -56,25 +56,25 @@ import {
   type RelayOwner,
 } from '../repos/conversationsRepo.js';
 import {
-  contactPhones,
   createContactsRepo,
   isDeleted,
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
 export type InboxFilter = 'all' | 'unread' | 'unknown';
-export type InboxChannel = 'sms' | 'mms' | 'call';
+export type InboxChannel = 'sms' | 'mms' | 'call' | 'email';
 
 export interface InboxRow {
   kind: 'contact' | 'unknown' | 'relay_group';
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
-  role?: 'tenant' | 'landlord' | 'unknown';
+  role?: 'tenant' | 'landlord' | 'partner' | 'unknown';
   placementContext?: { placementId: string; label: string }; // e.g. "Touring" — optional
   unreadCount: number; // aggregate across ALL of the contact's numbers (relay: the group's unread)
   preview: string; // latest item's text as a preview (relay: last_message_preview)
@@ -194,10 +194,13 @@ function nameFromContact(contact: ContactItem | undefined): string | undefined {
   return name.length > 0 ? name : undefined;
 }
 
-/** A contact's audience role for the row chip (tenant/landlord, else unknown). */
-function roleFromContact(contact: ContactItem | undefined): 'tenant' | 'landlord' | 'unknown' {
+/** A contact's audience role for the row chip (tenant/landlord/partner, else unknown). */
+function roleFromContact(
+  contact: ContactItem | undefined,
+): 'tenant' | 'landlord' | 'partner' | 'unknown' {
   if (contact?.type === 'tenant') return 'tenant';
   if (contact?.type === 'landlord') return 'landlord';
+  if (contact?.type === 'partner') return 'partner';
   return 'unknown';
 }
 
@@ -234,6 +237,10 @@ function deriveLatest(
   let channel: InboxChannel;
   if (latest.type === 'call') {
     channel = 'call';
+  } else if (latest.type === 'email') {
+    // Email channel v1: an email is its own channel (checked before the mms
+    // media-array sniff, since an inbound email may carry attachments).
+    channel = 'email';
   } else if (
     latest.type === 'mms' ||
     (Array.isArray(latest.mediaUrls) && latest.mediaUrls.length > 0) ||
@@ -277,25 +284,22 @@ export async function aggregateInbox(
   // multi-number contact never yields two rows on one page).
   const emittedContacts = new Set<string>();
 
-  /** All open conversations a contact owns, across every phone (cached). */
+  /** All open 1:1 conversations a contact owns, across every phone AND email (cached). */
   const contactConversations = async (contact: ContactItem): Promise<ConversationItem[]> => {
     if (contactConvsCache.has(contact.contactId)) {
       return contactConvsCache.get(contact.contactId)!;
     }
-    const byPhone = new Map<string, ConversationItem>();
+    let list: ConversationItem[] = [];
     try {
-      for (const cp of contactPhones(contact)) {
-        const convs = await conversations.findByParticipantPhone(cp.phone);
-        for (const c of convs) {
-          if (c.status !== 'open') continue;
-          if (c.type === 'relay_group') continue; // never represented in the feed
-          byPhone.set(c.conversationId, c);
-        }
-      }
+      // Email channel v1 (invariant rule): resolve across BOTH phones AND emails
+      // so a mixed contact's unread SUM + newest-conversation choice include
+      // email-only threads. The feed shows OPEN 1:1s only (relay groups are the
+      // separate row source).
+      const all = await conversationsForContact(contact, conversations);
+      list = all.filter((c) => c.status === 'open' && c.type !== 'relay_group');
     } catch (err) {
       log.warn({ err, contactId: contact.contactId }, 'inbox: contact conversations lookup failed (best-effort)');
     }
-    const list = [...byPhone.values()];
     contactConvsCache.set(contact.contactId, list);
     return list;
   };
@@ -363,17 +367,29 @@ export async function aggregateInbox(
     // guarantee they can't be double-counted.
     if (conv.type === 'relay_group') return undefined;
 
+    // Email channel v1 (plan F2/F3 BLOCKER): resolve the contact via
+    // participant_phone OR participant_email, so an email-only thread folds into
+    // its contact's row (channel 'email') instead of surfacing as a phantom
+    // unknown.
     const phone = conv.participant_phone;
+    const email = conv.participant_email;
     let contact: ContactItem | undefined;
     try {
-      contact = await contacts.findByPhone(phone);
+      if (phone !== undefined) contact = await contacts.findByPhone(phone);
+      if (!contact && email !== undefined) contact = await contacts.findByEmail(email);
     } catch (err) {
       log.warn({ err }, 'inbox: contact lookup failed (best-effort)');
       contact = undefined;
     }
 
     if (!contact) {
-      // Unknown number → an untriaged unknown row, keyed by phone.
+      // No contact. A phoneless conversation (an email thread that resolved to no
+      // contact) must NOT render as a phantom unknown-triage row - email unknowns
+      // live in the unmatched-email surface only (spec Decision 4). In practice
+      // ingestion never creates a contactless email conversation, but be
+      // defensive: with no phone there is no unknown identity to show, so skip.
+      if (phone === undefined) return undefined;
+      // Unknown NUMBER -> an untriaged unknown row, keyed by phone.
       const { channel, direction, preview } = await latestMessageOf(conv.conversationId, conv);
       return {
         kind: 'unknown',
@@ -417,11 +433,16 @@ export async function aggregateInbox(
     // like a no-contact number. Keying triage off the ROLE (not "no contact
     // record") is what makes both cases surface.
     const role = roleFromContact(contact);
+    // Name fallback when the contact has no resolved name: the formatted phone
+    // for a phone thread, else the email address for an email-only thread (never
+    // undefined - email-only contacts lack a phone).
+    const fallbackLabel =
+      phone !== undefined ? (formatPhoneForDisplay(phone) ?? phone) : (email ?? '');
     return {
       kind: 'contact',
       contactId: contact.contactId,
-      phone: maxConv.participant_phone,
-      name: nameFromContact(contact) ?? formatPhoneForDisplay(phone) ?? phone,
+      ...(maxConv.participant_phone !== undefined && { phone: maxConv.participant_phone }),
+      name: nameFromContact(contact) ?? fallbackLabel,
       role,
       ...(placementContext !== undefined && { placementContext }),
       unreadCount: unreadSum,
@@ -695,14 +716,10 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
       return;
     }
 
-    // Gather all conversations across every phone number the contact owns.
-    const phones = contactPhones(contact);
-    const convMap = new Map<string, ConversationItem>();
-    for (const cp of phones) {
-      const convs = await conversations.findByParticipantPhone(cp.phone);
-      for (const c of convs) convMap.set(c.conversationId, c);
-    }
-    const all = [...convMap.values()];
+    // Gather all conversations across every phone number AND email address the
+    // contact owns (email channel v1, ADJ-1b: an email thread's unread must zero
+    // on mark-read too).
+    const all = await conversationsForContact(contact, conversations);
 
     await Promise.all(
       all

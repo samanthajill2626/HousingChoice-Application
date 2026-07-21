@@ -52,6 +52,20 @@ module "jobs" {
   name_prefix = local.name_prefix
 }
 
+# Email channel v1 (SES): the classic-SES DOMAIN family + inbound pipeline on
+# local.mail_domain (S3 + SNS -> one SQS queue). SEPARATE from module "ses"
+# above (that is the single sandboxed sender ADDRESS). local.mail_domain_phase
+# staircases the manual-Namecheap DNS the same way custom_domain_phase does;
+# local.manage_mail_rule_set owns the account-singleton receipt rule set (dev).
+module "inbound_mail" {
+  source = "../../modules/inbound_mail"
+
+  name_prefix       = local.name_prefix
+  mail_domain       = local.mail_domain
+  mail_domain_phase = local.mail_domain_phase
+  manage_rule_set   = local.manage_mail_rule_set
+}
+
 module "params" {
   source = "../../modules/params"
 
@@ -71,6 +85,14 @@ module "params" {
   jobs_queue_url       = module.jobs.queue_url
   scheduler_target_arn = module.jobs.queue_arn
   scheduler_role_arn   = module.jobs.scheduler_role_arn
+
+  # Email channel v1: the sender domain + default From address the outbound
+  # adapter composes with, and the inbound bucket/queue the app + worker read.
+  email_sender_domain     = local.mail_domain
+  email_from_address      = "team@${local.mail_domain}"
+  email_configuration_set = module.inbound_mail.config_set_name
+  inbound_mail_bucket     = module.inbound_mail.bucket_name
+  inbound_mail_queue_url  = module.inbound_mail.queue_url
 }
 
 module "ec2" {
@@ -85,6 +107,11 @@ module "ec2" {
   ecr_repository_arn = module.ecr.repository_arn
   jobs_queue_arn     = module.jobs.queue_arn
   scheduler_role_arn = module.jobs.scheduler_role_arn
+
+  # Email channel v1: SES send identity + the inbound queue/bucket the worker reads.
+  inbound_mail_queue_arn  = module.inbound_mail.queue_arn
+  inbound_mail_bucket_arn = module.inbound_mail.bucket_arn
+  ses_identity_arn        = module.inbound_mail.identity_arn
 }
 
 # ACM cert for the custom domain (Change Order 3). DNS-validated in Namecheap

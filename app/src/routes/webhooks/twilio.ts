@@ -127,6 +127,8 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
       return 'landlord_1to1';
     case 'tenant':
       return 'tenant_1to1';
+    case 'partner':
+      return 'partner_1to1';
     default:
       return 'unknown_1to1';
   }
@@ -362,7 +364,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // a stub/unknown sender is `unknown` (same rule as the 1:1 path).
     const senderContact = sender?.contactId ? await contacts.getById(sender.contactId) : undefined;
     const author =
-      senderContact?.type === 'landlord' || senderContact?.type === 'tenant'
+      senderContact?.type === 'landlord' ||
+      senderContact?.type === 'tenant' ||
+      senderContact?.type === 'partner'
         ? senderContact.type
         : 'unknown';
 
@@ -736,9 +740,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       type: mediaUrls.length > 0 ? 'mms' : 'sms',
       direction: 'inbound',
       // Same honesty rule as the 1:1 path: only a reviewed contact type may
-      // claim tenant/landlord authorship; everything else is `unknown`.
+      // claim tenant/landlord/partner authorship; everything else is `unknown`.
       author:
-        contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown',
+        contact?.type === 'landlord' || contact?.type === 'tenant' || contact?.type === 'partner'
+          ? contact.type
+          : 'unknown',
       // Inbound messages are received by definition.
       deliveryStatus: 'delivered',
       // Provenance: the pool number this reached only matches From on the CLOSED
@@ -946,10 +952,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       type: mediaUrls.length > 0 ? 'mms' : 'sms',
       direction: 'inbound',
       // Same honesty rule as conversation typing: only a reviewed contact
-      // type may claim tenant/landlord authorship; everything else is
+      // type may claim tenant/landlord/partner authorship; everything else is
       // `unknown` until a human types the contact (M1.4/M1.5).
       author:
-        contact?.type === 'landlord' || contact?.type === 'tenant' ? contact.type : 'unknown',
+        contact?.type === 'landlord' || contact?.type === 'tenant' || contact?.type === 'partner'
+          ? contact.type
+          : 'unknown',
       // Inbound messages are received by definition; the outbound delivery
       // machine never transitions them.
       deliveryStatus: 'delivered',
@@ -1383,8 +1391,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
-            const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact && conversation?.participant_phone === contact.phone) {
+            const convPhone = conversation?.participant_phone;
+            const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
+            if (contact && convPhone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_unreachable');
             } else if (contact) {
               log.warn(
@@ -1414,8 +1423,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — a 21610 on a SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
-            const contact = conversation ? await contacts.findByPhone(conversation.participant_phone) : undefined;
-            if (contact && conversation?.participant_phone === contact.phone) {
+            const convPhone = conversation?.participant_phone;
+            const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
+            if (contact && convPhone === contact.phone) {
               await contacts.setFlag(contact.contactId, 'sms_opt_out');
               await audit.append(`contacts#${contact.contactId}`, 'sms_opt_out_recorded', {
                 providerSid: MessageSid,

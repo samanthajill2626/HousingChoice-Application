@@ -87,6 +87,12 @@ function makeFakes(
     createOrGetByParticipantPhone: async () => conversation,
     getById: async (id) => (id === conversation.conversationId ? conversation : undefined),
     findByParticipantPhone: async () => [conversation],
+    findByParticipantEmail: async () => [],
+    claimEmailForConversation: async (_email, conversationId) => ({ conversationId }),
+    attachEmailToConversation: async (conversationId) => ({ conversationId }),
+    createOrGetByParticipantEmail: async () => conversation,
+    getReplyToken: async () => 'faketoken',
+    findByReplyToken: async () => undefined,
     setType: async (_id, type) => {
       conversation.type = type;
       return conversation;
@@ -149,6 +155,11 @@ function makeFakes(
     setPhone: async () => contact!,
     removePhone: async () => contact!,
     touchPhoneLastSeen: async () => {},
+    findByEmail: async () => undefined,
+    addEmail: async () => contact!,
+    setPrimaryEmail: async () => contact!,
+    removeEmail: async () => contact!,
+    touchEmailLastSeen: async () => {},
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {
@@ -156,6 +167,8 @@ function makeFakes(
       return { deduped: false, tsMsgId: buildTsMsgId(message.providerTs, message.providerSid) };
     },
     getByProviderSid: async () => undefined,
+    getByRfcMessageId: async () => undefined,
+    recordProviderSidAlias: async () => {},
     updateDeliveryStatus: async () => true,
     updateCallStatus: async () => true,
     setCallRecording: async () => true,
@@ -167,6 +180,11 @@ function makeFakes(
     listByConversation: async () => [],
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
+    getJobExecutionMarker: async () => false,
+    // Email orphan-event parking lot (B5) - unused by the SMS send service:
+    putParkedEmailEvent: async () => {},
+    listParkedEmailEvents: async () => [],
+    deleteParkedEmailEvent: async () => {},
     // Relay groups (M1.7) — unused by the send service:
     setRecipientDelivery: async () => {},
     updateRecipientDeliveryStatus: async () => true,

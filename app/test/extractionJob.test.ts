@@ -88,6 +88,33 @@ function callMsg(
   };
 }
 
+// A stored email message (email-channel B2). tsMsgId suffix `#e<seconds>` keeps
+// emails distinctly sortable beside texts (#s) and calls (#c). Carries a
+// subject so the email-arm tests can pin "BODY only - subject NEVER leaks
+// into the transcript".
+function emailMsg(
+  seconds: number,
+  direction: 'inbound' | 'outbound',
+  body: string,
+  subject: string,
+): MessageItem {
+  const ts = `2026-07-16T12:00:${String(seconds).padStart(2, '0')}.000Z`;
+  return {
+    conversationId: 'conv1',
+    tsMsgId: `${ts}#e${seconds}`,
+    type: 'email',
+    direction,
+    author: direction === 'inbound' ? 'tenant' : 'teammate',
+    body,
+    subject,
+    email_from: direction === 'inbound' ? 'tenant@x.test' : 'team@mail.test',
+    provider_sid: `e${seconds}`,
+    provider_ts: ts,
+    delivery_status: 'delivered',
+    created_at: ts,
+  };
+}
+
 function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
@@ -266,6 +293,22 @@ describe('runDueExtractions', () => {
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', '', NOW);
   });
 
+  it('partner contact: completes without a driver call (excluded like landlord)', async () => {
+    const partner = { contactId: 'c1', type: 'partner', phone: '+15551230001' } as ContactItem;
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
+      contact: partner,
+      conversation: convWith('c1'),
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 0 });
+    expect(h.seen).toHaveLength(0);
+    expect(h.repo.complete).toHaveBeenCalledWith('conv1', '', NOW);
+  });
+
   it('no new client messages since the cursor: completes with the same cursor, no driver', async () => {
     // Only a staff message is newer than the cursor; the sole client message
     // is AT the cursor (not newer).
@@ -381,6 +424,47 @@ describe('runDueExtractions', () => {
       { speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
       { speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
       { speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
+    ]);
+  });
+
+  it('email message: ONE utterance, channel email, trimmed BODY only - the subject never leaks (B2)', async () => {
+    // An email-channel due row does NOT bypass the freshness gate (unlike
+    // voice/triage); the inbound email itself clears it.
+    const mail = emailMsg(2, 'inbound', 'I have a voucher for a 2 bed', 'Voucher question');
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'email' })],
+      messages: [mail],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'client', text: 'I have a voucher for a 2 bed', at: mail.created_at, channel: 'email' },
+    ]);
+    // BODY only: the subject is metadata, never transcript content.
+    const allText = h.seen[0]!.transcript.map((u) => u.text).join(' ');
+    expect(allText).not.toContain('Voucher question');
+  });
+
+  it('email message: an OUTBOUND email maps speaker staff (adversarial Q3 pin)', async () => {
+    const inboundSms = msg(1, 'inbound', 'checking in'); // clears the freshness gate
+    const reply = emailMsg(2, 'outbound', 'Sending the listing over now', 'Re: listing');
+    const h = makeHarness({
+      dueRows: [dueRow({ channel: 'email' })],
+      messages: [reply, inboundSms], // newest-first, as listByConversation returns
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen).toHaveLength(1);
+    expect(h.seen[0]!.transcript).toEqual([
+      { speaker: 'client', text: 'checking in', at: inboundSms.created_at, channel: 'sms' },
+      { speaker: 'staff', text: 'Sending the listing over now', at: reply.created_at, channel: 'email' },
     ]);
   });
 

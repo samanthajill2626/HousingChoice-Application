@@ -22,6 +22,7 @@ import {
   UPLOAD_KEY_PATTERN,
 } from '../lib/outboundMediaLimits.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { normalizeEmailAddress } from '../lib/email.js';
 import { getContext, mergeContext, runWithContext } from '../lib/context.js';
 import {
   appEvents,
@@ -52,7 +53,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { type SettingsRepo } from '../repos/settingsRepo.js';
@@ -63,12 +64,18 @@ import {
   createPlacementDeadlinesRepo,
   type PlacementDeadlinesRepo,
 } from '../repos/placementDeadlinesRepo.js';
-import { type UsersRepo } from '../repos/usersRepo.js';
+import { createUsersRepo, displayNameOf, type UsersRepo } from '../repos/usersRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
+import {
+  createSendEmailMessageService,
+  EmailSendRefusedError,
+  type SendEmailService,
+} from '../services/sendEmailMessage.js';
+import { createApplyParkedEmailEvents } from '../services/emailEvents.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
@@ -93,7 +100,10 @@ import { createPlacementNudgesRouter } from './placementNudges.js';
 import { createContactsRouter } from './contacts.js';
 import { createContactTimelineRouter } from './contactTimeline.js';
 import { createInboxRouter } from './inbox.js';
+import { createUnmatchedEmailRouter } from './unmatchedEmail.js';
+import { type UnmatchedEmailRepo } from '../repos/unmatchedEmailRepo.js';
 import { createMmsMediaRouter } from './mmsMedia.js';
+import { createEmailMediaRouter } from './emailMedia.js';
 import { createPushRouter } from './push.js';
 import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
@@ -123,6 +133,24 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   sms_sending_disabled: 503,
 };
 
+/**
+ * Email refusal code -> HTTP status for POST /api/conversations/:id/email.
+ * NOTE (worklist ADJ-6 divergence 1, DELIBERATE): email_sending_disabled maps
+ * to 409, NOT the 503 the SMS kill-switch uses - do not "fix" it to 503. The
+ * two 400-class codes (invalid_cc / invalid_attachment) are request-validation
+ * refusals A6 should also surface as friendly copy.
+ */
+const EMAIL_REFUSAL_STATUS: Record<EmailSendRefusedError['code'], number> = {
+  conversation_not_found: 404,
+  conversation_contact_mismatch: 409,
+  email_sending_disabled: 409,
+  email_suppressed: 409,
+  email_attachments_too_large: 409,
+  contact_email_missing: 409,
+  invalid_cc: 400,
+  invalid_attachment: 400,
+};
+
 
 /** Page-size bounds shared by the inbox and thread endpoints. */
 const DEFAULT_PAGE_LIMIT = 50;
@@ -148,6 +176,8 @@ export interface ApiRouterDeps {
   logger?: Logger;
   /** Test seam: injected service (no DynamoDB/provider). */
   sendMessageService?: SendMessageService;
+  /** Email-channel A5: injected email send service (test seam). */
+  sendEmailService?: SendEmailService;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
   auditRepo?: AuditRepo;
@@ -213,6 +243,11 @@ export interface ApiRouterDeps {
   /** M1.8a share-broadcast — injected in tests; default to the real repo/service. */
   broadcastsRepo?: BroadcastsRepo;
   audienceResolutionService?: AudienceResolutionService;
+  /**
+   * email-channel B3: the unmatched_email side-door store (triage routes +
+   * B2's ingestion dep). Injected in tests; defaults to the real repo.
+   */
+  unmatchedEmailRepo?: UnmatchedEmailRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
   events?: EventBus;
   /** Test seam: shrink the 25s SSE heartbeat. */
@@ -400,6 +435,36 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       events,
     });
+  // Email-channel A5: the outbound email send service. Default-constructed HERE
+  // (the sendMessage precedent lives in this router, not index.ts) so the
+  // production composition root needs no change; it builds its own EmailAdapter
+  // from config. The email send route also resolves the recipient contact by
+  // address, so a contacts repo is shared with it.
+  const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  // The email From line renders "<name> at Housing Choice" to the RECIPIENT;
+  // the session user carries no `name`, so resolve the full user record
+  // (best-effort - a users-table blip falls back to the session identity).
+  const usersForEmail = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
+  const sendEmail =
+    deps.sendEmailService ??
+    createSendEmailMessageService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      ...(mediaStore !== undefined && { mediaStore }),
+      events,
+      // B5/ADJ-7: the post-send orphan-event consumer. Shares THIS router's repos
+      // so the parking-lot read + the alias write see one table view (a fast
+      // bounce parked before the send returns is applied the moment it lands).
+      applyParkedEmailEvents: createApplyParkedEmailEvents({
+        messagesRepo: messages,
+        contactsRepo: contacts,
+        conversationsRepo: conversations,
+        logger: deps.logger,
+      }),
+    });
 
   const router = Router();
 
@@ -422,6 +487,18 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/media',
     createMmsMediaRouter({
+      config,
+      logger: deps.logger,
+      ...(mediaStore !== undefined && { mediaStore }),
+    }),
+  );
+  // Email attachment media (POST /api/email-media/presign + /confirm) - a
+  // DISTINCT pair from /media above (review F1): it stores documents VERBATIM
+  // (no transcode/planMmsMedia), on the EMAIL_ATTACHMENT_TYPES allowlist with a
+  // 25 MB cap. The email send route resolves these keys straight to attachments.
+  router.use(
+    '/email-media',
+    createEmailMediaRouter({
       config,
       logger: deps.logger,
       ...(mediaStore !== undefined && { mediaStore }),
@@ -797,6 +874,29 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
     }),
   );
+  // Unmatched-email triage (email-channel B3; requireAuth via the /api mount -
+  // VAs triage the side-door, no admin gate). List/detail + read/link/create-
+  // contact/spam/release/dismiss; every mutation emits unmatched_email.updated
+  // on this bus. The link flows re-ingest the stored raw mail through the REAL
+  // ingestion service (default-constructed inside the router over the shared
+  // repos below; 503 when INBOUND_MAIL_BUCKET is unset).
+  router.use(
+    '/unmatched-email',
+    createUnmatchedEmailRouter({
+      config,
+      logger: deps.logger,
+      ...(deps.unmatchedEmailRepo !== undefined && {
+        unmatchedEmailRepo: deps.unmatchedEmailRepo,
+      }),
+      contactsRepo: contacts,
+      auditRepo: audit,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      extractionRepo: extraction,
+      ...(mediaStore !== undefined && { mediaStore }),
+      events,
+    }),
+  );
 
   // Outbound MMS presign TTL (design Sec 4): 1 hour. A generous margin over
   // Twilio's fetch-at-processing window, still short-lived exposure. Presigned
@@ -920,6 +1020,91 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
   });
 
+  // POST /api/conversations/:conversationId/email  { to, cc?, subject, body, attachmentKeys? }
+  // Email-channel v1 (A5): compose + send an email in the thread. The recipient
+  // contact is resolved by the To address (the service re-validates it is one of
+  // that contact's emails). 202 { message } on success; typed refusals map via
+  // EMAIL_REFUSAL_STATUS (ADJ-6: email_sending_disabled is 409, NOT 503). Shares
+  // the manual-send per-user fence (an email is a real send).
+  router.post('/conversations/:conversationId/email', manualSendLimiter, async (req, res) => {
+    const conversationId = String(req.params['conversationId'] ?? '');
+    mergeContext({ conversationId });
+    const user = (req as AuthedRequest).user;
+    if (!user) {
+      res.status(401).json({ error: 'unauthorized' });
+      return;
+    }
+    const payload = (req.body ?? {}) as {
+      to?: unknown;
+      cc?: unknown;
+      subject?: unknown;
+      body?: unknown;
+      attachments?: unknown;
+      attachmentKeys?: unknown;
+    };
+    const to = typeof payload.to === 'string' ? payload.to : '';
+    const subject = typeof payload.subject === 'string' ? payload.subject : '';
+    const body = typeof payload.body === 'string' ? payload.body : '';
+    if (to.trim() === '' || subject.trim() === '' || body.trim() === '') {
+      res.status(400).json({ error: 'to, subject, and body are required' });
+      return;
+    }
+    const cc =
+      Array.isArray(payload.cc) && payload.cc.every((c): c is string => typeof c === 'string')
+        ? payload.cc
+        : undefined;
+    // Attachments: prefer the {key, filename?} shape (carries the original filename
+    // to the MIME part + timeline gallery); accept the legacy attachmentKeys
+    // string[] for back-compat. Both normalize to a single `attachments` list.
+    const attachments = ((): { key: string; filename?: string }[] | undefined => {
+      if (Array.isArray(payload.attachments)) {
+        const mapped = payload.attachments
+          .filter(
+            (a): a is { key: string; filename?: unknown } =>
+              typeof a === 'object' && a !== null && typeof (a as { key?: unknown }).key === 'string',
+          )
+          .map((a) => ({ key: a.key, ...(typeof a.filename === 'string' && { filename: a.filename }) }));
+        return mapped.length > 0 ? mapped : undefined;
+      }
+      if (
+        Array.isArray(payload.attachmentKeys) &&
+        payload.attachmentKeys.length > 0 &&
+        payload.attachmentKeys.every((k): k is string => typeof k === 'string')
+      ) {
+        return payload.attachmentKeys.map((key) => ({ key }));
+      }
+      return undefined;
+    })();
+
+    // Resolve the recipient contact by address (the service re-validates on-file).
+    const contact = await contacts.findByEmail(normalizeEmailAddress(to));
+    // Sender display name: the session user has no `name` field, so the From
+    // line ("<name> at Housing Choice") must come from the users table; fall
+    // back to the session identity (email) if the lookup fails or is empty.
+    const senderRecord = await usersForEmail.findById(user.userId).catch(() => undefined);
+
+    try {
+      const outcome = await sendEmail({
+        conversationId,
+        contactId: contact?.contactId ?? '',
+        to,
+        ...(cc !== undefined && { cc }),
+        subject,
+        body,
+        ...(attachments !== undefined && { attachments }),
+        sentByUserId: user.userId,
+        sentByName: displayNameOf(senderRecord ?? user),
+      });
+      res.status(202).json({ message: outcome });
+    } catch (err) {
+      if (err instanceof EmailSendRefusedError) {
+        res.status(EMAIL_REFUSAL_STATUS[err.code]).json({ error: err.code });
+        return;
+      }
+      throw err; // Express 5 forwards async throws to the error handler.
+    }
+  });
+
   // POST /api/conversations/:conversationId/messages/:providerSid/retry
   // Re-send a FAILED outbound message (the dashboard Retry button). The server
   // re-reads the original by its provider SID (so the body AND media resend
@@ -946,6 +1131,15 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
     if (original.direction !== 'outbound') {
       res.status(400).json({ error: 'not_outbound' });
+      return;
+    }
+    // Email is NOT retryable through this route (email-channel v1): it re-sends via
+    // the SMS sendMessage path, which would text the email body to participant_phone.
+    // A failed email carries provider_sid = hc-<uuid>@<domain>, direction outbound,
+    // delivery_status failed - so it would otherwise pass every check below. Refuse
+    // it up front (re-compose to resend an email; there is no email-retry route yet).
+    if (original.type === 'email') {
+      res.status(409).json({ error: 'not_retryable' });
       return;
     }
     // Only a FAILED/UNDELIVERED send is retryable — refuse re-sending a message

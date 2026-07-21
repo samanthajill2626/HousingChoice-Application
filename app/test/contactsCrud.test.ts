@@ -348,6 +348,96 @@ describe('POST /api/contacts/:id/conversation — start a thread with a new cont
   });
 });
 
+describe('POST /api/contacts/:id/email-conversation - email-only contact thread (M1)', () => {
+  it('creates the 1:1 email thread for the primary address (participant_email + participants + name, NO phone)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'c-email',
+      type: 'partner',
+      status: 'active',
+      firstName: 'Ed',
+      lastName: 'Only',
+      email: 'ed@partner.example',
+      emails: [{ email: 'ed@partner.example', primary: true }],
+    });
+
+    const res = await request(app)
+      .post('/api/contacts/c-email/email-conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect(res.body.conversation.participant_email).toBe('ed@partner.example');
+    expect(res.body.conversation.type).toBe('partner_1to1');
+    expect(res.body.conversation.participant_display_name).toBe('Ed Only');
+    expect(res.body.conversation.participants[0].contactId).toBe('c-email');
+    // Email-only threads carry NO participant_phone (ADJ-9).
+    expect(res.body.conversation.participant_phone).toBeUndefined();
+  });
+
+  it('400s contact_has_no_email when no address is on file; 404s a missing contact', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'c-noemail', type: 'tenant', status: 'active', phone: '+15550107400' });
+    const noEmail = await request(app)
+      .post('/api/contacts/c-noemail/email-conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(noEmail.status).toBe(400);
+    expect(noEmail.body.error).toBe('contact_has_no_email');
+
+    const missing = await request(app)
+      .post('/api/contacts/nope/email-conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(missing.status).toBe(404);
+  });
+
+  it('end-to-end: an email-ONLY contact can get a thread and SEND (202) where the phone path dead-ended', async () => {
+    const { app, world } = makeWebhookHarness({
+      env: {
+        EMAIL_SENDING_ENABLED: 'true',
+        EMAIL_DRIVER: 'console',
+        EMAIL_FROM_ADDRESS: 'team@mail.test',
+        EMAIL_SENDER_DOMAIN: 'mail.test',
+      },
+    });
+    world.contacts.push({
+      contactId: 'c-email',
+      type: 'partner',
+      status: 'active',
+      firstName: 'Ed',
+      lastName: 'Only',
+      email: 'ed@partner.example',
+      emails: [{ email: 'ed@partner.example', primary: true }],
+    });
+
+    // The phone /conversation route dead-ends for a phoneless contact (the M1 bug).
+    const noPhone = await request(app)
+      .post('/api/contacts/c-email/conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(noPhone.status).toBe(400);
+    expect(noPhone.body.error).toBe('contact_has_no_phone');
+
+    // The email-conversation route creates the thread instead.
+    const conv = await request(app)
+      .post('/api/contacts/c-email/email-conversation')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(conv.status).toBe(200);
+    const conversationId = conv.body.conversation.conversationId;
+
+    // And a send into that thread succeeds end-to-end (console driver, no network).
+    const sent = await request(app)
+      .post(`/api/conversations/${conversationId}/email`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ to: 'ed@partner.example', subject: 'Your documents', body: 'Please see the info below.' });
+    expect(sent.status).toBe(202);
+    expect(sent.body.message.status).toBe('sent');
+    expect(sent.body.message.conversationId).toBe(conversationId);
+  });
+});
+
 describe('PATCH /api/contacts/:id — A2P/CTIA JIT record-consent (spec §3.4)', () => {
   const CONSENT_AT = '2026-06-29T12:00:00.000Z';
 

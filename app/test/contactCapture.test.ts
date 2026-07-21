@@ -108,6 +108,20 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
       return contacts.find((c) => c.contactId === contactId)!;
     },
     async touchPhoneLastSeen() {},
+    // Email-channel A1 primitives - unused by the capture service.
+    async findByEmail() {
+      return undefined;
+    },
+    async addEmail(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async setPrimaryEmail(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async removeEmail(contactId) {
+      return contacts.find((c) => c.contactId === contactId)!;
+    },
+    async touchEmailLastSeen() {},
   };
 
   const conversationsRepo: ConversationsRepo = {
@@ -116,6 +130,24 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     },
     async findByParticipantPhone() {
       return [];
+    },
+    async findByParticipantEmail() {
+      return [];
+    },
+    async claimEmailForConversation(_email, conversationId) {
+      return { conversationId };
+    },
+    async attachEmailToConversation(conversationId) {
+      return { conversationId };
+    },
+    async createOrGetByParticipantEmail() {
+      return conversation;
+    },
+    async getReplyToken() {
+      return 'faketoken';
+    },
+    async findByReplyToken() {
+      return undefined;
     },
     async setType() {
       return conversation;

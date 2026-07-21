@@ -9,6 +9,21 @@ created: 2026-06-30
 refs: app/src/repos/messagesRepo.ts:31, infra/modules/ses/main.tf, docs/issues/ses-sandbox-exit.md, documentation/landlord-onboarding-sequence.mermaid
 ---
 
+**Update (email-channel v1, 2026-07-21).** A two-way email channel IS now built, on
+the `feat/email-channel` branch (PENDING MERGE): outbound send + inbound receive +
+interleaved timeline rendering + an unmatched-email side-door surface, for all contact
+types, via AWS SES (a fake-SES router locally/e2e). `MessageType` now includes
+`'email'`; email threads onto the existing conversations/messages model with a
+`participant_email` key. This issue stays OPEN until BOTH (a) the branch merges AND
+(b) the SES infra is activated - the owed `inbound_mail` terraform apply, Namecheap
+DNS records (DKIM x3 / MX / SPF), the account-scoped receipt-rule-set activation, the
+SES production-access request (`ses-sandbox-exit`), and the `EMAIL_SENDING_ENABLED`
+flip (see RUNBOOK "Email (SES)"). Remaining BEYOND v1, tracked separately: automated /
+message-catalog email sends (v1 adds none - only the `channel` union widened), CC
+mirroring into a CC'd contact's timeline (`email-cc-mirroring`), shared-address
+identity collisions (`email-identity-collision-followup`), and a reconciler for sends
+stranded `queued` by a crash (`email-outbound-stuck-queued-on-crash`).
+
 **Problem.** The messaging model is SMS/MMS/voice only — `messagesRepo` `MessageType =
 'sms' | 'mms' | 'call'`, keyed on Twilio provider SIDs — and there is no email-sending code in
 `app/src`. Email is therefore NOT a first-class conversation channel the way texts are. The

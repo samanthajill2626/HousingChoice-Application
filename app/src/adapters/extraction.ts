@@ -25,7 +25,10 @@ export interface TranscriptUtterance {
   speaker: 'staff' | 'client' | 'unknown';
   text: string;
   at: string; // ISO 8601
-  channel: 'sms' | 'voice';
+  // NOTE (ADJ-13): this is the TRANSCRIPT channel - a different union from the
+  // extraction-repo SCHEDULING channel ('sms'|'voice'|'triage'|'email').
+  // 'triage' is a scheduling trigger, never transcript content - do not add it.
+  channel: 'sms' | 'voice' | 'email';
 }
 
 export type ExtractableField =

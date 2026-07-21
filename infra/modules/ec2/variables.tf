@@ -55,6 +55,21 @@ variable "scheduler_role_arn" {
   type        = string
 }
 
+variable "inbound_mail_queue_arn" {
+  description = "Inbound-mail SQS queue ARN (from the inbound_mail module) - the worker's second consumer Receives/Deletes inbound notifications (email-channel-v1)."
+  type        = string
+}
+
+variable "inbound_mail_bucket_arn" {
+  description = "Inbound-mail S3 bucket ARN (from the inbound_mail module) - the worker GetObjects raw inbound MIME (email-channel-v1)."
+  type        = string
+}
+
+variable "ses_identity_arn" {
+  description = "SES domain identity ARN (from the inbound_mail module) - the ses:SendEmail/SendRawEmail resource scope (email-channel-v1)."
+  type        = string
+}
+
 variable "compose_version" {
   description = "docker compose v2 release tag installed by user-data (pinned for reproducible boots)."
   type        = string

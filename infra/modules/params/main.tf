@@ -111,3 +111,41 @@ resource "aws_ssm_parameter" "scheduler_role_arn" {
   type        = "String"
   value       = var.scheduler_role_arn
 }
+
+# Email channel v1 (SES). The sender domain + default From address the outbound
+# adapter composes with, and the inbound bucket/queue the app + worker read raw
+# inbound MIME from (inbound_mail module).
+resource "aws_ssm_parameter" "email_sender_domain" {
+  name        = "/hc/${var.env}/app/EMAIL_SENDER_DOMAIN"
+  description = "SES sender/receiver domain (inbound_mail module) - the outbound From/Reply-To domain and inbound recipient (email-channel-v1)."
+  type        = "String"
+  value       = var.email_sender_domain
+}
+
+resource "aws_ssm_parameter" "email_from_address" {
+  name        = "/hc/${var.env}/app/EMAIL_FROM_ADDRESS"
+  description = "Default From address for outbound email (email-channel-v1)."
+  type        = "String"
+  value       = var.email_from_address
+}
+
+resource "aws_ssm_parameter" "email_configuration_set" {
+  name        = "/hc/${var.env}/app/EMAIL_CONFIGURATION_SET"
+  description = "SES configuration set (inbound_mail module) outbound sends attach so bounce/complaint/delivery events fan out to the mail-events topic (email-channel-v1)."
+  type        = "String"
+  value       = var.email_configuration_set
+}
+
+resource "aws_ssm_parameter" "inbound_mail_bucket" {
+  name        = "/hc/${var.env}/app/INBOUND_MAIL_BUCKET"
+  description = "S3 bucket the SES receipt rule writes raw inbound MIME to (inbound_mail module); the worker GetObjects it (email-channel-v1)."
+  type        = "String"
+  value       = var.inbound_mail_bucket
+}
+
+resource "aws_ssm_parameter" "inbound_mail_queue_url" {
+  name        = "/hc/${var.env}/app/INBOUND_MAIL_QUEUE_URL"
+  description = "SQS queue URL the worker's second consumer long-polls for inbound-mail SNS notifications (inbound_mail module, email-channel-v1)."
+  type        = "String"
+  value       = var.inbound_mail_queue_url
+}

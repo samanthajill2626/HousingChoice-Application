@@ -72,6 +72,15 @@ if (isMain) {
   console.log(`s3:create — ensuring bucket ${bucket} at ${endpoint}`);
   try {
     await ensureBucketWithRetry(endpoint, bucket);
+    // Inbound-mail bucket (email-channel B4): the SES receipt-rule S3 target the
+    // fake-SES host writes raw inbound MIME to. Created only when INBOUND_MAIL_BUCKET
+    // is set (the e2e/dev launcher composes it per-lane, hc-local-inbound-mail-<L>);
+    // a plain local dev boot without it is a harmless no-op.
+    const inboundBucket = process.env.INBOUND_MAIL_BUCKET;
+    if (inboundBucket) {
+      console.log(`s3:create - ensuring inbound-mail bucket ${inboundBucket}`);
+      await ensureBucketWithRetry(endpoint, inboundBucket);
+    }
     console.log('s3:create — done');
   } catch (err) {
     console.error('s3:create failed — is MinIO up? (npm run s3:start)');

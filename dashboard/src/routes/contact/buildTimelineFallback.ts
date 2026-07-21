@@ -34,6 +34,32 @@ export function buildTimelineFallback(
     const messages = messagesByConvId.get(conv.conversationId) ?? [];
     for (const m of messages) {
       if (m.type === 'call') continue; // messages-only fallback
+      // Email (A6): an email message has NO participant_phone, so skip the
+      // from/toPhone attach entirely and carry subject/email_* so the EmailCard
+      // renders on the fallback path too (else an email-only contact renders empty).
+      if (m.type === 'email') {
+        const emailItem: TimelineMessage = {
+          kind: 'message',
+          id: m.tsMsgId,
+          at: instantOf(m),
+          conversationId: m.conversationId,
+          tsMsgId: m.tsMsgId,
+          direction: m.direction,
+          author: m.author,
+          type: 'email',
+          delivery_status: m.delivery_status,
+          ...(m.body !== undefined && { body: m.body }),
+          ...(m.subject !== undefined && { subject: m.subject }),
+          ...(m.email_from !== undefined && { email_from: m.email_from }),
+          ...(m.email_to !== undefined && { email_to: m.email_to }),
+          ...(m.email_cc !== undefined && { email_cc: m.email_cc }),
+          ...(m.email_new_address === true && { email_new_address: true }),
+          ...(m.email_html_sanitized !== undefined && { email_html_sanitized: m.email_html_sanitized }),
+          ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
+        };
+        items.push(emailItem);
+        continue;
+      }
       const inbound = m.direction === 'inbound';
       const item: TimelineMessage = {
         kind: 'message',
@@ -48,8 +74,12 @@ export function buildTimelineFallback(
         // The participant phone is the EXTERNAL party. Inbound: they're the
         // sender (fromPhone); outbound: they're the recipient (toPhone). The
         // platform-side number isn't on the summary, so we leave the other side
-        // undefined rather than guess.
-        ...(inbound ? { fromPhone: conv.participant_phone } : { toPhone: conv.participant_phone }),
+        // undefined rather than guess. participant_phone is optional (email-only
+        // threads carry none) - only attach it when present.
+        ...(conv.participant_phone !== undefined &&
+          (inbound
+            ? { fromPhone: conv.participant_phone }
+            : { toPhone: conv.participant_phone })),
         ...(m.body !== undefined && { body: m.body }),
         ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
         // Relay group (M1.7): carry the per-recipient delivery map so a relay

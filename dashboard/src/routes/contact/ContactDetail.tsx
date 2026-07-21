@@ -23,8 +23,10 @@ import {
   ApiError,
   deleteContact,
   ensureContactConversation,
+  ensureEmailConversation,
   restoreContact,
   retryMessage,
+  sendEmail,
   sendMessage,
   setContactOptOut,
   setContactVoiceOptOut,
@@ -52,9 +54,13 @@ import { Timeline } from './Timeline.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { UnknownFile } from './UnknownFile.js';
+import { PartnerFile } from './PartnerFile.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
+import { EmailManager } from './EmailManager.js';
+import { contactEmails } from './contactEmails.js';
+import type { EmailComposerSendInput } from './EmailComposer.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
@@ -88,6 +94,9 @@ export function ContactDetail(): React.JSX.Element {
   const [pane, setPane] = useState<Pane>('comms');
   const [editing, setEditing] = useState(false);
   const [managingPhones, setManagingPhones] = useState(false);
+  // The "Manage email" dialog (email-channel v1, A6). Opened from the composer's
+  // channel toggle when the contact has no address, and from the file pane.
+  const [managingEmails, setManagingEmails] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this (tenant) contact.
   const [startingPlacement, setStartingPlacement] = useState(false);
   // The "Schedule a tour" dialog, pre-filled+locked to this (tenant) contact.
@@ -168,6 +177,15 @@ export function ContactDetail(): React.JSX.Element {
   // timeline refetches on SSE message.persisted. Memoized on items identity.
   const media = useMemo(() => commsMedia(timeline.items), [timeline.items]);
   const mediaLoading = timeline.status === 'loading';
+  // The conversation an email sends into: an existing email thread if any (else
+  // onSendEmail falls back to the default phone thread / creates the 1:1). A hook,
+  // so it MUST run before the loading/error guards below (stable hook order).
+  const existingEmailConvId = useMemo(() => {
+    for (const it of timeline.items) {
+      if (it.kind === 'message' && it.type === 'email') return it.conversationId;
+    }
+    return null;
+  }, [timeline.items]);
 
   if (contactStatus === 'loading') {
     return (
@@ -187,22 +205,27 @@ export function ContactDetail(): React.JSX.Element {
     );
   }
 
-  // Three-way by audience: landlord → landlord, unknown → untriaged, everything
-  // else (tenant + team_member) → tenant. `pill`/file are chosen from this.
-  const kind: 'tenant' | 'landlord' | 'unknown' =
+  // Four-way by audience: landlord -> landlord, partner -> partner (a resolved
+  // third party; generic pane, no housing pipeline), unknown -> untriaged,
+  // everything else (tenant + team_member) -> tenant. `pill`/file chosen from this.
+  const kind: 'tenant' | 'landlord' | 'partner' | 'unknown' =
     contact.type === 'landlord'
       ? 'landlord'
-      : contact.type === 'unknown'
-        ? 'unknown'
-        : 'tenant';
+      : contact.type === 'partner'
+        ? 'partner'
+        : contact.type === 'unknown'
+          ? 'unknown'
+          : 'tenant';
   const isLandlord = kind === 'landlord';
   const kindLabel = displayKind(contact, (t) => CONTACT_TYPE_LABEL[t]);
   const pill =
     kind === 'landlord'
       ? { label: kindLabel, cls: styles.pillLandlord }
-      : kind === 'unknown'
-        ? { label: kindLabel, cls: styles.pillUnknown }
-        : { label: kindLabel, cls: styles.pillTenant };
+      : kind === 'partner'
+        ? { label: kindLabel, cls: styles.pillPartner }
+        : kind === 'unknown'
+          ? { label: kindLabel, cls: styles.pillUnknown }
+          : { label: kindLabel, cls: styles.pillTenant };
   const phones = contactPhones(contact);
   const target = defaultPhone(phones);
   const name = contactDisplayName(contact.firstName, contact.lastName, target?.phone);
@@ -237,6 +260,12 @@ export function ContactDetail(): React.JSX.Element {
   // one with — a BRAND-NEW contact has no conversation yet, so the first send
   // creates it (ensureContactConversation in onSend) instead of graying out.
   const canSend = sendConvId !== null || target !== undefined;
+  // Email channel (A6): the contact's addresses + which conversation an email
+  // sends into. Prefer an existing email thread; else the default (phone) thread;
+  // else onSendEmail creates/gets the 1:1. The A5 route attaches the email claim
+  // to whichever conversation it POSTs to (or redirects to the already-claimed one).
+  const emails = contactEmails(contact);
+  const emailSuppressed = contact.email_opt_out === true || contact.email_unreachable === true;
   // The number shown in the reply box = the selected target's number (else the
   // default reply target).
   const replyToPhone =
@@ -254,7 +283,10 @@ export function ContactDetail(): React.JSX.Element {
     attachmentKeys?: string[],
     attachmentOriginalKeys?: string[],
   ): Promise<void> => {
-    const tempId = timeline.addOptimistic(conversationId, body, toPhone, attachmentKeys);
+    const tempId = timeline.addOptimistic(conversationId, body, {
+      ...(toPhone !== undefined && { toPhone }),
+      ...(attachmentKeys !== undefined && { attachmentKeys }),
+    });
     return sendMessage(conversationId, {
       body,
       ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
@@ -323,6 +355,57 @@ export function ContactDetail(): React.JSX.Element {
       throw err;
     });
   };
+  // Compose + send an email (A6). Resolve a conversation to POST into (an existing
+  // email thread -> the default phone thread -> create/get the 1:1), show the
+  // optimistic "Sending..." EmailCard immediately, then POST. On success stamp the
+  // real id/status (the SSE refetch reconciles by tsMsgId - even if the send
+  // `redirected` into another conversation, the contact timeline gathers all the
+  // contact's threads). On any refusal, drop the optimistic card and rethrow so the
+  // EmailComposer surfaces the reason.
+  const onSendEmail = async (input: EmailComposerSendInput): Promise<void> => {
+    let convId = existingEmailConvId ?? sendConvId;
+    if (convId === null) {
+      // A phoneless (email-only) contact has no phone thread to fall back to, and
+      // the phone ensure route 400s (contact_has_no_phone) for them - use the
+      // email-conversation route instead. Also fall through to it if the phone
+      // ensure fails that way (defensive), so the composer never dead-ends.
+      if (phones.length === 0) {
+        convId = await ensureEmailConversation(contact.contactId);
+      } else {
+        try {
+          convId = await ensureContactConversation(contact.contactId);
+        } catch (err) {
+          if (err instanceof ApiError && err.code === 'contact_has_no_phone') {
+            convId = await ensureEmailConversation(contact.contactId);
+          } else {
+            throw err;
+          }
+        }
+      }
+    }
+    const cId = convId;
+    const tempId = timeline.addOptimistic(cId, input.body, {
+      type: 'email',
+      subject: input.subject,
+      email_to: [input.to],
+      ...(input.cc.length > 0 && { email_cc: input.cc }),
+    });
+    return sendEmail(cId, {
+      to: input.to,
+      ...(input.cc.length > 0 && { cc: input.cc }),
+      subject: input.subject,
+      body: input.body,
+      ...(input.attachments.length > 0 && { attachments: input.attachments }),
+    })
+      .then((result) => {
+        timeline.resolveOptimistic(tempId, result);
+      })
+      .catch((err: unknown) => {
+        timeline.failOptimistic(tempId);
+        throw err;
+      });
+  };
+
   // Retry a failed outbound message. The server re-reads the original by its
   // provider SID (so body AND media resend correctly) and stamps `retry_of`, so
   // the SSE message.persisted refetch brings back BOTH the resent message and the
@@ -623,6 +706,12 @@ export function ContactDetail(): React.JSX.Element {
             optedOut={optedOut}
             clearDraftSignal={clearDraftSignal}
             resetScrollKey={contactId}
+            emailChannel={{
+              emails,
+              onSendEmail,
+              onManageEmails: () => setManagingEmails(true),
+              ...(emailSuppressed && { suppressed: true }),
+            }}
           />
         </div>
         <div
@@ -650,6 +739,19 @@ export function ContactDetail(): React.JSX.Element {
                 onEdit={() => setEditing(true)}
                 onManagePhones={() => setManagingPhones(true)}
                 onAddProperty={() => setAddingProperty(true)}
+              />
+              <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
+              <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
+            </>
+          ) : kind === 'partner' ? (
+            <>
+              <PartnerFile
+                contact={contact}
+                phones={phones}
+                media={media}
+                mediaLoading={mediaLoading}
+                onEdit={() => setEditing(true)}
+                onManagePhones={() => setManagingPhones(true)}
               />
               <RelationshipsCard relationships={contact.relationships} onEdit={() => setEditing(true)} />
               <CustomFieldsCard customFields={contact.customFields} onEdit={() => setEditing(true)} />
@@ -727,6 +829,18 @@ export function ContactDetail(): React.JSX.Element {
           onChanged={(updated) => {
             setContact(updated);
             timeline.refetch(); // number_added milestone — same no-SSE gap
+          }}
+        />
+      ) : null}
+
+      {managingEmails ? (
+        <EmailManager
+          contact={contact}
+          emails={emails}
+          onClose={() => setManagingEmails(false)}
+          onChanged={(updated) => {
+            setContact(updated);
+            timeline.refetch();
           }}
         />
       ) : null}

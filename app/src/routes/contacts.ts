@@ -42,24 +42,29 @@ import {
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
+  contactEmails,
   contactPhones,
   createContactsRepo,
+  PrimaryEmailRemovalError,
   PrimaryPhoneRemovalError,
   type ContactItem,
   type ContactsRepo,
   type ContactType,
   type ListContactsOpts,
 } from '../repos/contactsRepo.js';
+import { isValidEmailAddress, normalizeEmailAddress } from '../lib/email.js';
 import { loadConfig } from '../lib/config.js';
 import { HUMAN_CONSENT_METHODS, type ConsentMethod } from '../lib/smsCompliance.js';
 import {
   createConversationsRepo,
   getOwner,
+  type ConversationItem,
   type ConversationParticipant,
   type ConversationsRepo,
   type ConversationType,
   type RelayOwner,
 } from '../repos/conversationsRepo.js';
+import { conversationsForContact } from '../lib/contactThreads.js';
 import {
   createMessagesRepo,
   mediaAttachmentsOf,
@@ -178,6 +183,7 @@ const MEDIA_SCAN_PAGE_LIMIT = 200;
 const CONTACT_TYPES: readonly ContactType[] = [
   'tenant',
   'landlord',
+  'partner',
   'team_member',
   'unknown',
 ] as const;
@@ -340,10 +346,28 @@ function decodePhoneParam(raw: unknown): string | undefined {
   return normalizeToE164(decoded);
 }
 
+/**
+ * Decode + normalize a URL-encoded :email path param (email-channel A1 - the
+ * decodePhoneParam analog). Returns the normalized address when valid, else
+ * undefined (a malformed %-escape OR an invalid address -> route 400, never a
+ * 500 + error-logs alarm).
+ */
+function decodeEmailParam(raw: unknown): string | undefined {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(String(raw ?? ''));
+  } catch {
+    return undefined;
+  }
+  const normalized = normalizeEmailAddress(decoded);
+  return isValidEmailAddress(normalized) ? normalized : undefined;
+}
+
 /** A resolved-identity 1:1 type for the conversation, or undefined when not propagatable. */
 function conversationTypeFor(contactType: ContactType): ConversationType | undefined {
   if (contactType === 'tenant') return 'tenant_1to1';
   if (contactType === 'landlord') return 'landlord_1to1';
+  if (contactType === 'partner') return 'partner_1to1';
   // team_member/unknown have no 1:1 conversation type to propagate.
   return undefined;
 }
@@ -584,6 +608,8 @@ interface CreateContactResult {
   item: Partial<ContactItem> & { type: ContactType };
   /** Normalized E.164 phone (the dedupe key), when one was supplied. */
   phone?: string;
+  /** Normalized email (the dedupe key - email-channel A1), when one was supplied. */
+  email?: string;
   /** True when the body records SMS consent (route stamps consent_captured_by). */
   consentCaptured?: boolean;
 }
@@ -663,6 +689,19 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
     }
     phone = normalized;
     item.phone = normalized;
+  }
+
+  // Email-channel A1: optional email (the byEmail dedupe key). Normalized + a
+  // pragmatic validity check, mirroring the phone branch above.
+  let email: string | undefined;
+  if ('email' in b && b['email'] !== undefined && b['email'] !== '') {
+    if (typeof b['email'] !== 'string') return { error: 'email must be a string' };
+    const normalized = normalizeEmailAddress(b['email']);
+    if (!isValidEmailAddress(normalized)) {
+      return { error: 'email is not a valid email address' };
+    }
+    email = normalized;
+    item.email = normalized;
   }
 
   if ('company' in b) {
@@ -757,6 +796,7 @@ function parseCreateBody(body: unknown): CreateContactResult | { error: string }
   return {
     item,
     ...(phone !== undefined && { phone }),
+    ...(email !== undefined && { email }),
     ...(consent.hasConsent && { consentCaptured: true }),
   };
 }
@@ -880,6 +920,16 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // Email-channel A1: same one-contact-per-address dedupe as phone (findByEmail
+    // is pointer-aware). Only ONE of phone/email need collide to reject.
+    if (parsed.email !== undefined) {
+      const existing = await contacts.findByEmail(parsed.email);
+      if (existing) {
+        res.status(409).json({ error: 'contact_exists', contact: existing });
+        return;
+      }
+    }
+
     // A2P/CTIA: when the create body records consent, stamp consent_captured_by
     // from the SESSION user server-side (never trusted from the client).
     if (parsed.consentCaptured === true) {
@@ -947,7 +997,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       res.status(404).json({ error: 'contact_not_found' });
       return;
     }
-    res.json({ contact: { ...contact, phones: contactPhones(contact) } });
+    res.json({
+      contact: { ...contact, phones: contactPhones(contact), emails: contactEmails(contact) },
+    });
   });
 
   // GET /api/contacts/:contactId/listings-sent — the tenant page's "Properties
@@ -1076,17 +1128,15 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       return;
     }
 
-    // Resolve the contact's 1:1 conversations across ALL their numbers — exactly
-    // like the merged timeline. relay_group threads front a pool number (never
-    // the contact's real phone), so they are excluded purely on type.
-    const phones = contactPhones(contact).map((p) => p.phone);
+    // Resolve the contact's 1:1 conversations across ALL their numbers AND email
+    // addresses (email channel v1, ADJ-1c) - exactly like the merged timeline, so
+    // inbound EMAIL attachments (the document-exchange core use case) appear in
+    // the Media panel too. relay_group threads front a pool number (never the
+    // contact's real phone/email), so they are excluded purely on type.
     const convById = new Map<string, string>(); // conversationId → (presence)
-    for (const phone of phones) {
-      const linked = await conversations.findByParticipantPhone(phone);
-      for (const conv of linked) {
-        if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
-        convById.set(conv.conversationId, conv.conversationId);
-      }
+    for (const conv of await conversationsForContact(contact, conversations)) {
+      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      convById.set(conv.conversationId, conv.conversationId);
     }
 
     // Single pass: collect every attachment of every media-bearing message.
@@ -1171,21 +1221,24 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
-    // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord moves the
-    // contact off the needs_review triage front door at the moment the identity
-    // is known — but only when the caller didn't set status itself (an explicit
-    // status always wins). Type-scoped (status-model unification — one `status`
-    // field): tenant -> 'onboarding' (the section 5 lifecycle starts past the
-    // front door); landlord -> 'interested' (a freshly identified landlord is a
+    // AUTO-ADVANCE (Cluster A): resolving identity to tenant|landlord|partner
+    // moves the contact off the needs_review triage front door at the moment the
+    // identity is known - but only when the caller didn't set status itself (an
+    // explicit status always wins). Type-scoped (status-model unification - one
+    // `status` field): tenant -> 'onboarding' (the section 5 lifecycle starts past
+    // the front door); landlord -> 'interested' (a freshly identified landlord is a
     // LEAD; 'active' means their properties are onboarded -
-    // landlord-status-onboarding design D1). We do NOT stamp status_source -
+    // landlord-status-onboarding design D1); partner -> 'active' (partner has no
+    // rich lifecycle - NON_TENANT_STATUSES needs_review|active - so a resolved
+    // partner is simply off the front door). We do NOT stamp status_source -
     // leaving provenance unset keeps the tenant lifecycle DERIVABLE by the first
     // placement transition (a 'manual' pin would block it: the create-pin
     // regression - docs/issues/status-pin-vs-terminal-derivation.md). We never
     // auto-advance for unknown/team_member (no 1:1 identity) - and never
     // fabricate a name to do it.
     if (convType !== undefined && !('status' in parsed.patch)) {
-      parsed.patch['status'] = newType === 'tenant' ? 'onboarding' : 'interested';
+      parsed.patch['status'] =
+        newType === 'tenant' ? 'onboarding' : newType === 'landlord' ? 'interested' : 'active';
       parsed.changedFields.push('status');
     }
 
@@ -1325,11 +1378,27 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // so connected inboxes update without a reload (Cluster C).
     let propagatedConversations = 0;
     const phone = typeof updated.phone === 'string' ? updated.phone : undefined;
+    // Gather the contact's linked 1:1 threads: the scalar-primary phone thread
+    // (unchanged) PLUS any EMAIL threads on the contact's addresses (email
+    // channel v1, ADJ-1d) - so triage flips an email-only thread's type +
+    // denormalizes the name onto it too.
+    const linked: ConversationItem[] = [];
+    const seenLinked = new Set<string>();
+    const pushLinked = (conv: ConversationItem): void => {
+      if (seenLinked.has(conv.conversationId)) return;
+      seenLinked.add(conv.conversationId);
+      linked.push(conv);
+    };
+    if (phone !== undefined) {
+      for (const conv of await conversations.findByParticipantPhone(phone)) pushLinked(conv);
+    }
+    for (const ce of contactEmails(updated)) {
+      for (const conv of await conversations.findByParticipantEmail(ce.email)) pushLinked(conv);
+    }
     // Touch threads when EITHER identity resolved (flip unknown_1to1) OR a name
     // is known to denormalize (so naming a contact without typing it still
     // surfaces in the inbox).
-    if (phone !== undefined && (convType !== undefined || displayName !== null)) {
-      const linked = await conversations.findByParticipantPhone(phone);
+    if (linked.length > 0 && (convType !== undefined || displayName !== null)) {
       for (const conv of linked) {
         // Only FLIP an UNKNOWN thread — never re-type a thread already resolved
         // to a different identity (a triage conflict the human must reconcile,
@@ -1465,6 +1534,42 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     res.json({ conversation });
   });
 
+  // POST /api/contacts/:contactId/email-conversation -> 200 { conversation }.
+  // Create-or-get the 1:1 EMAIL thread for the contact's PRIMARY address - the
+  // email analog of /conversation, so the dashboard can email an email-ONLY contact
+  // (no phone) who has never messaged us. The phone /conversation route 400s
+  // (contact_has_no_phone) for them; this uses the createOrGetByParticipantEmail
+  // claim arbiter (idempotent - a racing send resolves to the same thread). It sets
+  // participants + display name AT CREATE (ADJ-9) so channel-agnostic readers
+  // (Today/inbox) resolve an email-only thread that carries no participant_phone.
+  // 400 contact_has_no_email when no address is on file.
+  router.post('/:contactId/email-conversation', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const contact = await contacts.getById(contactId);
+    if (!contact) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    const emails = contactEmails(contact);
+    const primary = emails.find((e) => e.primary) ?? emails[0];
+    if (!primary) {
+      res.status(400).json({ error: 'contact_has_no_email' });
+      return;
+    }
+
+    const type = conversationTypeFor(contact.type) ?? 'unknown_1to1';
+    const displayName = displayNameOf(contact);
+    const conversation = await conversations.createOrGetByParticipantEmail(primary.email, type, {
+      contactId,
+      ...(displayName !== null && { displayName }),
+    });
+    mergeContext({ conversationId: conversation.conversationId });
+    res.json({ conversation });
+  });
+
   // Manually mark a contact Do-Not-Contact (sms_opt_out=true) or clear it. The
   // contact-level flag is authoritative for send suppression — the send wrapper
   // refuses on contact.sms_opt_out (sendMessage.ts gate) — so setting it here
@@ -1575,13 +1680,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     contact: ContactItem,
   ): Promise<void> => {
     try {
-      const seen = new Set<string>();
-      for (const p of contactPhones(contact)) {
-        for (const conv of await conversations.findByParticipantPhone(p.phone)) {
-          if (seen.has(conv.conversationId)) continue;
-          seen.add(conv.conversationId);
-          events.emit('conversation.updated', toConversationUpdatedEvent(conv));
-        }
+      // Email channel v1 (ADJ-1e): fan out across BOTH phones AND emails so an
+      // email-only thread's inbox/Today card also refreshes on delete/restore
+      // (conversationsForContact dedupes, so each thread emits once).
+      for (const conv of await conversationsForContact(contact, conversations)) {
+        events.emit('conversation.updated', toConversationUpdatedEvent(conv));
       }
     } catch (err) {
       log.warn({ err, contactId }, 'contact presence change: conversation fan-out failed (best-effort)');
@@ -1848,6 +1951,177 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     });
     log.info({ contactId, actor: req.user?.userId }, 'contact phone removed via api');
     res.json({ contact: withPhones(updated) });
+  });
+
+  // --- Email-channel A1 contact-emails CRUD (manual curation / merge) --------
+  // The exact analog of the phone CRUD above; responses re-serialize emails via
+  // contactEmails() so the wire shape matches GET /:contactId. Error codes
+  // mirror the phone ones: email_in_use / cannot_remove_primary /
+  // contact_or_email_not_found. Addresses are PII: the audit payload records the
+  // address (system-of-record), but pino logs carry only contactId + actor.
+  function withEmails(
+    contact: ContactItem,
+  ): ContactItem & { emails: ReturnType<typeof contactEmails> } {
+    return { ...contact, emails: contactEmails(contact) };
+  }
+
+  // POST /api/contacts/:contactId/emails { email, label? } -> 200 { contact }.
+  // 200 (idempotent upsert into the roster returning the parent contact), 404
+  // unknown contact, 400 invalid body, 409 email_in_use when the (normalized)
+  // address already resolves to a DIFFERENT contact (one-address-per-contact,
+  // mirroring the POST / dedupe policy).
+  router.post('/:contactId/emails', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    if (typeof b['email'] !== 'string') {
+      res.status(400).json({ error: 'email is required and must be a string' });
+      return;
+    }
+    const normalized = normalizeEmailAddress(b['email']);
+    if (!isValidEmailAddress(normalized)) {
+      res.status(400).json({ error: 'email is not a valid email address' });
+      return;
+    }
+    let label: string | undefined;
+    if ('label' in b) {
+      if (typeof b['label'] !== 'string') {
+        res.status(400).json({ error: 'label must be a string' });
+        return;
+      }
+      label = b['label'];
+    }
+
+    // Conflict guard: the address must not already resolve to another contact
+    // (findByEmail is pointer-aware, so this covers BOTH a primary scalar AND a
+    // pointer-attached address on some other contact). An address that already
+    // resolves to THIS contact falls through to addEmail's idempotent no-op.
+    const owner = await contacts.findByEmail(normalized);
+    if (owner && owner.contactId !== contactId) {
+      res.status(409).json({ error: 'email_in_use', contact: owner });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.addEmail(contactId, {
+        email: normalized,
+        ...(label !== undefined && { label }),
+      });
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_email_added', {
+      actor: req.user?.userId,
+      email: normalized,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact email added via api');
+    res.status(200).json({ contact: withEmails(updated) });
+  });
+
+  // PATCH /api/contacts/:contactId/emails/:email { primary?, label? } -> { contact }.
+  // :email is a URL-encoded address; decode + normalize. 404 contact-or-email
+  // missing; 400 invalid body / no updatable field / invalid :email.
+  router.patch('/:contactId/emails/:email', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const normalized = decodeEmailParam(req.params['email']);
+    if (normalized === undefined) {
+      res.status(400).json({ error: 'email is not a valid email address' });
+      return;
+    }
+
+    const body = req.body;
+    if (typeof body !== 'object' || body === null || Array.isArray(body)) {
+      res.status(400).json({ error: 'body must be a JSON object' });
+      return;
+    }
+    const b = body as Record<string, unknown>;
+    const opts: { primary?: boolean; label?: string } = {};
+    if ('primary' in b) {
+      if (typeof b['primary'] !== 'boolean') {
+        res.status(400).json({ error: 'primary must be a boolean' });
+        return;
+      }
+      opts.primary = b['primary'];
+    }
+    if ('label' in b) {
+      if (typeof b['label'] !== 'string') {
+        res.status(400).json({ error: 'label must be a string' });
+        return;
+      }
+      opts.label = b['label'];
+    }
+    if (opts.primary === undefined && opts.label === undefined) {
+      res.status(400).json({ error: 'no updatable fields supplied (primary and/or label)' });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.setPrimaryEmail(contactId, normalized, opts);
+    } catch (err) {
+      // setPrimaryEmail throws the conditional-check error for BOTH an unknown
+      // contact and an address not on the contact - either way it isn't there.
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_or_email_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_email_updated', {
+      actor: req.user?.userId,
+      email: normalized,
+      ...(opts.primary !== undefined && { primary: opts.primary }),
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact email updated via api');
+    res.json({ contact: withEmails(updated) });
+  });
+
+  // DELETE /api/contacts/:contactId/emails/:email -> 200 { contact }. 404
+  // contact-or-email missing; 409 when removing the primary while others remain.
+  router.delete('/:contactId/emails/:email', async (req: AuthedRequest, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const normalized = decodeEmailParam(req.params['email']);
+    if (normalized === undefined) {
+      res.status(400).json({ error: 'email is not a valid email address' });
+      return;
+    }
+
+    let updated: ContactItem;
+    try {
+      updated = await contacts.removeEmail(contactId, normalized);
+    } catch (err) {
+      if (err instanceof PrimaryEmailRemovalError) {
+        res.status(409).json({ error: 'cannot_remove_primary' });
+        return;
+      }
+      if (err instanceof ConditionalCheckFailedException) {
+        res.status(404).json({ error: 'contact_or_email_not_found' });
+        return;
+      }
+      throw err;
+    }
+
+    await audit.append(`contacts#${contactId}`, 'contact_email_removed', {
+      actor: req.user?.userId,
+      email: normalized,
+    });
+    log.info({ contactId, actor: req.user?.userId }, 'contact email removed via api');
+    res.json({ contact: withEmails(updated) });
   });
 
   return router;

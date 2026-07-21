@@ -3,7 +3,7 @@
 // assert the factory's gating and that a local endpoint configures cleanly.
 import { describe, expect, it } from 'vitest';
 import { S3Client } from '@aws-sdk/client-s3';
-import { createMediaStore, S3MediaStore } from '../src/adapters/mediaStore.js';
+import { createInboundMailRawStore, createMediaStore, S3MediaStore } from '../src/adapters/mediaStore.js';
 import { loadConfig } from '../src/lib/config.js';
 
 const cfg = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: 's' });
@@ -22,6 +22,28 @@ describe('createMediaStore', () => {
       config: { ...cfg, mediaBucket: 'hc-local-media', mediaS3Endpoint: 'http://localhost:9000' },
     });
     expect(store).toBeDefined();
+  });
+});
+
+describe('createInboundMailRawStore (email-channel B4 wires this)', () => {
+  it('returns undefined when INBOUND_MAIL_BUCKET is unset (consumer no-ops - ADJ-11)', () => {
+    expect(createInboundMailRawStore({ config: { ...cfg, inboundMailBucket: undefined } })).toBeUndefined();
+  });
+
+  it('returns a store satisfying InboundRawStore (head + getBytes) when the bucket is set', () => {
+    const store = createInboundMailRawStore({
+      config: { ...cfg, inboundMailBucket: 'hc-local-inbound-mail-1', mediaS3Endpoint: 'http://localhost:9000' },
+    });
+    expect(store).toBeDefined();
+    // The B2 InboundRawStore contract is head + getBytes.
+    expect(typeof store!.head).toBe('function');
+    expect(typeof store!.getBytes).toBe('function');
+  });
+
+  it('returns a store over the inbound bucket on the real AWS path (no local endpoint)', () => {
+    expect(
+      createInboundMailRawStore({ config: { ...cfg, inboundMailBucket: 'b', mediaS3Endpoint: undefined } }),
+    ).toBeDefined();
   });
 });
 

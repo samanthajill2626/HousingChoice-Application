@@ -61,6 +61,7 @@ const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
 const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
   tenant_1to1: 'Tenant',
   landlord_1to1: 'Landlord',
+  partner_1to1: 'Partner',
   unknown_1to1: 'Unknown',
   relay_group: 'Group',
 };
@@ -96,7 +97,9 @@ function formatPhone(phone: string): string {
 
 /** A conversation's display name, falling back to the formatted phone. */
 function conversationWho(conv: ConversationSummary): string {
-  return conv.participant_display_name ?? formatPhone(conv.participant_phone);
+  // participant_phone is optional (email-only threads carry none); `?? ''` keeps
+  // phone-row behavior identical and yields '' when there is no phone to format.
+  return conv.participant_display_name ?? formatPhone(conv.participant_phone ?? '');
 }
 
 /** The external participant's contact id (match by phone, else the first
@@ -112,16 +115,22 @@ function participantContactId(conv: ConversationSummary): string | undefined {
  *  `refType:'conversation'` ref — /conversations/:id is an unrouted placeholder
  *  ("Not found"), which is the dead-link this fixes. */
 function contactRefId(conv: ConversationSummary): string {
+  // An email-only thread resolves via participantContactId (its participants roster
+  // carries the contact); the phone fallback guards the now-optional participant_phone
+  // with `?? ''` so it never encodes the literal string "undefined".
   return (
-    participantContactId(conv) ?? `unknown?phone=${encodeURIComponent(conv.participant_phone)}`
+    participantContactId(conv) ?? `unknown?phone=${encodeURIComponent(conv.participant_phone ?? '')}`
   );
 }
 
 /** 1:1 conversation types (one external contact) — these route to the contact
- *  page. relay_group has no single contact, so it keeps a conversation ref. */
+ *  page. relay_group has no single contact, so it keeps a conversation ref.
+ *  partner_1to1 is a 1:1 too (n8): omitting it dropped an unread partner thread
+ *  onto the dead /conversations/:id 404 fallback instead of /contacts/:id. */
 const ONE_TO_ONE: ReadonlySet<ConversationType> = new Set<ConversationType>([
   'tenant_1to1',
   'landlord_1to1',
+  'partner_1to1',
   'unknown_1to1',
 ]);
 

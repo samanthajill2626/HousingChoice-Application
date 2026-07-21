@@ -57,6 +57,11 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       status: 'placing', // byTypeStatus RANGE = §5 tenant lifecycle
       status_source: 'derived', // §8 provenance — derivation-permitting
       phone: '+15550100001', // byPhone
+      // Email-channel A1: BOTH the scalar (byEmail hash) and the emails[] array
+      // (mirror how phone/phones[] are represented on read). Deterministic +
+      // ASCII + stable so re-runs stay byte-identical.
+      email: 'tasha.nguyen@example.com', // byEmail
+      emails: [{ email: 'tasha.nguyen@example.com', primary: true }],
       housingAuthority: 'atlanta_housing', // byHousingAuthority (tenants only)
       // Name, voucher size, and housingAuthority are camelCase EVERYWHERE the app
       // reads them (contactFullName / displayNameOf / audienceResolution.voucherSizeOf;
@@ -89,6 +94,9 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       type: 'landlord',
       status: 'active',
       phone: '+15550100002',
+      // Email-channel A1: scalar (byEmail hash) + emails[] array, like the tenant.
+      email: 'marcus.bell@example.com', // byEmail
+      emails: [{ email: 'marcus.bell@example.com', primary: true }],
       firstName: 'Marcus',
       lastName: 'Bell',
       lead_status: 'registered',

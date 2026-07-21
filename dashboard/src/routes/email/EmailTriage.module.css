@@ -1,0 +1,429 @@
+/* EmailTriage -- the /email side-door page + its rows. Mirrors the Inbox page /
+   InboxRow language (tokens only) so it reads as a sibling of the Inbox. */
+
+.page {
+  /* Full-width nav page (the AppFrame content area already pads the gutters). */
+}
+.title {
+  margin: 0;
+  font-size: var(--fs-xl);
+  font-weight: var(--fw-bold);
+  color: var(--c-text);
+  line-height: var(--lh-tight);
+}
+.sub {
+  margin: var(--sp-1) 0 var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* Tabs -- URL-backed Links (aria-current="page" on the active one). */
+.tabs {
+  display: flex;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-5);
+  border-bottom: 1px solid var(--c-border);
+}
+.tab {
+  padding: var(--sp-2) var(--sp-3);
+  border-bottom: 2px solid transparent;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  text-decoration: none;
+  cursor: pointer;
+}
+.tab:hover {
+  color: var(--c-text);
+}
+.tabActive {
+  color: var(--c-brand);
+  border-bottom-color: var(--c-brand);
+}
+.tab:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+
+.rows {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.loadMore {
+  display: block;
+  width: 100%;
+  margin-top: var(--sp-2);
+  padding: var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.loadMore:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.loadMore:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--sp-3);
+  margin: var(--sp-4) 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-danger);
+  font-size: var(--fs-sm);
+}
+.retry {
+  flex: 0 0 auto;
+  padding: var(--sp-1) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.empty {
+  margin-top: var(--sp-6);
+  padding: var(--sp-6);
+  text-align: center;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-lg);
+  background: var(--c-surface);
+}
+.emptyTitle {
+  margin: 0 0 var(--sp-1);
+  font-size: var(--fs-lg);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+.emptyBody {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+
+/* --- One row ------------------------------------------------------------- */
+.rowItem {
+  list-style: none;
+  margin-bottom: var(--sp-2);
+}
+.row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-3);
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-sm);
+  overflow: hidden;
+}
+.row:hover {
+  border-color: var(--c-border-strong);
+  box-shadow: var(--shadow-md);
+}
+.unread {
+  border-left: 3px solid var(--c-brand);
+}
+
+/* The header button: expands the detail region. */
+.main {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  gap: var(--sp-3);
+  min-width: 0;
+  padding: var(--sp-3) var(--sp-4);
+  border: none;
+  background: none;
+  text-align: left;
+  color: inherit;
+  cursor: pointer;
+}
+.main:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+.dot {
+  flex: 0 0 auto;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--radius-pill);
+  background: var(--c-brand);
+}
+
+.head {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex: 0 0 auto;
+  min-width: 0;
+}
+.from {
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 16rem;
+}
+.bold {
+  font-weight: var(--fw-bold);
+}
+.subject {
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 20rem;
+}
+.spamTag {
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-evt-amber-bg);
+  border: 1px solid var(--c-evt-amber-border);
+  color: var(--c-evt-amber-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+.attachCount {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+  white-space: nowrap;
+}
+
+.snippet {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+.time {
+  flex: 0 0 auto;
+  color: var(--c-text-subtle);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+/* Inline actions -- present + focusable always; visible on hover / focus. */
+.actions {
+  display: flex;
+  flex: 0 0 auto;
+  gap: var(--sp-1);
+  padding-right: var(--sp-3);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+.row:hover .actions,
+.row:focus-within .actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+.action {
+  padding: var(--sp-1) var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.action:hover {
+  border-color: var(--c-border-strong);
+  color: var(--c-text);
+}
+.action:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* --- Expanded detail region --------------------------------------------- */
+.detail {
+  margin: calc(-1 * var(--sp-1)) 0 var(--sp-2);
+  padding: var(--sp-3) var(--sp-4);
+  border: 1px solid var(--c-border);
+  border-top: none;
+  border-radius: 0 0 var(--radius-md) var(--radius-md);
+  background: var(--c-surface-2);
+}
+.detailMeta {
+  margin: 0 0 var(--sp-2);
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+.detailError {
+  margin: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+.body {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  line-height: var(--lh-normal);
+}
+.htmlDetails {
+  margin: var(--sp-2) 0 0;
+}
+.htmlToggle {
+  cursor: pointer;
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+}
+.htmlToggle:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}
+.attachments {
+  margin-top: var(--sp-3);
+}
+.attachLabel {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text-muted);
+}
+.attachList {
+  margin: 0;
+  padding-left: var(--sp-4);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+.attachSize {
+  color: var(--c-text-subtle);
+}
+
+/* --- Modal internals (Link / New contact / Spam confirm) ---------------- */
+.modalHint {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.modalError {
+  margin: var(--sp-3) 0 0;
+  font-size: var(--fs-sm);
+  color: var(--c-danger);
+}
+.field {
+  display: block;
+  margin-bottom: var(--sp-3);
+}
+.fieldLabel {
+  display: block;
+  margin-bottom: var(--sp-1);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+}
+.input {
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+.input:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+/* Segmented [Tenant | Landlord | Partner] type control. */
+.segmented {
+  display: inline-flex;
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+.segment {
+  padding: var(--sp-2) var(--sp-3);
+  border: none;
+  border-left: 1px solid var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.segment:first-child {
+  border-left: none;
+}
+.segment:hover {
+  color: var(--c-text);
+}
+.segmentActive {
+  background: var(--c-brand-soft);
+  color: var(--c-brand);
+}
+.segment:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: -2px;
+}
+
+/* Modal footer buttons. */
+.btnSecondary,
+.btnPrimary,
+.btnDanger {
+  padding: var(--sp-2) var(--sp-4);
+  border-radius: var(--radius-sm);
+  border: 1px solid transparent;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  cursor: pointer;
+}
+.btnSecondary {
+  border-color: var(--c-border);
+  background: var(--c-surface);
+  color: var(--c-text);
+}
+.btnSecondary:hover:not(:disabled) {
+  border-color: var(--c-border-strong);
+}
+.btnPrimary {
+  background: var(--c-brand);
+  color: var(--c-text-inverse);
+}
+.btnPrimary:hover:not(:disabled) {
+  background: var(--c-brand-hover);
+}
+.btnDanger {
+  background: var(--c-danger);
+  color: var(--c-text-inverse);
+}
+.btnDanger:hover:not(:disabled) {
+  background: var(--c-danger-hover);
+}
+.btnSecondary:disabled,
+.btnPrimary:disabled,
+.btnDanger:disabled {
+  cursor: default;
+  opacity: 0.6;
+}

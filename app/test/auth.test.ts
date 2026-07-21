@@ -896,6 +896,9 @@ describe('config fail-fast (M1.3 auth wiring)', () => {
     NODE_ENV: 'production',
     CF_ORIGIN_SECRET: 's',
     MESSAGING_DRIVER: 'console',
+    // email-channel-v1: ses is the email default in production and requires a
+    // sender identity; console neutralizes that gate (this suite tests auth).
+    EMAIL_DRIVER: 'console',
     JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
     SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:000000000000:hc-test-jobs',
     SCHEDULER_ROLE_ARN: 'arn:aws:iam::000000000000:role/hc-test-scheduler',

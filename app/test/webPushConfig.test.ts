@@ -40,6 +40,9 @@ describe('VAPID config', () => {
       GOOGLE_CLIENT_SECRET: 's',
       OAUTH_ALLOWED_DOMAINS: 'housingchoice.org',
       MESSAGING_DRIVER: 'console',
+      // email-channel-v1: ses is the email default in production and requires a
+      // sender identity; console neutralizes that gate (this test is about VAPID).
+      EMAIL_DRIVER: 'console',
     } as NodeJS.ProcessEnv);
     expect(isPushConfigured(cfg)).toBe(false);
   });

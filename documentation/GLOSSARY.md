@@ -165,6 +165,34 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   many groups (burn-as-claim multiplexing), so the accurate noun is "group text
   number", never "the group's number". Tenants and landlords never see this term.
 
+- **`partner`** (email-channel v1, 2026-07-21) - a FIRST-CLASS `ContactType` (the
+  code/data value `partner`, a union member beside `tenant` / `landlord` /
+  `unknown`), shown to staff as **"Partner"** (the KindPicker segment + the
+  contact-type pill). A partner is an outside collaborator we email/text 1:1 - a
+  caseworker, an agency contact - who is neither a tenant nor a landlord. It is
+  deliberately HEAVIER than the property-manager precedent, which is a CUSTOM-KIND
+  (a role layered on the landlord base), NOT its own union member: `partner` is a
+  real type end to end (a `partner_1to1` conversation, author `'partner'`). Tenants
+  and landlords never see the word - it is a staff/internal label only.
+
+- **unmatched email** (email-channel v1, 2026-07-21) - an inbound email from a sender
+  we do NOT recognize (no matching contact, no reply token). It NEVER auto-creates a
+  contact or a conversation (spec Decision 4): it lands in the side-door
+  `unmatched_email` store behind the **Email** nav item (`/email`, Unmatched tab),
+  where staff link it to a contact, start a new contact, report it as spam, or
+  dismiss it. An unmatched email is NEVER a `ConversationSummary` and NEVER appears
+  in the general inbox or in Today - it is a triage queue, not a thread. Code/data:
+  the `unmatched_email` table + `UnmatchedEmailItem`.
+
+- **quarantine** (email-channel v1, 2026-07-21) - the sub-bucket of the unmatched
+  surface for inbound mail from unknown senders whose SES spam/virus verdict FAILED
+  (or is GRAY). It is held ONE CLICK deeper on the Email page (the Quarantine tab,
+  `/email/quarantine`), not in the main Unmatched list, so suspected-spam/virus mail
+  never clutters triage. Staff **Release** a quarantined item back to Unmatched or
+  **Delete** it. Distinct from `unmatched` (a clean unknown-sender email): same
+  store, a different `status`. The Email nav badge counts UNMATCHED unread only,
+  never quarantine.
+
 ---
 
 ## For the future AI layer

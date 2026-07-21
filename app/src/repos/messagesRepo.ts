@@ -17,6 +17,7 @@
 // PII: message bodies must NEVER be logged (doc §9) — IDs and lengths only.
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
@@ -28,7 +29,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
-export type MessageType = 'sms' | 'mms' | 'call';
+export type MessageType = 'sms' | 'mms' | 'call' | 'email';
 export type MessageDirection = 'inbound' | 'outbound';
 
 /**
@@ -91,7 +92,7 @@ export function allowedPriorCallStatuses(next: CallStatus): CallStatus[] {
  * services/relayAnnouncements.ts): no human wrote it, so neither `teammate`
  * nor `ai` would be honest.
  */
-export type MessageAuthor = 'tenant' | 'landlord' | 'teammate' | 'ai' | 'unknown' | 'system';
+export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai' | 'unknown' | 'system';
 
 /**
  * Outbound delivery status machine (doc §7.1):
@@ -234,6 +235,65 @@ export interface NewMessage {
    * "Landlord"/"Team") or contact name — NEVER the raw counterpart phone (PII).
    */
   callPartyLabel?: string;
+
+  // --- Email channel v1 (type:'email' items) -------------------------------
+  // Provider-id convention (plan F5/F14): INBOUND providerSid = the RFC
+  // Message-ID (the sid# pointer IS the threading lookup); OUTBOUND providerSid
+  // = the SES MessageId and `email_message_id` is our own <hc-...@domain> id -
+  // set `rfcMessageIdPointer` to that RFC id and append() writes a THIRD
+  // emailmsgid#<rfcId> pointer so getByRfcMessageId can follow it.
+  /** Email subject line. */
+  subject?: string;
+  /** RFC From address (normalized). */
+  email_from?: string;
+  /** RFC To addresses (normalized). */
+  email_to?: string[];
+  /** RFC Cc addresses (normalized). */
+  email_cc?: string[];
+  /** The RFC Message-ID (ours on outbound `<hc-...>`, the sender's on inbound). */
+  email_message_id?: string;
+  /**
+   * INBOUND email: the References chain from the mail's headers (bracketed RFC
+   * ids), persisted so an outbound staff REPLY can build its own References (this
+   * chain + the inbound's own Message-ID, capped) for recipient-MUA threading.
+   * Absent on outbound + non-email.
+   */
+  email_references?: string[];
+  /** Sanitized inbound HTML body (Phase B B7 renders it; absent on outbound). */
+  email_html_sanitized?: string;
+  /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
+  email_raw_ref?: { bucket: string; key: string };
+  /**
+   * INBOUND email (B2 tier 5): the message threaded via a reply token or
+   * References match, but the From-address is NOT on the resolved contact -
+   * the UI renders a "New address" chip; ADDING the address to the contact
+   * stays a staff action (Decision 4 - never auto-attached). Absent otherwise.
+   */
+  email_new_address?: boolean;
+  /**
+   * INBOUND email (B2 DoS caps): some parsed attachments were NOT stored -
+   * over the 50-attachment cap, past the 25MB per-message total, or no media
+   * store was configured. The raw MIME (email_raw_ref) remains the full-
+   * fidelity record. Absent when every attachment stored.
+   */
+  attachments_truncated?: boolean;
+  /**
+   * INBOUND email (B2 DoS caps): a sender-controlled stored array was capped so
+   * the assembled item stays under DynamoDB's 400 KB ceiling - the To/Cc
+   * recipient lists (count + summed bytes), the References chain (last-N), or an
+   * attachment filename (summed bytes). Long Cc/References are ROUTINE on
+   * forwarded / mailing-list mail, so this is not just an adversarial guard. The
+   * raw MIME (email_raw_ref) keeps the full header set. Absent when nothing
+   * capped.
+   */
+  headers_truncated?: boolean;
+  /**
+   * OUTBOUND email only: our own RFC Message-ID (`<hc-...@domain>`). When set,
+   * append() adds a THIRD emailmsgid#<rfcId> pointer to the transaction so an
+   * inbound reply's In-Reply-To/References can resolve this message via
+   * getByRfcMessageId (the SES providerSid differs from our RFC id).
+   */
+  rfcMessageIdPointer?: string;
   /**
    * Recording/transcript seams (later decision; UNUSED for masked calls —
    * masked calls never record). Included so M1.9b/founder-bridge can populate
@@ -264,6 +324,13 @@ export interface MediaAttachment {
    * legacy attachments (they carry only the delivered key).
    */
   originalKey?: string;
+  /**
+   * The original client-supplied filename (email-channel v1). Carried from the
+   * composer through the send so the outbound MIME part and the timeline gallery
+   * show `lease.pdf` rather than a synthesized `attachment-1.pdf`. Optional -
+   * MMS/inbound/legacy attachments have none.
+   */
+  filename?: string;
 }
 
 export interface MessageItem {
@@ -345,6 +412,37 @@ export interface MessageItem {
   masked?: boolean;
   /** MASKED party label (counterpart role/name) — NEVER a raw phone (PII). */
   call_party_label?: string;
+
+  // --- Email channel v1 - present only on type:'email' items ---------------
+  /** Email subject line. */
+  subject?: string;
+  /** RFC From address (normalized). */
+  email_from?: string;
+  /** RFC To addresses (normalized). */
+  email_to?: string[];
+  /** RFC Cc addresses (normalized). */
+  email_cc?: string[];
+  /** RFC Message-ID (ours on outbound, the sender's on inbound). */
+  email_message_id?: string;
+  /** INBOUND email References chain (see NewMessage.email_references). */
+  email_references?: string[];
+  /**
+   * OUTBOUND email (A5): the SES MessageId returned by adapter.send, stamped by
+   * recordProviderSidAlias AFTER send. Distinct from provider_sid (which is our
+   * own RFC id, known before send) - the correlation key SES delivery/bounce/
+   * complaint events (B5) arrive under. Absent on inbound + non-email messages.
+   */
+  ses_message_id?: string;
+  /** Sanitized inbound HTML body (Phase B rendering; absent on outbound). */
+  email_html_sanitized?: string;
+  /** S3 ref to the raw MIME (inbound only; NEVER presigned/served unauthed). */
+  email_raw_ref?: { bucket: string; key: string };
+  /** Inbound tier-5 "new address" flag (see NewMessage.email_new_address). */
+  email_new_address?: boolean;
+  /** Inbound attachment-cap note (see NewMessage.attachments_truncated). */
+  attachments_truncated?: boolean;
+  /** Inbound stored-array cap note (see NewMessage.headers_truncated). */
+  headers_truncated?: boolean;
   /**
    * S3 key of the mirrored recording (M1.9c founder-bridge calls only; UNUSED
    * for masked calls, which are never recorded). Set by the recording callback.
@@ -424,17 +522,55 @@ export interface ListByConversationOptions {
   before?: string;
 }
 
+/**
+ * A parked SES delivery event (email-channel B5 orphan parking, plan F12). An
+ * outbound email persists under our OWN RFC id and only gets a `sid#<sesId>`
+ * alias AFTER adapter.send returns - so a fast Bounce/Complaint/Delivery can
+ * arrive before that alias exists (getByProviderSid(sesId) misses). Rather than
+ * drop it, applyEmailEvent PARKS it under the `emailevent#<sesId>` pointer
+ * partition; A5's post-send applyParkedEmailEvents then applies + consumes it.
+ * Only the three fields the applier needs are stored (never message content).
+ */
+export interface ParkedEmailEvent {
+  /** 'Bounce' | 'Complaint' | 'Delivery'. */
+  eventType: string;
+  sesMessageId: string;
+  bounceType?: string;
+}
+
 export interface MessagesRepo {
   /** Conditional append + SID pointer in one transaction; dedupe is a no-op. */
   append(message: NewMessage): Promise<AppendResult>;
   /** Resolve a provider SID to its message via the pointer item (doc §9). */
   getByProviderSid(sid: string): Promise<MessageItem | undefined>;
   /**
+   * Email channel v1 - resolve an RFC Message-ID to its message. Checks the
+   * emailmsgid#<id> pointer (OUTBOUND: our own <hc-...> id, distinct from the SES
+   * providerSid) FIRST, then falls back to sid#<id> (INBOUND: providerSid IS the
+   * RFC Message-ID). The In-Reply-To/References threading lookup for inbound
+   * replies. Undefined when neither pointer resolves.
+   */
+  getByRfcMessageId(messageId: string): Promise<MessageItem | undefined>;
+  /**
    * Apply a status-callback transition. Returns false (no-op) when the
    * message is unknown or the transition would move backwards — delivery
    * callbacks arrive out of order and redelivered (doc §7.1).
    */
   updateDeliveryStatus(sid: string, status: DeliveryStatus, errorCode?: string): Promise<boolean>;
+  /**
+   * Email channel v1 (A5): alias a provider SID to an ALREADY-persisted message.
+   * An outbound email persists under our own RFC Message-ID as `provider_sid`
+   * (we do not know the SES MessageId until adapter.send returns), so this writes
+   * a second `sid#<providerSid>` pointer to that message AND stamps
+   * `ses_message_id`. A later SES delivery/bounce/complaint event (B5) - keyed on
+   * the SES MessageId - then resolves the message via getByProviderSid(sesId) and
+   * runs the SAME forward-only updateDeliveryStatus machine. Idempotent: a
+   * duplicate alias writes the same pointer + field (harmless).
+   */
+  recordProviderSidAlias(
+    providerSid: string,
+    ref: { conversationId: string; tsMsgId: string },
+  ): Promise<void>;
   /**
    * Voice call (M1.9a): apply a call status-callback transition to a
    * `type:'call'` item, found by CallSid (== provider_sid). Forward-only on
@@ -527,6 +663,38 @@ export interface MessagesRepo {
    * redelivery — suppress the side effect).
    */
   putJobExecutionMarker(jobId: string, conversationId: string): Promise<boolean>;
+  /**
+   * READ a job-execution marker (the inbound-email object-key dedupe FAST PATH,
+   * email-channel fix-wave B): true = this jobId already ran to a terminal
+   * durable write. Correctness never rests on it - the durable writes are
+   * independently idempotent - it only lets a clean redelivery skip the work.
+   */
+  getJobExecutionMarker(jobId: string): Promise<boolean>;
+
+  // --- Email orphan-event parking lot (email-channel B5, plan F12) ----------
+
+  /**
+   * Park a SES event whose sesMessageId has no message yet (a fast bounce before
+   * the A5 post-send alias write). Stored under `emailevent#<sesMessageId>` /
+   * `parked#<eventType>` (m4: keyed per event type so a Delivery cannot overwrite
+   * a parked Bounce and silently lose the suppression) with an `expires_at`
+   * (epoch seconds) TTL backstop. Idempotent UPSERT: a redelivery of the SAME
+   * event type overwrites the identical item (harmless). The authoritative
+   * cleanup is deleteParkedEmailEvent (the consume), NOT the TTL - the messages
+   * table has no TTL configured today; expires_at is forward-compatible (reaps
+   * only if/when TTL is enabled on the table).
+   */
+  putParkedEmailEvent(event: ParkedEmailEvent, opts: { receivedAt: string; expiresAt: number }): Promise<void>;
+  /** ALL parked events for a sesMessageId (m4: one per eventType), or [] when
+   *  nothing is parked. The post-send drain applies + consumes every one. */
+  listParkedEmailEvents(sesMessageId: string): Promise<ParkedEmailEvent[]>;
+  /**
+   * Consume (delete) ONE parked event (by sesMessageId + eventType) - the
+   * exactly-once marker. Conditional on the item still existing (attribute_
+   * exists); a concurrent consumer that already deleted it makes this a no-op
+   * (ConditionalCheckFailed swallowed).
+   */
+  deleteParkedEmailEvent(sesMessageId: string, eventType: string): Promise<void>;
 
   // --- Relay groups (M1.7) -------------------------------------------------
 
@@ -596,6 +764,16 @@ function sidPk(providerSid: string): string {
   return `sid#${providerSid}`;
 }
 
+/**
+ * Pointer partition key for an OUTBOUND email's own RFC Message-ID (email
+ * channel v1). Written as a THIRD append item when rfcMessageIdPointer is set;
+ * getByRfcMessageId checks it before the sid# fallback. Never collides with
+ * real conversation partitions.
+ */
+function emailMsgIdPk(rfcMessageId: string): string {
+  return `emailmsgid#${rfcMessageId}`;
+}
+
 /** Marker partition key for a job execution (see putJobExecutionMarker). */
 function jobPk(jobId: string): string {
   return `job#${jobId}`;
@@ -609,6 +787,19 @@ function relaySidPk(providerSid: string): string {
 /** Marker partition key for a system (non-conversation) send's provider SID. */
 function sysSidPk(providerSid: string): string {
   return `syssid#${providerSid}`;
+}
+
+/** Pointer partition key for a PARKED SES event (email-channel B5, plan F12). */
+function emailEventPk(sesMessageId: string): string {
+  return `emailevent#${sesMessageId}`;
+}
+
+/** Sort key for a parked SES event, per EVENT TYPE (m4): a single sesMessageId
+ *  can have a Bounce AND a Delivery parked at once (a second park must not
+ *  overwrite the first and silently lose the suppression), so the sort key
+ *  carries the eventType discriminator instead of a fixed 'parked'. */
+function parkedSk(eventType: string): string {
+  return `parked#${eventType}`;
 }
 
 export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
@@ -640,6 +831,28 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
   return {
     getByProviderSid,
+
+    async getByRfcMessageId(messageId) {
+      // OUTBOUND: emailmsgid#<rfcId> maps our own RFC id -> the message (the SES
+      // providerSid differs). INBOUND: no emailmsgid pointer - providerSid IS the
+      // RFC id, so fall back to sid#<rfcId>. Both pointer shapes are
+      // {ref_conversationId, ref_tsMsgId}.
+      const emailPtrRes = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: emailMsgIdPk(messageId), tsMsgId: 'ptr' } }),
+      );
+      const emailPtr = emailPtrRes.Item as
+        | { ref_conversationId: string; ref_tsMsgId: string }
+        | undefined;
+      const ptr = emailPtr ?? (await getSidPointer(messageId));
+      if (!ptr) return undefined;
+      const { Item } = await doc.send(
+        new GetCommand({
+          TableName: table,
+          Key: { conversationId: ptr.ref_conversationId, tsMsgId: ptr.ref_tsMsgId },
+        }),
+      );
+      return Item as MessageItem | undefined;
+    },
 
     async append(message) {
       const tsMsgId = buildTsMsgId(message.providerTs, message.providerSid);
@@ -695,6 +908,23 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.transcriptChannelRoles !== undefined && {
           transcript_channel_roles: message.transcriptChannelRoles,
         }),
+        // Email channel v1 (type:'email'): the email fields land beside the
+        // broadcastId pattern above. Only-when-present so non-email messages are
+        // byte-identical to before.
+        ...(message.subject !== undefined && { subject: message.subject }),
+        ...(message.email_from !== undefined && { email_from: message.email_from }),
+        ...(message.email_to !== undefined && { email_to: message.email_to }),
+        ...(message.email_cc !== undefined && { email_cc: message.email_cc }),
+        ...(message.email_message_id !== undefined && { email_message_id: message.email_message_id }),
+        ...(message.email_references !== undefined &&
+          message.email_references.length > 0 && { email_references: message.email_references }),
+        ...(message.email_html_sanitized !== undefined && {
+          email_html_sanitized: message.email_html_sanitized,
+        }),
+        ...(message.email_raw_ref !== undefined && { email_raw_ref: message.email_raw_ref }),
+        ...(message.email_new_address === true && { email_new_address: true }),
+        ...(message.attachments_truncated === true && { attachments_truncated: true }),
+        ...(message.headers_truncated === true && { headers_truncated: true }),
       };
       try {
         await doc.send(
@@ -721,6 +951,28 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                   ConditionExpression: 'attribute_not_exists(tsMsgId)',
                 },
               },
+              // Email channel v1: an OUTBOUND email carries its own RFC
+              // Message-ID (distinct from the SES providerSid) - write a THIRD
+              // emailmsgid#<rfcId> pointer so an inbound reply's In-Reply-To
+              // resolves this message via getByRfcMessageId. Only when set
+              // (INBOUND uses providerSid == the RFC id, so its sid# pointer is
+              // already the threading lookup - no third item).
+              ...(message.rfcMessageIdPointer !== undefined
+                ? [
+                    {
+                      Put: {
+                        TableName: table,
+                        Item: {
+                          conversationId: emailMsgIdPk(message.rfcMessageIdPointer),
+                          tsMsgId: 'ptr',
+                          ref_conversationId: message.conversationId,
+                          ref_tsMsgId: tsMsgId,
+                        },
+                        ConditionExpression: 'attribute_not_exists(tsMsgId)',
+                      },
+                    },
+                  ]
+                : []),
             ],
           }),
         );
@@ -798,6 +1050,34 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
       log.info({ providerSid: sid, status, errorCode }, 'delivery status updated');
       return true;
+    },
+
+    async recordProviderSidAlias(providerSid, ref) {
+      // (1) sid#<providerSid> -> the message: the SAME pointer shape append
+      // writes, so getByProviderSid(sesMessageId) / updateDeliveryStatus resolve
+      // it. Unconditional Put: a redelivery writes the identical ref (harmless).
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: sidPk(providerSid),
+            tsMsgId: 'ptr',
+            ref_conversationId: ref.conversationId,
+            ref_tsMsgId: ref.tsMsgId,
+          },
+        }),
+      );
+      // (2) Stamp the SES id on the message for correlation/display. Best-effort
+      // idempotent SET (no condition - re-writing the same id is a no-op).
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId: ref.conversationId, tsMsgId: ref.tsMsgId },
+          UpdateExpression: 'SET ses_message_id = :m',
+          ExpressionAttributeValues: { ':m': providerSid },
+        }),
+      );
+      log.info({ providerSid, conversationId: ref.conversationId }, 'email provider-sid alias recorded');
     },
 
     async updateCallStatus(callSid, fields) {
@@ -1123,6 +1403,77 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         throw err;
       }
       return true;
+    },
+
+    async getJobExecutionMarker(jobId) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId: jobPk(jobId), tsMsgId: 'ran' } }),
+      );
+      return Item !== undefined;
+    },
+
+    async putParkedEmailEvent(event, opts) {
+      // Unconditional UPSERT keyed by (sesMessageId, eventType) (m4): a redelivery
+      // of the SAME event type before the alias exists overwrites the identical
+      // item (idempotent), but a DIFFERENT event type (e.g. a Delivery after a
+      // parked Bounce) lands in its own slot instead of clobbering the first.
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: emailEventPk(event.sesMessageId),
+            tsMsgId: parkedSk(event.eventType),
+            event_type: event.eventType,
+            ses_message_id: event.sesMessageId,
+            ...(event.bounceType !== undefined && { bounce_type: event.bounceType }),
+            received_at: opts.receivedAt,
+            expires_at: opts.expiresAt,
+          },
+        }),
+      );
+      log.info({ sesMessageId: event.sesMessageId, eventType: event.eventType }, 'SES event parked');
+    },
+
+    async listParkedEmailEvents(sesMessageId) {
+      // ALL parked events for this SES id (the drain applies every one). The
+      // partition holds one item per eventType (parked#<eventType>).
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'conversationId = :pk AND begins_with(tsMsgId, :sk)',
+          ExpressionAttributeValues: { ':pk': emailEventPk(sesMessageId), ':sk': 'parked#' },
+        }),
+      );
+      const out: ParkedEmailEvent[] = [];
+      for (const Item of Items ?? []) {
+        const eventType = Item['event_type'];
+        const storedId = Item['ses_message_id'];
+        if (typeof eventType !== 'string' || typeof storedId !== 'string') continue;
+        const bounceType = Item['bounce_type'];
+        out.push({
+          eventType,
+          sesMessageId: storedId,
+          ...(typeof bounceType === 'string' && { bounceType }),
+        });
+      }
+      return out;
+    },
+
+    async deleteParkedEmailEvent(sesMessageId, eventType) {
+      try {
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { conversationId: emailEventPk(sesMessageId), tsMsgId: parkedSk(eventType) },
+            // The consume marker: exactly-once even under a concurrent double-apply.
+            ConditionExpression: 'attribute_exists(tsMsgId)',
+          }),
+        );
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return;
+        throw err;
+      }
+      log.info({ sesMessageId, eventType }, 'parked SES event consumed');
     },
 
     async listByConversation(conversationId, opts = {}) {

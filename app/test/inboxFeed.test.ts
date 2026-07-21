@@ -189,6 +189,30 @@ describe('aggregateInbox — one row per contact (C8)', () => {
     expect(page.rows[0]!.contactId).toBeUndefined();
   });
 
+  it('a partner CONTACT -> kind:"contact", role:"partner", needsTriage:false (A2 parity)', async () => {
+    const contact: ContactItem = {
+      contactId: 'c-partner',
+      type: 'partner',
+      firstName: 'Casey',
+      lastName: 'Worker',
+      phone: '+15550008888',
+      phones: [{ phone: '+15550008888', primary: true }],
+    };
+    const deps = makeDeps({
+      contacts: [contact],
+      conversations: [
+        conv({ conversationId: 'conv-p', participant_phone: '+15550008888', last_activity_at: '2026-06-12T10:00:00.000Z', unread_count: 1, type: 'partner_1to1' }),
+      ],
+    });
+
+    const all = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(all.rows[0]).toMatchObject({ kind: 'contact', contactId: 'c-partner', role: 'partner', needsTriage: false });
+
+    // A resolved partner is NOT an untriaged unknown -> excluded from "unknown".
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 25 }, deps);
+    expect(unknown.rows).toHaveLength(0);
+  });
+
   it('a type="unknown" CONTACT (untriaged inbound WITH a record) → needsTriage:true and appears under the "unknown" filter', async () => {
     // Regression: the seed models untriaged inbound as a type=unknown contact, so
     // findByPhone resolves it (needsTriage was hardcoded false for contact rows) →

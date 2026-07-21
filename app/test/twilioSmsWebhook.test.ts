@@ -88,6 +88,10 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
     const prod = makeWebhookHarness({
       env: {
         NODE_ENV: 'production',
+        // email-channel-v1: ses is the email default in production and requires
+        // a sender identity; console neutralizes that gate (this test is about
+        // Twilio signature validation).
+        EMAIL_DRIVER: 'console',
         TWILIO_AUTH_TOKEN: undefined,
         PUBLIC_BASE_URL: undefined,
         JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',
@@ -368,6 +372,17 @@ describe('POST /webhooks/twilio/sms — conversation resolution', () => {
 
     const conv = [...world.conversations.values()][0]!;
     expect(conv.type).toBe('tenant_1to1');
+  });
+
+  it('routes a known partner phone into a partner_1to1 conversation with author partner (A2 honesty)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({ contactId: 'contact-P', type: 'partner', phone: TENANT_PHONE });
+
+    await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
+
+    const conv = [...world.conversations.values()][0]!;
+    expect(conv.type).toBe('partner_1to1');
+    expect(world.messages[0]).toMatchObject({ author: 'partner' });
   });
 
   it('unknown phones get an unknown_1to1 conversation (type is never guessed) and a touch with the body preview + 200', async () => {
@@ -1065,9 +1080,9 @@ describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (T
   // surfaces an accidental call as a test failure rather than a silent no-op).
   function stubExtractionRepo(overrides: Partial<ExtractionRepo> = {}): {
     repo: ExtractionRepo;
-    scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage'; dueAt: string }[];
+    scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage' | 'email'; dueAt: string }[];
   } {
-    const scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage'; dueAt: string }[] = [];
+    const scheduleCalls: { conversationId: string; channel: 'sms' | 'voice' | 'triage' | 'email'; dueAt: string }[] = [];
     const notImpl = (name: string) => async (): Promise<never> => {
       throw new Error(`extraction stub: ${name} must not be called by the webhook path`);
     };

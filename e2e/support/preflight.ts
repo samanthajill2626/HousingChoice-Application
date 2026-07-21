@@ -22,6 +22,9 @@ const EXPECTED = {
   recordOutbox: true,
   messagingDriver: 'twilio',
   smsSendingEnabled: true,
+  // Email-channel v1 (A7): the hermetic stack runs the SES driver pointed at the
+  // fake-SES host (scripts/e2e-session.mjs childEnv). A3 makes /__dev/ping echo it.
+  emailDriver: 'ses',
 } as const;
 
 /** How long to wait for the app to finish booting before giving up. */

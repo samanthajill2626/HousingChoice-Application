@@ -38,7 +38,24 @@ describe('tables.ts — the table contract', () => {
       'placementDeadlines',
       'tours',
       'ai_extraction',
+      'unmatched_email',
     ]);
+  });
+
+  it('unmatched_email (email-channel B3): PK unmatchedId; sparse byStatus (status + received_at); TTL expires_at; no stream', () => {
+    const t = spec('unmatched_email');
+    expect(t.hashKey.name).toBe('unmatchedId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byStatus']);
+    const byStatus = t.gsis.find((g) => g.indexName === 'byStatus');
+    expect(byStatus?.hashKey.name).toBe('status');
+    expect(byStatus?.rangeKey?.name).toBe('received_at');
+    // Sparse: block#<address> pointer items carry neither key attr, so the
+    // blocklist never appears in the triage feeds.
+    expect(byStatus?.sparse).toBe(true);
+    expect(t.stream).toBeUndefined();
+    // F19 retention: linked/dismissed/quarantined rows expire via expires_at.
+    expect(t.ttlAttribute).toBe('expires_at');
   });
 
   it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs/stream/TTL', () => {
@@ -106,11 +123,12 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('contacts: PK contactId; GSIs byPhone, byTypeStatus, byHousingAuthority', () => {
+  it('contacts: PK contactId; GSIs byPhone, byEmail, byTypeStatus, byHousingAuthority', () => {
     const t = spec('contacts');
     expect(t.hashKey.name).toBe('contactId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
+    // byEmail (email-channel A1) is the byPhone analog: inbound address -> person.
+    expect(gsiNames(t)).toEqual(['byPhone', 'byEmail', 'byTypeStatus', 'byHousingAuthority']);
   });
 
   it('units: PK unitId; GSIs byLandlord, byStatus, byJurisdiction, byProperty (sparse, BE3)', () => {
@@ -124,16 +142,21 @@ describe('tables.ts — the table contract', () => {
     expect(byProperty?.sparse).toBe(true);
   });
 
-  it('conversations: PK conversationId; GSIs byParticipantPhone, byLastActivity, byPoolNumber, byRelayStatus', () => {
+  it('conversations: PK conversationId; GSIs byParticipantPhone, byParticipantEmail, byLastActivity, byPoolNumber, byRelayStatus', () => {
     const t = spec('conversations');
     expect(t.hashKey.name).toBe('conversationId');
     expect(t.rangeKey).toBeUndefined();
     expect(gsiNames(t)).toEqual([
       'byParticipantPhone',
+      'byParticipantEmail',
       'byLastActivity',
       'byPoolNumber',
       'byRelayStatus',
     ]);
+    // byParticipantEmail: sparse email-participant index (email channel v1).
+    const byParticipantEmail = t.gsis.find((g) => g.indexName === 'byParticipantEmail');
+    expect(byParticipantEmail?.sparse).toBe(true);
+    expect(byParticipantEmail?.hashKey.name).toBe('participant_email');
     expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.sparse).toBe(true);
     expect(t.gsis.find((g) => g.indexName === 'byPoolNumber')?.hashKey.name).toBe('pool_number');
     // byRelayStatus: sparse relay-group index (relay-inbox-open-groups-truncation fix).
@@ -229,9 +252,17 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('only messages and placements have streams; only matches has TTL', () => {
+  it('only messages and placements have streams; messages + matches + unmatched_email have TTL', () => {
     expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'placements']);
-    expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual(['matches']);
+    // messages: reaps orphan F12 parked SES events (email-channel fix-wave adv
+    // M3) - real conversation messages never set expires_at. matches: volatile
+    // engine output. unmatched_email: F19 retention on linked/dismissed/
+    // quarantined rows (email-channel B3).
+    expect(TABLES.filter((t) => t.ttlAttribute).map((t) => t.baseName)).toEqual([
+      'messages',
+      'matches',
+      'unmatched_email',
+    ]);
   });
 
   it('getTableSpec throws on unknown base names', () => {

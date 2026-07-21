@@ -689,6 +689,16 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // D1: best-effort-delete the S3 object for the removed entry (own-namespace
     // stored keys only; the helper skips legacy URLs + foreign keys). Fire-and-
     // forget - never affects this response.
+    //
+    // DANGLING-REFERENCE RACE (review S1, accepted + documented, LOW probability;
+    // docs/issues/unit-media-dangling-reference-race.md): removeMedia is a
+    // NON-ATOMIC read-modify-write (unitsRepo.ts:710), so a CONCURRENT makeCover /
+    // PATCH that read the pre-delete list can commit AFTER this delete and re-
+    // persist the just-deleted key - leaving unit.media pointing at an object
+    // whose bytes are gone (a broken <img> on the dashboard AND the public flyer
+    // until a staff re-edit). Before D1 the same interleaving merely resurrected a
+    // stale-but-working entry; the delete is what makes it customer-visible.
+    // Accepted (self-healing by re-upload); remedies in the issue if it ever bites.
     deleteRemovedUnitMedia(mediaStore, unitId, [entry], log);
     await audit.append(`units#${unitId}`, 'unit_photo_removed', {
       actor: req.user?.userId,
@@ -1081,8 +1091,15 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     // could observe the already-mutated value. Read-then-write is NOT atomic: an
     // append racing between this getById and the update can orphan its object
     // (the replace drops it without it appearing in prevMedia) - the same
-    // accepted orphan class that existed before D1. An unknown unit yields no
-    // prior state here; the update below still owns the 404 (ConditionalCheckFailed).
+    // accepted orphan class that existed before D1. The REVERSE interleaving is
+    // the DANGLING-REFERENCE race (review S1, accepted + documented;
+    // docs/issues/unit-media-dangling-reference-race.md): a concurrent removal
+    // that best-effort-deletes an object's bytes can lose the commit ordering to a
+    // later-committing write HERE that re-persists that key, leaving unit.media
+    // referencing a deleted object (a broken image until re-edit). Both directions
+    // stem from the non-atomic read-modify-write; both accepted as LOW-probability
+    // and self-healing. An unknown unit yields no prior state here; the update
+    // below still owns the 404 (ConditionalCheckFailed).
     const hasMediaPatch = Object.prototype.hasOwnProperty.call(validation.fields, 'media');
     let prevMedia: string[] = [];
     if (hasMediaPatch) {

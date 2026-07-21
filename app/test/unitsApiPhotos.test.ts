@@ -9,7 +9,7 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
-import { UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
+import { isSafeUnitMediaSegment, UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../src/lib/outboundMediaLimits.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -541,6 +541,49 @@ describe('GET /api/units/:unitId - mediaDisplay same-origin URLs (design 2026-07
     expect(display[1]!).toEqual({ entry: 'uploads/some-mms-attachment' }); // foreign: NO url
     expect(display[2]!).toEqual({ entry: 'unit-media/unit-OTHER/their-photo' }); // cross-unit: NO url
     expect(display[3]!.url).toBe('https://legacy.example/photo.jpg'); // legacy URL: pass-through
+  });
+
+  it('review C1: a crafted own-namespace key with an unsafe SHAPE yields NO url (guard shared with the serve route)', async () => {
+    // The raw PATCH seam (E5) can plant an own-PREFIX key whose remainder is not
+    // a single safe segment. resolveUnitMedia shares the GET /unit-media serve
+    // route's per-segment guard, so such a key degrades to url-absent instead of
+    // emitting a display URL the route would ALWAYS 404 (traversal / embedded
+    // slash / space). The real uuid key still resolves to its same-origin URL.
+    const { app, world } = makeWebhookHarness();
+    const REAL = 'unit-media/unit-1/11111111-2222-3333-4444-555555555555';
+    const TRAVERSAL = 'unit-media/unit-1/../../recordings/secret';
+    const EXTRA_SEG = 'unit-media/unit-1/a/b';
+    const SPACE = 'unit-media/unit-1/has space';
+    seedUnit(world, 'unit-1', { media: [REAL, TRAVERSAL, EXTRA_SEG, SPACE] });
+    const res = await request(app)
+      .get('/api/units/unit-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const display: { entry: string; url?: string }[] = res.body.unit.mediaDisplay;
+    expect(display).toHaveLength(4);
+    expect(display[0]!.url).toBe('/' + REAL); // real uuid key: same-origin URL
+    expect(display[1]!).toEqual({ entry: TRAVERSAL }); // '..' traversal: NO url
+    expect(display[2]!).toEqual({ entry: EXTRA_SEG }); // embedded slash: NO url
+    expect(display[3]!).toEqual({ entry: SPACE }); // space in segment: NO url
+  });
+});
+
+describe('isSafeUnitMediaSegment (shared serve-route + URL-emission guard, review C1)', () => {
+  it('accepts a uuid-shaped segment + the safe charset; rejects slashes, dot-nav, spaces, empty', () => {
+    // Real key segments: the unitId and the server-minted uuid object.
+    expect(isSafeUnitMediaSegment('11111111-2222-3333-4444-555555555555')).toBe(true);
+    expect(isSafeUnitMediaSegment('unit-1')).toBe(true);
+    expect(isSafeUnitMediaSegment('a.b_c-1')).toBe(true);
+    // Dot-navigation + out-of-charset bytes: rejected. These are exactly the
+    // shapes GET /unit-media 404s, so the resolver must not emit URLs for them.
+    expect(isSafeUnitMediaSegment('.')).toBe(false);
+    expect(isSafeUnitMediaSegment('..')).toBe(false);
+    expect(isSafeUnitMediaSegment('a/b')).toBe(false);
+    expect(isSafeUnitMediaSegment('../x')).toBe(false);
+    expect(isSafeUnitMediaSegment('has space')).toBe(false);
+    expect(isSafeUnitMediaSegment('a$b')).toBe(false);
+    expect(isSafeUnitMediaSegment('')).toBe(false);
   });
 });
 

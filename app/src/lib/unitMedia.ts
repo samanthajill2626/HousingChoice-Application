@@ -29,6 +29,21 @@ export function unitMediaPrefix(unitId: string): string {
   return `unit-media/${unitId}/`;
 }
 
+/**
+ * True when `seg` is exactly ONE safe `unit-media/` path segment: the safe
+ * charset only, never a `.`/`..` dot-navigation token (and, since the charset
+ * excludes `/`, never a multi-segment run). SHARED (review C1, 2026-07-21) by
+ * BOTH the display-URL emission below (resolveUnitMedia) AND the GET /unit-media
+ * serve route (routes/unitMediaServe.ts imports this) so the two agree on what a
+ * valid key is - the resolver never emits a URL whose shape the route rejects. A
+ * real stored key is `unit-media/<unitId>/<uuid>`: each of `<unitId>` and
+ * `<uuid>` is one such segment.
+ */
+const UNIT_MEDIA_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+export function isSafeUnitMediaSegment(seg: string): boolean {
+  return UNIT_MEDIA_SEGMENT_RE.test(seg) && seg !== '.' && seg !== '..';
+}
+
 /** One resolved gallery entry: the durable handle + its display URL when resolvable. */
 export interface UnitMediaDisplay {
   /** The raw `unit.media` entry (an S3 key or a legacy URL) - the management handle. */
@@ -60,6 +75,7 @@ export function resolveUnitMedia(
     ? unit.media.filter((e): e is string => typeof e === 'string' && e.length > 0)
     : [];
   const ownPrefix = unitMediaPrefix(unit.unitId);
+  const ownSegmentSafe = isSafeUnitMediaSegment(unit.unitId);
   return media.map((entry): UnitMediaDisplay => {
     if (isAbsoluteUrl(entry)) return { entry, url: entry };
     // NAMESPACE SCOPING (review hardening, 2026-07-15): only keys under THIS
@@ -73,6 +89,22 @@ export function resolveUnitMedia(
       log.warn(
         { unitId: unit.unitId },
         'unit media: entry outside the unit media namespace - no display URL',
+      );
+      return { entry };
+    }
+    // SHAPE SCOPING (review C1, 2026-07-21): the own-prefix check proves the
+    // namespace but NOT the shape. The remainder after the prefix must be a
+    // SINGLE safe segment, and this unit's own id must be one too - the SAME
+    // per-segment guard GET /unit-media enforces (isSafeUnitMediaSegment, shared
+    // above). Without it a crafted own-namespace key from the raw PATCH seam (E5)
+    // - e.g. `unit-media/<id>/../../recordings/x`, `.../a/b`, `.../has space` -
+    // would be emitted as a display URL the serve route ALWAYS 404s (asymmetric +
+    // non-canonical). Real keys are `unit-media/<id>/<uuid>`, so legitimate data
+    // is unaffected; a malformed one degrades to url-absent like a foreign key.
+    if (!ownSegmentSafe || !isSafeUnitMediaSegment(entry.slice(ownPrefix.length))) {
+      log.warn(
+        { unitId: unit.unitId },
+        'unit media: entry is not a single safe segment under the namespace - no display URL',
       );
       return { entry };
     }
@@ -106,6 +138,11 @@ export function deleteRemovedUnitMedia(
   if (!mediaStore) return;
   const ownPrefix = unitMediaPrefix(unitId);
   for (const entry of removedEntries) {
+    // Prefix-only ON PURPOSE (no per-segment shape check): S3 keys are literal,
+    // so deleting an odd-but-literal key INSIDE our own prefix is harmless. The
+    // URL-emission guard in resolveUnitMedia is deliberately STRICTER (it also
+    // enforces isSafeUnitMediaSegment) because a bad shape there would emit an
+    // unservable PUBLIC url; here a bad shape can only delete our own stray object.
     if (isAbsoluteUrl(entry) || !entry.startsWith(ownPrefix)) continue;
     void mediaStore.deleteObject(entry).catch((err: unknown) => {
       log.warn({ err, unitId }, 'unit media: best-effort object delete failed (orphan remains)');

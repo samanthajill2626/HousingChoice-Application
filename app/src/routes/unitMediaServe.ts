@@ -22,15 +22,13 @@ import { Router } from 'express';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import type { Logger } from '../lib/logger.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
+// One SHARED per-segment guard (review C1): the SAME check resolveUnitMedia uses
+// when emitting display URLs, so this route and the URL emitter never disagree on
+// what a valid key is. See lib/unitMedia.ts.
+import { isSafeUnitMediaSegment } from '../lib/unitMedia.js';
 
 /** Parity with the CloudFront response-headers policy (7 days, immutable keys). */
 const UNIT_MEDIA_CACHE_CONTROL = 'public, max-age=604800';
-
-const SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
-/** One path segment: safe charset, never a dot-navigation token. */
-function isSafeSegment(seg: string): boolean {
-  return SEGMENT_RE.test(seg) && seg !== '.' && seg !== '..';
-}
 
 export function createUnitMediaServeRouter(deps: {
   mediaStore?: MediaStore;
@@ -42,7 +40,7 @@ export function createUnitMediaServeRouter(deps: {
   router.get('/:unitId/:object', async (req, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const object = String(req.params['object'] ?? '');
-    if (!isSafeSegment(unitId) || !isSafeSegment(object)) {
+    if (!isSafeUnitMediaSegment(unitId) || !isSafeUnitMediaSegment(object)) {
       res.status(404).json({ error: 'not_found' });
       return;
     }

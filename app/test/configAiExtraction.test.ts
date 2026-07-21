@@ -6,10 +6,13 @@ const base = { CF_ORIGIN_SECRET: 's' };
 
 // Full production wiring so loadConfig gets past the CF/job-delivery/auth
 // fail-fast gates; extraction defaults (disabled in prod) then need no key.
+// EMAIL_DRIVER=console neutralizes the email-channel-v1 ses sender-identity
+// gate (ses is the email default in production).
 const prodBase = {
   NODE_ENV: 'production',
   CF_ORIGIN_SECRET: 's',
   MESSAGING_DRIVER: 'console',
+  EMAIL_DRIVER: 'console',
   JOBS_QUEUE_URL: 'https://sqs.example/q',
   SCHEDULER_TARGET_ARN: 'arn:aws:sqs:us-east-1:0:q',
   SCHEDULER_ROLE_ARN: 'arn:aws:iam::0:role/r',

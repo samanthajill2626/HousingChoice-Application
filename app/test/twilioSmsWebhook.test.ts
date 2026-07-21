@@ -88,6 +88,10 @@ describe('POST /webhooks/twilio/sms — signature verification (real HMAC)', () 
     const prod = makeWebhookHarness({
       env: {
         NODE_ENV: 'production',
+        // email-channel-v1: ses is the email default in production and requires
+        // a sender identity; console neutralizes that gate (this test is about
+        // Twilio signature validation).
+        EMAIL_DRIVER: 'console',
         TWILIO_AUTH_TOKEN: undefined,
         PUBLIC_BASE_URL: undefined,
         JOBS_QUEUE_URL: 'https://sqs.us-east-1.amazonaws.com/000000000000/hc-test-jobs',

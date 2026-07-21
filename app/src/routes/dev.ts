@@ -144,6 +144,8 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       recordOutbox: config.recordOutbox,
       messagingDriver: config.messagingDriver,
       smsSendingEnabled: config.smsSendingEnabled,
+      emailDriver: config.emailDriver,
+      emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,
       // Launch commit (set by scripts/e2e-session.mjs) — the e2e preflight compares
       // it to the checkout to catch a stale reused backend. null when unstamped.

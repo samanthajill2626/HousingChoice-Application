@@ -79,7 +79,7 @@ export interface MessageDef {
   class: MessageClass;
   /** May an operator override it later? (does NOT expose it now — no override map/UI) */
   editable: boolean;
-  channel: 'sms' | 'voice';
+  channel: 'sms' | 'voice' | 'email';
   /** Allowed interpolation tokens, e.g. ['firstName'], ['callerLabel']. */
   vars: readonly string[];
   /** First-contact compliance floor: an override must contain "STOP". */

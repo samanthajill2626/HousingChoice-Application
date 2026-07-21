@@ -167,7 +167,7 @@ export interface FakeWorld {
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
-  presignPosts: { key: string; contentType: string }[];
+  presignPosts: { key: string; contentType: string; maxBytes?: number }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -2372,7 +2372,11 @@ export function createFakeWorld(): FakeWorld {
       // tests can assert the key + content-type policy WITHOUT a live S3), and
       // return a plausible { url, fields } shape. The `key` + `Content-Type`
       // fields stand in for the SDK's policy-pinned form fields.
-      presignPosts.push({ key, contentType: opts.contentType });
+      presignPosts.push({
+        key,
+        contentType: opts.contentType,
+        ...(opts.maxBytes !== undefined && { maxBytes: opts.maxBytes }),
+      });
       return {
         url: 'https://fake-s3.local/hc-local-media',
         fields: {

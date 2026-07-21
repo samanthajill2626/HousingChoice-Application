@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
-import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../src/lib/outboundMediaLimits.js';
+import { UNIT_PHOTO_SOURCE_MAX_BYTES } from '../src/lib/unitPhotoLimits.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 
@@ -169,6 +169,15 @@ describe('POST /api/units/:unitId/photos/presign', () => {
     expect(limited.body).toEqual({ error: 'rate_limited' });
     expect(Number(limited.headers['retry-after'])).toBeGreaterThanOrEqual(1);
   });
+
+  it('mints each grant with the 20MB source policy cap (transcode design 2026-07-21)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1');
+    const res = await presign(app, 'unit-1').send({ count: 1, contentTypes: ['image/jpeg'] });
+    expect(res.status).toBe(200);
+    expect(world.presignPosts).toHaveLength(1);
+    expect(world.presignPosts[0]!.maxBytes).toBe(UNIT_PHOTO_SOURCE_MAX_BYTES);
+  });
 });
 
 describe('POST /api/units/:unitId/photos/confirm', () => {
@@ -237,7 +246,7 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     const tooBig = 'unit-media/unit-1/toobig';
     storeObject(world, good, { contentType: 'image/png' });
     storeObject(world, badType, { contentType: 'application/pdf' });
-    storeObject(world, tooBig, { contentType: 'image/png', size: OUTBOUND_MMS_MAX_FILE_BYTES + 1 });
+    storeObject(world, tooBig, { contentType: 'image/png', size: UNIT_PHOTO_SOURCE_MAX_BYTES + 1 });
     const res = await confirm(app, 'unit-1').send({ keys: [good, badType, tooBig] });
     expect(res.status).toBe(200);
     expect(res.body.unit.media).toEqual([good]);

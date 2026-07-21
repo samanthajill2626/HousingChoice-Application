@@ -24,6 +24,7 @@ import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
 import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
+import { UNIT_PHOTO_SOURCE_MAX_BYTES } from '../lib/unitPhotoLimits.js';
 import { resolveUnitMedia, UNIT_MEDIA_MAX, unitMediaPrefix } from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
@@ -484,7 +485,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const uploads = await Promise.all(
       normalized.map(async (contentType) => {
         const key = `${unitMediaPrefix(unitId)}${randomUUID()}`;
-        const post = await mediaStore.createPresignedPost(key, { contentType });
+        const post = await mediaStore.createPresignedPost(key, {
+          contentType,
+          maxBytes: UNIT_PHOTO_SOURCE_MAX_BYTES,
+        });
         return { key, post };
       }),
     );

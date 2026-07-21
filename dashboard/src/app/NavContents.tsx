@@ -37,8 +37,15 @@ function NavLeafLink({
   onNavigate?: () => void;
 }): React.JSX.Element {
   const Icon = item.icon ? NAV_ICONS[item.icon] : undefined;
-  const { unread } = useUnread();
-  const badge = item.badge === 'inbox-unread' && unread !== null && unread > 0 ? unread : null;
+  const { unread, unmatchedUnread } = useUnread();
+  // Two badge sources, one render: the Inbox unread count and the Email side-door
+  // (unmatched-email) unread count. Each leaf declares which via `item.badge`.
+  const badge =
+    item.badge === 'inbox-unread' && unread !== null && unread > 0
+      ? unread
+      : item.badge === 'unmatched-email-unread' && unmatchedUnread !== null && unmatchedUnread > 0
+        ? unmatchedUnread
+        : null;
   return (
     <div className={styles.linkRow}>
       <NavLink

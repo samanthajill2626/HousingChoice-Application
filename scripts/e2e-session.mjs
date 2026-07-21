@@ -185,6 +185,14 @@ const childEnv = {
   SES_API_BASE_URL: fakeUrl,
   EMAIL_SENDER_DOMAIN: 'mail.local.test',
   EMAIL_FROM_ADDRESS: 'team@mail.local.test',
+  // Inbound email (email-channel B4): the per-lane MinIO bucket the fake writes raw
+  // inbound MIME to (the SES receipt-rule S3 target). Composed from the lane number -
+  // ONE shared MinIO :9000, per-lane bucket is the isolation boundary for inbound MIME
+  // (review F22). The fake inherits this SAME childEnv, so both sides agree. Note
+  // INBOUND_MAIL_QUEUE_URL is deliberately UNSET locally (ADJ-11: no local SQS - inbound
+  // arrives via the fake POST to /webhooks/ses/inbound, so the worker's second consumer
+  // stays dormant here).
+  INBOUND_MAIL_BUCKET: `hc-local-inbound-mail-${lane}`,
   // Stale-stack guard (e2e/support/preflight.ts): stamp the launch commit on the
   // app (/__dev/ping → appCommit) AND the dashboard (index.html <meta>) so a
   // reused server booted at a different commit is caught with an actionable error.

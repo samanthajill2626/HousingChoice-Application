@@ -37,3 +37,61 @@ export async function resetMail(request: APIRequestContext): Promise<void> {
   const res = await request.post(`${FAKE_BASE}/control/reset-mail`, { data: {} });
   if (!res.ok()) throw new Error(`reset-mail failed: ${res.status()} ${await res.text()}`);
 }
+
+/** One inbound attachment (base64) the fake wraps into the delivered MIME. */
+export interface InboundAttachmentInput {
+  filename: string;
+  contentType: string;
+  base64: string;
+}
+
+/** The control-plane inbound-send request (POST /control/send-inbound-email). */
+export interface SendInboundEmailOpts {
+  from: string;
+  to?: string[];
+  cc?: string[];
+  subject: string;
+  text?: string;
+  html?: string;
+  attachments?: InboundAttachmentInput[];
+  spamVerdict?: 'PASS' | 'FAIL' | 'GRAY';
+  virusVerdict?: 'PASS' | 'FAIL';
+  /** Optional threading headers (reply-in-thread specs). */
+  messageId?: string;
+  inReplyTo?: string;
+  references?: string[];
+}
+
+/** The fake's response after delivering one inbound email (email-channel B4). */
+export interface SentInboundEmail {
+  bucket: string;
+  key: string;
+  posted: boolean;
+  /** The app webhook's response status to the SNS POST. */
+  appStatus: number;
+  sesMessageId: string;
+}
+
+/**
+ * Deliver ONE inbound email (email-channel B4): the fake hand-rolls MIME, writes it
+ * to MinIO INBOUND_MAIL_BUCKET, and POSTs an SNS-shaped receipt to the app's
+ * /webhooks/ses/inbound (with x-origin-verify) - the whole prod inbound path minus
+ * real SES. Returns the bucket/key + the app's response status.
+ */
+export async function sendInboundEmail(
+  request: APIRequestContext,
+  opts: SendInboundEmailOpts,
+): Promise<SentInboundEmail> {
+  const res = await request.post(`${FAKE_BASE}/control/send-inbound-email`, { data: opts });
+  if (!res.ok()) throw new Error(`send-inbound-email failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as SentInboundEmail;
+}
+
+/** Every inbound email the fake delivered, NEWEST FIRST (test observability). */
+export async function listInboundEmails(request: APIRequestContext): Promise<
+  { key: string; bucket: string; from: string; to: string[]; subject: string; appStatus: number; receivedAt: string }[]
+> {
+  const res = await request.get(`${FAKE_BASE}/control/inbound-emails`);
+  if (!res.ok()) throw new Error(`list inbound emails failed: ${res.status()}`);
+  return (await res.json()).emails;
+}

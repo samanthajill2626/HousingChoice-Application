@@ -203,7 +203,9 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       "default-src 'self'",
       "script-src 'self'",
       "style-src 'self' 'unsafe-inline'",
-      withMedia("img-src 'self' data:"),
+      // blob: = URL.createObjectURL previews (MMS composer image chip,
+      // dashboard Timeline) — document-created in-memory content, no network.
+      withMedia("img-src 'self' data: blob:"),
       withMedia("connect-src 'self'"),
       "frame-ancestors 'none'",
     ].join('; ');

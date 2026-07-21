@@ -69,7 +69,10 @@ describe.skipIf(!built)('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
       expect(csp, path).toContain("script-src 'self'");
       // The ONE documented allowance: React inline style={} attributes.
       expect(csp, path).toContain("style-src 'self' 'unsafe-inline'");
-      expect(csp, path).toContain("img-src 'self' data:");
+      // blob: = local object URLs (URL.createObjectURL) for the MMS composer's
+      // pre-send image preview chip (dashboard Timeline) — in-memory,
+      // document-created content, no network fetch.
+      expect(csp, path).toContain("img-src 'self' data: blob:");
       expect(csp, path).toContain("connect-src 'self'");
       expect(csp, path).toContain("frame-ancestors 'none'");
       // No media store configured -> no bucket origin leaks into the CSP.
@@ -129,7 +132,7 @@ describe.skipIf(!built)('SPA CSP allows the configured media-bucket origin', () 
     const csp = res.headers['content-security-policy'];
     const origin = 'https://hc-test-media.s3.us-east-1.amazonaws.com';
     expect(csp).toContain(`connect-src 'self' ${origin}`);
-    expect(csp).toContain(`img-src 'self' data: ${origin}`);
+    expect(csp).toContain(`img-src 'self' data: blob: ${origin}`);
     // The allowance is scoped: script/style/default stay 'self'.
     expect(csp).toContain("default-src 'self';");
     expect(csp).toContain("script-src 'self';");
@@ -141,7 +144,7 @@ describe.skipIf(!built)('SPA CSP allows the configured media-bucket origin', () 
     expect(res.status).toBe(200);
     const csp = res.headers['content-security-policy'];
     expect(csp).toContain("connect-src 'self' http://localhost:9000");
-    expect(csp).toContain("img-src 'self' data: http://localhost:9000");
+    expect(csp).toContain("img-src 'self' data: blob: http://localhost:9000");
     expect(csp).not.toContain('amazonaws.com');
   });
 });

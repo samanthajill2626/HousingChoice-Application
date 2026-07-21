@@ -53,6 +53,8 @@ export function buildTimelineFallback(
           ...(m.email_from !== undefined && { email_from: m.email_from }),
           ...(m.email_to !== undefined && { email_to: m.email_to }),
           ...(m.email_cc !== undefined && { email_cc: m.email_cc }),
+          ...(m.email_new_address === true && { email_new_address: true }),
+          ...(m.email_html_sanitized !== undefined && { email_html_sanitized: m.email_html_sanitized }),
           ...(m.media_attachments !== undefined && { media_attachments: m.media_attachments }),
         };
         items.push(emailItem);

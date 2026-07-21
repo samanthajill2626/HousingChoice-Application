@@ -31,6 +31,7 @@ import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
 import type { ReplyTarget } from './replyTargets.js';
 import { EmailComposer, type EmailComposerSendInput } from './EmailComposer.js';
+import { EmailHtmlFrame } from './EmailHtmlFrame.js';
 import styles from './Timeline.module.css';
 
 /** A send refusal → a clear, human reason. The server returns a machine-readable
@@ -347,6 +348,21 @@ const TONE_CLASS: Record<DeliveryTone, string | undefined> = {
   danger: styles.toneDanger,
 };
 
+// Attachment glyphs via String.fromCodePoint (pure-ASCII source; byte-identical
+// render to the literal emoji) so every source line stays ASCII. U+1F4CE =
+// paperclip; U+1F4C4 = page (PDF).
+const ICON_CLIP = String.fromCodePoint(0x1f4ce);
+const ICON_PAGE = String.fromCodePoint(0x1f4c4);
+
+/** The visible label for one non-image attachment: the persisted original
+ *  filename when present (fix-wave R1 - inbound email + outbound both carry it),
+ *  else the positional "Attachment N" / "PDF attachment N" fallback (unchanged
+ *  MMS behavior when no filename was stored). */
+function attachmentLabel(filename: string | undefined, isPdf: boolean, i: number): string {
+  if (filename !== undefined && filename.trim().length > 0) return filename;
+  return isPdf ? `PDF attachment ${i + 1}` : `Attachment ${i + 1}`;
+}
+
 /** The mirrored-attachment gallery for a message (MMS bubble AND email card).
  *  Images render inline (open full-size in a new tab); PDFs/other files are links
  *  to the authed serve endpoint. Without a derivable provider SID there's no
@@ -360,7 +376,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
   if (!sid) {
     return (
       <div className={styles.media}>
-        📎 {attachments.length === 1 ? '1 attachment' : `${attachments.length} attachments`}
+        {ICON_CLIP} {attachments.length === 1 ? '1 attachment' : `${attachments.length} attachments`}
       </div>
     );
   }
@@ -377,7 +393,12 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
               target="_blank"
               rel="noopener noreferrer"
             >
-              <img className={styles.mediaImg} src={src} alt={`Attachment ${i + 1}`} loading="lazy" />
+              <img
+                className={styles.mediaImg}
+                src={src}
+                alt={attachmentLabel(att.filename, false, i)}
+                loading="lazy"
+              />
             </a>
           );
         }
@@ -390,7 +411,7 @@ function AttachmentGallery({ msg }: { msg: TimelineMessage }): React.JSX.Element
             target="_blank"
             rel="noopener noreferrer"
           >
-            {isPdf ? `📄 PDF attachment ${i + 1}` : `📎 Attachment ${i + 1}`}
+            {isPdf ? ICON_PAGE : ICON_CLIP} {attachmentLabel(att.filename, isPdf, i)}
           </a>
         );
       })}
@@ -627,15 +648,20 @@ function CallCard({ call }: { call: TimelineCall }): React.JSX.Element {
   );
 }
 
-/** A collapsed OUTBOUND email card (email-channel v1, A6). Visually DISTINCT from
- *  an SMS/MMS bubble - the CallCard treatment: an "EMAIL" transport tag, a
- *  semibold subject, a ~140-char snippet, a from/to line, and a delivery chip;
- *  a <details> discloses the full plain-text body, any Cc, and attachments.
- *  Message text renders as TEXT (React escapes) - NEVER dangerouslySetInnerHTML.
- *  Outbound email is plain text; inbound HTML rendering is B7 (a sandboxed iframe,
- *  not this card). */
+/** A collapsed email card (email-channel v1; A6 outbound, B7 inbound). Visually
+ *  DISTINCT from an SMS/MMS bubble - the CallCard treatment: an "EMAIL" transport
+ *  tag, a semibold subject, a ~140-char snippet, a from/to line (the sender on
+ *  inbound), a "New address" chip on a first-seen inbound address, and a delivery
+ *  chip on outbound; a "View full email" <details> discloses the full plain-text
+ *  body, any Cc, and attachments. Message text always renders as TEXT (React
+ *  escapes) - NEVER dangerouslySetInnerHTML. An inbound mail that carries
+ *  sanitized HTML also gets a "View original formatting" <details> that LAZILY
+ *  mounts the CSP-framed sandboxed EmailHtmlFrame (only once opened). */
 const EMAIL_SNIPPET_CHARS = 140;
 function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
+  // Lazy-mount gate for the HTML frame: keep the sandboxed iframe OUT of the DOM
+  // (no render, no fetch) until the user opens "View original formatting".
+  const [htmlOpen, setHtmlOpen] = useState(false);
   const outbound = msg.direction === 'outbound';
   const delivery = outbound ? presentDeliveryStatus(msg.delivery_status) : null;
   const reason = delivery?.isFailure ? deliveryReason(msg.error_code) : undefined;
@@ -669,6 +695,20 @@ function EmailCard({ msg }: { msg: TimelineMessage }): React.JSX.Element {
           {cc.length > 0 ? <div className={styles.emailAddrLine}>cc {cc.join(', ')}</div> : null}
           {bodyText ? <p className={styles.emailBody}>{bodyText}</p> : null}
           <AttachmentGallery msg={msg} />
+        </details>
+      ) : null}
+      {/* B7: sanitized inbound HTML behind its own disclosure. The frame is
+       *  mounted LAZILY (only when open) and ONLY when the mail carried HTML -
+       *  a fully sandboxed, CSP-locked iframe (EmailHtmlFrame), never
+       *  dangerouslySetInnerHTML. Independent of "View full email" so a short
+       *  HTML mail (no snippet/cc/attachments) still exposes the frame. */}
+      {msg.email_html_sanitized !== undefined ? (
+        <details
+          className={styles.emailDetails}
+          onToggle={(e) => setHtmlOpen((e.currentTarget as HTMLDetailsElement).open)}
+        >
+          <summary className={styles.emailToggle}>View original formatting</summary>
+          {htmlOpen ? <EmailHtmlFrame html={msg.email_html_sanitized} /> : null}
         </details>
       ) : null}
       {delivery ? (

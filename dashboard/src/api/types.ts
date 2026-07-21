@@ -1406,6 +1406,13 @@ export interface Message {
   email_cc?: string[];
   /** Our RFC Message-ID (outbound) or theirs (inbound), with angle brackets. */
   email_message_id?: string;
+  /** Inbound reply arrived from an address NOT yet on the contact (B2 sets it;
+   *  the client renders a "New address" chip). Absent otherwise. */
+  email_new_address?: boolean;
+  /** Sanitized inbound HTML body (bounded at ingest; may be ABSENT even when the
+   *  mail had HTML). Rendered ONLY inside the CSP-framed sandboxed iframe (B7) -
+   *  never dangerouslySetInnerHTML. */
+  email_html_sanitized?: string;
   // --- Voice call — present only on a type:'call' entry --------------------
   call_outcome?: CallOutcome;
   started_at?: string;
@@ -1559,6 +1566,10 @@ export interface TimelineMessage extends TimelineBase {
   /** Inbound reply arrived from an address NOT yet on the contact (B7 "New
    *  address" chip). Outbound email never sets this. */
   email_new_address?: boolean;
+  /** Sanitized inbound HTML body (bounded at ingest; may be ABSENT even when the
+   *  mail had HTML - fall back to the trimmed text body). Rendered ONLY inside the
+   *  CSP-framed, fully sandboxed EmailHtmlFrame (B7) - never dangerouslySetInnerHTML. */
+  email_html_sanitized?: string;
   /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
    *  keyed by member key. A `contact_opted_out` failed slot means that member
    *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent

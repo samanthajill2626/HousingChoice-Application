@@ -4,6 +4,7 @@ import express, { type Express } from 'express';
 import type { FakeTwilioConfig } from './config.js';
 import { FakeTwilioEngine } from './engine/engine.js';
 import { CallEngine } from './engine/callEngine.js';
+import { MailEngine } from './engine/mailEngine.js';
 import { NumberRegistry } from './engine/numberRegistry.js';
 import { EventHub } from './engine/eventHub.js';
 import { RealClock } from './engine/clock.js';
@@ -13,6 +14,8 @@ import { createVoiceRestRouter } from './routes/voiceRest.js';
 import { createIntelligenceRestRouter } from './routes/intelligenceRest.js';
 import { createControlRouter } from './routes/control.js';
 import { createVoiceControlRouter } from './routes/voiceControl.js';
+import { createSesRestRouter } from './routes/sesRest.js';
+import { createSesControlRouter } from './routes/sesControl.js';
 import { createRcsRouter } from './routes/rcs.js';
 import { createEventsRouter } from './routes/events.js';
 
@@ -38,6 +41,10 @@ export interface FakeTwilioAppDeps {
    *  ONE instance is shared by the CallEngine and the voice REST router so a number
    *  provisioned via REST is recognized as a pool number by an inbound call. */
   registry?: NumberRegistry;
+  /** The fake-SES MailEngine (email-channel v1). Injectable for tests; default-
+   *  constructed sharing the messaging engine's hub so its `mail.outbound` events
+   *  reach the SSE stream. */
+  mailEngine?: MailEngine;
 }
 
 export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
@@ -100,6 +107,11 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
       recordingServeBase: deps.config.publicBaseUrl,
     });
 
+  // The fake-SES MailEngine - shares the SAME hub (so its `mail.outbound` events
+  // reach the SSE stream by construction, like the CallEngine above). It captures
+  // the app's outbound SESv2 SendEmail and stores the raw MIME in memory.
+  const mailEngine = deps.mailEngine ?? new MailEngine({ hub: engine.hub });
+
   const app = express();
   // Twilio posts application/x-www-form-urlencoded; the control API uses JSON.
   app.use(express.urlencoded({ extended: false }));
@@ -127,6 +139,12 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // RCS 501 seams (Task 7.2): the Content-API REST path + POST /control/send-rcs
   // both 501 with a pointer to docs/RCS-integration-contract.md. Thin — no engine.
   app.use(createRcsRouter());
+  // fake-SES (email-channel v1): the SESv2 SendEmail REST surface (POST
+  // /v2/email/outbound-emails) + the disjoint mail CONTROL subpaths (/control/emails,
+  // /control/reset-mail). Both driven by the SAME mailEngine; mounted BEFORE the SSE
+  // + static-UI blocks so the reserved-prefix guard (/v2, /control) matches them.
+  app.use(createSesRestRouter(mailEngine));
+  app.use(createSesControlRouter(mailEngine));
   // SSE stream of engine events for the fake-phones UI (Plan 2). Derive the hub from
   // the (injected-or-constructed) engine so the SSE stream is ALWAYS the bus the engine
   // emits through — no way to fabricate a mismatched hub even when `engine` is injected

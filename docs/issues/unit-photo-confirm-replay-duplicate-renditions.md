@@ -29,7 +29,7 @@ fires today only via a MANUAL replay: no current client retries confirm
 (dashboard `endpoints.ts confirmUnitPhotos` is retry-free, and the dashboard
 confirms each >5MB file in its own request exactly once). The DoS-via-free-replay
 angle is separately fenced by the per-user confirm limiter added in the same fix
-wave (routeKey `unit_photo_confirm`, 30/min; see
+wave (routeKey `unit_photo_confirm`, 60/min; see
 unit-photo-confirm-headobject-amplification).
 
 **Suggested fix (only if a confirm-retrying client is ever added).** Derive the

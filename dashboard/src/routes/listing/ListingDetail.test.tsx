@@ -750,6 +750,39 @@ describe('ListingDetail', () => {
     ]);
   });
 
+  it('a failed big-file confirm does NOT abandon later batches - all settle, then one adjudicated alert (N2)', async () => {
+    const setUnit = vi.fn();
+    useListing.mockReturnValue({ ...READY, setUnit });
+    presignUnitPhotos.mockImplementation((_id: string, files: File[]) => Promise.resolve(grantsFor(files)));
+    uploadToPresignedPost.mockResolvedValue(undefined);
+    // Batches: smalls [key-0], big1 [key-1] (503s), big2 [key-2] (succeeds).
+    confirmUnitPhotos.mockImplementation((_id: string, keys: string[]) =>
+      keys.length === 1 && keys[0] === 'unit-media/u1/key-1'
+        ? Promise.reject(new ApiError(503, 'transcode_busy', 'transcode_busy'))
+        : Promise.resolve(READY.unit!),
+    );
+    renderAt();
+
+    const files = [
+      photoOfSize('a.jpg', 1 * 1024 * 1024),
+      photoOfSize('b.jpg', 8 * 1024 * 1024), // its own confirm - rejected 503
+      photoOfSize('c.jpg', 9 * 1024 * 1024), // its own confirm - MUST still run
+    ];
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    fireEvent.change(input, { target: { files } });
+
+    // ALL THREE batches were attempted (smalls + both bigs) despite the 503.
+    await waitFor(() => expect(confirmUnitPhotos).toHaveBeenCalledTimes(3));
+    // The two successes applied unit state; the alert carries the count AND the
+    // mapped transcode_busy copy.
+    expect(setUnit).toHaveBeenCalledTimes(2);
+    await waitFor(() => {
+      const alert = screen.getByRole('alert');
+      expect(alert).toHaveTextContent('Uploaded 2 of 3 photos');
+      expect(alert).toHaveTextContent('The server is busy fitting large photos');
+    });
+  });
+
   it('disables "+ Add" with a note at the 100-photo cap', () => {
     const full = Array.from({ length: 100 }, (_, i) => ({
       entry: `units/u1/p-${i}.jpg`,

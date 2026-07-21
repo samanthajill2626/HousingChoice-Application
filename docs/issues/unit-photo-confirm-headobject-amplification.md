@@ -37,10 +37,14 @@ limiter went from "not merge-blocking" to load-bearing.
 **Resolution (2026-07-21).** Added `createUserRateLimit` (routeKey
 `unit_photo_confirm`) to `POST /api/units/:id/photos/confirm` in
 app/src/routes/units.ts, mounted before the handler like the presign limiter.
-Sized at 30/min per user (presign's mint pace): unlike the MMS confirm
-(1-2 attachments per message, 20/min), photo confirms are BULK BY DESIGN -
-D5 chunking sends each >5MB file in its own request, and a transcode-bearing
-confirm takes >=~2s end to end, so a real serial client tops out around
-30/min. The fence kills scripted tight loops without tripping the
-dashboard's own pace. Covered by the `MF-2a` limiter test in
+Sized at 60/min per user (Cameron raised it from the initial 30 at the
+2026-07-21 planner review, finding P2): unlike the MMS confirm (1-2
+attachments per message, 20/min), photo confirms are BULK BY DESIGN - D5
+chunking sends each >5MB file in its own request, and a 35+ big-photo drop
+with fast (~1-2s) transcodes plus the batched small confirm could
+legitimately exceed 30 requests inside one 60s window (UNIT_MEDIA_MAX is
+100, so such drops are in-scope). 60 gives 2x headroom over the fastest
+physically-realizable dashboard pace and still kills scripted tight loops
+(each admitted request stays bounded by the shared gate + the per-request
+transcode cap). Covered by the `MF-2a` limiter test in
 app/test/unitsApiPhotos.test.ts.

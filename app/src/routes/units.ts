@@ -299,15 +299,18 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // + both cores pinned and 503 everyone else (incl. MMS media confirm). The
   // fence kills scripted tight loops, NOT the dashboard's own serial pace:
   // D5 chunking deliberately sends each >5MB file in its OWN confirm, so a
-  // bulk big-photo drop is MANY requests, and a transcode-bearing confirm
-  // takes >=~2s end to end - a real serial client tops out around 30/min.
-  // 30/min (presign's mint pace, looser than MMS confirm's 20/min because MMS
-  // attaches 1-2 files per message while photos are bulk by design) admits any
-  // physically-realizable dashboard flow and still stops free-loop abuse.
+  // bulk big-photo drop is MANY requests. 60/min (Cameron, 2026-07-21 review
+  // P2 - raised from the initial 30): a transcode-bearing confirm usually
+  // takes ~2-5s, but fast transcodes (~6MB sources) plus the batched small
+  // confirm can legitimately exceed 30 requests inside one 60s window on a
+  // 35+ photo drop, and UNIT_MEDIA_MAX is 100 - so 30 was reachable by real
+  // staff. 60 gives 2x headroom over the fastest physically-realizable
+  // dashboard pace and still stops free-loop abuse (each admitted request
+  // stays bounded by the shared gate + the per-request transcode cap).
   // ONE instance per router.
   const photoConfirmLimiter = createUserRateLimit({
     routeKey: 'unit_photo_confirm',
-    max: 30,
+    max: 60,
     windowMs: 60_000,
     logger: log,
   });
@@ -560,6 +563,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // rendition uuid, never the source key) never matches and mints a SECOND
   // rendition - accepted per the design; the per-user confirm limiter fences the
   // replay-as-DoS angle (issue unit-photo-confirm-replay-duplicate-renditions).
+  // API-CLIENT CAUTION (review N3, recorded 2026-07-21): a MIXED body (some
+  // valid keys + some failed/undecodable keys) returns 200 with the failures
+  // SILENTLY dropped - transcode_failed only surfaces when NO key survives.
+  // Fine for the dashboard (it never mixes: big files are confirmed alone),
+  // but a future client submitting mixed bodies must diff its request keys
+  // against the returned unit.media to detect per-key drops.
   // A key failing (a)/(c)/(d) or whose transcode fails is DROPPED with a logged
   // warn (unitId + byte counts only, never keys); if NO key survives -> 400
   // (transcode_failed when a >5MB source was undecodable, else no_valid_photos),

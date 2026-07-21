@@ -390,15 +390,16 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     expect(world.auditEvents.some((e) => e.event_type === 'unit_photos_added')).toBe(false);
   });
 
-  it('MF-2a: meters the per-user confirm limiter: 429 past 30 confirms in a minute', async () => {
+  it('MF-2a: meters the per-user confirm limiter: 429 past 60 confirms in a minute', async () => {
     const { app } = makeWebhookHarness();
     // Confirm is now the EXPENSIVE endpoint (it downloads + transcodes >5MB
-    // sources behind the SHARED gate), so it carries a per-user fence. 30/min:
-    // sized so the dashboard's own serial one-confirm-per-big-file pace (a
-    // transcode-bearing confirm takes >=~2s) can never trip it, while scripted
-    // tight loops still 429. All to a ghost unit: the limiter runs BEFORE the
-    // handler, so the first 30 are admitted (each 404s) and the 31st is limited.
-    for (let i = 0; i < 30; i += 1) {
+    // sources behind the SHARED gate), so it carries a per-user fence. 60/min
+    // (raised from 30 per the 2026-07-21 review - a 35+ big-photo drop could
+    // legitimately exceed 30 requests in a 60s window): 2x headroom over the
+    // fastest real dashboard pace, while scripted tight loops still 429. All
+    // to a ghost unit: the limiter runs BEFORE the handler, so the first 60
+    // are admitted (each 404s) and the 61st is limited.
+    for (let i = 0; i < 60; i += 1) {
       const res = await confirm(app, 'ghost').send({ keys: ['unit-media/ghost/aaa'] });
       expect(res.status).toBe(404);
     }

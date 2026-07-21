@@ -320,6 +320,10 @@ export function ListingDetail(): React.JSX.Element {
     void (async () => {
       const total = chosen.length;
       let uploaded = 0;
+      // The last confirm-batch failure, adjudicated AFTER all batches settle
+      // (review N2, Cameron 2026-07-21) - a transient 503/429 on one big-file
+      // confirm must not discard the later batches' already-uploaded bytes.
+      let confirmError: unknown;
       try {
         // Sequential 20-file waves keep each presign request within the server's
         // per-request batch max; the direct POSTs inside a wave run in parallel.
@@ -357,16 +361,32 @@ export function ListingDetail(): React.JSX.Element {
             ...okBigKeys.map((k) => [k]),
           ];
           for (const batch of confirmBatches) {
-            const updated = await confirmUnitPhotos(unit.unitId, batch);
-            uploaded += batch.length;
-            setUnit(updated);
+            // Settle EVERY batch (review N2): catch per batch so one failed
+            // confirm never abandons the later batches' uploads; failures
+            // adjudicate together below. Deliberately SEQUENTIAL, not
+            // Promise.all - parallel confirms from one client would contend
+            // the shared 2-slot server transcode gate and the per-user
+            // confirm limiter for no wall-clock win.
+            try {
+              const updated = await confirmUnitPhotos(unit.unitId, batch);
+              uploaded += batch.length;
+              setUnit(updated);
+            } catch (err) {
+              confirmError = err;
+            }
           }
         }
         if (uploaded < total) {
-          // Partial S3 failure. If an oversize file was ALSO dropped up front,
-          // append its named message so it is never silently lost (DEC-5c).
+          // Partial failure: S3-upload drops keep the generic copy; a confirm
+          // failure surfaces its mapped server error instead. If an oversize
+          // file was ALSO dropped up front, append its named message so it is
+          // never silently lost (DEC-5c).
+          const base =
+            confirmError !== undefined
+              ? photoUploadMessage(confirmError)
+              : "some photos couldn't be uploaded. Please try again.";
           setPhotoError(
-            `Uploaded ${uploaded} of ${total} photos - some photos couldn't be uploaded. Please try again.${
+            `Uploaded ${uploaded} of ${total} photos - ${base}${
               oversizeMsg ? ` ${oversizeMsg}` : ''
             }`,
           );

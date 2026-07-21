@@ -9,8 +9,13 @@ export const UNIT_PHOTO_SOURCE_MAX_BYTES = 20 * 1024 * 1024;
 
 /**
  * At/under this a source is stored byte-identical (every previously-working
- * upload keeps today's behavior); only sources OVER it are transcoded. Also
- * the size invariant every STORED photo must satisfy (renditions re-checked).
+ * upload keeps today's behavior); only sources OVER it are transcoded.
+ * Renditions are re-checked against this before put. NEAR-invariant, not
+ * absolute (accepted deviation, Cameron 2026-07-21): the size check runs at
+ * confirm-time HeadObject, but a presigned-POST grant is multi-use within its
+ * 300s TTL - a re-POST of larger bytes (up to the 20MB policy cap) to an
+ * ALREADY-CONFIRMED key leaves a stored photo over this threshold. Staff-authed
+ * and racy; tracked in docs/issues/unit-photo-presign-ttl-size-window.md.
  */
 export const UNIT_PHOTO_PASSTHROUGH_MAX_BYTES = 5 * 1024 * 1024;
 

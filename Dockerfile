@@ -3,7 +3,11 @@
 # docker-compose.yml overrides the command for the worker container.
 
 # ---------- build stage ----------
-FROM node:24-slim AS build
+# --platform=$BUILDPLATFORM: run this stage NATIVE on the building machine
+# (amd64 on the dev PC) instead of under QEMU ARM emulation — its outputs
+# (tsc JS + vite static files) are arch-neutral, and the emulated build was
+# the dominant cost of every deploy. Only the runtime stage is arm64.
+FROM --platform=$BUILDPLATFORM node:24-slim AS build
 WORKDIR /srv/app
 
 # Copy ALL workspace manifests first so dependency install is layer-cached.

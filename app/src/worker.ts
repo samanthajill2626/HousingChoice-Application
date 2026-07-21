@@ -99,6 +99,73 @@ if (config.jobsQueueUrl) {
   consumer.start();
 }
 
+// Inbound-email delivery (email-channel B4): a SECOND SqsJobConsumer on the
+// dedicated inbound-mail queue. In AWS the SES receipt rule writes raw MIME to S3
+// and fans an SNS notification into INBOUND_MAIL_QUEUE_URL; this consumer's
+// dispatch parses the SNS/SES envelope and hands inbound receipts to the
+// channel-agnostic ingestion service (semaphore(2)-gated inside the dispatch).
+//
+// The SNS envelope is NEVER routed through dispatchJob: it carries no jobName, so
+// dispatchJob would reject it as a MalformedJobEnvelope and the SqsJobConsumer
+// would DELETE it as poison - silently dropping inbound mail. Hence this
+// dedicated dispatch. Skipped ENTIRELY when INBOUND_MAIL_QUEUE_URL is unset
+// (ADJ-11: no local SQS - local/e2e inbound arrives via the fake-SES POST to the
+// dev webhook route instead).
+let inboundMailConsumer: SqsJobConsumer | undefined;
+if (config.inboundMailQueueUrl) {
+  const { createInboundMailRawStore, createMediaStore } = await import('./adapters/mediaStore.js');
+  const rawStore = createInboundMailRawStore({ config });
+  if (rawStore === undefined) {
+    runWithContext(bootContext, () =>
+      logger.warn(
+        'INBOUND_MAIL_QUEUE_URL is set but INBOUND_MAIL_BUCKET is not - inbound-mail consumer NOT started (the raw MIME would be unreachable)',
+      ),
+    );
+  } else {
+    const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+    const { createMessagesRepo } = await import('./repos/messagesRepo.js');
+    const { createContactsRepo } = await import('./repos/contactsRepo.js');
+    const { createExtractionRepo } = await import('./repos/extractionRepo.js');
+    const { createUnmatchedEmailRepo } = await import('./repos/unmatchedEmailRepo.js');
+    const { appEvents } = await import('./lib/events.js');
+    const { ingestInboundEmail } = await import('./services/inboundEmail.js');
+    const { createInboundMailDispatch } = await import('./services/inboundMailConsumer.js');
+    const { SQSClient } = await import('@aws-sdk/client-sqs');
+    const { SqsJobConsumer } = await import('./adapters/sqsJobConsumer.js');
+
+    const mediaStore = createMediaStore({ config });
+    const ingestDeps = {
+      config,
+      logger,
+      rawStore,
+      unmatchedStore: createUnmatchedEmailRepo({ logger }),
+      conversations: createConversationsRepo({ logger }),
+      messages: createMessagesRepo({ logger }),
+      contacts: createContactsRepo({ logger }),
+      extraction: createExtractionRepo({ logger }),
+      events: appEvents,
+      ...(mediaStore !== undefined && { mediaStore }),
+    };
+    inboundMailConsumer = new SqsJobConsumer({
+      client: new SQSClient({ region: config.awsRegion }),
+      queueUrl: config.inboundMailQueueUrl,
+      dispatch: createInboundMailDispatch({
+        ingest: (notice) => ingestInboundEmail(notice, ingestDeps),
+        logger,
+      }),
+      baseContext: bootContext,
+      logger,
+    });
+    inboundMailConsumer.start();
+    runWithContext(bootContext, () =>
+      logger.info(
+        { inboundMailQueueUrl: config.inboundMailQueueUrl },
+        'inbound-mail consumer started - polling for SES receipt/event notifications',
+      ),
+    );
+  }
+}
+
 // The deploy health gate greps for the 'worker ready' line — keep it intact.
 // The queue URL is operational config (never a credential), so it may appear.
 runWithContext(bootContext, () => {
@@ -266,7 +333,8 @@ function shutdown(signal: NodeJS.Signals): void {
   void (async () => {
     try {
       // Stop polling, finish in-flight jobs (and their deletes), then exit.
-      await consumer?.stop();
+      // Drain BOTH consumers (jobs + inbound-mail) concurrently.
+      await Promise.all([consumer?.stop(), inboundMailConsumer?.stop()]);
     } finally {
       runWithContext(bootContext, () => {
         logger.info('worker drained — exiting');

@@ -52,6 +52,11 @@ export type SnsSesNotification =
     }
   | { kind: 'ignored'; reason: string };
 
+/** The event variant, extracted for the B5 `applyEmailEvent` seam signature. */
+export type SnsSesEvent = Extract<SnsSesNotification, { kind: 'event' }>;
+/** The inbound variant, extracted for the delivery-mechanism dispatch. */
+export type SnsSesInbound = Extract<SnsSesNotification, { kind: 'inbound' }>;
+
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
     ? (value as Record<string, unknown>)

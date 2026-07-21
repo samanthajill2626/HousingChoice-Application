@@ -21,6 +21,15 @@ saved a photo URL can fetch it indefinitely after staff remove it. Unit photos
 are public-flyer content, so the exposure class is unchanged, but "staff
 removed it and it stayed reachable" is still a surprise worth closing.
 
+**Update (2026-07-21).** The unit-photo-transcode design (spec
+2026-07-21-unit-photo-transcode-design.md) adds a SECOND orphan class: a >5MB
+source uploaded under the new 20MB presign cap is transcoded at confirm and
+its jpeg rendition appended - the oversize ORIGINAL object is deliberately
+left in the bucket unreferenced (kept for idempotent-replay simplicity).
+Any future cleanup should sweep both classes: removed-photo keys and
+never-appended oversize originals (bucket contents not present in any
+unit.media list).
+
 **Suggested fix.** On photo removal, best-effort DeleteObject the removed
 `unit-media/<unitId>/...` keys (never legacy absolute-URL entries, never keys
 outside the unit's own namespace - reuse the `unitMediaPrefix` guard). Failure

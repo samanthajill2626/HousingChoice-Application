@@ -58,6 +58,25 @@ export interface ContactPhone {
   lastSeenAt?: string;
 }
 
+/**
+ * One email address a contact owns (email-channel A1 - the ContactPhone analog;
+ * the frontend imports the same shape). Exactly one entry is `primary: true`.
+ * The primary is mirrored onto the legacy scalar `email` (the byEmail-indexed
+ * attribute); non-primary addresses are made resolvable via email-pointer items
+ * (see EMAIL_REF_PREFIX / findByEmail), exactly as phones do.
+ */
+export interface ContactEmail {
+  /** Normalized: trim + lowercase (lib/email.ts). */
+  email: string;
+  label?: string;
+  /** Exactly one true across a contact's emails[]. */
+  primary: boolean;
+  /** ISO 8601 - when first observed. */
+  firstSeenAt?: string;
+  /** ISO 8601 - most recent inbound/outbound on this address. */
+  lastSeenAt?: string;
+}
+
 export interface ContactItem {
   contactId: string;
   type: ContactType;
@@ -108,6 +127,18 @@ export interface ContactItem {
    * Never mutated on read; serialized via contactPhones() on read responses.
    */
   phones?: ContactPhone[];
+  /**
+   * Email-channel A1: the PRIMARY email (byEmail GSI hash + back-compat scalar).
+   * The email analog of `phone`. Normalized (trim + lowercase). ABSENT until the
+   * contact has an address.
+   */
+  email?: string;
+  /**
+   * Email-channel A1: all addresses this contact owns. When ABSENT, treat as
+   * `[{ email, primary: true }]` (the scalar) - see contactEmails(). Never
+   * mutated on read; serialized via contactEmails() on read responses.
+   */
+  emails?: ContactEmail[];
   sms_opt_out?: boolean;
   sms_unreachable?: boolean;
   /**
@@ -168,6 +199,15 @@ export interface ContactItem {
   phone_ref?: boolean;
   phone_ref_owner?: string;
   /**
+   * Email-pointer marker (email-channel A1 - the phone_ref analog). A pointer
+   * item carries `email_ref: true`, `email_ref_owner` (the real contactId), and
+   * the indexed scalar `email`, but NO type/status - invisible to byTypeStatus /
+   * byHousingAuthority (never in lists/triage) yet findable via byEmail. The
+   * primary address has NO pointer (it resolves via the owner's own scalar).
+   */
+  email_ref?: boolean;
+  email_ref_owner?: string;
+  /**
    * Eligibility intake (tenant onboarding). Free-text answers to the narrow LIF
    * questions, plus a boolean LIF-eligibility flag. First-class fields (not
    * customFields) so eligibility is reportable/filterable later.
@@ -215,6 +255,14 @@ export function phoneRefId(phone: string): string {
   return `${PHONE_REF_PREFIX}${phone}`;
 }
 
+/** contactId prefix for an email-pointer item: `emailref#<addr>` (A1). */
+export const EMAIL_REF_PREFIX = 'emailref#';
+
+/** The pointer item's primary key (contactId) for a given (normalized) email. */
+export function emailRefId(email: string): string {
+  return `${EMAIL_REF_PREFIX}${email}`;
+}
+
 /**
  * Back-compat read serializer (BE1/C1). Returns the contact's phones[] when
  * present & non-empty, else `[{ phone, primary: true }]` when only the legacy
@@ -229,6 +277,20 @@ export function contactPhones(contact: Pick<ContactItem, 'phone' | 'phones'>): C
 }
 
 /**
+ * Back-compat read serializer (email-channel A1 - the contactPhones() analog).
+ * Returns the contact's emails[] when present & non-empty, else
+ * `[{ email, primary: true }]` when only the scalar exists, else []. Pure -
+ * never mutates the stored item.
+ */
+export function contactEmails(contact: Pick<ContactItem, 'email' | 'emails'>): ContactEmail[] {
+  if (Array.isArray(contact.emails) && contact.emails.length > 0) return contact.emails;
+  if (typeof contact.email === 'string' && contact.email.length > 0) {
+    return [{ email: contact.email, primary: true }];
+  }
+  return [];
+}
+
+/**
  * Thrown by removePhone when the target is the PRIMARY number while other
  * numbers remain — the route maps this to a 409 ("promote another number
  * first"). A contact must never be left with zero primary.
@@ -237,6 +299,18 @@ export class PrimaryPhoneRemovalError extends Error {
   constructor(message = 'cannot remove the primary phone; promote another number first') {
     super(message);
     this.name = 'PrimaryPhoneRemovalError';
+  }
+}
+
+/**
+ * Thrown by removeEmail when the target is the PRIMARY address while other
+ * addresses remain (email-channel A1 - the PrimaryPhoneRemovalError analog) -
+ * the route maps this to a 409. A contact must never be left with zero primary.
+ */
+export class PrimaryEmailRemovalError extends Error {
+  constructor(message = 'cannot remove the primary email; promote another address first') {
+    super(message);
+    this.name = 'PrimaryEmailRemovalError';
   }
 }
 
@@ -352,6 +426,49 @@ export interface ContactsRepo {
    * inbound) or the number isn't in phones[]. Never throws on a missing entry.
    */
   touchPhoneLastSeen(contactId: string, phone: string, at: string): Promise<void>;
+
+  /**
+   * Email-channel A1 (the findByPhone analog): normalized email -> contact via
+   * the byEmail GSI, pointer-aware (a non-primary address resolves to the owner
+   * via its email-pointer item); undefined when unknown or a dangling pointer.
+   */
+  findByEmail(email: string): Promise<ContactItem | undefined>;
+  /**
+   * Email-channel A1 (the addPhone analog): attach an address to a contact.
+   * `email` MUST already be normalized (the route validates). Loads the contact
+   * (throws ConditionalCheckFailedException when missing). If emails[] is absent,
+   * SEEDS it from the scalar (the existing primary). An already-present address
+   * is an idempotent no-op. Otherwise appends a non-primary entry, persists
+   * emails[], and writes the email-pointer item. Returns the updated contact.
+   * The route enforces the cross-contact `email_in_use` conflict (findByEmail).
+   */
+  addEmail(contactId: string, opts: { email: string; label?: string }): Promise<ContactItem>;
+  /**
+   * Email-channel A1 (the setPhone analog): update an address already in
+   * emails[] (else ConditionalCheckFailedException -> route 404). Sets `label`
+   * when supplied. When `primary: true` and it isn't already primary: demotes the
+   * old primary, promotes this one, swaps the scalar `email`, and reconciles
+   * pointers. `primary: false` is intentionally IGNORED. Maintains
+   * exactly-one-primary. Returns the updated contact.
+   */
+  setPrimaryEmail(
+    contactId: string,
+    email: string,
+    opts: { primary?: boolean; label?: string },
+  ): Promise<ContactItem>;
+  /**
+   * Email-channel A1 (the removePhone analog): remove a non-primary address
+   * (drops its pointer). Removing the PRIMARY while other addresses remain throws
+   * PrimaryEmailRemovalError (route 409). An address not in emails[] throws
+   * ConditionalCheckFailedException (route 404). Returns the updated contact.
+   */
+  removeEmail(contactId: string, email: string): Promise<ContactItem>;
+  /**
+   * Email-channel A1 (the touchPhoneLastSeen analog): best-effort lastSeenAt bump
+   * for an address on inbound. No-op when emails[] is absent or the address isn't
+   * in emails[]. Never throws on a missing entry.
+   */
+  touchEmailLastSeen(contactId: string, email: string, at: string): Promise<void>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -449,6 +566,79 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
     return Attributes as ContactItem;
   };
 
+  // --- Email-channel A1 internal helpers (the phone-helper analogs) ---------
+  /** The emails[] in canonical form: seed (copy) from the scalar when absent. */
+  const seededEmails = (contact: ContactItem): ContactEmail[] => {
+    if (Array.isArray(contact.emails) && contact.emails.length > 0) {
+      return contact.emails.map((e) => ({ ...e }));
+    }
+    if (typeof contact.email === 'string' && contact.email.length > 0) {
+      return [
+        {
+          email: contact.email,
+          primary: true,
+          ...(typeof contact.created_at === 'string' && { firstSeenAt: contact.created_at }),
+          lastSeenAt: new Date().toISOString(),
+        },
+      ];
+    }
+    return [];
+  };
+
+  /** Write an email-pointer item for a non-primary address (idempotent). */
+  const putEmailPointer = async (email: string, ownerContactId: string): Promise<void> => {
+    try {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            contactId: emailRefId(email),
+            email,
+            email_ref: true,
+            email_ref_owner: ownerContactId,
+          },
+          ConditionExpression: 'attribute_not_exists(contactId)',
+        }),
+      );
+    } catch (err) {
+      if (err instanceof ConditionalCheckFailedException) return; // already present
+      throw err;
+    }
+  };
+
+  /** Delete an email-pointer item (idempotent; no condition). */
+  const deleteEmailPointer = async (email: string): Promise<void> => {
+    await doc.send(new DeleteCommand({ TableName: table, Key: { contactId: emailRefId(email) } }));
+  };
+
+  /** Persist emails[] (and an optional scalar swap) on the owner contact. */
+  const persistEmails = async (
+    contactId: string,
+    emails: ContactEmail[],
+    scalar?: string,
+  ): Promise<ContactItem> => {
+    const names: Record<string, string> = { '#emails': 'emails' };
+    const values: Record<string, unknown> = { ':emails': emails };
+    let expr = 'SET #emails = :emails';
+    if (scalar !== undefined) {
+      names['#email'] = 'email';
+      values[':email'] = scalar;
+      expr += ', #email = :email';
+    }
+    const { Attributes } = await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { contactId },
+        UpdateExpression: expr,
+        ConditionExpression: 'attribute_exists(contactId)',
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+        ReturnValues: 'ALL_NEW',
+      }),
+    );
+    return Attributes as ContactItem;
+  };
+
   return {
     async findByPhone(phone) {
       // Accepted risk: duplicate phones return the FIRST item the GSI yields
@@ -473,6 +663,32 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       if (hit.phone_ref === true) {
         const owner =
           typeof hit.phone_ref_owner === 'string' ? hit.phone_ref_owner : undefined;
+        if (owner === undefined) return undefined;
+        return getByIdImpl(owner);
+      }
+      return hit;
+    },
+
+    async findByEmail(email) {
+      // Email analog of findByPhone (A1). The byEmail GSI hashes the scalar
+      // `email` - carried by BOTH a contact's primary (the owner) and every
+      // non-primary email-pointer item - so ONE address resolves to exactly one
+      // row. A pointer hit (email_ref) hops to its owner, giving every existing
+      // caller multi-address resolution transparently. A dangling pointer
+      // (owner deleted) -> undefined.
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          IndexName: 'byEmail',
+          KeyConditionExpression: 'email = :e',
+          ExpressionAttributeValues: { ':e': email },
+        }),
+      );
+      const hit = (Items as ContactItem[] | undefined)?.[0];
+      if (!hit) return undefined;
+      if (hit.email_ref === true) {
+        const owner =
+          typeof hit.email_ref_owner === 'string' ? hit.email_ref_owner : undefined;
         if (owner === undefined) return undefined;
         return getByIdImpl(owner);
       }
@@ -809,6 +1025,113 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       target.lastSeenAt = at;
       try {
         await persistPhones(contactId, phones);
+      } catch {
+        // Best-effort: a lost race must never throw on inbound.
+      }
+    },
+
+    // --- Email-channel A1 email primitives (the multi-phone analogs) -------
+    // Same invariant maintenance as phones: exactly-one-primary, scalar `email`
+    // == the primary, and email-pointer items for non-primary addresses (so the
+    // byEmail GSI resolves them). Multi-write, non-transactional, and self-heals
+    // on retry - acceptable for low-frequency manual curation. Addresses are PII
+    // (doc PII posture): logs carry contactId + counts, never the address.
+
+    async addEmail(contactId, { email, label }) {
+      const contact = await requireContact(contactId);
+      const emails = seededEmails(contact);
+      if (emails.some((e) => e.email === email)) {
+        // Idempotent: address already attached. Persist the seed only if we just
+        // materialized emails[] from the scalar (so reads are consistent).
+        if (!Array.isArray(contact.emails)) return persistEmails(contactId, emails);
+        return contact;
+      }
+      const now = new Date().toISOString();
+      const entry: ContactEmail = {
+        email,
+        primary: false,
+        firstSeenAt: now,
+        lastSeenAt: now,
+        ...(label !== undefined && { label }),
+      };
+      const next = [...emails, entry];
+      const updated = await persistEmails(contactId, next);
+      // Non-primary address -> make it resolvable via a pointer.
+      await putEmailPointer(email, contactId);
+      log.info({ contactId, emailCount: next.length }, 'contact email added');
+      return updated;
+    },
+
+    async setPrimaryEmail(contactId, email, { primary, label }) {
+      const contact = await requireContact(contactId);
+      const emails = seededEmails(contact);
+      const target = emails.find((e) => e.email === email);
+      if (!target) {
+        throw new ConditionalCheckFailedException({
+          message: `contact ${contactId} has no email ${email}`,
+          $metadata: {},
+        });
+      }
+      if (label !== undefined) target.label = label;
+
+      // `primary: false` is intentionally IGNORED - the primary changes only by
+      // promoting ANOTHER address (primary: true on it), never by demoting the
+      // current one in isolation (this guarantees a contact always has exactly
+      // one primary, never a zero-primary state).
+      let scalarSwap: string | undefined;
+      const oldPrimary = emails.find((e) => e.primary && e.email !== email);
+      if (primary === true && !target.primary) {
+        for (const e of emails) e.primary = e.email === email;
+        scalarSwap = email;
+      }
+
+      // Crash-safe promote ordering (mirror setPhone): putEmailPointer(oldPrimary)
+      // FIRST (old still resolves via BOTH the scalar AND the new pointer), THEN
+      // persist the scalar swap, THEN deleteEmailPointer(new). Every address
+      // resolves to the owner at every step; pointers self-heal on a retried call.
+      if (scalarSwap !== undefined && oldPrimary) {
+        await putEmailPointer(oldPrimary.email, contactId);
+      }
+      const updated = await persistEmails(contactId, emails, scalarSwap);
+      if (scalarSwap !== undefined) {
+        await deleteEmailPointer(email);
+        log.info({ contactId }, 'contact primary email changed');
+      }
+      return updated;
+    },
+
+    async removeEmail(contactId, email) {
+      const contact = await requireContact(contactId);
+      const emails = seededEmails(contact);
+      const target = emails.find((e) => e.email === email);
+      if (!target) {
+        throw new ConditionalCheckFailedException({
+          message: `contact ${contactId} has no email ${email}`,
+          $metadata: {},
+        });
+      }
+      if (target.primary) {
+        // Never leave a contact with zero primary - the route maps this to 409.
+        throw new PrimaryEmailRemovalError();
+      }
+      const next = emails.filter((e) => e.email !== email);
+      const updated = await persistEmails(contactId, next);
+      await deleteEmailPointer(email);
+      log.info({ contactId, emailCount: next.length }, 'contact email removed');
+      return updated;
+    },
+
+    async touchEmailLastSeen(contactId, email, at) {
+      const contact = await getByIdImpl(contactId);
+      // No-op when there's no contact, no emails[] (do NOT churn-seed a
+      // scalar-only contact on every inbound), or no matching entry. Never throws.
+      if (!contact || !Array.isArray(contact.emails) || contact.emails.length === 0) return;
+      const emails = contact.emails.map((e) => ({ ...e }));
+      const target = emails.find((e) => e.email === email);
+      if (!target) return;
+      target.lastSeenAt = at;
+      try {
+        await persistEmails(contactId, emails);
       } catch {
         // Best-effort: a lost race must never throw on inbound.
       }

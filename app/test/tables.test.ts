@@ -106,11 +106,12 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('contacts: PK contactId; GSIs byPhone, byTypeStatus, byHousingAuthority', () => {
+  it('contacts: PK contactId; GSIs byPhone, byEmail, byTypeStatus, byHousingAuthority', () => {
     const t = spec('contacts');
     expect(t.hashKey.name).toBe('contactId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byPhone', 'byTypeStatus', 'byHousingAuthority']);
+    // byEmail (email-channel A1) is the byPhone analog: inbound address -> person.
+    expect(gsiNames(t)).toEqual(['byPhone', 'byEmail', 'byTypeStatus', 'byHousingAuthority']);
   });
 
   it('units: PK unitId; GSIs byLandlord, byStatus, byJurisdiction, byProperty (sparse, BE3)', () => {

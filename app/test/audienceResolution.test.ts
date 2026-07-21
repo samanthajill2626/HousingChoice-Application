@@ -91,6 +91,20 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
       return { contactId, type: 'tenant' };
     },
     async touchPhoneLastSeen() {},
+    // Email-channel A1 primitives - unused by audience resolution.
+    async findByEmail() {
+      return undefined;
+    },
+    async addEmail(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async setPrimaryEmail(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async removeEmail(contactId) {
+      return { contactId, type: 'tenant' };
+    },
+    async touchEmailLastSeen() {},
   };
 }
 

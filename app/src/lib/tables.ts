@@ -80,6 +80,11 @@ export const TABLES: readonly TableSpec[] = [
     gsis: [
       // Hottest lookup in the system: inbound phone -> person.
       { indexName: 'byPhone', hashKey: { name: 'phone', type: 'S' } },
+      // Email-channel A1: inbound email address -> person (the byPhone analog).
+      // Naturally sparse (only contacts with an address, plus email-pointer
+      // items for non-primary addresses, carry the `email` scalar). NOTE: the
+      // `users` table has an UNRELATED GSI also named byEmail - distinct table.
+      { indexName: 'byEmail', hashKey: { name: 'email', type: 'S' } },
       // Composite: all contacts of a type, optionally narrowed by status
       // (e.g. landlords by lead_status value).
       {

@@ -144,6 +144,11 @@ function makeSendFakes(
     setPhone: async () => contact!,
     removePhone: async () => contact!,
     touchPhoneLastSeen: async () => {},
+    findByEmail: async () => undefined,
+    addEmail: async () => contact!,
+    setPrimaryEmail: async () => contact!,
+    removeEmail: async () => contact!,
+    touchEmailLastSeen: async () => {},
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

@@ -27,14 +27,19 @@ describe('messages SK construction (`<ISO ts>#<msgId>`)', () => {
 
 describe('delivery-status machine (queued → sent → delivered | undelivered | failed)', () => {
   it('moves forward only', () => {
-    expect(allowedPriorStatuses('sent')).toEqual(['queued']);
+    // sent accepts queued_pending as a forward prior (T7: a held message's flush
+    // path is queued_pending -> queued -> sent; listing it is forward-only-safe).
+    expect(allowedPriorStatuses('sent')).toEqual(['queued', 'queued_pending']);
     expect(allowedPriorStatuses('delivered')).toEqual(['queued', 'sent']);
     expect(allowedPriorStatuses('undelivered')).toEqual(['queued', 'sent']);
     expect(allowedPriorStatuses('failed')).toEqual(['queued', 'sent']);
   });
 
-  it('nothing transitions INTO queued, and delivered can never be overwritten', () => {
-    expect(allowedPriorStatuses('queued')).toEqual([]);
+  it('only the queued_pending flush transitions INTO queued, and delivered can never be overwritten', () => {
+    // queued_pending -> queued is the T7 flush (a held message enters the send
+    // path the instant its connecting group opens); nothing else precedes queued.
+    expect(allowedPriorStatuses('queued')).toEqual(['queued_pending']);
+    expect(allowedPriorStatuses('queued_pending')).toEqual([]);
     for (const next of ['sent', 'delivered', 'undelivered', 'failed'] as const) {
       expect(allowedPriorStatuses(next)).not.toContain('delivered');
     }

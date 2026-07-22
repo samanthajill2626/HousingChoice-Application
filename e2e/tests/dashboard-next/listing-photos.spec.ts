@@ -199,6 +199,54 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     ).toEqual([]);
   });
 
+  test('a >5MB photo uploads, transcodes at confirm, and renders in the gallery', async ({
+    page,
+  }) => {
+    test.slow();
+    // A >5MB source plus a real server-side transcode: the tripled slow budget gives
+    // the '+ Add' re-enable expect headroom the default 30s per-test cap can't (DEC-7).
+    await devLogin(page);
+    const unitId = await createAvailableUnit(page.request);
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await expect(page.getByRole('heading', { name: 'Photos' })).toBeVisible();
+
+    // Generate a genuinely-decodable >5MB png IN THE BROWSER (random noise defeats
+    // png compression, so 1800x1800 comfortably exceeds 5MB) - the e2e workspace
+    // needs no image dependency, and the browser POSTs the bytes straight to MinIO.
+    const bigPngBase64 = await page.evaluate(async () => {
+      const side = 1800;
+      const canvas = document.createElement('canvas');
+      canvas.width = side;
+      canvas.height = side;
+      const ctx = canvas.getContext('2d')!;
+      const img = ctx.createImageData(side, side);
+      for (let i = 0; i < img.data.length; i += 1) img.data[i] = (Math.random() * 256) | 0;
+      ctx.putImageData(img, 0, 0);
+      const blob: Blob = await new Promise((r) => canvas.toBlob((b) => r(b!), 'image/png'));
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      return btoa(bin);
+    });
+    const bigPng = Buffer.from(bigPngBase64, 'base64');
+    expect(bigPng.length).toBeGreaterThan(5 * 1024 * 1024);
+
+    await photoInput(page).setInputFiles({ name: 'huge-noise.png', mimeType: 'image/png', buffer: bigPng });
+    // Upload + its own confirm settle when "+ Add" re-enables (the sibling tests'
+    // done-signal); the >5MB source's server-side transcode adds a few seconds.
+    await expect(page.getByRole('button', { name: '+ Add' })).toBeEnabled({ timeout: 30_000 });
+
+    // The gallery gained the photo - a transcoded RENDITION (the browser POSTed 5MB+
+    // straight to MinIO, which the OLD 5MB policy would have 400'd). Assert it
+    // rendered REAL bytes back (naturalWidth > 0), proving the rendition round-trips
+    // MinIO and decodes; and that no error alert is showing.
+    await expectLoadedBytes(
+      page.getByRole('img', { name: 'Property photo 1' }),
+      'the transcoded rendition never loaded bytes (>5MB source -> 2560/q85 jpeg served back)',
+    );
+    await expect(page.getByRole('alert')).toHaveCount(0);
+  });
+
   test('E1: a non-shareable (On hold) unit 404s the whole flyer, photos included', async ({
     page,
     request,

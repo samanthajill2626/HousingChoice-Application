@@ -15,13 +15,12 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isInlineMediaType, planMmsMedia } from '../lib/mediaTypes.js';
 import {
   MMS_UPLOAD_SOURCE_MAX_BYTES,
-  MMS_TRANSCODE_MAX_CONCURRENT,
   MMS_TRANSCODE_WAIT_TIMEOUT_MS,
   OUTBOUND_MMS_MAX_FILE_BYTES,
 } from '../lib/outboundMediaLimits.js';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
 import { transcodeForMms } from '../adapters/mediaTranscode.js';
-import { createSemaphore } from '../lib/semaphore.js';
+import { sharedTranscodeGate } from '../lib/transcodeGate.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 
 const UPLOAD_KEY_RE = /^uploads\/[0-9a-f-]+$/;
@@ -42,7 +41,7 @@ export function createMmsMediaRouter(deps: MmsMediaRouterDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
-  const transcodeGate = createSemaphore(MMS_TRANSCODE_MAX_CONCURRENT);
+  const transcodeGate = sharedTranscodeGate;
 
   const router = Router();
 

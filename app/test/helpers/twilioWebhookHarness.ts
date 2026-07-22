@@ -11,6 +11,7 @@ import request, { type Test } from 'supertest';
 import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
+import type { Semaphore } from '../../src/lib/semaphore.js';
 import type {
   InitiateCallParams,
   MessagingAdapter,
@@ -167,7 +168,7 @@ export interface FakeWorld {
   initiatedCalls: InitiateCallParams[];
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
-  presignPosts: { key: string; contentType: string }[];
+  presignPosts: { key: string; contentType: string; maxBytes?: number }[];
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -2372,7 +2373,11 @@ export function createFakeWorld(): FakeWorld {
       // tests can assert the key + content-type policy WITHOUT a live S3), and
       // return a plausible { url, fields } shape. The `key` + `Content-Type`
       // fields stand in for the SDK's policy-pinned form fields.
-      presignPosts.push({ key, contentType: opts.contentType });
+      presignPosts.push({
+        key,
+        contentType: opts.contentType,
+        ...(opts.maxBytes !== undefined && { maxBytes: opts.maxBytes }),
+      });
       return {
         url: 'https://fake-s3.local/hc-local-media',
         fields: {
@@ -2506,6 +2511,14 @@ export interface HarnessOptions {
    * calls without a real DynamoDB table. Omit to use the router's real default.
    */
   extractionRepo?: ExtractionRepo;
+  /**
+   * unit-photo-transcode (Task 4): inject a transcode gate into the units
+   * confirm route (threaded through buildApp -> createApiRouter ->
+   * createUnitsRouter). Tests pass a rejecting stub to drive the 503
+   * transcode_busy path without saturating the real shared gate. Omit for the
+   * real default.
+   */
+  transcodeGate?: Semaphore;
 }
 
 export interface Harness {
@@ -2600,6 +2613,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // streams the stored recording back out of the SAME media store the voice
       // recording callback wrote it into.
       ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
+      // unit-photo-transcode (Task 4): thread the injected gate through to the
+      // units confirm route (createApiRouter -> createUnitsRouter).
+      ...(opts.transcodeGate !== undefined && { transcodeGate: opts.transcodeGate }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

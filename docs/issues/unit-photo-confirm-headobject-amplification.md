@@ -3,9 +3,10 @@ id: unit-photo-confirm-headobject-amplification
 title: "Unit-photo confirm route has no rate limiter; up to 100 HeadObjects per authed call"
 type: improvement
 severity: low
-status: open
+status: resolved
 area: app
 created: 2026-07-15
+resolved: 2026-07-21
 refs: app/src/routes/units.ts
 ---
 
@@ -25,3 +26,25 @@ limiter indirectly paces confirms - but a direct confirm caller bypasses that.
 **Suggested fix.** Add a matching `createUserRateLimit` (routeKey
 `unit_photo_confirm`, ~30/min) to the confirm route, mirroring presign. Cheap,
 symmetric, closes the direct-caller gap. Not merge-blocking.
+
+**Update (2026-07-21, unit-photo-transcode).** The "HeadObject is cheap ... not
+an availability risk today" premise no longer holds: the transcode feature makes
+confirm the app's MOST expensive endpoint - a >5MB source is downloaded and
+sharp-transcoded behind the SHARED 2-slot gate (now shared with MMS confirm), so
+an unfenced caller can pin both slots + both cores and 503 everyone else. The
+limiter went from "not merge-blocking" to load-bearing.
+
+**Resolution (2026-07-21).** Added `createUserRateLimit` (routeKey
+`unit_photo_confirm`) to `POST /api/units/:id/photos/confirm` in
+app/src/routes/units.ts, mounted before the handler like the presign limiter.
+Sized at 60/min per user (Cameron raised it from the initial 30 at the
+2026-07-21 planner review, finding P2): unlike the MMS confirm (1-2
+attachments per message, 20/min), photo confirms are BULK BY DESIGN - D5
+chunking sends each >5MB file in its own request, and a 35+ big-photo drop
+with fast (~1-2s) transcodes plus the batched small confirm could
+legitimately exceed 30 requests inside one 60s window (UNIT_MEDIA_MAX is
+100, so such drops are in-scope). 60 gives 2x headroom over the fastest
+physically-realizable dashboard pace and still kills scripted tight loops
+(each admitted request stays bounded by the shared gate + the per-request
+transcode cap). Covered by the `MF-2a` limiter test in
+app/test/unitsApiPhotos.test.ts.

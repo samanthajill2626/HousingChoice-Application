@@ -13,6 +13,7 @@ import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { createMediaStore, type MediaStore } from '../adapters/mediaStore.js';
+import type { Semaphore } from '../lib/semaphore.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
 import { isInlineMediaType, isTwilioDeliverableType, normalizeStoredMediaType } from '../lib/mediaTypes.js';
 import { renditionFor } from '../lib/mmsRenditions.js';
@@ -188,6 +189,13 @@ export interface ApiRouterDeps {
    * then answers 404 (nothing is stored locally).
    */
   mediaStore?: MediaStore;
+  /**
+   * unit-photo-transcode (Task 4): the shared transcode gate, threaded to the
+   * units confirm route (>5MB fit). Injected by the harness for the 503
+   * transcode_busy test; createUnitsRouter defaults to the process-wide shared
+   * instance when omitted.
+   */
+  transcodeGate?: Semaphore;
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
   settingsRepo?: SettingsRepo;
@@ -663,6 +671,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // unit-photos: presign/confirm direct-upload + display resolution
       // (presign-per-read).
       ...(mediaStore !== undefined && { mediaStore }),
+      // unit-photo-transcode: the shared transcode gate for the confirm >5MB
+      // branch (test seam; createUnitsRouter defaults to the shared instance).
+      ...(deps.transcodeGate !== undefined && { transcodeGate: deps.transcodeGate }),
     }),
   );
   // Tours CRUD (Tours feature; requireAuth — VAs schedule tours, no admin gate).

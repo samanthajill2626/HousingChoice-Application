@@ -23,6 +23,7 @@ import {
   createPlacementFromTour,
   createTourRelay,
   getConversation,
+  getNoShowCheckinDraft,
   patchTour,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
@@ -163,6 +164,8 @@ function TourDetailLoaded({
   const [modal, setModal] = useState<'book' | 'reschedule' | 'outcome' | 'cancel' | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
+  // "Send no-show check-in" seed handed to TourConversation (nonce bumps per click).
+  const [noShowSeed, setNoShowSeed] = useState<{ body: string; nonce: number } | null>(null);
   // The "Also close the group text?" ask, opened AFTER a terminal outcome saves.
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
@@ -185,6 +188,12 @@ function TourDetailLoaded({
   const canReschedule = RESCHEDULABLE_UI.has(tour.status);
   const canCancel = CANCELABLE.has(tour.status);
   const canMarkNoShow = tour.status === 'scheduled';
+  // "Send no-show check-in" shows only once the tour start has passed AND the tour
+  // is still scheduled or already no_show (hidden for canceled/toured/closed/requested).
+  const startPassed =
+    typeof tour.scheduledAt === 'string' && new Date(tour.scheduledAt).getTime() <= Date.now();
+  const canSendNoShowCheckin =
+    startPassed && (tour.status === 'scheduled' || tour.status === 'no_show');
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   const isConverted = typeof tour.convertedPlacementId === 'string';
@@ -206,6 +215,22 @@ function TourDetailLoaded({
   };
   const markToured = (): void => void runDirect(() => patchTour(tourId, { status: 'toured' }), 'Status update failed');
   const markNoShow = (): void => void runDirect(() => patchTour(tourId, { status: 'no_show' }), 'Status update failed');
+
+  // Manual no-show check-in: fetch the editable template, switch the mobile pane to
+  // the conversation, and hand the body to TourConversation which selects the Tenant
+  // tab and prefills its composer. Kept HERE (not in the kebab) so the trigger can
+  // move to a standalone button later without rewiring the behavior. Fetch failure
+  // surfaces in the header alert; nothing is seeded. The send itself rides the normal
+  // composer sendMessage path, so the consent gate / opt-out / kill-switch all apply.
+  const handleSendNoShowCheckin = (): void => {
+    setActionError(null);
+    setPane('conversation');
+    void getNoShowCheckinDraft(tourId)
+      .then(({ body }) => setNoShowSeed((prev) => ({ body, nonce: (prev?.nonce ?? 0) + 1 })))
+      .catch((err: unknown) =>
+        setActionError(err instanceof ApiError ? err.message : 'Could not load the check-in message'),
+      );
+  };
 
   // Provision the masked group thread (members auto-resolved server-side); shared
   // by the header kebab AND the left-pane empty state.
@@ -408,6 +433,8 @@ function TourDetailLoaded({
             onCancel={() => setModal('cancel')}
             canMarkNoShow={canMarkNoShow}
             onMarkNoShow={markNoShow}
+            canSendNoShowCheckin={canSendNoShowCheckin}
+            onSendNoShowCheckin={handleSendNoShowCheckin}
             canOpenGroup={canOpenGroup}
             onOpenGroup={() => void handleOpenGroup()}
             busy={busy}
@@ -455,6 +482,7 @@ function TourDetailLoaded({
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
             tourMilestones={tourMilestones}
+            {...(noShowSeed !== null && { noShowDraft: noShowSeed })}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>

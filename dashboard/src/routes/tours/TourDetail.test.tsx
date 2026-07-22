@@ -23,6 +23,7 @@ const getContact = vi.fn();
 const getConversations = vi.fn();
 const getTourActivity = vi.fn();
 const getTourReminders = vi.fn();
+const getNoShowCheckinDraft = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversation = vi.fn();
 const getConversationMembers = vi.fn();
@@ -45,6 +46,7 @@ vi.mock('../../api/index.js', async () => {
     getConversations: (...a: unknown[]) => getConversations(...a),
     getTourActivity: (...a: unknown[]) => getTourActivity(...a),
     getTourReminders: (...a: unknown[]) => getTourReminders(...a),
+    getNoShowCheckinDraft: (...a: unknown[]) => getNoShowCheckinDraft(...a),
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversation: (...a: unknown[]) => getConversation(...a),
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
@@ -166,6 +168,9 @@ beforeEach(() => {
   });
   getConversationMembers.mockResolvedValue([]);
   markConversationRead.mockResolvedValue(undefined);
+  getNoShowCheckinDraft.mockResolvedValue({
+    body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
+  });
 });
 
 describe('TourDetail - load + header', () => {
@@ -355,6 +360,58 @@ describe('TourDetail - kebab guards', () => {
     await openKebab();
     await userEvent.click(screen.getByRole('menuitem', { name: 'Mark no-show' }));
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'no_show' });
+  });
+});
+
+describe('TourDetail - Send no-show check-in (manual)', () => {
+  const CHECKIN = 'Hi! We noticed you may have missed your tour. Want to reschedule?';
+
+  async function openKebab() {
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+  }
+
+  it('the kebab shows the item once the tour start has passed (scheduled)', async () => {
+    // makeTour default scheduledAt 2026-07-10 is already in the past -> visible.
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: 'Send no-show check-in' })).toBeInTheDocument();
+  });
+
+  it('is hidden while the tour start is still in the future', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: '2999-01-01T00:00:00Z' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    // The other scheduled actions remain; only the no-show check-in is gated out.
+    expect(screen.getByRole('menuitem', { name: 'Mark no-show' })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('menuitem', { name: 'Send no-show check-in' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('is available for a no_show tour (send again after marking no-show)', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'no_show' }));
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    expect(screen.getByRole('menuitem', { name: 'Send no-show check-in' })).toBeInTheDocument();
+  });
+
+  it('clicking it fetches the copy and prefills the tenant composer with the template', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    getNoShowCheckinDraft.mockResolvedValue({ body: CHECKIN });
+    renderDetail();
+    await waitLoaded();
+    await openKebab();
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Send no-show check-in' }));
+    // TourConversation selects the Tenant tab and seeds its composer via the nonce.
+    expect(await screen.findByRole('tab', { name: /Tenant/, selected: true })).toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(CHECKIN),
+    );
+    expect(getNoShowCheckinDraft).toHaveBeenCalledWith('tour-abc');
   });
 });
 

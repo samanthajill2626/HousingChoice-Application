@@ -18,6 +18,9 @@ export interface TourActionsMenuProps {
   /** Mark no-show (scheduled only). */
   canMarkNoShow: boolean;
   onMarkNoShow: () => void;
+  /** Send the manual no-show check-in (tour start passed; scheduled or no_show). */
+  canSendNoShowCheckin: boolean;
+  onSendNoShowCheckin: () => void;
   /** Open group text (no group yet + tour not dead). */
   canOpenGroup: boolean;
   onOpenGroup: () => void;
@@ -32,6 +35,8 @@ export function TourActionsMenu({
   onCancel,
   canMarkNoShow,
   onMarkNoShow,
+  canSendNoShowCheckin,
+  onSendNoShowCheckin,
   canOpenGroup,
   onOpenGroup,
   busy = false,
@@ -57,7 +62,8 @@ export function TourActionsMenu({
 
   // Nothing qualifies -> no kebab at all (a closed tour with a group has no branch
   // actions, so the parent shows only the header + primary CTA).
-  if (!canReschedule && !canCancel && !canMarkNoShow && !canOpenGroup) return null;
+  if (!canReschedule && !canCancel && !canMarkNoShow && !canOpenGroup && !canSendNoShowCheckin)
+    return null;
 
   const run = (fn: () => void): void => {
     setOpen(false);
@@ -101,6 +107,17 @@ export function TourActionsMenu({
               onClick={() => run(onMarkNoShow)}
             >
               Mark no-show
+            </button>
+          ) : null}
+          {canSendNoShowCheckin ? (
+            <button
+              type="button"
+              role="menuitem"
+              className={styles.item}
+              disabled={busy}
+              onClick={() => run(onSendNoShowCheckin)}
+            >
+              Send no-show check-in
             </button>
           ) : null}
           {canOpenGroup ? (

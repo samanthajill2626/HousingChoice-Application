@@ -97,10 +97,13 @@ function makeFakePoolNumbers(): PoolNumbersService & {
 }
 
 /**
- * A pool service emulating the M1.7 kill-switch OFF: provisionForGroup
- * always refuses (as the real service does on the deployed twilio driver
- * pre-A2P). NO number is ever handed out — the route must surface 503
- * relay_provisioning_disabled.
+ * A pool service emulating the M1.7 kill-switch OFF at a TIER-3 miss:
+ * provisionForGroup throws RelayProvisioningDisabledError. This faithfully models
+ * the REAL service on the deployed twilio driver pre-A2P - a fresh-pair, no-spare
+ * roster (no reuse, no spare) with relayLiveProvisioning off hits tier 3, which
+ * cannot warm a number and so throws (proven in poolNumbers.test.ts). The 503 test
+ * below sends a single fresh member, exactly that fresh-pair/no-spare scenario. NO
+ * number is ever handed out - the route must surface 503 relay_provisioning_disabled.
  */
 function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: number } {
   const DISABLED_MESSAGE =

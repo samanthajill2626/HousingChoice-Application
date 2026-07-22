@@ -56,17 +56,23 @@ const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 const MAX_PROVISION_ATTEMPTS = 20;
 
 /**
- * Thrown by warmOneNumber when buying a pool number is required but the relay
+ * Thrown when buying/warming a pool number is required but the relay
  * number-provisioning kill-switch is off (config.relayLiveProvisioning ===
  * false). Raised BEFORE any adapter.provisionPhoneNumber call, so the deployed
  * twilio driver can never accidentally PURCHASE a real number before A2P
  * approval / an explicit RELAY_LIVE_PROVISIONING=true decision. The message is
  * actionable and PII-free.
  *
- * NOTE (T5): provisionForGroup NO LONGER throws this - it returns
- * `needs_connecting` instead (buying moved to warmOneNumber). The relay-group
- * routes still catch it defensively, but on the group-create path it is now
- * surfaced only from a warm job, not the route.
+ * Two throw sites, both gated by the same flag:
+ *   - warmOneNumber (T4): buying a warm spare.
+ *   - provisionForGroup (T5) at a TIER-3 miss (no reuse AND no spare): with the
+ *     flag OFF the connect-when-ready path cannot complete (no number now and none
+ *     can be warmed), so it throws rather than returning `needs_connecting` -
+ *     otherwise the caller would mint a CONNECTING group whose warm job dies in the
+ *     worker, stranding it permanently connecting. The routes map the throw to a
+ *     clean 503 and the whole path stays dormant. With the flag ON that same
+ *     tier-3 miss returns `needs_connecting` (buying deferred to a warm job).
+ * Tiers 1/2 (reuse/spare) never throw - they never buy.
  */
 export class RelayProvisioningDisabledError extends Error {
   constructor(message: string) {
@@ -93,10 +99,13 @@ export interface PoolNumbersServiceDeps {
  *    fresh spare. Under the warm-pool model provisionForGroup never BUYS, so
  *    `provisioned` is always false here; it is retained on the shape so existing
  *    callers/telemetry that read it keep compiling.
- *  - `needs_connecting`: no reusable number AND no free spare, so the caller must
- *    create a CONNECTING group and enqueue a warm job (connect-when-ready). NO
- *    number is bought and NO kill-switch error is thrown from this path (buying
- *    is solely warmOneNumber, which carries the kill-switch guard).
+ *  - `needs_connecting`: no reusable number AND no free spare (a TIER-3 miss) WITH
+ *    relay live provisioning ON, so the caller must create a CONNECTING group and
+ *    enqueue a warm job (connect-when-ready). No number is bought here (buying is
+ *    solely warmOneNumber). When the kill-switch is OFF this same tier-3 miss
+ *    THROWS RelayProvisioningDisabledError instead of returning this variant (it
+ *    cannot warm a number, so it fails clean via a 503 rather than stranding a
+ *    connecting group whose warm job would die in the worker).
  */
 export type ProvisionResult =
   | { kind: 'assigned'; poolNumber: string; record: PoolNumberItem; provisioned: boolean }
@@ -138,20 +147,26 @@ export interface OnNumberRegisteredInput {
 export interface PoolNumbersService {
   /**
    * Acquire a pool number for a relay GROUP via the THREE-TIER ladder (T5),
-   * returning a discriminated ProvisionResult (never buying, never throwing the
-   * kill-switch error):
+   * returning a discriminated ProvisionResult. It never BUYS; it throws the
+   * kill-switch error (RelayProvisioningDisabledError) ONLY at a tier-3 miss when
+   * relay live provisioning is off (see TIER 3):
    *   TIER 1 - reuse, PREFER MULTIPLEX: burn-as-claim onto the first active
    *     same-driver number that ALREADY hosts a group (non-empty burn) and does
    *     not overlap `rosterPhones`.
    *   TIER 2 - fresh spare: burn-as-claim onto an active same-driver EMPTY-burn
    *     spare that is NOT earmarked to a connecting group (G2 - same "fresh spare"
    *     definition as countFreshSpares).
-   *   TIER 3 - connect-when-ready: neither hit -> `{ kind: 'needs_connecting' }`
-   *     (the caller creates a connecting group + enqueues a warm job).
+   *   TIER 3 - connect-when-ready: neither hit. With the flag ON ->
+   *     `{ kind: 'needs_connecting' }` (the caller creates a connecting group +
+   *     enqueues a warm job). With the flag OFF -> THROWS
+   *     RelayProvisioningDisabledError (no number now and none can be warmed; the
+   *     routes map it to a 503 and the path stays dormant). Tiers 1/2 are
+   *     unaffected by the flag - they never buy.
    * `rosterPhones` = every member phone of the NEW group; MUST be non-empty.
-   * Before every return it awaits refillBufferIfNeeded (tops the warm spare
-   * buffer; on dev target 0 this enqueues nothing) and opportunistically fires
-   * the retirement + stuck-warming sweeps.
+   * Before every NON-THROWING return it awaits refillBufferIfNeeded (tops the warm
+   * spare buffer; on dev target 0 this enqueues nothing) and opportunistically
+   * fires the retirement + stuck-warming sweeps. The tier-3 throw short-circuits
+   * BEFORE refillBufferIfNeeded, so with the flag off nothing is enqueued.
    */
   provisionForGroup(rosterPhones: string[], tag?: string): Promise<ProvisionResult>;
   /** Stamp a group-close time onto the number (the retirement clock). */
@@ -489,11 +504,28 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         }
       }
 
-      // TIER 3 - CONNECT-WHEN-READY: no reusable number and no free spare. Do NOT
-      // buy here (buying is solely warmOneNumber, T4) and do NOT throw the
-      // kill-switch error - signal the caller to create a connecting group +
-      // enqueue a warm job. Still top the buffer up first (dev target 0 enqueues
-      // nothing; prod refills the spare this group would have consumed).
+      // TIER 3 - CONNECT-WHEN-READY: no reusable number and no free spare. Buying
+      // is solely warmOneNumber (T4), gated by the SAME kill-switch, so when relay
+      // live provisioning is OFF (the deployed default pre-A2P) this path cannot
+      // complete: there is no number now AND none can be warmed. Throw the identical
+      // kill-switch error the old buy path used (routes map it to a clean 503)
+      // rather than returning needs_connecting - otherwise the caller would mint a
+      // CONNECTING group and enqueue a warm job that dies with
+      // RelayProvisioningDisabledError in the worker, stranding the group
+      // permanently connecting. Thrown BEFORE refillBufferIfNeeded, so with the
+      // flag off NOTHING is enqueued and the whole warm/connect path stays dormant.
+      // Tiers 1/2 are unaffected (they never buy, so they resolve regardless).
+      if (!config.relayLiveProvisioning) {
+        throw new RelayProvisioningDisabledError(
+          'relay number provisioning is disabled in this environment — set ' +
+            'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number',
+        );
+      }
+
+      // Flag ON: do NOT buy here (buying is solely warmOneNumber, T4) - signal the
+      // caller to create a connecting group + enqueue a warm job. Still top the
+      // buffer up first (dev target 0 enqueues nothing; prod refills the spare this
+      // group would have consumed).
       await refillBufferIfNeeded();
       log.info(
         { event: 'relay_needs_connecting' },

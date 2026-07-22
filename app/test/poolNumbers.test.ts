@@ -17,7 +17,11 @@ import {
   type PoolNumberItem,
   type PoolNumbersRepo,
 } from '../src/repos/poolNumbersRepo.js';
-import { createPoolNumbersService, RELAY_WARM_JOB } from '../src/services/poolNumbers.js';
+import {
+  createPoolNumbersService,
+  RelayProvisioningDisabledError,
+  RELAY_WARM_JOB,
+} from '../src/services/poolNumbers.js';
 import {
   _resetForTests,
   configureOutboundQueue,
@@ -382,18 +386,29 @@ describe('poolNumbersService.provisionForGroup - three-tier ladder (T5)', () => 
     expect(repo.store.get('+1EARMARKED')!.pending_conversation_id).toBe('conv-waiting');
   });
 
-  it('kill-switch OFF no longer throws: a tier-3 miss returns needs_connecting (buying moved to warmOneNumber)', async () => {
+  it('kill-switch OFF: a tier-3 miss THROWS RelayProvisioningDisabledError (no buy, no warm job enqueued - the connect-when-ready path stays dormant, route surfaces a clean 503)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
     const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    // The ONLY candidate overlaps the roster and there is no spare -> tier-3 miss.
+    // With the kill-switch OFF the connect-when-ready path cannot complete (no
+    // number now and warming is forbidden), so provisionForGroup must THROW rather
+    // than return needs_connecting - otherwise the caller mints a CONNECTING group
+    // whose warm job dies in the worker, stranding it permanently connecting.
     await repo.create({ poolNumber: '+1OVERLAP', voiceCapable: true, smsCapable: true, provisionedVia: 'twilio', burn: [T1] });
+    // A NON-ZERO buffer target so a stray refillBufferIfNeeded WOULD enqueue a warm
+    // job; asserting zero proves the throw short-circuits BEFORE any refill (dormant).
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
     const svc = createPoolNumbersService({
-      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOff(),
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger,
+      config: makeConfig({ messagingDriver: 'twilio', relayLiveProvisioning: false, relaySpareBufferTarget: 2 }),
     });
 
-    const result = await svc.provisionForGroup([T1, L1]); // overlaps; no spare
-    expect(result).toEqual({ kind: 'needs_connecting' }); // NOT a throw
-    expect(provisionSpy).not.toHaveBeenCalled();
+    await expect(svc.provisionForGroup([T1, L1])).rejects.toBeInstanceOf(RelayProvisioningDisabledError);
+    expect(provisionSpy).not.toHaveBeenCalled(); // never buys - the buy path is warmOneNumber only
+    // NO warm job enqueued by this method: the path is fully dormant with the flag off.
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_WARM_JOB)).toHaveLength(0);
   });
 
   it('reuse works regardless of the kill-switch: a clean twilio-tagged burned active is claimed with the flag OFF', async () => {
@@ -407,6 +422,22 @@ describe('poolNumbersService.provisionForGroup - three-tier ladder (T5)', () => 
     const result = await svc.provisionForGroup([T1, L1]);
     expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1CLEAN', provisioned: false });
     expect(adapter.provisions).toBe(0);
+  });
+
+  it('spare works regardless of the kill-switch: a fresh twilio-tagged spare is consumed with the flag OFF (tier 2 never buys)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    // A pristine twilio-tagged spare. Tier 2 consumes it (no buy, no throw) even
+    // with the kill-switch OFF - only a tier-3 MISS is gated by the flag.
+    await seedSpare(repo, '+1TWSPARE', { via: 'twilio' });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOff(),
+    });
+
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1TWSPARE', provisioned: false });
+    expect(provisionSpy).not.toHaveBeenCalled(); // spare consumed, nothing bought
   });
 
   it('driver source-isolation: the twilio path does NOT reuse a console-tagged number -> needs_connecting', async () => {

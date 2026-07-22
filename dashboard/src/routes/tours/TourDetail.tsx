@@ -16,7 +16,7 @@
 // tours that are convertible but unconverted (an API-recorded outcome, or the
 // retry path when the chained conversion fails). Audience: staff see
 // "property" for the unit (GLOSSARY).
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
 import {
   ApiError,
@@ -222,14 +222,21 @@ function TourDetailLoaded({
   // move to a standalone button later without rewiring the behavior. Fetch failure
   // surfaces in the header alert; nothing is seeded. The send itself rides the normal
   // composer sendMessage path, so the consent gate / opt-out / kill-switch all apply.
+  // The in-flight draft fetch is aborted on unmount (and superseded on a re-click).
+  const noShowFetchRef = useRef<AbortController | null>(null);
+  useEffect(() => () => noShowFetchRef.current?.abort(), []);
   const handleSendNoShowCheckin = (): void => {
     setActionError(null);
     setPane('conversation');
-    void getNoShowCheckinDraft(tourId)
+    noShowFetchRef.current?.abort();
+    const ac = new AbortController();
+    noShowFetchRef.current = ac;
+    void getNoShowCheckinDraft(tourId, ac.signal)
       .then(({ body }) => setNoShowSeed((prev) => ({ body, nonce: (prev?.nonce ?? 0) + 1 })))
-      .catch((err: unknown) =>
-        setActionError(err instanceof ApiError ? err.message : 'Could not load the check-in message'),
-      );
+      .catch((err: unknown) => {
+        if (ac.signal.aborted) return; // unmounted or superseded - nothing to surface
+        setActionError(err instanceof ApiError ? err.message : 'Could not load the check-in message');
+      });
   };
 
   // Provision the masked group thread (members auto-resolved server-side); shared

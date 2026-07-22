@@ -225,7 +225,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   // tour page fetches it here to PREFILL the tenant 1:1 composer. Copy is
   // tour-independent and var-less; resolveMessage keeps it in sync with any
   // editable override, exactly like the reminder-body resolution above.
-  router.get('/:tourId/no-show-checkin-draft', (_req, res) => {
+  router.get('/:tourId/no-show-checkin-draft', async (req, res) => {
+    // 404 on an unknown tour, mirroring GET /:tourId/reminders. The copy itself is
+    // tour-independent, but a draft is always requested for a real tour, so a
+    // bogus id is a client error, not a 200 with the template.
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
     res.json({ body: resolveMessage('tour.no_show_checkin') });
   });
 

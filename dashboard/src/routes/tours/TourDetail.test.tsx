@@ -411,7 +411,8 @@ describe('TourDetail - Send no-show check-in (manual)', () => {
     await waitFor(() =>
       expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(CHECKIN),
     );
-    expect(getNoShowCheckinDraft).toHaveBeenCalledWith('tour-abc');
+    // Called with the tourId + an AbortSignal (the fetch is aborted on unmount).
+    expect(getNoShowCheckinDraft).toHaveBeenCalledWith('tour-abc', expect.any(AbortSignal));
   });
 });
 

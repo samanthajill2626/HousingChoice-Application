@@ -1034,7 +1034,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
   });
 
-  it("status-only {status:'no_show'} keeps the pending rows (the reschedule nudge is for exactly this)", async () => {
+  it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
     const { app, world } = makeWebhookHarness();
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
@@ -1043,8 +1043,10 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
 
     const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
     expect(res.status).toBe(200);
-    const after = pendingRows(world, tourId).map((r) => r.reminderId).sort();
-    expect(after).toEqual(before); // same rows - nothing canceled, nothing re-armed
+    // no_show is terminal for auto-reminders now: the pending rungs are canceled so
+    // a tour flagged no-show never later fires "your tour is tomorrow". The
+    // "want to reschedule?" check-in is sent manually, not as an armed rung.
+    expect(pendingRows(world, tourId)).toHaveLength(0);
   });
 });
 
@@ -1195,6 +1197,36 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
+
+  it('PATCH -> no_show cancels the still-pending rungs (no auto no-show check-in)', async () => {
+    const FIXED_NOW = '2026-07-13T10:00:00.000Z';
+    // Future tour, so day_before/morning_of/en_route are all still upcoming.
+    const SCHEDULED_AT = '2026-07-20T10:00:00.000Z';
+    const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
+
+    const created = await authed(app)
+      .post('/api/tours')
+      .send({ ...BASE_CREATE_BODY, scheduledAt: SCHEDULED_AT });
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // Pre-no_show: rungs are armed and uncanceled (en_route among them).
+    const armed = [...world.tourRemindersMap.values()].filter(
+      (r) => r.tourId === tourId && r.canceledAt === undefined,
+    );
+    expect(armed.map((r) => r.kind)).toContain('en_route');
+
+    // Staff can mark no_show even before the tour (canMarkNoShow is not start-gated).
+    const res = await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' });
+    expect(res.status).toBe(200);
+
+    // Every rung for this tour is now canceled - nothing fires "your tour is
+    // tomorrow" at a tour flagged no-show, and there is no no_show_checkin rung.
+    const after = [...world.tourRemindersMap.values()].filter((r) => r.tourId === tourId);
+    expect(after.length).toBeGreaterThan(0);
+    expect(after.every((r) => r.canceledAt !== undefined)).toBe(true);
+    expect(after.some((r) => r.kind === 'no_show_checkin')).toBe(false);
+  });
 });
 
 // ============================================================================
@@ -1217,6 +1249,13 @@ describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
     expect(res.body).toEqual({
       body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
     });
+  });
+
+  it('404s for an unknown tour (mirrors the reminders route)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await authed(app).get('/api/tours/tour-does-not-exist/no-show-checkin-draft');
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'tour_not_found' });
   });
 });
 

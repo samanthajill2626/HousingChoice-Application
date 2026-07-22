@@ -1022,17 +1022,10 @@ function buildToursMatrix(now: Date, availableUnitIds: string[], searchingTenant
         tour['updatedAt'] = scheduledAt;
 
         if (status === 'no_show') {
-          const checkinDueAt = iso(scheduledMs + 30 * MINUTE_MS); // computeDueAt('no_show_checkin')
-          reminders.push({
-            reminderId: `rem-mx-${tourId}-nsc`,
-            tourId,
-            kind: 'no_show_checkin',
-            dueAt: checkinDueAt,
-            sentAt: checkinDueAt,
-            _reminderPartition: 'reminders',
-            createdAt,
-          });
-          tour['updatedAt'] = checkinDueAt;
+          // The no-show check-in is a MANUAL send now (not an auto-armed rung), so
+          // a no_show tour carries NO no_show_checkin reminder row. updatedAt still
+          // advances to ~when staff would mark the no-show (start + 30m).
+          tour['updatedAt'] = iso(scheduledMs + 30 * MINUTE_MS);
         } else {
           // toured / closed carry the exit-gate decision the route/conversion read.
           // The decision is recorded POST-visit (exit gate), so updatedAt advances a

@@ -22,7 +22,7 @@ variable "webhook_secret" {
 }
 
 variable "webhook_user" {
-  description = "Basic-auth username portion of the sink URL user-info. The app only checks the PASSWORD, so this is a stable, non-secret label for the Twilio-side credential (defense-in-depth pairs with the X-Twilio-Signature raw-body check - decision D4). Default 'twilio-events'."
+  description = "Basic-auth username portion of the sink URL user-info. The app only checks the PASSWORD (the shared secret, constant-time compared - decision D4), so this is a stable, non-secret label for the Twilio-side credential. Default 'twilio-events'."
   type        = string
   default     = "twilio-events"
 }

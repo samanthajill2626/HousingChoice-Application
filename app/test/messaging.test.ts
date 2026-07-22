@@ -25,6 +25,9 @@ const TWILIO_ENV = {
   TWILIO_API_KEY_SECRET: 'secret',
   TWILIO_AUTH_TOKEN: 'token',
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
+  // A real (non-mock) twilio config must carry the Event Streams webhook secret
+  // (config boot gate) - the promotion webhook fails open without it.
+  TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
 };
 
 // NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring and the

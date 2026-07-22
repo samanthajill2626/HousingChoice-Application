@@ -599,6 +599,25 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
           '(npm run secrets:push) or set MESSAGING_DRIVER=console. Refusing to start without them.',
       );
     }
+
+    // Event Streams promotion-webhook shared secret (relay-number-buying T3,
+    // security). The webhook is the SOLE warming->active promotion gate and its
+    // shared-secret auth SKIPS when the secret is unset - so a REAL deployed twilio
+    // stack that forgets it fails OPEN: a forged registration event could promote
+    // an unregistered number (a real 30034, the exact failure this feature
+    // prevents). Require it on every REAL twilio config; EXEMPT the hermetic/mock
+    // stack (TWILIO_API_BASE_URL set -> the in-process fake sink POSTs without a
+    // secret), which can never be a valid prod config (TWILIO_API_BASE_URL is
+    // rejected at boot when NODE_ENV=production). Console/local driver: not gated.
+    const isMockTwilio = twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0;
+    if (!isMockTwilio && !env.TWILIO_EVENTS_WEBHOOK_SECRET) {
+      throw new Error(
+        'MESSAGING_DRIVER=twilio requires TWILIO_EVENTS_WEBHOOK_SECRET (the Event Streams ' +
+          'number-registration webhook shared secret) - without it that webhook fails OPEN and a ' +
+          'forged registration event could promote an unregistered number. Hydrate from Parameter ' +
+          'Store (npm run secrets:push) or set MESSAGING_DRIVER=console. Refusing to start without it.',
+      );
+    }
   }
 
   // Relay number-provisioning kill-switch (M1.7 safety). DEFAULT: on when the

@@ -170,9 +170,11 @@ export interface MessagingAdapter {
   //                         phone string, which is fragile)
   //     phonenumber         digits only, NO leading + (non-E.164)
   //     messagingservicesid MG...
-  //   auth: X-Twilio-Signature computed over the RAW request body, validated
-  //     via RequestValidator(authToken).validate(fullUrl, rawBody, sig) - NOT
-  //     the classic sorted-form-params overload.
+  //   auth (decision D4): a shared secret carried in the Authorization header
+  //     (Basic-auth-in-URL - Twilio's native webhook-sink mechanism),
+  //     constant-time compared to config.twilioEventsWebhookSecret - NOT
+  //     X-Twilio-Signature (that raw-body scheme has SDK nuance). See
+  //     routes/webhooks/twilioEvents.ts.
   // (Also .pending / .failed and de-registration.* variants exist; log-only.)
   /**
    * ATTACH a purchased number (its PN... SID) to the configured A2P Messaging

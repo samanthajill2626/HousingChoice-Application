@@ -29,6 +29,7 @@ import type {
   ConversationsRepo,
 } from '../src/repos/conversationsRepo.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
+import type { MessagesRepo } from '../src/repos/messagesRepo.js';
 import type { AuditRepo } from '../src/repos/auditRepo.js';
 import type { OutboundQueueAdapter } from '../src/adapters/scheduler.js';
 import type { JobEnvelope } from '../src/jobs/types.js';
@@ -259,6 +260,23 @@ function makeReadyPool(opts: { burnResult?: boolean } = {}): PoolNumbersService 
   } as unknown as PoolNumbersService & { burns: { poolNumber: string; phones: string[] }[] };
 }
 
+/**
+ * A no-message messagesRepo for the ready-handler tests: flushQueuedMessages (T7)
+ * runs after the intro, so the handler needs a messagesRepo. These groups carry no
+ * queued_pending composes, so listByConversation returns [] and the flush enqueues
+ * nothing (the intro-only assertions below stay exact).
+ */
+function makeEmptyMessagesRepo(): MessagesRepo {
+  return {
+    async listByConversation() {
+      return [];
+    },
+    async updateDeliveryStatus() {
+      return false;
+    },
+  } as unknown as MessagesRepo;
+}
+
 function connectingGroup(conversationId: string, phones: string[]): ConversationItem {
   const now = new Date().toISOString();
   return {
@@ -289,7 +307,12 @@ describe('relay.numberReady handler (T6 - connect-when-ready open)', () => {
     const pool = makeReadyPool();
     const queue = makeRecordingQueue();
     configureOutboundQueue(queue);
-    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+    registerRelayNumberReadyJobHandler({
+      poolNumbersService: pool,
+      conversationsRepo: repo,
+      messagesRepo: makeEmptyMessagesRepo(),
+      logger,
+    });
 
     await dispatchJob({
       jobName: RELAY_NUMBER_READY_JOB,
@@ -317,7 +340,12 @@ describe('relay.numberReady handler (T6 - connect-when-ready open)', () => {
     const pool = makeReadyPool();
     const queue = makeRecordingQueue();
     configureOutboundQueue(queue);
-    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+    registerRelayNumberReadyJobHandler({
+      poolNumbersService: pool,
+      conversationsRepo: repo,
+      messagesRepo: makeEmptyMessagesRepo(),
+      logger,
+    });
 
     const payload = { conversationId: 'conv-dup', poolNumber: NEW_NUMBER };
     await dispatchJob({ jobName: RELAY_NUMBER_READY_JOB, payload });
@@ -341,7 +369,12 @@ describe('relay.numberReady handler (T6 - connect-when-ready open)', () => {
     const pool = makeReadyPool();
     const queue = makeRecordingQueue();
     configureOutboundQueue(queue);
-    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+    registerRelayNumberReadyJobHandler({
+      poolNumbersService: pool,
+      conversationsRepo: repo,
+      messagesRepo: makeEmptyMessagesRepo(),
+      logger,
+    });
 
     await dispatchJob({
       jobName: RELAY_NUMBER_READY_JOB,

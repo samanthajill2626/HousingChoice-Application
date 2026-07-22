@@ -30,6 +30,8 @@ import {
   RELAY_NUMBER_READY_JOB,
   type PoolNumbersService,
 } from '../services/poolNumbers.js';
+import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { flushQueuedMessages } from '../services/relayQueuedMessages.js';
 import { RELAY_INTRO_JOB } from './relayFanOut.js';
 import { defineJobHandler, enqueueImmediate } from './jobs.js';
 
@@ -63,6 +65,8 @@ export interface RelayNumberReadyJobDeps {
   /** Injected in tests; lazily built from config on first job run otherwise. */
   poolNumbersService?: PoolNumbersService;
   conversationsRepo?: ConversationsRepo;
+  /** Read by flushQueuedMessages (T7) to release queued_pending composes on open. */
+  messagesRepo?: MessagesRepo;
   logger?: Logger;
 }
 
@@ -74,11 +78,13 @@ export function registerRelayNumberReadyJobHandler(deps: RelayNumberReadyJobDeps
   const log = deps.logger ?? defaultLogger;
   let poolNumbers = deps.poolNumbersService;
   let conversations = deps.conversationsRepo;
+  let messages = deps.messagesRepo;
 
   defineJobHandler(RELAY_NUMBER_READY_JOB, async (rawPayload) => {
     const { conversationId, poolNumber } = parseRelayNumberReadyPayload(rawPayload);
     poolNumbers ??= createPoolNumbersService({ logger: deps.logger });
     conversations ??= createConversationsRepo({ logger: deps.logger });
+    messages ??= createMessagesRepo({ logger: deps.logger });
 
     // G3 read-check: only a group STILL connecting is opened. A redelivered job
     // (group already open) / a closed or unknown conversation is an idempotent
@@ -131,16 +137,16 @@ export function registerRelayNumberReadyJobHandler(deps: RelayNumberReadyJobDeps
     // connecting provision path skipped it: there was no number to send from).
     await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: conversationId });
 
-    // T7 SEAM (next slice): after the intro, flush any messages the composer
-    // QUEUED (delivery_status 'queued_pending') while the group was connecting, in
-    // created_at order, so they deliver right after the intro:
-    //     await flushQueuedMessages(conversationId);
-    // Deliberately NOT built here - left as a clear, ordered seam. The intro must
-    // land first.
+    // T7: AFTER the intro, flush any messages the composer QUEUED (delivery_status
+    // 'queued_pending') while the group was connecting - in created_at order, so
+    // they deliver right after the intro. The intro MUST be enqueued first (above):
+    // the fan-out handler vetoes a non-open group, and staff expect the intro to
+    // lead. A queued message must never be lost.
+    await flushQueuedMessages(conversationId, { messagesRepo: messages, logger: deps.logger });
 
     log.info(
       { conversationId, event: 'relay_number_ready_opened' },
-      'relay.numberReady: connecting group opened on its dedicated number, intro enqueued',
+      'relay.numberReady: connecting group opened on its dedicated number, intro enqueued, queued messages flushed',
     );
   });
 }

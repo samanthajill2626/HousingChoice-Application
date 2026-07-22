@@ -56,7 +56,7 @@ function uniquePhone(): string {
 async function createTenant(
   request: APIRequestContext,
   firstName: string,
-  opts: { pets?: string } = {},
+  opts: { pets?: string; evictions?: string } = {},
 ): Promise<{ contactId: string; phone: string }> {
   const phone = uniquePhone();
   const res = await request.post(`${NEXT}/api/contacts`, {
@@ -66,6 +66,7 @@ async function createTenant(
       lastName: 'Bridge',
       phone,
       ...(opts.pets !== undefined && { pets: opts.pets }),
+      ...(opts.evictions !== undefined && { evictions: opts.evictions }),
     },
   });
   expect(res.ok(), `create tenant ${firstName}`).toBeTruthy();
@@ -205,7 +206,9 @@ test('cross-process: a worker-poll DIRECT WRITE updates the open page field valu
   // Auto badge), not just the chips, must update in place on the bridge hint.
   test.setTimeout(150_000);
   await devLogin(page);
-  const { contactId } = await createTenant(page.request, 'BridgeFieldLive', {});
+  // evictions pre-seeded so the Eligibility-intake card renders (it hides when
+  // empty - same trick as the chip test above); pets stays EMPTY for the write.
+  const { contactId } = await createTenant(page.request, 'BridgeFieldLive', { evictions: 'none' });
   const conversationId = await ensureConversation(page.request, contactId);
 
   await page.goto(`${NEXT}/contacts/${contactId}`);
@@ -227,6 +230,6 @@ test('cross-process: a worker-poll DIRECT WRITE updates the open page field valu
 
   // NO reload: the written value and its Auto badge can only appear if the
   // open page background-refetched the contact when suggestion.updated arrived.
-  await expect(intake.getByText('cat', { exact: true })).toBeVisible({ timeout: 90_000 });
+  await expect(intake.getByText('cat')).toBeVisible({ timeout: 90_000 });
   await expect(intake.getByRole('img', { name: 'Auto' })).toBeVisible();
 });

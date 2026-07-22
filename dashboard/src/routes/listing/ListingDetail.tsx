@@ -107,6 +107,17 @@ const PHOTO_PRESIGN_WAVE_SIZE = 20;
  *  at once); 5 keeps uploads brisk without hammering the connection pool. */
 const PHOTO_UPLOAD_CONCURRENCY = 5;
 
+/** Mirror of the server's UNIT_PHOTO_SOURCE_MAX_BYTES presign policy cap - a
+ *  file over this is rejected by S3 itself, so drop it client-side with an
+ *  honest, NAMED message instead of a doomed upload. Server re-enforces. */
+const PHOTO_MAX_SOURCE_BYTES = 20 * 1024 * 1024;
+
+/** Mirror of UNIT_PHOTO_PASSTHROUGH_MAX_BYTES: a file over this transcodes at
+ *  confirm (one sharp run behind a 2-slot server gate), so each such file is
+ *  confirmed in its OWN request - a batch of transcodes serialized in one
+ *  request could brush CloudFront's 30s origin timeout. */
+const PHOTO_TRANSCODE_THRESHOLD_BYTES = 5 * 1024 * 1024;
+
 /** An honest, staff-facing message for a photo-upload failure (the app 400 carries
  *  a machine `error` code on `ApiError.code`; map the known ones, else a generic
  *  retry). GLOSSARY: staff copy says "property" / "photo". */
@@ -121,6 +132,12 @@ function photoUploadMessage(err: unknown): string {
       return "None of the photos could be uploaded - please try again.";
     case 'media_storage_unavailable':
       return "Photo storage isn't available right now - please try again later.";
+    case 'transcode_busy':
+      return 'The server is busy fitting large photos - wait a moment, then add just the large photo(s) again.';
+    case 'transcode_failed':
+      return "A large photo couldn't be processed - it may be corrupted. Re-export it and try again.";
+    case 'rate_limited':
+      return 'Uploads are being rate limited - wait a minute, then add the remaining photos.';
     default:
       return "Couldn't upload the photos - please try again.";
   }
@@ -261,28 +278,52 @@ export function ListingDetail(): React.JSX.Element {
   };
 
   // Photos: "+ Add" opens the hidden multi-select file input; the chosen files
-  // upload DIRECTLY to S3 (unit-photos direct-upload R4). Per wave of up to
-  // PHOTO_PRESIGN_WAVE_SIZE files: (1) presign mints one grant per file;
-  // (2) the browser POSTs each file straight to its presigned S3/MinIO target,
-  // in parallel with a modest concurrency pool - the bytes never touch the app,
-  // so there is no memory concern; (3) confirm records the keys that uploaded
-  // OK and returns the updated unit, applied after EACH wave (already-stored
-  // photos persist + render even if a later wave fails). Honest partial handling:
+  // upload DIRECTLY to S3 (unit-photos direct-upload R4). A 20MB pre-check runs
+  // first: any file over PHOTO_MAX_SOURCE_BYTES (the presign policy cap S3 itself
+  // enforces) is dropped up front with a NAMED inline alert and the rest proceed.
+  // Per wave of up to PHOTO_PRESIGN_WAVE_SIZE in-limit files: (1) presign mints
+  // one grant per file; (2) the browser POSTs each file straight to its presigned
+  // S3/MinIO target, in parallel with a modest concurrency pool - the bytes never
+  // touch the app, so there is no memory concern; (3) confirm records the keys
+  // that uploaded OK, SPLIT BY SIZE - files at/under PHOTO_TRANSCODE_THRESHOLD_BYTES
+  // go in one batch, each larger file in its OWN confirm request (its server-side
+  // transcode runs alone, so a serialized batch never brushes CloudFront's 30s
+  // origin timeout). The updated unit is applied after EACH confirm (already-stored
+  // photos persist + render even if a later confirm fails). Honest partial handling:
   // a single file that fails to reach S3 is dropped and the confirm records the
-  // rest; if fewer than all uploaded the inline alert says "Uploaded N of M".
+  // rest; if fewer than all in-limit files uploaded the inline alert says "Uploaded
+  // N of M" (with any oversize-drop message appended so it is never lost).
   // A presign/confirm failure surfaces the mapped server error. Reset the input
   // so re-picking the SAME file fires change again.
   const onPickPhotos = (): void => photoInputRef.current?.click();
   const onFilesChosen = (e: React.ChangeEvent<HTMLInputElement>): void => {
     const input = e.currentTarget;
-    const chosen = input.files ? Array.from(input.files) : [];
+    const picked = input.files ? Array.from(input.files) : [];
     input.value = '';
-    if (chosen.length === 0 || photoBusy) return;
+    if (picked.length === 0 || photoBusy) return;
+    // 20MB pre-check: a file over the presign policy cap would 400 at S3 -
+    // drop it here with a NAMED message and upload the rest.
+    const tooBig = picked.filter((f) => f.size > PHOTO_MAX_SOURCE_BYTES);
+    const chosen = picked.filter((f) => f.size <= PHOTO_MAX_SOURCE_BYTES);
+    const oversizeMsg =
+      tooBig.length > 0
+        ? `${tooBig
+            .map((f) => `${f.name} is ${(f.size / (1024 * 1024)).toFixed(1)}MB`)
+            .join(', ')} - the limit is 20MB per photo.`
+        : null;
+    if (chosen.length === 0) {
+      setPhotoError(oversizeMsg);
+      return;
+    }
     setPhotoBusy(true);
     setPhotoError(null);
     void (async () => {
       const total = chosen.length;
       let uploaded = 0;
+      // The last confirm-batch failure, adjudicated AFTER all batches settle
+      // (review N2, Cameron 2026-07-21) - a transient 503/429 on one big-file
+      // confirm must not discard the later batches' already-uploaded bytes.
+      let confirmError: unknown;
       try {
         // Sequential 20-file waves keep each presign request within the server's
         // per-request batch max; the direct POSTs inside a wave run in parallel.
@@ -292,7 +333,8 @@ export function ListingDetail(): React.JSX.Element {
           // Simple concurrency pool: at most PHOTO_UPLOAD_CONCURRENCY direct
           // POSTs in flight; each worker pulls the next index until the wave is
           // drained. grants[i] pairs with wave[i] (the server keeps order).
-          const okKeys: string[] = [];
+          const okSmallKeys: string[] = [];
+          const okBigKeys: string[] = [];
           let next = 0;
           const worker = async (): Promise<void> => {
             while (next < wave.length) {
@@ -302,7 +344,8 @@ export function ListingDetail(): React.JSX.Element {
               if (grant === undefined || file === undefined) continue;
               try {
                 await uploadToPresignedPost(grant.post, file);
-                okKeys.push(grant.key);
+                if (file.size > PHOTO_TRANSCODE_THRESHOLD_BYTES) okBigKeys.push(grant.key);
+                else okSmallKeys.push(grant.key);
               } catch {
                 // A single file failed to reach S3 - drop it (honest partial).
               }
@@ -311,16 +354,44 @@ export function ListingDetail(): React.JSX.Element {
           await Promise.all(
             Array.from({ length: Math.min(PHOTO_UPLOAD_CONCURRENCY, wave.length) }, () => worker()),
           );
-          if (okKeys.length > 0) {
-            const updated = await confirmUnitPhotos(unit.unitId, okKeys);
-            uploaded += okKeys.length;
-            setUnit(updated);
+          // Confirm small files as one batch; each >5MB file in its OWN request
+          // (one server-side transcode per request - see the threshold const).
+          const confirmBatches = [
+            ...(okSmallKeys.length > 0 ? [okSmallKeys] : []),
+            ...okBigKeys.map((k) => [k]),
+          ];
+          for (const batch of confirmBatches) {
+            // Settle EVERY batch (review N2): catch per batch so one failed
+            // confirm never abandons the later batches' uploads; failures
+            // adjudicate together below. Deliberately SEQUENTIAL, not
+            // Promise.all - parallel confirms from one client would contend
+            // the shared 2-slot server transcode gate and the per-user
+            // confirm limiter for no wall-clock win.
+            try {
+              const updated = await confirmUnitPhotos(unit.unitId, batch);
+              uploaded += batch.length;
+              setUnit(updated);
+            } catch (err) {
+              confirmError = err;
+            }
           }
         }
         if (uploaded < total) {
+          // Partial failure: S3-upload drops keep the generic copy; a confirm
+          // failure surfaces its mapped server error instead. If an oversize
+          // file was ALSO dropped up front, append its named message so it is
+          // never silently lost (DEC-5c).
+          const base =
+            confirmError !== undefined
+              ? photoUploadMessage(confirmError)
+              : "some photos couldn't be uploaded. Please try again.";
           setPhotoError(
-            `Uploaded ${uploaded} of ${total} photos - some photos couldn't be uploaded. Please try again.`,
+            `Uploaded ${uploaded} of ${total} photos - ${base}${
+              oversizeMsg ? ` ${oversizeMsg}` : ''
+            }`,
           );
+        } else if (oversizeMsg) {
+          setPhotoError(oversizeMsg);
         }
       } catch (err) {
         const base = photoUploadMessage(err);

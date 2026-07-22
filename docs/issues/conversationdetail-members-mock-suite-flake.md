@@ -43,3 +43,5 @@ sighting this week across two missions (different test cases, same class);
 now the dominant gate-noise source - each occurrence costs a triage cycle.
 The module-level default-mock fix below is approved work, sized as a small
 slice.
+
+**Third sighting (2026-07-21).** Same shape (getConversationMembers mock undefined -> .then TypeError) in the "HARD-disables the composer when the group is closed" case during the unit-photo-transcode planner gate run (full dashboard suite); passed solo 16/16 immediately after on the same commit (040951e1). Untouched surface.

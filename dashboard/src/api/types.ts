@@ -1278,8 +1278,9 @@ export type UnitStatus = ListingStatus;
 
 /** Hand-mirror of app/src/lib/unitMedia.ts UnitMediaDisplay. One resolved photo:
  *  the raw `media` entry (the management handle for Remove / Make cover) plus its
- *  display URL when resolvable (presigned for a stored key, pass-through for a
- *  legacy URL). `url` absent = the photo is currently unresolvable. */
+ *  display URL when resolvable (a stable same-origin `/unit-media/...` URL for a
+ *  stored key, pass-through for a legacy URL). `url` absent = the photo is
+ *  currently unresolvable. */
 export interface UnitMediaDisplay {
   entry: string;
   url?: string;
@@ -1329,9 +1330,9 @@ export interface UnitItem {
   /** S3 keys / URLs of property media (the Photos gallery + hero). The raw
    *  management handle: the photo routes mutate this array (Remove / Make cover). */
   media?: string[];
-  /** Resolved display URLs for `media` (presign-per-read), attached ALONGSIDE the
-   *  raw `media` by GET /api/units/:id and the photo-mutating routes. Absent on the
-   *  units LIST (no gallery there) and on older backends. */
+  /** Resolved display URLs for `media` (stable same-origin `/unit-media/...` URLs),
+   *  attached ALONGSIDE the raw `media` by GET /api/units/:id and the photo-mutating
+   *  routes. Absent on the units LIST (no gallery there) and on older backends. */
   mediaDisplay?: UnitMediaDisplay[];
   listing_link?: string;
   /** Public flyer details (public-pages §3): a tour video link. */

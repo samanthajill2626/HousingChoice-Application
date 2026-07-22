@@ -16,6 +16,7 @@
 // PII (doc §9): responses carry full unit docs to the authenticated client;
 // LOG LINES are IDs/counts only.
 import { createHash, randomUUID } from 'node:crypto';
+import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
@@ -23,8 +24,21 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { validateUnitBody } from '../lib/unitFields.js';
 import { rankSimilarUnits } from '../lib/similarUnits.js';
 import { isImageMediaType } from '../lib/mediaTypes.js';
-import { OUTBOUND_MMS_MAX_FILE_BYTES } from '../lib/outboundMediaLimits.js';
-import { resolveUnitMedia, UNIT_MEDIA_MAX, unitMediaPrefix } from '../lib/unitMedia.js';
+import { transcodeForUnitPhoto } from '../adapters/mediaTranscode.js';
+import { MMS_TRANSCODE_WAIT_TIMEOUT_MS } from '../lib/outboundMediaLimits.js';
+import {
+  UNIT_PHOTO_PASSTHROUGH_MAX_BYTES,
+  UNIT_PHOTO_SOURCE_MAX_BYTES,
+  UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST,
+} from '../lib/unitPhotoLimits.js';
+import { sharedTranscodeGate } from '../lib/transcodeGate.js';
+import type { Semaphore } from '../lib/semaphore.js';
+import {
+  deleteRemovedUnitMedia,
+  resolveUnitMedia,
+  UNIT_MEDIA_MAX,
+  unitMediaPrefix,
+} from '../lib/unitMedia.js';
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -76,6 +90,12 @@ export interface UnitsRouterDeps {
    * url-absent (only legacy absolute URLs carry through).
    */
   mediaStore?: MediaStore;
+  /**
+   * unit-photo-transcode: the process-wide transcode gate (shared with MMS
+   * confirm - ONE memory bound). Injectable for tests; defaults to the shared
+   * instance.
+   */
+  transcodeGate?: Semaphore;
 }
 
 /** BE3/C3: a valid roster role (C3 `UnitContact.role`). */
@@ -244,6 +264,11 @@ function decodeCursor(cursor: string): Record<string, unknown> | undefined {
   }
 }
 
+// MediaStore.put wants a Readable; wrap the finished transcode buffer.
+function bufferToStream(buf: Buffer): Readable {
+  return Readable.from([buf]);
+}
+
 export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
@@ -253,6 +278,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const mediaStore = deps.mediaStore;
+  const transcodeGate = deps.transcodeGate ?? sharedTranscodeGate;
 
   const router = Router();
 
@@ -262,11 +288,34 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // browser->S3, never through here - so there is NO memory concern and no
   // concurrency gate). ONE request mints MANY grants, so staff never feel it.
   // ONE instance per router (per-request creation would reset the window). The
-  // confirm + manage routes (remove/cover) match the unit PATCH posture: no
-  // limiter (design S4).
+  // manage routes (remove/cover) match the unit PATCH posture: no limiter
+  // (design S4); confirm now carries its OWN, heavier fence below.
   const photoPresignLimiter = createUserRateLimit({
     routeKey: 'unit_photo_presign',
     max: 30,
+    windowMs: 60_000,
+    logger: log,
+  });
+
+  // Confirm is now the EXPENSIVE unit-photo endpoint (unit-photo-transcode): a
+  // >5MB source is downloaded + sharp-transcoded behind the SHARED process-wide
+  // gate (one memory bound with MMS confirm). The gate bounds memory but is the
+  // only backpressure - without a per-user fence one caller can keep both slots
+  // + both cores pinned and 503 everyone else (incl. MMS media confirm). The
+  // fence kills scripted tight loops, NOT the dashboard's own serial pace:
+  // D5 chunking deliberately sends each >5MB file in its OWN confirm, so a
+  // bulk big-photo drop is MANY requests. 60/min (Cameron, 2026-07-21 review
+  // P2 - raised from the initial 30): a transcode-bearing confirm usually
+  // takes ~2-5s, but fast transcodes (~6MB sources) plus the batched small
+  // confirm can legitimately exceed 30 requests inside one 60s window on a
+  // 35+ photo drop, and UNIT_MEDIA_MAX is 100 - so 30 was reachable by real
+  // staff. 60 gives 2x headroom over the fastest physically-realizable
+  // dashboard pace and still stops free-loop abuse (each admitted request
+  // stays bounded by the shared gate + the per-request transcode cap).
+  // ONE instance per router.
+  const photoConfirmLimiter = createUserRateLimit({
+    routeKey: 'unit_photo_confirm',
+    max: 60,
     windowMs: 60_000,
     logger: log,
   });
@@ -413,9 +462,9 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(404).json({ error: 'unit_not_found' });
       return;
     }
-    // unit-photos S3: resolve stored media keys to short-lived display URLs
-    // (presign-per-read) ALONGSIDE the raw `media` (the management handle).
-    const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+    // unit-photos: resolve stored media keys to stable same-origin /unit-media
+    // URLs (design 2026-07-21) ALONGSIDE the raw `media` (the management handle).
+    const mediaDisplay = resolveUnitMedia(unit, { logger: log });
     res.json({ unit: { ...unit, contacts: await enrichRoster(unit), mediaDisplay } });
   });
 
@@ -484,7 +533,10 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const uploads = await Promise.all(
       normalized.map(async (contentType) => {
         const key = `${unitMediaPrefix(unitId)}${randomUUID()}`;
-        const post = await mediaStore.createPresignedPost(key, { contentType });
+        const post = await mediaStore.createPresignedPost(key, {
+          contentType,
+          maxBytes: UNIT_PHOTO_SOURCE_MAX_BYTES,
+        });
         return { key, post };
       }),
     );
@@ -504,20 +556,47 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // server-minted); (b) it is not a duplicate within the body and not ALREADY
   // on the unit (idempotent retries - see below); (c) HeadObject succeeds (the
   // object was actually uploaded); (d) the stored Content-Type is an allowed
-  // image type AND the size <= 5MB (re-verify what S3 stored). A key failing
-  // (a)/(c)/(d) is DROPPED with a logged warn (key + unitId only); if NO key
-  // survives -> 400, UNLESS every valid key was already present (a replayed
-  // confirm) -> 200 with the current unit. Survivors pass a friendly cap
-  // pre-check (existing + new <= 100 -> else 400 photo_cap_exceeded) and are
-  // committed via ONE atomic appendMedia - its ConditionExpression + batch
-  // bound re-guard the cap under a race (ConditionalCheckFailed -> same 400).
+  // image type (else dropped), then the stored SIZE is classified
+  // (unit-photo-transcode): <= 5MB is appended as-is (today's byte-identical
+  // path); > 20MB is dropped (the presign policy already forbids it - defense
+  // in depth); 5MB < size <= 20MB is FITTED at confirm - behind the SHARED
+  // process-wide transcode gate it is downloaded, transcoded to a 2560/q85
+  // jpeg, put at a FRESH uuid key, and that RENDITION key is appended in place
+  // of the oversize original (left as an accepted orphan). REPLAY CAVEAT
+  // (spec D4): the idempotent-replay skip in guard (b) matches on the appended
+  // entry, so a replayed >5MB SOURCE key (whose appended entry is a fresh
+  // rendition uuid, never the source key) never matches and mints a SECOND
+  // rendition - accepted per the design; the per-user confirm limiter fences the
+  // replay-as-DoS angle (issue unit-photo-confirm-replay-duplicate-renditions).
+  // API-CLIENT CAUTION (review N3, recorded 2026-07-21): a MIXED body (some
+  // valid keys + some failed/undecodable keys) returns 200 with the failures
+  // SILENTLY dropped - transcode_failed only surfaces when NO key survives.
+  // Fine for the dashboard (it never mixes: big files are confirmed alone),
+  // but a future client submitting mixed bodies must diff its request keys
+  // against the returned unit.media to detect per-key drops.
+  // A key failing (a)/(c)/(d) or whose transcode fails is DROPPED with a logged
+  // warn (unitId + byte counts only, never keys); if NO key survives -> 400
+  // (transcode_failed when a >5MB source was undecodable, else no_valid_photos),
+  // UNLESS every valid key was already present (a replayed confirm) -> 200 with
+  // the current unit. Gate starvation aborts the WHOLE request with 503
+  // transcode_busy before any append (all-or-nothing; the dashboard sends each
+  // >5MB file in its own confirm). Before the transcode loop the >5MB count is
+  // bounded (> UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST -> 400 too_many_large_photos)
+  // and an EARLY cap pre-check (existing + survivors + pending > 100 -> 400
+  // photo_cap_exceeded) rejects an at-cap request BEFORE paying any transcode.
+  // Surviving keys then pass a friendly post-loop cap pre-check (existing + new
+  // <= 100 -> else 400 photo_cap_exceeded) and are committed via ONE atomic
+  // appendMedia - its ConditionExpression + batch bound re-guard the cap under a
+  // race (ConditionalCheckFailed -> same 400).
   // Audit unit_photos_added COUNT only, BEST-EFFORT (the media append has
   // already committed; a transient audit failure must not 500 a confirm whose
   // photos are stored). Returns the updated unit (with mediaDisplay). An
   // ordinary async handler - no busboy, no callback outside Express's
   // async-error capture, so the F3 hang class simply does not exist here.
+  // Behind the per-user confirm limiter (unit_photo_confirm, 30/min - confirm
+  // now transcodes; sized for the dashboard's one-confirm-per-big-file pace).
   // 503 when the store is unconfigured.
-  router.post('/:unitId/photos/confirm', async (req: AuthedRequest, res) => {
+  router.post('/:unitId/photos/confirm', photoConfirmLimiter, async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     if (!mediaStore) {
       res.status(503).json({ error: 'media_storage_unavailable' });
@@ -559,6 +638,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const ownPrefix = unitMediaPrefix(unitId);
     const seen = new Set<string>();
     const survivors: string[] = [];
+    const transcodePending: { key: string; sourceType: string }[] = [];
     let alreadyPresent = 0;
     for (const raw of rawKeys) {
       const key = typeof raw === 'string' ? raw : '';
@@ -570,14 +650,21 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // (b) idempotency: a key repeated within the body appends ONCE, and a key
       // ALREADY on the unit (a replayed confirm after a lost response) is
       // skipped rather than double-appended. Already-present keys skip the
-      // HeadObject too - they were verified when first confirmed.
+      // HeadObject too - they were verified when first confirmed. CAVEAT
+      // (spec D4): this holds for PASSTHROUGH (<=5MB) keys, whose submitted key
+      // IS the appended entry; a replayed >5MB SOURCE key never matches here
+      // (its appended entry is a fresh rendition uuid), so a replay re-transcodes
+      // and mints a SECOND rendition - accepted per the design (the confirm
+      // limiter fences the replay-as-DoS angle; issue
+      // unit-photo-confirm-replay-duplicate-renditions tracks the dedupe option).
       if (seen.has(key)) continue;
       seen.add(key);
       if (existingSet.has(key)) {
         alreadyPresent += 1;
         continue;
       }
-      // (c) the object was actually uploaded; (d) re-check the stored type + size.
+      // (c) the object was actually uploaded; (d) re-check the stored type, then
+      // classify by size (unit-photo-transcode): <=5MB passthrough, >5MB fit.
       let head;
       try {
         head = await mediaStore.head(key);
@@ -589,11 +676,103 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         log.warn({ unitId }, 'unit photos confirm: object missing - key dropped');
         continue;
       }
-      if (!isImageMediaType(head.contentType) || (head.size ?? Infinity) > OUTBOUND_MMS_MAX_FILE_BYTES) {
-        log.warn({ unitId }, 'unit photos confirm: stored type/size re-check failed - key dropped');
+      if (!isImageMediaType(head.contentType)) {
+        log.warn({ unitId }, 'unit photos confirm: stored type re-check failed - key dropped');
         continue;
       }
-      survivors.push(key);
+      const size = head.size ?? Infinity;
+      if (size > UNIT_PHOTO_SOURCE_MAX_BYTES) {
+        // The presign policy already forbids this; defense in depth.
+        log.warn({ unitId }, 'unit photos confirm: stored size over the source cap - key dropped');
+        continue;
+      }
+      if (size <= UNIT_PHOTO_PASSTHROUGH_MAX_BYTES) {
+        // <=5MB: stored byte-identical - the pre-transcode behavior, unchanged.
+        survivors.push(key);
+        continue;
+      }
+      // >5MB: fit at confirm (design 2026-07-21) - transcoded below, behind the gate.
+      transcodePending.push({ key, sourceType: head.contentType!.trim().toLowerCase() });
+    }
+
+    // P-2: bound the number of >5MB transcodes ONE request may drive. The
+    // dashboard confirms each oversize file alone (D5), so a real client submits
+    // 1; this caps the worst-case occupancy a hand-crafted body can impose on the
+    // SHARED gate. Reject BEFORE any download/transcode so no work is paid.
+    if (transcodePending.length > UNIT_PHOTO_TRANSCODE_MAX_PER_REQUEST) {
+      res.status(400).json({ error: 'too_many_large_photos' });
+      return;
+    }
+
+    // MF-2b: EARLY cap pre-check BEFORE the transcode loop. Each pending
+    // transcode yields at most one rendition survivor, so if existing +
+    // passthrough survivors + pending already exceeds the cap the request cannot
+    // fit - reject now rather than paying the transcode(s) and orphaning their
+    // renditions (an at-cap unit otherwise pays a full download+sharp+put before
+    // the post-loop 400). The post-loop check below still re-guards the committed
+    // survivor count, and appendMedia re-guards atomically under a race.
+    if (existingMedia.length + survivors.length + transcodePending.length > UNIT_MEDIA_MAX) {
+      res.status(400).json({ error: 'photo_cap_exceeded' });
+      return;
+    }
+
+    // >5MB sources: download + fit to the photo rendition profile, behind the
+    // SHARED process-wide gate (one raster memory bound with MMS confirm). The
+    // rendition is appended under a FRESH uuid key - indistinguishable from a
+    // direct upload, so display/flyer/namespace-guard need no changes. The
+    // oversize ORIGINAL stays as an accepted orphan (issue
+    // unit-photo-removal-never-deletes-s3-objects). A per-key transcode failure
+    // drops THAT key (confirm's per-key posture); gate starvation is a
+    // request-level 503 (memory pressure, not this key's fault). PII: byte
+    // counts + unitId only - never keys/filenames.
+    let transcodeFailed = 0;
+    for (const pending of transcodePending) {
+      // Acquire in its own try so a gate timeout is a request-level 503
+      // (all-or-nothing), not a per-key drop. `release` is assigned before the
+      // work try/finally below, so it is definitely-assigned there and stays
+      // NON-optional (DEC-4) - release() ALWAYS runs after a successful acquire.
+      let release: () => void;
+      try {
+        release = await transcodeGate.acquire(MMS_TRANSCODE_WAIT_TIMEOUT_MS);
+      } catch {
+        res.status(503).json({ error: 'transcode_busy' });
+        return;
+      }
+      try {
+        const bytes = await mediaStore.getBytes(pending.key);
+        if (!bytes) {
+          transcodeFailed += 1;
+          log.warn({ unitId }, 'unit photo transcode: source vanished - key dropped');
+          continue;
+        }
+        const result = await transcodeForUnitPhoto(bytes, pending.sourceType);
+        if (result.bytes.length > UNIT_PHOTO_PASSTHROUGH_MAX_BYTES) {
+          // Practically unreachable at 2560px, but the stored-photo invariant holds.
+          transcodeFailed += 1;
+          log.warn(
+            { unitId, byteCount: result.bytes.length },
+            'unit photo transcode: rendition over the stored cap - key dropped',
+          );
+          continue;
+        }
+        const renditionKey = `${ownPrefix}${randomUUID()}`;
+        await mediaStore.put(renditionKey, bufferToStream(result.bytes), result.contentType);
+        log.info(
+          {
+            unitId,
+            sourceBytes: bytes.length,
+            renditionBytes: result.bytes.length,
+            transcodedFrom: result.transcodedFrom,
+          },
+          'unit photo transcoded',
+        );
+        survivors.push(renditionKey);
+      } catch (err) {
+        transcodeFailed += 1;
+        log.warn({ err, unitId }, 'unit photo transcode failed - key dropped');
+      } finally {
+        release();
+      }
     }
 
     if (survivors.length === 0) {
@@ -602,11 +781,11 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       // append, no audit) so a client retry after a lost response is safe.
       // Only a body with no valid key AT ALL is an error.
       if (alreadyPresent > 0) {
-        const mediaDisplay = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
+        const mediaDisplay = resolveUnitMedia(unit, { logger: log });
         res.json({ unit: { ...unit, mediaDisplay } });
         return;
       }
-      res.status(400).json({ error: 'no_valid_photos' });
+      res.status(400).json({ error: transcodeFailed > 0 ? 'transcode_failed' : 'no_valid_photos' });
       return;
     }
 
@@ -645,15 +824,19 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       log.warn({ err, unitId }, 'unit photos confirm: audit append failed - continuing (best-effort)');
     }
     log.info({ unitId, count: survivors.length, actor: req.user?.userId }, 'unit photos confirmed via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 
   // DELETE /api/units/:unitId/photos  body { entry } - drop one media entry
-  // (unit-photos S4). Removes the array entry only (NO S3 object deletion; the
-  // object decays as an accepted orphan, the MMS posture). 404 on unknown unit
-  // or unknown entry; audits unit_photo_removed (entry-HASH + count only, never
-  // the key/URL). Returns the updated unit (with mediaDisplay).
+  // (unit-photos S4). Removes the array entry AND best-effort-deletes its S3
+  // object when it is an own-namespace stored key (design 2026-07-21, D1; legacy
+  // absolute URLs + foreign keys are never deleted). The delete is fire-and-
+  // forget - a failure is a WARN, never a 500 - and a removed photo may keep
+  // serving from CloudFront edge caches up to the 7-day TTL (accepted; manual
+  // invalidation is the operator escape hatch). 404 on unknown unit or unknown
+  // entry; audits unit_photo_removed (entry-HASH + count only, never the
+  // key/URL). Returns the updated unit (with mediaDisplay).
   router.delete('/:unitId/photos', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const body = req.body;
@@ -677,13 +860,27 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       }
       throw err;
     }
+    // D1: best-effort-delete the S3 object for the removed entry (own-namespace
+    // stored keys only; the helper skips legacy URLs + foreign keys). Fire-and-
+    // forget - never affects this response.
+    //
+    // DANGLING-REFERENCE RACE (review S1, accepted + documented, LOW probability;
+    // docs/issues/unit-media-dangling-reference-race.md): removeMedia is a
+    // NON-ATOMIC read-modify-write (unitsRepo.ts:710), so a CONCURRENT makeCover /
+    // PATCH that read the pre-delete list can commit AFTER this delete and re-
+    // persist the just-deleted key - leaving unit.media pointing at an object
+    // whose bytes are gone (a broken <img> on the dashboard AND the public flyer
+    // until a staff re-edit). Before D1 the same interleaving merely resurrected a
+    // stale-but-working entry; the delete is what makes it customer-visible.
+    // Accepted (self-healing by re-upload); remedies in the issue if it ever bites.
+    deleteRemovedUnitMedia(mediaStore, unitId, [entry], log);
     await audit.append(`units#${unitId}`, 'unit_photo_removed', {
       actor: req.user?.userId,
       entryHash: entryHash(entry),
       remaining: Array.isArray(updated.media) ? updated.media.length : 0,
     });
     log.info({ unitId, actor: req.user?.userId }, 'unit photo removed via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 
@@ -718,7 +915,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       entryHash: entryHash(entry),
     });
     log.info({ unitId, actor: req.user?.userId }, 'unit photo cover set via api');
-    const mediaDisplay = await resolveUnitMedia(mediaStore, updated, { logger: log, unitId });
+    const mediaDisplay = resolveUnitMedia(updated, { logger: log });
     res.json({ unit: { ...updated, mediaDisplay } });
   });
 
@@ -1061,6 +1258,30 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
+    // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
+    // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
+    // write - as a COPY, because a read-modify-write repo can return the SAME
+    // object from getById and update, so reading prev.media AFTER the update
+    // could observe the already-mutated value. Read-then-write is NOT atomic: an
+    // append racing between this getById and the update can orphan its object
+    // (the replace drops it without it appearing in prevMedia) - the same
+    // accepted orphan class that existed before D1. The REVERSE interleaving is
+    // the DANGLING-REFERENCE race (review S1, accepted + documented;
+    // docs/issues/unit-media-dangling-reference-race.md): a concurrent removal
+    // that best-effort-deletes an object's bytes can lose the commit ordering to a
+    // later-committing write HERE that re-persists that key, leaving unit.media
+    // referencing a deleted object (a broken image until re-edit). Both directions
+    // stem from the non-atomic read-modify-write; both accepted as LOW-probability
+    // and self-healing. An unknown unit yields no prior state here; the update
+    // below still owns the 404 (ConditionalCheckFailed).
+    const hasMediaPatch = Object.prototype.hasOwnProperty.call(validation.fields, 'media');
+    let prevMedia: string[] = [];
+    if (hasMediaPatch) {
+      const prevMediaValue = (await units.getById(unitId))?.media;
+      prevMedia = Array.isArray(prevMediaValue)
+        ? prevMediaValue.filter((e): e is string => typeof e === 'string')
+        : [];
+    }
     let unit;
     try {
       unit = await units.update(unitId, validation.fields);
@@ -1070,6 +1291,14 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
         return;
       }
       throw err; // Express 5 forwards async throws to the error handler.
+    }
+    if (hasMediaPatch) {
+      // Diff prior vs next by set membership (string entries only); best-effort-
+      // delete the removed own-namespace stored keys (the helper skips legacy
+      // URLs + foreign keys). Fire-and-forget - never affects this response.
+      const next = new Set(Array.isArray(unit.media) ? unit.media : []);
+      const removed = prevMedia.filter((e) => !next.has(e));
+      deleteRemovedUnitMedia(mediaStore, unitId, removed, log);
     }
     await audit.append(`units#${unitId}`, 'unit_updated', {
       actor: req.user?.userId,

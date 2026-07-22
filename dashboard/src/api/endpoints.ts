@@ -976,7 +976,12 @@ export async function uploadToPresignedPost(
  *  (own-prefix scope + HeadObject type/size), drops the invalid, atomically
  *  appends the survivors under the 100-cap re-guard, and returns the updated unit
  *  (WITH mediaDisplay). A plain JSON call. Throws ApiError (400 no_valid_photos /
- *  photo_cap_exceeded, 503 media_storage_unavailable). */
+ *  photo_cap_exceeded / transcode_failed / too_many_large_photos, 503
+ *  media_storage_unavailable / transcode_busy, 429 rate_limited). CAUTION for
+ *  future callers: a MIXED body (valid + failed keys) returns 200 with the
+ *  failures silently dropped - callers that mix must diff request keys against
+ *  the returned unit.media (this dashboard never mixes: >5MB files confirm
+ *  alone, so a failure is always a thrown ApiError, never a silent drop). */
 export async function confirmUnitPhotos(unitId: string, keys: string[]): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/photos/confirm`,

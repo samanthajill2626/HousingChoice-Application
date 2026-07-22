@@ -32,7 +32,6 @@ import { resolveWithSettings } from '../messages/index.js';
 import { SHAREABLE_STATUSES, isDeleted } from '../repos/unitsRepo.js';
 import { toUnitFlyer } from '../lib/unitFields.js';
 import { resolveUnitMedia } from '../lib/unitMedia.js';
-import type { MediaStore } from '../adapters/mediaStore.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
@@ -164,14 +163,6 @@ export interface PublicRouterDeps {
    * reply-prompt copy (never a broken button).
    */
   contactNumber?: string;
-  /**
-   * unit-photos: the media bucket store - the flyer resolves stored photo keys
-   * to short-lived presigned URLs at render time (D1: the bucket stays private).
-   * Undefined when MEDIA_BUCKET is unset - stored keys then resolve to url-absent
-   * and are omitted from the public url list (only legacy absolute URLs carry
-   * through).
-   */
-  mediaStore?: MediaStore;
 }
 
 export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
@@ -181,7 +172,6 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
-  const mediaStore = deps.mediaStore;
   // flyer-full-info: config.ourPhoneNumbers[0] (or null when unconfigured). Rides
   // on the flyer payload AND every opaque 404 so the page's unavailable state can
   // still offer the text-us CTA (there is no flyer payload to read it from there).
@@ -204,14 +194,13 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
     res.status(404).json({ error: 'not_found', contact_number: contactNumber });
   }
 
-  // unit-photos S3 (D1): resolve the unit's photos to render-time presigned URLs
-  // for the PUBLIC surface. The wire shape stays string[] (a url list the public
-  // flyer page (FlyerPage) renders as-is); entries that fail to resolve (stored
-  // key with no store / a presign failure) are OMITTED - the private bucket is
-  // never exposed and a degraded photo simply doesn't appear.
-  async function resolvePublicMedia(unit: UnitItem, unitId: string): Promise<string[]> {
-    const display = await resolveUnitMedia(mediaStore, unit, { logger: log, unitId });
-    return display
+  // unit-photos (design 2026-07-21): resolve the unit's photos to stable
+  // same-origin /unit-media URLs for the PUBLIC surface. The wire shape stays
+  // string[] (a url list the public flyer page (FlyerPage) renders as-is);
+  // foreign / out-of-namespace entries resolve to no url and are OMITTED - only
+  // this unit's own keys (and legacy absolute URLs) ever reach the public flyer.
+  function resolvePublicMedia(unit: UnitItem): string[] {
+    return resolveUnitMedia(unit, { logger: log })
       .map((d) => d.url)
       .filter((u): u is string => typeof u === 'string');
   }
@@ -360,10 +349,10 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
       sendNotFound(res);
       return;
     }
-    // unit-photos: replace the raw media pass-through with render-time presigned
-    // URLs (unresolvable entries omitted). contact_number is config (the main
-    // 1:1 business number), added here like media - NOT part of the projection.
-    const media = await resolvePublicMedia(unit, unitId);
+    // unit-photos: replace the raw media pass-through with same-origin
+    // /unit-media URLs (unresolvable entries omitted). contact_number is config
+    // (the main 1:1 business number), added here like media - NOT part of the projection.
+    const media = resolvePublicMedia(unit);
     res.json({ flyer: { ...toUnitFlyer(unit), media, contact_number: contactNumber } });
   });
 

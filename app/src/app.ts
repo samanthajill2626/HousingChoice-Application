@@ -29,6 +29,7 @@ import { createApiRouter, type ApiRouterDeps } from './routes/api.js';
 import { createAuthRouter, type AuthRouterDeps } from './routes/auth.js';
 import { healthRouter } from './routes/health.js';
 import { createPublicRouter, type PublicRouterDeps } from './routes/public.js';
+import { createUnitMediaServeRouter } from './routes/unitMediaServe.js';
 import { createWebhooksRouter, type WebhooksRouterDeps } from './routes/webhooks/index.js';
 import { createInternalRouter } from './routes/internal.js';
 
@@ -114,11 +115,11 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
   // /api requireAuth gate below. A per-IP rate limiter fronts ALL /public
   // routes (the abuse fence on an unauthenticated, SMS-spending surface); the
   // router itself re-validates everything and never logs PII.
-  // unit-photos (D1): the public flyer resolves stored photo keys to render-time
-  // presigned URLs, so the /public router needs the media store. Built from
-  // config (undefined when MEDIA_BUCKET is unset); a test-injected deps.public
-  // (which may carry its own fake store) still overrides via the spread.
-  const publicMediaStore = createMediaStore({ config });
+  // Media store for same-origin unit-photo serving: it feeds the /unit-media
+  // serve route below. The /public flyer resolver no longer needs it - photo
+  // reads are now stable relative /unit-media URLs (design 2026-07-21), resolved
+  // with no store. Built from config (undefined when MEDIA_BUCKET is unset).
+  const mediaServeStore = createMediaStore({ config });
   app.use(
     '/public',
     createRateLimit({
@@ -133,9 +134,21 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       // under noUncheckedIndexedAccess + the dep is optional, so spread it in
       // only when configured (empty list -> the page degrades to reply-prompt).
       ...(config.ourPhoneNumbers[0] !== undefined && { contactNumber: config.ourPhoneNumbers[0] }),
-      ...(publicMediaStore !== undefined && { mediaStore: publicMediaStore }),
       ...deps.public,
     }),
+  );
+  // Same-origin unit-photo serving (unit-media-cloudfront design 2026-07-21).
+  // Unauthenticated BY DESIGN (spec D5) - public-flyer content on unguessable
+  // uuid keys; in deployed envs CloudFront serves this path from S3 (OAC)
+  // before it ever reaches the app, so this route is the non-CloudFront
+  // fallback (local MinIO, hermetic e2e, live-mode local dev). Its own generous
+  // per-IP limiter: a gallery load is up to ~100 images, so the /public
+  // limiter's small config cannot be reused. Mounted before the SPA fallback
+  // and reserved in it (below) so an unmatched shape 404s, never index.html.
+  app.use(
+    '/unit-media',
+    createRateLimit({ max: 1000, windowMs: 60_000, logger: log }),
+    createUnitMediaServeRouter({ mediaStore: mediaServeStore, logger: log }),
   );
   // M1.3 auth — mounted HERE in the route stage, never ahead of the
   // origin-secret validator (locked chain). /auth itself is public by
@@ -185,14 +198,17 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     // (legacy UAs) forbid framing; Referrer-Policy keeps paths out of
     // cross-origin referrers; nosniff is already set app-wide above.
     //
-    // The SECOND allowance (unit-photos, 2026-07-21): when a media store is
-    // configured, the browser talks to the bucket DIRECTLY — presigned-POST
-    // upload and presigned-GET <img> display — so the bucket origin joins
-    // connect-src + img-src (ONLY those two). Derived exactly as the store's
-    // S3 client resolves it (adapters/mediaStore.ts): MEDIA_S3_ENDPOINT
-    // (local MinIO, path-style → the endpoint origin) or the virtual-hosted
-    // AWS URL. Without this, deployed photo upload/display dies in the
-    // browser on CSP ("Uploaded 0 of 3").
+    // The SECOND allowance (unit-photos): when a media store is configured, the
+    // browser talks to the bucket DIRECTLY for the presigned-POST UPLOAD, so the
+    // bucket origin joins connect-src ONLY. Photo READS are same-origin now
+    // (design 2026-07-21): the dashboard/flyer render `/unit-media/<unitId>/...`
+    // paths served by CloudFront's /unit-media/* behavior (or the app's GET
+    // /unit-media fallback), so the bucket origin is NO LONGER in img-src -
+    // img-src is back to 'self' data: blob:. The origin is derived exactly as
+    // the store's S3 client resolves it (adapters/mediaStore.ts):
+    // MEDIA_S3_ENDPOINT (local MinIO, path-style -> the endpoint origin) or the
+    // virtual-hosted AWS URL. Without the connect-src allowance, deployed photo
+    // UPLOAD dies in the browser on CSP ("Uploaded 0 of 3").
     const mediaOrigin = config.mediaBucket
       ? config.mediaS3Endpoint
         ? new URL(config.mediaS3Endpoint).origin
@@ -205,7 +221,10 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
       "style-src 'self' 'unsafe-inline'",
       // blob: = URL.createObjectURL previews (MMS composer image chip,
       // dashboard Timeline) — document-created in-memory content, no network.
-      withMedia("img-src 'self' data: blob:"),
+      // img-src: same-origin reads (design 2026-07-21) mean the bucket origin is
+      // NO LONGER appended here - back to 'self' data: blob:. connect-src keeps
+      // the bucket origin below for presigned-POST uploads.
+      "img-src 'self' data: blob:",
       withMedia("connect-src 'self'"),
       "frame-ancestors 'none'",
     ].join('; ');
@@ -217,7 +236,7 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     });
     app.use(express.static(distDir));
     app.use((req, res, next) => {
-      const reserved = ['/api', '/webhooks', '/auth', '/public', '/__dev', '/internal'].some(
+      const reserved = ['/api', '/webhooks', '/auth', '/public', '/unit-media', '/__dev', '/internal'].some(
         (prefix) => req.path === prefix || req.path.startsWith(`${prefix}/`),
       );
       if ((req.method !== 'GET' && req.method !== 'HEAD') || reserved) {

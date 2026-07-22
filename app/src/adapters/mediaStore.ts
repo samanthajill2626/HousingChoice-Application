@@ -5,7 +5,7 @@
 // guideline 1): @aws-sdk/lib-storage's Upload consumes the Readable in
 // bounded parts — no whole-body buffering, ever.
 import { Readable } from 'node:stream';
-import { GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
+import { DeleteObjectCommand, GetObjectCommand, HeadObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { Upload } from '@aws-sdk/lib-storage';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { createPresignedPost } from '@aws-sdk/s3-presigned-post';
@@ -77,15 +77,24 @@ export interface MediaStore {
    * Mint a presigned POST grant so the BROWSER uploads one file DIRECTLY to the
    * media bucket (unit-photos direct-upload revision) - the bytes never touch
    * the app process. The returned policy pins the upload to EXACTLY `key`,
-   * `contentType`, and the 1..maxBytes size range (default
-   * OUTBOUND_MMS_MAX_FILE_BYTES = 5MB, the unit-photo cap; outbound MMS passes
-   * the 20MB source ceiling so big originals can upload then auto-fit down), and
-   * expires in UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS. S3/MinIO enforces every
+   * `contentType`, and the 1..maxBytes size range, and expires in
+   * UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS. `maxBytes` defaults to
+   * OUTBOUND_MMS_MAX_FILE_BYTES (5MB) as a conservative FALLBACK ONLY - every
+   * production caller now passes its own cap explicitly (unit photos 20MB,
+   * outbound MMS 20MB, email per its own limits), so a big original can upload
+   * then auto-fit down at confirm. S3/MinIO enforces every
    * condition at the edge (spike Q2): an over-size, zero-byte, wrong-type, or
    * tampered-key POST is rejected and stores nothing. Signed with the store's
    * OWN client so endpoint/forcePathStyle/creds/region are inherited.
    */
   createPresignedPost(key: string, opts: { contentType: string; maxBytes?: number }): Promise<PresignedPost>;
+  /**
+   * Best-effort object removal (unit-photo removal, design spec 2026-07-21
+   * D1). S3 DeleteObject is idempotent - deleting an absent key succeeds -
+   * so callers need no absent-object handling. Throws only on transport /
+   * access errors; callers degrade failures to a WARN, never a 500.
+   */
+  deleteObject(key: string): Promise<void>;
 }
 
 export class S3MediaStore implements MediaStore {
@@ -190,6 +199,10 @@ export class S3MediaStore implements MediaStore {
     }
   }
 
+  async deleteObject(key: string): Promise<void> {
+    await this.client.send(new DeleteObjectCommand({ Bucket: this.bucket, Key: key }));
+  }
+
   async createPresignedPost(
     key: string,
     opts: { contentType: string; maxBytes?: number },
@@ -201,7 +214,8 @@ export class S3MediaStore implements MediaStore {
     //     each `Fields` entry into an exact-match condition, so the Content-Type
     //     field both seeds the form AND pins the policy (spike Q2b);
     //   - content-length-range 1 .. maxBytes - rejects a zero-byte or over-size
-    //     POST (default 5MB; MMS sources pass 20MB and auto-fit at confirm).
+    //     POST (maxBytes defaults to 5MB as a fallback; every caller passes its
+    //     own cap - see the interface doc).
     const maxBytes = opts.maxBytes ?? OUTBOUND_MMS_MAX_FILE_BYTES;
     const { url, fields } = await createPresignedPost(this.client, {
       Bucket: this.bucket,

@@ -61,11 +61,6 @@ export const PINO_ERROR_INSIGHTS_FILTER = 'level >= 50';
  *  warnings" firehose. Off by default (warns are noisy: best-effort degradations,
  *  benign "…ignored" events); the operator toggles it on to widen the panel. */
 export const PINO_WARN_INSIGHTS_FILTER = 'level >= 40';
-/** Insights filter for Twilio send/delivery FAILURES — surfaced on the errors
- *  panel REGARDLESS of the warn toggle. These are logged at warn (level 40, e.g.
- *  a 30034 undelivered) so `level >= 50` alone misses them; this pins them in by
- *  their structured `event` marker so an operator always sees the failing code. */
-export const DELIVERY_FAILURE_INSIGHTS_FILTER = 'event = "delivery_failed"';
 /** Insights filter for V8 heap-OOM (Node stderr, non-JSON). */
 export const OOM_APP_INSIGHTS_FILTER = '@message like /JavaScript heap out of memory/ or @message like /Reached heap limit/';
 /** Insights filter for kernel OOM-killer lines (shipped from /var/log/messages). */

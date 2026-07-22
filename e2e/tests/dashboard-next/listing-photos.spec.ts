@@ -4,15 +4,20 @@ import { dashboardUrl } from '../../support/urls.js';
 
 // Property photos (unit-photos direct-upload, spec Sec 5) - drives the REAL
 // dashboard Photos gallery against the hermetic lane stack + MinIO and proves the
-// feature end to end. The upload now flows through the REAL direct-upload path:
-// the browser presigns, POSTs the bytes STRAIGHT to MinIO, then confirms - no
+// feature end to end. The upload flows through the REAL direct-upload path: the
+// browser presigns, POSTs the bytes STRAIGHT to MinIO, then confirms - no
 // test-side special-casing (setInputFiles drives the app UI, which does it all).
+// Photo READS are served SAME-ORIGIN off /unit-media/<unitId>/<uuid> (design
+// 2026-07-21: CloudFront's /unit-media/* behavior in deployed envs, this app's
+// streaming fallback route here) - no presign-per-read, no expiring URLs.
 //   (1) upload a REAL image -> the thumbnail AND the hero render loaded bytes
-//       (naturalWidth > 0 - proof MinIO stored + served the object back);
+//       (naturalWidth > 0 - proof MinIO stored + served the object back), and
+//       each src is a same-origin /unit-media/<unitId>/ path (no X-Amz, no host);
 //   (2) upload a SECOND photo + "Make cover" on it -> the hero flips to the new
-//       cover key (the presigned pathname changes);
-//   (3) "Remove" a photo (confirmed) -> it drops from the gallery;
-//   (4) the PUBLIC flyer for that available unit renders the photo;
+//       cover key (its served /unit-media pathname changes);
+//   (3) "Remove" a photo (confirmed) -> it drops from the gallery AND its
+//       /unit-media object stops serving (best-effort S3 delete, D1: 200 -> 404);
+//   (4) the PUBLIC flyer for that available unit renders the photo, same-origin;
 //   (5) NO multipart body ever hits the APP origin during upload (the bytes went
 //       browser->MinIO) - pins the direct-upload architecture;
 //   (6) E1 - flipping the unit to a non-shareable status (On hold) 404s the whole
@@ -28,7 +33,7 @@ const NEXT = dashboardUrl;
 const SEEDED_LANDLORD = 'contact-landlord-0001';
 
 // A real, tiny, valid PNG the file picker uploads. MinIO stores it and the
-// presign-per-read serve pipeline streams it back, so naturalWidth > 0 asserts
+// same-origin /unit-media serve route streams it back, so naturalWidth > 0 asserts
 // real bytes (the same fixture the outbound-MMS loaded-bytes assertion uses).
 const FIXTURE_PNG = fileURLToPath(new URL('../../fixtures/tiny.png', import.meta.url));
 
@@ -126,13 +131,36 @@ async function expectLoadedBytes(img: Locator, message: string): Promise<void> {
     .toBeGreaterThan(0);
 }
 
-/** The presigned key path (pathname only, sans the signature query) of an
- *  <img>'s current src - stable across re-reads of the SAME key, so a change
- *  proves the cover key itself changed. */
+/** The same-origin key path (the /unit-media pathname) of an <img>'s current
+ *  src - stable across re-reads of the SAME key, so a change proves the cover
+ *  key itself changed. The src is already a relative /unit-media/<unitId>/<uuid>
+ *  path, so new URL(src, NEXT).pathname just normalizes it. */
 async function srcKeyPath(img: Locator): Promise<string> {
   const src = await img.getAttribute('src');
   expect(src, 'image has no src').toBeTruthy();
   return new URL(src!, NEXT).pathname;
+}
+
+/**
+ * Same-origin serving pin (design 2026-07-21): a rendered photo src MUST be a
+ * RELATIVE /unit-media/<unitId>/<uuid> path - served by CloudFront's
+ * /unit-media/* behavior in deployed envs and by this app's streaming route
+ * here. No presigned query (X-Amz*), no absolute bucket host. Asserts the RAW
+ * src (relative-string + no-host claims) AND the resolved pathname (the exact
+ * per-unit prefix).
+ */
+async function expectSameOriginUnitMedia(img: Locator, unitId: string): Promise<void> {
+  const src = await img.getAttribute('src');
+  expect(src, 'image has no src').toBeTruthy();
+  // Relative => same-origin => no absolute bucket host anywhere in the src.
+  expect(src!.startsWith('/'), `expected a relative /unit-media src, got: ${src}`).toBe(true);
+  expect(src!, 'src must carry no presigned signature (X-Amz*)').not.toContain('X-Amz');
+  expect(src!.toLowerCase(), 'src must carry no bucket host').not.toContain('amazonaws.com');
+  const pathname = new URL(src!, NEXT).pathname;
+  expect(
+    pathname.startsWith(`/unit-media/${unitId}/`),
+    `expected pathname under /unit-media/${unitId}/, got: ${pathname}`,
+  ).toBe(true);
 }
 
 test.describe('Property photos - upload, cover, remove, and the public flyer', () => {
@@ -152,17 +180,20 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     await uploadPhoto(page);
     const thumb1 = page.getByRole('img', { name: 'Property photo 1' });
     const hero = page.getByRole('img', { name: /hero$/ });
-    await expectLoadedBytes(thumb1, 'the first thumbnail never loaded bytes (presign-per-read serve)');
-    await expectLoadedBytes(hero, 'the hero never loaded bytes (cover presign)');
+    await expectLoadedBytes(thumb1, 'the first thumbnail never loaded bytes (same-origin /unit-media serve)');
+    await expectLoadedBytes(hero, 'the hero never loaded bytes (cover served same-origin)');
+    // Same-origin pin (design 2026-07-21): every rendered photo src is a
+    // relative /unit-media/<unitId>/ path - no presigned query, no bucket host.
+    await expectSameOriginUnitMedia(thumb1, unitId);
+    await expectSameOriginUnitMedia(hero, unitId);
 
     // (2) Upload a SECOND photo, then Make cover on it -> the hero flips to the
-    // new cover key (its presigned pathname changes).
+    // new cover key (its served /unit-media pathname changes).
     const heroKeyBefore = await srcKeyPath(hero);
     await uploadPhoto(page);
-    await expectLoadedBytes(
-      page.getByRole('img', { name: 'Property photo 2' }),
-      'the second thumbnail never loaded bytes',
-    );
+    const photo2 = page.getByRole('img', { name: 'Property photo 2' });
+    await expectLoadedBytes(photo2, 'the second thumbnail never loaded bytes');
+    await expectSameOriginUnitMedia(photo2, unitId);
     await activateThumbAction(page.getByRole('button', { name: 'Make property photo 2 the cover' }));
     await expect
       .poll(async () => srcKeyPath(hero), {
@@ -173,8 +204,20 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     // The flipped hero still renders real bytes.
     await expectLoadedBytes(hero, 'the hero never loaded bytes after the cover flip');
 
-    // (3) Remove one photo (confirmed) -> the gallery drops from 2 thumbs to 1.
+    // (3) Remove one photo (confirmed) -> the gallery drops from 2 thumbs to 1
+    // AND the removed object stops serving (delete-on-removal pin, D1).
     await expect(page.getByRole('img', { name: /^Property photo \d+$/ })).toHaveCount(2);
+    // Capture photo 2's same-origin URL and prove the route serves it NOW - this
+    // guards the 404 assertion below against a false green from a route that
+    // 404s everything.
+    const photo2Src = await photo2.getAttribute('src');
+    expect(photo2Src, 'photo 2 has no src').toBeTruthy();
+    const photo2Url = new URL(photo2Src!, NEXT).toString();
+    expect(
+      (await page.request.get(photo2Url)).status(),
+      'photo 2 must serve 200 BEFORE removal (else the 404 pin is a false green)',
+    ).toBe(200);
+
     await activateThumbAction(page.getByRole('button', { name: 'Remove property photo 2' }));
     const removeDialog = page.getByRole('dialog', { name: 'Remove photo?' });
     await expect(removeDialog).toBeVisible();
@@ -182,14 +225,26 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
     await expect(page.getByRole('dialog')).toHaveCount(0);
     await expect(page.getByRole('img', { name: /^Property photo \d+$/ })).toHaveCount(1);
 
+    // The DELETE API responds 200 WITHOUT awaiting the best-effort S3 delete
+    // (fire-and-forget, D1), so the removed object's URL flips 200 -> 404 a
+    // moment AFTER the UI settles - poll within a bounded window.
+    await expect
+      .poll(async () => (await page.request.get(photo2Url)).status(), {
+        timeout: 10_000,
+        message: 'the removed photo object never 404d (best-effort S3 delete, D1)',
+      })
+      .toBe(404);
+
     // (4) The PUBLIC flyer for this available unit renders the surviving photo
     // (the teaser gallery mounts OUTSIDE the auth gate; alt = "Home photo N").
     await page.goto(`${NEXT}/p/${unitId}`);
     await expect(page.getByRole('button', { name: /I'm interested/i })).toBeVisible();
+    const flyerPhoto = page.getByRole('img', { name: 'Home photo 1' });
     await expectLoadedBytes(
-      page.getByRole('img', { name: 'Home photo 1' }),
-      'the public flyer photo never loaded bytes (public presign-per-read)',
+      flyerPhoto,
+      'the public flyer photo never loaded bytes (public same-origin /unit-media serve)',
     );
+    await expectSameOriginUnitMedia(flyerPhoto, unitId);
 
     // (5) The bytes went browser->MinIO: the app origin saw ZERO multipart POSTs
     // across both uploads (presign + confirm are plain JSON).
@@ -197,6 +252,54 @@ test.describe('Property photos - upload, cover, remove, and the public flyer', (
       watch.offenders,
       `a multipart body reached the app origin - the direct-upload path regressed: ${watch.offenders.join(', ')}`,
     ).toEqual([]);
+  });
+
+  test('a >5MB photo uploads, transcodes at confirm, and renders in the gallery', async ({
+    page,
+  }) => {
+    test.slow();
+    // A >5MB source plus a real server-side transcode: the tripled slow budget gives
+    // the '+ Add' re-enable expect headroom the default 30s per-test cap can't (DEC-7).
+    await devLogin(page);
+    const unitId = await createAvailableUnit(page.request);
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await expect(page.getByRole('heading', { name: 'Photos' })).toBeVisible();
+
+    // Generate a genuinely-decodable >5MB png IN THE BROWSER (random noise defeats
+    // png compression, so 1800x1800 comfortably exceeds 5MB) - the e2e workspace
+    // needs no image dependency, and the browser POSTs the bytes straight to MinIO.
+    const bigPngBase64 = await page.evaluate(async () => {
+      const side = 1800;
+      const canvas = document.createElement('canvas');
+      canvas.width = side;
+      canvas.height = side;
+      const ctx = canvas.getContext('2d')!;
+      const img = ctx.createImageData(side, side);
+      for (let i = 0; i < img.data.length; i += 1) img.data[i] = (Math.random() * 256) | 0;
+      ctx.putImageData(img, 0, 0);
+      const blob: Blob = await new Promise((r) => canvas.toBlob((b) => r(b!), 'image/png'));
+      const buf = new Uint8Array(await blob.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+      return btoa(bin);
+    });
+    const bigPng = Buffer.from(bigPngBase64, 'base64');
+    expect(bigPng.length).toBeGreaterThan(5 * 1024 * 1024);
+
+    await photoInput(page).setInputFiles({ name: 'huge-noise.png', mimeType: 'image/png', buffer: bigPng });
+    // Upload + its own confirm settle when "+ Add" re-enables (the sibling tests'
+    // done-signal); the >5MB source's server-side transcode adds a few seconds.
+    await expect(page.getByRole('button', { name: '+ Add' })).toBeEnabled({ timeout: 30_000 });
+
+    // The gallery gained the photo - a transcoded RENDITION (the browser POSTed 5MB+
+    // straight to MinIO, which the OLD 5MB policy would have 400'd). Assert it
+    // rendered REAL bytes back (naturalWidth > 0), proving the rendition round-trips
+    // MinIO and decodes; and that no error alert is showing.
+    await expectLoadedBytes(
+      page.getByRole('img', { name: 'Property photo 1' }),
+      'the transcoded rendition never loaded bytes (>5MB source -> 2560/q85 jpeg served back)',
+    );
+    await expect(page.getByRole('alert')).toHaveCount(0);
   });
 
   test('E1: a non-shareable (On hold) unit 404s the whole flyer, photos included', async ({

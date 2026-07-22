@@ -20,7 +20,6 @@ import {
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   createCloudWatchClient,
-  DELIVERY_FAILURE_INSIGHTS_FILTER,
   OOM_APP_INSIGHTS_FILTER,
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
@@ -188,7 +187,7 @@ describe('cloudwatch adapter — queryInsights', () => {
     const logs = { send };
     const seam = createCloudWatchClient({ config: CONFIG, cloudwatch: fakeCw({}) as never, logs: logs as never });
 
-    const events = await seam.queryInsights(['/hc/dev/app'], DELIVERY_FAILURE_INSIGHTS_FILTER, sinceMs, 25);
+    const events = await seam.queryInsights(['/hc/dev/app'], PINO_WARN_INSIGHTS_FILTER, sinceMs, 25);
     expect(events).toHaveLength(2);
     expect(events[0]!.errorCode).toBe('30034');
     expect(events[0]!.level).toBe(40);
@@ -313,7 +312,5 @@ describe('cloudwatch adapter — queryInsights', () => {
     // PINO_WARN_INSIGHTS_FILTER widens to warn+ (level ≥ 40)
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('level');
     expect(PINO_WARN_INSIGHTS_FILTER).toContain('40');
-    // DELIVERY_FAILURE_INSIGHTS_FILTER pins Twilio failures by their event marker
-    expect(DELIVERY_FAILURE_INSIGHTS_FILTER).toContain('delivery_failed');
   });
 });

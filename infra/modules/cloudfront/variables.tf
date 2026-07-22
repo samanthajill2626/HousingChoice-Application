@@ -31,3 +31,9 @@ variable "acm_certificate_arn" {
   type        = string
   default     = null
 }
+
+variable "media_origin_domain_name" {
+  description = "Regional domain of the media bucket, served as the /unit-media/* S3 origin via OAC (unit-media-cloudfront design 2026-07-21). null = no media origin/behavior."
+  type        = string
+  default     = null
+}

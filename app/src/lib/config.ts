@@ -104,6 +104,27 @@ export interface AppConfig {
    */
   relayNumberReleaseEnabled: boolean;
   /**
+   * Relay spare-buffer target K (relay number buying strategy T4). The count of
+   * FRESH SPARE pool numbers the event-driven refill keeps pre-bought + A2P-
+   * registered so a brand-new group opens instantly instead of connect-when-ready.
+   * Read from RELAY_SPARE_BUFFER_TARGET; per-env via .env.<env> (dev 0 / prod 2),
+   * NOT an in-code appEnv switch. DEFAULT 0. D8: 0 is a VALID target (dev/local
+   * posture - no spares), so loadConfig rejects only a NEGATIVE / non-integer
+   * value, NOT the repo-standard `<= 0` positive-int guard (that would crash boot
+   * on the legitimate dev value 0).
+   */
+  relaySpareBufferTarget: number;
+  /**
+   * Stuck-warming alert threshold in ms (relay number buying strategy T4). A
+   * warming pool number whose warming_started_at is older than this (Twilio's A2P
+   * registration event never arrived) is flagged by flagStuckWarming at log.error
+   * - an ALERT ONLY, never a promotion (the sole warming->active writer is the
+   * registration event). Read from RELAY_WARMING_MAX_WAIT (ms); DEFAULT 30min.
+   * Same NOT-fail-fast idiom as voiceTranscriptReconcileSeconds: a bad/zero/negative
+   * value WARNs and falls back (a stuck-alert typo must never block boot).
+   */
+  relayWarmingMaxWaitMs: number;
+  /**
    * Outbound-SMS kill-switch (A2P safety). When false, every real-Twilio SMS
    * send is REFUSED before the provider call (the send wrapper throws a
    * SendRefusedError; the Twilio driver also refuses as a backstop), so a
@@ -621,6 +642,44 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // must never be permissive.
   const relayNumberReleaseEnabled = env.RELAY_NUMBER_RELEASE_ENABLED === 'true';
 
+  // Relay spare-buffer target K (relay number buying strategy T4). The count of
+  // FRESH SPARE pool numbers the event-driven refill pre-warms so a new group can
+  // open instantly. Read from RELAY_SPARE_BUFFER_TARGET; DEFAULT 0. D8: dev/local
+  // run with 0 (no spares - connect-when-ready covers a fresh pair), so 0 is VALID
+  // and the guard rejects only a NEGATIVE / non-integer value (fail-fast: a
+  // misconfigured buffer must not silently disable refill). It is deliberately the
+  // `< 0` guard, NOT the repo-standard `<= 0` positive-int guard (PORT above),
+  // which would crash boot on the legitimate dev value 0. Per-env value comes from
+  // .env.<env> (dev 0 / prod 2), never an in-code appEnv switch.
+  const relaySpareBufferTarget = Number(env.RELAY_SPARE_BUFFER_TARGET ?? 0);
+  if (!Number.isInteger(relaySpareBufferTarget) || relaySpareBufferTarget < 0) {
+    throw new Error(
+      `RELAY_SPARE_BUFFER_TARGET must be a non-negative integer, got: ${env.RELAY_SPARE_BUFFER_TARGET}`,
+    );
+  }
+
+  // Stuck-warming alert threshold (relay number buying strategy T4). A warming
+  // pool number older than this without a registration event is flagged by
+  // flagStuckWarming at log.error - an ALERT only (never a promotion; the sole
+  // warming->active writer is the Event Streams registration event). Read from
+  // RELAY_WARMING_MAX_WAIT (ms); DEFAULT 30min. Same NOT-fail-fast idiom as
+  // VOICE_TRANSCRIPT_RECONCILE_SECONDS: a bad value (including '0' or negative -
+  // there is no zero-wait stuck window) WARNs and falls back, so a threshold typo
+  // never blocks boot.
+  const RELAY_WARMING_MAX_WAIT_DEFAULT = 30 * 60_000;
+  let relayWarmingMaxWaitMs = RELAY_WARMING_MAX_WAIT_DEFAULT;
+  if (env.RELAY_WARMING_MAX_WAIT !== undefined && env.RELAY_WARMING_MAX_WAIT.length > 0) {
+    const parsed = Number(env.RELAY_WARMING_MAX_WAIT);
+    if (Number.isFinite(parsed) && parsed > 0) {
+      relayWarmingMaxWaitMs = parsed;
+    } else {
+      logger.warn(
+        { value: env.RELAY_WARMING_MAX_WAIT, fallback: RELAY_WARMING_MAX_WAIT_DEFAULT },
+        'RELAY_WARMING_MAX_WAIT is not a positive number - using the default',
+      );
+    }
+  }
+
   // Outbound-SMS kill-switch (A2P) — same shape/posture as RELAY_LIVE_PROVISIONING:
   // default OFF on the deployed (twilio) stacks so NO real SMS is sent before A2P
   // approval (an unregistered-number send draws Twilio 30034 and hurts sender
@@ -1066,6 +1125,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     messagingDriver,
     relayLiveProvisioning,
     relayNumberReleaseEnabled,
+    relaySpareBufferTarget,
+    relayWarmingMaxWaitMs,
     smsSendingEnabled,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,

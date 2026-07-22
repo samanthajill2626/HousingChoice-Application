@@ -63,6 +63,9 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
       return [];
     },
     async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
     async getRecord(poolNumber) {
       return rec(poolNumber);
     },
@@ -87,6 +90,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
       return [];
     },
     async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
     async getRecord() {
       return undefined;
     },

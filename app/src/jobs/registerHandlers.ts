@@ -17,6 +17,7 @@ import { registerRelayFanOutJobHandler } from './relayFanOut.js';
 import { registerBroadcastSendJobHandler } from './broadcastFanOut.js';
 import { registerMissedCallAutoTextJobHandler } from './missedCallAutoText.js';
 import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
+import { registerRelayWarmJobHandler } from './relayWarm.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
@@ -26,11 +27,14 @@ export interface RegisterJobHandlersDeps {
 /**
  * Register every job handler. Job names produced: `messaging.retrySend`,
  * `relay.fanOut` + `relay.intro` (both from the relay registrar), `broadcast.send`,
- * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`.
+ * `call.missedAutoText`, `voice.createTranscript` + `voice.reconcileTranscript`,
+ * `relay.warmNumber`.
  * retrySend is a single low-volume send and is intentionally not throttled; the
  * SMS handlers share `tokenBucket` so the COMBINED outbound rate stays under the
  * registered A2P tier. The voice-transcript jobs make VI API calls (no outbound
  * SMS), so they draw no token and lazily build their own config/adapter/repos.
+ * relay.warmNumber is an SDK provision + messaging-service attach (a number
+ * PURCHASE, not an outbound SMS), so it likewise draws no token.
  */
 export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerRetrySendJobHandler();
@@ -38,4 +42,5 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerBroadcastSendJobHandler({ tokenBucket: deps.tokenBucket });
   registerMissedCallAutoTextJobHandler({ tokenBucket: deps.tokenBucket });
   registerVoiceTranscriptJobHandlers();
+  registerRelayWarmJobHandler();
 }

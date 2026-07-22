@@ -97,6 +97,17 @@ export interface ProvisionForGroupResult {
  */
 export const RELAY_NUMBER_READY_JOB = 'relay.numberReady';
 
+/**
+ * Job name for warming ONE pool number (relay number buying strategy T4). The
+ * buffer refill (refillBufferIfNeeded) enqueues it per missing spare; the
+ * connect-when-ready path (T6) enqueues it tagged with a conversationId. Its
+ * handler (registerRelayWarmJobHandler in jobs/relayWarm.ts) dispatches back to
+ * warmOneNumber. Defined HERE (the producing service), NOT in the job module, so
+ * refillBufferIfNeeded can reference it without a service<->job import cycle -
+ * mirroring RELAY_NUMBER_READY_JOB above.
+ */
+export const RELAY_WARM_JOB = 'relay.warmNumber';
+
 /** Input to onNumberRegistered - the Event Streams registration webhook (T3). */
 export interface OnNumberRegisteredInput {
   /** The registered number's Twilio PN SID - the D2 correlation key. */
@@ -146,6 +157,34 @@ export interface PoolNumbersService {
    * for the ops script.
    */
   retireEligible(): Promise<string[]>;
+  /**
+   * Buy ONE pool number and park it WARMING until the Event Streams registration
+   * event promotes it (T4). Gated by relayLiveProvisioning (throws
+   * RelayProvisioningDisabledError when off, like provisionForGroup's fresh-buy
+   * guard - no real number is purchased pre-A2P). Order: provision (REQUIRE voice,
+   * like the group buy) -> repo.createWarming (persist as warming + the PN sid,
+   * the D2 correlation key, + the connect-when-ready earmark when conversationId is
+   * given) -> adapter.attachToMessagingService(sid) (start A2P registration). The
+   * voice webhook is pre-wired exactly as the group buy does (M1.9). NOT promoted
+   * here - promotion is solely the registration event.
+   */
+  warmOneNumber(conversationId?: string): Promise<void>;
+  /**
+   * Top the spare buffer up to relaySpareBufferTarget (T4). have =
+   * countFreshSpares() + countWarming() (WARMING counts, so an in-flight warm is
+   * never double-bought - the debounce); need = max(0, target - have); enqueues
+   * that many RELAY_WARM_JOB jobs. Target 0 (dev) enqueues nothing. Wiring this
+   * after provisionForGroup is deferred to T5; here it is a standalone method.
+   */
+  refillBufferIfNeeded(): Promise<void>;
+  /**
+   * Stuck-warming ALERT sweep (T4): log.error for every warming record whose
+   * warming_started_at is older than relayWarmingMaxWaitMs (the registration event
+   * never arrived). ALERT ONLY - it NEVER promotes (promotion is solely the
+   * registration event). Fresh warming records are skipped. PII (doc section 9):
+   * logs the SID (the correlation key an operator acts on), never the pool number.
+   */
+  flagStuckWarming(): Promise<void>;
   /**
    * Event Streams registration callback (T3): the number identified by its PN
    * SID has been A2P 10DLC-registered. Correlate by SID (D2): findWarmingBySid ->
@@ -456,6 +495,125 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
           log.error(
             { err, event: 'relay_number_ready_enqueue_failed' },
             'relay.numberReady enqueue failed - connecting group stays pending until reconciled',
+          );
+        }
+      }
+    },
+
+    async warmOneNumber(conversationId) {
+      // KILL-SWITCH (M1.7): warming a spare BUYS a real number, so refuse BEFORE
+      // the adapter call when relay live provisioning is off - the identical guard
+      // provisionForGroup's fresh-buy branch uses, so a deployed stack never
+      // purchases a number pre-A2P.
+      if (!config.relayLiveProvisioning) {
+        throw new RelayProvisioningDisabledError(
+          'relay number provisioning is disabled in this environment - set ' +
+            'RELAY_LIVE_PROVISIONING=true after A2P approval to enable warming a pool number',
+        );
+      }
+
+      // Buy a voice+sms-capable number, RETRYING on a pool collision exactly like
+      // provisionForGroup's fresh block (createWarming's attribute_not_exists guard
+      // can fire locally against the shared dev table; a purchased number is
+      // globally unique in prod so this runs once). REQUIRE voice on each candidate
+      // (M1.9 masked calling rides the same number) - a misconfigured account fails
+      // HERE, not at call time. Persist WARMING (NOT active) with the PN sid (D2
+      // correlation key) + the connect-when-ready earmark; the number is NOT a
+      // usable pool number until the registration event promotes it.
+      let candidate: ProvisionPhoneNumberResult | undefined;
+      for (let attempt = 1; attempt <= MAX_PROVISION_ATTEMPTS; attempt += 1) {
+        const bought = await adapter.provisionPhoneNumber({ voiceCapable: true });
+        if (!bought.capabilities.voice) {
+          throw new VoiceCapabilityError(
+            `warmOneNumber: provisioned ${bought.sid} lacks voice capability`,
+          );
+        }
+        try {
+          await repo.createWarming({
+            poolNumber: bought.phoneNumber,
+            sid: bought.sid,
+            voiceCapable: bought.capabilities.voice,
+            smsCapable: bought.capabilities.sms,
+            provisionedVia: currentVia,
+            ...(conversationId !== undefined && { conversationId }),
+          });
+          candidate = bought;
+          break;
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) {
+            log.warn(
+              { attempt },
+              'warmed number already in the pool - retrying with a fresh number',
+            );
+            continue;
+          }
+          throw err;
+        }
+      }
+      if (candidate === undefined) {
+        throw new Error(
+          `warmOneNumber: could not obtain a free pool number after ${MAX_PROVISION_ATTEMPTS} attempts`,
+        );
+      }
+
+      // Attach to the A2P messaging service so Twilio begins registering it (the
+      // event that later promotes it fires against this membership). AFTER the
+      // durable createWarming, so a crash between buy and attach still leaves a
+      // warming record the stuck-warming alert surfaces. Idempotent on 21710.
+      await adapter.attachToMessagingService(candidate.sid);
+
+      // Pre-wire the voice webhook exactly as provisionForGroup does (M1.9 bridge
+      // seam). Best-effort: a wiring failure must not strand the warming number.
+      if (config.publicBaseUrl) {
+        try {
+          await adapter.setVoiceWebhook(
+            candidate.phoneNumber,
+            `${config.publicBaseUrl}${VOICE_WEBHOOK_PATH}`,
+          );
+        } catch (err) {
+          log.error({ err }, 'relay warming number voice webhook wiring failed');
+        }
+      }
+
+      log.info(
+        { event: 'relay_number_warming' },
+        'relay pool number bought and warming (awaiting A2P registration)',
+      );
+    },
+
+    async refillBufferIfNeeded() {
+      // have = fresh spares + warming (WARMING counts, so a 2nd spare is never
+      // bought while the 1st is still registering - the debounce). need clamps at
+      // 0, so target 0 (dev) enqueues nothing. Each missing spare = one warm job.
+      const have = (await repo.countFreshSpares()) + (await repo.countWarming());
+      const need = Math.max(0, config.relaySpareBufferTarget - have);
+      for (let i = 0; i < need; i += 1) {
+        await enqueueImmediate(RELAY_WARM_JOB, {});
+      }
+      if (need > 0) {
+        log.info(
+          { event: 'relay_buffer_refill', need },
+          'relay spare buffer below target - warm jobs enqueued',
+        );
+      }
+    },
+
+    async flagStuckWarming() {
+      // ALERT-ONLY stuck-registration sweep: a warming number older than the max
+      // wait means Twilio's A2P registration event never arrived. NEVER promote
+      // (promotion is solely the registration event) - just log.error so the
+      // error-logs alarm surfaces it. PII (doc section 9): log the SID (the D2
+      // correlation key an operator acts on), NEVER the pool number.
+      const cutoff = now().getTime() - config.relayWarmingMaxWaitMs;
+      for (const record of await repo.listWarming()) {
+        const startedAt = record.warming_started_at;
+        if (startedAt === undefined) continue; // no stamp - cannot age it
+        const startedMs = Date.parse(startedAt);
+        if (Number.isNaN(startedMs)) continue; // corrupt stamp - skip (retire NaN-guard parity)
+        if (startedMs < cutoff) {
+          log.error(
+            { event: 'relay_warm_stuck', sid: record.sid },
+            'relay warming number stuck past the max wait - A2P registration never arrived (manual attention)',
           );
         }
       }

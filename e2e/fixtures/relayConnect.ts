@@ -131,8 +131,12 @@ export async function driveConnectingGroupToOpen(
     return number;
   });
   await expect
+    // 60s (not 30s): the connect-when-ready chain is multi-hop async - register ->
+    // Event Streams webhook -> promote -> relay.numberReady job -> assign+open ->
+    // SSE. Solo it opens in seconds, but under FULL-SUITE parallel load the shared
+    // worker/queue can push it past a 30s wait (a real flake seen at 187-spec load).
     .poll(async () => (await getConversation(request, conversationId)).status, {
-      timeout: 30_000,
+      timeout: 60_000,
       message: 'connecting group never opened after register-number',
     })
     .toBe('open');

@@ -153,6 +153,8 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
     listSuggestionsByContact: vi.fn(async () => []),
     deleteSuggestion: vi.fn(async () => {}),
     listPending: vi.fn(async () => []),
+    putDismissal: vi.fn(async () => {}),
+    hasDismissal: vi.fn(async () => false),
   } satisfies ExtractionRepo;
 }
 

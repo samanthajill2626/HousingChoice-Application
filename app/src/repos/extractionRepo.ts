@@ -130,6 +130,15 @@ export interface ExtractionRepo {
   deleteSuggestion(contactId: string, target: string): Promise<void>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
   listPending(opts?: { limit?: number }): Promise<SuggestionItem[]>;
+  /**
+   * Record a dismissed (target, NORMALIZED value) pair - PERMANENT by ruling
+   * (2026-07-21): a human edit never clears it; the same value is never
+   * re-suggested. Tombstones carry NO GSI keys, so they can never surface as
+   * pending suggestions or Today counts.
+   */
+  putDismissal(contactId: string, target: string, normValue: string): Promise<void>;
+  /** True when this exact normalized value was previously dismissed for the target. */
+  hasDismissal(contactId: string, target: string, normValue: string): Promise<boolean>;
 }
 
 // ---------------------------------------------------------------------------
@@ -138,6 +147,10 @@ export interface ExtractionRepo {
 
 const dueId = (conversationId: string): string => `due#${conversationId}`;
 const suggId = (contactId: string, target: string): string => `sugg#${contactId}#${target}`;
+// Value-keyed (unlike sugg#, which is one slot per target): several rejected
+// values can accumulate per target over a contact's life.
+const dismId = (contactId: string, target: string, normValue: string): string =>
+  `dism#${contactId}#${target}#${normValue}`;
 
 // ---------------------------------------------------------------------------
 // Factory
@@ -355,6 +368,30 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       };
       const { Items } = await doc.send(new QueryCommand(input));
       return (Items ?? []) as SuggestionItem[];
+    },
+
+    async putDismissal(contactId, target, normValue) {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            itemId: dismId(contactId, target, normValue),
+            // Deliberately NOT ownerContactId / _pendingPartition - tombstones
+            // must stay out of the byOwner and byPending GSIs.
+            contactId,
+            target,
+            dismissedValue: normValue,
+            createdAt: new Date().toISOString(),
+          },
+        }),
+      );
+    },
+
+    async hasDismissal(contactId, target, normValue) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { itemId: dismId(contactId, target, normValue) } }),
+      );
+      return Item !== undefined;
     },
 
     async deleteSuggestion(contactId, target) {

@@ -56,7 +56,7 @@ function uniquePhone(): string {
 async function createTenant(
   request: APIRequestContext,
   firstName: string,
-  opts: { pets?: string } = {},
+  opts: { pets?: string; evictions?: string } = {},
 ): Promise<{ contactId: string; phone: string }> {
   const phone = uniquePhone();
   const res = await request.post(`${NEXT}/api/contacts`, {
@@ -66,6 +66,7 @@ async function createTenant(
       lastName: 'Bridge',
       phone,
       ...(opts.pets !== undefined && { pets: opts.pets }),
+      ...(opts.evictions !== undefined && { evictions: opts.evictions }),
     },
   });
   expect(res.ok(), `create tenant ${firstName}`).toBeTruthy();
@@ -194,4 +195,41 @@ test('cross-process: a worker-poll extraction updates an open contact page live'
   await expect(page.getByRole('group', { name: /AI suggestion for/i })).toBeVisible({
     timeout: 90_000,
   });
+});
+
+test('cross-process: a worker-poll DIRECT WRITE updates the open page field values live', async ({
+  page,
+  request,
+}) => {
+  // Same one-real-worker-poll shape as the chip test above. Pins
+  // suggestion-event-no-contact-refetch: the CONTACT record (field values +
+  // Auto badge), not just the chips, must update in place on the bridge hint.
+  test.setTimeout(150_000);
+  await devLogin(page);
+  // evictions pre-seeded so the Eligibility-intake card renders (it hides when
+  // empty - same trick as the chip test above); pets stays EMPTY for the write.
+  const { contactId } = await createTenant(page.request, 'BridgeFieldLive', { evictions: 'none' });
+  const conversationId = await ensureConversation(page.request, contactId);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const intake = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Eligibility intake' }) });
+  await expect(intake).toBeVisible();
+
+  await planTranscribedCall(request, {
+    conversationId,
+    callSid: `CAbridgew${Date.now()}`,
+    sentences: [
+      {
+        text: 'EXTRACT:{"fields":{"pets":{"op":"write","value":"cat","reason":"said has a cat"}}}',
+        mediaChannel: 1,
+      },
+    ],
+  });
+
+  // NO reload: the written value and its Auto badge can only appear if the
+  // open page background-refetched the contact when suggestion.updated arrived.
+  await expect(intake.getByText('cat')).toBeVisible({ timeout: 90_000 });
+  await expect(intake.getByRole('img', { name: 'Auto' })).toBeVisible();
 });

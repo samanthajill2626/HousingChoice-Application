@@ -404,3 +404,38 @@ describe('PATCH /api/contacts/:contactId - human edit clears AI provenance + pen
     expect(await world.extractionRepo.getSuggestion(contactId, 'type')).toBeUndefined();
   });
 });
+
+// Dismissal tombstones (suggestion-dismissals-not-sticky, Cameron's ruling
+// 2026-07-21): a dismiss PERMANENTLY records the rejected normalized value so
+// the extraction pipeline never re-suggests it; accept records nothing.
+describe('dismissal tombstones', () => {
+  it('dismiss writes a tombstone for the normalized suggested value', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'firstName',
+      suggestedValue: '  Cameron ',
+      conversationId: 'conv-7',
+    });
+    const res = await dismiss(app, contactId, 'firstName');
+    expect(res.status).toBe(200);
+    expect(await world.extractionRepo.hasDismissal(contactId, 'firstName', 'cameron')).toBe(true);
+    // A different value for the same target is NOT tombstoned.
+    expect(await world.extractionRepo.hasDismissal(contactId, 'firstName', 'kamran')).toBe(false);
+  });
+
+  it('accept does NOT write a tombstone', async () => {
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'pets',
+      suggestedValue: '2 cats',
+      conversationId: 'conv-7',
+    });
+    const res = await accept(app, contactId, 'pets');
+    expect(res.status).toBe(200);
+    expect(await world.extractionRepo.hasDismissal(contactId, 'pets', '2 cats')).toBe(false);
+  });
+});

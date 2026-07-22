@@ -58,7 +58,7 @@ import {
   type StatusTransitionDeps,
   type StatusTransitionService,
 } from '../services/statusTransition.js';
-import { EXTRACTABLE_FIELDS } from '../services/extraction/schema.js';
+import { EXTRACTABLE_FIELDS, normalizeSuggestionValue } from '../services/extraction/schema.js';
 import {
   cleanAddressParts,
   contactAddressToParts,
@@ -328,6 +328,14 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       ...(actor !== undefined && { actor }),
       target,
     });
+    // Tombstone the rejected value PERMANENTLY (ruling 2026-07-21): the same
+    // normalized value is never re-suggested for this target; a different
+    // value still comes through. A human field edit does NOT clear it.
+    await extraction.putDismissal(
+      contactId,
+      target,
+      normalizeSuggestionValue(target, suggestion.suggestedValue),
+    );
     await extraction.deleteSuggestion(contactId, target);
     events.emit('suggestion.updated', { contactId });
     const remaining = await extraction.listSuggestionsByContact(contactId);

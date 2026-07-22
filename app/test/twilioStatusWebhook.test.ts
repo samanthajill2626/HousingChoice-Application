@@ -353,7 +353,7 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       expect(outbound.delayed).toHaveLength(1);
     });
 
-    it('30003 past the attempt cap WARNs and does NOT enqueue', async () => {
+    it('30003 past the attempt cap ERRORs (now terminal) and does NOT enqueue', async () => {
       const { app, world, capture } = makeWebhookHarness();
       await seedOutbound(world, 'SMretry3', { retry_attempt: MAX_SEND_RETRY_ATTEMPTS });
 
@@ -364,8 +364,9 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       );
 
       expect(outbound.delayed).toHaveLength(0);
-      const warn = capture.atLevel(WARN).find((l) => String(l['msg']).includes('retry cap reached'));
-      expect(warn).toBeDefined();
+      // Exhausting retries makes the transient failure TERMINAL → it graduates to error.
+      const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('exhausted retries'));
+      expect(err).toBeDefined();
     });
 
     it('30005 (invalid number) flags the CONTACT sms_unreachable and never retries', async () => {
@@ -431,16 +432,23 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       }
     });
 
-    it('30007 (carrier filtering) ERROR-logs with correlation and never retries', async () => {
+    it('30007 (carrier filtering) is a terminal ERROR (via the delivery_failed marker) and never retries', async () => {
       const { app, world, capture } = makeWebhookHarness();
       const seeded = await seedOutbound(world, 'SMout0001');
 
       await signedTwilioPost(app, STATUS_PATH, statusParams({ MessageStatus: 'undelivered', ErrorCode: '30007' }));
 
-      const err = capture.atLevel(ERROR).find((l) => String(l['msg']).includes('carrier filtering'))!;
+      // Terminal failure → the delivery_failed marker carries the error severity
+      // (feeds the alarm), with the conversation + correlation context.
+      const err = capture.atLevel(ERROR).find((l) => l['event'] === 'delivery_failed')!;
       expect(err).toBeDefined();
+      expect(err['errorCode']).toBe('30007');
       expect(err['conversationId']).toBe(seeded.conversationId);
       expect(typeof err['correlationId']).toBe('string');
+      // The "carrier filtering — not retried" note is now a WARN context line
+      // (the marker owns the error/alarm, so we don't double-log an error).
+      const note = capture.atLevel(WARN).find((l) => String(l['msg']).includes('carrier filtering'));
+      expect(note).toBeDefined();
       expect(outbound.delayed).toHaveLength(0);
       expect(world.flagWrites).toHaveLength(0);
     });
@@ -520,21 +528,22 @@ describe('POST /webhooks/twilio/status — transitions', () => {
         statusParams({ MessageStatus: 'undelivered', ErrorCode: '30005' }),
       );
 
-      // Stable marker the DeliveryFailures metric filter keys on — WARN, with
-      // the Twilio error_code + provider SID, never a body/phone (PII).
+      // Stable marker the DeliveryFailures metric filter keys on. 30005 (invalid
+      // number) is a TERMINAL failure → ERROR, with the Twilio error_code +
+      // provider SID, never a body/phone (PII).
       const marker = capture
-        .atLevel(WARN)
+        .atLevel(ERROR)
         .find((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0001')!;
       expect(marker).toBeDefined();
       expect(marker['errorCode']).toBe('30005');
       expect(marker['providerStatus']).toBe('undelivered');
       expect(typeof marker['correlationId']).toBe('string');
-      // A 'failed' status maps the same way → also marked (no error code needed).
+      // A 'failed' status with no code is terminal too → also marked at ERROR.
       const { app: app2, world: world2, capture: capture2 } = makeWebhookHarness();
       await seedOutbound(world2, 'SMout0002');
       await signedTwilioPost(app2, STATUS_PATH, statusParams({ MessageSid: 'SMout0002', MessageStatus: 'failed' }));
       expect(
-        capture2.atLevel(WARN).some((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0002'),
+        capture2.atLevel(ERROR).some((l) => l['event'] === 'delivery_failed' && l['providerSid'] === 'SMout0002'),
       ).toBe(true);
     });
 

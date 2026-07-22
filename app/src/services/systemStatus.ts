@@ -18,7 +18,6 @@
 import {
   classifyCloudWatchError,
   createCloudWatchClient,
-  DELIVERY_FAILURE_INSIGHTS_FILTER,
   OOM_APP_INSIGHTS_FILTER,
   OOM_SYSTEM_INSIGHTS_FILTER,
   PINO_ERROR_INSIGHTS_FILTER,
@@ -181,23 +180,22 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
       }
       const sinceMs = Date.now() - WINDOW_MS[window];
       // The pino query is level≥50 by default; the "include warnings" toggle
-      // widens it to level≥40. Twilio delivery failures are pinned in by a
-      // SEPARATE query regardless (they log at warn), so operators always see
-      // the failing code without opting into the whole warn firehose.
+      // widens it to level≥40. Terminal Twilio delivery failures log at ERROR
+      // (see the delivery-failure taxonomy in routes/webhooks/twilio.ts), so they
+      // surface here through the normal error query; transient-retrying / opt-out
+      // delivery events are warn and appear only with the toggle on.
       const pinoFilter = opts.includeWarnings ? PINO_WARN_INSIGHTS_FILTER : PINO_ERROR_INSIGHTS_FILTER;
       try {
-        // Four Insights queries in parallel:
+        // Three Insights queries in parallel:
         //   appErrors      — pino level≥50 (or ≥40 with warnings) in app+worker
-        //   deliveryFails  — Twilio send/delivery failures (event=delivery_failed), always
         //   appWorkerV8Oom — V8 heap OOM across BOTH app+worker in a single multi-group query
         //   systemOom      — kernel OOM-killer lines in the system log group
-        const [appErrors, deliveryFails, appWorkerV8Oom, systemOom] = await Promise.all([
+        const [appErrors, appWorkerV8Oom, systemOom] = await Promise.all([
           // BOTH process log groups: worker-side errors (extraction poll, tour
           // reminder + placement nudge polls, voice transcript jobs) were
           // invisible to this panel when only the app group was queried
           // (found live 2026-07-20: an extraction 400 surfaced nowhere).
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], pinoFilter, sinceMs, ERROR_EVENT_LIMIT),
-          cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], DELIVERY_FAILURE_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.errorLogGroupName, config.workerLogGroupName], OOM_APP_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
           cloudwatch.queryInsights([config.systemLogGroupName], OOM_SYSTEM_INSIGHTS_FILTER, sinceMs, ERROR_EVENT_LIMIT),
         ]);
@@ -207,11 +205,10 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         const relabeledV8 = appWorkerV8Oom.map((e) => ({ ...e, message: OOM_APP_LABEL }));
         const relabeledSystem = systemOom.map((e) => ({ ...e, message: OOM_SYSTEM_LABEL }));
         // Merge, dedup by timestamp+message+errorCode, sort newest-first, cap at
-        // limit. errorCode is in the key so a delivery failure surfaced by BOTH
-        // the warn-widened pino query and the delivery query collapses to one,
-        // while two distinct-code failures at the same instant both survive.
+        // limit. errorCode is in the key so two distinct-code failures at the same
+        // instant both survive (rather than collapsing on timestamp+message).
         const seen = new Set<string>();
-        const events = [...appErrors, ...deliveryFails, ...relabeledV8, ...relabeledSystem]
+        const events = [...appErrors, ...relabeledV8, ...relabeledSystem]
           .filter((e) => {
             const key = `${e.timestamp}|${e.message}|${e.errorCode ?? ''}`;
             if (seen.has(key)) return false;

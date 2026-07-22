@@ -56,12 +56,17 @@ const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 const MAX_PROVISION_ATTEMPTS = 20;
 
 /**
- * Thrown by provisionForGroup when obtaining a NEW pool number would be
- * required but the relay number-provisioning kill-switch is off
- * (config.relayLiveProvisioning === false). Raised BEFORE any
- * adapter.provisionPhoneNumber call, so the deployed twilio driver can never
- * accidentally PURCHASE a real number before A2P approval / an explicit
- * RELAY_LIVE_PROVISIONING=true decision. The message is actionable and PII-free.
+ * Thrown by warmOneNumber when buying a pool number is required but the relay
+ * number-provisioning kill-switch is off (config.relayLiveProvisioning ===
+ * false). Raised BEFORE any adapter.provisionPhoneNumber call, so the deployed
+ * twilio driver can never accidentally PURCHASE a real number before A2P
+ * approval / an explicit RELAY_LIVE_PROVISIONING=true decision. The message is
+ * actionable and PII-free.
+ *
+ * NOTE (T5): provisionForGroup NO LONGER throws this - it returns
+ * `needs_connecting` instead (buying moved to warmOneNumber). The relay-group
+ * routes still catch it defensively, but on the group-create path it is now
+ * surfaced only from a warm job, not the route.
  */
 export class RelayProvisioningDisabledError extends Error {
   constructor(message: string) {
@@ -81,12 +86,21 @@ export interface PoolNumbersServiceDeps {
   now?: () => Date;
 }
 
-export interface ProvisionForGroupResult {
-  poolNumber: string;
-  record: PoolNumberItem;
-  /** True when a fresh number was purchased; false when an active one was reused. */
-  provisioned: boolean;
-}
+/**
+ * The outcome of provisionForGroup (T5), a discriminated union:
+ *  - `assigned`: a pool number was acquired for the group NOW - tier-1 reuse of
+ *    an already-burned active (prefer multiplex) or tier-2 consumption of a
+ *    fresh spare. Under the warm-pool model provisionForGroup never BUYS, so
+ *    `provisioned` is always false here; it is retained on the shape so existing
+ *    callers/telemetry that read it keep compiling.
+ *  - `needs_connecting`: no reusable number AND no free spare, so the caller must
+ *    create a CONNECTING group and enqueue a warm job (connect-when-ready). NO
+ *    number is bought and NO kill-switch error is thrown from this path (buying
+ *    is solely warmOneNumber, which carries the kill-switch guard).
+ */
+export type ProvisionResult =
+  | { kind: 'assigned'; poolNumber: string; record: PoolNumberItem; provisioned: boolean }
+  | { kind: 'needs_connecting' };
 
 /**
  * Job name for the connect-when-ready hand-off (D6). A warming number that was
@@ -123,15 +137,23 @@ export interface OnNumberRegisteredInput {
 
 export interface PoolNumbersService {
   /**
-   * Acquire a voice+sms-capable pool number for a relay GROUP via burn-as-claim:
-   * a lazy retirement sweep, then reuse the first active same-driver number whose
-   * burn does not overlap `rosterPhones`, else provision a fresh one (seeded with
-   * the roster burn). `rosterPhones` = every member phone of the NEW group; MUST
-   * be non-empty. Throws VoiceCapabilityError when a fresh number cannot be made
-   * voice-capable, RelayProvisioningDisabledError when a fresh purchase is needed
-   * but the kill-switch is off.
+   * Acquire a pool number for a relay GROUP via the THREE-TIER ladder (T5),
+   * returning a discriminated ProvisionResult (never buying, never throwing the
+   * kill-switch error):
+   *   TIER 1 - reuse, PREFER MULTIPLEX: burn-as-claim onto the first active
+   *     same-driver number that ALREADY hosts a group (non-empty burn) and does
+   *     not overlap `rosterPhones`.
+   *   TIER 2 - fresh spare: burn-as-claim onto an active same-driver EMPTY-burn
+   *     spare that is NOT earmarked to a connecting group (G2 - same "fresh spare"
+   *     definition as countFreshSpares).
+   *   TIER 3 - connect-when-ready: neither hit -> `{ kind: 'needs_connecting' }`
+   *     (the caller creates a connecting group + enqueues a warm job).
+   * `rosterPhones` = every member phone of the NEW group; MUST be non-empty.
+   * Before every return it awaits refillBufferIfNeeded (tops the warm spare
+   * buffer; on dev target 0 this enqueues nothing) and opportunistically fires
+   * the retirement + stuck-warming sweeps.
    */
-  provisionForGroup(rosterPhones: string[], tag?: string): Promise<ProvisionForGroupResult>;
+  provisionForGroup(rosterPhones: string[], tag?: string): Promise<ProvisionResult>;
   /** Stamp a group-close time onto the number (the retirement clock). */
   noteGroupClosed(poolNumber: string, closedAt: string): Promise<void>;
   /**
@@ -206,6 +228,18 @@ function rosterOverlapsBurn(
   if (burned === undefined) return false;
   const set = burned instanceof Set ? burned : new Set(burned);
   return roster.some((p) => set.has(p));
+}
+
+/**
+ * True if the number carries ANY burn (D7 Set-or-array-safe). Separates the
+ * tier-1 "already hosts a group" candidates (prefer multiplex) from the tier-2
+ * empty-burn spares. `!burned?.size` is unsafe for the `string[]` arm of
+ * `Set<string> | string[]`, so branch on both shapes explicitly.
+ */
+function hasBurn(burned: Set<string> | string[] | undefined): boolean {
+  if (burned === undefined) return false;
+  if (burned instanceof Set) return burned.size > 0;
+  return Array.isArray(burned) && burned.length > 0;
 }
 
 export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): PoolNumbersService {
@@ -306,6 +340,47 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
     return released;
   }
 
+  // Buffer refill (T4). Hoisted to a local function (like retireEligible) so
+  // provisionForGroup can await it directly, without relying on `this` binding.
+  // have = fresh spares + warming (WARMING counts, so a 2nd spare is never bought
+  // while the 1st is still registering - the debounce). need clamps at 0, so
+  // target 0 (dev) enqueues nothing. Each missing spare = one warm job.
+  async function refillBufferIfNeeded(): Promise<void> {
+    const have = (await repo.countFreshSpares()) + (await repo.countWarming());
+    const need = Math.max(0, config.relaySpareBufferTarget - have);
+    for (let i = 0; i < need; i += 1) {
+      await enqueueImmediate(RELAY_WARM_JOB, {});
+    }
+    if (need > 0) {
+      log.info(
+        { event: 'relay_buffer_refill', need },
+        'relay spare buffer below target - warm jobs enqueued',
+      );
+    }
+  }
+
+  // Stuck-warming ALERT sweep (T4). Hoisted for the same reason (the
+  // opportunistic fire-and-forget in provisionForGroup calls it directly). A
+  // warming number older than the max wait means Twilio's A2P registration event
+  // never arrived. NEVER promote (promotion is solely the registration event) -
+  // just log.error so the error-logs alarm surfaces it. PII (doc section 9): log
+  // the SID (the D2 correlation key an operator acts on), NEVER the pool number.
+  async function flagStuckWarming(): Promise<void> {
+    const cutoff = now().getTime() - config.relayWarmingMaxWaitMs;
+    for (const record of await repo.listWarming()) {
+      const startedAt = record.warming_started_at;
+      if (startedAt === undefined) continue; // no stamp - cannot age it
+      const startedMs = Date.parse(startedAt);
+      if (Number.isNaN(startedMs)) continue; // corrupt stamp - skip (retire NaN-guard parity)
+      if (startedMs < cutoff) {
+        log.error(
+          { event: 'relay_warm_stuck', sid: record.sid },
+          'relay warming number stuck past the max wait - A2P registration never arrived (manual attention)',
+        );
+      }
+    }
+  }
+
   return {
     async provisionForGroup(rosterPhones, tag) {
       // Never claim an unburnable (empty-roster) group - it would match every
@@ -314,114 +389,70 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         throw new Error('provisionForGroup: rosterPhones must be non-empty');
       }
 
-      // (a) Lazy retirement sweep - the seat the quarantine reclaim used to hold.
-      // Fire-and-forget: a release failure (or the whole sweep) must never block a
-      // fresh provision. No-ops silently when the config gate is off.
+      // Opportunistic background sweeps - fire-and-forget, never block a provision
+      // and never fail it: (a) lazy retirement (the seat the quarantine reclaim
+      // used to hold) and (b) the stuck-warming ALERT (T4 - a warming number whose
+      // A2P registration event never arrived). Both no-op silently when their
+      // config gates are off / nothing is stuck.
       void retireEligible().catch((err) => {
         log.error({ err }, 'lazy retirement sweep failed (non-fatal)');
       });
+      void flagStuckWarming().catch((err) => {
+        log.error({ err }, 'stuck-warming sweep failed (non-fatal)');
+      });
 
-      // (b) Reuse: burn-as-claim onto the FIRST active same-driver number whose
-      // burn does not overlap this roster. repo.burnClaim is the atomic arbiter
-      // (an overlapping or lost-race candidate fails its condition and we try the
-      // next). SOURCE ISOLATION (M1.7 kill-switch): only reuse a number our
-      // CURRENT driver obtained - the live twilio path must never reuse a fake
-      // console number (and vice-versa), even though both live in the shared dev
-      // table.
-      const candidates = (await repo.listActive()).filter(
+      // SOURCE ISOLATION (M1.7 kill-switch): only ever reuse a number our CURRENT
+      // driver obtained - the live twilio path must never burn onto a fake console
+      // number (and vice-versa), even though both live in the shared dev table.
+      const actives = (await repo.listActive()).filter(
         (c) => c.provisioned_via === currentVia,
       );
-      for (const candidate of candidates) {
-        // Cheap in-code pre-filter: skip an obviously-overlapping number without a
-        // conditional write (burnClaim still enforces the invariant atomically).
+
+      // TIER 1 - REUSE, PREFER MULTIPLEX: burn-as-claim onto the FIRST active
+      // same-driver number that ALREADY hosts a group (non-empty burn) and whose
+      // burn does not overlap this roster. Preferring already-burned numbers packs
+      // groups onto existing numbers (multiplexing) BEFORE consuming a fresh spare
+      // - so the warm buffer is spent last. repo.burnClaim is the atomic arbiter
+      // (an overlapping / lost-race candidate fails its condition; try the next).
+      for (const candidate of actives) {
+        if (!hasBurn(candidate.burned_phones)) continue; // empty-burn spares are tier 2
         if (rosterOverlapsBurn(rosterPhones, candidate.burned_phones)) continue;
         const claimed = await repo.burnClaim(candidate.poolNumber, rosterPhones, tag);
         if (claimed) {
-          log.info({ provisioned: false }, 'relay pool number acquired (reused)');
-          return { poolNumber: claimed.poolNumber, record: claimed, provisioned: false };
+          await refillBufferIfNeeded();
+          log.info({ provisioned: false, tier: 1 }, 'relay pool number acquired (reused - multiplex)');
+          return { kind: 'assigned', poolNumber: claimed.poolNumber, record: claimed, provisioned: false };
         }
       }
 
-      // Obtaining a NEW number is required. KILL-SWITCH (M1.7): when relay live
-      // provisioning is off (default when deployed/twilio), refuse BEFORE the
-      // adapter call so no real number is ever PURCHASED pre-A2P. Strict: we do
-      // not fall back to reusing anything here (the matching-source reuse above
-      // already failed) — deployed pre-A2P relay creation fails cleanly with an
-      // actionable error.
-      if (!config.relayLiveProvisioning) {
-        throw new RelayProvisioningDisabledError(
-          'relay number provisioning is disabled in this environment — set ' +
-            'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number',
-        );
-      }
-
-      // (c) Provision fresh, RETRYING on a number collision. The adapter can hand
-      // back a number that ALREADY has a pool_numbers record - create()'s
-      // attribute_not_exists(poolNumber) guard then throws
-      // ConditionalCheckFailedException; try the NEXT number. (Local console
-      // driver: its per-process counter restarts each `npm run dev` and collides
-      // with leftover numbers in the shared dev table. Production: a purchased
-      // number is globally unique, so create never collides and this runs once.)
-      // REQUIRE voice on each candidate - a misconfigured account/exhausted
-      // inventory must fail HERE (provision time), not at M1.9 call time. The
-      // fresh record is created with burned_phones = rosterPhones, so create IS
-      // the claim (no separate burnClaim call).
-      let provisioned: ProvisionPhoneNumberResult | undefined;
-      let record: PoolNumberItem | undefined;
-      for (let attempt = 1; attempt <= MAX_PROVISION_ATTEMPTS; attempt += 1) {
-        const candidate = await adapter.provisionPhoneNumber({ voiceCapable: true });
-        if (!candidate.capabilities.voice) {
-          throw new VoiceCapabilityError(
-            `provisionForGroup: provisioned ${candidate.sid} lacks voice capability`,
-          );
-        }
-        try {
-          // Create as ACTIVE + source-tag with the current driver, seeding
-          // burned_phones from the roster - the create IS the burn-claim.
-          record = await repo.create({
-            poolNumber: candidate.phoneNumber,
-            voiceCapable: candidate.capabilities.voice,
-            smsCapable: candidate.capabilities.sms,
-            provisionedVia: currentVia,
-            burn: rosterPhones,
-            ...(tag !== undefined && { tag }),
-          });
-          provisioned = candidate;
-          break;
-        } catch (err) {
-          if (err instanceof ConditionalCheckFailedException) {
-            // The number already has a record (collision) - try the next one.
-            log.warn(
-              { attempt },
-              'provisioned number already in the pool - retrying with a fresh number',
-            );
-            continue;
-          }
-          throw err;
-        }
-      }
-      if (provisioned === undefined || record === undefined) {
-        throw new Error(
-          `provisionForGroup: could not obtain a free pool number after ${MAX_PROVISION_ATTEMPTS} attempts`,
-        );
-      }
-
-      // Pre-wire the voice webhook (M1.9). Real driver sets VoiceUrl; console
-      // driver logs a no-op. Best-effort: a wiring failure must not strand the
-      // claimed number - log and continue (M1.9 re-wires before going live).
-      if (config.publicBaseUrl) {
-        try {
-          await adapter.setVoiceWebhook(
-            provisioned.phoneNumber,
-            `${config.publicBaseUrl}${VOICE_WEBHOOK_PATH}`,
-          );
-        } catch (err) {
-          log.error({ err }, 'relay pool number voice webhook wiring failed');
+      // TIER 2 - FRESH SPARE: consume a warm-pool spare (active, EMPTY burn, and
+      // NOT earmarked to a connecting group - G2). The empty-burn + no-pending
+      // check is the SAME "fresh spare" definition as repo.countFreshSpares, so we
+      // never burn a roster onto a number a concurrent connecting group is waiting
+      // to open (that number is momentarily active+empty-burn but carries a
+      // pending_conversation_id).
+      for (const candidate of actives) {
+        if (hasBurn(candidate.burned_phones)) continue; // burned actives were tier 1
+        if (candidate.pending_conversation_id !== undefined) continue; // G2: earmarked - hands off
+        const claimed = await repo.burnClaim(candidate.poolNumber, rosterPhones, tag);
+        if (claimed) {
+          await refillBufferIfNeeded();
+          log.info({ provisioned: false, tier: 2 }, 'relay pool number acquired (fresh spare)');
+          return { kind: 'assigned', poolNumber: claimed.poolNumber, record: claimed, provisioned: false };
         }
       }
 
-      log.info({ provisioned: true }, 'relay pool number acquired (provisioned)');
-      return { poolNumber: record.poolNumber, record, provisioned: true };
+      // TIER 3 - CONNECT-WHEN-READY: no reusable number and no free spare. Do NOT
+      // buy here (buying is solely warmOneNumber, T4) and do NOT throw the
+      // kill-switch error - signal the caller to create a connecting group +
+      // enqueue a warm job. Still top the buffer up first (dev target 0 enqueues
+      // nothing; prod refills the spare this group would have consumed).
+      await refillBufferIfNeeded();
+      log.info(
+        { event: 'relay_needs_connecting' },
+        'no reusable relay number and no spare - connect-when-ready',
+      );
+      return { kind: 'needs_connecting' };
     },
 
     async noteGroupClosed(poolNumber, closedAt) {
@@ -581,43 +612,10 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       );
     },
 
-    async refillBufferIfNeeded() {
-      // have = fresh spares + warming (WARMING counts, so a 2nd spare is never
-      // bought while the 1st is still registering - the debounce). need clamps at
-      // 0, so target 0 (dev) enqueues nothing. Each missing spare = one warm job.
-      const have = (await repo.countFreshSpares()) + (await repo.countWarming());
-      const need = Math.max(0, config.relaySpareBufferTarget - have);
-      for (let i = 0; i < need; i += 1) {
-        await enqueueImmediate(RELAY_WARM_JOB, {});
-      }
-      if (need > 0) {
-        log.info(
-          { event: 'relay_buffer_refill', need },
-          'relay spare buffer below target - warm jobs enqueued',
-        );
-      }
-    },
-
-    async flagStuckWarming() {
-      // ALERT-ONLY stuck-registration sweep: a warming number older than the max
-      // wait means Twilio's A2P registration event never arrived. NEVER promote
-      // (promotion is solely the registration event) - just log.error so the
-      // error-logs alarm surfaces it. PII (doc section 9): log the SID (the D2
-      // correlation key an operator acts on), NEVER the pool number.
-      const cutoff = now().getTime() - config.relayWarmingMaxWaitMs;
-      for (const record of await repo.listWarming()) {
-        const startedAt = record.warming_started_at;
-        if (startedAt === undefined) continue; // no stamp - cannot age it
-        const startedMs = Date.parse(startedAt);
-        if (Number.isNaN(startedMs)) continue; // corrupt stamp - skip (retire NaN-guard parity)
-        if (startedMs < cutoff) {
-          log.error(
-            { event: 'relay_warm_stuck', sid: record.sid },
-            'relay warming number stuck past the max wait - A2P registration never arrived (manual attention)',
-          );
-        }
-      }
-    },
+    // Hoisted above (so provisionForGroup can call them without `this`); exposed
+    // here via shorthand so the public service surface is unchanged.
+    refillBufferIfNeeded,
+    flagStuckWarming,
 
     retireEligible,
   };

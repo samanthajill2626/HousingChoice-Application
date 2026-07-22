@@ -67,7 +67,7 @@ function makeFakePoolNumbers(): PoolNumbersService & {
       provisioned.push(poolNumber);
       const record = rec(poolNumber);
       records.set(poolNumber, record);
-      return { poolNumber, record, provisioned: true };
+      return { kind: 'assigned', poolNumber, record, provisioned: true };
     },
     async noteGroupClosed(poolNumber) {
       closed.push(poolNumber);
@@ -153,13 +153,13 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
       for (const [pn, set] of burned) {
         if (!rosterPhones.some((p) => set.has(p))) {
           for (const p of rosterPhones) set.add(p);
-          return { poolNumber: pn, record: rec(pn), provisioned: false };
+          return { kind: 'assigned', poolNumber: pn, record: rec(pn), provisioned: false };
         }
       }
       counter += 1;
       const pn = `+1555070${String(counter).padStart(4, '0')}`;
       burned.set(pn, new Set(rosterPhones));
-      return { poolNumber: pn, record: rec(pn), provisioned: true };
+      return { kind: 'assigned', poolNumber: pn, record: rec(pn), provisioned: true };
     },
     async noteGroupClosed() {},
     async burnMember(poolNumber: string, phone: string) {

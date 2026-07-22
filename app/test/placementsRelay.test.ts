@@ -53,7 +53,7 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
       counter += 1;
       const poolNumber = `+1555030${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
-      return { poolNumber, record: rec(poolNumber), provisioned: true };
+      return { kind: 'assigned', poolNumber, record: rec(poolNumber), provisioned: true };
     },
     async noteGroupClosed() {},
     async burnMember() {

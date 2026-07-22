@@ -472,12 +472,18 @@ export function createFakeWorld(): FakeWorld {
           : typeof placementId === 'string' && placementId.length > 0
             ? { type: 'placement', id: placementId }
             : { type: null };
+      // Connect-when-ready (T6): no pool number => CONNECTING (no pool_number /
+      // participant_phone until assignPoolNumberAndOpen stamps it).
+      const connecting = poolNumber === undefined;
+      const status = connecting ? 'connecting' : 'open';
       const item: ConversationItem = {
         conversationId: `conv-${++convCounter}`,
-        participant_phone: poolNumber,
-        pool_number: poolNumber,
-        status: 'open',
-        relay_status: 'relay_group#open', // byRelayStatus GSI HASH (fidelity)
+        ...(poolNumber !== undefined && {
+          participant_phone: poolNumber,
+          pool_number: poolNumber,
+        }),
+        status,
+        relay_status: `relay_group#${status}`, // byRelayStatus GSI HASH (fidelity)
         last_activity_at: now,
         type: 'relay_group',
         ai_mode: 'manual',
@@ -563,6 +569,21 @@ export function createFakeWorld(): FakeWorld {
       // W3: a reopen (-> open) clears the close-announce marker (folded into the
       // flip in the real repo) so a future close re-announces.
       if (status === 'open') delete conv.close_announced_at;
+      return conv;
+    },
+    async assignPoolNumberAndOpen(conversationId, poolNumber) {
+      // Connect-when-ready assign (T6 / G3): flip connecting -> open + stamp the
+      // number, CONDITIONAL on the group still being connecting (atomic-faithful:
+      // synchronous check-and-set). A redelivery (already open) is a no-op
+      // (undefined) so the intro is enqueued exactly once.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.status !== 'connecting' || conv.relay_status !== 'relay_group#connecting') {
+        return undefined;
+      }
+      conv.pool_number = poolNumber;
+      conv.participant_phone = poolNumber;
+      conv.status = 'open';
+      conv.relay_status = 'relay_group#open';
       return conv;
     },
     async claimCloseAnnounce(conversationId) {

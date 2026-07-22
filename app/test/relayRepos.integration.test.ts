@@ -228,6 +228,57 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
     ).rejects.toBeInstanceOf(ConditionalCheckFailedException);
   });
 
+  // --- Connect-when-ready (T6): connecting create + assign-on-ready ---------
+  it('createRelayGroup with NO poolNumber creates a CONNECTING group (no pool_number, queryable via listRelayGroups)', async () => {
+    const created = await conversations.createRelayGroup({
+      members: [{ contactId: 'c1', phone: '+15550100300', name: 'A' }],
+      tag: 'connect-me',
+    });
+    expect(created.status).toBe('connecting');
+    expect(created.relay_status).toBe('relay_group#connecting');
+    expect(created.pool_number).toBeUndefined(); // no number yet
+    expect(created.participant_phone).toBeUndefined();
+    // Visible in its OWN status partition (the inbox reads this alongside 'open').
+    const { items } = await conversations.listRelayGroups('connecting');
+    expect(items.some((c) => c.conversationId === created.conversationId)).toBe(true);
+    // NOT in the 'open' partition until assigned.
+    const openList = await conversations.listRelayGroups('open');
+    expect(openList.items.some((c) => c.conversationId === created.conversationId)).toBe(false);
+  });
+
+  it('assignPoolNumberAndOpen flips connecting -> open + stamps the number; a SECOND call is a no-op (G3)', async () => {
+    const pool = `+1555053${Math.floor(Math.random() * 9000 + 1000)}`;
+    const created = await conversations.createRelayGroup({
+      members: [{ contactId: 'c1', phone: '+15550100310' }],
+    });
+    // First assign wins: pool number stamped, flipped open on BOTH fields.
+    const opened = await conversations.assignPoolNumberAndOpen(created.conversationId, pool);
+    expect(opened?.status).toBe('open');
+    expect(opened?.relay_status).toBe('relay_group#open');
+    expect(opened?.pool_number).toBe(pool);
+    expect(opened?.participant_phone).toBe(pool);
+    // Now byPoolNumber resolves it (the GSI got its key on assign).
+    expect((await conversations.getByPoolNumber(pool))?.conversationId).toBe(created.conversationId);
+    // G3: a redelivered relay.numberReady finds it already open -> undefined no-op.
+    const again = await conversations.assignPoolNumberAndOpen(created.conversationId, pool);
+    expect(again).toBeUndefined();
+    // The group is unchanged (still open on the first number).
+    expect((await conversations.getById(created.conversationId))?.pool_number).toBe(pool);
+  });
+
+  it('assignPoolNumberAndOpen is a no-op on an ALREADY-open (non-connecting) group', async () => {
+    const pool = `+1555054${Math.floor(Math.random() * 9000 + 1000)}`;
+    const openGroup = await conversations.createRelayGroup({
+      poolNumber: pool,
+      members: [{ contactId: 'c1', phone: '+15550100320' }],
+    });
+    // It is 'open' from birth (poolNumber provided) — not connecting — so assign
+    // must refuse (G3 condition on connecting) and never re-stamp another number.
+    const res = await conversations.assignPoolNumberAndOpen(openGroup.conversationId, '+15559998888');
+    expect(res).toBeUndefined();
+    expect((await conversations.getById(openGroup.conversationId))?.pool_number).toBe(pool);
+  });
+
   // --- BUG 1: clearRelayMemberOptedOut is a safe no-op when the map is absent -
   // The common member-remove path clears the removed member's opt-out annotation.
   // When NO member ever opted out, `relay_opted_out_members` is ABSENT, and a

@@ -135,6 +135,7 @@ function makeFakes(
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
+    assignPoolNumberAndOpen: async () => undefined,
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,

@@ -707,4 +707,57 @@ describe('poolNumbersService.retireEligible', () => {
     expect(repo.store.get('+1RACE2')!.lifecycle_state).toBe('active'); // aborted back to active
     expect(reads).toBe(2); // pre-veto + the fresh re-verify both ran
   });
+
+  // --- T8 explicit Messaging Service detach on retirement ------------------
+  it('T8 detach ordering: detaches from the messaging service BEFORE dropping the number at Twilio', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1DETACH', OLD_CLOSE);
+    // Record the adapter call order: the A2P sender-pool detach must run BEFORE
+    // the resource delete (deterministic membership cleanup; the delete would
+    // otherwise detach only implicitly).
+    const order: string[] = [];
+    vi.spyOn(adapter, 'detachFromMessagingService').mockImplementation(async () => {
+      order.push('detach');
+    });
+    vi.spyOn(adapter, 'releasePhoneNumber').mockImplementation(async (pn: string) => {
+      order.push('release');
+      adapter.released.push(pn);
+    });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1DETACH': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    expect(await svc.retireEligible()).toEqual(['+1DETACH']);
+    expect(order).toEqual(['detach', 'release']); // detach FIRST, then the delete
+    expect(adapter.released).toEqual(['+1DETACH']);
+  });
+
+  it('T8 best-effort: a detach failure is logged but does NOT abort the release (delete + finalize still run)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1DFAIL', OLD_CLOSE);
+    // The detach throws (e.g. a transient Twilio API error). Because the number
+    // delete below drops it from the service implicitly anyway, the sweep must
+    // swallow + log the detach error and STILL release + finalize the number -
+    // never strand a retirement on a detach hiccup.
+    const detachSpy = vi
+      .spyOn(adapter, 'detachFromMessagingService')
+      .mockRejectedValue(new Error('twilio 500 on detach'));
+    const releaseSpy = vi.spyOn(adapter, 'releasePhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1DFAIL': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    const released = await svc.retireEligible();
+    expect(detachSpy).toHaveBeenCalledWith('+1DFAIL'); // detach was attempted
+    expect(released).toEqual(['+1DFAIL']); // retirement COMPLETED despite the detach throw
+    expect(releaseSpy).toHaveBeenCalledWith('+1DFAIL'); // the delete still ran
+    expect(adapter.released).toEqual(['+1DFAIL']);
+    expect(repo.store.get('+1DFAIL')!.lifecycle_state).toBe('released'); // finalized
+  });
 });

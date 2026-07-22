@@ -357,6 +357,22 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         continue;
       }
 
+      // (2b) DETACH from the A2P Messaging Service sender pool FIRST (T8), so the
+      // sender-pool membership is cleaned up deterministically BEFORE the resource
+      // delete. BEST-EFFORT: releasePhoneNumber below also drops the number from the
+      // service implicitly, so a detach failure LOGS (error taxonomy) and the sweep
+      // CONTINUES to the delete rather than aborting - a detach hiccup must never
+      // strand an otherwise-eligible retirement. PII (doc section 9): the adapter
+      // logs the SID/boolean only, never the number.
+      try {
+        await adapter.detachFromMessagingService(record.poolNumber);
+      } catch (err) {
+        log.error(
+          { err },
+          'relay retirement: detachFromMessagingService failed - continuing to release (delete detaches implicitly)',
+        );
+      }
+
       // (3) Drop it at Twilio. On failure ABORT back to active (matches the
       // existing adapter-failure contract - the number stays fully reusable) and
       // continue; we never mark released a number Twilio still owns.

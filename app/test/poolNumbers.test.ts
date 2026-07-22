@@ -134,6 +134,8 @@ function makeFakeAdapter(
     async releasePhoneNumber(phoneNumber) {
       released.push(phoneNumber);
     },
+    async attachToMessagingService() {},
+    async detachFromMessagingService() {},
     async initiateCall() {
       return { callSid: 'CAtest-pool' };
     },

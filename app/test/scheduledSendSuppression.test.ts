@@ -208,6 +208,8 @@ function makeSendFakes(
     }),
     setVoiceWebhook: async () => {},
     releasePhoneNumber: async () => {},
+    attachToMessagingService: async () => {},
+    detachFromMessagingService: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
     createViTranscript: async () => {
       throw new Error('not used');

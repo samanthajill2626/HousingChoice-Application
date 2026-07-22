@@ -672,6 +672,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       async releasePhoneNumber() {
         throw new Error('adapter spy: releasePhoneNumber not expected');
       },
+      async attachToMessagingService() {
+        throw new Error('adapter spy: attachToMessagingService not expected');
+      },
+      async detachFromMessagingService() {
+        throw new Error('adapter spy: detachFromMessagingService not expected');
+      },
       async initiateCall() {
         throw new Error('adapter spy: initiateCall not expected');
       },

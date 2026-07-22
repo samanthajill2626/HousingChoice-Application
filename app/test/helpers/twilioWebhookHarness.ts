@@ -2301,6 +2301,12 @@ export function createFakeWorld(): FakeWorld {
     async releasePhoneNumber() {
       // no-op fake
     },
+    async attachToMessagingService() {
+      // no-op fake
+    },
+    async detachFromMessagingService() {
+      // no-op fake
+    },
     async initiateCall(params) {
       // Voice (M1.9a): record the origination + return a deterministic fake
       // CallSid. The inbound masked bridge answers with TwiML (no initiateCall),

@@ -35,6 +35,7 @@ import {
   type ScheduledUpdatedEvent,
   type TourUpdatedEvent,
   type SuggestionUpdatedEvent,
+  type UnmatchedEmailUpdatedEvent,
 } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -1638,6 +1639,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const onSuggestionUpdated = (payload: SuggestionUpdatedEvent): void => {
       writeEvent('suggestion.updated', payload);
     };
+    const onUnmatchedEmailUpdated = (payload: UnmatchedEmailUpdatedEvent): void => {
+      writeEvent('unmatched_email.updated', payload);
+    };
     events.on('conversation.updated', onConversationUpdated);
     events.on('message.persisted', onMessagePersisted);
     events.on('broadcast.updated', onBroadcastUpdated);
@@ -1645,6 +1649,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     events.on('scheduled.updated', onScheduledUpdated);
     events.on('tour.updated', onTourUpdated);
     events.on('suggestion.updated', onSuggestionUpdated);
+    events.on('unmatched_email.updated', onUnmatchedEmailUpdated);
 
     // Heartbeat as a REAL named event, not an SSE comment: the browser
     // EventSource API cannot observe comment frames (': ...') by spec, so a
@@ -1676,6 +1681,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       events.off('scheduled.updated', onScheduledUpdated);
       events.off('tour.updated', onTourUpdated);
       events.off('suggestion.updated', onSuggestionUpdated);
+      events.off('unmatched_email.updated', onUnmatchedEmailUpdated);
       runWithContext(ctx, () => {
         log.info({ sse: 'disconnected' }, 'sse client disconnected');
       });

@@ -138,6 +138,21 @@ describe('GET /api/events — stream mechanics', () => {
     );
   });
 
+  it('forwards unmatched_email.updated frames (the Email nav badge live path)', async () => {
+    // Regression pin (2026-07-21 dev QA): the triage routes emitted the bus
+    // event and the dashboard listened for it, but this SSE bridge never
+    // subscribed - the badge went stale until a page refresh.
+    const { app, world } = makeWebhookHarness();
+    const port = await startServer(app);
+    const client = await connectSse(port);
+    await client.waitFor(': connected');
+
+    world.events.emit('unmatched_email.updated', { unmatchedId: 'um-sse-1' });
+
+    await client.waitFor('event: unmatched_email.updated');
+    expect(client.received()).toContain(`data: ${JSON.stringify({ unmatchedId: 'um-sse-1' })}`);
+  });
+
   it('sends heartbeat as an observable named event (not a comment) on the configured interval', async () => {
     const { app } = makeWebhookHarness({ sseHeartbeatMs: 20 });
     const port = await startServer(app);

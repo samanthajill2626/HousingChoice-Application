@@ -1242,8 +1242,9 @@ describe('relay-group API (M1.7)', () => {
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
       const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
-      // The full 5-rung ladder is upcoming (armed 2 days before the tour).
-      expect(scheduled).toHaveLength(5);
+      // The full 4-rung ladder is upcoming (armed 2 days before the tour;
+      // no_show_checkin is manual-send only, so it is not in the ladder).
+      expect(scheduled).toHaveLength(4);
       // dueAt ascending; each item is wire-parity TimelineScheduled.
       const ats = scheduled.map((s) => s['at'] as string);
       expect([...ats].sort()).toEqual(ats);
@@ -1265,7 +1266,7 @@ describe('relay-group API (M1.7)', () => {
         .set('x-origin-verify', SECRET)
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(200);
-      expect(after.body.scheduled).toHaveLength(4);
+      expect(after.body.scheduled).toHaveLength(3);
       expect(
         (after.body.scheduled as Array<{ reminderKind: string }>).some(
           (s) => s.reminderKind === 'confirmation',

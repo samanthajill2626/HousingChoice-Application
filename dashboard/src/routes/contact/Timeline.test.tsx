@@ -688,6 +688,25 @@ describe('Timeline', () => {
   });
 });
 
+describe('Timeline initialDraft seed (manual no-show check-in prefill)', () => {
+  const SEED = 'Hi! We noticed you may have missed your tour. Want to reschedule?';
+
+  it('seeds the composer from initialDraft and fires onDraftSeeded exactly once', () => {
+    const onDraftSeeded = vi.fn();
+    renderTimeline({ initialDraft: SEED, onDraftSeeded });
+    const box = screen.getByRole('textbox', { name: 'Reply message' });
+    expect(box).toHaveValue(SEED);
+    expect(onDraftSeeded).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not seed the composer or fire onDraftSeeded when initialDraft is absent', () => {
+    const onDraftSeeded = vi.fn();
+    renderTimeline({ onDraftSeeded });
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+    expect(onDraftSeeded).not.toHaveBeenCalled();
+  });
+});
+
 describe('Timeline relay-group annotations', () => {
   const ROSTER = [
     { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },

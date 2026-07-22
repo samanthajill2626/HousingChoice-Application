@@ -1160,8 +1160,8 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
     // en_route = SCHEDULED_AT - 2h = '2026-07-15T08:00:00.000Z'
     expect(byKind['en_route']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
-    // no_show_checkin = SCHEDULED_AT + 30m = '2026-07-15T10:30:00.000Z'
-    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-15T10:30:00.000Z');
+    // no_show_checkin is manual-send only now, so it is not auto-armed.
+    expect(byKind['no_show_checkin']).toBeUndefined();
   });
 
   it('PATCH reschedule re-arms with dueAts relative to the injected now', async () => {
@@ -1192,8 +1192,31 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
     // day_before = NEW_SCHEDULED - 24h = '2026-07-19T14:00:00.000Z'
     expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
-    // no_show_checkin = NEW_SCHEDULED + 30m = '2026-07-20T14:30:00.000Z'
-    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+    // no_show_checkin is manual-send only now, so it is not auto-armed.
+    expect(byKind['no_show_checkin']).toBeUndefined();
+  });
+});
+
+// ============================================================================
+// GET /api/tours/:tourId/no-show-checkin-draft - templated copy for the MANUAL
+// no-show check-in send (the rung is no longer auto-armed)
+// ============================================================================
+
+describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
+  it('returns the templated no-show check-in copy', async () => {
+    // The copy is tour-independent, but mirror the sibling tour routes: book a
+    // tour and read the draft off its id. The route resolves the editable
+    // catalog entry (tour.no_show_checkin) via resolveMessage, no override set.
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).get(`/api/tours/${tourId}/no-show-checkin-draft`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
+    });
   });
 });
 
@@ -1272,8 +1295,8 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
     // day_before = BOOKED_AT - 24h
     expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
-    // no_show_checkin = BOOKED_AT + 30m
-    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-15T10:30:00.000Z');
+    // no_show_checkin is manual-send only now, so it is not auto-armed.
+    expect(byKind['no_show_checkin']).toBeUndefined();
   });
 
   it('explicit { scheduledAt, status: "scheduled" } booking also works', async () => {
@@ -1972,7 +1995,7 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
     const byKind = Object.fromEntries(rowsAfter.map((r) => [r.kind, r]));
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
     expect(byKind['day_before']?.dueAt).toBe('2026-07-24T10:00:00.000Z'); // NEW_SCHED - 24h
-    expect(byKind['no_show_checkin']?.dueAt).toBe('2026-07-25T10:30:00.000Z'); // NEW_SCHED + 30m
+    expect(byKind['no_show_checkin']).toBeUndefined(); // manual-send only, not auto-armed
   });
 
   it('PATCH canceled from requested is allowed (requested → canceled)', async () => {

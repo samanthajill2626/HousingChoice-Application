@@ -190,6 +190,28 @@ export interface TwilioWebhookDeps {
 /** Default wait before the one unknown-SID retry in /status (see above). */
 const STATUS_UNKNOWN_SID_RETRY_DELAY_MS = 2_500;
 
+// --- Delivery-failure severity taxonomy --------------------------------------
+// Policy: a message that ends UNDELIVERED and won't be retried is a TERMINAL
+// failure → log at ERROR (it degraded a real send, is operator-actionable, and
+// feeds the hc-<env>-error-logs alarm + the Recent Errors panel). Two carve-outs
+// stay WARN: a transient code we're still auto-retrying (not yet terminal), and a
+// provider-side opt-out (21610 = correctly honoring STOP — the platform working,
+// not a failure). See docs/GLOSSARY / the error-vs-warn decision rule.
+const TRANSIENT_RETRYING_DELIVERY_CODES = new Set(['30003']);
+const EXPECTED_NONFAILURE_DELIVERY_CODES = new Set(['21610']);
+
+/**
+ * True when an undelivered/failed delivery callback is a TERMINAL, operator-
+ * actionable failure (→ log at ERROR). False for a transient code we auto-retry
+ * (30003) or a provider-side opt-out (21610), which stay WARN. A failure with no
+ * code, or any unrecognized code, is treated as terminal (fail loud, not silent).
+ */
+export function isTerminalDeliveryFailure(errorCode: string | undefined): boolean {
+  if (errorCode !== undefined && EXPECTED_NONFAILURE_DELIVERY_CODES.has(errorCode)) return false;
+  if (errorCode !== undefined && TRANSIENT_RETRYING_DELIVERY_CODES.has(errorCode)) return false;
+  return true;
+}
+
 export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const log = deps.logger ?? defaultLogger;
@@ -1199,13 +1221,22 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         'twilio relay-recipient delivery status callback processed',
       );
       // Delivery-failure marker (doc §9): a relay fan-out leg that resolved
-      // undelivered/failed is also a countable failed delivery. Same `event`
-      // field the DeliveryFailures metric filter keys on; IDs/codes only.
+      // undelivered/failed is a countable failed delivery. Severity follows the
+      // taxonomy — a terminal failure is an ERROR (feeds the error-logs alarm +
+      // Recent Errors panel); a transient-retrying / opt-out leg stays WARN. The
+      // `event` field is unchanged either way, so the DeliveryFailures count
+      // metric (which keys on `event`, not level) is unaffected. IDs/codes only.
       if (mapped === 'undelivered' || mapped === 'failed') {
-        log.warn(
-          { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus, relay: true },
-          'twilio relay-recipient delivery failed (undelivered/failed)',
-        );
+        const failure = {
+          event: 'delivery_failed',
+          providerSid: MessageSid,
+          errorCode: ErrorCode,
+          providerStatus: MessageStatus,
+          relay: true,
+        };
+        const failureMsg = 'twilio relay-recipient delivery failed (undelivered/failed)';
+        if (isTerminalDeliveryFailure(ErrorCode)) log.error(failure, failureMsg);
+        else log.warn(failure, failureMsg);
       }
       if (transitioned) {
         // Refresh the UI: a per-recipient delivery move re-renders the relay
@@ -1297,15 +1328,21 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
 
     // Delivery-failure marker (doc §9 "Send failures / delivery errors"): a
     // callback that resolves to undelivered/failed is a countable failed
-    // delivery. The `event` field is what the observability DeliveryFailures
-    // metric filter keys on; IDs/codes only, never the body (PII). 30007
-    // additionally ERROR-logs below — this WARN marker is the countable signal,
-    // so both fire (the alarm counts deliveries, not error severity).
+    // delivery. Severity follows the taxonomy — a TERMINAL failure is an ERROR
+    // (feeds the error-logs alarm + Recent Errors panel); a transient-retrying /
+    // opt-out (21610) callback stays WARN. The `event` field is unchanged, so the
+    // DeliveryFailures count metric (keyed on `event`, not level) is unaffected.
+    // IDs/codes only, never the body (PII).
     if (mappedStatus === 'undelivered' || mappedStatus === 'failed') {
-      log.warn(
-        { event: 'delivery_failed', providerSid: MessageSid, errorCode: ErrorCode, providerStatus: MessageStatus },
-        'twilio delivery failed (undelivered/failed)',
-      );
+      const failure = {
+        event: 'delivery_failed',
+        providerSid: MessageSid,
+        errorCode: ErrorCode,
+        providerStatus: MessageStatus,
+      };
+      const failureMsg = 'twilio delivery failed (undelivered/failed)';
+      if (isTerminalDeliveryFailure(ErrorCode)) log.error(failure, failureMsg);
+      else log.warn(failure, failureMsg);
     }
 
     if (transitioned) {
@@ -1370,9 +1407,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // backoff, capped chain (attempt count rides the job payload).
             const priorAttempt = message.retry_attempt ?? 0;
             if (priorAttempt >= MAX_SEND_RETRY_ATTEMPTS) {
-              log.warn(
-                { providerSid: MessageSid, attempt: priorAttempt },
-                'transient delivery failure but retry cap reached — giving up',
+              // Retries exhausted → the transient failure is now TERMINAL, so it
+              // graduates to an error (the delivery_failed marker above logged
+              // this callback at warn, as 30003 is in the transient set).
+              log.error(
+                { providerSid: MessageSid, attempt: priorAttempt, errorCode: ErrorCode },
+                'transient delivery failure exhausted retries — terminal, giving up',
               );
               break;
             }
@@ -1407,10 +1447,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           }
           case '30007': {
             // Carrier filtering: NEVER retry (re-sending filtered content
-            // compounds reputation damage). ERROR feeds the
-            // hc-<env>-error-logs alarm; a dedicated deliverability alarm
-            // (filtered-rate metric) is future work.
-            log.error(
+            // compounds reputation damage). The delivery_failed marker above
+            // already logged this at ERROR (30007 is terminal) and carries the
+            // alarm; this is the no-retry context note (WARN to avoid a
+            // duplicate error line/alarm count for the same event).
+            log.warn(
               { providerSid: MessageSid, errorCode: ErrorCode },
               'carrier filtering (30007) — message suppressed by carrier, not retried',
             );

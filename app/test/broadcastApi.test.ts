@@ -402,6 +402,62 @@ describe('share-broadcast API (M1.8a)', () => {
     expect(world.broadcasts.get(id)!.stats.failed).toBe(1);
   });
 
+  // --- Delivery-failure severity taxonomy (marker log level) ---------------
+  // The delivery_failed marker's LEVEL follows the taxonomy: a terminal failure
+  // is an ERROR (so it reaches the error-logs alarm + Recent Errors panel); a
+  // provider-side opt-out (21610) stays WARN (the platform behaving correctly).
+  async function sendBroadcastGetSid(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const create = await request(app)
+      .post('/api/broadcasts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ unitId: 'unit-1', body_template: 'hi', audience_filter: { contact_type: 'tenant' } });
+    await request(app)
+      .post(`/api/broadcasts/${create.body.broadcastId}/send`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({});
+    await queueAdapter.settle();
+    return world.messages.find((m) => m.broadcast_id === create.body.broadcastId)!.provider_sid;
+  }
+
+  it('a terminal delivery failure (30034) logs the delivery_failed marker at ERROR level', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app, capture } = makeWebhookHarness({ world });
+    const sid = await sendBroadcastGetSid(app);
+
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: sid, MessageStatus: 'undelivered', ErrorCode: '30034' }),
+    );
+
+    const errorMarker = capture.atLevel(50).find((l) => l['event'] === 'delivery_failed');
+    expect(errorMarker, 'a terminal failure must log delivery_failed at error').toBeDefined();
+    expect(errorMarker!['errorCode']).toBe('30034');
+    // ...and NOT at warn.
+    expect(capture.atLevel(40).find((l) => l['event'] === 'delivery_failed')).toBeUndefined();
+  });
+
+  it('a provider-side opt-out (21610) logs the delivery_failed marker at WARN, not error', async () => {
+    seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });
+    seedUnit(world);
+    const { app, capture } = makeWebhookHarness({ world });
+    const sid = await sendBroadcastGetSid(app);
+
+    await signedTwilioPost(
+      app,
+      STATUS_PATH,
+      statusParams({ MessageSid: sid, MessageStatus: 'failed', ErrorCode: '21610' }),
+    );
+
+    const warnMarker = capture.atLevel(40).find((l) => l['event'] === 'delivery_failed');
+    expect(warnMarker, 'an opt-out must log delivery_failed at warn').toBeDefined();
+    expect(warnMarker!['errorCode']).toBe('21610');
+    expect(capture.atLevel(50).find((l) => l['event'] === 'delivery_failed')).toBeUndefined();
+  });
+
   // --- FIX 1: the rollup transition is atomic (exactly-once stat bump) ------
   it('two delivery callbacks for the same SID roll up to delivered exactly once (FIX 1)', async () => {
     seedTenant(world, { contactId: 'c-1', phone: '+15550100001' });

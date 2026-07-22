@@ -315,16 +315,12 @@ test('connect-when-ready: a connecting group queues a team send, then opens + de
     )
     .toBe(true);
 
-  // --- Assert ZERO 30034 (D13): scan every fake thread leg AND every fake group
-  //     per-recipient leg for the A2P-unregistered error code. The design never
-  //     sent from an unregistered number, so no leg carries 30034 (and none
-  //     failed at all). ---
-  const threads = await listThreads(request);
-  const threadLegsWith30034 = threads.flatMap((t) =>
-    t.messages.filter((m) => m.errorCode === '30034'),
-  );
-  expect(threadLegsWith30034, 'no fake thread leg carries errorCode 30034').toHaveLength(0);
-
+  // --- Assert ZERO 30034 (D13): scan every fake GROUP per-recipient leg for the
+  //     A2P-unregistered error code. Per-recipient errorCode lives ONLY on the
+  //     fake's group recipients (GET /control/groups); a thread message never
+  //     carries it, so the group snapshot is the sole real source of a 30034. The
+  //     design never sent from an unregistered number, so no leg carries 30034
+  //     (and none failed at all). ---
   const groups = await listGroups(request);
   const groupLegsWith30034 = groups.flatMap((g) =>
     g.entries.flatMap((e) => (e.recipients ?? []).filter((r) => r.errorCode === '30034')),

@@ -13,6 +13,7 @@
 // the Task 4 conformance audit (.superpowers/sdd/task-4-audit.md).
 import { test, expect, type Page, type APIRequestContext, type Locator } from '@playwright/test';
 import { sendAsParty, listThreads, registerParty } from '../fixtures/fakeTwilio.js';
+import { driveConnectingGroupToOpen } from '../fixtures/relayConnect.js';
 import { fakeUrl } from '../support/urls.js';
 import { tenantCallNoAnswer, findOutboundCall } from '../fixtures/fakeVoice.js';
 import {
@@ -1586,11 +1587,27 @@ export class Scenario {
       expect(res.status(), await res.text()).toBe(201);
       const { tour: updated, conversation } = (await res.json()) as {
         tour: { groupThreadId?: string };
-        conversation: { conversationId: string; pool_number?: string };
+        conversation: { conversationId: string; pool_number?: string; status?: string };
       };
-      expect(conversation.pool_number).toMatch(POOL_NUMBER_RE);
+      // The tour links its groupThreadId at create time whether the group opened
+      // immediately or landed connecting (tours.ts stamps it BEFORE the connecting
+      // check), so this holds on both paths.
       expect(updated.groupThreadId).toBe(conversation.conversationId);
-      tour.poolNumber = conversation.pool_number as string;
+      // Connect-when-ready (tier 3): a fresh tour pair with no reusable twilio
+      // number is created CONNECTING (no pool number). Complete the handshake -
+      // discover the warmed number, fire the fake registration, wait for the group
+      // to OPEN - so the pool-number assertion + the intro fan-out below see the
+      // live number. A reuse would arrive open already (poolNumber set immediately).
+      let poolNumber = conversation.pool_number;
+      if (conversation.status === 'connecting') {
+        const opened = await driveConnectingGroupToOpen(
+          this.page.request,
+          conversation.conversationId,
+        );
+        poolNumber = opened.pool_number;
+      }
+      expect(poolNumber).toMatch(POOL_NUMBER_RE);
+      tour.poolNumber = poolNumber as string;
       tour.groupThreadId = conversation.conversationId;
       // The empty state is replaced by the live group transcript (the composer),
       // so the [Open group text] button is gone. The intro fan-out to each member

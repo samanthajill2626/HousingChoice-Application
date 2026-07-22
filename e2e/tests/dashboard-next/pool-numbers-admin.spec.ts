@@ -1,4 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
+import { createGroupOpen } from '../../fixtures/relayConnect.js';
 
 // Settings > Group text numbers (:5174) - the admin-only, READ-ONLY pool-number
 // inventory (spec docs/superpowers/specs/2026-07-18-pool-numbers-admin-design.md
@@ -40,33 +41,12 @@ function uniquePhone(): string {
   return `+15558${`${Date.now()}`.slice(-4)}${String(uid).padStart(2, '0')}`;
 }
 
-interface CreatedGroup {
-  conversationId: string;
-  pool_number: string;
-}
-
 /** Local mirror of dashboard/src/lib/phone.ts formatPhoneDisplay for a NANP E.164
  *  (research DRIFT 4): "+15550190102" -> "(555) 019-0102". The row renders the
  *  FORMATTED number, so the raw E.164 the API returns is reshaped to match it. */
 function formatPhoneDisplay(e164: string): string {
   const m = /^\+1(\d{3})(\d{3})(\d{4})$/.exec(e164);
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : e164;
-}
-
-/** Create a relay group via POST /api/relay-groups under the current page session.
- *  Provisions a pool number (burn-as-claim ladder) and returns the conversation +
- *  its minted number. */
-async function createGroup(
-  page: Page,
-  members: { phone: string; name: string }[],
-): Promise<CreatedGroup> {
-  const res = await page.request.post(`${NEXT}/api/relay-groups`, { data: { members } });
-  expect(res.ok(), `create group failed: ${res.status()} ${await res.text()}`).toBeTruthy();
-  expect(res.status()).toBe(201);
-  const { conversation } = (await res.json()) as { conversation: CreatedGroup };
-  expect(typeof conversation.pool_number, 'created group carries a pool number').toBe('string');
-  expect(conversation.pool_number.length).toBeGreaterThan(0);
-  return conversation;
 }
 
 test.describe('Settings - Group text numbers (admin path)', () => {
@@ -81,7 +61,10 @@ test.describe('Settings - Group text numbers (admin path)', () => {
     const stamp = Date.now();
     const memberA = { phone: uniquePhone(), name: `PoolAlice${stamp}` };
     const memberB = { phone: uniquePhone(), name: `PoolBob${stamp}` };
-    const group = await createGroup(page, [memberA, memberB]);
+    // A fresh pair with no reusable twilio number lands CONNECTING; createGroupOpen
+    // completes the connect-when-ready handshake so the number is warmed then
+    // promoted to ACTIVE - exactly the active-state row this admin surface asserts.
+    const group = await createGroupOpen(page, [memberA, memberB]);
 
     // The pool number is MINTED (+1555019XXXX) - capture and reshape to the row's
     // formatted display; the raw E.164 is never rendered.

@@ -1,6 +1,7 @@
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { postInboundSms, twimlMessageBody } from '../../fixtures/fakeTwilio.js';
 import { getOutbox } from '../../fixtures/outbox.js';
+import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the filed keyword-reply copy (no drift): the spec reads
 // the app catalog directly, mirroring the lifecycle spec's cross-package import.
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
@@ -58,11 +59,6 @@ interface Member {
   contactId?: string;
 }
 
-interface CreatedGroup {
-  conversationId: string;
-  pool_number: string;
-}
-
 /** Reseed the lane with the LEAN profile (a light, clean slate: this spec builds all
  *  its own data via the API). */
 async function reseedLean(request: APIRequestContext): Promise<void> {
@@ -77,25 +73,6 @@ async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
-}
-
-/** Create a relay group via the standalone API (POST /api/relay-groups). Provisions a
- *  pool number (burn-as-claim ladder) and returns the conversation + its number. */
-async function createGroup(page: Page, members: Member[]): Promise<CreatedGroup> {
-  const res = await page.request.post(`${NEXT}/api/relay-groups`, {
-    data: {
-      members: members.map((m) => ({
-        phone: m.phone,
-        name: m.name,
-        ...(m.contactId !== undefined && { contactId: m.contactId }),
-      })),
-    },
-  });
-  expect(res.ok(), `create group failed: ${res.status()} ${await res.text()}`).toBeTruthy();
-  const { conversation } = (await res.json()) as { conversation: CreatedGroup };
-  expect(typeof conversation.pool_number, 'created group carries a pool number').toBe('string');
-  expect(conversation.pool_number.length).toBeGreaterThan(0);
-  return conversation;
 }
 
 /** Poll the dev outbox until a message to `phone` whose body includes `needle`
@@ -149,7 +126,10 @@ test('open-path STOP suppresses relay legs; START resumes them (A2P parity)', as
   const memberA: Member = { phone: aPhone, name: 'Stop MemberA', contactId: aId };
   const memberB: Member = { phone: uniquePhone(), name: 'Stop MemberB' };
   const memberC: Member = { phone: uniquePhone(), name: 'Stop MemberC' };
-  const group = await createGroup(page, [memberA, memberB, memberC]);
+  // A fresh trio with no reusable twilio number lands CONNECTING; createGroupOpen
+  // completes the connect-when-ready handshake so we proceed with an OPEN group on
+  // its warmed pool number (the open-path STOP behaviour under test is unchanged).
+  const group = await createGroupOpen(page, [memberA, memberB, memberC]);
   const pool = group.pool_number;
 
   // The create-time intro fan-out is async AND its body CONTAINS "STOP" - wait for it

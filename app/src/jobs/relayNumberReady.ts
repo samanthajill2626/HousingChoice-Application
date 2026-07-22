@@ -86,15 +86,32 @@ export function registerRelayNumberReadyJobHandler(deps: RelayNumberReadyJobDeps
     conversations ??= createConversationsRepo({ logger: deps.logger });
     messages ??= createMessagesRepo({ logger: deps.logger });
 
-    // G3 read-check: only a group STILL connecting is opened. A redelivered job
-    // (group already open) / a closed or unknown conversation is an idempotent
-    // no-op here - it never re-burns and never re-enqueues the intro.
+    // G3 read-check: only a group STILL connecting is opened here. A redelivered
+    // job (group already open) / a closed or unknown conversation never re-burns
+    // and never re-enqueues the intro (both are one-shot on the open path).
     const conversation = await conversations.getById(conversationId);
     if (
       conversation === undefined ||
       conversation.type !== 'relay_group' ||
       conversation.status !== 'connecting'
     ) {
+      // CRASH-MID-FLUSH RECOVERY: a prior run may have opened the group + fired the
+      // intro + released SOME queued messages, then crashed before finishing the
+      // flush. On redelivery the group is already OPEN, so the burn + intro stay
+      // suppressed above - but remaining queued_pending messages would be lost
+      // forever (violating "a queued message must never be lost"). flushQueuedMessages
+      // is idempotent (updateDeliveryStatus is a forward-only queued_pending -> queued
+      // flip, so already-released messages are skipped), so RE-ENTER it for an
+      // already-OPEN relay_group. A closed / wrong-type / unknown conversation is
+      // left fully alone.
+      if (conversation !== undefined && conversation.type === 'relay_group' && conversation.status === 'open') {
+        await flushQueuedMessages(conversationId, { messagesRepo: messages, logger: deps.logger });
+        log.info(
+          { conversationId, event: 'relay_number_ready_reflush' },
+          'relay.numberReady: group already open (redelivery) - re-flushed any leftover queued messages, intro not re-enqueued',
+        );
+        return;
+      }
       log.info(
         { conversationId, event: 'relay_number_ready_noop' },
         'relay.numberReady: group not connecting (already opened, closed, or unknown) - no-op',

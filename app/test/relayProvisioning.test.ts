@@ -14,7 +14,7 @@ import {
   configureOutboundQueue,
   dispatchJob,
 } from '../src/jobs/jobs.js';
-import { RELAY_INTRO_JOB } from '../src/jobs/relayFanOut.js';
+import { RELAY_FANOUT_JOB, RELAY_INTRO_JOB } from '../src/jobs/relayFanOut.js';
 import {
   RELAY_NUMBER_READY_JOB,
   RELAY_WARM_JOB,
@@ -387,6 +387,62 @@ describe('relay.numberReady handler (T6 - connect-when-ready open)', () => {
     });
 
     expect(pool.burns).toHaveLength(0); // never burned onto an already-open / unknown group
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_INTRO_JOB)).toHaveLength(0);
+  });
+
+  it('a redelivery on an ALREADY-OPEN group re-enters the flush (leftover queued_pending released) without re-intro or re-burn', async () => {
+    // Crash-mid-flush recovery: a prior run opened the group + flushed the intro
+    // and SOME queued messages, then crashed before finishing. On redelivery the
+    // group is already OPEN, so the read-check no-ops the burn + intro - but the
+    // handler must STILL re-enter flushQueuedMessages so the remaining
+    // queued_pending messages are not lost forever (the module's contract).
+    const openGroup: ConversationItem = {
+      ...connectingGroup('conv-crash', [T1, L1]),
+      status: 'open',
+      relay_status: 'relay_group#open',
+      pool_number: NEW_NUMBER,
+    };
+    const { repo } = makeConnectingRepo(openGroup);
+    const pool = makeReadyPool();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+
+    // One leftover queued_pending message the prior crashed run never released.
+    const flipped: string[] = [];
+    const messagesRepo = {
+      async listByConversation() {
+        return [
+          {
+            provider_sid: 'sid-1',
+            tsMsgId: 'ts-1',
+            created_at: '2026-07-21T00:00:00.000Z',
+            direction: 'outbound',
+            delivery_status: 'queued_pending',
+          },
+        ];
+      },
+      async updateDeliveryStatus(sid: string) {
+        flipped.push(sid);
+        return true;
+      },
+    } as unknown as MessagesRepo;
+    registerRelayNumberReadyJobHandler({
+      poolNumbersService: pool,
+      conversationsRepo: repo,
+      messagesRepo,
+      logger,
+    });
+
+    await dispatchJob({
+      jobName: RELAY_NUMBER_READY_JOB,
+      payload: { conversationId: 'conv-crash', poolNumber: NEW_NUMBER },
+    });
+
+    // The leftover queued message was released into the fan-out (not lost).
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_FANOUT_JOB)).toHaveLength(1);
+    expect(flipped).toEqual(['sid-1']);
+    // One-shot on this branch: no re-burn and no re-intro.
+    expect(pool.burns).toHaveLength(0);
     expect(queue.envelopes.filter((e) => e.jobName === RELAY_INTRO_JOB)).toHaveLength(0);
   });
 });

@@ -46,6 +46,7 @@ interface NumberRowView {
   releasedAt?: string;
   retire: { eligible: boolean; daysRemaining?: number };
   groups: GroupRowView[];
+  pendingConversationId?: string;
 }
 
 const SECRET = ORIGIN_SECRET;

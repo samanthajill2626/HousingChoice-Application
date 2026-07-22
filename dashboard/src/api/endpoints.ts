@@ -1774,6 +1774,18 @@ export async function getTourReminders(
   );
 }
 
+/** GET /api/tours/:tourId/no-show-checkin-draft -> the templated body used to
+ *  PREFILL the tenant 1:1 composer for a manual no-show check-in send. */
+export async function getNoShowCheckinDraft(
+  tourId: string,
+  signal?: AbortSignal,
+): Promise<{ body: string }> {
+  return request<{ body: string }>(
+    `/api/tours/${encodeURIComponent(tourId)}/no-show-checkin-draft`,
+    { ...(signal !== undefined && { signal }) },
+  );
+}
+
 /** PATCH /api/tours/:tourId/reminders/:reminderId { canceled } — cancel one
  *  upcoming rung, or restore (un-cancel) a canceled one. 409 when the rung is
  *  already sent/skipped or the transition raced the send poll — the response

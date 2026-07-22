@@ -219,6 +219,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     res.json({ reminders: reminderViews, ...(next !== undefined && { next }) });
   });
 
+  // GET /:tourId/no-show-checkin-draft -> the templated body for the MANUAL
+  // no-show check-in send. The no_show_checkin rung is no longer auto-armed
+  // (jobs/tourReminders.ts), so there is no armed row to read the copy from; the
+  // tour page fetches it here to PREFILL the tenant 1:1 composer. Copy is
+  // tour-independent and var-less; resolveMessage keeps it in sync with any
+  // editable override, exactly like the reminder-body resolution above.
+  router.get('/:tourId/no-show-checkin-draft', (_req, res) => {
+    res.json({ body: resolveMessage('tour.no_show_checkin') });
+  });
+
   return router;
 }
 

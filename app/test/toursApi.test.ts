@@ -1198,6 +1198,29 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 });
 
 // ============================================================================
+// GET /api/tours/:tourId/no-show-checkin-draft - templated copy for the MANUAL
+// no-show check-in send (the rung is no longer auto-armed)
+// ============================================================================
+
+describe('GET /api/tours/:tourId/no-show-checkin-draft', () => {
+  it('returns the templated no-show check-in copy', async () => {
+    // The copy is tour-independent, but mirror the sibling tour routes: book a
+    // tour and read the draft off its id. The route resolves the editable
+    // catalog entry (tour.no_show_checkin) via resolveMessage, no override set.
+    const { app } = makeWebhookHarness();
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).get(`/api/tours/${tourId}/no-show-checkin-draft`);
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({
+      body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
+    });
+  });
+});
+
+// ============================================================================
 // Timeless create ('requested') + booking arms the ladder
 // (tours sequence gap 1: the tour record precedes the time)
 // ============================================================================

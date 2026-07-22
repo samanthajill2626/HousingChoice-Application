@@ -207,6 +207,11 @@ export interface TimelineProps {
   /** Relay group is closed — show a standing note at the composer (sending is
    *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
   relayClosed?: boolean;
+  /** Relay group is CONNECTING (connect-when-ready, T7): its number is still
+   *  warming / A2P-registering. Unlike relayClosed the composer stays ENABLED
+   *  (canSend=true) - a send is HELD (queued_pending) and flushes when the group
+   *  connects. Shows a standing "queued" note at the composer. */
+  relayConnecting?: boolean;
   /** A stable id for the conversation/contact this timeline shows (contactId or
    *  conversationId). When it changes the stream is treated as a FRESH timeline —
    *  jump to the newest item, no "new messages" pill — so switching conversations
@@ -457,9 +462,12 @@ function MessageBubble({
   // as ONE rollup chip (counting up while in flight, green "Delivered N/N" once
   // every leg delivered, danger when a leg hard-fails) from the SAME map the
   // opted-out note reads. GUARDED to relay + outbound so a 1:1 bubble (no
-  // delivery_recipients) is visually unchanged.
+  // delivery_recipients) is visually unchanged. A `queued_pending` HOLD (T7) is
+  // EXCLUDED: its per-member slots are pre-seeded 'queued' placeholders (nothing
+  // was fanned out), so a rollup would read as a misleading "delivered 0/N" - the
+  // message's own "Queued - will send when connected" chip is the honest state.
   const deliveredSummary =
-    outbound && msg.delivery_recipients
+    outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(Object.values(msg.delivery_recipients))
       : null;
   // Relay attribution: who authored this relayed message ("Team" or a member's
@@ -776,6 +784,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     clearDraftSignal,
     relayRoster,
     relayClosed,
+    relayConnecting,
     resetScrollKey,
     emptyLabel,
   } = props;
@@ -1235,6 +1244,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         {relayClosed ? (
           <p className={styles.optOutNote} role="note">
             🔒 This group is closed — reopen it to send.
+          </p>
+        ) : null}
+        {relayConnecting ? (
+          <p className={styles.optOutNote} role="note">
+            Queued - messages will send when the group connects.
           </p>
         ) : null}
         <label className={styles.srOnly} htmlFor="reply-box">

@@ -228,6 +228,46 @@ describe('NumbersSection - state filter chips', () => {
   });
 });
 
+describe('NumbersSection - warming + spare counts', () => {
+  it('surfaces warming and fresh-spare counts alongside active', async () => {
+    listPoolNumbers.mockResolvedValue([
+      // Active but burned -> counts as active, NOT a fresh spare.
+      numberRow({ number: '+15550190001', state: 'active', burnedCount: 2 }),
+      // Active + empty burn -> a fresh spare (and an active).
+      numberRow({ number: '+15550190002', state: 'active', burnedCount: 0 }),
+      // Warming (pre-registration) -> counts as warming, not active/spare.
+      numberRow({ number: '+15550190010', state: 'warming', burnedCount: 0 }),
+    ]);
+    renderSection();
+    await screen.findByText('(555) 019-0001');
+
+    const counts = screen.getByRole('list', { name: 'Pool number counts' });
+    expect(within(counts).getByText('2 active')).toBeInTheDocument();
+    expect(within(counts).getByText('1 warming')).toBeInTheDocument();
+    expect(within(counts).getByText('1 fresh spare')).toBeInTheDocument();
+  });
+
+  it('the Warming filter reveals warming rows hidden under the default Active', async () => {
+    const u = userEvent.setup();
+    listPoolNumbers.mockResolvedValue([
+      numberRow({ number: '+15550190001', state: 'active' }),
+      numberRow({ number: '+15550190010', state: 'warming' }),
+    ]);
+    renderSection();
+    await screen.findByText('(555) 019-0001');
+
+    // Default Active filter hides the warming number.
+    expect(screen.queryByText('(555) 019-0010')).not.toBeInTheDocument();
+
+    await u.click(screen.getByRole('button', { name: 'Warming' }));
+    expect(screen.getByText('(555) 019-0010')).toBeInTheDocument();
+    expect(screen.queryByText('(555) 019-0001')).not.toBeInTheDocument();
+    // The warming row's State cell reads "warming".
+    const row = screen.getByText('(555) 019-0010').closest('tr') as HTMLTableRowElement;
+    expect(within(row).getByText('warming')).toBeInTheDocument();
+  });
+});
+
 describe('NumbersSection - expansion', () => {
   it('expands a number into its group rows, each linking to the conversation thread', async () => {
     const u = userEvent.setup();

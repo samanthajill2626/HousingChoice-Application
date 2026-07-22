@@ -230,6 +230,36 @@ describe('ConversationDetail group view', () => {
   });
 });
 
+describe('ConversationDetail connecting state', () => {
+  it('renders a Connecting pill (not Open/Closed) and keeps the composer usable', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    // A connect-when-ready group (D9): status 'connecting', no pool_number yet.
+    getConversation.mockResolvedValue(relayHeader({ status: 'connecting', pool_number: undefined }));
+    sendMessage.mockResolvedValue({
+      conversationId: 'conv-g1',
+      providerSid: 'team-q1',
+      tsMsgId: '2026-07-04T10:00:00.000Z#team-q1',
+      status: 'queued_pending',
+    });
+    renderAt('conv-g1');
+    await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
+
+    // A distinct Connecting state - never Open, never Closed.
+    expect(screen.getAllByText('Connecting').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('Closed')).not.toBeInTheDocument();
+    // A standing note explains the composer queues instead of sending.
+    expect(screen.getByText(/messages will send when the group connects/i)).toBeInTheDocument();
+
+    // The composer is NOT hard-disabled (unlike closed): typing enables Send, and a
+    // send is accepted (the server persists it queued_pending and returns success).
+    await user.type(screen.getByLabelText('Reply message'), 'On my way');
+    expect(screen.getByRole('button', { name: /^Send$/ })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: /^Send$/ }));
+    await waitFor(() => expect(sendMessage).toHaveBeenCalledWith('conv-g1', { body: 'On my way' }));
+  });
+});
+
 describe('ConversationDetail roster management', () => {
   it('adds a member picked from contact search (resolves the contact primary phone)', async () => {
     const { default: userEvent } = await import('@testing-library/user-event');

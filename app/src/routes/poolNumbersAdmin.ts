@@ -188,10 +188,14 @@ export function createPoolNumbersAdminRouter(deps: PoolNumbersAdminRouterDeps = 
   // Admin-only inventory surface (mirrors adminUsers).
   router.use(requireRole('admin'));
 
-  // GET /api/pool-numbers - the whole inventory (active, releasing, released);
-  // the client filters. N+1 group lookups are accepted at launch scale (spec sec 3).
+  // GET /api/pool-numbers - the whole inventory (active, warming, releasing,
+  // released); the client filters + tallies buffer-health counts. `warming`
+  // (relay number buying strategy) surfaces the connect-when-ready buffer of
+  // bought+attached numbers awaiting A2P registration - it has no groups and is
+  // never retire-eligible (retireMirror requires 'active'). N+1 group lookups are
+  // accepted at launch scale (spec sec 3).
   router.get('/', async (_req, res) => {
-    const states: PoolNumberLifecycleState[] = ['active', 'releasing', 'released'];
+    const states: PoolNumberLifecycleState[] = ['active', 'warming', 'releasing', 'released'];
     const flat = (await Promise.all(states.map((s) => poolNumbers.listByState(s)))).flat();
     // W1: these three Queries are NOT a consistent snapshot. A number changing
     // state as we read can be projected under TWO partitions at once (a stale old

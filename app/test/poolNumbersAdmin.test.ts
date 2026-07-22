@@ -37,7 +37,7 @@ interface GroupRowView {
 }
 interface NumberRowView {
   number: string;
-  state: 'active' | 'releasing' | 'released';
+  state: 'active' | 'warming' | 'releasing' | 'released';
   openGroups: number;
   totalGroups: number;
   burnedCount: number;
@@ -301,6 +301,31 @@ describe('GET /api/pool-numbers - retire mirror (injected clock)', () => {
     expect(row?.state).toBe('released');
     expect(row?.releasedAt).toBe(releasedAt);
     expect(row?.retire.eligible).toBe(false);
+  });
+});
+
+describe('GET /api/pool-numbers - warming numbers', () => {
+  it('includes a warming (pre-registration) number as a state:warming row with no groups', async () => {
+    const pn = '+15551239300';
+    // A warming record: bought + attached, awaiting the A2P registration event. It
+    // has no groups and is never retirement-eligible (mirror requires 'active').
+    const pool = makeFakePoolRepo([
+      poolItem(pn, {
+        lifecycle_state: 'warming',
+        warming_started_at: '2026-07-18T00:00:00.000Z',
+        sid: 'PN0001',
+      }),
+    ]);
+    const { app } = makeWebhookHarness({ world: createFakeWorld(), poolNumbersRepo: pool });
+
+    const res = await getAdmin(app);
+    expect(res.status).toBe(200);
+    const row = numbersOf(res).find((n) => n.number === pn);
+    expect(row).toBeDefined();
+    expect(row?.state).toBe('warming');
+    expect(row?.openGroups).toBe(0);
+    expect(row?.totalGroups).toBe(0);
+    expect(row?.retire).toEqual({ eligible: false });
   });
 });
 

@@ -173,6 +173,16 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   const { contacts: allContacts } = useContacts('all');
 
   const closed = header.status === 'closed';
+  // Connect-when-ready (D9): a group awaiting its pool number - it has no number
+  // yet, so a team reply QUEUES (queued_pending) rather than sends. Distinct from
+  // open/closed; the composer stays enabled (the messages are held, not refused).
+  const connecting = header.status === 'connecting';
+  const statusLabel = connecting ? 'Connecting' : closed ? 'Closed' : 'Open';
+  const statusPillClass = connecting
+    ? styles.statusConnecting
+    : closed
+      ? styles.statusClosed
+      : styles.statusOpen;
 
   // Load the roster (and refresh it whenever the conversation changes).
   useEffect(() => {
@@ -213,7 +223,9 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   };
 
   // Composer: post a team reply (server fans out to all members). Optimistic,
-  // mirroring ContactDetail's postSend. HARD-disabled when the group is closed.
+  // mirroring ContactDetail's postSend. HARD-disabled when the group is closed;
+  // a CONNECTING group stays enabled (a send is held server-side as queued_pending
+  // and flushes when the number registers), so only `closed` gates sending.
   const canSend = !closed;
   const onSend = (
     body: string,
@@ -370,11 +382,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         <div className={shell.identity}>
           <div className={shell.nameRow}>
             <span className={shell.name}>Group text</span>
-            <span
-              className={`${styles.statusPill} ${closed ? styles.statusClosed : styles.statusOpen}`}
-            >
-              {closed ? 'Closed' : 'Open'}
-            </span>
+            <span className={`${styles.statusPill} ${statusPillClass}`}>{statusLabel}</span>
           </div>
           <div className={styles.facts}>{identityFacts}</div>
         </div>
@@ -445,6 +453,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             {...(canSend && { onSend })}
             relayRoster={members}
             relayClosed={closed}
+            relayConnecting={connecting}
             resetScrollKey={conversationId}
           />
         </div>
@@ -463,7 +472,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
                   )
                 }
               />
-              <KV k="Status" v={closed ? 'Closed' : 'Open'} />
+              <KV k="Status" v={statusLabel} />
               {header.placement_tag && header.placement_tag.length > 0 ? (
                 <KV k="Tag" v={header.placement_tag} />
               ) : null}

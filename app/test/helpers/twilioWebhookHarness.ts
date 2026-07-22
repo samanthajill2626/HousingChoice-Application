@@ -2194,6 +2194,7 @@ export function createFakeWorld(): FakeWorld {
   // review API (GET/accept/dismiss) + the contact-PATCH provenance-clear run
   // end-to-end against the SAME store the api router reads. Due-item methods are
   // minimal stubs (the webhook schedule path is covered by its own opts stub).
+  const dismissals = new Set<string>();
   const extractionRepo: ExtractionRepo = {
     async scheduleExtraction(conversationId, channel, dueAt) {
       // Recorded for API-side schedule-site assertions (triage re-extraction);
@@ -2236,6 +2237,12 @@ export function createFakeWorld(): FakeWorld {
     async getSuggestion(contactId, target) {
       const hit = suggestions.get(`sugg#${contactId}#${target}`);
       return hit ? { ...hit } : undefined;
+    },
+    async putDismissal(contactId, target, normValue) {
+      dismissals.add(`${contactId}#${target}#${normValue}`);
+    },
+    async hasDismissal(contactId, target, normValue) {
+      return dismissals.has(`${contactId}#${target}#${normValue}`);
     },
     async listSuggestionsByContact(contactId) {
       return [...suggestions.values()]

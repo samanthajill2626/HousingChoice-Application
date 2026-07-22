@@ -27,6 +27,8 @@ function makeDeps(opts: {
   findByPhone?: (phone: string) => Promise<ContactItem | undefined>;
   putSuggestionImpl?: (s: unknown) => Promise<unknown>;
   updateImpl?: (id: string, patch: Record<string, unknown>) => Promise<ContactItem>;
+  /** Tombstoned values as `target#normValue` pairs (hasDismissal stub). */
+  dismissedValues?: string[];
 } = {}): { deps: ApplyDeps; records: StubRecords; logger: Logger } {
   const records: StubRecords = { updates: [], suggestions: [], audits: [], emits: [] };
   const logger = createLogger({ destination: createLogCapture().stream, level: 'debug' });
@@ -50,6 +52,9 @@ function makeDeps(opts: {
       return s as never;
     }),
     deleteSuggestion: vi.fn(async () => {}),
+    hasDismissal: vi.fn(async (_contactId: string, target: string, normValue: string) =>
+      (opts.dismissedValues ?? []).includes(`${target}#${normValue}`),
+    ),
   };
 
   const audit: ApplyDeps['audit'] = {
@@ -789,5 +794,27 @@ describe('applyExtraction - address (ninth target)', () => {
     const notes = records.updates[0]!.patch['notes'] as string;
     expect(notes).toContain('Current address is unstable, couch-surfing with family');
     expect(notes).not.toContain('535 Seal Pl NE');
+  });
+});
+
+// Dismissal tombstones (Cameron's ruling 2026-07-21): a previously dismissed
+// normalized value is never re-suggested; a different value still comes through.
+describe('applyExtraction - dismissal tombstones', () => {
+  it('suppresses a suggestion whose value was previously dismissed', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: ['firstName#cameron'] });
+    const outcome = await run(deps, makeContact({ type: 'tenant', firstName: 'Natalie' }), {
+      fields: { firstName: { op: 'suggest', value: 'Cameron', reason: 'stated in voicemail' } },
+    });
+    expect(outcome.suggested).toEqual([]);
+    expect(records.suggestions).toHaveLength(0);
+  });
+
+  it('a DIFFERENT value than the tombstone still suggests', async () => {
+    const { deps, records } = makeDeps({ dismissedValues: ['firstName#cameron'] });
+    const outcome = await run(deps, makeContact({ type: 'tenant', firstName: 'Natalie' }), {
+      fields: { firstName: { op: 'suggest', value: 'Kamran', reason: 'stated in voicemail' } },
+    });
+    expect(outcome.suggested).toEqual(['firstName']);
+    expect(records.suggestions).toHaveLength(1);
   });
 });

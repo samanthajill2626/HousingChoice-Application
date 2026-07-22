@@ -16,7 +16,7 @@ import type {
   ExtractionFieldOp,
   ExtractionResult,
 } from '../../adapters/extraction.js';
-import { cleanAddressParts } from './address.js';
+import { cleanAddressParts, normalizeAddressForCompare } from './address.js';
 
 /** The eight client-profile fields the model may operate on. */
 export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
@@ -298,4 +298,14 @@ export function parseExtractionText(text: string): ExtractionResult {
   }
 
   return result;
+}
+
+/**
+ * Canonical comparison key for a suggestion value - the shape dismissal
+ * tombstones store and the apply layer checks against. Address values use the
+ * address-specific normalizer; everything else folds case + whitespace.
+ */
+export function normalizeSuggestionValue(target: string, value: string): string {
+  if (target === 'address') return normalizeAddressForCompare(value);
+  return value.toLowerCase().replace(/\s+/g, ' ').trim();
 }

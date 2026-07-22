@@ -563,3 +563,25 @@ describe('extractionRepo.listPending', () => {
     expect(pending.map((s) => s.ownerContactId)).toEqual(['c3', 'c2']);
   });
 });
+
+// Dismissal tombstones: permanent (target, normalized-value) records - out of
+// every GSI so they never surface as pending suggestions or Today counts.
+describe('dismissal tombstones', () => {
+  it('putDismissal/hasDismissal round-trip; other values and targets stay false', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putDismissal('c1', 'firstName', 'cameron');
+    expect(await repo.hasDismissal('c1', 'firstName', 'cameron')).toBe(true);
+    expect(await repo.hasDismissal('c1', 'firstName', 'kamran')).toBe(false);
+    expect(await repo.hasDismissal('c1', 'lastName', 'cameron')).toBe(false);
+    expect(await repo.hasDismissal('c2', 'firstName', 'cameron')).toBe(false);
+  });
+
+  it('tombstones never appear in byOwner or byPending suggestion reads', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putDismissal('c1', 'firstName', 'cameron');
+    expect(await repo.listSuggestionsByContact('c1')).toEqual([]);
+    expect(await repo.listPending()).toEqual([]);
+  });
+});

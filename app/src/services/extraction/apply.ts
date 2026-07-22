@@ -18,7 +18,7 @@ import { contactPhones } from '../../repos/contactsRepo.js';
 import type { createExtractionRepo } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
-import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB } from './schema.js';
+import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB, normalizeSuggestionValue } from './schema.js';
 import {
   ADDRESS_PART_KEYS,
   cleanAddressParts,
@@ -30,7 +30,10 @@ import type { Logger } from '../../lib/logger.js';
 
 export interface ApplyDeps {
   contacts: Pick<ReturnType<typeof createContactsRepo>, 'update' | 'addPhone' | 'findByPhone'>;
-  extraction: Pick<ReturnType<typeof createExtractionRepo>, 'putSuggestion' | 'deleteSuggestion'>;
+  extraction: Pick<
+    ReturnType<typeof createExtractionRepo>,
+    'putSuggestion' | 'deleteSuggestion' | 'hasDismissal'
+  >;
   audit: { append(entityKey: string, type: string, payload?: Record<string, unknown>): Promise<unknown> };
   events: { emit(name: string, payload: unknown): void };
   logger: Logger;
@@ -454,6 +457,17 @@ async function putSuggestionSafe(
   s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0],
 ): Promise<boolean> {
   try {
+    // Dismissal tombstone check (single choke point for EVERY suggest path):
+    // a value a human already rejected for this target is never re-suggested
+    // (permanent by ruling 2026-07-21); a different value still comes through.
+    const norm = normalizeSuggestionValue(s.target, s.suggestedValue);
+    if (await deps.extraction.hasDismissal(s.ownerContactId, s.target, norm)) {
+      deps.logger.debug(
+        { contactId: s.ownerContactId, target: s.target },
+        'suggestion suppressed (previously dismissed value)',
+      );
+      return false;
+    }
     await deps.extraction.putSuggestion(s);
     return true;
   } catch (err) {

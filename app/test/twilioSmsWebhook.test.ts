@@ -1091,6 +1091,8 @@ describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (T
         scheduleCalls.push({ conversationId, channel, dueAt });
       },
       listDue: notImpl('listDue') as ExtractionRepo['listDue'],
+      putDismissal: notImpl('putDismissal') as ExtractionRepo['putDismissal'],
+      hasDismissal: notImpl('hasDismissal') as ExtractionRepo['hasDismissal'],
       claim: notImpl('claim') as ExtractionRepo['claim'],
       complete: notImpl('complete') as ExtractionRepo['complete'],
       fail: notImpl('fail') as ExtractionRepo['fail'],

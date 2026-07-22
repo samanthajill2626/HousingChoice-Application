@@ -17,7 +17,7 @@
 //     scopes to THIS test's phones, ticks ride pre-computed rung dueAts
 //     (tourSchedule/justAfter) / transition-relative offsets (hoursFromNow), and
 //     1:1 sends stay within the 10/min/conversation breaker budget.
-import { test } from '@playwright/test';
+import { test, expect } from '@playwright/test';
 import {
   Scenario,
   freshTenant,
@@ -25,6 +25,7 @@ import {
   justAfter,
   hoursFromNow,
   TOUR_REMINDER_BODIES,
+  REMINDER_KIND_LABELS,
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
@@ -96,7 +97,15 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   await flow.expectReminderRung('day_before', 'upcoming');
   await flow.expectReminderRung('morning_of', 'upcoming');
   await flow.expectReminderRung('en_route', 'upcoming');
-  await flow.expectReminderRung('no_show_checkin', 'upcoming');
+  // no_show_checkin is no longer auto-armed (manual send only), so its rung never
+  // appears in the panel. Assert its ABSENCE where expectReminderRung would look:
+  // the Reminders card listitems, keyed by the staff label.
+  const reminders = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Reminders' }) });
+  await expect(
+    reminders.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.no_show_checkin }),
+  ).toHaveCount(0);
 
   // Fire the confirmation rung → the panel now reads it SENT, and day_before is
   // still upcoming (a future rung the tick left untouched).

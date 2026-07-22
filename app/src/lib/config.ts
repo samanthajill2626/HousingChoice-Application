@@ -126,6 +126,15 @@ export interface AppConfig {
    * (M1.1 Builder B). Never used for REST calls. Never log.
    */
   twilioAuthToken?: string;
+  /**
+   * Shared secret gating POST /webhooks/twilio/events (relay Event Streams sink,
+   * T3). The Event Streams webhook Sink (T10) posts with Basic-auth-in-URL, so
+   * its requests carry Authorization: Basic base64(user:secret); the handler
+   * constant-time compares the password to this value. UNSET (hermetic / local /
+   * test) SKIPS the check so the fake-twilio sink can POST without it; a deployed
+   * env sets it to enforce. Never log.
+   */
+  twilioEventsWebhookSecret?: string;
   /** A2P Messaging Service (MGxxx) all outbound sends go through. */
   twilioMessagingServiceSid?: string;
   /**
@@ -1062,6 +1071,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     twilioApiKeySid: env.TWILIO_API_KEY_SID,
     twilioApiKeySecret: env.TWILIO_API_KEY_SECRET,
     twilioAuthToken: env.TWILIO_AUTH_TOKEN,
+    twilioEventsWebhookSecret: env.TWILIO_EVENTS_WEBHOOK_SECRET,
     twilioMessagingServiceSid: env.TWILIO_MESSAGING_SERVICE_SID,
     twilioApiBaseUrl: twilioApiBaseUrl !== undefined && twilioApiBaseUrl.length > 0 ? twilioApiBaseUrl : undefined,
     twilioViServiceSid: env.TWILIO_VI_SERVICE_SID?.trim() || undefined,

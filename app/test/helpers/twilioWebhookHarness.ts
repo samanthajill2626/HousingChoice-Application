@@ -2717,6 +2717,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),
+      // relay-number-buying T3: the Event Streams sink router (POST
+      // /webhooks/twilio/events) promotes a warming pool number on registration.
+      ...(opts.poolNumbersService !== undefined && {
+        poolNumbersService: opts.poolNumbersService,
+      }),
     },
   });
   return { app, world, capture, config, fakeUsers };

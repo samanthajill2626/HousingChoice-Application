@@ -40,6 +40,7 @@ import {
   type PoolNumberItem,
   type PoolNumbersRepo,
 } from '../repos/poolNumbersRepo.js';
+import { enqueueImmediate } from '../jobs/jobs.js';
 
 /** Voice webhook the relay pool number is pre-wired to (M1.9 bridge seam). */
 const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
@@ -87,6 +88,28 @@ export interface ProvisionForGroupResult {
   provisioned: boolean;
 }
 
+/**
+ * Job name for the connect-when-ready hand-off (D6). A warming number that was
+ * earmarked to a connecting group enqueues THIS job on promotion; the handler is
+ * registered in a later slice (T6) - dormant until a connecting group tags a
+ * warming record, so no orphan jobs land before then. Deliberately a JOB, NOT an
+ * appEvents bus event (that bus is SSE-facing / a closed typed union).
+ */
+export const RELAY_NUMBER_READY_JOB = 'relay.numberReady';
+
+/** Input to onNumberRegistered - the Event Streams registration webhook (T3). */
+export interface OnNumberRegisteredInput {
+  /** The registered number's Twilio PN SID - the D2 correlation key. */
+  phoneNumberSid: string;
+  /**
+   * The registered number, digits-only / non-E.164 (D1). Informational only -
+   * correlation is by SID, never this fragile string. Optional.
+   */
+  phoneNumber?: string;
+  /** The Messaging Service the number registered under (MG...) - sanity-checked. */
+  messagingServiceSid?: string;
+}
+
 export interface PoolNumbersService {
   /**
    * Acquire a voice+sms-capable pool number for a relay GROUP via burn-as-claim:
@@ -123,6 +146,17 @@ export interface PoolNumbersService {
    * for the ops script.
    */
   retireEligible(): Promise<string[]>;
+  /**
+   * Event Streams registration callback (T3): the number identified by its PN
+   * SID has been A2P 10DLC-registered. Correlate by SID (D2): findWarmingBySid ->
+   * promoteToActive (the SOLE warming->active promotion). When the pre-promote
+   * record carried a pending_conversation_id (connect-when-ready earmark), enqueue
+   * the RELAY_NUMBER_READY_JOB (D6) so a later slice opens the connecting group.
+   * No-op when the SID matches no warming record (unknown / already promoted -
+   * idempotent for a redelivered event). Only a genuine store error throws (the
+   * webhook maps that to a retry); a queue-enqueue failure is logged, not fatal.
+   */
+  onNumberRegistered(input: OnNumberRegisteredInput): Promise<void>;
 }
 
 /** True if any roster phone is already in the number's burn set (Set or array). */
@@ -365,6 +399,66 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
 
     async getRecord(poolNumber) {
       return repo.get(poolNumber);
+    },
+
+    async onNumberRegistered({ phoneNumberSid, messagingServiceSid }) {
+      // Correlate by PN SID (D2), never the (non-E.164) phone string. The warming
+      // set is tiny (K spares + any connecting numbers), so a listWarming scan is
+      // cheap. An unknown SID or an already-promoted number (a redelivered event -
+      // findWarmingBySid only matches lifecycle_state 'warming') is an idempotent
+      // no-op. PII: log the outcome only, never the SID/number.
+      const record = await repo.findWarmingBySid(phoneNumberSid);
+      if (record === undefined) {
+        log.info(
+          { event: 'relay_register_no_match' },
+          'relay registration event: no warming record for this SID - ignoring (unknown or already promoted)',
+        );
+        return;
+      }
+      // Sanity: a registration under a DIFFERENT messaging service than the one we
+      // attach warming numbers to is surprising (a misrouted sink). Warn but still
+      // promote - the SID matched a warming record WE created, so the number is
+      // ours regardless. Only checked when both sides are known.
+      if (
+        messagingServiceSid !== undefined &&
+        config.twilioMessagingServiceSid !== undefined &&
+        messagingServiceSid !== config.twilioMessagingServiceSid
+      ) {
+        log.warn(
+          { event: 'relay_register_service_mismatch' },
+          'relay registration event messaging service does not match the configured service - promoting anyway',
+        );
+      }
+      // pending_conversation_id survives the promote (repo contract), but read it
+      // from the pre-promote record so the earmark is captured before any mutate.
+      const pendingConversationId = record.pending_conversation_id;
+      // The SOLE warming->active promotion. Conditional + idempotent: a concurrent
+      // event that already promoted returns false, and we then skip the enqueue so
+      // relay.numberReady is emitted exactly once (the winner emits it).
+      const promoted = await repo.promoteToActive(record.poolNumber);
+      log.info(
+        { event: 'relay_number_promoted', promoted },
+        'relay pool number registration event processed (warming -> active)',
+      );
+
+      // Connect-when-ready hand-off (D6): signal readiness via the JOB queue (NOT
+      // the SSE-facing appEvents bus). Best-effort like the intro enqueue - a queue
+      // hiccup must not undo the durable promote; T6's stuck-connecting alert
+      // reconciles a lost signal. Dormant until a connecting group tags a warming
+      // record (T6), so this branch does not fire in this slice's normal flow.
+      if (promoted && pendingConversationId !== undefined) {
+        try {
+          await enqueueImmediate(RELAY_NUMBER_READY_JOB, {
+            conversationId: pendingConversationId,
+            poolNumber: record.poolNumber,
+          });
+        } catch (err) {
+          log.error(
+            { err, event: 'relay_number_ready_enqueue_failed' },
+            'relay.numberReady enqueue failed - connecting group stays pending until reconciled',
+          );
+        }
+      }
     },
 
     retireEligible,

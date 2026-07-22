@@ -80,6 +80,7 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
     // AF-3: the reopen route reads the pool record. Default active; a test flips
     // records.get(n)!.lifecycle_state = 'released' to prove the reopen refusal.
     async getRecord(poolNumber) {
@@ -114,6 +115,7 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
     async getRecord() {
       return undefined;
     },
@@ -164,6 +166,7 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
     async getRecord(poolNumber: string) {
       return rec(poolNumber);
     },

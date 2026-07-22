@@ -50,3 +50,24 @@ ack + key-names-only including a value-leak assertion; shapeless 400).
 FOLLOW-UP TRIGGER: the next occurrence's `keys` log line identifies the
 event type - if fresh transcripts keep producing these (scenario (b) in the
 evidence above), file a new issue to handle that event type explicitly.
+
+**Update (2026-07-21) - keys read from dev CloudWatch (`/hc/dev/app`).** Every
+occurrence has the identical top-level shape `keys: ["eventType","timestamp",
+"data"]` (keyCount 3, contentLength varying 434-1440) - Twilio's nested event
+envelope, NOT our top-level `transcript_sid` shape. Disambiguation from the
+evidence above:
+- Scenario (b) is RULED OUT. The two real inbound bridge calls in the window
+  (`recording mirrored` @ epoch 1784579944 / 1784592321) each fast-persisted via
+  the webhook (`vi transcript saved`, then reconcile logged `webhook won`) - the
+  `{transcript_sid}` "transcript available" webhook still works. The
+  `{eventType,timestamp,data}` events are NOT correlated with any call: zero
+  recording callbacks and zero inline `VI transcript created` precede them. So
+  nothing is lost by ignoring them; they are a distinct Twilio event we do not
+  process, not a transcript we are dropping.
+- Still unidentified: the `eventType` VALUE (our PII-safe log recorded key NAMES
+  only). Handler now (this change) logs the `eventType` VALUE (a bounded Twilio
+  enum - PII-safe) + `data` KEY NAMES, at INFO not WARN (a chosen-to-ignore
+  event, not a fault), still acking 200. PENDING: deploy to dev, read one line's
+  `eventType`, then decide explicit name-handling vs. permanent ignore (and
+  update this issue). Test updated to assert eventType-value logged + data-values
+  never logged.

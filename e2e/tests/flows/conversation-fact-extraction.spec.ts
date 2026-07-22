@@ -329,3 +329,39 @@ test('debounce slide: two quick inbound EXTRACT texts run exactly one extraction
   const tick = await extractionTick(request);
   expect(tick.processed).toBe(1);
 });
+
+test('dismissal tombstone: a dismissed value never re-suggests; the run still applies other facts', async ({
+  page,
+  request,
+}) => {
+  await devLogin(page);
+  const { contactId, phone } = await createTenant(page.request, { firstName: 'Natalie' });
+
+  // Run 1: a conflicting name -> chip.
+  await sendExtractSms(request, phone, {
+    fields: { firstName: { op: 'suggest', value: 'Cameron', reason: 'voicemail said Cameron' } },
+  });
+  let tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const nameChip = page.getByRole('group', { name: 'AI suggestion for first name' });
+  await expect(nameChip).toBeVisible();
+  await nameChip.getByRole('button', { name: 'Dismiss' }).click();
+  await expect(nameChip).toBeHidden();
+
+  // Run 2: the SAME rejected value again, plus a sentinel fact that proves the
+  // run fully applied (a deterministic positive signal beats a fixed wait).
+  await sendExtractSms(request, phone, {
+    fields: {
+      firstName: { op: 'suggest', value: 'Cameron', reason: 'transcript still says Cameron' },
+      evictions: { op: 'suggest', value: 'none stated', reason: 'sentinel fact' },
+    },
+  });
+  tick = await extractionTick(request);
+  expect(tick.processed).toBeGreaterThanOrEqual(1);
+
+  await expect(page.getByRole('group', { name: 'AI suggestion for evictions' })).toBeVisible();
+  // The tombstoned value stayed dead - permanent by ruling (2026-07-21).
+  await expect(page.getByRole('group', { name: 'AI suggestion for first name' })).toBeHidden();
+});

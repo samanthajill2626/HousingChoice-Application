@@ -2,7 +2,7 @@
 // page header + file. getContact exists today (legacy Contact, single phone);
 // C1's phones[] is handled downstream by contactPhones(). Loading/error/ready.
 import { useCallback, useEffect, useState } from 'react';
-import { getContact, type Contact } from '../../api/index.js';
+import { getContact, useEventStream, type Contact } from '../../api/index.js';
 
 export interface ContactState {
   status: 'loading' | 'ready' | 'error';
@@ -47,6 +47,24 @@ export function useContact(contactId: string): ContactState {
   const setContact = useCallback((contact: Contact) => {
     setState({ status: 'ready', contact, forId: contactId });
   }, [contactId]);
+
+  // Live IN-PLACE refresh (suggestion-event-no-contact-refetch): when an
+  // extraction run touches this contact (`suggestion.updated` names it), the
+  // run may have DIRECT-written fields - re-fetch in the background and swap
+  // the committed state. Deliberately no status flip: the page keeps rendering
+  // the current contact until the fresh one lands (no spinner, no reload).
+  useEventStream({
+    onSuggestionUpdated: (event) => {
+      if (event.contactId !== contactId) return;
+      void getContact(contactId)
+        .then((contact) => {
+          setState((prev) => (prev.forId === contactId ? { status: 'ready', contact, forId: contactId } : prev));
+        })
+        .catch(() => {
+          /* best-effort: keep the current contact on a fetch hiccup */
+        });
+    },
+  });
 
   // The committed state is for the previous id → the new fetch is in flight.
   if (state.forId !== contactId) {

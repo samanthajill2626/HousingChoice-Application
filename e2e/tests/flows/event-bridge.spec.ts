@@ -195,3 +195,38 @@ test('cross-process: a worker-poll extraction updates an open contact page live'
     timeout: 90_000,
   });
 });
+
+test('cross-process: a worker-poll DIRECT WRITE updates the open page field values live', async ({
+  page,
+  request,
+}) => {
+  // Same one-real-worker-poll shape as the chip test above. Pins
+  // suggestion-event-no-contact-refetch: the CONTACT record (field values +
+  // Auto badge), not just the chips, must update in place on the bridge hint.
+  test.setTimeout(150_000);
+  await devLogin(page);
+  const { contactId } = await createTenant(page.request, 'BridgeFieldLive', {});
+  const conversationId = await ensureConversation(page.request, contactId);
+
+  await page.goto(`${NEXT}/contacts/${contactId}`);
+  const intake = page
+    .locator('section')
+    .filter({ has: page.getByRole('heading', { name: 'Eligibility intake' }) });
+  await expect(intake).toBeVisible();
+
+  await planTranscribedCall(request, {
+    conversationId,
+    callSid: `CAbridgew${Date.now()}`,
+    sentences: [
+      {
+        text: 'EXTRACT:{"fields":{"pets":{"op":"write","value":"cat","reason":"said has a cat"}}}',
+        mediaChannel: 1,
+      },
+    ],
+  });
+
+  // NO reload: the written value and its Auto badge can only appear if the
+  // open page background-refetched the contact when suggestion.updated arrived.
+  await expect(intake.getByText('cat', { exact: true })).toBeVisible({ timeout: 90_000 });
+  await expect(intake.getByRole('img', { name: 'Auto' })).toBeVisible();
+});

@@ -104,13 +104,27 @@ data "aws_iam_policy_document" "app" {
   # NO SendMessage, SNS delivers the notifications) and GetObjects raw inbound
   # MIME from the inbound-mail bucket. All least-privilege to this stack's
   # inbound_mail resources.
+  # SesSend resource covers ALL account identities, not just the sending
+  # domain: in the SES SANDBOX the recipient's verified identity is ALSO an
+  # authorization resource for SendEmail/SendRawEmail (proven at the
+  # 2026-07-21 dev smoke - a Resource scoped to the sender identity denied on
+  # identity/<recipient>). Least privilege is preserved by the FromAddress
+  # condition: this role can only send AS an address on our mail domain,
+  # whatever the resource set.
   statement {
     sid = "SesSend"
     actions = [
       "ses:SendEmail",
       "ses:SendRawEmail",
     ]
-    resources = [var.ses_identity_arn]
+    resources = [
+      "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/*",
+    ]
+    condition {
+      test     = "StringLike"
+      variable = "ses:FromAddress"
+      values   = ["*@${element(split("identity/", var.ses_identity_arn), 1)}"]
+    }
   }
   statement {
     sid = "InboundMailQueue"
@@ -262,8 +276,8 @@ data "aws_iam_policy_document" "app" {
   # wide windows. StartQuery IS resource-scopable to this env's groups;
   # GetQueryResults + StopQuery do NOT support resource-level permissions ("*").
   statement {
-    sid       = "SystemStatusInsightsStart"
-    actions   = ["logs:StartQuery"]
+    sid     = "SystemStatusInsightsStart"
+    actions = ["logs:StartQuery"]
     resources = [
       "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*",
       "arn:aws:logs:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:log-group:/hc/${var.env}/*:*",

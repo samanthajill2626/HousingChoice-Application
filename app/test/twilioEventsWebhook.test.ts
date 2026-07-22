@@ -12,9 +12,6 @@
 // in-memory pool repo (no Twilio, no DynamoDB), with the jobs machinery wired so
 // the relay.numberReady enqueue lands in a recording dispatch.
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import request from 'supertest';
-import type { Test } from 'supertest';
-import type { Express } from 'express';
 import {
   InMemorySchedulerAdapter,
   InProcessOutboundQueueAdapter,
@@ -32,11 +29,15 @@ import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import type { PoolNumberItem, PoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 import { createPoolNumbersService, type PoolNumbersService } from '../src/services/poolNumbers.js';
 import { createLogCapture } from './helpers/logCapture.js';
-import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+import {
+  emitNumberRegistered,
+  makeWebhookHarness,
+  postEvents,
+  registrationEvent,
+} from './helpers/twilioWebhookHarness.js';
 
 const logger = createLogger({ destination: createLogCapture().stream });
 
-const REG_TYPE = 'com.twilio.messaging.compliance.number-registration.successful';
 const DEREG_TYPE = 'com.twilio.messaging.compliance.number-deregistration.successful';
 const WARMING_NUMBER = '+15550009001';
 const WARMING_SID = 'PNwarm000000000000000000000000001';
@@ -183,41 +184,6 @@ function makeService(repo: PoolNumbersRepo): PoolNumbersService {
   });
 }
 
-/** One CloudEvents registration envelope (concatenated-lowercase data, D1/D3). */
-function registrationEvent(over: {
-  phonenumbersid: string;
-  phonenumber?: string;
-  messagingservicesid?: string;
-  type?: string;
-}): unknown {
-  return {
-    specversion: '1.0',
-    type: over.type ?? REG_TYPE,
-    source: '/2010-04-01/Accounts/ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-    id: `CE${over.phonenumbersid}`,
-    dataschema: 'https://events-schemas.twilio.com/Messaging.ComplianceNumberRegistration/1',
-    datacontenttype: 'application/json',
-    time: new Date().toISOString(),
-    data: {
-      accountsid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
-      timestamp: new Date().toISOString(),
-      phonenumbersid: over.phonenumbersid,
-      ...(over.phonenumber !== undefined && { phonenumber: over.phonenumber }),
-      ...(over.messagingservicesid !== undefined && { messagingservicesid: over.messagingservicesid }),
-    },
-  };
-}
-
-/** Plain JSON POST to the events sink (no Twilio signature) with the origin secret. */
-function eventsPost(app: Express, body: unknown, opts: { authorization?: string } = {}): Test {
-  let req = request(app)
-    .post('/webhooks/twilio/events')
-    .set('x-origin-verify', ORIGIN_SECRET)
-    .set('content-type', 'application/json');
-  if (opts.authorization !== undefined) req = req.set('authorization', opts.authorization);
-  return req.send(JSON.stringify(body));
-}
-
 async function seedWarming(repo: PoolNumbersRepo, conversationId?: string): Promise<void> {
   await repo.createWarming({
     poolNumber: WARMING_NUMBER,
@@ -256,7 +222,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     await seedWarming(repo);
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [
+    const res = await postEvents(app, [
       registrationEvent({ phonenumbersid: WARMING_SID, phonenumber: '15550009001', messagingservicesid: MG_SID }),
     ]);
 
@@ -268,12 +234,29 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     expect(captured).toHaveLength(0); // no earmark -> no relay.numberReady
   });
 
+  it('emitNumberRegistered(app, {phoneNumber, phoneNumberSid}) drives a warming number to active', async () => {
+    // The shared convenience helper the T12 e2e-support + fake-twilio's
+    // /control/register-number mirror: one PN-sid-correlated batch, one promotion.
+    const repo = makeFakeRepo();
+    await seedWarming(repo);
+    const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
+
+    const res = await emitNumberRegistered(app, {
+      phoneNumber: '15550009001',
+      phoneNumberSid: WARMING_SID,
+      messagingServiceSid: MG_SID,
+    });
+
+    expect(res.status).toBe(200);
+    expect(repo.store.get(WARMING_NUMBER)?.lifecycle_state).toBe('active');
+  });
+
   it('ignores a registration event whose PN SID matches no warming record (200, nothing promoted)', async () => {
     const repo = makeFakeRepo();
     await seedWarming(repo);
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [registrationEvent({ phonenumbersid: 'PNunknown0000000000000000000000000' })]);
+    const res = await postEvents(app, [registrationEvent({ phonenumbersid: 'PNunknown0000000000000000000000000' })]);
 
     expect(res.status).toBe(200);
     expect(repo.store.get(WARMING_NUMBER)?.lifecycle_state).toBe('warming'); // untouched
@@ -284,7 +267,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     await seedWarming(repo);
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [
+    const res = await postEvents(app, [
       registrationEvent({
         phonenumbersid: WARMING_SID,
         type: 'com.twilio.messaging.compliance.number-registration.pending',
@@ -300,7 +283,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     await seedWarming(repo);
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [registrationEvent({ phonenumbersid: WARMING_SID, type: DEREG_TYPE })]);
+    const res = await postEvents(app, [registrationEvent({ phonenumbersid: WARMING_SID, type: DEREG_TYPE })]);
 
     expect(res.status).toBe(200);
     expect(repo.store.get(WARMING_NUMBER)?.lifecycle_state).toBe('warming');
@@ -311,7 +294,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     await seedWarming(repo, 'conv-connecting-1');
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [
+    const res = await postEvents(app, [
       registrationEvent({ phonenumbersid: WARMING_SID, messagingservicesid: MG_SID }),
     ]);
 
@@ -329,7 +312,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
     await seedWarming(repo);
     const { app } = makeWebhookHarness({ poolNumbersService: makeService(repo) });
 
-    const res = await eventsPost(app, [
+    const res = await postEvents(app, [
       registrationEvent({ phonenumbersid: 'PNother0000000000000000000000000000', type: DEREG_TYPE }),
       registrationEvent({ phonenumbersid: WARMING_SID, messagingservicesid: MG_SID }),
     ]);
@@ -351,7 +334,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
         env: { TWILIO_EVENTS_WEBHOOK_SECRET: SECRET },
       });
 
-      const res = await eventsPost(app, [registrationEvent({ phonenumbersid: WARMING_SID })]);
+      const res = await postEvents(app, [registrationEvent({ phonenumbersid: WARMING_SID })]);
 
       expect(res.status).toBe(403);
       expect(repo.store.get(WARMING_NUMBER)?.lifecycle_state).toBe('warming'); // never processed
@@ -365,7 +348,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
         env: { TWILIO_EVENTS_WEBHOOK_SECRET: SECRET },
       });
 
-      const res = await eventsPost(app, [registrationEvent({ phonenumbersid: WARMING_SID })], {
+      const res = await postEvents(app, [registrationEvent({ phonenumbersid: WARMING_SID })], {
         authorization: basic('twilio', 'WRONG-secret'),
       });
 
@@ -381,7 +364,7 @@ describe('POST /webhooks/twilio/events - Event Streams registration promotion', 
         env: { TWILIO_EVENTS_WEBHOOK_SECRET: SECRET },
       });
 
-      const res = await eventsPost(app, [registrationEvent({ phonenumbersid: WARMING_SID, messagingservicesid: MG_SID })], {
+      const res = await postEvents(app, [registrationEvent({ phonenumbersid: WARMING_SID, messagingservicesid: MG_SID })], {
         authorization: basic('twilio', SECRET),
       });
 

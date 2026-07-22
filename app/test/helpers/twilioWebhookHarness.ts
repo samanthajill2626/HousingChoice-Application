@@ -2803,6 +2803,96 @@ export function signedJsonPost(
   return req.send(raw);
 }
 
+// ---------------------------------------------------------------------------
+// Twilio Event Streams A2P number-registration (relay-number-buying T3/T9). One
+// shared batch builder + POST helper so the T3 unit tests and the T12 e2e-support
+// (fake-twilio's POST /control/register-number mirrors this shape) drive the SAME
+// CloudEvents envelope - keeping the app<-fake integration seam honest.
+// ---------------------------------------------------------------------------
+
+/** CloudEvents `type` (schema v1) for a successful A2P number-registration (D3). */
+export const REGISTRATION_SUCCESS_TYPE =
+  'com.twilio.messaging.compliance.number-registration.successful';
+
+/**
+ * Build ONE Twilio Event Streams CloudEvents envelope for an A2P number-registration.
+ * The `data` field names are concatenated-lowercase (D1) - `phonenumbersid` is the
+ * correlation key the app keys on (D2). `type` defaults to the success type; pass it
+ * to exercise pending / failed / de-registration variants.
+ */
+export function registrationEvent(over: {
+  phonenumbersid: string;
+  phonenumber?: string;
+  messagingservicesid?: string;
+  type?: string;
+}): unknown {
+  const now = new Date().toISOString();
+  return {
+    specversion: '1.0',
+    type: over.type ?? REGISTRATION_SUCCESS_TYPE,
+    source: '/2010-04-01/Accounts/ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    id: `CE${over.phonenumbersid}`,
+    dataschema: 'https://events-schemas.twilio.com/Messaging.ComplianceNumberRegistration/1',
+    datacontenttype: 'application/json',
+    time: now,
+    data: {
+      accountsid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      timestamp: now,
+      phonenumbersid: over.phonenumbersid,
+      ...(over.phonenumber !== undefined && { phonenumber: over.phonenumber }),
+      ...(over.messagingservicesid !== undefined && {
+        messagingservicesid: over.messagingservicesid,
+      }),
+    },
+  };
+}
+
+/**
+ * POST a raw CloudEvents batch (JSON array, D3) to the events sink with the origin
+ * secret. The events sink authorizes by shared secret / origin-verify (D4 pragmatic
+ * form), NOT X-Twilio-Signature - so no signing here; pass `authorization` to
+ * exercise the configured-shared-secret path.
+ */
+export function postEvents(
+  app: Express,
+  batch: unknown,
+  opts: { authorization?: string } = {},
+): Test {
+  let req = request(app)
+    .post('/webhooks/twilio/events')
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('content-type', 'application/json');
+  if (opts.authorization !== undefined) req = req.set('authorization', opts.authorization);
+  return req.send(JSON.stringify(batch));
+}
+
+/**
+ * Drive a warming pool number toward `active` through the REAL events webhook: POST a
+ * one-event registration-SUCCESS batch carrying its PN sid (D2). The convenience over
+ * registrationEvent+postEvents that fake-twilio's /control/register-number mirrors -
+ * one shared entry point for unit + e2e-support. Returns the supertest Test.
+ */
+export function emitNumberRegistered(
+  app: Express,
+  opts: {
+    phoneNumber: string;
+    phoneNumberSid: string;
+    messagingServiceSid?: string;
+    authorization?: string;
+  },
+): Test {
+  const batch = [
+    registrationEvent({
+      phonenumbersid: opts.phoneNumberSid,
+      phonenumber: opts.phoneNumber,
+      ...(opts.messagingServiceSid !== undefined && {
+        messagingservicesid: opts.messagingServiceSid,
+      }),
+    }),
+  ];
+  return postEvents(app, batch, opts.authorization !== undefined ? { authorization: opts.authorization } : {});
+}
+
 /** Standard inbound SMS webhook params (Programmable Messaging shape). */
 export function inboundSmsParams(overrides: Record<string, string> = {}): Record<string, string> {
   return {

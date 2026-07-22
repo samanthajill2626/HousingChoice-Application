@@ -233,6 +233,15 @@ export interface TimelineProps {
     /** Contact is suppressed for email (opt-out/unreachable) - standing note. */
     suppressed?: boolean;
   };
+  /** Seed the composer textarea with this body ON MOUNT ONLY (read by the draft
+   *  useState initializer). Used by the tour page's "Send no-show check-in" to
+   *  prefill the tenant 1:1 composer with the editable template. Changing it
+   *  after mount is inert, so the parent can clear its seed (see onDraftSeeded)
+   *  without wiping an in-progress draft. */
+  initialDraft?: string;
+  /** Fired once, on mount, iff initialDraft was a non-empty string. Lets the
+   *  parent clear its seed so a later remount of this timeline does not re-seed. */
+  onDraftSeeded?: () => void;
 }
 
 /** The relay member key convention (MIRRORS app relayMemberKey): the member's
@@ -788,7 +797,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const showChannelToggle = emailChannel !== undefined && relayRoster === undefined;
   const effectiveChannel: 'text' | 'email' = showChannelToggle && hasEmail ? channel : 'text';
   const [commsOnly, setCommsOnly] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(props.initialDraft ?? '');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // Outbound MMS attachments. Component-local state (like `draft`) so the tour
@@ -826,6 +835,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       setAttachError(null);
     }
   }, [clearDraftSignal]);
+
+  // Seed announcement: if we mounted with a non-empty initialDraft, tell the
+  // parent once so it can clear its seed (a later remount must start empty).
+  // Mount-only (empty deps): initialDraft is read by the draft useState above; we
+  // never re-seed on prop changes, so changing initialDraft after mount is inert.
+  useEffect(() => {
+    if (props.initialDraft !== undefined && props.initialDraft.length > 0) {
+      props.onDraftSeeded?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Upload ONE picked file, reconciling its chip by localId as it completes.
   // Direct-to-S3 flow (spec Sec 4): presign mints a grant, the browser POSTs the

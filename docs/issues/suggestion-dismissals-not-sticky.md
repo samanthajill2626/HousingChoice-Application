@@ -23,16 +23,18 @@ days.
 **Expected.** A dismissal is a human decision about a specific proposed
 value; the pipeline should honor it.
 
-**Suggested fix - dismissal tombstones.** On dismiss, keep the row (or a
-sibling `dism#<contactId>#<target>` item) recording the dismissed
-`suggestedValue` (and `suggestedAddress` for the compound target) instead
-of deleting outright. In apply's suggest path, skip when the new
-suggestedValue NORMALIZED-equals a tombstoned value for that target - a
-DIFFERENT proposed value still suggests (new information beats an old
-dismissal). Clear the target's tombstone when a human PATCH changes the
-field (the human re-engaged with the field; the world moved). Accept flow
-unchanged. Today-page pending counts must exclude tombstones (sparse
-`_pendingPartition` already handles this if tombstones drop it).
+**Fix - dismissal tombstones (Cameron's ruling 2026-07-21).** On dismiss,
+write a tombstone item recording the dismissed target + NORMALIZED
+suggestedValue (per-value, so several rejected values can accumulate per
+target). In apply's suggest path, skip when the proposed value
+normalized-equals a tombstoned value for that target - a DIFFERENT
+proposed value still suggests (new information beats an old dismissal).
+Tombstones are PERMANENT: a human edit of the field does NOT clear them -
+a dismissal means "this value is wrong for this contact" and that judgment
+does not expire (accepted trade: future genuine re-evidence of the same
+value stays suppressed; staff see those conversations themselves). Accept
+flow unchanged. Tombstones must not appear in pending lists or Today
+counts (keep them out of the byOwner/byPending GSIs).
 
 **Note.** The same loop applies to the `status` target while a tenant sits
 in `onboarding` (the only stage that ever produces a status suggestion) -

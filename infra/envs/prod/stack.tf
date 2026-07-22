@@ -32,6 +32,11 @@ module "s3_media" {
   # the operator sets local.dashboard_origins - the upload path is CORS-blocked
   # in a deployed env until this CORS rule is applied.
   dashboard_origins = local.dashboard_origins
+  # CloudFront OAC read grant (unit-media-cloudfront design 2026-07-21). NOT a
+  # cycle: only the bucket POLICY resource depends on the distribution ARN while
+  # cloudfront's media origin depends on the bucket domain - Terraform graphs at
+  # resource granularity, same pattern as params<->cloudfront below.
+  cloudfront_distribution_arn = module.cloudfront.distribution_arn
 }
 
 module "ecr" {
@@ -130,6 +135,9 @@ module "cloudfront" {
   name_prefix        = local.name_prefix
   origin_domain_name = module.ec2.eip_public_dns
   origin_secret      = module.params.origin_secret
+  # Media bucket regional domain -> the /unit-media/* S3 origin via OAC
+  # (unit-media-cloudfront design 2026-07-21).
+  media_origin_domain_name = module.s3_media.bucket_regional_domain_name
 
   # Custom domain attaches at phase >= 1: the alias and the validated cert move
   # together (acm.certificate_arn reads through the validation resource, so this

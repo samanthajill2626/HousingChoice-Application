@@ -13,3 +13,9 @@ variable "dashboard_origins" {
   type        = list(string)
   default     = []
 }
+
+variable "cloudfront_distribution_arn" {
+  description = "ARN of the CloudFront distribution allowed to read unit-media/* via OAC (unit-media-cloudfront design 2026-07-21). null = no bucket policy created."
+  type        = string
+  default     = null
+}

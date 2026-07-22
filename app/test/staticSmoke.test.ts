@@ -108,11 +108,12 @@ describe.skipIf(!built)('static dashboard serving (DASHBOARD_DIST_DIR)', () => {
   });
 });
 
-// unit-photos deployed-CSP regression (2026-07-21): the browser talks to the
-// media bucket DIRECTLY — presigned-POST upload + presigned-GET display — so
-// when a media store is configured, its origin MUST be allowed by connect-src
-// (fetch) and img-src (<img>). With connect-src 'self' alone, deployed-dev
-// photo upload died in the browser ("Uploaded 0 of 3").
+// unit-photos deployed-CSP (2026-07-21) + same-origin reads: the browser talks
+// to the media bucket DIRECTLY only for the presigned-POST UPLOAD, so a
+// configured store's origin MUST be allowed by connect-src (fetch). Photo READS
+// are same-origin now (/unit-media via CloudFront or the app route), so the
+// bucket origin is NO LONGER in img-src - img-src stays 'self' data: blob:. With
+// connect-src 'self' alone, deployed-dev photo upload died ("Uploaded 0 of 3").
 describe.skipIf(!built)('SPA CSP allows the configured media-bucket origin', () => {
   const buildWith = (extraEnv: Record<string, string>) =>
     buildApp({
@@ -125,26 +126,30 @@ describe.skipIf(!built)('SPA CSP allows the configured media-bucket origin', () 
       logger: createLogger({ destination: createLogCapture().stream }),
     });
 
-  it('real AWS shape: virtual-hosted bucket origin lands in connect-src AND img-src', async () => {
+  it('real AWS shape: virtual-hosted bucket origin lands in connect-src ONLY (img-src stays self)', async () => {
     const app = buildWith({ MEDIA_BUCKET: 'hc-test-media', AWS_REGION: 'us-east-1' });
     const res = await request(app).get('/').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);
     const csp = res.headers['content-security-policy'];
     const origin = 'https://hc-test-media.s3.us-east-1.amazonaws.com';
     expect(csp).toContain(`connect-src 'self' ${origin}`);
-    expect(csp).toContain(`img-src 'self' data: blob: ${origin}`);
-    // The allowance is scoped: script/style/default stay 'self'.
+    // Same-origin reads (design 2026-07-21): the bucket origin is NOT in img-src.
+    expect(csp).toContain("img-src 'self' data: blob:; connect-src");
+    expect(csp).not.toContain(`img-src 'self' data: blob: ${origin}`);
+    // The allowance is scoped to connect-src: img-src/script/style/default stay 'self'.
     expect(csp).toContain("default-src 'self';");
     expect(csp).toContain("script-src 'self';");
   });
 
-  it('local MinIO shape: the MEDIA_S3_ENDPOINT origin is allowed instead (path-style)', async () => {
+  it('local MinIO shape: the MEDIA_S3_ENDPOINT origin is allowed in connect-src (path-style)', async () => {
     const app = buildWith({ MEDIA_BUCKET: 'hc-local-media', MEDIA_S3_ENDPOINT: 'http://localhost:9000' });
     const res = await request(app).get('/').set('x-origin-verify', SECRET);
     expect(res.status).toBe(200);
     const csp = res.headers['content-security-policy'];
     expect(csp).toContain("connect-src 'self' http://localhost:9000");
-    expect(csp).toContain("img-src 'self' data: blob: http://localhost:9000");
+    // Same-origin reads: the endpoint origin is NOT in img-src.
+    expect(csp).toContain("img-src 'self' data: blob:; connect-src");
+    expect(csp).not.toContain("img-src 'self' data: blob: http://localhost:9000");
     expect(csp).not.toContain('amazonaws.com');
   });
 });

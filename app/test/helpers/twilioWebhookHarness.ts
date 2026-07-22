@@ -169,6 +169,10 @@ export interface FakeWorld {
   mediaPuts: { key: string; contentType?: string; bytes: number }[];
   /** Presigned-POST grants minted via mediaStore.createPresignedPost, in order. */
   presignPosts: { key: string; contentType: string; maxBytes?: number }[];
+  /** Keys removed via mediaStore.deleteObject (D1 best-effort removal), in order. */
+  deletedMediaKeys: string[];
+  /** Keys for which mediaStore.deleteObject should REJECT (exercises D1's best-effort WARN path). */
+  failMediaDeletes: Set<string>;
   /** Media URLs that getMediaStream should fail for. */
   failMediaUrls: Set<string>;
   /** Recording URLs that getRecordingStream should fail for (M1.9c). */
@@ -271,6 +275,8 @@ export function createFakeWorld(): FakeWorld {
   let viCreateError: Error | undefined;
   const mediaPuts: FakeWorld['mediaPuts'] = [];
   const presignPosts: FakeWorld['presignPosts'] = [];
+  const deletedMediaKeys: FakeWorld['deletedMediaKeys'] = [];
+  const failMediaDeletes = new Set<string>();
   const failMediaUrls = new Set<string>();
   const failRecordingUrls = new Set<string>();
   // What put() stored, keyed by S3 key — so getStream() can read it back (the
@@ -2389,6 +2395,20 @@ export function createFakeWorld(): FakeWorld {
         },
       };
     },
+    async deleteObject(key) {
+      // D1 WARN-path seam: a test can force this to reject for a given key
+      // (world.failMediaDeletes.add(key)) to exercise the best-effort delete's
+      // failure branch. Mirrors failMediaUrls / failRecordingUrls. Throws BEFORE
+      // recording, so a forced-fail key never lands in deletedMediaKeys.
+      if (failMediaDeletes.has(key)) {
+        throw new Error(`fake mediaStore: forced deleteObject failure for ${key}`);
+      }
+      // D1 best-effort removal: drop the stored object (idempotent - a missing
+      // key is a no-op, mirroring S3 DeleteObject) and record the key so the
+      // delete-on-removal tests can assert exactly which objects were removed.
+      mediaObjects.delete(key);
+      deletedMediaKeys.push(key);
+    },
   };
 
   return {
@@ -2408,6 +2428,8 @@ export function createFakeWorld(): FakeWorld {
     initiatedCalls,
     mediaPuts,
     presignPosts,
+    deletedMediaKeys,
+    failMediaDeletes,
     failMediaUrls,
     failRecordingUrls,
     mediaObjects,
@@ -2635,9 +2657,6 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       conversationsRepo: world.conversationsRepo,
       unitsRepo: world.unitsRepo,
       auditRepo: world.auditRepo,
-      // unit-photos: the flyer/details resolve stored photo keys to presigned
-      // URLs through the SAME fake media store the authed API + webhooks use.
-      ...(opts.withoutMediaStore ? {} : { mediaStore: world.mediaStore }),
       // The housing-fair welcome reads the operator's welcomeText override (with
       // a constant fallback) — share the world's fake settings repo so a
       // welcomeText edit is reflected without touching DynamoDB.

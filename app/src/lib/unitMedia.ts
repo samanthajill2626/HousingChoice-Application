@@ -1,12 +1,17 @@
 // Property-photo (unit media) shared constants + display resolution (design
-// spec 2026-07-15, S1/S3). The storage field stays `unit.media: string[]`:
-// stored S3 keys (the primary case, minted at upload) OR legacy absolute URLs
-// (tolerated, render-only). First entry = cover.
+// spec 2026-07-15, S1/S3; same-origin reads 2026-07-21). The storage field
+// stays `unit.media: string[]`: stored S3 keys (the primary case, minted at
+// upload) OR legacy absolute URLs (tolerated, render-only). First entry = cover.
 //
-// PRESIGN PER READ (D5): a stored key is resolved to a short-lived presigned
-// GET URL at SERVE time and NEVER persisted - the same presign-per-attempt rule
-// the MMS send path follows, applied to reads. A per-entry presign failure
-// degrades that entry to url-absent (never 500s the read - E4).
+// SAME-ORIGIN READS (design 2026-07-21): a stored key resolves to the STABLE
+// relative URL `/` + key (e.g. `/unit-media/<unitId>/<uuid>`) - the path IS the
+// S3 object key. CloudFront's `/unit-media/*` behavior serves it straight from
+// the bucket (OAC) in deployed envs; the app's own GET /unit-media route streams
+// it everywhere else. Deterministic and cache-friendly: no media store, no async
+// S3 call, no TTL, never a presigned/expiring URL (presign-per-read is retired).
+// A foreign / out-of-namespace key still degrades to url-absent with a WARN.
+// resolveUnitMedia below is store-independent; the MediaStore import feeds the
+// deleteRemovedUnitMedia helper (best-effort S3 cleanup on photo removal, D1).
 import type { MediaStore } from '../adapters/mediaStore.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 import type { UnitItem } from '../repos/unitsRepo.js';
@@ -14,28 +19,36 @@ import type { UnitItem } from '../repos/unitsRepo.js';
 /**
  * Photos per unit cap. This is an ABUSE / RUNAWAY BACKSTOP, not a product limit
  * (D3): there is no hard technical constraint - a key is ~60B against a 400KB
- * item, and presigning is local SigV4 signing (no S3 round trip). Raise it the
- * day someone legitimately hits it.
+ * item, and display resolution is a trivial local string build (no S3 round
+ * trip). Raise it the day someone legitimately hits it.
  */
 export const UNIT_MEDIA_MAX = 100;
-
-/**
- * Presign TTL for a property photo served to the staff gallery or the public
- * flyer: 1 hour (the same short-lived exposure class the outbound-MMS presign
- * uses). Long enough to render a page, short enough that a leaked URL expires.
- */
-export const UNIT_MEDIA_PRESIGN_TTL_SECONDS = 3600;
 
 /** The prefix all stored (non-URL) media entries for a unit must live under. */
 export function unitMediaPrefix(unitId: string): string {
   return `unit-media/${unitId}/`;
 }
 
+/**
+ * True when `seg` is exactly ONE safe `unit-media/` path segment: the safe
+ * charset only, never a `.`/`..` dot-navigation token (and, since the charset
+ * excludes `/`, never a multi-segment run). SHARED (review C1, 2026-07-21) by
+ * BOTH the display-URL emission below (resolveUnitMedia) AND the GET /unit-media
+ * serve route (routes/unitMediaServe.ts imports this) so the two agree on what a
+ * valid key is - the resolver never emits a URL whose shape the route rejects. A
+ * real stored key is `unit-media/<unitId>/<uuid>`: each of `<unitId>` and
+ * `<uuid>` is one such segment.
+ */
+const UNIT_MEDIA_SEGMENT_RE = /^[A-Za-z0-9._-]+$/;
+export function isSafeUnitMediaSegment(seg: string): boolean {
+  return UNIT_MEDIA_SEGMENT_RE.test(seg) && seg !== '.' && seg !== '..';
+}
+
 /** One resolved gallery entry: the durable handle + its display URL when resolvable. */
 export interface UnitMediaDisplay {
   /** The raw `unit.media` entry (an S3 key or a legacy URL) - the management handle. */
   entry: string;
-  /** The display URL (presigned for a stored key, pass-through for a URL). Absent = unresolvable. */
+  /** The display URL (same-origin `/`+key for a stored key, pass-through for a URL). Absent = unresolvable. */
   url?: string;
 }
 
@@ -45,51 +58,94 @@ function isAbsoluteUrl(entry: string): boolean {
 }
 
 /**
- * Resolve a unit's `media` entries to display URLs (S3, design spec S3). Stored
- * keys presign fresh (TTL 1h); absolute URLs pass through; a per-entry presign
- * failure degrades to a url-absent entry (logged WARN, never thrown - E4). When
- * `mediaStore` is undefined (local loop with no S3), stored keys resolve to
- * url-absent and only legacy URLs carry through.
- *
- * PRESIGN-PER-READ: never persist the returned URLs - this runs per request.
+ * Resolve a unit's `media` entries to display URLs (design 2026-07-21). A stored
+ * key under THIS unit's own namespace resolves to the stable same-origin URL
+ * `/` + key; absolute URLs pass through; a foreign / out-of-namespace key
+ * degrades to a url-absent entry (logged WARN, never thrown - E4). SYNC and
+ * deterministic: no media store, no S3 round trip, no TTL. A key that cannot be
+ * served yields the same visible outcome as before (the URL simply 404s at the
+ * serve route, an absent image) - minus the per-read presigning.
  */
-export async function resolveUnitMedia(
-  mediaStore: MediaStore | undefined,
+export function resolveUnitMedia(
   unit: Pick<UnitItem, 'unitId' | 'media'>,
-  opts: { logger?: Logger; unitId?: string } = {},
-): Promise<UnitMediaDisplay[]> {
+  opts: { logger?: Logger } = {},
+): UnitMediaDisplay[] {
   const log = opts.logger ?? defaultLogger;
   const media = Array.isArray(unit.media)
     ? unit.media.filter((e): e is string => typeof e === 'string' && e.length > 0)
     : [];
   const ownPrefix = unitMediaPrefix(unit.unitId);
-  return Promise.all(
-    media.map(async (entry): Promise<UnitMediaDisplay> => {
-      if (isAbsoluteUrl(entry)) return { entry, url: entry };
-      if (!mediaStore) return { entry };
-      // NAMESPACE SCOPING (review hardening, 2026-07-15): presign ONLY keys
-      // under THIS unit's own `unit-media/<unitId>/` prefix. `media` stays
-      // PATCH-writable (the raw seam, E5) and the bucket is SHARED with the MMS
-      // attachment namespaces - without this check a foreign key (an MMS
-      // `uploads/<uuid>` attachment, or another unit's photo) pasted into
-      // `media` would be presigned onto the PUBLIC flyer. A foreign key
-      // degrades to url-absent, exactly like a presign failure.
-      if (!entry.startsWith(ownPrefix)) {
-        log.warn(
-          { unitId: unit.unitId },
-          'unit media: entry outside the unit media namespace - not presigned',
-        );
-        return { entry };
-      }
-      try {
-        const url = await mediaStore.presign(entry, UNIT_MEDIA_PRESIGN_TTL_SECONDS);
-        return { entry, url };
-      } catch (err) {
-        // E4: a presign failure degrades this ONE entry (no url) - never 500s
-        // the unit read or the flyer. Log the fact only (never the URL).
-        log.warn({ err, ...(opts.unitId !== undefined && { unitId: opts.unitId }) }, 'unit media: presign failed (entry degraded)');
-        return { entry };
-      }
-    }),
-  );
+  const ownSegmentSafe = isSafeUnitMediaSegment(unit.unitId);
+  return media.map((entry): UnitMediaDisplay => {
+    if (isAbsoluteUrl(entry)) return { entry, url: entry };
+    // NAMESPACE SCOPING (review hardening, 2026-07-15): only keys under THIS
+    // unit's own `unit-media/<unitId>/` prefix become URLs. `media` stays
+    // PATCH-writable (the raw seam, E5) and the bucket is SHARED with the MMS
+    // attachment namespaces - without this check a foreign key (an MMS
+    // `uploads/<uuid>` attachment, or another unit's photo) pasted into `media`
+    // would be emitted as a served URL onto the PUBLIC flyer. A foreign key
+    // degrades to url-absent.
+    if (!entry.startsWith(ownPrefix)) {
+      log.warn(
+        { unitId: unit.unitId },
+        'unit media: entry outside the unit media namespace - no display URL',
+      );
+      return { entry };
+    }
+    // SHAPE SCOPING (review C1, 2026-07-21): the own-prefix check proves the
+    // namespace but NOT the shape. The remainder after the prefix must be a
+    // SINGLE safe segment, and this unit's own id must be one too - the SAME
+    // per-segment guard GET /unit-media enforces (isSafeUnitMediaSegment, shared
+    // above). Without it a crafted own-namespace key from the raw PATCH seam (E5)
+    // - e.g. `unit-media/<id>/../../recordings/x`, `.../a/b`, `.../has space` -
+    // would be emitted as a display URL the serve route ALWAYS 404s (asymmetric +
+    // non-canonical). Real keys are `unit-media/<id>/<uuid>`, so legitimate data
+    // is unaffected; a malformed one degrades to url-absent like a foreign key.
+    if (!ownSegmentSafe || !isSafeUnitMediaSegment(entry.slice(ownPrefix.length))) {
+      log.warn(
+        { unitId: unit.unitId },
+        'unit media: entry is not a single safe segment under the namespace - no display URL',
+      );
+      return { entry };
+    }
+    // SAME-ORIGIN URL (design 2026-07-21): the path IS the S3 object key. Served
+    // by CloudFront's /unit-media/* behavior in deployed envs and by the app's
+    // GET /unit-media route everywhere else. Stable and cache-friendly - never a
+    // presigned, expiring URL.
+    return { entry, url: `/${entry}` };
+  });
+}
+
+/**
+ * Best-effort S3 cleanup for entries REMOVED from unit.media (design 2026-07-21,
+ * D1). Deletes ONLY stored keys inside THIS unit's own namespace - legacy
+ * absolute URLs and foreign keys (an MMS uploads/ attachment, another unit's
+ * photo) are never deleted. Fire-and-forget: every failure is a WARN and the
+ * caller's response is never affected. A removed photo may keep serving from
+ * CloudFront edge caches up to the 7-day TTL (accepted; manual invalidation is
+ * the operator escape hatch). No-op when no media store is configured.
+ *
+ * PII posture (matches units.ts): the WARN logs { err, unitId } ONLY - never the
+ * key or URL.
+ */
+export function deleteRemovedUnitMedia(
+  mediaStore: MediaStore | undefined,
+  unitId: string,
+  removedEntries: string[],
+  logger?: Logger,
+): void {
+  const log = logger ?? defaultLogger;
+  if (!mediaStore) return;
+  const ownPrefix = unitMediaPrefix(unitId);
+  for (const entry of removedEntries) {
+    // Prefix-only ON PURPOSE (no per-segment shape check): S3 keys are literal,
+    // so deleting an odd-but-literal key INSIDE our own prefix is harmless. The
+    // URL-emission guard in resolveUnitMedia is deliberately STRICTER (it also
+    // enforces isSafeUnitMediaSegment) because a bad shape there would emit an
+    // unservable PUBLIC url; here a bad shape can only delete our own stray object.
+    if (isAbsoluteUrl(entry) || !entry.startsWith(ownPrefix)) continue;
+    void mediaStore.deleteObject(entry).catch((err: unknown) => {
+      log.warn({ err, unitId }, 'unit media: best-effort object delete failed (orphan remains)');
+    });
+  }
 }

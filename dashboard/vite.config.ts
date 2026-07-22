@@ -67,6 +67,13 @@ export default defineConfig({
       // stack). Mounted on the app; Vite proxies requests through so the UI +
       // e2e specs can reach them at the baseURL (:5174).
       '/__dev': appProxy,
+      // Same-origin unit-photo reads (unit-media-cloudfront design 2026-07-21):
+      // the app resolves unit.media keys to RELATIVE /unit-media/... URLs, so a
+      // Vite-fronted dashboard (local dev, live-mode :5174, hermetic e2e) must
+      // proxy the path to the app's streaming route - otherwise the SPA
+      // fallback serves index.html and every photo decodes to zero bytes. In
+      // deployed envs CloudFront routes this path to S3 before the app.
+      '/unit-media': appProxy,
     },
   },
   build: {

@@ -1,7 +1,7 @@
 // unit-photos direct-upload route tests: POST /api/units/:unitId/photos/presign
 // (mint presigned-POST grants), POST /api/units/:unitId/photos/confirm (record
 // the keys the browser uploaded directly to S3), DELETE /api/units/:unitId/photos,
-// PUT /api/units/:unitId/photos/cover, and the mediaDisplay presign-per-read
+// PUT /api/units/:unitId/photos/cover, and the mediaDisplay same-origin
 // resolution on GET /api/units/:unitId. Drives the real routers through
 // makeWebhookHarness with the world's fake MediaStore (which records each minted
 // grant into world.presignPosts and reads back stored objects via head()).
@@ -10,7 +10,7 @@ import { describe, expect, it } from 'vitest';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import sharp from 'sharp';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
-import { UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
+import { isSafeUnitMediaSegment, UNIT_MEDIA_MAX } from '../src/lib/unitMedia.js';
 import { UNIT_PHOTO_PASSTHROUGH_MAX_BYTES, UNIT_PHOTO_SOURCE_MAX_BYTES } from '../src/lib/unitPhotoLimits.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
@@ -60,6 +60,23 @@ function confirm(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: stri
     .set('x-origin-verify', SECRET)
     .set('cookie', TEST_SESSION_COOKIE);
 }
+
+function del(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+  return request(app)
+    .delete(`/api/units/${unitId}/photos`)
+    .set('x-origin-verify', SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
+
+function patchUnit(app: ReturnType<typeof makeWebhookHarness>['app'], unitId: string) {
+  return request(app)
+    .patch(`/api/units/${unitId}`)
+    .set('x-origin-verify', SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
+}
+
+/** Best-effort deletes are fire-and-forget - drain the immediate queue before asserting. */
+const drainDeletes = () => new Promise((resolve) => setImmediate(resolve));
 
 const KEY_RE = /^unit-media\/unit-1\/[0-9a-f-]+$/;
 
@@ -192,10 +209,10 @@ describe('POST /api/units/:unitId/photos/confirm', () => {
     const res = await confirm(app, 'unit-1').send({ keys: [k1, k2] });
     expect(res.status).toBe(200);
     expect(res.body.unit.media).toEqual([k1, k2]);
-    // mediaDisplay resolves each stored key to a presigned URL alongside the raw entry.
+    // mediaDisplay resolves each stored key to a same-origin /unit-media URL alongside the raw entry.
     expect(res.body.unit.mediaDisplay).toHaveLength(2);
     expect(res.body.unit.mediaDisplay[0].entry).toBe(k1);
-    expect(res.body.unit.mediaDisplay[0].url).toMatch(/^https:\/\/fake-s3\.local\//);
+    expect(res.body.unit.mediaDisplay[0].url).toBe('/' + k1);
     // The audit carries COUNT only (no key/filename).
     const added = world.auditEvents.find((e) => e.event_type === 'unit_photos_added');
     expect(added?.payload).toMatchObject({ count: 2 });
@@ -621,8 +638,8 @@ describe('PUT /api/units/:unitId/photos/cover', () => {
   });
 });
 
-describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
-  it('mints a DIFFERENT url on each read and NEVER persists a presigned url', async () => {
+describe('GET /api/units/:unitId - mediaDisplay same-origin URLs (design 2026-07-21)', () => {
+  it('emits a STABLE same-origin url on each read and NEVER persists a url', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { media: ['unit-media/unit-1/k1'] });
     const get = () =>
@@ -632,9 +649,10 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     expect(first.status).toBe(200);
     const url1: string = first.body.unit.mediaDisplay[0].url;
     const url2: string = second.body.unit.mediaDisplay[0].url;
-    expect(url1).toMatch(/^https:\/\/fake-s3\.local\//);
-    expect(url1).not.toBe(url2); // fresh signature each read
-    // The durable field still holds the raw key - no presigned URL persisted.
+    expect(url1).toBe('/unit-media/unit-1/k1');
+    expect(url1).toMatch(/^\/unit-media\//);
+    expect(url2).toBe(url1); // stable same-origin URL, not a per-read presign
+    // The durable field still holds the raw key - no URL persisted.
     expect(world.units.get('unit-1')?.media).toEqual(['unit-media/unit-1/k1']);
   });
 
@@ -652,11 +670,11 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     });
   });
 
-  it('review F2: presigns ONLY keys under this unit\'s own namespace (foreign keys degrade)', async () => {
+  it('review F2: emits URLs ONLY for keys under this unit\'s own namespace (foreign keys degrade)', async () => {
     // `media` stays PATCH-writable (E5) and the bucket is shared with the MMS
     // namespaces - a foreign key pasted into media (an uploads/ MMS attachment,
-    // or ANOTHER unit's photo) must NEVER presign (else the public flyer would
-    // expose a private object). Legacy URLs still pass through.
+    // or ANOTHER unit's photo) must NEVER get a display URL (else the public
+    // flyer would expose a private object). Legacy URLs still pass through.
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', {
       media: [
@@ -673,9 +691,158 @@ describe('GET /api/units/:unitId - mediaDisplay presign-per-read (D5)', () => {
     expect(res.status).toBe(200);
     const display: { entry: string; url?: string }[] = res.body.unit.mediaDisplay;
     expect(display).toHaveLength(4);
-    expect(display[0]!.url).toMatch(/^https:\/\/fake-s3\.local\//); // own key: presigned
+    expect(display[0]!.url).toBe('/unit-media/unit-1/own-photo'); // own key: same-origin URL
     expect(display[1]!).toEqual({ entry: 'uploads/some-mms-attachment' }); // foreign: NO url
     expect(display[2]!).toEqual({ entry: 'unit-media/unit-OTHER/their-photo' }); // cross-unit: NO url
     expect(display[3]!.url).toBe('https://legacy.example/photo.jpg'); // legacy URL: pass-through
+  });
+
+  it('review C1: a crafted own-namespace key with an unsafe SHAPE yields NO url (guard shared with the serve route)', async () => {
+    // The raw PATCH seam (E5) can plant an own-PREFIX key whose remainder is not
+    // a single safe segment. resolveUnitMedia shares the GET /unit-media serve
+    // route's per-segment guard, so such a key degrades to url-absent instead of
+    // emitting a display URL the route would ALWAYS 404 (traversal / embedded
+    // slash / space). The real uuid key still resolves to its same-origin URL.
+    const { app, world } = makeWebhookHarness();
+    const REAL = 'unit-media/unit-1/11111111-2222-3333-4444-555555555555';
+    const TRAVERSAL = 'unit-media/unit-1/../../recordings/secret';
+    const EXTRA_SEG = 'unit-media/unit-1/a/b';
+    const SPACE = 'unit-media/unit-1/has space';
+    seedUnit(world, 'unit-1', { media: [REAL, TRAVERSAL, EXTRA_SEG, SPACE] });
+    const res = await request(app)
+      .get('/api/units/unit-1')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    const display: { entry: string; url?: string }[] = res.body.unit.mediaDisplay;
+    expect(display).toHaveLength(4);
+    expect(display[0]!.url).toBe('/' + REAL); // real uuid key: same-origin URL
+    expect(display[1]!).toEqual({ entry: TRAVERSAL }); // '..' traversal: NO url
+    expect(display[2]!).toEqual({ entry: EXTRA_SEG }); // embedded slash: NO url
+    expect(display[3]!).toEqual({ entry: SPACE }); // space in segment: NO url
+  });
+});
+
+describe('isSafeUnitMediaSegment (shared serve-route + URL-emission guard, review C1)', () => {
+  it('accepts a uuid-shaped segment + the safe charset; rejects slashes, dot-nav, spaces, empty', () => {
+    // Real key segments: the unitId and the server-minted uuid object.
+    expect(isSafeUnitMediaSegment('11111111-2222-3333-4444-555555555555')).toBe(true);
+    expect(isSafeUnitMediaSegment('unit-1')).toBe(true);
+    expect(isSafeUnitMediaSegment('a.b_c-1')).toBe(true);
+    // Dot-navigation + out-of-charset bytes: rejected. These are exactly the
+    // shapes GET /unit-media 404s, so the resolver must not emit URLs for them.
+    expect(isSafeUnitMediaSegment('.')).toBe(false);
+    expect(isSafeUnitMediaSegment('..')).toBe(false);
+    expect(isSafeUnitMediaSegment('a/b')).toBe(false);
+    expect(isSafeUnitMediaSegment('../x')).toBe(false);
+    expect(isSafeUnitMediaSegment('has space')).toBe(false);
+    expect(isSafeUnitMediaSegment('a$b')).toBe(false);
+    expect(isSafeUnitMediaSegment('')).toBe(false);
+  });
+});
+
+describe('delete-on-removal (D1) - best-effort S3 cleanup of removed unit photos', () => {
+  const K1 = 'unit-media/unit-1/k1';
+  const K2 = 'unit-media/unit-1/k2';
+  const LEGACY = 'https://legacy.example/photo.jpg';
+
+  // --- DELETE /api/units/:unitId/photos ---
+
+  it('DELETE: best-effort-deletes the removed own-namespace object', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await del(app, 'unit-1').send({ entry: K1 });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([K1]);
+    expect(world.mediaObjects.has(K1)).toBe(false); // object gone
+    expect(world.mediaObjects.has(K2)).toBe(true); // survivor untouched
+  });
+
+  it('DELETE: never deletes a removed legacy absolute-URL entry (own-namespace keys only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [LEGACY, K2] });
+    const res = await del(app, 'unit-1').send({ entry: LEGACY });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  it('DELETE: a rejecting deleteObject stays best-effort - still 200 (WARN, not 500); key not recorded', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    world.failMediaDeletes.add(K1); // force the fake deleteObject to reject
+    const res = await del(app, 'unit-1').send({ entry: K1 });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([]);
+    await drainDeletes();
+    // The delete threw (WARN path): the key never lands in deletedMediaKeys.
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  // --- PATCH /api/units/:unitId (the raw E5 seam) ---
+
+  it('PATCH: replacing media [k1,k2] -> [k2] deletes ONLY the removed k1', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [K2] });
+    expect(res.status).toBe(200);
+    expect(res.body.unit.media).toEqual([K2]);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([K1]);
+    expect(world.mediaObjects.has(K2)).toBe(true);
+  });
+
+  it('PATCH: clearing media to [] deletes every prior own-namespace key, never the legacy URL', async () => {
+    // NOTE: `media: null` (the plan's literal "attribute removal") is rejected by
+    // validateUnitBody (kind string[]; isStringArray(null) is false -> 400), so the
+    // route-reachable "remove all photos" is `media: []`. It drives the same helper
+    // path: an empty next-set means every prior stored key counts as removed.
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2, LEGACY] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect([...world.deletedMediaKeys].sort()).toEqual([K1, K2].sort());
+    expect(world.deletedMediaKeys).not.toContain(LEGACY);
+  });
+
+  it('PATCH: keeping media identical deletes nothing', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [K1, K2] });
+    storeObject(world, K1, { contentType: 'image/png' });
+    storeObject(world, K2, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [K1, K2] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([]);
+  });
+
+  it('PATCH: a removed FOREIGN-namespace key (planted in the prior list) is never deleted', async () => {
+    // The raw seam can leave a foreign key on unit.media; removing it must NOT
+    // delete a cross-unit / uploads object (own-namespace guard in the helper).
+    const OWN = 'unit-media/unit-1/own';
+    const FOREIGN = 'unit-media/unit-OTHER/theirs';
+    const UPLOAD = 'uploads/mms-attachment';
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-1', { media: [OWN, FOREIGN, UPLOAD] });
+    storeObject(world, OWN, { contentType: 'image/png' });
+    storeObject(world, FOREIGN, { contentType: 'image/png' });
+    storeObject(world, UPLOAD, { contentType: 'image/png' });
+    const res = await patchUnit(app, 'unit-1').send({ media: [] });
+    expect(res.status).toBe(200);
+    await drainDeletes();
+    expect(world.deletedMediaKeys).toEqual([OWN]); // only the own-namespace key
+    expect(world.mediaObjects.has(FOREIGN)).toBe(true);
+    expect(world.mediaObjects.has(UPLOAD)).toBe(true);
   });
 });

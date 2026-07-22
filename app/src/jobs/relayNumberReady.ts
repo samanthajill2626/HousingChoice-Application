@@ -150,6 +150,22 @@ export function registerRelayNumberReadyJobHandler(deps: RelayNumberReadyJobDeps
       return;
     }
 
+    // Finding 4 reclaim: the group now OWNS its number with a REAL burn, so clear
+    // the connect-when-ready earmark on the assigned record AND reclaim any OTHER
+    // record still earmarked to this conversation (a duplicate warm) so
+    // countFreshSpares picks it up as a usable spare instead of stranding it.
+    // BEST-EFFORT cleanup: a failure here must NEVER block the (user-visible) intro
+    // + queued flush below - a leaked earmark is a spare-inventory issue, not data
+    // loss, and the stuck-warming/connecting sweeps still surface a real anomaly.
+    try {
+      await poolNumbers.clearConnectingEarmarks(conversationId);
+    } catch (err) {
+      log.error(
+        { conversationId, err, event: 'relay_number_ready_earmark_clear_failed' },
+        'relay.numberReady: clearing connect-when-ready earmarks failed - a duplicate number may stay earmarked (spare-inventory only, not data loss)',
+      );
+    }
+
     // The group is now OPEN on its dedicated number - fire the DEFERRED intro (the
     // connecting provision path skipped it: there was no number to send from).
     await enqueueImmediate(RELAY_INTRO_JOB, { relayConversationId: conversationId });

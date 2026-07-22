@@ -152,6 +152,17 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
     async countWarming() {
       return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
     },
+    async findByPendingConversationId(conversationId) {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber) {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
+    },
   };
 }
 
@@ -759,5 +770,53 @@ describe('poolNumbersService.retireEligible', () => {
     expect(releaseSpy).toHaveBeenCalledWith('+1DFAIL'); // the delete still ran
     expect(adapter.released).toEqual(['+1DFAIL']);
     expect(repo.store.get('+1DFAIL')!.lifecycle_state).toBe('released'); // finalized
+  });
+});
+
+describe('poolNumbersService.clearConnectingEarmarks (finding 4 - reclaim on open)', () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('clears the earmark on the assigned number AND reclaims a duplicate as a countable fresh spare', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // The ASSIGNED number: active, a real burn, still carrying the earmark (promote
+    // leaves pending_conversation_id intact).
+    await repo.create({
+      poolNumber: '+1ASSIGNED', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [T1, L1],
+    });
+    repo.store.get('+1ASSIGNED')!.pending_conversation_id = 'conv-X';
+    // A DUPLICATE number that raced in: active, EMPTY burn, same earmark -> excluded
+    // from countFreshSpares (stranded) until its earmark is cleared.
+    await seedSpare(repo, '+1DUP', { pendingConversationId: 'conv-X' });
+
+    // Before: the duplicate is NOT a countable spare (earmarked).
+    expect(await repo.countFreshSpares()).toBe(0);
+
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+    await svc.clearConnectingEarmarks('conv-X');
+
+    // No pool record remains earmarked to the conversation.
+    expect(await repo.findByPendingConversationId('conv-X')).toEqual([]);
+    expect(repo.store.get('+1ASSIGNED')!.pending_conversation_id).toBeUndefined();
+    expect(repo.store.get('+1DUP')!.pending_conversation_id).toBeUndefined();
+    // The duplicate (empty burn, now un-earmarked) is a COUNTABLE fresh spare.
+    expect(await repo.countFreshSpares()).toBe(1);
+  });
+
+  it('is a no-op when nothing is earmarked to the conversation', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedSpare(repo, '+1SPARE'); // no earmark
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+
+    await svc.clearConnectingEarmarks('conv-none');
+
+    expect(await repo.countFreshSpares()).toBe(1); // untouched
   });
 });

@@ -230,6 +230,24 @@ export interface PoolNumbersRepo {
   countFreshSpares(): Promise<number>;
   /** Count WARMING numbers (listWarming length) - the buffer refill debounce. */
   countWarming(): Promise<number>;
+  /**
+   * Every pool record (WARMING or ACTIVE) still earmarked to a connecting group
+   * via pending_conversation_id. Scans the two small pre-open partitions (warming +
+   * active) and filters - no new GSI (a connecting group's number lives in exactly
+   * one of these until the group opens). Feeds (a) the warmOneNumber DEDUP (never
+   * buy a SECOND number for a group that already has one warming/active) and (b) the
+   * earmark reclaim when the group opens. Returns [] when none is earmarked.
+   */
+  findByPendingConversationId(conversationId: string): Promise<PoolNumberItem[]>;
+  /**
+   * REMOVE the pending_conversation_id earmark from a pool record. Called when a
+   * connecting group opens: the assigned number now carries a REAL burn, and any
+   * duplicate number left earmarked must be reclaimed as a usable fresh spare
+   * (countFreshSpares excludes an earmarked record, so a stranded duplicate would
+   * never be counted, assigned, or retired). Idempotent + best-effort: a record
+   * without the attribute is a no-op, and a missing record is swallowed.
+   */
+  clearPendingConversation(poolNumber: string): Promise<void>;
   /** All ACTIVE numbers (paged Query on byLifecycleState 'active'). */
   listActive(): Promise<PoolNumberItem[]>;
   /**
@@ -450,6 +468,41 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
 
     async countWarming() {
       return (await listByState('warming')).length;
+    },
+
+    async findByPendingConversationId(conversationId) {
+      // Scan the two pre-open partitions (both tiny) and filter by the earmark. A
+      // connecting group's number is WARMING before its A2P registration and ACTIVE
+      // after promotion (until the group opens), so both must be checked.
+      const [warming, active] = await Promise.all([
+        listByState('warming'),
+        listByState('active'),
+      ]);
+      return [...warming, ...active].filter(
+        (rec) => rec.pending_conversation_id === conversationId,
+      );
+    },
+
+    async clearPendingConversation(poolNumber) {
+      // Idempotent REMOVE, conditioned only on the record existing so a missing
+      // number is never phantom-created. REMOVE of an absent attribute succeeds, so
+      // a record already un-earmarked is a benign no-op. A missing record fails the
+      // condition and is swallowed (best-effort reclaim). PII (doc section 9):
+      // poolNumber is PII - log a marker only, never the number.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'REMOVE pending_conversation_id',
+            ConditionExpression: 'attribute_exists(poolNumber)',
+          }),
+        );
+        log.info({ event: 'pool_earmark_cleared' }, 'pool number connect-when-ready earmark cleared');
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return;
+        throw err;
+      }
     },
 
     async listActive() {

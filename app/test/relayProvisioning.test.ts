@@ -257,6 +257,7 @@ function makeReadyPool(opts: { burnResult?: boolean } = {}): PoolNumbersService 
       burns.push({ poolNumber, phones });
       return opts.burnResult ?? true;
     },
+    async clearConnectingEarmarks() {},
   } as unknown as PoolNumbersService & { burns: { poolNumber: string; phones: string[] }[] };
 }
 

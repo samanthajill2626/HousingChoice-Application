@@ -294,5 +294,52 @@ describe.skipIf(!reachable)(
       const after = await poolNumbers.countWarming();
       expect(after - before).toBe(2);
     });
+
+    it('findByPendingConversationId returns WARMING and ACTIVE records earmarked to the conversation (not others)', async () => {
+      const conv = `conv-${randomUUID().slice(0, 8)}`;
+      const warmingPn = poolPn('+1555098');
+      const activePn = poolPn('+1555099');
+      const otherPn = poolPn('+1555100');
+      // A warming number earmarked to conv.
+      await poolNumbers.createWarming({
+        poolNumber: warmingPn, sid: uniqSid(), voiceCapable: true, smsCapable: true,
+        provisionedVia: 'console', conversationId: conv,
+      });
+      // An active number earmarked to conv (create threads conversationId -> pending).
+      await poolNumbers.create({
+        poolNumber: activePn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+        burn: [], conversationId: conv,
+      });
+      // A different active number NOT earmarked to conv.
+      await poolNumbers.create({
+        poolNumber: otherPn, voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [],
+      });
+
+      const found = (await poolNumbers.findByPendingConversationId(conv))
+        .map((r) => r.poolNumber)
+        .sort();
+      expect(found).toEqual([warmingPn, activePn].sort());
+    });
+
+    it('clearPendingConversation removes the earmark (idempotent; missing record swallowed)', async () => {
+      const conv = `conv-${randomUUID().slice(0, 8)}`;
+      const pn = poolPn('+1555101');
+      await poolNumbers.create({
+        poolNumber: pn, voiceCapable: true, smsCapable: true, provisionedVia: 'console',
+        burn: [], conversationId: conv,
+      });
+      expect((await poolNumbers.get(pn))?.pending_conversation_id).toBe(conv);
+
+      await poolNumbers.clearPendingConversation(pn);
+      expect((await poolNumbers.get(pn))?.pending_conversation_id).toBeUndefined();
+      // countFreshSpares now counts it (active + empty burn + no earmark).
+      expect((await poolNumbers.findByPendingConversationId(conv))).toEqual([]);
+
+      // Idempotent on an already-clear record, and a missing record is swallowed.
+      await expect(poolNumbers.clearPendingConversation(pn)).resolves.toBeUndefined();
+      await expect(
+        poolNumbers.clearPendingConversation(poolPn('+1555102')),
+      ).resolves.toBeUndefined();
+    });
   },
 );

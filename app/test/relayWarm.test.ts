@@ -172,6 +172,17 @@ function makeRepo(trace: string[] = []): PoolNumbersRepo & FakePoolRepo {
     async countWarming(): Promise<number> {
       return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
     },
+    async findByPendingConversationId(conversationId: string): Promise<PoolNumberItem[]> {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber: string): Promise<void> {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
+    },
   };
   return repo as unknown as PoolNumbersRepo & FakePoolRepo;
 }
@@ -280,6 +291,62 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       expect(provisionSpy).not.toHaveBeenCalled();
       expect(trace).toEqual([]);
       expect(repo.createWarmingCalls).toEqual([]);
+    });
+
+    it('DEDUP: a redelivered warm for a group with a WARMING earmarked number does NOT buy again (resumes attach)', async () => {
+      // A prior warm bought + earmarked a number to conv-42 (and maybe crashed on
+      // attach). The redelivered relay.warmNumber must NOT buy a SECOND number - the
+      // duplicate would strand forever. It resumes the in-flight warm: re-attach.
+      const trace: string[] = [];
+      const adapter = makeAdapter({ trace });
+      const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+      const repo = makeRepo(trace);
+      repo.seedWarming('+15550309999', { sid: 'PNexisting', startedAt: new Date().toISOString() });
+      repo.store.get('+15550309999')!.pending_conversation_id = 'conv-42';
+      const svc = createPoolNumbersService({
+        adapter,
+        poolNumbersRepo: repo,
+        conversationsRepo: stubConversations(),
+        logger,
+        config: makeConfig({ relayLiveProvisioning: true }),
+      });
+
+      await svc.warmOneNumber('conv-42');
+
+      // No second buy, no second warming record.
+      expect(provisionSpy).not.toHaveBeenCalled();
+      expect(repo.createWarmingCalls).toHaveLength(0);
+      expect(trace).not.toContain('provision');
+      expect(trace).not.toContain('createWarming');
+      // Resumed the in-flight warm: re-attached the existing PN sid (idempotent).
+      expect(adapter.attachedSids).toEqual(['PNexisting']);
+      // Still exactly ONE warming record for the group (no duplicate).
+      expect([...repo.store.values()].filter((i) => i.lifecycle_state === 'warming')).toHaveLength(1);
+    });
+
+    it('DEDUP: a group whose earmarked number already PROMOTED to active is not re-bought (awaits open)', async () => {
+      const trace: string[] = [];
+      const adapter = makeAdapter({ trace });
+      const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+      const repo = makeRepo(trace);
+      // An already-promoted (active, empty burn) number still earmarked to conv-9,
+      // waiting for relay.numberReady - nothing to buy or attach.
+      repo.seedActiveSpare('+15550308888');
+      repo.store.get('+15550308888')!.pending_conversation_id = 'conv-9';
+      const svc = createPoolNumbersService({
+        adapter,
+        poolNumbersRepo: repo,
+        conversationsRepo: stubConversations(),
+        logger,
+        config: makeConfig({ relayLiveProvisioning: true }),
+      });
+
+      await svc.warmOneNumber('conv-9');
+
+      expect(provisionSpy).not.toHaveBeenCalled();
+      expect(repo.createWarmingCalls).toHaveLength(0);
+      expect(adapter.attachedSids).toEqual([]); // active branch: no re-attach
+      expect(trace).toEqual([]);
     });
   });
 

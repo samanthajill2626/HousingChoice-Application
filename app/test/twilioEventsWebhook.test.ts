@@ -157,6 +157,17 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
     async countWarming() {
       return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
     },
+    async findByPendingConversationId(conversationId) {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber) {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
+    },
   };
 }
 

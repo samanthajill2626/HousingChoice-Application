@@ -93,6 +93,7 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async getRecord(poolNumber) {
       return records.get(poolNumber) ?? rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -136,6 +137,7 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -198,6 +200,7 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
     async getRecord(poolNumber: string) {
       return rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 

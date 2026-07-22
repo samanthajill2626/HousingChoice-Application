@@ -73,6 +73,7 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
     async getRecord(poolNumber) {
       return rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -104,6 +105,7 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 

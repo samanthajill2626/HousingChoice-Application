@@ -220,6 +220,16 @@ export interface PoolNumbersService {
    */
   warmOneNumber(conversationId?: string): Promise<void>;
   /**
+   * Clear the connect-when-ready earmark (pending_conversation_id) on EVERY pool
+   * record still tagged to this conversation - called when the group OPENS
+   * (relay.numberReady). The assigned number now carries a REAL burn, so its
+   * earmark is stale; and any OTHER record left earmarked (a duplicate warm that
+   * raced past the dedup) is reclaimed as a usable fresh spare - otherwise it stays
+   * active+empty-burn+earmarked and countFreshSpares excludes it forever (a
+   * stranded number + a leaked A2P sender-pool slot). Idempotent + best-effort.
+   */
+  clearConnectingEarmarks(conversationId: string): Promise<void>;
+  /**
    * Top the spare buffer up to relaySpareBufferTarget (T4). have =
    * countFreshSpares() + countWarming() (WARMING counts, so an in-flight warm is
    * never double-bought - the debounce); need = max(0, target - have); enqueues
@@ -647,6 +657,49 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         );
       }
 
+      // DEDUP (connect-when-ready). A redelivered relay.warmNumber for the SAME
+      // connecting group - or a retry after a transient attach failure - must NOT
+      // buy a SECOND number earmarked to this conversation. Only the first opens the
+      // group; the duplicate would stay active+empty-burn+earmarked, be excluded
+      // from countFreshSpares forever, and never be assigned or retired (stranded
+      // cost + a leaked A2P sender-pool slot -> eventual 21714). If a warming/active
+      // record already carries this pending_conversation_id, RESUME it instead of
+      // buying again: for a warming record re-attach (idempotent on 21710) so a
+      // prior attach failure that redelivered this job still lands the number in the
+      // A2P service and re-wire its voice webhook; for an already-promoted active
+      // record there is nothing to do but wait for relay.numberReady.
+      if (conversationId !== undefined) {
+        const earmarked = await repo.findByPendingConversationId(conversationId);
+        const warmingDup = earmarked.find((r) => r.lifecycle_state === 'warming');
+        if (warmingDup !== undefined) {
+          if (warmingDup.sid !== undefined) {
+            await adapter.attachToMessagingService(warmingDup.sid);
+          }
+          if (config.publicBaseUrl) {
+            try {
+              await adapter.setVoiceWebhook(
+                warmingDup.poolNumber,
+                `${config.publicBaseUrl}${VOICE_WEBHOOK_PATH}`,
+              );
+            } catch (err) {
+              log.error({ err }, 'relay warming number voice webhook re-wiring failed (dedup resume)');
+            }
+          }
+          log.info(
+            { event: 'relay_warm_dedup_warming' },
+            'relay warmOneNumber: a warming number is already earmarked to this group - resumed attach, not buying again',
+          );
+          return;
+        }
+        if (earmarked.length > 0) {
+          log.info(
+            { event: 'relay_warm_dedup_active' },
+            'relay warmOneNumber: an active number is already earmarked to this group (awaiting open) - not buying again',
+          );
+          return;
+        }
+      }
+
       // Buy a voice+sms-capable number, RETRYING on a pool collision exactly like
       // provisionForGroup's fresh block (createWarming's attribute_not_exists guard
       // can fire locally against the shared dev table; a purchased number is
@@ -714,6 +767,24 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         { event: 'relay_number_warming' },
         'relay pool number bought and warming (awaiting A2P registration)',
       );
+    },
+
+    async clearConnectingEarmarks(conversationId) {
+      // Finding 4 reclaim: clear pending_conversation_id on EVERY pool record still
+      // tagged to this conversation. The assigned number (now burned) sheds a stale
+      // earmark; a duplicate number (empty burn) becomes a countable fresh spare
+      // instead of a stranded one. Idempotent - clearPendingConversation is a no-op
+      // on an already-clear/missing record.
+      const earmarked = await repo.findByPendingConversationId(conversationId);
+      for (const rec of earmarked) {
+        await repo.clearPendingConversation(rec.poolNumber);
+      }
+      if (earmarked.length > 0) {
+        log.info(
+          { count: earmarked.length, event: 'relay_earmarks_cleared' },
+          'relay: cleared connect-when-ready earmarks on group open',
+        );
+      }
     },
 
     // Hoisted above (so provisionForGroup can call them without `this`); exposed

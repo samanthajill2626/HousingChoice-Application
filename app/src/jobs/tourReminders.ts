@@ -75,12 +75,15 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
   }
 }
 
+// no_show_checkin is intentionally NOT auto-armed: whether a no-show happened is
+// a human judgment the system cannot verify, so it is sent manually from the tour
+// page ("Send no-show check-in"). The kind stays valid everywhere else (catalog,
+// ReminderKind union, computeDueAt case) for that manual send.
 const REMINDER_KINDS: ReminderKind[] = [
   'confirmation',
   'day_before',
   'morning_of',
   'en_route',
-  'no_show_checkin',
 ];
 
 export interface ArmTourRemindersDeps {

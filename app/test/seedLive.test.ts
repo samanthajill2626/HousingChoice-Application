@@ -52,12 +52,15 @@ function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): str
   }
 }
 
+// no_show_checkin is intentionally NOT auto-armed (manual send only), so it is
+// omitted here to mirror the canonical REMINDER_KINDS in jobs/tourReminders.ts.
+// The ReminderKind type + computeDueAt case above deliberately keep all 5 kinds
+// (the kind stays legal everywhere it is read/rendered; it is just never armed).
 const REMINDER_KINDS: ReminderKind[] = [
   'confirmation',
   'day_before',
   'morning_of',
   'en_route',
-  'no_show_checkin',
 ];
 
 // ---------------------------------------------------------------------------
@@ -174,7 +177,7 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
     const scheduledAtTomorrow = `${tomorrowDate.toISOString().slice(0, 10)}T14:00:00.000Z`;
 
-    it('has all 5 reminder rungs armed (all are in the future at 09:00 seed time)', async () => {
+    it('has all 4 reminder rungs armed (all are in the future at 09:00 seed time)', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -187,10 +190,10 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       // day_before = 14:00 today (future)
       // morning_of = 08:00 tomorrow (future)
       // en_route = 12:00 tomorrow (future)
-      // no_show_checkin = 14:30 tomorrow (future)
-      // All 5 should arm.
+      // no_show_checkin is manual-send only now, so it is NOT auto-armed.
+      // The other 4 rungs should arm.
       expect(Items).toBeDefined();
-      expect(Items!.length).toBe(5);
+      expect(Items!.length).toBe(4);
     });
 
     it('each reminder dueAt matches computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO)', async () => {

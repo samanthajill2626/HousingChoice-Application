@@ -108,7 +108,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
-  it('armTourReminders creates all 5 reminder rows with correct dueAts', async () => {
+  it('armTourReminders creates all 4 reminder rows with correct dueAts', async () => {
     const now = '2026-07-13T10:00:00.000Z';
     const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d
 
@@ -121,8 +121,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
 
-    // All 5 kinds should be armed (all dueAts are in the future relative to now).
-    expect(rows).toHaveLength(5);
+    // All 4 armed kinds: confirmation, day_before, morning_of, en_route
+    // (no_show_checkin is manual-send only). All dueAts are future relative to now.
+    expect(rows).toHaveLength(4);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
     // confirmation: dueAt = now
@@ -140,8 +141,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // of the test case. Let's just check the actual computed value.
     expect(byKind['en_route']!.dueAt).toBe('2026-07-15T08:00:00.000Z');
 
-    // no_show_checkin: scheduledAt + 30m = '2026-07-15T10:30:00.000Z'
-    expect(byKind['no_show_checkin']!.dueAt).toBe('2026-07-15T10:30:00.000Z');
+    // no_show_checkin is manual-send only, so it is NOT auto-armed (absent here).
+    expect(byKind['no_show_checkin']).toBeUndefined();
 
     // All rows should have no sentAt/canceledAt
     for (const r of rows) {
@@ -154,7 +155,28 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // listByTour round-trip
     const listed = await tourReminders.listByTour(tour.tourId);
-    expect(listed).toHaveLength(5);
+    expect(listed).toHaveLength(4);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1b - guard: no_show_checkin is manual-send only, never auto-armed
+  // ---------------------------------------------------------------------------
+  it('does not auto-arm the no_show_checkin rung (manual send only)', async () => {
+    const now = '2026-07-13T10:00:00.000Z';
+    const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d, full future ladder
+
+    const tour = await tours.create({
+      tenantId: 'contact-noarm-1',
+      unitId: 'unit-noarm-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
+    const kinds = rows.map((r) => r.kind);
+
+    expect(kinds).not.toContain('no_show_checkin');
+    expect(kinds).toHaveLength(4);
   });
 
   // ---------------------------------------------------------------------------
@@ -347,7 +369,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // Arm original reminders.
     await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
     const origRows = await tourReminders.listByTour(tour.tourId);
-    expect(origRows).toHaveLength(5);
+    expect(origRows).toHaveLength(4);
 
     // Cancel and re-arm with the new scheduledAt.
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
@@ -363,15 +385,15 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // New rows should exist in addition to the canceled ones.
     const allRows = await tourReminders.listByTour(tour.tourId);
     const newRows = allRows.filter((r) => r.canceledAt === undefined);
-    expect(newRows).toHaveLength(5);
+    expect(newRows).toHaveLength(4);
 
     // New day_before should reflect the new scheduledAt: newScheduledAt - 24h.
     const dayBefore = newRows.find((r) => r.kind === 'day_before');
     expect(dayBefore?.dueAt).toBe('2026-07-19T14:00:00.000Z');
 
-    // New no_show_checkin: newScheduledAt + 30m = '2026-07-20T14:30:00.000Z'
+    // no_show_checkin is manual-send only now, so re-arm does NOT create it.
     const noShow = newRows.find((r) => r.kind === 'no_show_checkin');
-    expect(noShow?.dueAt).toBe('2026-07-20T14:30:00.000Z');
+    expect(noShow).toBeUndefined();
   });
 
   // ---------------------------------------------------------------------------
@@ -443,8 +465,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // en_route = scheduledAt - 2h = '2026-07-13T12:00:00.000Z' > now0 → armed
     expect(kinds).toContain('en_route');
 
-    // no_show_checkin = scheduledAt + 30m = '2026-07-13T14:30:00.000Z' > now0 → armed
-    expect(kinds).toContain('no_show_checkin');
+    // no_show_checkin is manual-send only now, so it is never auto-armed.
+    expect(kinds).not.toContain('no_show_checkin');
   });
 
   // ---------------------------------------------------------------------------

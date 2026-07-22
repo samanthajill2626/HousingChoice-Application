@@ -19,7 +19,7 @@
 // ConsentCaptureModal the contact page uses; recording consent retries the exact
 // send and clears the composer's restored draft. Without this the refusal was
 // SILENT here — the optimistic bubble vanished, the draft came back, no error.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ApiError,
   ensureContactConversation,
@@ -67,6 +67,11 @@ export interface TourConversationProps {
    *  newest), interleaved into ALL THREE transcripts so the panes show tour
    *  activity, not just comms. The Timeline's "Comms only" toggle hides them. */
   tourMilestones?: TimelineMilestone[];
+  /** "Send no-show check-in" from the tour header: when nonce bumps to a new
+   *  positive value, switch to the Tenant tab and PREFILL its composer with body
+   *  (the editable no_show_checkin template). The tenant pane is remounted so the
+   *  seed lands via the Timeline initialDraft initializer. */
+  noShowDraft?: { body: string; nonce: number };
 }
 
 /** A pane's stream: its messages + the tour milestone pins, oldest→newest. Both
@@ -95,11 +100,30 @@ export function TourConversation({
   onOpenGroup,
   openGroupBusy,
   tourMilestones,
+  noShowDraft,
 }: TourConversationProps): React.JSX.Element {
   // Initial tab decided ONCE from the tour at first render; never re-synced.
   const [activeKey, setActiveKey] = useState<TourChannelKey>(
     tour.groupThreadId ? 'group' : 'tenant',
   );
+
+  // "Send no-show check-in" seed: on a new nonce we (1) select the Tenant tab and
+  // (2) hand seededBody to the tenant pane, bumping seedKey to REMOUNT it so the
+  // Timeline initialDraft initializer picks up the copy. seededBody is cleared
+  // once the pane reports it consumed the seed (onDraftSeeded), so a later manual
+  // switch back to Tenant starts with an empty composer.
+  const [seededBody, setSeededBody] = useState<string | null>(null);
+  const [seedKey, setSeedKey] = useState(0);
+  const lastSeedNonce = useRef(0);
+  useEffect(() => {
+    const nonce = noShowDraft?.nonce ?? 0;
+    if (nonce > 0 && nonce !== lastSeedNonce.current) {
+      lastSeedNonce.current = nonce;
+      setActiveKey('tenant');
+      setSeededBody(noShowDraft?.body ?? '');
+      setSeedKey((k) => k + 1);
+    }
+  }, [noShowDraft?.nonce, noShowDraft?.body]);
 
   const active = channels[activeKey];
 
@@ -154,6 +178,13 @@ export function TourConversation({
   // same as the contact page's reply box); the group tab passes none - its
   // composer matches ConversationDetail's group view.
   const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
+
+  // The no-show check-in seed reaches the TENANT 1:1 composer ONLY: guarded by
+  // isTenantChannel so the landlord/PM pane never receives it (its key suffix is
+  // the constant 'x', so a seedKey bump never remounts it), and cleared to
+  // undefined once consumed (seededBody null) so a later Tenant remount is empty.
+  const isTenantChannel = oneToOneKey === 'tenant';
+  const tenantSeed = isTenantChannel && seededBody !== null ? seededBody : undefined;
 
   // Just-in-time consent gate (ContactDetail parity): the refused send held while
   // the ConsentCaptureModal is open, and a per-channel clear-draft signal for the
@@ -257,11 +288,13 @@ export function TourConversation({
           // in-progress draft survives the switch, so a Send would post it to the
           // newly-selected party. Also clears the stale-transcript flash (MINOR 3).
           <ContactThread
-            key={active.conversationId}
+            key={`${active.conversationId}:${isTenantChannel ? seedKey : 'x'}`}
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
             clearDraftSignal={clearSignals[oneToOneKey]}
+            {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
+            onDraftSeeded={() => setSeededBody(null)}
             onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({
                 key: oneToOneKey,
@@ -280,13 +313,15 @@ export function TourConversation({
           // key by channel so a create-on-demand Tenant/Landlord tab also remounts
           // on switch (conversationId is null here, so it cannot key the pane).
           <NewContactThread
-            key={activeKey}
+            key={`${activeKey}:${isTenantChannel ? seedKey : 'x'}`}
             contactId={oneToOneContactId}
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
             clearDraftSignal={clearSignals[oneToOneKey]}
+            {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
+            onDraftSeeded={() => setSeededBody(null)}
             onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({
                 key: oneToOneKey,
@@ -396,6 +431,8 @@ function ContactThread({
   replyToPhone,
   tourMilestones,
   clearDraftSignal,
+  initialDraft,
+  onDraftSeeded,
   onConsentRefused,
 }: {
   conversationId: string;
@@ -405,6 +442,10 @@ function ContactThread({
   tourMilestones?: TimelineMilestone[];
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
+  /** Seed the composer once on mount (no-show check-in prefill). */
+  initialDraft?: string;
+  /** Fired once when a non-empty initialDraft seeded the composer. */
+  onDraftSeeded?: () => void;
   /** The consent gate refused this send (409 contact_no_consent) — the parent
    *  opens the capture modal holding it. Still rethrown so the composer restores
    *  the draft (the modal shows WHY; no inline error — ContactDetail parity). */
@@ -447,6 +488,8 @@ function ContactThread({
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
+      {...(initialDraft !== undefined && { initialDraft })}
+      {...(onDraftSeeded !== undefined && { onDraftSeeded })}
       resetScrollKey={conversationId}
     />
   );
@@ -462,6 +505,8 @@ function NewContactThread({
   tourMilestones,
   onCreated,
   clearDraftSignal,
+  initialDraft,
+  onDraftSeeded,
   onConsentRefused,
 }: {
   contactId: string;
@@ -473,6 +518,10 @@ function NewContactThread({
   onCreated: (conversationId: string) => void;
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
+  /** Seed the composer once on mount (no-show check-in prefill). */
+  initialDraft?: string;
+  /** Fired once when a non-empty initialDraft seeded the composer. */
+  onDraftSeeded?: () => void;
   /** The consent gate refused this send — see ContactThread. */
   onConsentRefused?: (
     body: string,
@@ -508,6 +557,8 @@ function NewContactThread({
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
+      {...(initialDraft !== undefined && { initialDraft })}
+      {...(onDraftSeeded !== undefined && { onDraftSeeded })}
       emptyLabel={`No messages with ${name} yet`}
       resetScrollKey={`new:${contactId}`}
     />

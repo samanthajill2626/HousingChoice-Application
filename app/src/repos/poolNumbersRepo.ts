@@ -48,8 +48,17 @@ import type { RepoDeps } from './conversationsRepo.js';
  * Twilio (W2 TOCTOU fence) - byLifecycleState keys on the attribute value, so a
  * releasing number simply vanishes from the 'active' partition (listActive /
  * burnClaim) until the sweep finalizes (released) or aborts (active).
+ *
+ * `warming` (A2P warm-pool revision) is a number that has been bought and
+ * attached to the Messaging Service but is NOT YET A2P-registered - it must
+ * never send. It is EXCLUDED from listActive + burnClaim (both gate on
+ * 'active'), so no group can land on it. The ONLY writer of warming->active is
+ * promoteToActive, called solely from the Event Streams registration webhook
+ * (never a timer). Like every other item a warming row carries the retained
+ * quarantine_until sentinel, so byLifecycleState indexes it in a 'warming'
+ * partition (listWarming) with no GSI reshape.
  */
-export type PoolNumberLifecycleState = 'active' | 'releasing' | 'released';
+export type PoolNumberLifecycleState = 'active' | 'warming' | 'releasing' | 'released';
 
 /**
  * Which messaging driver obtained the number (M1.7 kill-switch). A flexible doc
@@ -104,6 +113,27 @@ export interface PoolNumberItem {
   last_group_closed_at?: string;
   /** Operator placement label carried through provisioning. */
   placement_tag?: string;
+  /**
+   * When this number entered the `warming` state (ISO). Present only while
+   * warming; promoteToActive REMOVEs it. The stuck-warming alert compares it
+   * against relayWarmingMaxWaitMs.
+   */
+  warming_started_at?: string;
+  /**
+   * The purchased number's Twilio PN SID. Persisted so the Event Streams
+   * registration webhook can correlate the event to this record BY SID (decision
+   * D2) - the event payload's phone number is non-E.164 and fragile, the PN SID
+   * maps 1:1. Absent on legacy items (created before the warm-pool revision).
+   */
+  sid?: string;
+  /**
+   * The conversation awaiting this number (connect-when-ready). Stamped when a
+   * warming number is bought FOR a specific connecting group so the promotion
+   * routes back to it (D6). A promoted (active) number that still carries this
+   * is momentarily active+empty-burn but is NOT a free spare (countFreshSpares
+   * excludes it) - it is earmarked for its connecting group.
+   */
+  pending_conversation_id?: string;
   provisioned_at: string;
   released_at?: string;
   [key: string]: unknown;
@@ -119,6 +149,40 @@ export interface CreatePoolNumberInput {
   burn: string[];
   /** Operator placement label. */
   tag?: string;
+  /**
+   * The purchased number's Twilio PN SID (D2 correlation key). Optional on the
+   * active path (an active number is never registration-correlated); written
+   * only when provided.
+   */
+  sid?: string;
+  /** Connecting-group tag - written as pending_conversation_id when provided. */
+  conversationId?: string;
+}
+
+/**
+ * Input for createWarming - a bought+attached number parked in the `warming`
+ * state until the Event Streams registration event promotes it. Unlike create
+ * there is NO `burn` (a warming number hosts no group yet - empty burn), and
+ * `sid` is REQUIRED: the registration webhook correlates the event to this
+ * record by its PN SID (decision D2), not the (non-E.164) phone number.
+ */
+export interface CreateWarmingInput {
+  poolNumber: string;
+  /** The purchased number's Twilio PN SID - the D2 correlation key. */
+  sid: string;
+  voiceCapable: boolean;
+  smsCapable: boolean;
+  /** Source driver tag (M1.7 kill-switch) - 'console' fakes vs 'twilio' real. */
+  provisionedVia?: PoolNumberProvisionedVia;
+  /** Operator placement label. */
+  tag?: string;
+  /**
+   * The conversation awaiting this number (connect-when-ready). When given it is
+   * persisted as pending_conversation_id so the promotion routes back to the
+   * connecting group (D6); a promoted number still carrying it is NOT counted as
+   * a free spare.
+   */
+  conversationId?: string;
 }
 
 export interface PoolNumbersRepo {
@@ -129,6 +193,43 @@ export interface PoolNumbersRepo {
    * ONLY when the roster is non-empty (DynamoDB forbids empty string sets).
    */
   create(input: CreatePoolNumberInput): Promise<PoolNumberItem>;
+  /**
+   * Create a WARMING record (bought+attached, not yet A2P-registered) with an
+   * EMPTY burn and the stored PN `sid` (D2). Same attribute_not_exists guard and
+   * quarantine_until sentinel as create (so byLifecycleState indexes it in the
+   * 'warming' partition). `conversationId`, if given, is stored as
+   * pending_conversation_id (the connect-when-ready earmark). It is excluded from
+   * listActive + burnClaim for free (both gate on 'active').
+   */
+  createWarming(input: CreateWarmingInput): Promise<PoolNumberItem>;
+  /**
+   * Promote warming -> active, conditional on the number being `warming`, and
+   * REMOVE warming_started_at. Returns true on success; false if the number is
+   * not warming (already active/releasing/released, or missing) - idempotent for
+   * a redelivered registration event. pending_conversation_id is left INTACT (the
+   * webhook reads it from the pre-promote record to route the ready signal).
+   * The ONLY warming->active writer; called solely from onNumberRegistered.
+   */
+  promoteToActive(poolNumber: string): Promise<boolean>;
+  /** All WARMING numbers (paged Query on byLifecycleState 'warming'). */
+  listWarming(): Promise<PoolNumberItem[]>;
+  /**
+   * The D2 correlation primitive: find the warming record whose stored PN `sid`
+   * matches. Iterates listWarming (the warming set is tiny - K spares + any
+   * connecting numbers; no new GSI). undefined if none matches (unknown/already
+   * promoted).
+   */
+  findWarmingBySid(sid: string): Promise<PoolNumberItem | undefined>;
+  /**
+   * Count FRESH SPARES: active numbers with an empty burn AND no
+   * pending_conversation_id earmark. Un-burned uses the Set-or-array-safe count
+   * (D7) - NOT `!burned_phones?.size` (unsafe for the string[] arm). A promoted
+   * connecting number (active + empty burn + pending_conversation_id) is momentarily
+   * active but is NOT a free spare, so it is excluded. Feeds the buffer refill calc.
+   */
+  countFreshSpares(): Promise<number>;
+  /** Count WARMING numbers (listWarming length) - the buffer refill debounce. */
+  countWarming(): Promise<number>;
   /** All ACTIVE numbers (paged Query on byLifecycleState 'active'). */
   listActive(): Promise<PoolNumberItem[]>;
   /**
@@ -230,6 +331,13 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
         // roster has at least one phone.
         ...(input.burn.length > 0 && { burned_phones: new Set(input.burn) }),
         ...(input.tag !== undefined && { placement_tag: input.tag }),
+        // Threaded for consistency (the active path rarely sets these); a
+        // registration correlation SID and/or a connecting-group earmark ride
+        // along only when the caller supplies them.
+        ...(input.sid !== undefined && { sid: input.sid }),
+        ...(input.conversationId !== undefined && {
+          pending_conversation_id: input.conversationId,
+        }),
         provisioned_at: now,
       };
       await doc.send(
@@ -244,6 +352,104 @@ export function createPoolNumbersRepo(deps: RepoDeps = {}): PoolNumbersRepo {
         'pool number created',
       );
       return item;
+    },
+
+    async createWarming(input) {
+      // Mirror create, but land in the WARMING state with an EMPTY burn (a
+      // warming number hosts no group yet) and the required PN sid for D2
+      // correlation. The quarantine_until sentinel is written exactly as create
+      // writes it, so byLifecycleState indexes this row in the 'warming'
+      // partition (listWarming). attribute_not_exists(poolNumber) guards against
+      // clobbering an existing record.
+      const now = new Date().toISOString();
+      const item: PoolNumberItem = {
+        poolNumber: input.poolNumber,
+        lifecycle_state: 'warming',
+        quarantine_until: NOT_QUARANTINED_SENTINEL,
+        voice_capable: input.voiceCapable,
+        sms_capable: input.smsCapable,
+        sid: input.sid,
+        warming_started_at: now,
+        ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
+        ...(input.tag !== undefined && { placement_tag: input.tag }),
+        // The connect-when-ready earmark - routes the promotion back to its group.
+        ...(input.conversationId !== undefined && {
+          pending_conversation_id: input.conversationId,
+        }),
+        // No burned_phones: DynamoDB forbids empty string sets, and a warming
+        // number carries no roster until a group is assigned on promotion.
+        provisioned_at: now,
+      };
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: item,
+          ConditionExpression: 'attribute_not_exists(poolNumber)',
+        }),
+      );
+      // PII: no poolNumber/sid (sid maps 1:1 to a number) - state + a boolean only.
+      log.info(
+        {
+          lifecycleState: item.lifecycle_state,
+          hasPendingConversation: input.conversationId !== undefined,
+        },
+        'pool number created (warming)',
+      );
+      return item;
+    },
+
+    async promoteToActive(poolNumber) {
+      // The SOLE warming->active writer (called only from onNumberRegistered).
+      // Conditional on lifecycle_state='warming' so a redelivered registration
+      // event, or an event for a non-warming number, is an idempotent no-op
+      // (false). Leaves pending_conversation_id intact - the webhook reads it
+      // from the pre-promote record to route the ready signal back to the group.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { poolNumber },
+            UpdateExpression: 'SET lifecycle_state = :active REMOVE warming_started_at',
+            ConditionExpression: 'lifecycle_state = :warming',
+            ExpressionAttributeValues: { ':active': 'active', ':warming': 'warming' },
+          }),
+        );
+        log.info({ lifecycleState: 'active' }, 'pool number promoted (warming -> active)');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async listWarming() {
+      // All WARMING numbers (the tiny pre-registration set). Delegates to
+      // listByState; kept named so the service + webhook read clearly.
+      return listByState('warming');
+    },
+
+    async findWarmingBySid(sid) {
+      // D2 correlation: the Event Streams registration event carries the PN SID;
+      // resolve it to the warming record. The warming set is tiny (K spares + any
+      // connecting numbers), so an in-memory scan beats a new GSI.
+      return (await listByState('warming')).find((rec) => rec.sid === sid);
+    },
+
+    async countFreshSpares() {
+      // Fresh spare = active AND empty-burn AND not earmarked for a connecting
+      // group. D7: the un-burned check MUST be Set-or-array-safe (burned_phones
+      // reads back as a Set, but the type admits string[]) - never `!x?.size`.
+      const actives = await listByState('active');
+      return actives.filter((rec) => {
+        const burned = rec.burned_phones;
+        const burnedCount =
+          burned instanceof Set ? burned.size : Array.isArray(burned) ? burned.length : 0;
+        return burnedCount === 0 && rec.pending_conversation_id === undefined;
+      }).length;
+    },
+
+    async countWarming() {
+      return (await listByState('warming')).length;
     },
 
     async listActive() {

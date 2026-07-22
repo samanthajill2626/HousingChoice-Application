@@ -99,6 +99,53 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
       item.released_at = new Date().toISOString();
       return item;
     },
+    async createWarming(input) {
+      const now = new Date().toISOString();
+      const item: PoolNumberItem = {
+        poolNumber: input.poolNumber,
+        lifecycle_state: 'warming',
+        quarantine_until: SENTINEL,
+        voice_capable: input.voiceCapable,
+        sms_capable: input.smsCapable,
+        sid: input.sid,
+        warming_started_at: now,
+        ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
+        ...(input.tag !== undefined && { placement_tag: input.tag }),
+        ...(input.conversationId !== undefined && {
+          pending_conversation_id: input.conversationId,
+        }),
+        provisioned_at: now,
+      };
+      store.set(item.poolNumber, item);
+      return item;
+    },
+    async promoteToActive(poolNumber) {
+      // Sole warming->active writer; conditional + idempotent (false if not warming).
+      const item = store.get(poolNumber);
+      if (!item || item.lifecycle_state !== 'warming') return false;
+      item.lifecycle_state = 'active';
+      delete item.warming_started_at; // pending_conversation_id left intact
+      return true;
+    },
+    async listWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming');
+    },
+    async findWarmingBySid(sid) {
+      return [...store.values()].find((i) => i.lifecycle_state === 'warming' && i.sid === sid);
+    },
+    async countFreshSpares() {
+      // active AND empty-burn AND not earmarked (D7 Set-or-array-safe count).
+      return [...store.values()].filter((i) => {
+        if (i.lifecycle_state !== 'active') return false;
+        const burned = i.burned_phones;
+        const burnedCount =
+          burned instanceof Set ? burned.size : Array.isArray(burned) ? burned.length : 0;
+        return burnedCount === 0 && i.pending_conversation_id === undefined;
+      }).length;
+    },
+    async countWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
+    },
   };
 }
 

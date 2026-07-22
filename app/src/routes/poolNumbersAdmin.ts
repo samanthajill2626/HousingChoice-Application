@@ -44,7 +44,7 @@ export interface PoolNumberGroupRow {
 /** One pool number + its group history (wire row; T3 copies this verbatim). */
 export interface PoolNumberRow {
   number: string;
-  state: 'active' | 'releasing' | 'released';
+  state: PoolNumberLifecycleState;
   openGroups: number;
   totalGroups: number;
   burnedCount: number;
@@ -68,18 +68,20 @@ const ONE_DAY_MS = 86_400_000;
 
 /**
  * Lifecycle progression rank for the W1 de-dupe (higher = further along):
- * released > releasing > active. A pool number lives in exactly ONE lifecycle
- * partition, so the only way the three listByState Queries can return it under
- * two states at once is a state transition (active -> releasing -> released)
- * racing the reads: the byLifecycleState GSI is eventually consistent, so it can
- * still project the row under its OLD partition while the NEW one already sees
- * it. We keep the FURTHEST-ALONG copy because a mid-transition duplicate always
- * reflects a FORWARD transition, so the furthest state is the honest render.
+ * released > releasing > active > warming. A pool number lives in exactly ONE
+ * lifecycle partition, so the only way the listByState Queries can return it
+ * under two states at once is a forward state transition (warming -> active ->
+ * releasing -> released) racing the reads: the byLifecycleState GSI is eventually
+ * consistent, so it can still project the row under its OLD partition while the
+ * NEW one already sees it. We keep the FURTHEST-ALONG copy because a
+ * mid-transition duplicate always reflects a FORWARD transition, so the furthest
+ * state is the honest render.
  */
 const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
-  active: 0,
-  releasing: 1,
-  released: 2,
+  warming: 0,
+  active: 1,
+  releasing: 2,
+  released: 3,
 };
 
 /**

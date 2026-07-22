@@ -41,3 +41,5 @@ and wait for the option list to CLOSE (e.g. expect the listbox to be hidden)
 before clicking the unit row; alternatively the picker could close its
 dropdown on outside-pointer-down before the click is delivered (component
 behavior worth a look - a real user can hit the same overlay).
+
+**Third sighting (2026-07-21, planner gates on 0fd65de4).** Reproduced once in a SOLO 3-spec run (not just under full-suite load - the overlay race is intrinsic), identical shape (li role=option from _pickerField_ subtree intercepts the unit-row click for 30s). Passed 3/3 on an immediate isolated retry of the spec file alone. Untouched surface for the unit-photo-transcode branch.

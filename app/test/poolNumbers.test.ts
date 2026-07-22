@@ -209,6 +209,11 @@ function makeFakeConversations(
     async getAllByPoolNumber(poolNumber: string) {
       return (byPool[poolNumber] ?? []) as ConversationItem[];
     },
+    // provisionForGroup opportunistically fires flagStuckConnecting, which lists
+    // the connecting partition - stub it (no connecting groups in these tests).
+    async listRelayGroups() {
+      return { items: [] as ConversationItem[], truncated: false };
+    },
   } as unknown as ConversationsRepo;
 }
 

@@ -87,6 +87,7 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     // AF-3: the reopen route reads the pool record. Default active; a test flips
     // records.get(n)!.lifecycle_state = 'released' to prove the reopen refusal.
     async getRecord(poolNumber) {
@@ -128,6 +129,7 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
@@ -189,6 +191,7 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord(poolNumber: string) {
       return rec(poolNumber);
     },
@@ -327,6 +330,48 @@ describe('relay-group API (M1.7)', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(delAgain.body.members).toHaveLength(1);
+  });
+
+  it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    // A connect-when-ready group: created with NO pool number -> connecting. A
+    // member add here would SILENTLY SKIP the burn (no pool number to burn onto).
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [{ phone: ALICE, contactId: 'c-alice', name: 'Alice' }],
+    });
+    expect(connecting.status).toBe('connecting');
+
+    const res = await request(app)
+      .post(`/api/conversations/${connecting.conversationId}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, name: 'Bob' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('group_connecting');
+    // Roster untouched - refused BEFORE any mutation (no unburned member added).
+    const after = await world.conversationsRepo.getById(connecting.conversationId);
+    expect(after?.participants).toHaveLength(1);
+  });
+
+  it('refuses member-REMOVE on a CONNECTING group (D11 parity): 409 group_connecting', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [
+        { phone: ALICE, contactId: 'c-alice', name: 'Alice' },
+        { phone: BOB, contactId: 'c-bob', name: 'Bob' },
+      ],
+    });
+
+    const res = await request(app)
+      .delete(`/api/conversations/${connecting.conversationId}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('group_connecting');
   });
 
   // --- BE2/C2: added_to_group_text / removed_from_group_text milestones -----

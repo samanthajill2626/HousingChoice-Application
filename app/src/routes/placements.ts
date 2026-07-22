@@ -940,10 +940,17 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(404).json({ error: 'placement_not_found' });
       return;
     }
-    // Idempotency: an OPEN relay already fronts this placement → never double-provision.
+    // Idempotency (D10): an OPEN *or CONNECTING* relay already fronts this
+    // placement -> never double-provision. A connecting group is mid-buy (its warm
+    // number has not registered yet); treating it as "already provisioned" stops a
+    // re-click from buying a SECOND number for the same placement.
     if (typeof item.group_thread === 'string' && item.group_thread.length > 0) {
       const existing = await conversations.getById(item.group_thread);
-      if (existing && existing.type === 'relay_group' && existing.status === 'open') {
+      if (
+        existing &&
+        existing.type === 'relay_group' &&
+        (existing.status === 'open' || existing.status === 'connecting')
+      ) {
         res.status(409).json({ error: 'relay_exists', conversation: existing });
         return;
       }

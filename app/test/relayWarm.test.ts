@@ -32,7 +32,7 @@ import type {
   PoolNumberItem,
   PoolNumbersRepo,
 } from '../src/repos/poolNumbersRepo.js';
-import type { ConversationsRepo } from '../src/repos/conversationsRepo.js';
+import type { ConversationItem, ConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
@@ -389,6 +389,73 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       await svc.flagStuckWarming();
 
       expect(repo.store.get('+1STUCK')!.lifecycle_state).toBe('warming');
+    });
+  });
+
+  describe('flagStuckConnecting (T6)', () => {
+    const NOW = new Date('2026-07-22T00:00:00.000Z');
+
+    /** A conversations repo returning the given connecting groups (by created_at). */
+    function connectingRepo(
+      groups: { conversationId: string; createdAt: string }[],
+    ): ConversationsRepo {
+      return {
+        async listRelayGroups(status: string) {
+          if (status !== 'connecting') return { items: [], truncated: false };
+          return {
+            items: groups.map((g) => ({
+              conversationId: g.conversationId,
+              status: 'connecting',
+              relay_status: 'relay_group#connecting',
+              type: 'relay_group',
+              ai_mode: 'manual',
+              last_activity_at: g.createdAt,
+              created_at: g.createdAt,
+            })) as unknown as ConversationItem[],
+            truncated: false,
+          };
+        },
+      } as unknown as ConversationsRepo;
+    }
+
+    it('logs a single relay_connecting_stuck error for a stale connecting group, none for a fresh one', async () => {
+      const maxWait = 30 * 60_000;
+      const svc = createPoolNumbersService({
+        adapter: makeAdapter({ trace: [] }),
+        poolNumbersRepo: makeRepo(),
+        conversationsRepo: connectingRepo([
+          // stale: created 1h ago (past the 30min wait); fresh: created 1min ago.
+          { conversationId: 'conv-stuck', createdAt: new Date(NOW.getTime() - 60 * 60_000).toISOString() },
+          { conversationId: 'conv-fresh', createdAt: new Date(NOW.getTime() - 60_000).toISOString() },
+        ]),
+        logger,
+        now: () => NOW,
+        config: makeConfig({ relayWarmingMaxWaitMs: maxWait }),
+      });
+
+      await svc.flagStuckConnecting();
+
+      const stuck = capture.atLevel(50).filter((l) => l['event'] === 'relay_connecting_stuck');
+      expect(stuck).toHaveLength(1);
+      // PII: the conversationId is logged (an internal id), never a member phone.
+      expect(stuck[0]!['conversationId']).toBe('conv-stuck');
+    });
+
+    it('does not open/mutate a stuck connecting group (alert only)', async () => {
+      const listSpy = vi.fn(async () => ({ items: [] as ConversationItem[], truncated: false }));
+      const svc = createPoolNumbersService({
+        adapter: makeAdapter({ trace: [] }),
+        poolNumbersRepo: makeRepo(),
+        conversationsRepo: { listRelayGroups: listSpy } as unknown as ConversationsRepo,
+        logger,
+        now: () => NOW,
+        config: makeConfig({ relayWarmingMaxWaitMs: 30 * 60_000 }),
+      });
+
+      await svc.flagStuckConnecting();
+
+      // It only READS the connecting partition - no assign/open call exists on the path.
+      expect(listSpy).toHaveBeenCalledWith('connecting');
     });
   });
 

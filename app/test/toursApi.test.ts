@@ -1374,6 +1374,7 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord(poolNumber) {
       return rec(poolNumber);
     },
@@ -1402,6 +1403,7 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
@@ -1427,6 +1429,7 @@ function makeVoiceCapabilityFailingPool(): PoolNumbersService {
     async warmOneNumber() {},
     async refillBufferIfNeeded() {},
     async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },

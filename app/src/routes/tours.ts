@@ -865,26 +865,31 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Stamp the real groupThreadId over the claim sentinel.
     const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
 
-    // Tour-history milestone (tour-detail-page 1a): group-opened is a
-    // tours#-ONLY audit row (the tenant timeline + property card deliberately
-    // do NOT carry it - recordTourEvent is not used here). Best-effort: a
-    // failed write must never fail the provisioned 201. IDs only.
+    // Connect-when-ready (T6): the group may be CONNECTING (no number yet) rather
+    // than open - "opened" would be premature, so mark the audit/log accordingly.
+    const connecting = conversation.status === 'connecting';
+
+    // Tour-history milestone (tour-detail-page 1a): a tours#-ONLY audit row (the
+    // tenant timeline + property card deliberately do NOT carry it - recordTourEvent
+    // is not used here). Best-effort: a failed write must never fail the 201. IDs
+    // only. `connecting` distinguishes a deferred-open (connect-when-ready) group.
     try {
       await audit.append(`tours#${tourId}`, 'tour_group_opened', {
         tourId,
         conversationId: conversation.conversationId,
+        connecting,
         ...(actor !== undefined && { actor }),
       });
     } catch (err) {
-      log.error({ err, tourId }, 'tour_group_opened tour audit failed (best-effort)');
+      log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
     }
 
     // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
     events.emit('tour.updated', { tourId, status: updatedTour.status });
 
     log.info(
-      { tourId, conversationId: conversation.conversationId, memberCount: members.length },
-      'tour relay group provisioned',
+      { tourId, conversationId: conversation.conversationId, memberCount: members.length, connecting },
+      connecting ? 'tour relay group provisioned (connecting - awaiting number)' : 'tour relay group provisioned',
     );
     res.status(201).json({ tour: updatedTour, conversation });
   });

@@ -160,7 +160,7 @@ interface ContactMediaItem {
  */
 interface RelayGroupRow {
   conversationId: string;
-  status: 'open' | 'closed';
+  status: 'open' | 'closed' | 'connecting';
   poolNumber?: string;
   memberCount: number;
   /** ISO 8601 — the conversation's last_activity_at. */
@@ -1068,7 +1068,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       (p.contactId !== '' && p.contactId === contactId) || phones.has(p.phone);
 
     const groups: RelayGroupRow[] = [];
-    for (const status of ['open', 'closed'] as const) {
+    // D9: include CONNECTING groups too (a connect-when-ready group this contact is
+    // rostered on has no pool number yet, but should still show on their card). The
+    // poolNumber field is guarded below, so a connecting row simply omits it.
+    for (const status of ['open', 'connecting', 'closed'] as const) {
       const { items, truncated } = await conversations.listRelayGroups(status);
       if (truncated) {
         // No silent truncation — the partition walk hit its page budget, so

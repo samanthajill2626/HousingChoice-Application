@@ -221,6 +221,16 @@ export interface PoolNumbersService {
    */
   flagStuckWarming(): Promise<void>;
   /**
+   * Stuck-CONNECTING ALERT sweep (T6, D9 sibling of flagStuckWarming): log.error
+   * for every relay group left in the `connecting` state longer than
+   * relayWarmingMaxWaitMs (its earmarked warm number never registered, so the
+   * relay.numberReady that would open it never fired). ALERT ONLY - it never
+   * promotes/opens anything (opening is solely the registration -> relay.numberReady
+   * path). Fresh connecting groups are skipped. PII (doc section 9): logs the
+   * conversationId only (an internal id) - never a member phone/name.
+   */
+  flagStuckConnecting(): Promise<void>;
+  /**
    * Event Streams registration callback (T3): the number identified by its PN
    * SID has been A2P 10DLC-registered. Correlate by SID (D2): findWarmingBySid ->
    * promoteToActive (the SOLE warming->active promotion). When the pre-promote
@@ -394,6 +404,27 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
     }
   }
 
+  // Stuck-CONNECTING ALERT sweep (T6, D9). A group left connecting past the max
+  // wait means its earmarked warm number never registered, so the relay.numberReady
+  // that opens it never fired. ALERT ONLY (never opens anything). Ages the group by
+  // its created_at (when the connecting group was minted). PII: conversationId only.
+  async function flagStuckConnecting(): Promise<void> {
+    const cutoff = now().getTime() - config.relayWarmingMaxWaitMs;
+    const { items } = await conversations.listRelayGroups('connecting');
+    for (const group of items) {
+      const startedAt = group.created_at;
+      if (typeof startedAt !== 'string') continue; // no stamp - cannot age it
+      const startedMs = Date.parse(startedAt);
+      if (Number.isNaN(startedMs)) continue; // corrupt stamp - skip
+      if (startedMs < cutoff) {
+        log.error(
+          { event: 'relay_connecting_stuck', conversationId: group.conversationId },
+          'relay group stuck connecting past the max wait - its warm number never registered (manual attention)',
+        );
+      }
+    }
+  }
+
   return {
     async provisionForGroup(rosterPhones, tag) {
       // Never claim an unburnable (empty-roster) group - it would match every
@@ -412,6 +443,9 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       });
       void flagStuckWarming().catch((err) => {
         log.error({ err }, 'stuck-warming sweep failed (non-fatal)');
+      });
+      void flagStuckConnecting().catch((err) => {
+        log.error({ err }, 'stuck-connecting sweep failed (non-fatal)');
       });
 
       // SOURCE ISOLATION (M1.7 kill-switch): only ever reuse a number our CURRENT
@@ -638,6 +672,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
     // here via shorthand so the public service surface is unchanged.
     refillBufferIfNeeded,
     flagStuckWarming,
+    flagStuckConnecting,
 
     retireEligible,
   };

@@ -517,7 +517,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // Tiers 1/2 are unaffected (they never buy, so they resolve regardless).
       if (!config.relayLiveProvisioning) {
         throw new RelayProvisioningDisabledError(
-          'relay number provisioning is disabled in this environment — set ' +
+          'relay number provisioning is disabled in this environment - set ' +
             'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number',
         );
       }

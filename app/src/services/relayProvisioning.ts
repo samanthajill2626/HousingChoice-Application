@@ -116,7 +116,7 @@ export async function provisionRelayGroup(
     } catch (err) {
       logger.error(
         { err, conversationId: conversation.conversationId },
-        'relay warm enqueue failed — connecting group created without a warm job (stuck-connecting alert will surface it)',
+        'relay warm enqueue failed - connecting group created without a warm job (stuck-connecting alert will surface it)',
       );
     }
 
@@ -131,7 +131,7 @@ export async function provisionRelayGroup(
         connecting: true,
         ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
       },
-      'relay group provisioned (connecting — awaiting a warm number)',
+      'relay group provisioned (connecting - awaiting a warm number)',
     );
     return conversation;
   }

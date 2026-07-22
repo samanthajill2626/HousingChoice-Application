@@ -583,7 +583,7 @@ export async function aggregateInbox(
   if (startKey === undefined) {
     // Relay rows come from TWO status partitions now: OPEN groups AND CONNECTING
     // groups (D9). A connect-when-ready group has no pool number yet but MUST be
-    // visible so staff can open it + queue messages on the composer — otherwise it
+    // visible so staff can open it + queue messages on the composer - otherwise it
     // is invisible until its warm number registers. Fetch both, merge, render.
     const relayItems: ConversationItem[] = [];
     let anyTruncated = false;

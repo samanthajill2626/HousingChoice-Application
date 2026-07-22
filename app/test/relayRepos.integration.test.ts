@@ -272,7 +272,7 @@ describe.skipIf(!reachable)('relay repos against DynamoDB Local (throwaway prefi
       poolNumber: pool,
       members: [{ contactId: 'c1', phone: '+15550100320' }],
     });
-    // It is 'open' from birth (poolNumber provided) — not connecting — so assign
+    // It is 'open' from birth (poolNumber provided) - not connecting - so assign
     // must refuse (G3 condition on connecting) and never re-stamp another number.
     const res = await conversations.assignPoolNumberAndOpen(openGroup.conversationId, '+15559998888');
     expect(res).toBeUndefined();

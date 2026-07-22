@@ -184,11 +184,11 @@ export interface ConversationItem {
   /**
    * byRelayStatus GSI HASH: `relay_group#<status>` (`relay_group#connecting` /
    * `relay_group#open` / `relay_group#closed`). Written ONLY on relay_group
-   * conversations — 1:1 threads never carry it, keeping the GSI sparse (relay
+   * conversations - 1:1 threads never carry it, keeping the GSI sparse (relay
    * groups only). Kept in lockstep with `status` by every relay-group writer
    * (create/assign/close/reopen). listRelayGroups queries this partition
    * directly, so a relay group can never be diluted out of the byLastActivity
-   * 'open' partition by open 1:1 volume — and a connecting group is queryable
+   * 'open' partition by open 1:1 volume - and a connecting group is queryable
    * via its own partition even though it has no pool number yet (D9).
    */
   relay_status?: string;
@@ -500,7 +500,7 @@ export interface ConversationsRepo {
    * label stored for operators. Returns the created item.
    *
    * Connect-when-ready (T6): `poolNumber` is OPTIONAL. When ABSENT the group is
-   * created in the `connecting` state — NO pool_number / participant_phone,
+   * created in the `connecting` state - NO pool_number / participant_phone,
    * status `connecting`, relay_status `relay_group#connecting`. It carries no
    * usable number until assignPoolNumberAndOpen stamps one on registration. The
    * poolNumber-provided path is unchanged (status `open`, exactly as today).
@@ -559,7 +559,7 @@ export interface ConversationsRepo {
    * budget: `truncated` is true when the budget stopped it early — the caller
    * MUST surface that (no silent truncation).
    *
-   * `connecting` (D9) queries the connect-when-ready partition — the inbox reads
+   * `connecting` (D9) queries the connect-when-ready partition - the inbox reads
    * it ALONGSIDE 'open' so a group awaiting its number is still visible/openable.
    */
   listRelayGroups(
@@ -604,13 +604,13 @@ export interface ConversationsRepo {
   ): Promise<ConversationItem>;
   /**
    * Connect-when-ready assign (T6): the warming number earmarked to this
-   * `connecting` group has A2P-registered — stamp `pool_number` +
+   * `connecting` group has A2P-registered - stamp `pool_number` +
    * `participant_phone` and flip `status` + `relay_status` from connecting ->
    * open, ALL CONDITIONAL on the group currently BEING connecting on BOTH fields
    * (G3 exactly-once: a redelivered relay.numberReady finds it already open and
    * this is a no-op). Returns the post-update item (ALL_NEW) on the winning flip,
    * or `undefined` when the condition did not hold (already assigned / not
-   * connecting / missing) — the caller then skips the (already-enqueued) intro so
+   * connecting / missing) - the caller then skips the (already-enqueued) intro so
    * no member is intro'd twice. Distinct from setRelayStatus (open<->closed): a
    * connecting group has no pool number to preserve, and this SETS one.
    */
@@ -1333,7 +1333,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         // Synthetic participant_phone: relay threads route on pool_number, but
         // the inbox row + byParticipantPhone GSI still want a value. The pool
         // number is the natural one (it is "the thread's number"). A connecting
-        // group has neither yet — both are stamped at assign time.
+        // group has neither yet - both are stamped at assign time.
         ...(poolNumber !== undefined && {
           participant_phone: poolNumber,
           pool_number: poolNumber,
@@ -1519,7 +1519,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       // conditional write. The condition requires the group to still be
       // `connecting` on both fields, so a redelivered relay.numberReady (group
       // already open) fails the condition and this is an idempotent no-op
-      // (undefined) — the intro is enqueued exactly once (only the winner
+      // (undefined) - the intro is enqueued exactly once (only the winner
       // proceeds). participant_phone is set to the pool number too (the synthetic
       // value a relay thread carries, mirroring createRelayGroup). PII: log the
       // conversationId only, never the number.
@@ -1547,11 +1547,11 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         return Attributes as ConversationItem;
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
-          // Not connecting (already assigned / closed / unknown) — the exactly-
+          // Not connecting (already assigned / closed / unknown) - the exactly-
           // once guard for a redelivered relay.numberReady.
           log.info(
             { conversationId },
-            'relay assignPoolNumberAndOpen no-op — group not connecting (already assigned or unknown)',
+            'relay assignPoolNumberAndOpen no-op - group not connecting (already assigned or unknown)',
           );
           return undefined;
         }

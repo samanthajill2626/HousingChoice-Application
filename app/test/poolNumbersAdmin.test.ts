@@ -337,6 +337,30 @@ describe('GET /api/pool-numbers - warming numbers', () => {
     expect(row?.openGroups).toBe(0);
     expect(row?.totalGroups).toBe(0);
     expect(row?.retire).toEqual({ eligible: false });
+    // A plain warming spare (no earmark) exposes no pendingConversationId.
+    expect(row?.pendingConversationId).toBeUndefined();
+  });
+
+  it('surfaces pendingConversationId for a warming number earmarked to a connecting group', async () => {
+    const pn = '+15551239301';
+    // A connect-when-ready warm: bought + attached, earmarked to the connecting
+    // group it will open. The earmark lets ops (and the e2e fixture) correlate a
+    // warming number to its group before it opens.
+    const pool = makeFakePoolRepo([
+      poolItem(pn, {
+        lifecycle_state: 'warming',
+        warming_started_at: '2026-07-18T00:00:00.000Z',
+        sid: 'PN0002',
+        pending_conversation_id: 'conv-connecting-1',
+      }),
+    ]);
+    const { app } = makeWebhookHarness({ world: createFakeWorld(), poolNumbersRepo: pool });
+
+    const res = await getAdmin(app);
+    expect(res.status).toBe(200);
+    const row = numbersOf(res).find((n) => n.number === pn);
+    expect(row?.state).toBe('warming');
+    expect(row?.pendingConversationId).toBe('conv-connecting-1');
   });
 });
 

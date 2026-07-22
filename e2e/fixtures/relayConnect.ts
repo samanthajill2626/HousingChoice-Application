@@ -49,6 +49,7 @@ interface RawConversation {
 interface PoolNumberRow {
   number: string;
   state: string;
+  pendingConversationId?: string;
 }
 
 /** Fire the fake's A2P registration signal for a warming number (the Task 9 seam):
@@ -82,12 +83,18 @@ async function withFounderAdmin<T>(fn: (admin: APIRequestContext) => Promise<T>)
   }
 }
 
-/** Poll the admin inventory until a warming number appears (the warm job buys +
- *  records it async in the worker). With K=0 and the connecting groups driven to
- *  open SEQUENTIALLY, exactly one number is warming at a time, so we take the first
- *  warming number. Mirrors pollWarmingNumber in the connect spec. */
-async function pollWarmingNumber(admin: APIRequestContext): Promise<string> {
-  let warming: string[] = [];
+/** Poll the admin inventory until THIS connecting group's warming number appears
+ *  (the warm job buys + records it async in the worker), correlated by the
+ *  `pendingConversationId` earmark. Correlation matters under FULL-SUITE parallel
+ *  load: many groups warm numbers at once, so "the first warming number" can belong
+ *  to another spec's group - registering it would open the wrong group and leave
+ *  ours connecting. The warming number earmarked to our conversationId is the only
+ *  correct one. */
+async function pollWarmingNumber(
+  admin: APIRequestContext,
+  conversationId: string,
+): Promise<string> {
+  let match: string | undefined;
   await expect
     .poll(
       async () => {
@@ -96,15 +103,18 @@ async function pollWarmingNumber(admin: APIRequestContext): Promise<string> {
           res.ok(),
           `pool-numbers admin read failed: ${res.status()} ${await res.text()}`,
         ).toBeTruthy();
-        warming = ((await res.json()) as { numbers: PoolNumberRow[] }).numbers
-          .filter((n) => n.state === 'warming')
-          .map((n) => n.number);
-        return warming.length;
+        match = ((await res.json()) as { numbers: PoolNumberRow[] }).numbers.find(
+          (n) => n.state === 'warming' && n.pendingConversationId === conversationId,
+        )?.number;
+        return match ?? '';
       },
-      { timeout: 30_000, message: 'no warming pool number ever appeared for the connecting group' },
+      {
+        timeout: 30_000,
+        message: 'no warming pool number earmarked to this connecting group appeared',
+      },
     )
-    .toBeGreaterThanOrEqual(1);
-  return warming[0]!;
+    .not.toBe('');
+  return match!;
 }
 
 async function getConversation(
@@ -126,7 +136,7 @@ export async function driveConnectingGroupToOpen(
   conversationId: string,
 ): Promise<RelayConversation> {
   const warmed = await withFounderAdmin(async (admin) => {
-    const number = await pollWarmingNumber(admin);
+    const number = await pollWarmingNumber(admin, conversationId);
     await registerNumber(admin, number);
     return number;
   });

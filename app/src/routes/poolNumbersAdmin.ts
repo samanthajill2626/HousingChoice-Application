@@ -53,6 +53,11 @@ export interface PoolNumberRow {
   releasedAt?: string;
   retire: { eligible: boolean; daysRemaining?: number };
   groups: PoolNumberGroupRow[];
+  /** For a `warming` number earmarked to a connect-when-ready group: the
+   *  connecting conversation it will open. Absent once the group opens (the
+   *  earmark is cleared) or on a plain buffer spare. Ops visibility + lets a
+   *  caller correlate a warming number to its group. */
+  pendingConversationId?: string;
 }
 
 export interface PoolNumbersAdminRouterDeps {
@@ -240,6 +245,9 @@ export function createPoolNumbersAdminRouter(deps: PoolNumbersAdminRouterDeps = 
             lastGroupClosedAt: rec.last_group_closed_at,
           }),
           ...(rec.released_at !== undefined && { releasedAt: rec.released_at }),
+          ...(rec.pending_conversation_id !== undefined && {
+            pendingConversationId: rec.pending_conversation_id,
+          }),
           retire: retireMirror(rec, openGroups, groups.length, nowMs),
           groups: groups.map(toGroupRow),
         };

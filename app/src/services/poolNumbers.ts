@@ -166,6 +166,19 @@ export interface PoolNumbersService {
    */
   burnMember(poolNumber: string, phone: string): Promise<boolean>;
   /**
+   * Burn a connecting group's WHOLE roster onto its freshly-assigned pool number
+   * (G1 - the connect-when-ready "burn on assign"). The number was created warming
+   * with an EMPTY burn and promoted to active still empty (+ earmarked via
+   * pending_conversation_id), so on a genuine first assign this claim CANNOT
+   * overlap-fail - it records the burn, preserving the burn-multiplexing invariant
+   * and enabling future multiplex. On a redelivered relay.numberReady the roster is
+   * already burned here, so burnClaim returns undefined and this returns false
+   * (benign - the caller still proceeds to the idempotent assign). A thin
+   * multi-phone repo.burnClaim (vs burnMember's single phone). Returns true when
+   * the burn was recorded.
+   */
+  burnGroupRoster(poolNumber: string, phones: string[]): Promise<boolean>;
+  /**
    * Read the pool record (thin repo.get passthrough). Used by the reopen route
    * (AF-3) to refuse reopening a group onto a number that retirement RELEASED -
    * a pure status flip would otherwise mint a zombie open group on a number we
@@ -464,6 +477,15 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // repo's conditional ADD is the atomic arbiter - undefined => the phone is
       // already burned here (another group's history), so the add is refused.
       const claimed = await repo.burnClaim(poolNumber, [phone]);
+      return claimed !== undefined;
+    },
+
+    async burnGroupRoster(poolNumber, phones) {
+      // G1 - burn on assign (connect-when-ready): claim the whole roster onto the
+      // now-active dedicated number. A fresh number's burn is empty, so a genuine
+      // first assign never overlap-fails; a redelivery finds the roster already
+      // burned here (undefined) -> false, which the caller treats as benign.
+      const claimed = await repo.burnClaim(poolNumber, phones);
       return claimed !== undefined;
     },
 

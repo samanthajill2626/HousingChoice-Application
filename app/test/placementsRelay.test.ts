@@ -59,6 +59,9 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
@@ -84,6 +87,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     },
     async noteGroupClosed() {},
     async burnMember() {
+      return true;
+    },
+    async burnGroupRoster() {
       return true;
     },
     async retireEligible() {

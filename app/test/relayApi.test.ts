@@ -77,6 +77,9 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
@@ -113,6 +116,9 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     },
     async noteGroupClosed() {},
     async burnMember() {
+      return true;
+    },
+    async burnGroupRoster() {
       return true;
     },
     async retireEligible() {
@@ -167,6 +173,13 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
       burned.set(poolNumber, set);
       if (set.has(phone)) return false; // already burned here -> conflict
       set.add(phone);
+      return true;
+    },
+    async burnGroupRoster(poolNumber: string, phones: string[]) {
+      const set = burned.get(poolNumber) ?? new Set<string>();
+      burned.set(poolNumber, set);
+      if (phones.some((p) => set.has(p))) return false; // overlap -> refuse
+      for (const p of phones) set.add(p);
       return true;
     },
     async retireEligible() {

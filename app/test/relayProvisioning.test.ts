@@ -12,13 +12,16 @@ import {
   _resetForTests,
   configureJobsLogger,
   configureOutboundQueue,
+  dispatchJob,
 } from '../src/jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../src/jobs/relayFanOut.js';
 import {
+  RELAY_NUMBER_READY_JOB,
   RELAY_WARM_JOB,
   type PoolNumbersService,
   type ProvisionResult,
 } from '../src/services/poolNumbers.js';
+import { registerRelayNumberReadyJobHandler } from '../src/jobs/relayNumberReady.js';
 import { provisionRelayGroup } from '../src/services/relayProvisioning.js';
 import type {
   ConversationItem,
@@ -212,5 +215,145 @@ describe('provisionRelayGroup - three-tier result branching (T6)', () => {
     );
 
     expect(conv.status).toBe('connecting'); // group created despite the enqueue failure
+  });
+});
+
+/** A store-backed connecting-group repo: getById + the conditional assign flip. */
+function makeConnectingRepo(group: ConversationItem): {
+  repo: ConversationsRepo;
+  store: Map<string, ConversationItem>;
+} {
+  const store = new Map<string, ConversationItem>([[group.conversationId, group]]);
+  const repo = {
+    async getById(id: string) {
+      return store.get(id);
+    },
+    async assignPoolNumberAndOpen(id: string, poolNumber: string) {
+      const c = store.get(id);
+      // Atomic-faithful: only a still-connecting group flips (G3). A redelivery
+      // (already open) returns undefined.
+      if (!c || c.status !== 'connecting' || c.relay_status !== 'relay_group#connecting') {
+        return undefined;
+      }
+      c.pool_number = poolNumber;
+      c.participant_phone = poolNumber;
+      c.status = 'open';
+      c.relay_status = 'relay_group#open';
+      return c;
+    },
+  };
+  return { repo: repo as unknown as ConversationsRepo, store };
+}
+
+/** A pool service that records burnGroupRoster calls (G1 assertion). */
+function makeReadyPool(opts: { burnResult?: boolean } = {}): PoolNumbersService & {
+  burns: { poolNumber: string; phones: string[] }[];
+} {
+  const burns: { poolNumber: string; phones: string[] }[] = [];
+  return {
+    burns,
+    async burnGroupRoster(poolNumber: string, phones: string[]) {
+      burns.push({ poolNumber, phones });
+      return opts.burnResult ?? true;
+    },
+  } as unknown as PoolNumbersService & { burns: { poolNumber: string; phones: string[] }[] };
+}
+
+function connectingGroup(conversationId: string, phones: string[]): ConversationItem {
+  const now = new Date().toISOString();
+  return {
+    conversationId,
+    status: 'connecting',
+    relay_status: 'relay_group#connecting',
+    last_activity_at: now,
+    type: 'relay_group',
+    ai_mode: 'manual',
+    participants: phones.map((phone, i) => ({ phone, contactId: `c${i}` })),
+    created_at: now,
+  };
+}
+
+describe('relay.numberReady handler (T6 - connect-when-ready open)', () => {
+  const NEW_NUMBER = '+15550002222';
+
+  beforeEach(() => {
+    _resetForTests();
+    configureJobsLogger(logger);
+  });
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('burns the roster onto the number (G1), flips the group connecting -> open with pool_number set, and enqueues the intro', async () => {
+    const { repo, store } = makeConnectingRepo(connectingGroup('conv-ready', [T1, L1]));
+    const pool = makeReadyPool();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+
+    await dispatchJob({
+      jobName: RELAY_NUMBER_READY_JOB,
+      payload: { conversationId: 'conv-ready', poolNumber: NEW_NUMBER },
+    });
+
+    // G1: the WHOLE roster was burned onto the new number.
+    expect(pool.burns).toHaveLength(1);
+    expect(pool.burns[0]!.poolNumber).toBe(NEW_NUMBER);
+    expect(pool.burns[0]!.phones.sort()).toEqual([T1, L1].sort());
+    // Group opened on its dedicated number.
+    const opened = store.get('conv-ready')!;
+    expect(opened.status).toBe('open');
+    expect(opened.pool_number).toBe(NEW_NUMBER);
+    // The DEFERRED intro fired, tagged with this conversation.
+    const intro = queue.envelopes.filter((e) => e.jobName === RELAY_INTRO_JOB);
+    expect(intro).toHaveLength(1);
+    expect((intro[0]!.payload as { relayConversationId?: string }).relayConversationId).toBe(
+      'conv-ready',
+    );
+  });
+
+  it('a SECOND relay.numberReady is a no-op (G3 exactly-once): no re-burn, no second intro', async () => {
+    const { repo, store } = makeConnectingRepo(connectingGroup('conv-dup', [T1]));
+    const pool = makeReadyPool();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+
+    const payload = { conversationId: 'conv-dup', poolNumber: NEW_NUMBER };
+    await dispatchJob({ jobName: RELAY_NUMBER_READY_JOB, payload });
+    // Redelivery: the group is already open -> the read-check no-ops it.
+    await dispatchJob({ jobName: RELAY_NUMBER_READY_JOB, payload });
+
+    expect(store.get('conv-dup')!.status).toBe('open');
+    expect(pool.burns).toHaveLength(1); // burned exactly once (G1 + G3)
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_INTRO_JOB)).toHaveLength(1); // intro once
+  });
+
+  it('an unknown / already-open conversation is an idempotent no-op (no burn, no intro)', async () => {
+    // The group is already OPEN (not connecting) - the read-check must short-circuit.
+    const openGroup: ConversationItem = {
+      ...connectingGroup('conv-open', [T1]),
+      status: 'open',
+      relay_status: 'relay_group#open',
+      pool_number: '+15550009999',
+    };
+    const { repo } = makeConnectingRepo(openGroup);
+    const pool = makeReadyPool();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    registerRelayNumberReadyJobHandler({ poolNumbersService: pool, conversationsRepo: repo, logger });
+
+    await dispatchJob({
+      jobName: RELAY_NUMBER_READY_JOB,
+      payload: { conversationId: 'conv-open', poolNumber: NEW_NUMBER },
+    });
+    // Also an entirely unknown conversation.
+    await dispatchJob({
+      jobName: RELAY_NUMBER_READY_JOB,
+      payload: { conversationId: 'conv-ghost', poolNumber: NEW_NUMBER },
+    });
+
+    expect(pool.burns).toHaveLength(0); // never burned onto an already-open / unknown group
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_INTRO_JOB)).toHaveLength(0);
   });
 });

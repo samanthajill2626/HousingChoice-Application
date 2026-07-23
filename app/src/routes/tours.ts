@@ -568,9 +568,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Reminder side effects after a successful patch, keyed on the EFFECTIVE
     // post-patch status — arming must never happen on a tour that is not live
     // (e.g. PATCH {scheduledAt, status:'canceled'} must not text "Your tour is
-    // confirmed" at the whole group), and marking 'toured' must cancel the
-    // still-pending rungs (a tenant who showed up must never get the
-    // no_show_checkin "you may have missed your tour" text).
+    // confirmed" at the whole group), and a terminal transition (toured / no_show
+    // / canceled / closed) must cancel the still-pending rungs (a tenant who
+    // showed up, or a tour flagged no-show, must never get a later "your tour is
+    // tomorrow" reminder).
     const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
     const armable = effectiveStatus === 'scheduled';
     // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
@@ -587,10 +588,14 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     } else if (
       effectiveStatus === 'canceled' ||
       effectiveStatus === 'closed' ||
-      effectiveStatus === 'toured'
+      effectiveStatus === 'toured' ||
+      effectiveStatus === 'no_show'
     ) {
-      // Dead or completed: nothing left to remind. (no_show keeps its pending
-      // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
+      // Dead, completed, or no-show: nothing left to auto-remind, so cancel any
+      // still-pending rungs. The no-show check-in is a MANUAL send from the tour
+      // page now (not an auto-armed rung), so a no_show tour has nothing to
+      // preserve - and canceling stops its day_before/morning_of/en_route from
+      // later firing "your tour is tomorrow" at a tour already flagged no-show.
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
       ladderChanged = true;
     }

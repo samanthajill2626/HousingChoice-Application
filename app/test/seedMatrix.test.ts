@@ -274,15 +274,14 @@ describe('seed matrix: reminder invariant (no reminders on requested tours)', ()
     }
   });
 
-  it('no_show tours have ≥1 no_show_checkin reminder with sentAt set', () => {
+  it('no_show tours carry NO no_show_checkin reminder (manual-send only)', () => {
     const noShowTourIds = new Set(allTours.filter((t) => t['status'] === 'no_show').map((t) => t['tourId'] as string));
-    expect(noShowTourIds.size, 'must have ≥2 no_show tours').toBeGreaterThanOrEqual(2);
+    expect(noShowTourIds.size, 'must have at least 2 no_show tours').toBeGreaterThanOrEqual(2);
     for (const tourId of noShowTourIds) {
+      // no_show_checkin is no longer auto-armed (manual send only), so a seeded
+      // no_show tour carries none.
       const checkins = allReminders.filter((r) => r['tourId'] === tourId && r['kind'] === 'no_show_checkin');
-      expect(checkins.length, `no_show tour '${tourId}' must have ≥1 no_show_checkin reminder`).toBeGreaterThanOrEqual(1);
-      for (const c of checkins) {
-        expect(c['sentAt'], `no_show_checkin reminder must have sentAt set`).toBeDefined();
-      }
+      expect(checkins.length, `no_show tour '${tourId}' must have no no_show_checkin rung`).toBe(0);
     }
   });
 });

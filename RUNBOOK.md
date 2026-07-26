@@ -40,6 +40,43 @@ now uses the assigned inbound-voice-line holder's verified cell). Bypass with `-
 correct — e.g. `.env.<env>` isn't on this machine. To clear a real drift, just
 `npm run secrets:push -- <env>` then re-run the deploy.
 
+### Dev modes (npm run dev): live / --mock / --local
+
+`npm run dev` runs the local app + worker (and the dashboard on :5174) against a
+chosen backend. The launcher flags are orthogonal and compose freely: `--local`
+controls DynamoDB, `--mock` controls outbound comms. Behavior:
+
+| invocation                      | DynamoDB       | SMS               | email          |
+|---------------------------------|----------------|-------------------|----------------|
+| `npm run dev`                   | real hc-dev    | twilio (REAL)     | ses (REAL)     |
+| `npm run dev -- --mock`         | real hc-dev    | twilio -> fake    | console (stub) |
+| `npm run dev -- --local`        | DynamoDB Local | console (stub)    | console (stub) |
+| `npm run dev -- --local --mock` | DynamoDB Local | twilio -> fake    | console (stub) |
+
+Explicit `env` / `.env` values still win over every default above (the
+`resolveDevEnv` `get()` precedence: real environment > `.env` > mode default). In
+live mode the SES sender identity (`EMAIL_SENDER_DOMAIN` / `EMAIL_FROM_ADDRESS` /
+`EMAIL_CONFIGURATION_SET`) is Terraform-owned and never lives in `.env.dev`, so
+the launcher fetches it from SSM (`/hc/dev/app/EMAIL_*`) at boot and injects it
+only-if-absent; if that fetch yields nothing, config's `EMAIL_DRIVER=ses`
+boot-check fast-fails loudly ("Refusing to start"). The app + worker log the
+resolved `messagingDriver` / `emailDriver` + their sending-enabled flags on the
+boot line, so "why didn't it send" is answerable immediately.
+
+**CAVEAT - shared hc-dev scheduled queue.** A live `npm run dev` puts a SECOND
+worker on the shared `hc-dev` `tourReminders` / `placementNudges` ladders
+alongside the DEPLOYED dev worker. The claim is atomic, so exactly one worker
+wins each rung - but it may be YOUR box, which now sends via REAL Twilio/SES. Use
+`--mock` or `--local` to avoid emitting real comms from a laptop.
+
+**CAVEAT - SMS kill-switch.** The `twilio` driver alone does NOT produce a real
+SMS: `SMS_SENDING_ENABLED` in `.env.dev` still gates actual sends (template
+default `false` until A2P approval). With the flag off, a local claim-winner
+REFUSES the send (`503 sms_sending_disabled`) rather than console-simulating it -
+so it still steals the rung's claim from the deployed worker. Verify the real
+`.env.dev` before expecting a live `npm run dev` to deliver a real SMS. Email has
+no such gap (`.env.dev.example` ships `EMAIL_SENDING_ENABLED=true`).
+
 ### DynamoDB schema changes (apply BEFORE deploying code that uses them)
 
 DynamoDB tables/GSIs are IaC: `app/src/lib/tables.ts` is the source of truth; `npm run gen:tables`
@@ -528,7 +565,7 @@ launcher's flags are **orthogonal, single-purpose**: `--local` controls DynamoDB
 the live AWS dev backend) and `--mock` controls Twilio (redirect to this local fake vs real Twilio),
 and they compose freely. `--local --mock` is the **fully hermetic** combo — the fake's seeded
 `+1555…` personas match the hermetic seed data; `--mock` alone redirects Twilio against the **live
-dev backend**, where those seeded personas won't map to real dev contacts.) Pick a persona from the
+dev backend**, where those seeded personas won't map to real dev contacts. For the full DynamoDB/SMS/email matrix across live/`--mock`/`--local`, plus the shared-queue and SMS kill-switch caveats, see **Dev modes (npm run dev)** under Daily operations.) Pick a persona from the
 roster (grouped Landlord / Tenant / PM, each
 with its number + unread badge; **＋ Ad-hoc number** mints a throwaway caller), type and **Send** to
 fire a signed inbound webhook at the app, flip the per-thread **delivery-profile** toggle (Normal /

@@ -54,7 +54,7 @@
 // so those personas won't resolve to any seeded contact either. Granular escape
 // hatches: npm run dev:app / dev:worker / db:* (those do NOT load
 // .env/.env.dev or apply mode defaults).
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync } from 'node:fs';
 import { Writable } from 'node:stream';
 import path from 'node:path';
@@ -63,7 +63,7 @@ import concurrently from 'concurrently';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
 import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killPort } from './lib/killTree.mjs';
-import { assertHousingChoiceAccount } from './lib/hcAws.mjs';
+import { assertHousingChoiceAccount, HC_REGION } from './lib/hcAws.mjs';
 import { resolveDevEnv } from './lib/devMode.mjs';
 import { parseDotenv } from './lib/secretsCore.mjs';
 
@@ -339,6 +339,59 @@ if (mode === 'local') {
     if (!childEnv.MEDIA_BUCKET) {
       childEnv.MEDIA_BUCKET = `hc-dev-media-${identity.Account}`;
       console.log(`dev - live mode media store: ${childEnv.MEDIA_BUCKET}`);
+    }
+    // Live mode's SES sender identity (EMAIL_SENDER_DOMAIN / EMAIL_FROM_ADDRESS /
+    // EMAIL_CONFIGURATION_SET) is Terraform-owned and on the MANAGED_BY_OTHERS
+    // denylist, so it MUST NOT live in .env.dev (design 2026-07-21, D3). The
+    // deployed box reads it from SSM; mirror that here - fetch it from Parameter
+    // Store at boot (same shape as MEDIA_BUCKET above) and inject only-if-absent
+    // so EMAIL_DRIVER=ses (the live default) can actually send. --mock forces
+    // console email and needs no identity, so skip the fetch there. Best-effort:
+    // any error warns and continues - config's EMAIL_DRIVER=ses boot-check is the
+    // intended loud fast-fail when the identity is genuinely missing. Uses the
+    // aws CLI (mirrors scripts/secrets.mjs capture()), never the SDK.
+    if (!mockEnabled) {
+      try {
+        const ssm = spawnSync(
+          'aws',
+          [
+            'ssm',
+            'get-parameters',
+            '--names',
+            '/hc/dev/app/EMAIL_SENDER_DOMAIN',
+            '/hc/dev/app/EMAIL_FROM_ADDRESS',
+            '/hc/dev/app/EMAIL_CONFIGURATION_SET',
+            '--profile',
+            childEnv.AWS_PROFILE,
+            '--region',
+            HC_REGION,
+            '--output',
+            'json',
+          ],
+          { cwd: repoRoot, encoding: 'utf8', shell: false, env: { ...childEnv, AWS_PAGER: '' } },
+        );
+        if (ssm.error) throw ssm.error;
+        if (ssm.status !== 0) {
+          throw new Error(`aws ssm get-parameters exited ${ssm.status}: ${(ssm.stderr ?? '').trim()}`);
+        }
+        const parsed = JSON.parse(ssm.stdout);
+        // Params absent from SSM come back under .InvalidParameters, not here.
+        let injectedFromAddress;
+        for (const p of parsed.Parameters ?? []) {
+          const key = String(p.Name).split('/').pop();
+          if (key && !childEnv[key]) {
+            childEnv[key] = p.Value;
+            if (key === 'EMAIL_FROM_ADDRESS') injectedFromAddress = p.Value;
+          }
+        }
+        if (injectedFromAddress) {
+          console.log(`dev - live mode email identity: ${injectedFromAddress} (SES)`);
+        }
+      } catch (ssmErr) {
+        console.warn(
+          `dev - could not hydrate SES identity from SSM (email sends will fast-fail): ${ssmErr.message}`,
+        );
+      }
     }
   } catch (err) {
     console.error(`dev — ${err.message}`);

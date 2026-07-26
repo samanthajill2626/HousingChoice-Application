@@ -88,5 +88,5 @@ locals {
   # account creds the local-exec reads - and BEFORE flipping RELAY_LIVE_PROVISIONING
   # on, so the readiness gate exists before any number warms. dev + prod get
   # DISTINCT sinks (account-scoped). See RUNBOOK "Relay Event Streams sink".
-  twilio_events_enabled = false
+  twilio_events_enabled = true
 }

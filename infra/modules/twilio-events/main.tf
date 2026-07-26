@@ -74,10 +74,14 @@ resource "terraform_data" "sink" {
 
   # Create / re-create: idempotent create-or-reconcile of the Sink + Subscription.
   provisioner "local-exec" {
-    when    = create
-    # Quote the path: an operator checkout can sit under a directory with spaces
-    # (e.g. "...\HC Application\...") - unquoted, node would stop at the space.
-    command = "node \"${local.script_path}\""
+    when = create
+    # Run node AS THE INTERPRETER so the script path is passed as a single argv
+    # element - NOT through a shell. A plain `command = "node <path>"` is executed
+    # via `cmd /C "..."` on Windows, whose nested-quote handling mangles a spaced,
+    # quoted path (an operator checkout can sit under "...\HC Application\..."). The
+    # interpreter form bypasses cmd entirely and is correct cross-platform.
+    interpreter = ["node"]
+    command     = local.script_path
     environment = {
       TWILIO_EVENTS_ENV            = var.env
       TWILIO_EVENTS_APP_HOST       = var.app_host
@@ -99,8 +103,9 @@ resource "terraform_data" "sink" {
   provisioner "local-exec" {
     when       = destroy
     on_failure = continue
-    # Quote the path (see the create provisioner) - checkout dir may contain spaces.
-    command    = "node \"${self.input.script}\""
+    # node as interpreter (see the create provisioner) - path passed intact, no shell.
+    interpreter = ["node"]
+    command     = self.input.script
     environment = {
       TWILIO_EVENTS_ENV            = self.input.env
       TWILIO_EVENTS_DESTROY        = "1"

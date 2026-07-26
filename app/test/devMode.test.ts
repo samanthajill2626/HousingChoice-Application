@@ -124,3 +124,37 @@ describe('resolveDevEnv — DEV_AUTH_ENABLED', () => {
     expect(overlay.DEV_AUTH_ENABLED).toBeUndefined();
   });
 });
+
+describe('resolveDevEnv - outbound comms drivers', () => {
+  it('live mode defaults MESSAGING_DRIVER=twilio and EMAIL_DRIVER=ses', () => {
+    const { mode, overlay } = resolve({});
+    expect(mode).toBe('live');
+    expect(overlay.MESSAGING_DRIVER).toBe('twilio');
+    expect(overlay.EMAIL_DRIVER).toBe('ses');
+  });
+
+  it('local mode (--local) sets NEITHER driver, keeping the console default', () => {
+    const { mode, overlay } = resolve({ local: true });
+    expect(mode).toBe('local');
+    expect(overlay.MESSAGING_DRIVER).toBeUndefined();
+    expect(overlay.EMAIL_DRIVER).toBeUndefined();
+  });
+
+  it('an explicit env MESSAGING_DRIVER wins: the overlay does not set it', () => {
+    const { mode, overlay } = resolve({
+      processEnv: { MESSAGING_DRIVER: 'console' },
+    });
+    expect(mode).toBe('live');
+    // env wins via get(); the overlay must not clobber an already-provided key.
+    expect(overlay.MESSAGING_DRIVER).toBeUndefined();
+  });
+
+  it('an explicit .env EMAIL_DRIVER wins: it rides the overlay unchanged', () => {
+    const { mode, overlay } = resolve({
+      fileEnv: { EMAIL_DRIVER: 'console' },
+    });
+    expect(mode).toBe('live');
+    // the .env value passes through as-is; the live 'ses' default must not replace it.
+    expect(overlay.EMAIL_DRIVER).toBe('console');
+  });
+});

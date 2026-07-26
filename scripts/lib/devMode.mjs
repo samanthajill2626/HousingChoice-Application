@@ -55,6 +55,13 @@ export function resolveDevEnv({ local = false, processEnv, fileEnv, localEndpoin
   } else {
     if (get('TABLE_PREFIX') === undefined) overlay.TABLE_PREFIX = LIVE_TABLE_PREFIX;
     if (get('AWS_PROFILE') === undefined) overlay.AWS_PROFILE = LIVE_AWS_PROFILE;
+    // Live mode mirrors deployed dev for outbound comms: real Twilio + SES.
+    // Creds/identity are hydrated by dev.mjs (Twilio from .env.dev; SES identity
+    // from SSM). --mock overrides both downstream (fake host / console). --local
+    // (hermetic) never reaches this branch, so it stays on the console default.
+    // Explicit env/.env still wins via get().
+    if (get('MESSAGING_DRIVER') === undefined) overlay.MESSAGING_DRIVER = 'twilio';
+    if (get('EMAIL_DRIVER') === undefined) overlay.EMAIL_DRIVER = 'ses';
     if (get('TABLE_PREFIX') === 'hc-prod-') {
       throw new Error(
         'refusing to start: TABLE_PREFIX=hc-prod- would point the local dev loop at PROD tables',

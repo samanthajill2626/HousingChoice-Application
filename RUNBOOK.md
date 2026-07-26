@@ -53,6 +53,11 @@ controls DynamoDB, `--mock` controls outbound comms. Behavior:
 | `npm run dev -- --local`        | DynamoDB Local | console (stub)    | console (stub) |
 | `npm run dev -- --local --mock` | DynamoDB Local | twilio -> fake    | console (stub) |
 
+Live mode requires `.env.dev` (the Twilio operator creds) to boot - without it
+the `twilio` driver refuses to start; use `--mock`/`--local`, or set
+`MESSAGING_DRIVER=console` + `EMAIL_DRIVER=console` in `.env` for a degraded live
+run.
+
 Explicit `env` / `.env` values still win over every default above (the
 `resolveDevEnv` `get()` precedence: real environment > `.env` > mode default). In
 live mode the SES sender identity (`EMAIL_SENDER_DOMAIN` / `EMAIL_FROM_ADDRESS` /

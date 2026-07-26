@@ -123,9 +123,11 @@ if (liveMode) {
   const loaded = readDotenv('.env.dev', '.env.dev');
   if (loaded === undefined) {
     console.warn(
-      'dev — .env.dev not found: the local app will run WITHOUT the dev operator\n' +
-        '       secrets, so Google login, Twilio, and web push are OFF. Copy\n' +
-        '       .env.dev.example → .env.dev and fill it in.',
+      'dev - .env.dev not found: without it the app will REFUSE TO START in live\n' +
+        '       mode (the twilio driver requires TWILIO_* creds). Escape hatches:\n' +
+        '       npm run dev -- --mock  or  npm run dev -- --local, or set\n' +
+        '       MESSAGING_DRIVER=console + EMAIL_DRIVER=console in .env for a\n' +
+        '       degraded live run. Copy .env.dev.example to .env.dev to fill it in.',
     );
   } else {
     secretsEnv = loaded;
@@ -320,12 +322,11 @@ if (mode === 'local') {
   if (seedEnabled) {
     console.warn('dev — --seeded/--seeded-lean ignored in live mode (the AWS dev backend is never seeded).');
   }
-  const driver =
-    childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');
-  // Post-resolveDevEnv + post-mock: live default is 'ses', --mock forced 'console',
-  // an explicit env/.env value overrides either. Mirrors the messaging fallback.
-  const emailDriver =
-    childEnv.EMAIL_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'ses' : 'console');
+  // Live mode always resolves BOTH drivers (resolveDevEnv default twilio+ses,
+  // --mock forces console email, or an explicit env/.env value wins), so read
+  // them directly - the old NODE_ENV fallbacks were dead code here.
+  const driver = childEnv.MESSAGING_DRIVER;
+  const emailDriver = childEnv.EMAIL_DRIVER;
   const secretCount = Object.keys(secretsEnv).length;
   console.log('dev — mode: live dev backend (real dev data + tools, run locally)');
   console.log(`       tables:    ${childEnv.TABLE_PREFIX}*  (DynamoDB, us-east-1)`);
@@ -333,13 +334,15 @@ if (mode === 'local') {
   console.log(
     secretCount > 0
       ? `       secrets:   ${secretCount} keys from .env.dev (Google login, Twilio, push)`
-      : '       secrets:   .env.dev MISSING — login/Twilio/push OFF (see warning above)',
+      : '       secrets:   .env.dev MISSING - app will NOT BOOT without Twilio creds (see warning above; use --mock, --local, or console overrides in .env)',
   );
   console.log(
     `       messaging: ${driver}` +
       (driver === 'console'
         ? ' (simulated; MESSAGING_DRIVER=console override - unset it for real Twilio sends)'
-        : ' (REAL Twilio sends)'),
+        : mockRedirect
+          ? ' (redirected to local fake-twilio on :8889 via --mock)'
+          : ' (REAL Twilio sends)'),
   );
   console.log(
     `       email:     ${emailDriver}` +
@@ -392,7 +395,16 @@ if (mode === 'local') {
             '--output',
             'json',
           ],
-          { cwd: repoRoot, encoding: 'utf8', shell: false, env: { ...childEnv, AWS_PAGER: '' } },
+          {
+            cwd: repoRoot,
+            encoding: 'utf8',
+            shell: false,
+            env: { ...childEnv, AWS_PAGER: '' },
+            // Ceiling so a hung/slow aws (e.g. an interactive SSO prompt) cannot
+            // block the everyday dev boot forever; a timeout surfaces as
+            // ssm.error / non-zero status and rides the warn-and-continue catch.
+            timeout: 15000,
+          },
         );
         if (ssm.error) throw ssm.error;
         if (ssm.status !== 0) {
@@ -411,9 +423,24 @@ if (mode === 'local') {
         if (injectedFromAddress) {
           console.log(`dev - live mode email identity: ${injectedFromAddress} (SES)`);
         }
+        // Absent names ride .InvalidParameters (aws still exits 0), so an
+        // un-applied email-channel Terraform is otherwise SILENT here - name the
+        // missing params + the consequence so the later config fast-fail is
+        // diagnosable. Params that DID come back are still injected above.
+        const missingParams = parsed.InvalidParameters ?? [];
+        if (missingParams.length > 0) {
+          const missingNames = missingParams.map((n) => String(n).split('/').pop()).join(', ');
+          console.warn(
+            `dev - SSM params missing: ${missingNames} - the app will REFUSE TO ` +
+              'START under EMAIL_DRIVER=ses (run --mock/--local, or set ' +
+              'EMAIL_DRIVER=console in .env, or apply the email-channel Terraform to dev).',
+          );
+        }
       } catch (ssmErr) {
         console.warn(
-          `dev - could not hydrate SES identity from SSM (email sends will fast-fail): ${ssmErr.message}`,
+          'dev - could not hydrate SES identity from SSM - the app will REFUSE TO ' +
+            'START under EMAIL_DRIVER=ses (run --mock/--local, or set ' +
+            `EMAIL_DRIVER=console in .env): ${ssmErr.message}`,
         );
       }
     }

@@ -160,7 +160,12 @@ async function main() {
   }
 
   const webhookUser = (webhookUserArg ?? process.env.TWILIO_EVENTS_WEBHOOK_USER ?? 'twilio-events').trim();
-  const secret = (process.env.TWILIO_EVENTS_WEBHOOK_SECRET_OVERRIDE ?? entries.TWILIO_EVENTS_WEBHOOK_SECRET ?? '').trim();
+  // The Terraform module ALWAYS sets the OVERRIDE env var (default "" = "use the
+  // .env.<env> value") - so an EMPTY override must fall through, not win. `??`
+  // alone kept the empty string (empty is not nullish) and blanked the secret on
+  // every Terraform run even with .env.<env> correctly set.
+  const secretOverride = (process.env.TWILIO_EVENTS_WEBHOOK_SECRET_OVERRIDE ?? '').trim();
+  const secret = secretOverride !== '' ? secretOverride : (entries.TWILIO_EVENTS_WEBHOOK_SECRET ?? '').trim();
 
   const typesRaw = (process.env.TWILIO_EVENTS_TYPES ?? '').trim();
   const eventTypes = typesRaw
@@ -259,13 +264,15 @@ async function main() {
   // A create needs the shared secret (an unauthenticated sink defeats decision
   // D4's Basic-auth defense-in-depth; the app enforces it only when set).
   if (!secret) {
-    const where = process.env.TWILIO_EVENTS_WEBHOOK_SECRET_OVERRIDE !== undefined
-      ? 'the twilio-events module webhook_secret var'
-      : `TWILIO_EVENTS_WEBHOOK_SECRET in ${envFileName}`;
+    // An empty override falls through to .env.<env> (above), so reaching here
+    // means NEITHER source had a value - point at the .env key (the recommended
+    // path); the module var is only worth mentioning as the deliberate override.
     fail(
-      `[twilio:events] no webhook secret - set ${where}. It MUST equal the app's ` +
-        `TWILIO_EVENTS_WEBHOOK_SECRET (deploy it with secrets:push FIRST, so the ` +
-        `sink validates). Use a URL-safe (alphanumeric) value.`,
+      `[twilio:events] no webhook secret - set TWILIO_EVENTS_WEBHOOK_SECRET in ` +
+        `${envFileName} (or deliberately supply the twilio-events module ` +
+        `webhook_secret var). It MUST equal the app's TWILIO_EVENTS_WEBHOOK_SECRET ` +
+        `(deploy it with secrets:push FIRST, so the sink validates). Use a URL-safe ` +
+        `(alphanumeric) value.`,
     );
   }
   const destinationUrl = `https://${encodeURIComponent(webhookUser)}:${encodeURIComponent(secret)}@${appHost}${WEBHOOK_PATH}`;

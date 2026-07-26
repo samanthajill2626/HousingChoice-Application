@@ -9,8 +9,9 @@ consent recording, JIT consent gate, self-managed STOP/HELP/START, keyword lists
 first-contact identity + opt-out), and the app gained features the submission
 must now cover: **MMS photo attachments**, **group relay texting**, and **staff
 cell-verification codes**. This doc lists every field to change, the new copy to
-paste in, and the few decisions only you can make. Items marked **[DECISION]**
-need your input; the rest are ready to submit.
+paste in. All founder decisions were made 2026-07-26 (single opt-in posture,
+one campaign, brand + DBA below) — everything here is ready to submit; the only
+remaining items are the live-URL and number-inventory confirmations (8 and 9).
 
 > **Heads-up on timing:** changing "embedded links" (item 1) and the opt-in flow
 > (item 3) can trigger **re-vetting** of the campaign. Budget lead time before we
@@ -34,10 +35,10 @@ need your input; the rest are ready to submit.
 |---|-------|--------|------|
 | 1 | Messages contain embedded links | **No → Yes** (we send links to our own property pages) | Required |
 | 2 | Messages contain phone numbers | Keep **No** — confirmed 2026-07-26, no message body carries a phone number | Confirmed |
-| 3 | Opt-in flow / "end-user consent" | Rewrite: web-form checkbox **+ customer-initiated inbound (text or call)** + advertised keyword + staff-recorded verbal consent | Required + [DECISION] |
+| 3 | Opt-in flow / "end-user consent" | Rewrite: web-form checkbox **+ customer-initiated inbound (text or call)** + advertised keyword + staff-recorded verbal consent (single opt-in — accepted 2026-07-26) | Required |
 | 4 | Campaign / use-case description | Rewrite to cover the full surface: alerts, tour + application messages, 1:1 replies, missed-call auto-text, **group relay threads**, **MMS photos**, **staff verification codes** | Required |
 | 5 | Sample messages | Replace all 5 with samples matching what we actually send (link, MMS note, relay intro, verification code) | Required |
-| 6 | Sender brand name in messages | Resolved: app sends **"Tenant Place LLC"** in all tenant/landlord copy. One loose end: the staff verification code says "HousingChoice" | [DECISION] |
+| 6 | Sender brand name / DBA | **Tenant Place LLC** is the registered brand; register **"HousingChoice" as a DBA** on the brand (plus any other trade names in use). Verification code keeps "HousingChoice" | Required |
 | 7 | Opt-in / opt-out keywords | No change — the app now honors your declared keyword lists (shipped) | Info |
 | 8 | Terms & Privacy URLs | Confirm live at `tenant.place/terms` and `tenant.place/privacypolicy` | Confirm |
 | 9 | Number inventory | Confirm **every** number is attached to this campaign: the main opt-in number **and all relay pool numbers** | Confirm |
@@ -93,16 +94,15 @@ Replace the **"How do end-users opt in to receive messages?"** narrative with:
 > declared keyword list) are honored immediately on every number and confirmed.
 > Mobile opt-in data is not shared with third parties.
 
-**⚠ [DECISION] — single opt-in posture.** Replying 1:1 to someone who texted us
-first is clearly fine. Enrolling that same person into **recurring** property
-alerts on the strength of their inbound question is more permissive than the
-originally-filed "reply YES" double opt-in. We mitigate it by making our **first
-outbound reply** disclose the program + STOP/HELP, and by recording the consent
-date/method per contact. This is a defensible, common approach for
-informational/transactional messaging (our filed classification — not
-marketing) — but you (or Twilio's vetting) may prefer an explicit confirmation
-before recurring-alert enrollment. **Your call.** If you want the explicit
-confirmation kept, tell us and we'll add it to the app instead.
+**Decision recorded (founder, 2026-07-26): single opt-in — accepted.** Context:
+enrolling someone into recurring property alerts off their inbound question is
+more permissive than the originally-filed "reply YES" double opt-in. Accepted
+because our messaging is informational/transactional (our filed classification —
+not marketing), and mitigated in the app: the **first outbound reply** discloses
+the program + STOP/HELP, and consent date/method is recorded per contact. The
+narrative above describes exactly this — submit it as written. If Twilio's
+vetting pushes back and demands an explicit confirmation step, tell the app team
+and we'll add it.
 
 ---
 
@@ -157,25 +157,27 @@ if the form has anywhere to say so.
 **Sample 5 — Staff cell-verification code (to our own staff only)**
 > Your HousingChoice verification code is 482913. It expires in 10 minutes.
 
-*(If you take option (a) in item 6, sample 5 becomes "Your Tenant Place LLC
-verification code is 482913. It expires in 10 minutes.")*
+*(This one intentionally says "HousingChoice" — covered by the DBA registration
+in item 6.)*
 
 ---
 
-## 6. Sender brand name — resolved, one loose end [DECISION]
+## 6. Sender brand name + DBA registration (decided 2026-07-26)
 
-Resolved since June: the app's SMS-facing copy uses **Tenant Place LLC**
-everywhere a tenant or property owner is the recipient (single constant in code;
-"HousingChoice" remains the internal/staff dashboard name only). No DBA needed.
+**Tenant Place LLC** is the real/legal company and stays the registered brand.
+The app's SMS-facing copy uses "Tenant Place LLC" everywhere a tenant or
+property owner is the recipient (single constant in code).
 
-**Loose end:** the staff cell-verification SMS deliberately says "Your
-**HousingChoice** verification code…" because its only recipients are our own
-staff, who know the product by its internal name. Carriers still see it leave
-the registered brand's number. **Pick one:**
-- **(a) Align it — recommended.** One-line app change to "Your Tenant Place LLC
-  verification code…". Simplest story: every message matches the registered brand.
-- **(b) Keep "HousingChoice"** and file sample 5 as-is. Low risk (staff-only,
-  transactional), but the sample won't match the registered brand name.
+**Action for the submission:** register **"HousingChoice" as a DBA** of Tenant
+Place LLC on the brand (Trust Hub brand registration has a DBA / brand-name
+field). While you're in there, **add any other company or trade names we
+operate under as DBAs too** — every name that could ever appear in a message
+should be on the brand.
+
+With the DBA registered, the staff cell-verification SMS **keeps** "Your
+**HousingChoice** verification code…" (decided — its only recipients are our own
+staff, who know the product by its internal name, and the DBA makes the name
+carrier-legitimate). No app change.
 
 ---
 

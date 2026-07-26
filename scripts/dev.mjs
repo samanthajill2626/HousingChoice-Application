@@ -24,13 +24,21 @@
 // proxies /api + /auth to the app on :8080 (which serves the API only in
 // local dev, not the built UI). Ctrl-C stops all three.
 //
-// Config layering (later wins): .env.dev (the dev stack's operator secrets —
-// Twilio, Google OAuth, VAPID — loaded in LIVE mode only) < .env (optional
+// Config layering (later wins): .env.dev (the dev stack's operator secrets -
+// Twilio, Google OAuth, VAPID - loaded in LIVE mode only) < .env (optional
 // local overrides) < real environment variables < mode defaults that must
 // hold locally (NODE_ENV=development, OTel off, PUBLIC_BASE_URL=:5174). So a
 // local live run is a true mirror of deployed dev: real dev data AND real
-// Google login / Twilio / push — except logs go to THIS terminal (pino
+// Google login / Twilio / push - except logs go to THIS terminal (pino
 // stdout), never CloudWatch (that's the deployed server's awslogs driver).
+//
+// Outbound comms by invocation (resolveDevEnv defaults; explicit env/.env wins):
+//   npm run dev            live: SMS via REAL Twilio, email via REAL SES.
+//   npm run dev -- --mock  fake Twilio host (:8889) + console email (stub ALL).
+//   npm run dev -- --local console for both (hermetic; no AWS, offline).
+// SMS_SENDING_ENABLED in .env.dev still gates a real send under the twilio driver
+// (template default OFF until A2P), so the driver flip alone is necessary but not
+// sufficient for a real SMS. See RUNBOOK "Dev modes".
 //
 // Flags — independent, single-purpose, compose freely:
 //   --local  controls DynamoDB ONLY: hermetic DynamoDB Local (no secrets/AWS)
@@ -171,10 +179,12 @@ if (webEnabled && (childEnv.PUBLIC_BASE_URL === undefined || childEnv.PUBLIC_BAS
   childEnv.PUBLIC_BASE_URL = 'http://localhost:5174';
 }
 
-// Local-dev invariants: development NODE_ENV (console messaging driver, non-
-// secure cookies) and OTel disabled — so app logs go to THIS terminal only
-// (pino stdout). CloudWatch is the deployed server's docker awslogs driver and
-// is never wired locally. Both are defaults: an explicit env value still wins.
+// Local-dev invariants: development NODE_ENV (non-secure cookies) and OTel
+// disabled - so app logs go to THIS terminal only (pino stdout). CloudWatch is
+// the deployed server's docker awslogs driver and is never wired locally. Both
+// are defaults: an explicit env value still wins. (Outbound comms drivers are
+// NOT tied to NODE_ENV here: resolveDevEnv defaults live mode to real Twilio +
+// SES; --mock stubs both, --local uses console - see the header's comms matrix.)
 if (childEnv.NODE_ENV === undefined) childEnv.NODE_ENV = 'development';
 if (childEnv.OTEL_SDK_DISABLED === undefined) childEnv.OTEL_SDK_DISABLED = 'true';
 // Cross-process event bridge (lib/eventBridge.ts): the worker forwards its bus
@@ -195,6 +205,10 @@ if (mockRedirect) {
   // route the driver at the local fake and accept its app-number on inbound.
   childEnv.MESSAGING_DRIVER = 'twilio';
   childEnv.TWILIO_API_BASE_URL = 'http://localhost:8889';
+  // mock ALL comms: fake Twilio host + console email. FORCED (like the driver
+  // above), not only-if-absent - a stray EMAIL_DRIVER must never let a mock run
+  // reach real SES.
+  childEnv.EMAIL_DRIVER = 'console';
   // Append the fake's app-number to OUR_PHONE_NUMBERS so the app recognizes it,
   // preserving any real numbers from .env.dev in live mode (and the fake's number
   // working). Set it outright when unset.
@@ -308,6 +322,10 @@ if (mode === 'local') {
   }
   const driver =
     childEnv.MESSAGING_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'twilio' : 'console');
+  // Post-resolveDevEnv + post-mock: live default is 'ses', --mock forced 'console',
+  // an explicit env/.env value overrides either. Mirrors the messaging fallback.
+  const emailDriver =
+    childEnv.EMAIL_DRIVER ?? (childEnv.NODE_ENV === 'production' ? 'ses' : 'console');
   const secretCount = Object.keys(secretsEnv).length;
   console.log('dev — mode: live dev backend (real dev data + tools, run locally)');
   console.log(`       tables:    ${childEnv.TABLE_PREFIX}*  (DynamoDB, us-east-1)`);
@@ -320,8 +338,14 @@ if (mode === 'local') {
   console.log(
     `       messaging: ${driver}` +
       (driver === 'console'
-        ? ' (simulated; set MESSAGING_DRIVER=twilio in .env for real sends)'
+        ? ' (simulated; MESSAGING_DRIVER=console override - unset it for real Twilio sends)'
         : ' (REAL Twilio sends)'),
+  );
+  console.log(
+    `       email:     ${emailDriver}` +
+      (emailDriver === 'console'
+        ? ' (simulated; --mock or EMAIL_DRIVER=console override)'
+        : ' (REAL SES sends)'),
   );
   console.log('       logs:      messages here; full JSON saved to logs/dev-*.log (CloudWatch is the deployed server only)');
   console.log('       (`npm run dev -- --local` for the offline DynamoDB Local loop)');

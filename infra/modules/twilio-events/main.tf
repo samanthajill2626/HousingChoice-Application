@@ -75,7 +75,9 @@ resource "terraform_data" "sink" {
   # Create / re-create: idempotent create-or-reconcile of the Sink + Subscription.
   provisioner "local-exec" {
     when    = create
-    command = "node ${local.script_path}"
+    # Quote the path: an operator checkout can sit under a directory with spaces
+    # (e.g. "...\HC Application\...") - unquoted, node would stop at the space.
+    command = "node \"${local.script_path}\""
     environment = {
       TWILIO_EVENTS_ENV            = var.env
       TWILIO_EVENTS_APP_HOST       = var.app_host
@@ -97,7 +99,8 @@ resource "terraform_data" "sink" {
   provisioner "local-exec" {
     when       = destroy
     on_failure = continue
-    command    = "node ${self.input.script}"
+    # Quote the path (see the create provisioner) - checkout dir may contain spaces.
+    command    = "node \"${self.input.script}\""
     environment = {
       TWILIO_EVENTS_ENV            = self.input.env
       TWILIO_EVENTS_DESTROY        = "1"

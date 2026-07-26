@@ -36,6 +36,8 @@ under `EMAIL_DRIVER=ses`). Write paths (`secrets:push` SSM writes) force the
 profile env var, so a wrong-account WRITE needs both a static-creds export AND the
 env-var-only mechanism to lose - unlikely but not proven impossible.
 
+Note also that the guard's assurance does not bind the spawned app/worker either: the app child resolves its OWN SDK credentials from the childEnv it inherits (AWS_PROFILE or static keys), so the same divergence modes apply to the application processes, not just CLI children.
+
 Related, distinct issue: [one-off-scripts-missing-account-guard](one-off-scripts-missing-account-guard.md)
 covers `app/scripts/*.ts` that have NO guard at all. This one covers guarded
 scripts whose CLI children may not inherit what the guard proved.

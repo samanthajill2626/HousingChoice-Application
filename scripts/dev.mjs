@@ -336,19 +336,30 @@ if (mode === 'local') {
       ? `       secrets:   ${secretCount} keys from .env.dev (Google login, Twilio, push)`
       : '       secrets:   .env.dev MISSING - app will NOT BOOT without Twilio creds (see warning above; use --mock, --local, or console overrides in .env)',
   );
+  // Banner honesty (planner wave): the REAL-sends branches below promise real
+  // Twilio/SES, but a deployed-dev SMS_SENDING_ENABLED / EMAIL_SENDING_ENABLED=false
+  // makes the send service REFUSE every send - so print a refused variant when the
+  // flag is EXPLICITLY false. Match config.ts's false tokens (false/0/no,
+  // case-insensitively via trim+lowercase). Explicit-false ONLY: unset / true /
+  // garbage keep the REAL-sends text (we do NOT replicate config's unset-default).
+  const isExplicitFalse = (v) => ['false', '0', 'no'].includes(String(v).trim().toLowerCase());
   console.log(
     `       messaging: ${driver}` +
       (driver === 'console'
         ? ' (simulated; MESSAGING_DRIVER=console override - unset it for real Twilio sends)'
         : mockRedirect
           ? ' (redirected to local fake-twilio on :8889 via --mock)'
-          : ' (REAL Twilio sends)'),
+          : isExplicitFalse(childEnv.SMS_SENDING_ENABLED)
+            ? ' (driver armed; SMS_SENDING_ENABLED=false - sends will be REFUSED until the A2P flip)'
+            : ' (REAL Twilio sends)'),
   );
   console.log(
     `       email:     ${emailDriver}` +
       (emailDriver === 'console'
         ? ' (simulated; --mock or EMAIL_DRIVER=console override)'
-        : ' (REAL SES sends)'),
+        : isExplicitFalse(childEnv.EMAIL_SENDING_ENABLED)
+          ? ' (driver armed; EMAIL_SENDING_ENABLED=false - sends will be REFUSED)'
+          : ' (REAL SES sends)'),
   );
   console.log('       logs:      messages here; full JSON saved to logs/dev-*.log (CloudWatch is the deployed server only)');
   console.log('       (`npm run dev -- --local` for the offline DynamoDB Local loop)');
@@ -426,15 +437,29 @@ if (mode === 'local') {
         // Absent names ride .InvalidParameters (aws still exits 0), so an
         // un-applied email-channel Terraform is otherwise SILENT here - name the
         // missing params + the consequence so the later config fast-fail is
-        // diagnosable. Params that DID come back are still injected above.
+        // diagnosable. Params that DID come back are still injected above. Split by
+        // basename: config's ses gate REQUIRES only EMAIL_SENDER_DOMAIN +
+        // EMAIL_FROM_ADDRESS (loadConfig throws without either); EMAIL_CONFIGURATION_SET
+        // is an OPTIONAL pass-through, so its absence is informational - NOT a
+        // refuse-to-start.
         const missingParams = parsed.InvalidParameters ?? [];
         if (missingParams.length > 0) {
-          const missingNames = missingParams.map((n) => String(n).split('/').pop()).join(', ');
-          console.warn(
-            `dev - SSM params missing: ${missingNames} - the app will REFUSE TO ` +
-              'START under EMAIL_DRIVER=ses (run --mock/--local, or set ' +
-              'EMAIL_DRIVER=console in .env, or apply the email-channel Terraform to dev).',
+          const missingBasenames = missingParams.map((n) => String(n).split('/').pop());
+          const missingRequired = missingBasenames.filter(
+            (n) => n === 'EMAIL_SENDER_DOMAIN' || n === 'EMAIL_FROM_ADDRESS',
           );
+          if (missingRequired.length > 0) {
+            console.warn(
+              `dev - SSM params missing: ${missingRequired.join(', ')} - the app will REFUSE TO ` +
+                'START under EMAIL_DRIVER=ses (run --mock/--local, or set ' +
+                'EMAIL_DRIVER=console in .env, or apply the email-channel Terraform to dev).',
+            );
+          } else {
+            console.warn(
+              'dev - optional EMAIL_CONFIGURATION_SET missing from SSM - bounce/complaint ' +
+                'events will not fan out; email still sends.',
+            );
+          }
         }
       } catch (ssmErr) {
         console.warn(

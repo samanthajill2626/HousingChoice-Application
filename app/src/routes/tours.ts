@@ -568,9 +568,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Reminder side effects after a successful patch, keyed on the EFFECTIVE
     // post-patch status — arming must never happen on a tour that is not live
     // (e.g. PATCH {scheduledAt, status:'canceled'} must not text "Your tour is
-    // confirmed" at the whole group), and marking 'toured' must cancel the
-    // still-pending rungs (a tenant who showed up must never get the
-    // no_show_checkin "you may have missed your tour" text).
+    // confirmed" at the whole group), and a terminal transition (toured / no_show
+    // / canceled / closed) must cancel the still-pending rungs (a tenant who
+    // showed up, or a tour flagged no-show, must never get a later "your tour is
+    // tomorrow" reminder).
     const effectiveStatus = (patch['status'] ?? currentStatus) as TourStatus;
     const armable = effectiveStatus === 'scheduled';
     // Re-arm on a time change, or on an explicit move INTO 'scheduled' (a
@@ -587,10 +588,14 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     } else if (
       effectiveStatus === 'canceled' ||
       effectiveStatus === 'closed' ||
-      effectiveStatus === 'toured'
+      effectiveStatus === 'toured' ||
+      effectiveStatus === 'no_show'
     ) {
-      // Dead or completed: nothing left to remind. (no_show keeps its pending
-      // no_show_checkin — the "want to reschedule?" nudge is exactly for it.)
+      // Dead, completed, or no-show: nothing left to auto-remind, so cancel any
+      // still-pending rungs. The no-show check-in is a MANUAL send from the tour
+      // page now (not an auto-armed rung), so a no_show tour has nothing to
+      // preserve - and canceling stops its day_before/morning_of/en_route from
+      // later firing "your tour is tomorrow" at a tour already flagged no-show.
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
       ladderChanged = true;
     }
@@ -865,26 +870,31 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Stamp the real groupThreadId over the claim sentinel.
     const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
 
-    // Tour-history milestone (tour-detail-page 1a): group-opened is a
-    // tours#-ONLY audit row (the tenant timeline + property card deliberately
-    // do NOT carry it - recordTourEvent is not used here). Best-effort: a
-    // failed write must never fail the provisioned 201. IDs only.
+    // Connect-when-ready (T6): the group may be CONNECTING (no number yet) rather
+    // than open - "opened" would be premature, so mark the audit/log accordingly.
+    const connecting = conversation.status === 'connecting';
+
+    // Tour-history milestone (tour-detail-page 1a): a tours#-ONLY audit row (the
+    // tenant timeline + property card deliberately do NOT carry it - recordTourEvent
+    // is not used here). Best-effort: a failed write must never fail the 201. IDs
+    // only. `connecting` distinguishes a deferred-open (connect-when-ready) group.
     try {
       await audit.append(`tours#${tourId}`, 'tour_group_opened', {
         tourId,
         conversationId: conversation.conversationId,
+        connecting,
         ...(actor !== undefined && { actor }),
       });
     } catch (err) {
-      log.error({ err, tourId }, 'tour_group_opened tour audit failed (best-effort)');
+      log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
     }
 
     // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
     events.emit('tour.updated', { tourId, status: updatedTour.status });
 
     log.info(
-      { tourId, conversationId: conversation.conversationId, memberCount: members.length },
-      'tour relay group provisioned',
+      { tourId, conversationId: conversation.conversationId, memberCount: members.length, connecting },
+      connecting ? 'tour relay group provisioned (connecting - awaiting number)' : 'tour relay group provisioned',
     );
     res.status(201).json({ tour: updatedTour, conversation });
   });

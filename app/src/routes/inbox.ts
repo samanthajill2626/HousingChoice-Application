@@ -84,7 +84,7 @@ export interface InboxRow {
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
-  status?: 'open' | 'closed'; // the relay group's lifecycle status
+  status?: 'open' | 'closed' | 'connecting'; // the relay group's lifecycle status (D9: connecting = awaiting its number)
   owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 
@@ -483,7 +483,10 @@ export async function aggregateInbox(
 
     const preview =
       typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '';
-    const status: 'open' | 'closed' = conv.status === 'closed' ? 'closed' : 'open';
+    // D9: surface the DISTINCT connecting state (never mis-bucket it as open) so
+    // the dashboard can render a "Connecting" affordance + queue on the composer.
+    const status: 'open' | 'closed' | 'connecting' =
+      conv.status === 'closed' ? 'closed' : conv.status === 'connecting' ? 'connecting' : 'open';
 
     return {
       kind: 'relay_group',
@@ -578,22 +581,30 @@ export async function aggregateInbox(
   // rest of the feed, which is open-only.
   let relayCount = 0;
   if (startKey === undefined) {
-    let relayResult: { items: ConversationItem[]; truncated: boolean };
-    try {
-      relayResult = await conversations.listRelayGroups('open');
-    } catch (err) {
-      log.warn({ err }, 'inbox: relay-group list failed (best-effort)');
-      relayResult = { items: [], truncated: false };
+    // Relay rows come from TWO status partitions now: OPEN groups AND CONNECTING
+    // groups (D9). A connect-when-ready group has no pool number yet but MUST be
+    // visible so staff can open it + queue messages on the composer - otherwise it
+    // is invisible until its warm number registers. Fetch both, merge, render.
+    const relayItems: ConversationItem[] = [];
+    let anyTruncated = false;
+    for (const relayStatus of ['open', 'connecting'] as const) {
+      try {
+        const res = await conversations.listRelayGroups(relayStatus);
+        relayItems.push(...res.items);
+        if (res.truncated) anyTruncated = true;
+      } catch (err) {
+        log.warn({ err, relayStatus }, 'inbox: relay-group list failed (best-effort)');
+      }
     }
-    if (relayResult.truncated) {
+    if (anyTruncated) {
       // No silent truncation — surface it (counts only; never a phone/body).
       log.warn(
-        { returned: relayResult.items.length },
+        { returned: relayItems.length },
         'inbox: relay-group list truncated by the page budget — some groups omitted',
       );
     }
     const relayRows: InboxRow[] = [];
-    for (const conv of relayResult.items) {
+    for (const conv of relayItems) {
       const row = await relayRowFor(conv);
       if (passesFilter(row)) relayRows.push(row);
     }

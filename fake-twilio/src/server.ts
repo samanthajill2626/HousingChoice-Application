@@ -142,8 +142,26 @@ export function buildFakeTwilioApp(deps: FakeTwilioAppDeps): Express {
   // Voice Intelligence REST surface (POST /v2/Transcripts + fetch/sentences) the app's
   // twilio client hits for transcription; a create schedules the signed JSON webhook.
   app.use(createIntelligenceRestRouter({ callEngine, serviceSid: deps.config.viServiceSid }));
-  // The control router mounts here with the same `engine` instance.
-  app.use(createControlRouter(engine));
+  // relay-number-buying T9: a dispatcher for the app's A2P Event Streams sink (POST
+  // /webhooks/twilio/events), constructed from the SAME config as the messaging/voice
+  // dispatchers so POST /control/register-number reaches the app's real address with
+  // the origin secret. Independent of the (possibly-injected) messaging engine's own
+  // private dispatcher, so it works whether or not `engine` was injected.
+  const eventsDispatcher = new WebhookDispatcher({
+    appBaseUrl: deps.config.appBaseUrl,
+    appPublicBaseUrl: deps.config.appPublicBaseUrl,
+    authToken: deps.config.authToken,
+    originSecret: deps.config.originSecret,
+  });
+  // The control router mounts here with the same `engine` instance. It also gets the
+  // SHARED pool-number registry (so /control/register-number finds the PN sid minted
+  // when the app provisioned the number - D2 correlation) + the events dispatcher.
+  app.use(
+    createControlRouter(engine, {
+      registry,
+      postEventsBatch: (path, batch) => eventsDispatcher.postEventsBatch(path, batch),
+    }),
+  );
   // The VOICE control router shares the `/control` prefix but owns DISJOINT
   // subpaths (`/control/place-call`, `/control/calls[...]`) — no collision with
   // the SMS control routes above. It drives the SAME CallEngine instance built

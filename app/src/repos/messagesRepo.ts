@@ -96,15 +96,31 @@ export type MessageAuthor = 'tenant' | 'landlord' | 'partner' | 'teammate' | 'ai
 
 /**
  * Outbound delivery status machine (doc §7.1):
- * queued → sent → delivered | undelivered | failed. Terminal states never
- * regress (a delivered message stays delivered).
+ * queued_pending -> queued -> sent -> delivered | undelivered | failed. Terminal
+ * states never regress (a delivered message stays delivered).
+ *
+ * 'queued_pending' (relay number buying strategy T7) is a PRE-queued hold: a team
+ * message composed on a CONNECTING relay group (one whose dedicated number is
+ * still warming/registering) is persisted queued_pending and sent to nobody. When
+ * relay.numberReady opens the group, flushQueuedMessages transitions each held
+ * message queued_pending -> queued and enqueues the normal relay fan-out. It is
+ * the earliest state - forward-only, so it can only move toward queued/sent.
  */
-export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
+export type DeliveryStatus =
+  | 'queued_pending'
+  | 'queued'
+  | 'sent'
+  | 'delivered'
+  | 'undelivered'
+  | 'failed';
 
 /** Statuses a given new status may overwrite — forward-only transitions. */
 const ALLOWED_PRIOR: Record<DeliveryStatus, DeliveryStatus[]> = {
-  queued: [],
-  sent: ['queued'],
+  queued_pending: [],
+  // queued_pending -> queued is the flush transition (T7): a held message enters
+  // the normal send path the instant its connecting group opens.
+  queued: ['queued_pending'],
+  sent: ['queued', 'queued_pending'],
   delivered: ['queued', 'sent'],
   undelivered: ['queued', 'sent'],
   failed: ['queued', 'sent'],

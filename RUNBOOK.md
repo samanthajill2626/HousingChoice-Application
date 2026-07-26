@@ -362,6 +362,89 @@ list in the Twilio console: A2P throughput and per-number cost scale with the
 number count, so confirm the sender pool shrank as expected and the campaign is
 still healthy.
 
+### Relay Event Streams sink (connect-when-ready readiness gate)
+
+The relay number buying strategy (T10) never sends from a pool number until
+Twilio confirms it is A2P-registered. That confirmation arrives as a Twilio
+**Event Streams** `com.twilio.messaging.compliance.number-registration.successful`
+event, POSTed to **`POST /webhooks/twilio/events`** (T3), which promotes the
+number `warming -> active` (and, for a `connecting` group, opens it + flushes the
+queued intro). This section wires the account-scoped Twilio Sink + Subscription
+that deliver those events.
+
+**Approach (why it is a script, not a Twilio Terraform resource).** `infra/` is
+AWS-only (`hashicorp/aws` + `hashicorp/random`); no Twilio provider is
+configured. Twilio's community TF provider (`RJPearson94/twilio`, v0.18.x) is in
+PILOT / unmaintained, pre-1.0, and has **no** Event Streams Sink/Subscription
+resources (verified 2026-07-21). So the REST work lives in an idempotent operator
+script, **`scripts/twilioEventsSink.mjs`** (`npm run twilio:events -- <env>`) -
+the same pattern as `scripts/twilioVi.mjs`. The **`infra/modules/twilio-events`**
+Terraform module wraps that script in a `terraform_data` `local-exec` so it is a
+per-env, wired-into-the-stack apply surface, **gated OFF by
+`local.twilio_events_enabled` (default `false`)** exactly like the acm /
+inbound_mail phase gates - a normal `npm run apply` provisions nothing here and
+needs no Twilio creds. (Eventual full Twilio IaC is tracked in
+`docs/issues/twilio-config-into-terraform.md`.) **dev and prod get DISTINCT sinks**
+(Event Streams config is account-scoped; each is keyed by the
+`hc-<env>-relay-events` description).
+
+**This is an OPERATOR step** - `terraform apply` (or the standalone script) +
+`secrets:push` - gated by the repo's no-infra-without-explicit-ask rule. Do not
+run it as part of ordinary development.
+
+**Apply ORDER (do these in sequence - the sink must exist and validate BEFORE any
+number warms, so the readiness gate is live before it is needed):**
+
+1. **Deploy the shared secret to the app FIRST.** Uncomment + set
+   `TWILIO_EVENTS_WEBHOOK_SECRET` in `.env.<env>` (a URL-safe / alphanumeric
+   random value), then land it and make it live:
+   ```powershell
+   npm run secrets:push -- <env>     # -> SecureString /hc/<env>/app/TWILIO_EVENTS_WEBHOOK_SECRET
+   npm run deploy:<env>              # hydrates it onto the instance (re-deploy current DEPLOYED_TAG is fine)
+   ```
+   The app must already know the secret because Twilio **validates** a new webhook
+   sink by POSTing to the destination; the handler compares the forwarded
+   password to `config.twilioEventsWebhookSecret`, so a sink created before the
+   app knows the secret fails validation (never reaches `status=active`).
+2. **Create the Sink + Subscription.** Either via Terraform (flip
+   `local.twilio_events_enabled = true` in `infra/envs/<env>/main.tf`, then
+   `npm run plan -- <env>` and, after review, `npm run apply -- <env>`), or
+   standalone (`npm run twilio:events -- <env>`). Both read the Twilio account
+   creds (`TWILIO_ACCOUNT_SID` + `TWILIO_AUTH_TOKEN`) and the **same**
+   `TWILIO_EVENTS_WEBHOOK_SECRET` from `.env.<env>` and embed that secret in the
+   sink URL user-info (`https://twilio-events:<secret>@<host>/webhooks/twilio/events`);
+   Twilio forwards it as `Authorization: Basic`. The destination host is the
+   env's **canonical CloudFront-fronted host** (dev.app.housingchoice.org /
+   app.housingchoice.org) - CloudFront stamps the `x-origin-verify` origin secret
+   transparently, so Twilio needs only the Basic-auth secret. The script is
+   idempotent (re-running finds the existing sink by description and does not
+   duplicate).
+3. **Only now flip `RELAY_LIVE_PROVISIONING=true`** (`secrets:push` + deploy - see
+   [Relay number release](#relay-number-release-relay_number_release_enabled) for
+   the flag mechanics) so numbers begin warming. Because the sink already exists,
+   the very first warmed number's registration event has somewhere to land.
+
+**Verify a live event.** With the sink `active` and `RELAY_LIVE_PROVISIONING` on,
+warm a number (open a relay group text for a fresh pair, or let the buffer refill)
+and confirm it promotes `warming -> active`: watch the `pool_numbers` item flip
+`lifecycle_state`, or watch a `connecting` group open + its intro deliver, or read
+the **Twilio Console -> Monitor -> Event Streams** delivery logs for the
+`hc-<env>-relay-events` sink (each POST shows a 200 from our endpoint).
+`npm run twilio:events -- <env> --check` is a read-only report of the current
+Sink/Subscription + any drift (exit 2 on drift).
+
+**Changing or tearing down.** The webhook Sink configuration is **immutable** in
+the Event Streams API. To change the destination host or the event-type set,
+delete and recreate: `npm run twilio:events -- <env> --destroy` (deletes the
+Subscription then the Sink; missing = no-op) then re-create, or - under Terraform
+- a change to the module inputs **replaces** the `terraform_data` resource
+(destroy provisioner deletes the old sink, create makes the new one). Setting
+`local.twilio_events_enabled = false` + apply also runs the best-effort teardown
+(it is `on_failure = continue`, so a Twilio hiccup never blocks the AWS
+`destroy`). If a rotated secret must reach both sides: `secrets:push` + deploy the
+new `TWILIO_EVENTS_WEBHOOK_SECRET`, then `--destroy` + recreate the sink so its
+embedded user-info matches.
+
 ### Users & access (invite-first)
 
 Access is **invite-first** (operator decision 2026-06-12, README deviations). A Google login

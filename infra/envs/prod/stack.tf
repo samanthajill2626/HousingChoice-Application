@@ -157,6 +157,25 @@ module "observability" {
   jobs_dlq_name      = module.jobs.dlq_name
 }
 
+# Relay Event Streams sink (T10, relay number buying strategy). The Twilio
+# webhook Sink + Subscription that promote a warming pool number to active on
+# the A2P number-registration event (connect-when-ready). INERT unless
+# local.twilio_events_enabled (the acm/inbound_mail phase-gate pattern) - a
+# normal apply provisions nothing here and needs no Twilio creds. NOT a Twilio TF
+# provider (none exists; the community one lacks Event Streams resources): a
+# local-exec invokes the idempotent scripts/twilioEventsSink.mjs. See the module
+# header + RUNBOOK "Relay Event Streams sink".
+module "twilio_events" {
+  source = "../../modules/twilio-events"
+
+  env      = local.env
+  enabled  = local.twilio_events_enabled
+  app_host = local.custom_domain
+  # webhook_secret left as the module default ("") so the script reads
+  # TWILIO_EVENTS_WEBHOOK_SECRET from .env.<env> at exec time - keeping the secret
+  # OUT of Terraform state. See the module's webhook_secret variable docs.
+}
+
 module "budget" {
   source = "../../modules/budget"
 

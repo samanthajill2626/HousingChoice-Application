@@ -183,6 +183,7 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
+    assignPoolNumberAndOpen: async () => undefined,
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,

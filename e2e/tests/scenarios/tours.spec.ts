@@ -32,6 +32,7 @@ import {
   freshTenant,
   tourSchedule,
   justAfter,
+  TOUR_REMINDER_BODIES,
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
@@ -239,7 +240,7 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   await flow.teamMarksToured();
 });
 
-test('no-show: booked (no group → 1:1 fallback) → check-in fires → logged no-show → rescheduled (ladder re-arms)', async ({
+test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged no-show -> rescheduled (ladder re-arms)', async ({
   page,
   request,
 }) => {
@@ -259,10 +260,11 @@ test('no-show: booked (no group → 1:1 fallback) → check-in fires → logged 
   await flow.tickTourReminders();
   await flow.expectReminderTo1to1('confirmation', tenant);
 
-  // The tenant never shows: 30m past the booked time the [AUTO] no-show
-  // check-in asks about rescheduling (earlier rungs ride along, unasserted).
+  // The tenant never shows. The no-show check-in is no longer auto-armed - it is
+  // a MANUAL send now (tour-no-show-checkin.spec.ts), so ticking past its OLD due
+  // time fires the earlier rungs (unasserted) but never the check-in body.
   await flow.tickTourReminders(justAfter(times.noShowCheckin));
-  await flow.expectReminderTo1to1('no_show_checkin', tenant);
+  await flow.expectNoOutboxMessageContaining(tenant, TOUR_REMINDER_BODIES.no_show_checkin);
 
   // Team logs the no-show, then reschedules — no-show tours stay reschedulable,
   // and rescheduling cancels + RE-ARMS the ladder off the new time: a FRESH

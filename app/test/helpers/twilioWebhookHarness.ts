@@ -472,12 +472,18 @@ export function createFakeWorld(): FakeWorld {
           : typeof placementId === 'string' && placementId.length > 0
             ? { type: 'placement', id: placementId }
             : { type: null };
+      // Connect-when-ready (T6): no pool number => CONNECTING (no pool_number /
+      // participant_phone until assignPoolNumberAndOpen stamps it).
+      const connecting = poolNumber === undefined;
+      const status = connecting ? 'connecting' : 'open';
       const item: ConversationItem = {
         conversationId: `conv-${++convCounter}`,
-        participant_phone: poolNumber,
-        pool_number: poolNumber,
-        status: 'open',
-        relay_status: 'relay_group#open', // byRelayStatus GSI HASH (fidelity)
+        ...(poolNumber !== undefined && {
+          participant_phone: poolNumber,
+          pool_number: poolNumber,
+        }),
+        status,
+        relay_status: `relay_group#${status}`, // byRelayStatus GSI HASH (fidelity)
         last_activity_at: now,
         type: 'relay_group',
         ai_mode: 'manual',
@@ -563,6 +569,21 @@ export function createFakeWorld(): FakeWorld {
       // W3: a reopen (-> open) clears the close-announce marker (folded into the
       // flip in the real repo) so a future close re-announces.
       if (status === 'open') delete conv.close_announced_at;
+      return conv;
+    },
+    async assignPoolNumberAndOpen(conversationId, poolNumber) {
+      // Connect-when-ready assign (T6 / G3): flip connecting -> open + stamp the
+      // number, CONDITIONAL on the group still being connecting (atomic-faithful:
+      // synchronous check-and-set). A redelivery (already open) is a no-op
+      // (undefined) so the intro is enqueued exactly once.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.status !== 'connecting' || conv.relay_status !== 'relay_group#connecting') {
+        return undefined;
+      }
+      conv.pool_number = poolNumber;
+      conv.participant_phone = poolNumber;
+      conv.status = 'open';
+      conv.relay_status = 'relay_group#open';
       return conv;
     },
     async claimCloseAnnounce(conversationId) {
@@ -2301,6 +2322,12 @@ export function createFakeWorld(): FakeWorld {
     async releasePhoneNumber() {
       // no-op fake
     },
+    async attachToMessagingService() {
+      // no-op fake
+    },
+    async detachFromMessagingService() {
+      // no-op fake
+    },
     async initiateCall(params) {
       // Voice (M1.9a): record the origination + return a deterministic fake
       // CallSid. The inbound masked bridge answers with TwiML (no initiateCall),
@@ -2711,6 +2738,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),
+      // relay-number-buying T3: the Event Streams sink router (POST
+      // /webhooks/twilio/events) promotes a warming pool number on registration.
+      ...(opts.poolNumbersService !== undefined && {
+        poolNumbersService: opts.poolNumbersService,
+      }),
     },
   });
   return { app, world, capture, config, fakeUsers };
@@ -2769,6 +2801,96 @@ export function signedJsonPost(
     req = req.set('x-twilio-signature', opts.tamper ? `${signature}TAMPERED` : signature);
   }
   return req.send(raw);
+}
+
+// ---------------------------------------------------------------------------
+// Twilio Event Streams A2P number-registration (relay-number-buying T3/T9). One
+// shared batch builder + POST helper so the T3 unit tests and the T12 e2e-support
+// (fake-twilio's POST /control/register-number mirrors this shape) drive the SAME
+// CloudEvents envelope - keeping the app<-fake integration seam honest.
+// ---------------------------------------------------------------------------
+
+/** CloudEvents `type` (schema v1) for a successful A2P number-registration (D3). */
+export const REGISTRATION_SUCCESS_TYPE =
+  'com.twilio.messaging.compliance.number-registration.successful';
+
+/**
+ * Build ONE Twilio Event Streams CloudEvents envelope for an A2P number-registration.
+ * The `data` field names are concatenated-lowercase (D1) - `phonenumbersid` is the
+ * correlation key the app keys on (D2). `type` defaults to the success type; pass it
+ * to exercise pending / failed / de-registration variants.
+ */
+export function registrationEvent(over: {
+  phonenumbersid: string;
+  phonenumber?: string;
+  messagingservicesid?: string;
+  type?: string;
+}): unknown {
+  const now = new Date().toISOString();
+  return {
+    specversion: '1.0',
+    type: over.type ?? REGISTRATION_SUCCESS_TYPE,
+    source: '/2010-04-01/Accounts/ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+    id: `CE${over.phonenumbersid}`,
+    dataschema: 'https://events-schemas.twilio.com/Messaging.ComplianceNumberRegistration/1',
+    datacontenttype: 'application/json',
+    time: now,
+    data: {
+      accountsid: 'ACxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx',
+      timestamp: now,
+      phonenumbersid: over.phonenumbersid,
+      ...(over.phonenumber !== undefined && { phonenumber: over.phonenumber }),
+      ...(over.messagingservicesid !== undefined && {
+        messagingservicesid: over.messagingservicesid,
+      }),
+    },
+  };
+}
+
+/**
+ * POST a raw CloudEvents batch (JSON array, D3) to the events sink with the origin
+ * secret. The events sink authorizes by shared secret / origin-verify (D4 pragmatic
+ * form), NOT X-Twilio-Signature - so no signing here; pass `authorization` to
+ * exercise the configured-shared-secret path.
+ */
+export function postEvents(
+  app: Express,
+  batch: unknown,
+  opts: { authorization?: string } = {},
+): Test {
+  let req = request(app)
+    .post('/webhooks/twilio/events')
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('content-type', 'application/json');
+  if (opts.authorization !== undefined) req = req.set('authorization', opts.authorization);
+  return req.send(JSON.stringify(batch));
+}
+
+/**
+ * Drive a warming pool number toward `active` through the REAL events webhook: POST a
+ * one-event registration-SUCCESS batch carrying its PN sid (D2). The convenience over
+ * registrationEvent+postEvents that fake-twilio's /control/register-number mirrors -
+ * one shared entry point for unit + e2e-support. Returns the supertest Test.
+ */
+export function emitNumberRegistered(
+  app: Express,
+  opts: {
+    phoneNumber: string;
+    phoneNumberSid: string;
+    messagingServiceSid?: string;
+    authorization?: string;
+  },
+): Test {
+  const batch = [
+    registrationEvent({
+      phonenumbersid: opts.phoneNumberSid,
+      phonenumber: opts.phoneNumber,
+      ...(opts.messagingServiceSid !== undefined && {
+        messagingservicesid: opts.messagingServiceSid,
+      }),
+    }),
+  ];
+  return postEvents(app, batch, opts.authorization !== undefined ? { authorization: opts.authorization } : {});
 }
 
 /** Standard inbound SMS webhook params (Programmable Messaging shape). */

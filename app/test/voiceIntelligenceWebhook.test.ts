@@ -58,28 +58,38 @@ describe('VI completion webhook - POST /voice/intelligence (voice-transcription 
     expect(res.status).toBe(403);
   });
 
-  it('acks (200) a SIGNED JSON event without transcript_sid and logs its top-level KEY NAMES only (never values)', async () => {
+  it('acks (200) a SIGNED VI event envelope without transcript_sid, INFO-logs its eventType VALUE + key NAMES, never data values', async () => {
     // vi-webhook-unrecognized-event-400: Twilio sends signed VI events beyond
     // the transcript-completed shape; a 400 makes it RETRY them forever (the
-    // observed noise loop). Signed + object + no transcript_sid -> ack 200 and
-    // log the key names so the event identifies itself next time.
+    // observed noise loop). These arrive in Twilio's nested envelope
+    // `{ eventType, timestamp, data }` (confirmed live on dev) and are not tied
+    // to any of our calls -> ack 200, INFO (not WARN - it is a chosen-to-ignore
+    // event, not a fault), and log the eventType VALUE (a bounded Twilio enum,
+    // safe) + top-level and `data` KEY NAMES so the event finally identifies
+    // itself. data VALUES may carry call content and must never be logged.
     const world = createFakeWorld();
     const { app, capture } = await seedFounderBridge(world);
     const res = await signedJsonPost(app, VI_PATH, {
-      event_type: 'mystery_event',
-      service_sid: 'GAfake',
-      secret_value: 'NEVER-LOGGED',
+      eventType: 'voice_intelligence_transcript_available',
+      timestamp: '2026-07-21T20:00:00Z',
+      data: { transcript_sid_but_nested: 'GTnested', secret_value: 'NEVER-LOGGED' },
     });
     expect(res.status).toBe(200);
     const line = capture.lines.find((l) =>
-      String(l['msg']).includes('unrecognized signed event'),
+      String(l['msg']).includes('known non-transcript VI event'),
     )!;
     expect(line).toBeDefined();
-    expect(line['keys']).toEqual(['event_type', 'service_sid', 'secret_value']);
+    // Not an alertable fault: INFO, never WARN/ERROR.
+    expect(line['level']).toBe(30);
+    // eventType VALUE is logged (the whole point - identify the event).
+    expect(line['eventType']).toBe('voice_intelligence_transcript_available');
+    expect(line['keys']).toEqual(['eventType', 'timestamp', 'data']);
     expect(line['keyCount']).toBe(3);
-    // PII rule: key NAMES only - no value from the body may appear in the log.
+    // data KEY NAMES surface (so a nested sid location is discoverable)...
+    expect(line['dataKeys']).toEqual(['transcript_sid_but_nested', 'secret_value']);
+    // ...but no data VALUE ever appears in the log.
     expect(JSON.stringify(capture.lines)).not.toContain('NEVER-LOGGED');
-    expect(JSON.stringify(capture.lines)).not.toContain('mystery_event');
+    expect(JSON.stringify(capture.lines)).not.toContain('GTnested');
   });
 
   it('an ARRAY body (signed, parseable, not our shape) is acked too - the 400 branch stays for unparseable bodies only', async () => {

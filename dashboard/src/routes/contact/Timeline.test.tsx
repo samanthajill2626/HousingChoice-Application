@@ -688,6 +688,25 @@ describe('Timeline', () => {
   });
 });
 
+describe('Timeline initialDraft seed (manual no-show check-in prefill)', () => {
+  const SEED = 'Hi! We noticed you may have missed your tour. Want to reschedule?';
+
+  it('seeds the composer from initialDraft and fires onDraftSeeded exactly once', () => {
+    const onDraftSeeded = vi.fn();
+    renderTimeline({ initialDraft: SEED, onDraftSeeded });
+    const box = screen.getByRole('textbox', { name: 'Reply message' });
+    expect(box).toHaveValue(SEED);
+    expect(onDraftSeeded).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not seed the composer or fire onDraftSeeded when initialDraft is absent', () => {
+    const onDraftSeeded = vi.fn();
+    renderTimeline({ onDraftSeeded });
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+    expect(onDraftSeeded).not.toHaveBeenCalled();
+  });
+});
+
 describe('Timeline relay-group annotations', () => {
   const ROSTER = [
     { contactId: 'c1', phone: '+14045550111', name: 'Keisha Kane' },
@@ -805,6 +824,27 @@ describe('Timeline relay-group annotations', () => {
     renderTimeline({ items: [RELAY_OUT], relayRoster: ROSTER });
     const chip = screen.getByText('delivered 1/2');
     expect(chip.className).toMatch(/toneNeutral/);
+  });
+
+  it('renders a "Queued - will send when connected" chip for a queued_pending message', () => {
+    // Connect-when-ready (T7): a team compose on a CONNECTING group is held as
+    // delivery_status 'queued_pending' with pre-seeded 'queued' member slots. The
+    // held state must show its own "Queued" chip - NOT a "delivered 0/2" rollup off
+    // those placeholder slots (which would read like a stalled/failed send).
+    const queued: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'rq',
+      tsMsgId: 'rq',
+      delivery_status: 'queued_pending',
+      body: 'Held until the group connects',
+      delivery_recipients: {
+        c1: { status: 'queued' },
+        c2: { status: 'queued' },
+      },
+    };
+    renderTimeline({ items: [queued], relayRoster: ROSTER });
+    expect(screen.getByText('Queued - will send when connected')).toBeInTheDocument();
+    expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
   });
 
   it('attributes an inbound relay bubble to the sending member', () => {

@@ -207,6 +207,11 @@ export interface TimelineProps {
   /** Relay group is closed — show a standing note at the composer (sending is
    *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
   relayClosed?: boolean;
+  /** Relay group is CONNECTING (connect-when-ready, T7): its number is still
+   *  warming / A2P-registering. Unlike relayClosed the composer stays ENABLED
+   *  (canSend=true) - a send is HELD (queued_pending) and flushes when the group
+   *  connects. Shows a standing "queued" note at the composer. */
+  relayConnecting?: boolean;
   /** A stable id for the conversation/contact this timeline shows (contactId or
    *  conversationId). When it changes the stream is treated as a FRESH timeline —
    *  jump to the newest item, no "new messages" pill — so switching conversations
@@ -233,6 +238,15 @@ export interface TimelineProps {
     /** Contact is suppressed for email (opt-out/unreachable) - standing note. */
     suppressed?: boolean;
   };
+  /** Seed the composer textarea with this body ON MOUNT ONLY (read by the draft
+   *  useState initializer). Used by the tour page's "Send no-show check-in" to
+   *  prefill the tenant 1:1 composer with the editable template. Changing it
+   *  after mount is inert, so the parent can clear its seed (see onDraftSeeded)
+   *  without wiping an in-progress draft. */
+  initialDraft?: string;
+  /** Fired once, on mount, iff initialDraft was a non-empty string. Lets the
+   *  parent clear its seed so a later remount of this timeline does not re-seed. */
+  onDraftSeeded?: () => void;
 }
 
 /** The relay member key convention (MIRRORS app relayMemberKey): the member's
@@ -457,9 +471,12 @@ function MessageBubble({
   // as ONE rollup chip (counting up while in flight, green "Delivered N/N" once
   // every leg delivered, danger when a leg hard-fails) from the SAME map the
   // opted-out note reads. GUARDED to relay + outbound so a 1:1 bubble (no
-  // delivery_recipients) is visually unchanged.
+  // delivery_recipients) is visually unchanged. A `queued_pending` HOLD (T7) is
+  // EXCLUDED: its per-member slots are pre-seeded 'queued' placeholders (nothing
+  // was fanned out), so a rollup would read as a misleading "delivered 0/N" - the
+  // message's own "Queued - will send when connected" chip is the honest state.
   const deliveredSummary =
-    outbound && msg.delivery_recipients
+    outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(Object.values(msg.delivery_recipients))
       : null;
   // Relay attribution: who authored this relayed message ("Team" or a member's
@@ -776,6 +793,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     clearDraftSignal,
     relayRoster,
     relayClosed,
+    relayConnecting,
     resetScrollKey,
     emptyLabel,
   } = props;
@@ -788,7 +806,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   const showChannelToggle = emailChannel !== undefined && relayRoster === undefined;
   const effectiveChannel: 'text' | 'email' = showChannelToggle && hasEmail ? channel : 'text';
   const [commsOnly, setCommsOnly] = useState(false);
-  const [draft, setDraft] = useState('');
+  const [draft, setDraft] = useState(props.initialDraft ?? '');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   // Outbound MMS attachments. Component-local state (like `draft`) so the tour
@@ -826,6 +844,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       setAttachError(null);
     }
   }, [clearDraftSignal]);
+
+  // Seed announcement: if we mounted with a non-empty initialDraft, tell the
+  // parent once so it can clear its seed (a later remount must start empty).
+  // Mount-only (empty deps): initialDraft is read by the draft useState above; we
+  // never re-seed on prop changes, so changing initialDraft after mount is inert.
+  useEffect(() => {
+    if (props.initialDraft !== undefined && props.initialDraft.length > 0) {
+      props.onDraftSeeded?.();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Upload ONE picked file, reconciling its chip by localId as it completes.
   // Direct-to-S3 flow (spec Sec 4): presign mints a grant, the browser POSTs the
@@ -1235,6 +1264,11 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
         {relayClosed ? (
           <p className={styles.optOutNote} role="note">
             🔒 This group is closed — reopen it to send.
+          </p>
+        ) : null}
+        {relayConnecting ? (
+          <p className={styles.optOutNote} role="note">
+            Queued - messages will send when the group connects.
           </p>
         ) : null}
         <label className={styles.srOnly} htmlFor="reply-box">

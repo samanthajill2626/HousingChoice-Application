@@ -1656,25 +1656,39 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     const transcriptSid = (req.body as { transcript_sid?: unknown } | undefined)?.transcript_sid;
     if (typeof transcriptSid !== 'string' || transcriptSid.length === 0) {
       // vi-webhook-unrecognized-event-400: Twilio sends SIGNED VI events beyond
-      // the transcript-completed shape we process (observed live 2026-07-20:
-      // ~1.4KB JSON bodies with no top-level transcript_sid, retried on every
-      // 4xx - a noise loop). The signature middleware already proved the sender,
-      // so for a JSON OBJECT we don't recognize: log the top-level KEY NAMES
-      // only (bounded, never values - PII rule) so the next occurrence
-      // identifies its event type, and ack 200 so Twilio stops retrying an
-      // event we have chosen not to process. A shapeless (non-object) body
-      // keeps the 400.
+      // the transcript-completed shape we process. Observed live on dev: these
+      // arrive in Twilio's nested event envelope `{ eventType, timestamp, data }`
+      // (NOT our top-level transcript_sid shape - that variant still works and
+      // fast-persists), and are NOT correlated with any of our calls/transcripts
+      // (no recording callback or inline create precedes them), so nothing is
+      // lost by ignoring them. The signature middleware already proved the
+      // sender; we ack 200 so Twilio stops retrying, and log - PII-safe - the
+      // `eventType` VALUE (a bounded Twilio enum, never call content) plus the
+      // top-level and `data` KEY NAMES so the event type is finally identifiable.
+      // This is deliberately INFO, not WARN: it is a known, chosen-to-ignore
+      // event, not an alertable fault. A shapeless (non-object) body keeps 400.
       const body: unknown = req.body;
       if (typeof body === 'object' && body !== null) {
-        const keys = Object.keys(body as Record<string, unknown>);
-        log.warn(
+        const obj = body as Record<string, unknown>;
+        const keys = Object.keys(obj);
+        // eventType is a Twilio event enum (e.g. voice_intelligence_*), safe to
+        // log by value; data key NAMES only (values may carry call content).
+        const eventType = typeof obj['eventType'] === 'string' ? (obj['eventType'] as string) : null;
+        const dataVal = obj['data'];
+        const dataKeys =
+          typeof dataVal === 'object' && dataVal !== null
+            ? Object.keys(dataVal as Record<string, unknown>).slice(0, 32)
+            : null;
+        log.info(
           {
             hasTranscriptSid: false,
+            eventType,
             keyCount: keys.length,
             keys: keys.slice(0, 32),
+            dataKeys,
             contentLength: req.headers['content-length'] ?? null,
           },
-          'vi webhook: unrecognized signed event (no transcript_sid) - acked and ignored',
+          'vi webhook: known non-transcript VI event (no transcript_sid) - acked and ignored',
         );
         res.status(200).end();
         return;

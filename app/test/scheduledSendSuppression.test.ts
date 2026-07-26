@@ -130,6 +130,7 @@ function makeSendFakes(
     addMember: async () => conversation,
     removeMember: async () => conversation,
     setRelayStatus: async () => conversation,
+    assignPoolNumberAndOpen: async () => undefined,
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,
@@ -208,6 +209,8 @@ function makeSendFakes(
     }),
     setVoiceWebhook: async () => {},
     releasePhoneNumber: async () => {},
+    attachToMessagingService: async () => {},
+    detachFromMessagingService: async () => {},
     initiateCall: async () => ({ callSid: 'CAfake-sm' }),
     createViTranscript: async () => {
       throw new Error('not used');

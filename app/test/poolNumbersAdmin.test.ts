@@ -37,7 +37,7 @@ interface GroupRowView {
 }
 interface NumberRowView {
   number: string;
-  state: 'active' | 'releasing' | 'released';
+  state: 'active' | 'warming' | 'releasing' | 'released';
   openGroups: number;
   totalGroups: number;
   burnedCount: number;
@@ -46,6 +46,7 @@ interface NumberRowView {
   releasedAt?: string;
   retire: { eligible: boolean; daysRemaining?: number };
   groups: GroupRowView[];
+  pendingConversationId?: string;
 }
 
 const SECRET = ORIGIN_SECRET;
@@ -113,6 +114,41 @@ function makeFakePoolRepo(
     },
     async releaseNumber() {
       return undefined;
+    },
+    async createWarming() {
+      throw new Error('createWarming: not used by the read-only admin route');
+    },
+    async promoteToActive() {
+      return false;
+    },
+    async listWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming');
+    },
+    async findWarmingBySid(sid) {
+      return [...store.values()].find((i) => i.lifecycle_state === 'warming' && i.sid === sid);
+    },
+    async countFreshSpares() {
+      return [...store.values()].filter((i) => {
+        if (i.lifecycle_state !== 'active') return false;
+        const burned = i.burned_phones;
+        const burnedCount =
+          burned instanceof Set ? burned.size : Array.isArray(burned) ? burned.length : 0;
+        return burnedCount === 0 && i.pending_conversation_id === undefined;
+      }).length;
+    },
+    async countWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
+    },
+    async findByPendingConversationId(conversationId) {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber) {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
     },
   };
 }
@@ -277,6 +313,55 @@ describe('GET /api/pool-numbers - retire mirror (injected clock)', () => {
     expect(row?.state).toBe('released');
     expect(row?.releasedAt).toBe(releasedAt);
     expect(row?.retire.eligible).toBe(false);
+  });
+});
+
+describe('GET /api/pool-numbers - warming numbers', () => {
+  it('includes a warming (pre-registration) number as a state:warming row with no groups', async () => {
+    const pn = '+15551239300';
+    // A warming record: bought + attached, awaiting the A2P registration event. It
+    // has no groups and is never retirement-eligible (mirror requires 'active').
+    const pool = makeFakePoolRepo([
+      poolItem(pn, {
+        lifecycle_state: 'warming',
+        warming_started_at: '2026-07-18T00:00:00.000Z',
+        sid: 'PN0001',
+      }),
+    ]);
+    const { app } = makeWebhookHarness({ world: createFakeWorld(), poolNumbersRepo: pool });
+
+    const res = await getAdmin(app);
+    expect(res.status).toBe(200);
+    const row = numbersOf(res).find((n) => n.number === pn);
+    expect(row).toBeDefined();
+    expect(row?.state).toBe('warming');
+    expect(row?.openGroups).toBe(0);
+    expect(row?.totalGroups).toBe(0);
+    expect(row?.retire).toEqual({ eligible: false });
+    // A plain warming spare (no earmark) exposes no pendingConversationId.
+    expect(row?.pendingConversationId).toBeUndefined();
+  });
+
+  it('surfaces pendingConversationId for a warming number earmarked to a connecting group', async () => {
+    const pn = '+15551239301';
+    // A connect-when-ready warm: bought + attached, earmarked to the connecting
+    // group it will open. The earmark lets ops (and the e2e fixture) correlate a
+    // warming number to its group before it opens.
+    const pool = makeFakePoolRepo([
+      poolItem(pn, {
+        lifecycle_state: 'warming',
+        warming_started_at: '2026-07-18T00:00:00.000Z',
+        sid: 'PN0002',
+        pending_conversation_id: 'conv-connecting-1',
+      }),
+    ]);
+    const { app } = makeWebhookHarness({ world: createFakeWorld(), poolNumbersRepo: pool });
+
+    const res = await getAdmin(app);
+    expect(res.status).toBe(200);
+    const row = numbersOf(res).find((n) => n.number === pn);
+    expect(row?.state).toBe('warming');
+    expect(row?.pendingConversationId).toBe('conv-connecting-1');
   });
 });
 
@@ -485,6 +570,41 @@ function makeReleasableFakeRepo(
       item.lifecycle_state = 'released';
       item.released_at = new Date().toISOString();
       return item;
+    },
+    async createWarming() {
+      throw new Error('createWarming: not used by the parity sweep');
+    },
+    async promoteToActive() {
+      return false;
+    },
+    async listWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming');
+    },
+    async findWarmingBySid(sid) {
+      return [...store.values()].find((i) => i.lifecycle_state === 'warming' && i.sid === sid);
+    },
+    async countFreshSpares() {
+      return [...store.values()].filter((i) => {
+        if (i.lifecycle_state !== 'active') return false;
+        const burned = i.burned_phones;
+        const burnedCount =
+          burned instanceof Set ? burned.size : Array.isArray(burned) ? burned.length : 0;
+        return burnedCount === 0 && i.pending_conversation_id === undefined;
+      }).length;
+    },
+    async countWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
+    },
+    async findByPendingConversationId(conversationId) {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber) {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
     },
   };
 }

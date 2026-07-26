@@ -76,4 +76,26 @@ export class WebhookDispatcher {
     });
     return res.status;
   }
+
+  /**
+   * POST a CloudEvents batch (the A2P Event Streams number-registration signal,
+   * relay-number-buying T9) to the app's events sink as raw JSON. Carries
+   * content-type application/json + the x-origin-verify origin secret, but NO
+   * X-Twilio-Signature: the events sink authorizes by a shared secret / origin-verify
+   * (app T3's pragmatic auth form), NOT the classic form-signature scheme - so this
+   * deliberately skips the signing path used by post()/postJson(). Returns the
+   * response status (fire-and-read; the caller maps a non-2xx to an error).
+   */
+  async postEventsBatch(path: string, batch: unknown): Promise<number> {
+    const res = await fetch(`${this.deps.appBaseUrl}${path}`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-origin-verify': this.deps.originSecret ?? 'dev-placeholder-not-a-secret',
+      },
+      body: JSON.stringify(batch),
+      signal: AbortSignal.timeout(5000),
+    });
+    return res.status;
+  }
 }

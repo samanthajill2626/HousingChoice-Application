@@ -480,14 +480,13 @@ describe('matrix coherence: the load-bearing live-fire invariant', () => {
     }
   });
 
-  it('no_show tours carry a sent no_show_checkin at scheduledAt + 30m', () => {
+  it('no_show tours carry NO no_show_checkin rung (manual-send only)', () => {
     const noShows = TOURS.filter((t) => tourStatusOf(t) === 'no_show');
     expect(noShows.length).toBeGreaterThanOrEqual(2);
     for (const t of noShows) {
+      // De-armed: the no-show check-in is a manual send, not a seeded rung.
       const nsc = remindersOf(t['tourId'] as string).find((r) => r['kind'] === 'no_show_checkin');
-      expect(nsc, `no_show ${t['tourId']} must have a no_show_checkin`).toBeDefined();
-      expect(nsc!['sentAt'], `no_show_checkin ${t['tourId']} must be sent`).toBeDefined();
-      expect(ms(nsc!['dueAt']) - ms(t['scheduledAt']), `no_show_checkin dueAt offset`).toBe(30 * 60 * 1000);
+      expect(nsc, `no_show ${t['tourId']} must have no no_show_checkin rung`).toBeUndefined();
     }
   });
 });

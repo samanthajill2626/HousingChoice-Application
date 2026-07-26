@@ -1245,6 +1245,76 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     attachments: MediaAttachment[] | undefined,
   ): Promise<void> {
     const conversationId = conversation.conversationId;
+
+    // Connect-when-ready intercept (T7): a CONNECTING relay group has no pool
+    // number yet (its dedicated number is still warming/A2P-registering), so it
+    // cannot send. Rather than reject the compose (which would DROP the message),
+    // PERSIST it as delivery_status 'queued_pending' and hold it. When
+    // relay.numberReady opens the group, flushQueuedMessages fans these out - in
+    // created_at order, right AFTER the intro. A queued message must never be
+    // lost. No provider send + NO fan-out enqueue happens here. Mirrors the open
+    // team-send append below (same TEAM sentinel + seeded per-member slots) so the
+    // fan-out has a parent delivery_recipients map to write into once it runs.
+    if (conversation.status === 'connecting') {
+      const connectingRoster = conversation.participants ?? [];
+      const queuedRecipients: Record<string, RelayRecipientDelivery> = {};
+      for (const member of connectingRoster) {
+        queuedRecipients[relayMemberKey(member)] = { status: 'queued' };
+      }
+      const queuedTs = new Date().toISOString();
+      const queuedSid = `team-${randomUUID()}`;
+      const queuedAppended = await messages.append({
+        conversationId,
+        providerSid: queuedSid,
+        providerTs: queuedTs,
+        type:
+          (mediaUrlList !== undefined && mediaUrlList.length > 0) ||
+          (attachments !== undefined && attachments.length > 0)
+            ? 'mms'
+            : 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        deliveryStatus: 'queued_pending',
+        relaySenderKey: TEAM_SENDER_KEY,
+        deliveryRecipients: queuedRecipients,
+        ...(bodyText !== undefined && { body: bodyText }),
+        ...(mediaUrlList !== undefined && { mediaUrls: mediaUrlList }),
+        ...(attachments !== undefined && attachments.length > 0 && { mediaAttachments: attachments }),
+      });
+
+      // Surface the held message live (SSE + audit) - but do NOT touchLastActivity:
+      // that force-flips status to 'open' ("activity reopens the thread"), which
+      // would prematurely open a pool-number-less connecting group and make
+      // relay.numberReady's still-connecting read-check no-op (the group would
+      // never get its number, intro, or flush). The connecting group is already
+      // visible in the inbox via its 'connecting' status partition (T6); it stays
+      // connecting until relay.numberReady opens it.
+      await audit.append(`conversations#${conversationId}`, 'message_queued_pending', {
+        actor: (req as AuthedRequest).user?.userId,
+        author: 'teammate',
+        relay: true,
+        memberCount: connectingRoster.length,
+      });
+      events.emit('message.persisted', {
+        conversationId,
+        tsMsgId: queuedAppended.tsMsgId,
+        direction: 'outbound',
+        deliveryStatus: 'queued_pending',
+      });
+
+      log.info(
+        { conversationId, memberCount: connectingRoster.length, actor: (req as AuthedRequest).user?.userId },
+        'relay team message QUEUED on a connecting group - deferred until the number registers',
+      );
+      res.status(201).json({
+        conversationId,
+        providerSid: queuedSid,
+        tsMsgId: queuedAppended.tsMsgId,
+        status: 'queued_pending',
+      });
+      return;
+    }
+
     if (conversation.status !== 'open') {
       res.status(409).json({ error: 'relay_closed' });
       return;

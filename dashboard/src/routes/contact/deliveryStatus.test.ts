@@ -10,6 +10,14 @@ describe('presentDeliveryStatus', () => {
     expect(presentDeliveryStatus('failed')).toEqual({ label: 'Failed', tone: 'danger', isFailure: true });
   });
 
+  it('maps queued_pending (connect-when-ready hold) to a neutral "Queued" chip, not a failure', () => {
+    expect(presentDeliveryStatus('queued_pending')).toEqual({
+      label: 'Queued - will send when connected',
+      tone: 'neutral',
+      isFailure: false,
+    });
+  });
+
   it('returns null for undefined — seed/legacy rows show no chip (not a false "Sending…")', () => {
     expect(presentDeliveryStatus(undefined)).toBeNull();
   });

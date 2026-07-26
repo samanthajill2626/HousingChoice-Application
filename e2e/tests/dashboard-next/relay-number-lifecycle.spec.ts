@@ -1,6 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 import { sendAsParty, registerParty } from '../../fixtures/fakeTwilio.js';
 import { getOutbox } from '../../fixtures/outbox.js';
+import { createGroupOpen } from '../../fixtures/relayConnect.js';
 // Single source of truth for the final "group is closed" copy (no drift).
 import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 import { Scenario, freshTenant, freshLandlord, tourSchedule } from '../../scenarios/steps.js';
@@ -57,17 +58,6 @@ function uniquePhone(): string {
   return `+15558${`${Date.now()}`.slice(-4)}${String(uid).padStart(2, '0')}`;
 }
 
-interface Member {
-  phone: string;
-  name: string;
-  contactId?: string;
-}
-
-interface CreatedGroup {
-  conversationId: string;
-  pool_number: string;
-}
-
 /** Reseed the lane with the FULL profile (needed only for the seeded nag group). */
 async function reseedFull(request: APIRequestContext): Promise<void> {
   const res = await request.post(`${NEXT}/__dev/reseed?profile=full`);
@@ -88,25 +78,6 @@ async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
   await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
-}
-
-/** Create a relay group via the standalone API (POST /api/relay-groups). Provisions
- *  a pool number (burn-as-claim ladder) and returns the conversation + its number. */
-async function createGroup(page: Page, members: Member[]): Promise<CreatedGroup> {
-  const res = await page.request.post(`${NEXT}/api/relay-groups`, {
-    data: {
-      members: members.map((m) => ({
-        phone: m.phone,
-        name: m.name,
-        ...(m.contactId !== undefined && { contactId: m.contactId }),
-      })),
-    },
-  });
-  expect(res.ok(), `create group failed: ${res.status()} ${await res.text()}`).toBeTruthy();
-  const { conversation } = (await res.json()) as { conversation: CreatedGroup };
-  expect(typeof conversation.pool_number, 'created group carries a pool number').toBe('string');
-  expect(conversation.pool_number.length).toBeGreaterThan(0);
-  return conversation;
 }
 
 /** The bodies of a conversation's transcript (GET /api/conversations/:id/messages). */
@@ -174,8 +145,8 @@ test('multiplex: two disjoint groups share ONE pool number; inbound routes to th
 
   // Two participant-DISJOINT groups created in sequence: the burn ladder reuses the
   // first number for the second (nothing overlaps), so both share ONE pool number.
-  const group1 = await createGroup(page, [tenantA, landlordA]);
-  const group2 = await createGroup(page, [tenantB, landlordB]);
+  const group1 = await createGroupOpen(page, [tenantA, landlordA]);
+  const group2 = await createGroupOpen(page, [tenantB, landlordB]);
   expect(group2.pool_number, 'disjoint groups multiplex onto one number').toBe(
     group1.pool_number,
   );
@@ -224,10 +195,10 @@ test('overlap forces a SECOND number: a group sharing a member never reuses the 
   const landlordA = { phone: uniquePhone(), name: 'Overlap LandlordA' };
   const landlordC = { phone: uniquePhone(), name: 'Overlap LandlordC' };
 
-  const groupA = await createGroup(page, [tenantA, landlordA]);
+  const groupA = await createGroupOpen(page, [tenantA, landlordA]);
   // group3 shares tenantA -> the (number, person) burn on groupA's number forbids
   // reuse, so it must be provisioned onto a DIFFERENT number.
-  const group3 = await createGroup(page, [tenantA, landlordC]);
+  const group3 = await createGroupOpen(page, [tenantA, landlordC]);
   expect(group3.pool_number, 'an overlapping roster is forced onto a fresh number').not.toBe(
     groupA.pool_number,
   );
@@ -241,7 +212,7 @@ test('close (ConversationDetail): final message to both members, composer hard-d
 
   const tenant = { phone: uniquePhone(), name: 'Close Tenant' };
   const landlord = { phone: uniquePhone(), name: 'Close Landlord' };
-  const group = await createGroup(page, [tenant, landlord]);
+  const group = await createGroupOpen(page, [tenant, landlord]);
 
   await page.goto(`${NEXT}/conversations/${group.conversationId}`);
   // Sending is available while the group is open.
@@ -331,11 +302,11 @@ test('late text: a closed member texting the kept number lands in their 1:1 with
   const landlordB = { phone: uniquePhone(), name: 'Late LandlordB' };
 
   // group1 (to be closed) + group2 (stays open) multiplexed on ONE number.
-  const group1 = await createGroup(page, [
+  const group1 = await createGroupOpen(page, [
     { phone: tenantAPhone, name: 'Late TenantA', contactId: tenantAId },
     landlordA,
   ]);
-  const group2 = await createGroup(page, [tenantB, landlordB]);
+  const group2 = await createGroupOpen(page, [tenantB, landlordB]);
   expect(group2.pool_number).toBe(group1.pool_number);
   const pool = group1.pool_number;
 

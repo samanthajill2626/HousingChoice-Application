@@ -6,6 +6,7 @@ import {
   ConsoleMessagingDriver,
   MAX_MEDIA_CONTENT_LENGTH,
   MediaFetchRefusedError,
+  PoolFullError,
   SmsSendingDisabledError,
   TwilioMessagingDriver,
   createMessagingAdapter,
@@ -24,6 +25,9 @@ const TWILIO_ENV = {
   TWILIO_API_KEY_SECRET: 'secret',
   TWILIO_AUTH_TOKEN: 'token',
   TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
+  // A real (non-mock) twilio config must carry the Event Streams webhook secret
+  // (config boot gate) - the promotion webhook fails open without it.
+  TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
 };
 
 // NODE_ENV=production fail-fasts without the M1.2 job-delivery wiring and the
@@ -653,5 +657,151 @@ describe('ConsoleMessagingDriver — provisioning (M1.7)', () => {
     const driver = new ConsoleMessagingDriver({ logger: createLogger({ destination: capture.stream }) });
     await driver.sendMessage({ to: '+15550100002', from: '+15550109001', body: 'x' });
     expect(capture.lines[0]!['from']).toBe('+15550109001');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Relay number buying (T1) - attach/detach a pool number to the A2P Messaging
+// Service sender pool (warming -> registration -> retirement lifecycle).
+// ---------------------------------------------------------------------------
+
+/** The `messaging.v1.services(sid).phoneNumbers` callable resource type. */
+type FakePhoneNumbersResource = ReturnType<
+  NonNullable<TwilioClientLike['messaging']>['v1']['services']
+>['phoneNumbers'];
+
+/**
+ * Fake Twilio client exposing the `messaging.v1.services(sid).phoneNumbers`
+ * surface. `phoneNumbers` is a callable `(sid) => { remove }` that ALSO carries
+ * `.create` + `.list`, built with the same Object.assign callable idiom as
+ * makeFakeProvisioningClient's incomingPhoneNumbers. `create`/`list` are
+ * injectable so a test can force the 21710 / 21714 error arms or seed senders.
+ */
+function makeFakeMessagingServiceClient(
+  opts: {
+    create?: (params: { phoneNumberSid: string }) => Promise<unknown>;
+    list?: () => Promise<Array<{ sid: string; phoneNumber: string }>>;
+  } = {},
+) {
+  const servicesCalledWith: string[] = [];
+  const created: { phoneNumberSid: string }[] = [];
+  const removed: string[] = [];
+  const createImpl =
+    opts.create ??
+    (async (params: { phoneNumberSid: string }) => {
+      created.push(params);
+      return {};
+    });
+  const listImpl = opts.list ?? (async () => []);
+  const phoneNumbers = ((sid: string) => ({
+    remove: async () => {
+      removed.push(sid);
+      return true;
+    },
+  })) as FakePhoneNumbersResource & object;
+  Object.assign(phoneNumbers as object, { create: createImpl, list: listImpl });
+  const client: TwilioClientLike = {
+    messages: {
+      create: async () => ({ sid: 'SM123', status: 'accepted', dateCreated: new Date() }),
+    },
+    messaging: {
+      v1: {
+        services: (serviceSid: string) => {
+          servicesCalledWith.push(serviceSid);
+          return { phoneNumbers };
+        },
+      },
+    },
+  };
+  return { client, servicesCalledWith, created, removed };
+}
+
+function makeMessagingServiceDriver(client: TwilioClientLike, messagingServiceSid = 'MGtest') {
+  return new TwilioMessagingDriver({
+    accountSid: 'ACtest',
+    apiKeySid: 'SKtest',
+    apiKeySecret: 'secret',
+    messagingServiceSid,
+    client,
+    logger: createLogger({ destination: createLogCapture().stream }),
+  });
+}
+
+describe('TwilioMessagingDriver.attachToMessagingService (relay warming, T1)', () => {
+  it('attaches a PN SID to the configured Messaging Service sender pool', async () => {
+    const { client, servicesCalledWith, created } = makeFakeMessagingServiceClient();
+    await makeMessagingServiceDriver(client).attachToMessagingService('PN123');
+    expect(servicesCalledWith).toEqual(['MGtest']);
+    expect(created).toEqual([{ phoneNumberSid: 'PN123' }]);
+  });
+
+  it('is idempotent: treats Twilio 21710 (already in service) as success', async () => {
+    const { client, created } = makeFakeMessagingServiceClient({
+      create: async () => {
+        throw Object.assign(new Error('phone number already in messaging service'), { code: 21710 });
+      },
+    });
+    await expect(makeMessagingServiceDriver(client).attachToMessagingService('PN123')).resolves.toBeUndefined();
+    expect(created).toEqual([]); // the spy threw before recording
+  });
+
+  it('throws PoolFullError on Twilio 21714 (sender pool full)', async () => {
+    const { client } = makeFakeMessagingServiceClient({
+      create: async () => {
+        throw Object.assign(new Error('pool full'), { code: 21714 });
+      },
+    });
+    await expect(makeMessagingServiceDriver(client).attachToMessagingService('PN123')).rejects.toBeInstanceOf(
+      PoolFullError,
+    );
+  });
+
+  it('re-throws an unexpected provider error unchanged', async () => {
+    const { client } = makeFakeMessagingServiceClient({
+      create: async () => {
+        throw Object.assign(new Error('boom'), { code: 20500 });
+      },
+    });
+    await expect(makeMessagingServiceDriver(client).attachToMessagingService('PN123')).rejects.toThrow('boom');
+  });
+
+  it('throws when no messagingServiceSid is configured', async () => {
+    const { client } = makeFakeMessagingServiceClient();
+    await expect(makeMessagingServiceDriver(client, '').attachToMessagingService('PN123')).rejects.toThrow(
+      /messagingServiceSid/,
+    );
+  });
+});
+
+describe('TwilioMessagingDriver.detachFromMessagingService (retirement, T8 logic)', () => {
+  it('finds the PN SID by E.164 among the service senders and removes it', async () => {
+    const { client, removed } = makeFakeMessagingServiceClient({
+      list: async () => [
+        { sid: 'PNother', phoneNumber: '+15559999999' },
+        { sid: 'PNx', phoneNumber: '+15551234567' },
+      ],
+    });
+    await makeMessagingServiceDriver(client).detachFromMessagingService('+15551234567');
+    expect(removed).toEqual(['PNx']);
+  });
+
+  it('is a no-op when the number is not a sender in the service (idempotent, no throw)', async () => {
+    const { client, removed } = makeFakeMessagingServiceClient({
+      list: async () => [{ sid: 'PNother', phoneNumber: '+15559999999' }],
+    });
+    await expect(
+      makeMessagingServiceDriver(client).detachFromMessagingService('+15551234567'),
+    ).resolves.toBeUndefined();
+    expect(removed).toEqual([]);
+  });
+});
+
+describe('ConsoleMessagingDriver - attach/detach (no-op)', () => {
+  it('attach + detach resolve as logged no-ops, never hitting a provider', async () => {
+    const driver = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    await expect(driver.attachToMessagingService('PN123')).resolves.toBeUndefined();
+    await expect(driver.detachFromMessagingService('+15551234567')).resolves.toBeUndefined();
   });
 });

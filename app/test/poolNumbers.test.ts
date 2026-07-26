@@ -4,9 +4,8 @@
 // check before the mutate, so a sloppy fake cannot fake-pass the ladder) + a
 // fake adapter (deterministic numbers; never touches Twilio) + a minimal fake
 // conversationsRepo (getAllByPoolNumber drives the open-group veto).
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
-  VoiceCapabilityError,
   type MessagingAdapter,
   type ProvisionPhoneNumberResult,
 } from '../src/adapters/messaging.js';
@@ -21,7 +20,14 @@ import {
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
+  RELAY_WARM_JOB,
 } from '../src/services/poolNumbers.js';
+import {
+  _resetForTests,
+  configureOutboundQueue,
+} from '../src/jobs/jobs.js';
+import type { OutboundQueueAdapter } from '../src/adapters/scheduler.js';
+import type { JobEnvelope } from '../src/jobs/types.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const logger = createLogger({ destination: createLogCapture().stream });
@@ -99,6 +105,64 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
       item.released_at = new Date().toISOString();
       return item;
     },
+    async createWarming(input) {
+      const now = new Date().toISOString();
+      const item: PoolNumberItem = {
+        poolNumber: input.poolNumber,
+        lifecycle_state: 'warming',
+        quarantine_until: SENTINEL,
+        voice_capable: input.voiceCapable,
+        sms_capable: input.smsCapable,
+        sid: input.sid,
+        warming_started_at: now,
+        ...(input.provisionedVia !== undefined && { provisioned_via: input.provisionedVia }),
+        ...(input.tag !== undefined && { placement_tag: input.tag }),
+        ...(input.conversationId !== undefined && {
+          pending_conversation_id: input.conversationId,
+        }),
+        provisioned_at: now,
+      };
+      store.set(item.poolNumber, item);
+      return item;
+    },
+    async promoteToActive(poolNumber) {
+      // Sole warming->active writer; conditional + idempotent (false if not warming).
+      const item = store.get(poolNumber);
+      if (!item || item.lifecycle_state !== 'warming') return false;
+      item.lifecycle_state = 'active';
+      delete item.warming_started_at; // pending_conversation_id left intact
+      return true;
+    },
+    async listWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming');
+    },
+    async findWarmingBySid(sid) {
+      return [...store.values()].find((i) => i.lifecycle_state === 'warming' && i.sid === sid);
+    },
+    async countFreshSpares() {
+      // active AND empty-burn AND not earmarked (D7 Set-or-array-safe count).
+      return [...store.values()].filter((i) => {
+        if (i.lifecycle_state !== 'active') return false;
+        const burned = i.burned_phones;
+        const burnedCount =
+          burned instanceof Set ? burned.size : Array.isArray(burned) ? burned.length : 0;
+        return burnedCount === 0 && i.pending_conversation_id === undefined;
+      }).length;
+    },
+    async countWarming() {
+      return [...store.values()].filter((i) => i.lifecycle_state === 'warming').length;
+    },
+    async findByPendingConversationId(conversationId) {
+      return [...store.values()].filter(
+        (i) =>
+          (i.lifecycle_state === 'warming' || i.lifecycle_state === 'active') &&
+          i.pending_conversation_id === conversationId,
+      );
+    },
+    async clearPendingConversation(poolNumber) {
+      const item = store.get(poolNumber);
+      if (item) delete item.pending_conversation_id;
+    },
   };
 }
 
@@ -134,6 +198,8 @@ function makeFakeAdapter(
     async releasePhoneNumber(phoneNumber) {
       released.push(phoneNumber);
     },
+    async attachToMessagingService() {},
+    async detachFromMessagingService() {},
     async initiateCall() {
       return { callSid: 'CAtest-pool' };
     },
@@ -158,6 +224,11 @@ function makeFakeConversations(
     async getAllByPoolNumber(poolNumber: string) {
       return (byPool[poolNumber] ?? []) as ConversationItem[];
     },
+    // provisionForGroup opportunistically fires flagStuckConnecting, which lists
+    // the connecting partition - stub it (no connecting groups in these tests).
+    async listRelayGroups() {
+      return { items: [] as ConversationItem[], truncated: false };
+    },
   } as unknown as ConversationsRepo;
 }
 
@@ -171,6 +242,11 @@ function makeConfig(over: Partial<AppConfig>): AppConfig {
     messagingDriver: 'console',
     relayLiveProvisioning: true,
     relayNumberReleaseEnabled: false,
+    // Warm-pool knobs (T4/T5). Dev default target 0 -> refillBufferIfNeeded
+    // enqueues nothing, so the ladder tests never touch the job queue unless a
+    // test opts in (the target-0 refill assertion below wires a recording queue).
+    relaySpareBufferTarget: 0,
+    relayWarmingMaxWaitMs: 30 * 60_000,
     ...over,
   } as AppConfig;
 }
@@ -184,11 +260,68 @@ const twilioConfigOn = (): AppConfig =>
 const T1 = '+15551110001';
 const L1 = '+15551110002';
 
-describe('poolNumbersService.provisionForGroup - burn ladder', () => {
-  it('reuses the FIRST active number with zero overlap (skips overlapping ones)', async () => {
+/** Records enqueued job envelopes without dispatching (refill enqueue counts). */
+function makeRecordingQueue(): OutboundQueueAdapter & { envelopes: JobEnvelope[] } {
+  const envelopes: JobEnvelope[] = [];
+  return {
+    envelopes,
+    async enqueue(envelope: JobEnvelope) {
+      envelopes.push(envelope);
+    },
+  };
+}
+
+/** Seed an EMPTY-burn active spare (fresh spare; optional connect-when-ready earmark). */
+async function seedSpare(
+  repo: ReturnType<typeof makeFakeRepo>,
+  pn: string,
+  opts: { via?: 'console' | 'twilio'; pendingConversationId?: string } = {},
+): Promise<void> {
+  await repo.create({
+    poolNumber: pn,
+    voiceCapable: true,
+    smsCapable: true,
+    provisionedVia: opts.via ?? 'console',
+    burn: [], // empty burn -> a fresh spare
+  });
+  if (opts.pendingConversationId !== undefined) {
+    repo.store.get(pn)!.pending_conversation_id = opts.pendingConversationId;
+  }
+}
+
+describe('poolNumbersService.provisionForGroup - three-tier ladder (T5)', () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('TIER 1 preferred over TIER 2: an already-burned non-overlapping active is claimed, the fresh spare untouched', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
-    // numberA burned {T1}; numberB burned {x1}. Roster {T1, L1} overlaps A -> B.
+    // A burned (multiplexable) active + a pristine spare. The roster overlaps
+    // neither, so BOTH could take it - tier 1 (multiplex) must win.
+    await repo.create({ poolNumber: '+1BURNED', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: ['+15559990001'] });
+    await seedSpare(repo, '+1SPARE');
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result.kind).toBe('assigned');
+    if (result.kind !== 'assigned') throw new Error('unreachable');
+    expect(result.poolNumber).toBe('+1BURNED'); // multiplex preferred
+    expect(result.provisioned).toBe(false);
+    expect(adapter.provisions).toBe(0); // NEVER buys
+    // The burned number now also carries the roster; the spare is pristine.
+    expect([...(repo.store.get('+1BURNED')!.burned_phones as Set<string>)]).toEqual(
+      expect.arrayContaining([T1, L1]),
+    );
+    expect(repo.store.get('+1SPARE')!.burned_phones).toBeUndefined(); // untouched
+  });
+
+  it('TIER 1 reuse: claims the FIRST burned active with zero overlap, skips overlapping ones', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // numberA burned {T1} (overlaps), numberB burned {x1} (clear). Roster {T1,L1}.
     await repo.create({ poolNumber: '+1A', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [T1] });
     await repo.create({ poolNumber: '+1B', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: ['+15559990001'] });
     const svc = createPoolNumbersService({
@@ -196,32 +329,44 @@ describe('poolNumbersService.provisionForGroup - burn ladder', () => {
     });
 
     const result = await svc.provisionForGroup([T1, L1]);
-    expect(result).toMatchObject({ poolNumber: '+1B', provisioned: false });
-    expect(adapter.provisions).toBe(0); // never bought
-    // B's burn now contains the roster.
+    expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1B', provisioned: false });
+    expect(adapter.provisions).toBe(0);
     expect([...(repo.store.get('+1B')!.burned_phones as Set<string>)]).toEqual(
       expect.arrayContaining([T1, L1]),
     );
-    // A untouched (the roster was never burned onto it).
     expect([...(repo.store.get('+1A')!.burned_phones as Set<string>)]).not.toContain(L1);
   });
 
-  it('driver source-isolation: a console-tagged clean number is NOT reused by the twilio path', async () => {
+  it('TIER 2: no reusable active but a fresh spare exists -> the spare is claimed (kind assigned, provisioned false)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
-    // A perfectly clean number, but tagged console - the twilio driver must buy fresh.
-    await repo.create({ poolNumber: '+1CONSOLE', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: ['+15559990002'] });
+    await seedSpare(repo, '+1SPARE');
     const svc = createPoolNumbersService({
-      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOn(),
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+
+    const result = await svc.provisionForGroup([T1, L1], 'fair-2026');
+    expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1SPARE', provisioned: false });
+    expect(adapter.provisions).toBe(0); // spare consumed, nothing bought
+    const rec = repo.store.get('+1SPARE')!;
+    expect([...(rec.burned_phones as Set<string>)].sort()).toEqual([T1, L1].sort());
+    expect(rec.placement_tag).toBe('fair-2026'); // tag stamped on claim
+  });
+
+  it('TIER 3: NO active and NO spare -> needs_connecting, and NO adapter buy call', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
     });
 
     const result = await svc.provisionForGroup([T1, L1]);
-    expect(result.provisioned).toBe(true);
-    expect(result.poolNumber).not.toBe('+1CONSOLE');
-    expect(repo.store.get('+1CONSOLE')!.lifecycle_state).toBe('active'); // never claimed
+    expect(result).toEqual({ kind: 'needs_connecting' });
+    expect(provisionSpy).not.toHaveBeenCalled(); // buying is warmOneNumber's job only
   });
 
-  it('buys fresh when EVERY active number overlaps; the new record is burn-seeded with the roster', async () => {
+  it('TIER 3: every burned active overlaps and there is no spare -> needs_connecting (no buy)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
     await repo.create({ poolNumber: '+1OVERLAP', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [T1] });
@@ -230,63 +375,113 @@ describe('poolNumbersService.provisionForGroup - burn ladder', () => {
     });
 
     const result = await svc.provisionForGroup([T1, L1]); // overlaps the only number
-    expect(result.provisioned).toBe(true);
-    expect(adapter.provisions).toBe(1);
-    // The fresh record carries the roster as its burn (create IS the claim).
-    expect([...(repo.store.get(result.poolNumber)!.burned_phones as Set<string>)].sort()).toEqual(
-      [T1, L1].sort(),
-    );
+    expect(result).toEqual({ kind: 'needs_connecting' });
+    expect(adapter.provisions).toBe(0);
   });
 
-  it('kill-switch guards the FRESH branch only: reuse still works with the flag OFF', async () => {
+  it('G2: a fresh spare carrying pending_conversation_id is NOT consumed (earmarked to a connecting group) -> needs_connecting', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
-    // A clean twilio-tagged number - reusable even though the flag is OFF.
+    // The ONLY candidate is an empty-burn active EARMARKED to a connecting group.
+    // Tier 2 must skip it (same "fresh spare" definition as countFreshSpares), so
+    // a concurrent group cannot steal a number another group is waiting to open.
+    await seedSpare(repo, '+1EARMARKED', { pendingConversationId: 'conv-waiting' });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result).toEqual({ kind: 'needs_connecting' });
+    // The earmarked number was NEVER burned onto (still a pristine, earmarked spare).
+    expect(repo.store.get('+1EARMARKED')!.burned_phones).toBeUndefined();
+    expect(repo.store.get('+1EARMARKED')!.pending_conversation_id).toBe('conv-waiting');
+  });
+
+  it('kill-switch OFF: a tier-3 miss THROWS RelayProvisioningDisabledError (no buy, no warm job enqueued - the connect-when-ready path stays dormant, route surfaces a clean 503)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
+    // The ONLY candidate overlaps the roster and there is no spare -> tier-3 miss.
+    // With the kill-switch OFF the connect-when-ready path cannot complete (no
+    // number now and warming is forbidden), so provisionForGroup must THROW rather
+    // than return needs_connecting - otherwise the caller mints a CONNECTING group
+    // whose warm job dies in the worker, stranding it permanently connecting.
+    await repo.create({ poolNumber: '+1OVERLAP', voiceCapable: true, smsCapable: true, provisionedVia: 'twilio', burn: [T1] });
+    // A NON-ZERO buffer target so a stray refillBufferIfNeeded WOULD enqueue a warm
+    // job; asserting zero proves the throw short-circuits BEFORE any refill (dormant).
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger,
+      config: makeConfig({ messagingDriver: 'twilio', relayLiveProvisioning: false, relaySpareBufferTarget: 2 }),
+    });
+
+    await expect(svc.provisionForGroup([T1, L1])).rejects.toBeInstanceOf(RelayProvisioningDisabledError);
+    expect(provisionSpy).not.toHaveBeenCalled(); // never buys - the buy path is warmOneNumber only
+    // NO warm job enqueued by this method: the path is fully dormant with the flag off.
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_WARM_JOB)).toHaveLength(0);
+  });
+
+  it('reuse works regardless of the kill-switch: a clean twilio-tagged burned active is claimed with the flag OFF', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
     await repo.create({ poolNumber: '+1CLEAN', voiceCapable: true, smsCapable: true, provisionedVia: 'twilio', burn: ['+15559990003'] });
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOff(),
     });
 
     const result = await svc.provisionForGroup([T1, L1]);
-    expect(result).toMatchObject({ poolNumber: '+1CLEAN', provisioned: false });
+    expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1CLEAN', provisioned: false });
     expect(adapter.provisions).toBe(0);
   });
 
-  it('kill-switch: a FRESH purchase is refused when relayLiveProvisioning=false (all overlap)', async () => {
+  it('spare works regardless of the kill-switch: a fresh twilio-tagged spare is consumed with the flag OFF (tier 2 never buys)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
     const provisionSpy = vi.spyOn(adapter, 'provisionPhoneNumber');
-    await repo.create({ poolNumber: '+1OVERLAP', voiceCapable: true, smsCapable: true, provisionedVia: 'twilio', burn: [T1] });
+    // A pristine twilio-tagged spare. Tier 2 consumes it (no buy, no throw) even
+    // with the kill-switch OFF - only a tier-3 MISS is gated by the flag.
+    await seedSpare(repo, '+1TWSPARE', { via: 'twilio' });
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOff(),
     });
 
-    await expect(svc.provisionForGroup([T1, L1])).rejects.toBeInstanceOf(RelayProvisioningDisabledError);
-    expect(provisionSpy).not.toHaveBeenCalled();
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result).toMatchObject({ kind: 'assigned', poolNumber: '+1TWSPARE', provisioned: false });
+    expect(provisionSpy).not.toHaveBeenCalled(); // spare consumed, nothing bought
   });
 
-  it('a lost race on a clean candidate falls through (here, to a fresh purchase)', async () => {
+  it('driver source-isolation: the twilio path does NOT reuse a console-tagged number -> needs_connecting', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // A pristine console-tagged spare + a burned console-tagged active: the twilio
+    // driver must reuse NEITHER (source isolation), so it needs a connecting group.
+    await seedSpare(repo, '+1CONSOLE_SPARE', { via: 'console' });
+    await repo.create({ poolNumber: '+1CONSOLE_BURNED', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: ['+15559990002'] });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: twilioConfigOn(),
+    });
+
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result).toEqual({ kind: 'needs_connecting' });
+    expect(repo.store.get('+1CONSOLE_SPARE')!.burned_phones).toBeUndefined(); // never claimed
+    expect(repo.store.get('+1CONSOLE_BURNED')!.lifecycle_state).toBe('active'); // never touched
+  });
+
+  it('a lost race on the only burned candidate falls through to needs_connecting (no spare to fall back to)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
     await repo.create({ poolNumber: '+1RACE', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: ['+15559990004'] });
-    // The clean candidate loses the race exactly ONCE (burnClaim -> undefined),
-    // so the ladder falls through to a fresh purchase.
-    const realBurnClaim = repo.burnClaim.bind(repo);
-    let lostOnce = false;
-    repo.burnClaim = async (pn, phones, tag) => {
-      if (!lostOnce) {
-        lostOnce = true;
-        return undefined;
-      }
-      return realBurnClaim(pn, phones, tag);
-    };
+    // The clean burned candidate loses its tier-1 claim (burnClaim -> undefined);
+    // there is no empty-burn spare, so the ladder falls through to needs_connecting.
+    repo.burnClaim = async () => undefined;
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
     });
 
     const result = await svc.provisionForGroup([T1, L1]);
-    expect(result.provisioned).toBe(true); // fell through to fresh
-    expect(adapter.provisions).toBe(1);
+    expect(result).toEqual({ kind: 'needs_connecting' });
+    expect(adapter.provisions).toBe(0);
   });
 
   it('empty roster throws (never claim an unburnable group)', async () => {
@@ -298,43 +493,36 @@ describe('poolNumbersService.provisionForGroup - burn ladder', () => {
     await expect(svc.provisionForGroup([])).rejects.toThrow();
   });
 
-  it('provisions a fresh voice-capable number when the pool is empty (source-tagged)', async () => {
+  it('refillBufferIfNeeded RAN after an assign (tops the buffer up)', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
+    await seedSpare(repo, '+1SPARE');
+    // countFreshSpares is called ONLY by refillBufferIfNeeded (never elsewhere in
+    // provisionForGroup), so observing it proves the refill hook ran on the assign.
+    const refillProbe = vi.spyOn(repo, 'countFreshSpares');
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
     });
-    const result = await svc.provisionForGroup([T1, L1], 'fair-2026');
-    expect(result.provisioned).toBe(true);
-    expect(adapter.provisions).toBe(1);
-    const rec = repo.store.get(result.poolNumber)!;
-    expect(rec.lifecycle_state).toBe('active');
-    expect(rec.provisioned_via).toBe('console');
-    expect(rec.placement_tag).toBe('fair-2026');
+
+    const result = await svc.provisionForGroup([T1, L1]);
+    expect(result.kind).toBe('assigned');
+    expect(refillProbe).toHaveBeenCalled();
   });
 
-  it('throws VoiceCapabilityError when a provisioned number lacks voice', async () => {
-    const repo = makeFakeRepo();
-    const adapter = makeFakeAdapter({ voice: false });
-    const svc = createPoolNumbersService({
-      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
-    });
-    await expect(svc.provisionForGroup([T1])).rejects.toBeInstanceOf(VoiceCapabilityError);
-  });
-
-  it('pre-wires the voice webhook when PUBLIC_BASE_URL is configured', async () => {
+  it('dev target 0: consuming a fresh spare enqueues 0 refill jobs', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter();
-    const setVoice = vi.spyOn(adapter, 'setVoiceWebhook');
+    await seedSpare(repo, '+1SPARE');
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger,
-      config: makeConfig({ publicBaseUrl: 'https://dxxxx.cloudfront.example' }),
+      config: makeConfig({ relaySpareBufferTarget: 0 }),
     });
-    await svc.provisionForGroup([T1]);
-    expect(setVoice).toHaveBeenCalledWith(
-      expect.stringMatching(/^\+1555/),
-      'https://dxxxx.cloudfront.example/webhooks/twilio/voice',
-    );
+
+    const result = await svc.provisionForGroup([T1, L1]); // consumes the spare (tier 2)
+    expect(result.kind).toBe('assigned');
+    expect(queue.envelopes.filter((e) => e.jobName === RELAY_WARM_JOB)).toHaveLength(0);
   });
 });
 
@@ -529,5 +717,106 @@ describe('poolNumbersService.retireEligible', () => {
     expect(adapter.released).toEqual([]); // never dropped at Twilio
     expect(repo.store.get('+1RACE2')!.lifecycle_state).toBe('active'); // aborted back to active
     expect(reads).toBe(2); // pre-veto + the fresh re-verify both ran
+  });
+
+  // --- T8 explicit Messaging Service detach on retirement ------------------
+  it('T8 detach ordering: detaches from the messaging service BEFORE dropping the number at Twilio', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1DETACH', OLD_CLOSE);
+    // Record the adapter call order: the A2P sender-pool detach must run BEFORE
+    // the resource delete (deterministic membership cleanup; the delete would
+    // otherwise detach only implicitly).
+    const order: string[] = [];
+    vi.spyOn(adapter, 'detachFromMessagingService').mockImplementation(async () => {
+      order.push('detach');
+    });
+    vi.spyOn(adapter, 'releasePhoneNumber').mockImplementation(async (pn: string) => {
+      order.push('release');
+      adapter.released.push(pn);
+    });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1DETACH': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    expect(await svc.retireEligible()).toEqual(['+1DETACH']);
+    expect(order).toEqual(['detach', 'release']); // detach FIRST, then the delete
+    expect(adapter.released).toEqual(['+1DETACH']);
+  });
+
+  it('T8 best-effort: a detach failure is logged but does NOT abort the release (delete + finalize still run)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedClosed(repo, '+1DFAIL', OLD_CLOSE);
+    // The detach throws (e.g. a transient Twilio API error). Because the number
+    // delete below drops it from the service implicitly anyway, the sweep must
+    // swallow + log the detach error and STILL release + finalize the number -
+    // never strand a retirement on a detach hiccup.
+    const detachSpy = vi
+      .spyOn(adapter, 'detachFromMessagingService')
+      .mockRejectedValue(new Error('twilio 500 on detach'));
+    const releaseSpy = vi.spyOn(adapter, 'releasePhoneNumber');
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, logger, now: () => NOW,
+      conversationsRepo: makeFakeConversations({ '+1DFAIL': [{ status: 'closed' }] }),
+      config: makeConfig({ relayNumberReleaseEnabled: true }),
+    });
+
+    const released = await svc.retireEligible();
+    expect(detachSpy).toHaveBeenCalledWith('+1DFAIL'); // detach was attempted
+    expect(released).toEqual(['+1DFAIL']); // retirement COMPLETED despite the detach throw
+    expect(releaseSpy).toHaveBeenCalledWith('+1DFAIL'); // the delete still ran
+    expect(adapter.released).toEqual(['+1DFAIL']);
+    expect(repo.store.get('+1DFAIL')!.lifecycle_state).toBe('released'); // finalized
+  });
+});
+
+describe('poolNumbersService.clearConnectingEarmarks (finding 4 - reclaim on open)', () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  it('clears the earmark on the assigned number AND reclaims a duplicate as a countable fresh spare', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    // The ASSIGNED number: active, a real burn, still carrying the earmark (promote
+    // leaves pending_conversation_id intact).
+    await repo.create({
+      poolNumber: '+1ASSIGNED', voiceCapable: true, smsCapable: true, provisionedVia: 'console', burn: [T1, L1],
+    });
+    repo.store.get('+1ASSIGNED')!.pending_conversation_id = 'conv-X';
+    // A DUPLICATE number that raced in: active, EMPTY burn, same earmark -> excluded
+    // from countFreshSpares (stranded) until its earmark is cleared.
+    await seedSpare(repo, '+1DUP', { pendingConversationId: 'conv-X' });
+
+    // Before: the duplicate is NOT a countable spare (earmarked).
+    expect(await repo.countFreshSpares()).toBe(0);
+
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+    await svc.clearConnectingEarmarks('conv-X');
+
+    // No pool record remains earmarked to the conversation.
+    expect(await repo.findByPendingConversationId('conv-X')).toEqual([]);
+    expect(repo.store.get('+1ASSIGNED')!.pending_conversation_id).toBeUndefined();
+    expect(repo.store.get('+1DUP')!.pending_conversation_id).toBeUndefined();
+    // The duplicate (empty burn, now un-earmarked) is a COUNTABLE fresh spare.
+    expect(await repo.countFreshSpares()).toBe(1);
+  });
+
+  it('is a no-op when nothing is earmarked to the conversation', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    await seedSpare(repo, '+1SPARE'); // no earmark
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: consoleConfig(),
+    });
+
+    await svc.clearConnectingEarmarks('conv-none');
+
+    expect(await repo.countFreshSpares()).toBe(1); // untouched
   });
 });

@@ -91,9 +91,13 @@ export interface ConversationItem {
   email_reply_token?: string;
   /**
    * byLastActivity GSI HASH. 1:1 threads only ever write `open`. relay_group
-   * threads use `open` | `closed`. Closing KEEPS the pool number (a closed
-   * group stays resolvable so late texts intercept to the sender's 1:1);
-   * reopening reuses the SAME number (nothing is re-provisioned).
+   * threads use `connecting` | `open` | `closed`. `connecting` (relay number
+   * buying strategy D9) is a group awaiting its pool number (connect-when-ready):
+   * it has NO pool_number yet, the composer QUEUES instead of sends, and
+   * assignPoolNumberAndOpen flips it to `open` when the number registers. Closing
+   * KEEPS the pool number (a closed group stays resolvable so late texts intercept
+   * to the sender's 1:1); reopening reuses the SAME number (nothing is
+   * re-provisioned). This is the coarse field the dashboard + inbox key on (D9).
    */
   status: string;
   /** byLastActivity GSI RANGE (ISO 8601). */
@@ -178,12 +182,14 @@ export interface ConversationItem {
     { contactId?: string; phone?: string; name?: string; at: string }
   >;
   /**
-   * byRelayStatus GSI HASH: `relay_group#<status>` (`relay_group#open` /
-   * `relay_group#closed`). Written ONLY on relay_group conversations — 1:1
-   * threads never carry it, keeping the GSI sparse (relay groups only). Kept in
-   * lockstep with `status` by every relay-group writer (create/close/reopen).
-   * listRelayGroups queries this partition directly, so a relay group can never
-   * be diluted out of the byLastActivity 'open' partition by open 1:1 volume.
+   * byRelayStatus GSI HASH: `relay_group#<status>` (`relay_group#connecting` /
+   * `relay_group#open` / `relay_group#closed`). Written ONLY on relay_group
+   * conversations - 1:1 threads never carry it, keeping the GSI sparse (relay
+   * groups only). Kept in lockstep with `status` by every relay-group writer
+   * (create/assign/close/reopen). listRelayGroups queries this partition
+   * directly, so a relay group can never be diluted out of the byLastActivity
+   * 'open' partition by open 1:1 volume - and a connecting group is queryable
+   * via its own partition even though it has no pool number yet (D9).
    */
   relay_status?: string;
   /**
@@ -215,8 +221,13 @@ export interface ConversationItem {
   [key: string]: unknown;
 }
 
-/** byRelayStatus GSI partition key for a relay group in the given status. */
-export function relayStatusKey(status: 'open' | 'closed'): string {
+/**
+ * byRelayStatus GSI partition key for a relay group in the given status.
+ * `connecting` (D9) is the connect-when-ready state: the group exists but has no
+ * pool number yet, so it lives in its own `relay_group#connecting` partition
+ * (listRelayGroups('connecting') surfaces it to the inbox).
+ */
+export function relayStatusKey(status: 'open' | 'closed' | 'connecting'): string {
   return `relay_group#${status}`;
 }
 
@@ -488,12 +499,19 @@ export interface ConversationsRepo {
    * pool_number for the byPoolNumber GSI. `tag` is an optional placement
    * label stored for operators. Returns the created item.
    *
+   * Connect-when-ready (T6): `poolNumber` is OPTIONAL. When ABSENT the group is
+   * created in the `connecting` state - NO pool_number / participant_phone,
+   * status `connecting`, relay_status `relay_group#connecting`. It carries no
+   * usable number until assignPoolNumberAndOpen stamps one on registration. The
+   * poolNumber-provided path is unchanged (status `open`, exactly as today).
+   *
    * Task 5: `owner` is the generalized ownership field; `placementId` is kept
    * for back-compat and is still written when `owner` is absent — both paths
    * call `getOwner()` to read it.
    */
   createRelayGroup(input: {
-    poolNumber: string;
+    /** Absent => create a CONNECTING group (connect-when-ready); present => OPEN. */
+    poolNumber?: string;
     members: ConversationParticipant[];
     tag?: string;
     /** Legacy back-reference (M1.10). Prefer `owner` for new callers. */
@@ -540,9 +558,12 @@ export interface ConversationsRepo {
    * relay-inbox-open-groups-truncation). The walk is bounded by a fixed page
    * budget: `truncated` is true when the budget stopped it early — the caller
    * MUST surface that (no silent truncation).
+   *
+   * `connecting` (D9) queries the connect-when-ready partition - the inbox reads
+   * it ALONGSIDE 'open' so a group awaiting its number is still visible/openable.
    */
   listRelayGroups(
-    status: 'open' | 'closed',
+    status: 'open' | 'closed' | 'connecting',
   ): Promise<{ items: ConversationItem[]; truncated: boolean }>;
   /**
    * Idempotent member add (relay groups): appends the member unless an entry
@@ -581,6 +602,22 @@ export interface ConversationsRepo {
     status: 'open' | 'closed',
     expectedCurrent: 'open' | 'closed',
   ): Promise<ConversationItem>;
+  /**
+   * Connect-when-ready assign (T6): the warming number earmarked to this
+   * `connecting` group has A2P-registered - stamp `pool_number` +
+   * `participant_phone` and flip `status` + `relay_status` from connecting ->
+   * open, ALL CONDITIONAL on the group currently BEING connecting on BOTH fields
+   * (G3 exactly-once: a redelivered relay.numberReady finds it already open and
+   * this is a no-op). Returns the post-update item (ALL_NEW) on the winning flip,
+   * or `undefined` when the condition did not hold (already assigned / not
+   * connecting / missing) - the caller then skips the (already-enqueued) intro so
+   * no member is intro'd twice. Distinct from setRelayStatus (open<->closed): a
+   * connecting group has no pool number to preserve, and this SETS one.
+   */
+  assignPoolNumberAndOpen(
+    conversationId: string,
+    poolNumber: string,
+  ): Promise<ConversationItem | undefined>;
   /**
    * Set (ISO string) or CLEAR (null -> REMOVE) a relay group's recurring
    * 28-day close-ask nag timestamp (D5). Conditional on the conversation
@@ -1284,17 +1321,27 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             ? { type: 'placement', id: placementId }
             : { type: null };
 
+      // Connect-when-ready (T6): no pool number yet => CONNECTING. A connecting
+      // group carries NO pool_number / participant_phone (byParticipantPhone +
+      // byPoolNumber stay sparse until assignPoolNumberAndOpen stamps the number
+      // on registration); it is reachable only via its byRelayStatus partition.
+      const connecting = poolNumber === undefined;
+      const status = connecting ? 'connecting' : 'open';
+
       const item: ConversationItem = {
         conversationId: `conv-${randomUUID()}`,
         // Synthetic participant_phone: relay threads route on pool_number, but
         // the inbox row + byParticipantPhone GSI still want a value. The pool
-        // number is the natural one (it is "the thread's number").
-        participant_phone: poolNumber,
-        pool_number: poolNumber,
-        status: 'open',
+        // number is the natural one (it is "the thread's number"). A connecting
+        // group has neither yet - both are stamped at assign time.
+        ...(poolNumber !== undefined && {
+          participant_phone: poolNumber,
+          pool_number: poolNumber,
+        }),
+        status,
         // byRelayStatus GSI HASH (sparse; relay groups only) — kept in lockstep
         // with `status` so listRelayGroups queries this partition directly.
-        relay_status: relayStatusKey('open'),
+        relay_status: relayStatusKey(status),
         last_activity_at: now,
         type: 'relay_group',
         // Relay threads are operator-run, never AI-driven; manual keeps the
@@ -1464,6 +1511,52 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId, status }, 'relay status set');
       return Attributes as ConversationItem;
+    },
+
+    async assignPoolNumberAndOpen(conversationId, poolNumber) {
+      // Connect-when-ready assign (T6 / G3): stamp the now-registered pool number
+      // and flip connecting -> open on BOTH status + relay_status IN ONE
+      // conditional write. The condition requires the group to still be
+      // `connecting` on both fields, so a redelivered relay.numberReady (group
+      // already open) fails the condition and this is an idempotent no-op
+      // (undefined) - the intro is enqueued exactly once (only the winner
+      // proceeds). participant_phone is set to the pool number too (the synthetic
+      // value a relay thread carries, mirroring createRelayGroup). PII: log the
+      // conversationId only, never the number.
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression:
+              'SET pool_number = :pn, participant_phone = :pn, #s = :open, relay_status = :rsOpen',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND #s = :connecting AND relay_status = :rsConnecting',
+            ExpressionAttributeNames: { '#s': 'status' },
+            ExpressionAttributeValues: {
+              ':pn': poolNumber,
+              ':open': 'open',
+              ':connecting': 'connecting',
+              ':rsOpen': relayStatusKey('open'),
+              ':rsConnecting': relayStatusKey('connecting'),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ conversationId }, 'relay connecting group assigned pool number and opened');
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) {
+          // Not connecting (already assigned / closed / unknown) - the exactly-
+          // once guard for a redelivered relay.numberReady.
+          log.info(
+            { conversationId },
+            'relay assignPoolNumberAndOpen no-op - group not connecting (already assigned or unknown)',
+          );
+          return undefined;
+        }
+        throw err;
+      }
     },
 
     async claimCloseAnnounce(conversationId) {

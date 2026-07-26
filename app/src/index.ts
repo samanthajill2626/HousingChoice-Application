@@ -125,7 +125,20 @@ const app = runWithContext(bootContext, () =>
 
 const server = runWithContext(bootContext, () =>
   app.listen(config.port, () => {
-    logger.info({ port: config.port, nodeEnv: config.nodeEnv }, 'app listening');
+    // Resolved outbound-comms config on the boot line so "why didn't it send" is
+    // answerable from the first log (guardrail, design 2026-07-21 D6). Flags and
+    // driver names only - never credentials or PII.
+    logger.info(
+      {
+        port: config.port,
+        nodeEnv: config.nodeEnv,
+        messagingDriver: config.messagingDriver,
+        emailDriver: config.emailDriver,
+        smsSendingEnabled: config.smsSendingEnabled,
+        emailSendingEnabled: config.emailSendingEnabled,
+      },
+      'app listening',
+    );
   }),
 );
 

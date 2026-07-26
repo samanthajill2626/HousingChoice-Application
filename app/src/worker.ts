@@ -191,7 +191,17 @@ if (config.inboundMailQueueUrl) {
 // The queue URL is operational config (never a credential), so it may appear.
 runWithContext(bootContext, () => {
   logger.info(
-    { handlers: registeredJobNames(), jobsQueueUrl: config.jobsQueueUrl },
+    {
+      handlers: registeredJobNames(),
+      jobsQueueUrl: config.jobsQueueUrl,
+      // Resolved outbound-comms config on the boot line (guardrail, design
+      // 2026-07-21 D6): "why didn't it send" is answerable from the worker's
+      // first log. Flags and driver names only - never credentials or PII.
+      messagingDriver: config.messagingDriver,
+      emailDriver: config.emailDriver,
+      smsSendingEnabled: config.smsSendingEnabled,
+      emailSendingEnabled: config.emailSendingEnabled,
+    },
     `worker ready - job handlers registered: [${registeredJobNames().join(', ')}]` +
       (config.jobsQueueUrl
         ? ` - polling ${config.jobsQueueUrl}`

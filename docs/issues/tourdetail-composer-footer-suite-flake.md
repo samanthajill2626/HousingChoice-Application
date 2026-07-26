@@ -36,3 +36,8 @@ before they do under full-suite load.
 waitFor on the parenthesized names) instead of asserting text content on the
 already-rendered footer, or pin the members mock to resolve before render like
 the spec's other tabs do.
+
+Sighting 2026-07-26 (feat/dev-live-comms, planner-wave gate run): failed in-suite
+("composer footer: the group tab names the WHOLE roster..."), passed solo 55/55
+and passed the immediate full-suite rerun (3167/1403/188/106 all green). Diff under
+test was launcher-script + docs only - consistent with the established signature.

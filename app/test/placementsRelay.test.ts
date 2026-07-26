@@ -53,18 +53,27 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
       counter += 1;
       const poolNumber = `+1555030${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
-      return { poolNumber, record: rec(poolNumber), provisioned: true };
+      return { kind: 'assigned', poolNumber, record: rec(poolNumber), provisioned: true };
     },
     async noteGroupClosed() {},
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord(poolNumber) {
       return rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -82,12 +91,21 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -191,6 +209,25 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
     expect(second.status).toBe(409);
     expect(second.body.error).toBe('relay_exists');
     expect(pool.provisioned).toHaveLength(1); // never bought a second number
+  });
+
+  it('is idempotent on a CONNECTING group (D10): a re-provision returns 409, never buys a second number', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    // Simulate a prior connect-when-ready provision: a CONNECTING group (no pool
+    // number yet) linked to the placement. A re-click must NOT double-buy.
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [{ phone: TENANT_PHONE, contactId: 'c-tenant' }],
+      placementId,
+    });
+    expect(connecting.status).toBe('connecting');
+    await world.placementsRepo.update(placementId, { group_thread: connecting.conversationId });
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('relay_exists');
+    expect(pool.provisioned).toHaveLength(0); // never provisioned a second number
   });
 
   it('404s an unknown placement', async () => {

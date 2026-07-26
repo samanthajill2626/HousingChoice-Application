@@ -826,6 +826,27 @@ describe('Timeline relay-group annotations', () => {
     expect(chip.className).toMatch(/toneNeutral/);
   });
 
+  it('renders a "Queued - will send when connected" chip for a queued_pending message', () => {
+    // Connect-when-ready (T7): a team compose on a CONNECTING group is held as
+    // delivery_status 'queued_pending' with pre-seeded 'queued' member slots. The
+    // held state must show its own "Queued" chip - NOT a "delivered 0/2" rollup off
+    // those placeholder slots (which would read like a stalled/failed send).
+    const queued: TimelineItem = {
+      ...RELAY_OUT,
+      id: 'rq',
+      tsMsgId: 'rq',
+      delivery_status: 'queued_pending',
+      body: 'Held until the group connects',
+      delivery_recipients: {
+        c1: { status: 'queued' },
+        c2: { status: 'queued' },
+      },
+    };
+    renderTimeline({ items: [queued], relayRoster: ROSTER });
+    expect(screen.getByText('Queued - will send when connected')).toBeInTheDocument();
+    expect(screen.queryByText('delivered 0/2')).not.toBeInTheDocument();
+  });
+
   it('attributes an inbound relay bubble to the sending member', () => {
     const inbound: TimelineItem = {
       kind: 'message',

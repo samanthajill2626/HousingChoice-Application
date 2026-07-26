@@ -141,6 +141,29 @@ describe('GET /api/inbox (C8)', () => {
     );
   });
 
+  it('surfaces a CONNECTING relay group with a distinct connecting status (D9)', async () => {
+    const { app, world } = makeWebhookHarness();
+    // A connect-when-ready group: createRelayGroup with NO pool number -> connecting.
+    // It must be VISIBLE in the inbox (so staff can open + queue on it) and carry a
+    // distinct 'connecting' status (never mis-bucketed as open).
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [
+        { phone: '+15551230001', contactId: 'c1', name: 'Alice' },
+        { phone: '+15551230002', contactId: 'c2', name: 'Bob' },
+      ],
+    });
+    expect(connecting.status).toBe('connecting');
+
+    const res = await auth(request(app).get('/api/inbox'));
+    expect(res.status).toBe(200);
+    const row = res.body.rows.find(
+      (r: { conversationId?: string }) => r.conversationId === connecting.conversationId,
+    );
+    expect(row).toBeDefined();
+    expect(row.kind).toBe('relay_group');
+    expect(row.status).toBe('connecting'); // distinct - NOT 'open'
+  });
+
   it('an unknown number (no contact) → kind:unknown, needsTriage, formatted-number name', async () => {
     const { app, world } = makeWebhookHarness();
     seedConversation(world, 'conv-unk', {

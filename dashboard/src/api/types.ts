@@ -84,10 +84,12 @@ export interface PoolNumberGroupRow {
 
 /** One pool number + its group history. `state` drives the table filter; `retire`
  *  mirrors the sweep's eligibility EXACTLY (daysRemaining present only while an
- *  idle number counts down). Absent optional stamps render as "-" on the page. */
+ *  idle number counts down). Absent optional stamps render as "-" on the page.
+ *  `warming` (relay number buying strategy T2) = a bought+attached number held
+ *  until Twilio's A2P registration event promotes it to `active`. */
 export interface PoolNumberRow {
   number: string;
-  state: 'active' | 'releasing' | 'released';
+  state: 'active' | 'warming' | 'releasing' | 'released';
   openGroups: number;
   totalGroups: number;
   burnedCount: number;
@@ -913,7 +915,17 @@ export type ConsentMethod =
   | 'imported';
 
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
-export type DeliveryStatus = 'queued' | 'sent' | 'delivered' | 'undelivered' | 'failed';
+export type DeliveryStatus =
+  // 'queued_pending' (relay number buying strategy T7) is a PRE-queued hold: a
+  // team message composed on a `connecting` group text (its number is still
+  // warming / A2P-registering) is persisted with this state and sent to nobody
+  // until the group connects, when it flushes into the normal queued -> ... path.
+  | 'queued_pending'
+  | 'queued'
+  | 'sent'
+  | 'delivered'
+  | 'undelivered'
+  | 'failed';
 
 /**
  * Per-recipient delivery slot on a relay-group source message (M1.7). MIRRORS

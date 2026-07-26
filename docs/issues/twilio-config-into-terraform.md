@@ -6,7 +6,7 @@ severity: low
 status: open
 area: infra
 created: 2026-07-20
-refs: scripts/twilioVi.mjs, RUNBOOK.md
+refs: scripts/twilioVi.mjs, scripts/twilioEventsSink.mjs, infra/modules/twilio-events, RUNBOOK.md
 ---
 
 **Problem.** Twilio config is entirely console-managed and hand-documented in
@@ -25,6 +25,17 @@ is an idempotent create-or-reconcile for the VI service - the repo's existing
 operator-script pattern (cf. vapidKeys.mjs), chosen over Terraform because
 Twilio's first-party TF provider is deprecated/archived and this was the only
 Twilio resource we would have managed as code (partial IaC = split-brain).
+
+A second script joined this set with the relay number buying strategy (T10):
+`scripts/twilioEventsSink.mjs` (`npm run twilio:events -- <env>`) create-or-
+reconciles the Event Streams webhook Sink + Subscription that promote a warming
+pool number to active. It is additionally wrapped by `infra/modules/twilio-events`
+(a `terraform_data` `local-exec`, gated OFF by default) so it can ride the
+per-env stack when an operator opts in. Data point for the provider decision
+below: the community `RJPearson94/twilio` provider (v0.18.x, PILOT) has **no**
+Event Streams Sink/Subscription resources (verified 2026-07-21), so it could not
+have expressed this surface either - reinforcing "check coverage before
+committing to a provider".
 
 **Suggested fix.** Decide whether to adopt IaC for Twilio as a deliberate
 initiative (not one resource at a time). Options to evaluate:

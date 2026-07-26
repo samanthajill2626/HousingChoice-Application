@@ -1420,18 +1420,27 @@ function makeFakePoolNumbers(): PoolNumbersService & { provisioned: string[] } {
       counter += 1;
       const poolNumber = `+1555040${String(counter).padStart(4, '0')}`;
       provisioned.push(poolNumber);
-      return { poolNumber, record: rec(poolNumber), provisioned: true };
+      return { kind: 'assigned', poolNumber, record: rec(poolNumber), provisioned: true };
     },
     async noteGroupClosed() {},
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord(poolNumber) {
       return rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -1447,12 +1456,21 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -1465,12 +1483,21 @@ function makeVoiceCapabilityFailingPool(): PoolNumbersService {
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 

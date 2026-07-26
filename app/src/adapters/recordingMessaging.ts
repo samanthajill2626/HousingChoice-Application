@@ -115,6 +115,12 @@ export class RecordingMessagingDriver implements MessagingAdapter {
   releasePhoneNumber(phoneNumber: string): Promise<void> {
     return this.inner.releasePhoneNumber(phoneNumber);
   }
+  attachToMessagingService(phoneNumberSid: string): Promise<void> {
+    return this.inner.attachToMessagingService(phoneNumberSid);
+  }
+  detachFromMessagingService(phoneNumber: string): Promise<void> {
+    return this.inner.detachFromMessagingService(phoneNumber);
+  }
   initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
     return this.inner.initiateCall(params);
   }

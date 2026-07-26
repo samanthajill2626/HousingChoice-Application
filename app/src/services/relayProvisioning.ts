@@ -24,7 +24,7 @@ import type {
   ConversationsRepo,
   RelayOwner,
 } from '../repos/conversationsRepo.js';
-import type { PoolNumbersService } from './poolNumbers.js';
+import { RELAY_WARM_JOB, type PoolNumbersService } from './poolNumbers.js';
 
 export interface ProvisionRelayDeps {
   conversationsRepo: ConversationsRepo;
@@ -74,15 +74,71 @@ export async function provisionRelayGroup(
         ? { type: 'placement', id: placementId }
         : { type: null };
 
-  // Provision the pool number first via burn-as-claim on the roster phones (lazy
-  // retirement sweep -> reuse a non-overlapping active number -> buy fresh). The
-  // roster IS the claim, so there is no provisional-id back-stamp. Kill-switch /
-  // voice-capability refusals throw here and propagate to the route's 503 mapping.
-  const provisioned = await poolNumbersService.provisionForGroup(
+  // Resolve a pool number via the three-tier ladder (T5): reuse (prefer
+  // multiplex) -> fresh spare -> connect-when-ready. It NEVER buys and NEVER
+  // throws the kill-switch error - a tier-3 miss returns `needs_connecting`.
+  const result = await poolNumbersService.provisionForGroup(
     members.map((m) => m.phone),
     tag,
   );
-  const poolNumber = provisioned.poolNumber;
+
+  // TIER 3 - CONNECT-WHEN-READY: no number available now. Create the group in the
+  // CONNECTING state (no pool number - staff can open + QUEUE messages) and warm a
+  // dedicated number for IT (D6): the warm job is tagged with this conversationId
+  // so warmOneNumber stamps pending_conversation_id, and onNumberRegistered then
+  // enqueues relay.numberReady back to this group. The intro is DEFERRED to the
+  // ready handler (there is no number to send from yet).
+  if (result.kind === 'needs_connecting') {
+    const conversation = await conversationsRepo.createRelayGroup({
+      // No poolNumber -> connecting create.
+      members,
+      ...(tag !== undefined && { tag }),
+      owner: resolvedOwner,
+    });
+    mergeContext({ conversationId: conversation.conversationId });
+
+    // Record the group + its roster (available to the ready handler for the
+    // assign-time burn). `connecting: true` marks the deferred-open path.
+    await auditRepo.append(`conversations#${conversation.conversationId}`, 'relay_group_created', {
+      actor,
+      memberCount: members.length,
+      connecting: true,
+      ...(tag !== undefined && { tag }),
+      ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
+      ...(resolvedOwner.type === 'placement' && { placementId: resolvedOwner.id }),
+    });
+
+    // Warm a dedicated number for THIS connecting group. Best-effort like the
+    // intro enqueue: a queue hiccup leaves the group connecting, which the
+    // stuck-connecting alert reconciles - never fatal to the created group.
+    try {
+      await enqueueImmediate(RELAY_WARM_JOB, { conversationId: conversation.conversationId });
+    } catch (err) {
+      logger.error(
+        { err, conversationId: conversation.conversationId },
+        'relay warm enqueue failed - connecting group created without a warm job (stuck-connecting alert will surface it)',
+      );
+    }
+
+    // NO intro enqueue here (deferred to relay.numberReady). Surface the new
+    // connecting group live so the dashboard can render it + queue on it.
+    events.emit('conversation.updated', toConversationUpdatedEvent(conversation));
+    logger.info(
+      {
+        conversationId: conversation.conversationId,
+        memberCount: members.length,
+        actor,
+        connecting: true,
+        ...(resolvedOwner.type !== null && { ownerType: resolvedOwner.type, ownerId: resolvedOwner.id }),
+      },
+      'relay group provisioned (connecting - awaiting a warm number)',
+    );
+    return conversation;
+  }
+
+  // TIER 1/2 - ASSIGNED: a number is available now -> today's OPEN-group behavior
+  // (create with the pool number -> audit -> intro -> emit), unchanged.
+  const poolNumber = result.poolNumber;
 
   const conversation = await conversationsRepo.createRelayGroup({
     poolNumber,

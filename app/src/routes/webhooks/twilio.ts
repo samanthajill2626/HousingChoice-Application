@@ -32,6 +32,7 @@ import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
 import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
+import type { PoolNumbersService } from '../../services/poolNumbers.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
 import {
   createBroadcastsRepo,
@@ -185,6 +186,13 @@ export interface TwilioWebhookDeps {
    * once (the send/append race window). Injectable for tests; default 2500ms.
    */
   statusUnknownSidRetryDelayMs?: number;
+  /**
+   * Relay pool-numbers service - consumed by the Event Streams sink router
+   * (createTwilioEventsRouter) to promote a `warming` number to `active` on a
+   * registration event (T3). Part of TwilioWebhookDeps so the shared webhooks
+   * deps (index.ts) thread it in; the real service by default. Injectable in tests.
+   */
+  poolNumbersService?: PoolNumbersService;
 }
 
 /** Default wait before the one unknown-SID retry in /status (see above). */

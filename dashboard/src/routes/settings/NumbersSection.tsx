@@ -14,21 +14,32 @@ import { Button, Spinner } from '../../ui/index.js';
 import styles from './NumbersSection.module.css';
 
 type Status = 'loading' | 'ready' | 'error';
-type StateFilter = 'active' | 'released' | 'all';
+type StateFilter = 'active' | 'warming' | 'released' | 'all';
 
 const FILTERS: { id: StateFilter; label: string }[] = [
   { id: 'active', label: 'Active' },
+  { id: 'warming', label: 'Warming' },
   { id: 'released', label: 'Released' },
   { id: 'all', label: 'All' },
 ];
 
 /** The lifecycle states a filter reveals. "Active" pairs active + releasing so an
  *  in-flight release still shows under the default view (its State cell reads
- *  "releasing"); "Released" is release-only; "All" is unfiltered. */
+ *  "releasing"); "Warming" is the pre-registration buffer (connect-when-ready);
+ *  "Released" is release-only; "All" is unfiltered. */
 function matchesFilter(n: PoolNumberRow, filter: StateFilter): boolean {
   if (filter === 'all') return true;
   if (filter === 'released') return n.state === 'released';
+  if (filter === 'warming') return n.state === 'warming';
   return n.state === 'active' || n.state === 'releasing';
+}
+
+/** A fresh spare = an active number with an empty burn set (never used for a
+ *  group), so it can host ANY roster. MIRRORS the server's countFreshSpares (D7):
+ *  active AND zero burned. `burnedCount` is the wire count, so no Set/array guard
+ *  is needed here. */
+function isFreshSpare(n: PoolNumberRow): boolean {
+  return n.state === 'active' && n.burnedCount === 0;
 }
 
 /** Local date formatter (the sibling Settings-table idiom); absent/invalid ->
@@ -110,6 +121,14 @@ export function NumbersSection(): React.JSX.Element {
 
   const visible = numbers.filter((n) => matchesFilter(n, filter));
 
+  // Buffer-health counts, over the WHOLE inventory (not the filtered view): how
+  // many numbers are active, how many are warming (buying/registering), and how
+  // many active ones are fresh spares ready to host a new group. Surfaced so an
+  // admin can see the connect-when-ready buffer at a glance (spec sec 7).
+  const activeCount = numbers.filter((n) => n.state === 'active').length;
+  const warmingCount = numbers.filter((n) => n.state === 'warming').length;
+  const freshSpareCount = numbers.filter(isFreshSpare).length;
+
   return (
     <section className={styles.section} aria-labelledby="numbers-heading">
       <h2 id="numbers-heading" className={styles.heading}>
@@ -135,6 +154,14 @@ export function NumbersSection(): React.JSX.Element {
         <p className={styles.empty}>No group text numbers yet - a number is provisioned with the first group text.</p>
       ) : (
         <>
+          <ul className={styles.counts} aria-label="Pool number counts">
+            <li className={styles.count}>{activeCount} active</li>
+            <li className={styles.count}>{warmingCount} warming</li>
+            <li className={styles.count}>
+              {freshSpareCount} fresh {freshSpareCount === 1 ? 'spare' : 'spares'}
+            </li>
+          </ul>
+
           <div className={styles.chips} role="group" aria-label="Filter by state">
             {FILTERS.map((f) => {
               const isActive = filter === f.id;

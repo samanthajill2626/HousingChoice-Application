@@ -6,6 +6,7 @@ import { Router } from 'express';
 import { loadConfig } from '../../lib/config.js';
 import { createTwilioWebhookRouter, type TwilioWebhookDeps } from './twilio.js';
 import { createTwilioVoiceRouter, type TwilioVoiceWebhookDeps } from './voice.js';
+import { createTwilioEventsRouter } from './twilioEvents.js';
 import { createSesWebhookRouter, type SesWebhookDeps } from './ses.js';
 
 export type WebhooksRouterDeps = TwilioWebhookDeps & TwilioVoiceWebhookDeps & SesWebhookDeps;
@@ -16,6 +17,10 @@ export function createWebhooksRouter(deps: WebhooksRouterDeps = {}): Router {
   // the messaging router owns /twilio/sms + /twilio/status (distinct segments,
   // no collision with /twilio/voice/status).
   router.use('/twilio/voice', createTwilioVoiceRouter(deps));
+  // Event Streams sink (relay-number-buying T3): the A2P registration webhook.
+  // Mounts BEFORE the /twilio prefix (like /twilio/voice) so /twilio/events is
+  // owned by the events router, not swallowed by the messaging router's /twilio.
+  router.use('/twilio/events', createTwilioEventsRouter(deps));
   router.use('/twilio', createTwilioWebhookRouter(deps));
   // SES inbound (email-channel B4): DEV-GATED. There is NO existing conditional-
   // mount precedent - both twilio routers are ALWAYS mounted (review F15). We

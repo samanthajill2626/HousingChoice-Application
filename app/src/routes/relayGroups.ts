@@ -286,6 +286,23 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(404).json({ error: 'relay_group_not_found' });
       return;
     }
+    // D11: a CONNECTING group has NO pool number yet, so a member add would
+    // SILENTLY SKIP the burn-claim (the burn gate below is `pool_number` present)
+    // - breaking the burn-multiplexing invariant + letting a future group reuse
+    // this number for an unburned phone. Refuse member mutations until connected.
+    // PII: actor + reason only (never the phone).
+    if (conversation.status === 'connecting') {
+      await audit.append(`conversations#${conversationId}`, 'relay_member_add_refused', {
+        actor,
+        reason: 'group_connecting',
+      });
+      res.status(409).json({
+        error: 'group_connecting',
+        message:
+          'This group text is still connecting to its number. Add members once it is connected.',
+      });
+      return;
+    }
     const parsed = parseMember(req.body);
     if ('error' in parsed) {
       res.status(400).json({ error: parsed.error });
@@ -415,6 +432,16 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const conversation = await conversations.getById(conversationId);
     if (!conversation || conversation.type !== 'relay_group') {
       res.status(404).json({ error: 'relay_group_not_found' });
+      return;
+    }
+    // D11: refuse roster mutations while CONNECTING (parity with the add guard -
+    // the roster is frozen until the group opens on its number).
+    if (conversation.status === 'connecting') {
+      res.status(409).json({
+        error: 'group_connecting',
+        message:
+          'This group text is still connecting to its number. Remove members once it is connected.',
+      });
       return;
     }
     // Capture the member being removed (for the milestone's contactId) BEFORE

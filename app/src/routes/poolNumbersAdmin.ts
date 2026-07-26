@@ -44,7 +44,7 @@ export interface PoolNumberGroupRow {
 /** One pool number + its group history (wire row; T3 copies this verbatim). */
 export interface PoolNumberRow {
   number: string;
-  state: 'active' | 'releasing' | 'released';
+  state: PoolNumberLifecycleState;
   openGroups: number;
   totalGroups: number;
   burnedCount: number;
@@ -53,6 +53,11 @@ export interface PoolNumberRow {
   releasedAt?: string;
   retire: { eligible: boolean; daysRemaining?: number };
   groups: PoolNumberGroupRow[];
+  /** For a `warming` number earmarked to a connect-when-ready group: the
+   *  connecting conversation it will open. Absent once the group opens (the
+   *  earmark is cleared) or on a plain buffer spare. Ops visibility + lets a
+   *  caller correlate a warming number to its group. */
+  pendingConversationId?: string;
 }
 
 export interface PoolNumbersAdminRouterDeps {
@@ -68,18 +73,20 @@ const ONE_DAY_MS = 86_400_000;
 
 /**
  * Lifecycle progression rank for the W1 de-dupe (higher = further along):
- * released > releasing > active. A pool number lives in exactly ONE lifecycle
- * partition, so the only way the three listByState Queries can return it under
- * two states at once is a state transition (active -> releasing -> released)
- * racing the reads: the byLifecycleState GSI is eventually consistent, so it can
- * still project the row under its OLD partition while the NEW one already sees
- * it. We keep the FURTHEST-ALONG copy because a mid-transition duplicate always
- * reflects a FORWARD transition, so the furthest state is the honest render.
+ * released > releasing > active > warming. A pool number lives in exactly ONE
+ * lifecycle partition, so the only way the listByState Queries can return it
+ * under two states at once is a forward state transition (warming -> active ->
+ * releasing -> released) racing the reads: the byLifecycleState GSI is eventually
+ * consistent, so it can still project the row under its OLD partition while the
+ * NEW one already sees it. We keep the FURTHEST-ALONG copy because a
+ * mid-transition duplicate always reflects a FORWARD transition, so the furthest
+ * state is the honest render.
  */
 const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
-  active: 0,
-  releasing: 1,
-  released: 2,
+  warming: 0,
+  active: 1,
+  releasing: 2,
+  released: 3,
 };
 
 /**
@@ -186,10 +193,14 @@ export function createPoolNumbersAdminRouter(deps: PoolNumbersAdminRouterDeps = 
   // Admin-only inventory surface (mirrors adminUsers).
   router.use(requireRole('admin'));
 
-  // GET /api/pool-numbers - the whole inventory (active, releasing, released);
-  // the client filters. N+1 group lookups are accepted at launch scale (spec sec 3).
+  // GET /api/pool-numbers - the whole inventory (active, warming, releasing,
+  // released); the client filters + tallies buffer-health counts. `warming`
+  // (relay number buying strategy) surfaces the connect-when-ready buffer of
+  // bought+attached numbers awaiting A2P registration - it has no groups and is
+  // never retire-eligible (retireMirror requires 'active'). N+1 group lookups are
+  // accepted at launch scale (spec sec 3).
   router.get('/', async (_req, res) => {
-    const states: PoolNumberLifecycleState[] = ['active', 'releasing', 'released'];
+    const states: PoolNumberLifecycleState[] = ['active', 'warming', 'releasing', 'released'];
     const flat = (await Promise.all(states.map((s) => poolNumbers.listByState(s)))).flat();
     // W1: these three Queries are NOT a consistent snapshot. A number changing
     // state as we read can be projected under TWO partitions at once (a stale old
@@ -234,6 +245,9 @@ export function createPoolNumbersAdminRouter(deps: PoolNumbersAdminRouterDeps = 
             lastGroupClosedAt: rec.last_group_closed_at,
           }),
           ...(rec.released_at !== undefined && { releasedAt: rec.released_at }),
+          ...(rec.pending_conversation_id !== undefined && {
+            pendingConversationId: rec.pending_conversation_id,
+          }),
           retire: retireMirror(rec, openGroups, groups.length, nowMs),
           groups: groups.map(toGroupRow),
         };

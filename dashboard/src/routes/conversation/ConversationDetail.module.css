@@ -70,6 +70,13 @@
   background: var(--c-pill-unknown-bg);
 }
 
+/* Connect-when-ready: a distinct "in progress" hue (teal), set apart from the
+ * open (blue) and closed (amber) pills so a group awaiting its number reads as a
+ * third state at a glance. */
+.statusConnecting {
+  background: var(--c-pill-landlord-bg);
+}
+
 .actionBtn {
   background: var(--c-header-btn-bg);
   color: var(--c-text-inverse);

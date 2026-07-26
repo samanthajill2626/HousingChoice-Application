@@ -85,4 +85,13 @@ locals {
   mail_domain          = "mail.housingchoice.org"
   mail_domain_phase    = 0
   manage_mail_rule_set = false
+
+  # Relay Event Streams sink (T10, relay number buying strategy). false = the
+  # twilio-events module is INERT: a normal apply provisions no Twilio sink and
+  # needs no Twilio creds. Flip to true ONLY after the app is deployed with
+  # TWILIO_EVENTS_WEBHOOK_SECRET (secrets:push) and .env.prod carries the Twilio
+  # account creds the local-exec reads - and BEFORE flipping RELAY_LIVE_PROVISIONING
+  # on, so the readiness gate exists before any number warms. dev + prod get
+  # DISTINCT sinks (account-scoped). See RUNBOOK "Relay Event Streams sink".
+  twilio_events_enabled = false
 }

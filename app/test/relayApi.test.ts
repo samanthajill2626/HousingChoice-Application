@@ -67,7 +67,7 @@ function makeFakePoolNumbers(): PoolNumbersService & {
       provisioned.push(poolNumber);
       const record = rec(poolNumber);
       records.set(poolNumber, record);
-      return { poolNumber, record, provisioned: true };
+      return { kind: 'assigned', poolNumber, record, provisioned: true };
     },
     async noteGroupClosed(poolNumber) {
       closed.push(poolNumber);
@@ -77,22 +77,34 @@ function makeFakePoolNumbers(): PoolNumbersService & {
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     // AF-3: the reopen route reads the pool record. Default active; a test flips
     // records.get(n)!.lifecycle_state = 'released' to prove the reopen refusal.
     async getRecord(poolNumber) {
       return records.get(poolNumber) ?? rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
 /**
- * A pool service emulating the M1.7 kill-switch OFF: provisionForGroup
- * always refuses (as the real service does on the deployed twilio driver
- * pre-A2P). NO number is ever handed out — the route must surface 503
- * relay_provisioning_disabled.
+ * A pool service emulating the M1.7 kill-switch OFF at a TIER-3 miss:
+ * provisionForGroup throws RelayProvisioningDisabledError. This faithfully models
+ * the REAL service on the deployed twilio driver pre-A2P - a fresh-pair, no-spare
+ * roster (no reuse, no spare) with relayLiveProvisioning off hits tier 3, which
+ * cannot warm a number and so throws (proven in poolNumbers.test.ts). The 503 test
+ * below sends a single fresh member, exactly that fresh-pair/no-spare scenario. NO
+ * number is ever handed out - the route must surface 503 relay_provisioning_disabled.
  */
 function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: number } {
   const DISABLED_MESSAGE =
@@ -111,12 +123,21 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
     async burnMember() {
       return true;
     },
+    async burnGroupRoster() {
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord() {
       return undefined;
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -145,13 +166,13 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
       for (const [pn, set] of burned) {
         if (!rosterPhones.some((p) => set.has(p))) {
           for (const p of rosterPhones) set.add(p);
-          return { poolNumber: pn, record: rec(pn), provisioned: false };
+          return { kind: 'assigned', poolNumber: pn, record: rec(pn), provisioned: false };
         }
       }
       counter += 1;
       const pn = `+1555070${String(counter).padStart(4, '0')}`;
       burned.set(pn, new Set(rosterPhones));
-      return { poolNumber: pn, record: rec(pn), provisioned: true };
+      return { kind: 'assigned', poolNumber: pn, record: rec(pn), provisioned: true };
     },
     async noteGroupClosed() {},
     async burnMember(poolNumber: string, phone: string) {
@@ -161,12 +182,25 @@ function makeBurnFaithfulPool(): PoolNumbersService & { burned: Map<string, Set<
       set.add(phone);
       return true;
     },
+    async burnGroupRoster(poolNumber: string, phones: string[]) {
+      const set = burned.get(poolNumber) ?? new Set<string>();
+      burned.set(poolNumber, set);
+      if (phones.some((p) => set.has(p))) return false; // overlap -> refuse
+      for (const p of phones) set.add(p);
+      return true;
+    },
     async retireEligible() {
       return [];
     },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
     async getRecord(poolNumber: string) {
       return rec(poolNumber);
     },
+    async clearConnectingEarmarks() {},
   };
 }
 
@@ -302,6 +336,48 @@ describe('relay-group API (M1.7)', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(delAgain.body.members).toHaveLength(1);
+  });
+
+  it('refuses member-add on a CONNECTING group (D11): 409 group_connecting, roster unchanged (burn invariant protected)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    // A connect-when-ready group: created with NO pool number -> connecting. A
+    // member add here would SILENTLY SKIP the burn (no pool number to burn onto).
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [{ phone: ALICE, contactId: 'c-alice', name: 'Alice' }],
+    });
+    expect(connecting.status).toBe('connecting');
+
+    const res = await request(app)
+      .post(`/api/conversations/${connecting.conversationId}/members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ phone: BOB, name: 'Bob' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('group_connecting');
+    // Roster untouched - refused BEFORE any mutation (no unburned member added).
+    const after = await world.conversationsRepo.getById(connecting.conversationId);
+    expect(after?.participants).toHaveLength(1);
+  });
+
+  it('refuses member-REMOVE on a CONNECTING group (D11 parity): 409 group_connecting', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = authedHarness(world, pool);
+    const connecting = await world.conversationsRepo.createRelayGroup({
+      members: [
+        { phone: ALICE, contactId: 'c-alice', name: 'Alice' },
+        { phone: BOB, contactId: 'c-bob', name: 'Bob' },
+      ],
+    });
+
+    const res = await request(app)
+      .delete(`/api/conversations/${connecting.conversationId}/members/${encodeURIComponent(BOB)}`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('group_connecting');
   });
 
   // --- BE2/C2: added_to_group_text / removed_from_group_text milestones -----

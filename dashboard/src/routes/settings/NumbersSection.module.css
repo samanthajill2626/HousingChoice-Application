@@ -42,6 +42,22 @@
   font-size: var(--fs-sm);
 }
 
+/* --- Buffer-health counts (active / warming / fresh spares) --------------- */
+.counts {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-2) var(--sp-4);
+}
+
+.count {
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+  font-variant-numeric: tabular-nums;
+}
+
 /* --- State filter chips (AudienceFilters idiom) -------------------------- */
 .chips {
   display: flex;

@@ -27,6 +27,15 @@ export interface DeliveryPresentation {
 }
 
 const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
+  // `queued_pending` (connect-when-ready hold, T7) = composed on a `connecting`
+  // group text and held: no number to send from yet, so it goes to nobody until
+  // the group connects and it flushes. A neutral, non-failure "Queued" cue that
+  // says WHEN it will send - it is a deliberate hold, not a stall.
+  queued_pending: {
+    label: 'Queued - will send when connected',
+    tone: 'neutral',
+    isFailure: false,
+  },
   // `queued` = accepted by us / handed to the carrier but not yet carrier-sent —
   // i.e. the "sending from the app" waypoint. Shown as "Sending…" so the optimistic
   // bubble reads as in-progress before it advances to Sent → Delivered.

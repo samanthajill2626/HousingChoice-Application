@@ -158,6 +158,45 @@ export interface MessagingAdapter {
    * also drops it from any Messaging Service / A2P campaign it belonged to.
    */
   releasePhoneNumber(phoneNumber: string): Promise<void>;
+  // --- Event Streams spike (relay-number-buying T1, RESOLVED) --------------
+  // Facts the T3 registration webhook (POST /webhooks/twilio/events) consumes.
+  // Twilio delivers a CloudEvents batch (JSON array); for the number-warming
+  // lifecycle the confirmed shape is:
+  //   event type: com.twilio.messaging.compliance.number-registration.successful
+  //   payload lives in the CloudEvents `data` object with fields (concatenated
+  //   lowercase, NOT snake_case):
+  //     phonenumbersid      PN... SID - the correlation key back to the pool
+  //                         record's stored `sid` (maps 1:1; use THIS, not the
+  //                         phone string, which is fragile)
+  //     phonenumber         digits only, NO leading + (non-E.164)
+  //     messagingservicesid MG...
+  //   auth (decision D4): a shared secret carried in the Authorization header
+  //     (Basic-auth-in-URL - Twilio's native webhook-sink mechanism),
+  //     constant-time compared to config.twilioEventsWebhookSecret - NOT
+  //     X-Twilio-Signature (that raw-body scheme has SDK nuance). See
+  //     routes/webhooks/twilioEvents.ts.
+  // (Also .pending / .failed and de-registration.* variants exist; log-only.)
+  /**
+   * ATTACH a purchased number (its PN... SID) to the configured A2P Messaging
+   * Service sender pool (relay warming, T1). A number MUST be a sender in the
+   * service before Twilio can 10DLC-register it - warmOneNumber attaches right
+   * after buying so the Event Streams registration event above can later promote
+   * it warming -> active. IDEMPOTENT: a re-attach of an already-present number
+   * (Twilio 21710 "already exists") is a no-op success, so a redelivered warm job
+   * is safe. Throws PoolFullError when the service's sender pool is full (Twilio
+   * 21714). The console driver logs a no-op.
+   */
+  attachToMessagingService(phoneNumberSid: string): Promise<void>;
+  /**
+   * DETACH a number (by its E.164) from the configured Messaging Service sender
+   * pool (relay retirement, T8): look the number up among the service's senders
+   * to get its PN... SID and remove it. IDEMPOTENT: a number that is not a sender
+   * in the service is a logged no-op (no throw). The console driver logs a no-op.
+   * NOTE: releasePhoneNumber (deleting the number) also drops it from the service
+   * implicitly; this explicit detach runs FIRST in the retirement sweep so the
+   * A2P membership is cleaned up deterministically before the resource delete.
+   */
+  detachFromMessagingService(phoneNumber: string): Promise<void>;
   /**
    * Originate an OUTBOUND call (M1.9a). NOT used by the inbound masked bridge
    * (that answers with <Dial> TwiML) — this is the seam for press-0 → team and
@@ -282,6 +321,21 @@ export class SmsSendingDisabledError extends Error {
   }
 }
 
+/**
+ * The A2P Messaging Service's phone-number sender pool is full (Twilio error
+ * 21714): attachToMessagingService cannot add another number until one is
+ * removed. Surfaced as a TYPED error so the relay warm/refill path fails LOUD -
+ * a full pool is an operational capacity limit (raise the pool / retire numbers),
+ * not a transient/retryable condition. The poolNumbers service surfaces it; the
+ * caller alerts rather than silently leaving a bought number unregistered.
+ */
+export class PoolFullError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = new.target.name;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Twilio driver — production path (Programmable Messaging REST).
 // ---------------------------------------------------------------------------
@@ -370,6 +424,27 @@ export interface TwilioClientLike {
           channel: unknown;
           customerKey?: string;
         }): Promise<{ sid: string }>;
+      };
+    };
+  };
+  /**
+   * A2P Messaging Service sender-pool management (relay warming/retirement, T1).
+   * Optional so the existing message-only fakes keep compiling; the real twilio
+   * SDK provides it, and the driver guards with a clear error when a fake omits
+   * it. `messaging.v1.services(sid).phoneNumbers` is a CALLABLE resource - the
+   * same callable-with-methods shape as incomingPhoneNumbers above:
+   *   .create({ phoneNumberSid })  attaches a number to the service sender pool
+   *   .list()                      enumerates the service's current senders
+   *   (sid).remove()               detaches the sender with that PN... SID
+   */
+  messaging?: {
+    v1: {
+      services: (serviceSid: string) => {
+        phoneNumbers: {
+          create(opts: { phoneNumberSid: string }): Promise<unknown>;
+          list(): Promise<Array<{ sid: string; phoneNumber: string }>>;
+          (sid: string): { remove(): Promise<unknown> };
+        };
       };
     };
   };
@@ -615,6 +690,61 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     this.log.info({ sid: match.sid }, 'twilio phone number released');
   }
 
+  async attachToMessagingService(phoneNumberSid: string): Promise<void> {
+    const svc = this.deps.messagingServiceSid;
+    if (!svc) {
+      throw new Error('attachToMessagingService: no messagingServiceSid configured');
+    }
+    const messaging = this.client.messaging;
+    if (!messaging) {
+      throw new Error('TwilioMessagingDriver: client lacks the messaging API');
+    }
+    try {
+      await messaging.v1.services(svc).phoneNumbers.create({ phoneNumberSid });
+      this.log.info({ phoneNumberSid, svc }, 'attached number to messaging service');
+    } catch (err) {
+      const code = providerErrorCode(err);
+      // IDEMPOTENT: 21710 = the number is ALREADY a sender in this service. A
+      // re-attach (e.g. a redelivered warm job) is success, not an error.
+      if (code === '21710') {
+        this.log.info(
+          { phoneNumberSid },
+          'number already attached to messaging service (21710) - idempotent no-op',
+        );
+        return;
+      }
+      // 21714 = the service's A2P sender pool is full. Fail LOUD with the typed
+      // error so the warm/refill path alerts (capacity limit, not transient).
+      if (code === '21714') {
+        throw new PoolFullError('attachToMessagingService: messaging service sender pool full (21714)');
+      }
+      throw err;
+    }
+  }
+
+  async detachFromMessagingService(phoneNumber: string): Promise<void> {
+    const svc = this.deps.messagingServiceSid;
+    if (!svc) {
+      throw new Error('detachFromMessagingService: no messagingServiceSid configured');
+    }
+    const messaging = this.client.messaging;
+    if (!messaging) {
+      throw new Error('TwilioMessagingDriver: client lacks the messaging API');
+    }
+    // Look the number up by E.164 among the service's senders to get its PN SID,
+    // then remove it (mirrors releasePhoneNumber's list-by-E.164 idiom). PII:
+    // never log the number - the SID / boolean outcome only.
+    const members = await messaging.v1.services(svc).phoneNumbers.list();
+    const match = members.find((m) => m.phoneNumber === phoneNumber);
+    if (!match) {
+      // Idempotent: not a sender in this service (already detached / never added).
+      this.log.warn({ detached: false }, 'detachFromMessagingService: number not in messaging service - no-op');
+      return;
+    }
+    await messaging.v1.services(svc).phoneNumbers(match.sid).remove();
+    this.log.info({ sid: match.sid }, 'detached number from messaging service');
+  }
+
   async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {
     const calls = this.client.calls;
     if (!calls) {
@@ -853,6 +983,21 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
     // No-op locally - there is no real number to release. PII: never log the number.
     void phoneNumber;
     this.log.info({ released: true }, 'console messaging driver: phone number "released" (no-op)');
+  }
+
+  async attachToMessagingService(phoneNumberSid: string): Promise<void> {
+    // No-op locally - there is no real Messaging Service to attach to. The
+    // fake-twilio register-number control (T9) supplies the "Twilio registered
+    // it" signal instead; here we just confirm the attach path ran.
+    void phoneNumberSid;
+    this.log.info({ attached: true }, 'console messaging driver: number "attached" to messaging service (no-op)');
+  }
+
+  async detachFromMessagingService(phoneNumber: string): Promise<void> {
+    // No-op locally - no real Messaging Service to detach from. PII: never log
+    // the number.
+    void phoneNumber;
+    this.log.info({ detached: true }, 'console messaging driver: number "detached" from messaging service (no-op)');
   }
 
   async initiateCall(params: InitiateCallParams): Promise<InitiateCallResult> {

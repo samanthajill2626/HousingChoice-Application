@@ -111,6 +111,15 @@ data "aws_iam_policy_document" "app" {
   # identity/<recipient>). Least privilege is preserved by the FromAddress
   # condition: this role can only send AS an address on our mail domain,
   # whatever the resource set.
+  #
+  # It ALSO covers the exact configuration-set resource: every send sets
+  # ConfigurationSetName (B5, so bounce/complaint/delivery events fan out),
+  # and SES authorizes SendEmail/SendRawEmail against BOTH the identity AND
+  # the configuration-set resource - granting only identity/* denies
+  # AccessDenied on configuration-set/<name>. This resource is exact (not a
+  # wildcard) because the name is a known, single Terraform-managed value.
+  # Proven 2026-07-22: this specific denial appeared only once production
+  # access lifted the sandbox (its own restriction masked this gap first).
   statement {
     sid = "SesSend"
     actions = [
@@ -119,6 +128,7 @@ data "aws_iam_policy_document" "app" {
     ]
     resources = [
       "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:identity/*",
+      "arn:aws:ses:${data.aws_region.current.region}:${data.aws_caller_identity.current.account_id}:configuration-set/${var.email_configuration_set_name}",
     ]
     condition {
       test     = "StringLike"

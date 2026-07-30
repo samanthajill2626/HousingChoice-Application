@@ -113,10 +113,12 @@ module "ec2" {
   jobs_queue_arn     = module.jobs.queue_arn
   scheduler_role_arn = module.jobs.scheduler_role_arn
 
-  # Email channel v1: SES send identity + the inbound queue/bucket the worker reads.
-  inbound_mail_queue_arn  = module.inbound_mail.queue_arn
-  inbound_mail_bucket_arn = module.inbound_mail.bucket_arn
-  ses_identity_arn        = module.inbound_mail.identity_arn
+  # Email channel v1: SES send identity + configuration set + the inbound
+  # queue/bucket the worker reads.
+  inbound_mail_queue_arn       = module.inbound_mail.queue_arn
+  inbound_mail_bucket_arn      = module.inbound_mail.bucket_arn
+  ses_identity_arn             = module.inbound_mail.identity_arn
+  email_configuration_set_name = module.inbound_mail.config_set_name
 }
 
 # ACM cert for the custom domain (Change Order 3). DNS-validated in Namecheap

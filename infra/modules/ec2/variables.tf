@@ -70,6 +70,11 @@ variable "ses_identity_arn" {
   type        = string
 }
 
+variable "email_configuration_set_name" {
+  description = "SES configuration set name (from the inbound_mail module's config_set_name output) - every send sets ConfigurationSetName so bounce/complaint/delivery events fan out (B5), and SES authorizes SendEmail/SendRawEmail against the configuration-set resource in ADDITION to the identity resource. Without a grant here, sends fail AccessDenied on the configuration-set ARN even with a correct identity grant (email-channel-v1, hit 2026-07-22 once production access lifted the sandbox's more permissive pre-check path)."
+  type        = string
+}
+
 variable "compose_version" {
   description = "docker compose v2 release tag installed by user-data (pinned for reproducible boots)."
   type        = string

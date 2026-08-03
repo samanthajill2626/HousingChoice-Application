@@ -15,9 +15,10 @@
 //   - CloudWatch Logs: the log STREAMS in the app/worker groups are deleted
 //     (the log GROUPS stay — they are Terraform-managed).
 //
-// After the wipe (and ONLY then), it RE-INVITES the operator
-// (cameron@abt-industries.com, admin) so login still works — auth is invite-
-// gated, and the wipe empties the users table. No other seed/fixture data.
+// After the wipe (and ONLY then), it RE-INVITES the operators
+// (cameron@abt-industries.com and sam@housingchoice.org, both admin) so login
+// still works — auth is invite-gated, and the wipe empties the users table.
+// No other seed/fixture data.
 //
 // What it NEVER touches (PRESERVE):
 //   - SSM Parameter Store (/hc/dev/app/* — Twilio/Google/VAPID/session secrets
@@ -99,11 +100,14 @@ const APP_TABLE_BASENAMES = [
 const QUEUE_NAMES = [`hc-${ENV}-jobs`, `hc-${ENV}-jobs-dlq`];
 const LOG_GROUPS = [`/hc/${ENV}/app`, `/hc/${ENV}/worker`];
 
-// After a wipe empties the users table, re-invite the operator so they can log
+// After a wipe empties the users table, re-invite the operators so they can log
 // back in (auth is invite-gated — a Google login is refused without an existing
 // record). Mirrors `npm run user:invite -- dev <email> admin` exactly (same
 // item shape + audit event), reusing scripts/lib/userInviteCore.mjs.
-const SEED_USER = { email: 'cameron@abt-industries.com', role: 'admin' };
+const SEED_USERS = [
+  { email: 'cameron@abt-industries.com', role: 'admin' },
+  { email: 'sam@housingchoice.org', role: 'admin' },
+];
 
 function usage() {
   process.stdout.write(
@@ -260,13 +264,13 @@ async function wipeLogStreams(logs, group, execute) {
   return { skipped: false, count };
 }
 
-// ── Re-invite the operator (so login works after the users table is emptied) ──
-async function inviteSeedUser(ddb, identity, execute) {
+// ── Re-invite the operators (so login works after the users table is emptied) ──
+async function inviteSeedUser(ddb, identity, execute, seedUser) {
   const usersTable = `${TABLE_PREFIX}users`;
   const auditTable = `${TABLE_PREFIX}audit_events`;
   assertDevName(usersTable);
   assertDevName(auditTable);
-  const userId = userIdForEmail(SEED_USER.email);
+  const userId = userIdForEmail(seedUser.email);
   if (!execute) return { skipped: false, userId, already: false, dryRun: true };
 
   const nowIso = new Date().toISOString();
@@ -276,7 +280,7 @@ async function inviteSeedUser(ddb, identity, execute) {
     await ddb.send(
       new PutItemCommand({
         TableName: usersTable,
-        Item: buildInvitedUserItem({ userId, email: SEED_USER.email, role: SEED_USER.role, nowIso }),
+        Item: buildInvitedUserItem({ userId, email: seedUser.email, role: seedUser.role, nowIso }),
         ConditionExpression: 'attribute_not_exists(userId)',
       }),
     );
@@ -288,8 +292,8 @@ async function inviteSeedUser(ddb, identity, execute) {
   // user_invited audit event (auditRepo conventions; actor = the IAM principal).
   const a = buildInvitedAuditItem({
     userId,
-    email: SEED_USER.email,
-    role: SEED_USER.role,
+    email: seedUser.email,
+    role: seedUser.role,
     invitedBy: identity.Arn,
     nowIso,
     suffix: randomUUID().slice(0, 8),
@@ -386,15 +390,17 @@ async function main() {
     process.stdout.write(line(group, r) + (r.skipped ? '' : ' stream(s)') + '\n');
   }
 
-  // Re-invite the operator so login works after the users wipe.
+  // Re-invite the operators so login works after the users wipe.
   process.stdout.write('\nOperator re-invite (so login works after the wipe):\n');
-  const inv = await inviteSeedUser(ddb, identity, execute);
-  if (inv.dryRun) {
-    process.stdout.write(`  - would invite ${SEED_USER.email} as '${SEED_USER.role}' (${inv.userId})\n`);
-  } else if (inv.already) {
-    process.stdout.write(`  - ${SEED_USER.email} already exists (${inv.userId}) — left unchanged\n`);
-  } else {
-    process.stdout.write(`  - invited ${SEED_USER.email} as '${SEED_USER.role}' (${inv.userId})\n`);
+  for (const seedUser of SEED_USERS) {
+    const inv = await inviteSeedUser(ddb, identity, execute, seedUser);
+    if (inv.dryRun) {
+      process.stdout.write(`  - would invite ${seedUser.email} as '${seedUser.role}' (${inv.userId})\n`);
+    } else if (inv.already) {
+      process.stdout.write(`  - ${seedUser.email} already exists (${inv.userId}) — left unchanged\n`);
+    } else {
+      process.stdout.write(`  - invited ${seedUser.email} as '${seedUser.role}' (${inv.userId})\n`);
+    }
   }
 
   process.stdout.write(
@@ -403,8 +409,8 @@ async function main() {
   );
   process.stdout.write(
     execute
-      ? `\n✓ Wipe complete. Clean slate — no fixture data, only the re-invited operator ` +
-          `(${SEED_USER.email}) so login works (activates on first Google sign-in).\n`
+      ? `\n✓ Wipe complete. Clean slate — no fixture data, only the re-invited operators ` +
+          `(${SEED_USERS.map((u) => u.email).join(', ')}) so login works (activates on first Google sign-in).\n`
       : `\nDRY RUN only — nothing was changed. Re-run with --yes to execute.\n`,
   );
 }

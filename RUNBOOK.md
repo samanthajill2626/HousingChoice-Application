@@ -230,9 +230,10 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
   *definition* (the tables, bucket, queues, log groups themselves stay). It deletes
   CONTENTS, not resources.
 - **No fixture re-seed** — the env is left EMPTY of demo data. The ONE exception: it
-  **auto-re-invites the operator** (`cameron@abt-industries.com`, admin) so login still
-  works (auth is invite-gated and the wipe empties the users table) — identical to
-  `npm run user:invite -- dev cameron@abt-industries.com admin` (idempotent; activates on
+  **auto-re-invites the operators** (`cameron@abt-industries.com` and
+  `sam@housingchoice.org`, both admin) so login still works (auth is invite-gated and
+  the wipe empties the users table) — identical to
+  `npm run user:invite -- dev <email> admin` per user (idempotent; activates on
   first Google sign-in). Invite anyone else with `npm run user:invite`.
 - **Guards:** hard-pinned to `dev` (no prod path); runs `assertHousingChoiceAccount()` first
   (named `housingchoice` profile must resolve to the pinned account, else it refuses); only

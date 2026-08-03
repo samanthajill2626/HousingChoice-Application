@@ -78,8 +78,9 @@ Notes:
   PRESENTATION only - preview, channel, direction and `lastActivityAt` - so an
   empty newest thread renders the fallback preview while an older thread is what
   earned the row.
-- Perf: zero added cost for non-deleted rows; deleted contacts cost 1-2 extra
-  queries only when encountered in the page walk. The pager remains
+- Perf: zero added cost for non-deleted rows; a deleted contact encountered in
+  the page walk costs one conversations query plus at most one latest-message
+  read per UNREAD thread (nothing when no thread is unread). The pager remains
   O(page size), never a scan (see
   `docs/issues/inbox-filter-tabs-full-walk.md` for the pre-existing filter-tab
   tail, which this feature does not worsen).

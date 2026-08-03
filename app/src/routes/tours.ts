@@ -821,8 +821,20 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // (the roster resolution above already produced its own errors if the
     // unit truly matters). The auto-resolve path fetched the unit internally
     // but does not expose it, and the explicit-members path never loads it.
-    const unitForZip = await units.getById(tour.unitId);
-    const postalCode = zipFive(unitForZip?.address);
+    // The read is WRAPPED because of that last point: on the explicit-members
+    // path this route never touched the units table before, so an unguarded
+    // repo/network throw would turn a DynamoDB hiccup into a 500 on a request
+    // that used to succeed - a cosmetic hint must never fail group creation.
+    let postalCode: string | undefined;
+    try {
+      const unitForZip = await units.getById(tour.unitId);
+      postalCode = zipFive(unitForZip?.address);
+    } catch (err) {
+      log.warn(
+        { err, tourId },
+        'tour relay: unit ZIP hint lookup failed - creating the group without the hint',
+      );
+    }
 
     // Atomically claim the group-thread slot BEFORE buying anything: the
     // read-guard above is check-then-act, so two overlapping POSTs could both

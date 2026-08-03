@@ -34,4 +34,15 @@ describe('relayPreferredAreaCodes resolution', () => {
       /RELAY_PREFERRED_AREA_CODES/,
     );
   });
+
+  it('rejects a 3-digit NON-NANP entry (first digit must be 2-9)', () => {
+    // '044' would reach the driver as Number('044') === 44 - a code nobody typed,
+    // and a Twilio 4xx there ABORTS the warm ladder instead of advancing it.
+    expect(() => loadConfig({ ...base, RELAY_PREFERRED_AREA_CODES: '044' })).toThrow(
+      /RELAY_PREFERRED_AREA_CODES/,
+    );
+    expect(() => loadConfig({ ...base, RELAY_PREFERRED_AREA_CODES: '404,104' })).toThrow(
+      /RELAY_PREFERRED_AREA_CODES/,
+    );
+  });
 });

@@ -756,16 +756,72 @@ describe('provisionPhoneNumber - geographic search hints', () => {
     ).rejects.toBeInstanceOf(VoiceCapabilityError); // subclass keeps existing catches working
   });
 
+  it('twilio driver SANITIZES a transport failure from the search - no ZIP, params or URL escape', async () => {
+    // The SDK re-throws the raw axios error on a transport failure, and its
+    // own-enumerable config/request carry the query params - now ZIP-bearing.
+    // Pino's err serializer would copy them straight into CloudWatch.
+    const axiosish = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:1'), {
+      code: 'ECONNREFUSED',
+      isAxiosError: true,
+      config: {
+        params: { InPostalCode: '30309', PageSize: 1 },
+        url: 'https://api.twilio.com/2010-04-01/Accounts/ACtest/AvailablePhoneNumbers/US/Local.json',
+      },
+      request: { _header: 'GET /2010-04-01/Accounts/ACtest/AvailablePhoneNumbers/US/Local.json?InPostalCode=30309' },
+    });
+    const client: TwilioClientLike = {
+      messages: { create: async () => ({ sid: 'SMstub', status: 'queued', dateCreated: new Date() }) },
+      availablePhoneNumbers: () => ({
+        local: {
+          list: async () => {
+            throw axiosish;
+          },
+        },
+      }),
+      incomingPhoneNumbers: makeProvisionClient([]).client.incomingPhoneNumbers,
+    };
+
+    let caught: unknown;
+    try {
+      await makeDriver(client).provisionPhoneNumber({ voiceCapable: true, postalCode: '30309' });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    // NOT the availability class: a transport failure must ABORT the warm ladder
+    // (no further rungs, no buy), never look like "this locality is sold out".
+    expect(caught).not.toBeInstanceOf(VoiceCapabilityError);
+    expect(caught).not.toBe(axiosish); // a fresh object, not the leaky original
+
+    // Everything pino could serialize: the message + the whole own-enumerable graph.
+    const serialized = `${(caught as Error).message} ${JSON.stringify(caught, Object.getOwnPropertyNames(caught))}`;
+    expect(serialized).not.toContain('InPostalCode');
+    expect(serialized).not.toContain('30309');
+    expect(serialized).not.toContain('AvailablePhoneNumbers/US');
+    expect(serialized).not.toContain('cause'); // no chained original either
+    // Still diagnosable: names the failing operation and keeps the transport code.
+    expect((caught as Error).message).toContain('availability search failed');
+    expect((caught as Error).message).toContain('ECONNREFUSED');
+    expect((caught as Error & { code?: string }).code).toBe('ECONNREFUSED');
+  });
+
   it('console driver marks the winning hint in the fake prefix (postal > areaCode > default)', async () => {
     const driver = new ConsoleMessagingDriver({
       logger: createLogger({ destination: createLogCapture().stream }),
     });
+    // Every shape stays a well-formed 10-digit national number (hint segment +
+    // the '010' exchange filler + the 4-digit sequence) so local fakes remain
+    // formattable - the hint marker must not cost E.164 well-formedness.
+    const nationalLen = (e164: string): number => e164.replace('+1', '').length;
     const postal = await driver.provisionPhoneNumber({ voiceCapable: true, postalCode: '30309' });
     expect(postal.phoneNumber.startsWith('+1303')).toBe(true); // ZIP first-3 marker
+    expect(nationalLen(postal.phoneNumber)).toBe(10);
     const area = await driver.provisionPhoneNumber({ voiceCapable: true, areaCode: '470' });
     expect(area.phoneNumber.startsWith('+1470')).toBe(true);
+    expect(nationalLen(area.phoneNumber)).toBe(10);
     const bare = await driver.provisionPhoneNumber({ voiceCapable: true });
     expect(bare.phoneNumber.startsWith('+1555010')).toBe(true);
+    expect(nationalLen(bare.phoneNumber)).toBe(10);
   });
 });
 

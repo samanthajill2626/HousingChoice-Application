@@ -1975,6 +1975,41 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(captured).toHaveLength(1);
     expect(captured[0]).toMatchObject({ postalCode: '30309' }); // ZIP+4 truncated to 5
   });
+
+  it('a THROWING unit lookup never fails group creation - the group opens with no ZIP hint', async () => {
+    const pool: PoolNumbersService = {
+      ...makeFakePoolNumbers(),
+      async provisionForGroup() {
+        return { kind: 'needs_connecting' };
+      },
+    };
+    const captured: Record<string, unknown>[] = [];
+    defineJobHandler(RELAY_WARM_JOB, (payload) => {
+      captured.push(payload as Record<string, unknown>);
+    });
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    // Break the units repo only AFTER the tour exists, and drive the
+    // EXPLICIT-members path: the ZIP hint is then the ONLY unit read this
+    // request makes, so the throw lands squarely on the best-effort lookup.
+    world.unitsRepo.getById = async () => {
+      throw new Error('dynamodb: ProvisionedThroughputExceededException');
+    };
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    await queueAdapter.settle();
+
+    // 201, not 500: a cosmetic buy hint must never break relay creation.
+    expect(res.status).toBe(201);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).not.toHaveProperty('postalCode'); // hint simply omitted
+  });
 });
 
 // ============================================================================

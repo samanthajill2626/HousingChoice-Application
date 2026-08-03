@@ -57,6 +57,14 @@ const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 const MAX_PROVISION_ATTEMPTS = 20;
 
 /**
+ * Which rung of the geographic hint ladder a buy was searched with - the ONLY
+ * thing the relay_warm_hint_miss / relay_number_warming events may say about the
+ * hint (PII: never the ZIP or the code value itself). A closed union so a typo
+ * in an emitted tier is a compile error rather than a silently novel log value.
+ */
+type HintTier = 'postal' | 'areaCode' | 'bare';
+
+/**
  * Thrown when buying/warming a pool number is required but the relay
  * number-provisioning kill-switch is off (config.relayLiveProvisioning ===
  * false). Raised BEFORE any adapter.provisionPhoneNumber call, so the deployed
@@ -732,11 +740,11 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
         ...config.relayPreferredAreaCodes.map((areaCode) => ({ areaCode })),
         {},
       ];
-      const hintTierOf = (h: { areaCode?: string; postalCode?: string }): string =>
+      const hintTierOf = (h: { areaCode?: string; postalCode?: string }): HintTier =>
         h.postalCode !== undefined ? 'postal' : h.areaCode !== undefined ? 'areaCode' : 'bare';
       async function provisionWithHints(): Promise<{
         bought: ProvisionPhoneNumberResult;
-        hintTier: string;
+        hintTier: HintTier;
       }> {
         for (let i = 0; i < hints.length; i += 1) {
           const hint = hints[i]!;
@@ -761,7 +769,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // Which rung won the accepted buy, for the success log (TYPE only, never
       // the ZIP/code value). A createWarming collision re-runs the whole ladder,
       // so the LAST attempt's tier is the one that landed.
-      let winningHintTier = 'bare';
+      let winningHintTier: HintTier = 'bare';
       for (let attempt = 1; attempt <= MAX_PROVISION_ATTEMPTS; attempt += 1) {
         const { bought, hintTier } = await provisionWithHints();
         winningHintTier = hintTier;

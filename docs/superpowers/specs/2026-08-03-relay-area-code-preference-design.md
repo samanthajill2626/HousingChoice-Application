@@ -42,7 +42,8 @@ New env var **`RELAY_PREFERRED_AREA_CODES`** - comma-separated NANP area
 codes, default **`404,470,678,770,943`** (Atlanta metro). Parsed in
 `app/src/lib/config.ts` to `relayPreferredAreaCodes: string[]`:
 
-- Trim entries; drop empties. Each entry must be exactly 3 digits - a
+- Trim entries; drop empties. Each entry must be a valid 3-digit NANP area
+  code (first digit 2-9, i.e. `/^[2-9]\d{2}$/`) - a
   malformed entry fails config load loudly (matching existing config
   validation style) rather than silently searching a bogus code.
 - Empty string / all-empty value => `[]` => no area-code preference (ladder

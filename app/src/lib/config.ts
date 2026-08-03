@@ -728,7 +728,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       .map((s) => s.trim())
       .filter((s) => s.length > 0);
     for (const code of relayPreferredAreaCodes) {
-      if (!/^\d{3}$/.test(code)) {
+      // NANP shape, not merely "3 digits": a real area code never starts with
+      // 0 or 1. Number('044') is 44, so a leading-zero typo would search a code
+      // the operator never typed - and Twilio answering an invalid AreaCode with
+      // a 4xx is NOT a NumberUnavailableError, so the warm ladder would abort
+      // instead of advancing and EVERY relay pool buy would fail until the env
+      // is corrected. Exactly the silent degradation this fail-fast exists for.
+      if (!/^[2-9]\d{2}$/.test(code)) {
         throw new Error(
           `RELAY_PREFERRED_AREA_CODES entries must be 3-digit NANP area codes, got: ${code}`,
         );

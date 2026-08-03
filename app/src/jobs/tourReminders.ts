@@ -19,6 +19,12 @@
 //   mirroring the missedCallAutoText putJobExecutionMarker pattern.
 //   Designed to be called by a setInterval in worker.ts.
 //
+// forceSendReminder - "Send now": a human sends ONE pending rung immediately
+//   through the SAME resolve/claim/send path (resolveReminderTarget is shared
+//   with the poll). It bypasses quiet hours, manual mode and the breaker
+//   (automated: false) but respects the kill switch, opt-out and JIT consent -
+//   all checked BEFORE the claim, so a refusal never consumes the row.
+//
 // IDEMPOTENCY: listDue filters out rows with sentAt or canceledAt. claimSend
 // atomically stamps sentAt BEFORE the send; the conditional also blocks
 // canceledAt rows. Both conditions together = exactly-once delivery.
@@ -27,8 +33,9 @@
 import type { MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { ContactsRepo } from '../repos/contactsRepo.js';
+import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type {
+  ConversationItem,
   ConversationParticipant,
   ConversationsRepo,
 } from '../repos/conversationsRepo.js';
@@ -57,6 +64,8 @@ import {
   type QuietHoursWindow,
 } from '../lib/quietHours.js';
 import { DEFAULT_ORG_SETTINGS, type SettingsRepo } from '../repos/settingsRepo.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
 
 // ---------------------------------------------------------------------------
 // armTourReminders
@@ -383,6 +392,88 @@ async function claimSkipRow(
   }
 }
 
+/**
+ * Why a rung has NO deliverable target. Each value is also a ReminderSkipReason,
+ * because the poll retires such a rung with exactly that claim-skip.
+ */
+type ReminderResolutionFailure =
+  | 'tour_missing'
+  | 'contact_missing'
+  | 'contact_no_phone'
+  | 'no_conversation';
+
+/** Where one rung would be delivered, resolved PRE-CLAIM. */
+type ReminderTarget =
+  | { route: 'group'; tour: TourItem; group: UsableGroup }
+  | { route: 'one_to_one'; tour: TourItem; contact: ContactItem; conversation: ConversationItem }
+  | { unresolvable: ReminderResolutionFailure; tenantId?: string };
+
+/**
+ * Resolve a rung's send target: the tour, then the masked GROUP thread
+ * (landlord_led / pm_team with a usable group) or the tenant's 1:1
+ * conversation. Read-only - it claims nothing and sends nothing, so each caller
+ * decides what "unresolvable" MEANS: the poll retires the rung (claim-skip with
+ * the returned reason), a human force-send refuses and leaves it pending.
+ */
+async function resolveReminderTarget(
+  row: TourReminderItem,
+  deps: RunDueTourRemindersDeps,
+  log: Logger,
+): Promise<ReminderTarget> {
+  const tour = await deps.toursRepo.get(row.tourId);
+  if (!tour) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId },
+      'tour reminder: tour not found',
+    );
+    return { unresolvable: 'tour_missing' };
+  }
+
+  // Route decision (founder decision 2026-07-02): reminders for landlord_led /
+  // pm_team tours go to the tour's masked GROUP thread - the landlord/PM should
+  // see them too. self_guided stays tenant-1:1 EVEN IF a group thread exists.
+  // A non-self_guided tour with no USABLE group (no groupThreadId, conversation
+  // missing, not a relay_group, closed, or no pool/roster) falls back to the
+  // tenant-1:1 path below - a reminder must never be lost.
+  if (tour.tourType !== 'self_guided') {
+    const group = await resolveUsableGroup(tour, row, deps, log);
+    if (group) return { route: 'group', tour, group };
+  }
+
+  // Resolve the tenant contact.
+  const contact = await deps.contactsRepo.getById(tour.tenantId);
+  if (!contact) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
+      'tour reminder: contact not found',
+    );
+    return { unresolvable: 'contact_missing', tenantId: tour.tenantId };
+  }
+
+  // Primary phone (scalar back-compat, never logged).
+  const phone = contact.phone;
+  if (typeof phone !== 'string' || phone.length === 0) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
+      'tour reminder: contact has no phone',
+    );
+    return { unresolvable: 'contact_no_phone', tenantId: tour.tenantId };
+  }
+
+  // Find the tenant's 1:1 conversation via phone lookup.
+  const convs = await deps.conversationsRepo.findByParticipantPhone(phone);
+  const conv = convs.find((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
+  if (!conv) {
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
+      'tour reminder: no 1:1 conversation found',
+    );
+    return { unresolvable: 'no_conversation', tenantId: tour.tenantId };
+  }
+
+  return { route: 'one_to_one', tour, contact, conversation: conv };
+}
+
 async function processReminderRow(
   row: TourReminderItem,
   now: string,
@@ -431,65 +522,31 @@ async function processReminderRow(
     return;
   }
 
-  // Resolve the tour.
-  const tour = await deps.toursRepo.get(row.tourId);
-  if (!tour) {
-    log.warn(
-      { reminderId: row.reminderId, tourId: row.tourId },
-      'tour reminder: tour not found — retiring (claim-skipped)',
+  // Resolve the send target (tour -> group route, or the tenant's 1:1). Shared
+  // with forceSendReminder so a human send can never route differently from the
+  // poll; the POLL retires an unresolvable rung with the same claim-skip
+  // reasons it always used.
+  const target = await resolveReminderTarget(row, deps, log);
+  if ('unresolvable' in target) {
+    log.info(
+      {
+        reminderId: row.reminderId,
+        tourId: row.tourId,
+        kind: row.kind,
+        reason: target.unresolvable,
+      },
+      'tour reminder undeliverable - retiring (claim-skipped)',
     );
-    await claimSkipRow(row, 'tour_missing', now, deps);
+    await claimSkipRow(row, target.unresolvable, now, deps, target.tenantId);
     return;
   }
 
-  // Route decision (founder decision 2026-07-02): reminders for landlord_led /
-  // pm_team tours go to the tour's masked GROUP thread — the landlord/PM should
-  // see them too. self_guided stays tenant-1:1 EVEN IF a group thread exists.
-  // A non-self_guided tour with no USABLE group (no groupThreadId, conversation
-  // missing, not a relay_group, closed, or no pool/roster) falls back to the
-  // tenant-1:1 path below — a reminder must never be lost.
-  if (tour.tourType !== 'self_guided') {
-    const group = await resolveUsableGroup(tour, row, deps, log);
-    if (group) {
-      await sendGroupReminder(row, tour, group, now, deps, log);
-      return;
-    }
-  }
-
-  // Resolve the tenant contact.
-  const contact = await deps.contactsRepo.getById(tour.tenantId);
-  if (!contact) {
-    log.warn(
-      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: contact not found — retiring (claim-skipped)',
-    );
-    await claimSkipRow(row, 'contact_missing', now, deps, tour.tenantId);
+  if (target.route === 'group') {
+    await sendGroupReminder(row, target.tour, target.group, now, deps, log);
     return;
   }
 
-  // Primary phone (scalar back-compat, never logged).
-  const phone = contact.phone;
-  if (typeof phone !== 'string' || phone.length === 0) {
-    log.warn(
-      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: contact has no phone — retiring (claim-skipped)',
-    );
-    await claimSkipRow(row, 'contact_no_phone', now, deps, tour.tenantId);
-    return;
-  }
-
-  // Find the tenant's 1:1 conversation via phone lookup.
-  const convs = await deps.conversationsRepo.findByParticipantPhone(phone);
-  const conv = convs.find((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
-  if (!conv) {
-    log.warn(
-      { reminderId: row.reminderId, tourId: row.tourId, tenantId: tour.tenantId },
-      'tour reminder: no 1:1 conversation found — retiring (claim-skipped)',
-    );
-    await claimSkipRow(row, 'no_conversation', now, deps, tour.tenantId);
-    return;
-  }
-
+  const { tour, conversation: conv } = target;
   const body = resolveMessage(`tour.${row.kind}`);
 
   // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two
@@ -624,8 +681,6 @@ async function sendGroupReminder(
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
-  const body = resolveMessage(`tour.${row.kind}`);
-
   // CLAIM-BEFORE-SEND (same atomic claim as the 1:1 path): claim ONCE for the
   // whole group — losing the claim (concurrent tick / cancel) skips silently.
   const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now);
@@ -639,18 +694,7 @@ async function sendGroupReminder(
   // Rung flipped to sent — same live-surface nudge as the 1:1 path.
   (deps.events ?? appEvents).emit('scheduled.updated', { contactId: tour.tenantId });
 
-  const result = await sendRelayAnnouncement(
-    {
-      conversationsRepo: deps.conversationsRepo,
-      messagesRepo: deps.messagesRepo,
-      contactsRepo: deps.contactsRepo,
-      adapter: deps.adapter,
-      ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
-      ...(deps.events !== undefined && { events: deps.events }),
-      ...(deps.logger !== undefined && { logger: deps.logger }),
-    },
-    { conversationId: group.conversationId, body, kind: `tour.${row.kind}` },
-  );
+  const sentCount = await announceGroupReminder(row, group, deps);
 
   log.info(
     {
@@ -661,9 +705,196 @@ async function sendGroupReminder(
       route: 'group',
       conversationId: group.conversationId,
       memberCount: group.members.length,
-      sentCount: result?.sentCount ?? 0,
+      sentCount,
     },
     'tour reminder sent',
   );
+}
+
+/**
+ * Hand ONE rung to sendRelayAnnouncement with the poll's exact deps/args.
+ * Single-sourced so the human force-send rides the identical announcement chain
+ * (per-member opt-out suppression and A2P pacing live INSIDE the service).
+ * Post-claim by contract: both callers claim first. Returns the member count
+ * actually sent (0 when the service no-ops on an unusable thread).
+ */
+async function announceGroupReminder(
+  row: TourReminderItem,
+  group: UsableGroup,
+  deps: RunDueTourRemindersDeps,
+): Promise<number> {
+  const result = await sendRelayAnnouncement(
+    {
+      conversationsRepo: deps.conversationsRepo,
+      messagesRepo: deps.messagesRepo,
+      contactsRepo: deps.contactsRepo,
+      adapter: deps.adapter,
+      ...(deps.tokenBucket !== undefined && { tokenBucket: deps.tokenBucket }),
+      ...(deps.events !== undefined && { events: deps.events }),
+      ...(deps.logger !== undefined && { logger: deps.logger }),
+    },
+    {
+      conversationId: group.conversationId,
+      body: resolveMessage(`tour.${row.kind}`),
+      kind: `tour.${row.kind}`,
+    },
+  );
+  return result?.sentCount ?? 0;
+}
+
+// ---------------------------------------------------------------------------
+// forceSendReminder (Send now - quiet-hours spec section 7)
+// ---------------------------------------------------------------------------
+
+/** Why a human force-send was refused BEFORE the row was claimed. */
+export type ForceSendRefusal =
+  | 'sms_sending_disabled'
+  | 'contact_opted_out'
+  | 'no_consent'
+  | ReminderResolutionFailure;
+
+export type ForceSendResult =
+  /** Claimed and handed to the send path. */
+  | { outcome: 'sent' }
+  /** Already sent/canceled/skipped, or the poll won the claim race. */
+  | { outcome: 'not_pending' }
+  /** Refused PRE-claim: the row is untouched and still pending. */
+  | { outcome: 'refused'; reason: ForceSendRefusal }
+  /** The narrow post-claim race (see forceSendReminder): claim KEPT, nothing sent. */
+  | { outcome: 'refused_post_claim'; reason: SendRefusedError['code'] };
+
+/**
+ * Send ONE pending rung immediately, on a human's click.
+ *
+ * Semantics (spec section 7): being human-triggered it BYPASSES quiet hours,
+ * manual mode and the per-conversation circuit breaker - the 1:1 send goes out
+ * with `automated: false`. It still RESPECTS the absolute gates (kill switch,
+ * opt-out) and the JIT consent gate, and EVERY gate runs BEFORE `claimSend`,
+ * because the claim IS the sentAt stamp: a refusal after it would leave the row
+ * claimed-but-unsent and destroy the message. A refusal therefore leaves the row
+ * exactly as it found it - still pending, still the poll's to deliver at dueAt
+ * (never a claim-skip: a human failure must not retire a rung).
+ *
+ * Force-sending one rung does NOT touch the ladder's other rungs; their dueAts
+ * stand and supersession applies to them normally at their own fire time.
+ *
+ * The one race that survives: an opt-out (or a breaker trip) landing between the
+ * pre-check and the provider call surfaces as a post-claim SendRefusedError.
+ * The claim is KEPT (poller parity - a stamped row must never be re-sent), and
+ * the outcome is reported as `refused_post_claim` so the route can show the
+ * operator an honest error instead of a false "sent".
+ *
+ * PII (doc s9): log ids/kinds/refusal codes only - never a phone/name/body.
+ */
+export async function forceSendReminder(
+  reminderId: string,
+  tourId: string,
+  nowIso: string,
+  smsSendingEnabled: boolean | undefined,
+  deps: RunDueTourRemindersDeps,
+): Promise<ForceSendResult> {
+  const log = deps.logger ?? defaultLogger;
+
+  const rows = await deps.tourRemindersRepo.listByTour(tourId);
+  const row = rows.find((r) => r.reminderId === reminderId);
+  if (row === undefined) return { outcome: 'refused', reason: 'tour_missing' };
+  if (row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
+    return { outcome: 'not_pending' };
+  }
+
+  const target = await resolveReminderTarget(row, deps, log);
+  if ('unresolvable' in target) {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason: target.unresolvable },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason: target.unresolvable };
+  }
+
+  // PRE-CLAIM ABSOLUTE GATES. Manual mode and the breaker are deliberately NOT
+  // checked - this is a human send (the composer bypasses both today).
+  const refuse = (reason: ForceSendRefusal): ForceSendResult => {
+    log.warn(
+      { reminderId, tourId, kind: row.kind, reason },
+      'tour reminder force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason };
+  };
+  if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
+  if (target.route === 'one_to_one') {
+    // Opt-out is absolute; consent is required because `automated: false` is
+    // subject to the JIT consent gate (services/sendMessage.ts) - checking it
+    // here is what keeps that gate from firing AFTER the claim.
+    if (isOptedOut(target.conversation.sms_opt_out, target.contact.sms_opt_out === true)) {
+      return refuse('contact_opted_out');
+    }
+    if (!hasSmsConsent(target.contact)) return refuse('no_consent');
+  }
+
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, nowIso);
+  if (!claimed) {
+    log.info(
+      { reminderId, tourId, kind: row.kind },
+      'tour reminder force-send claim lost (concurrent poll tick or cancel)',
+    );
+    return { outcome: 'not_pending' };
+  }
+  // The rung just flipped to sent - tell the live surfaces to refetch.
+  (deps.events ?? appEvents).emit('scheduled.updated', { contactId: target.tour.tenantId });
+
+  if (target.route === 'group') {
+    const sentCount = await announceGroupReminder(row, target.group, deps);
+    log.info(
+      {
+        reminderId,
+        tourId,
+        tenantId: target.tour.tenantId,
+        kind: row.kind,
+        route: 'group',
+        conversationId: target.group.conversationId,
+        memberCount: target.group.members.length,
+        sentCount,
+      },
+      'tour reminder force-sent',
+    );
+    return { outcome: 'sent' };
+  }
+
+  try {
+    await deps.sendMessageService({
+      conversationId: target.conversation.conversationId,
+      body: resolveMessage(`tour.${row.kind}`),
+      author: 'teammate',
+      // Human force-send: bypasses manual mode + the breaker (and IS subject to
+      // the JIT consent gate pre-checked above).
+      automated: false,
+    });
+    log.info(
+      {
+        reminderId,
+        tourId,
+        tenantId: target.tour.tenantId,
+        kind: row.kind,
+        route: 'tenant_1to1',
+      },
+      'tour reminder force-sent',
+    );
+    return { outcome: 'sent' };
+  } catch (err) {
+    if (err instanceof SendRefusedError) {
+      log.warn(
+        { reminderId, tourId, kind: row.kind, refusal: err.code },
+        'tour reminder force-send refused POST-claim (race) - claim kept, not retried',
+      );
+      return { outcome: 'refused_post_claim', reason: err.code };
+    }
+    // Non-refusal error: the claim is already stamped, so this rung will NOT
+    // retry - same accepted tradeoff as the poll. Surface it as a 500.
+    log.error(
+      { err, reminderId, tourId, kind: row.kind },
+      'tour reminder force-send failed (non-refusal) - claim already stamped, not retried',
+    );
+    throw err;
+  }
 }
 

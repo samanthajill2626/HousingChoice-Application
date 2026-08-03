@@ -37,6 +37,7 @@ import type {
 import { SendRefusedError } from '../src/services/sendMessage.js';
 import {
   armNudgeForStage,
+  forceSendNudge,
   runDuePlacementNudges,
   type RunDuePlacementNudgesDeps,
 } from '../src/jobs/placementNudges.js';
@@ -716,5 +717,259 @@ describe('runDuePlacementNudges', () => {
     // existing SendRefusedError shape).
     expect(row.sentAt).toBeDefined();
     expect(await rows.repo.listDue(NOW)).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// send now (quiet-hours spec section 7)
+//
+// Human-triggered, so it BYPASSES quiet hours, manual mode and the breaker (the
+// send goes out with automated: false), but still RESPECTS the absolute gates -
+// kill switch, opt-out, JIT consent - plus the staleness check, and every gate
+// runs BEFORE the claim so a refusal never leaves a row claimed-but-unsent.
+// ---------------------------------------------------------------------------
+
+describe('forceSendNudge', () => {
+  // 06:00 America/New_York in July - INSIDE the default 21:00-08:00 window, so
+  // every case below proves the human path ignores quiet hours.
+  const NOW = '2026-07-05T10:00:00.000Z';
+  const TENANT_PHONE = '+15550800001';
+  const LANDLORD_PHONE = '+15550800002';
+
+  /** A contact with RECORDED CONSENT - automated: false is JIT-consent gated. */
+  function consenting(
+    contactId: string,
+    type: ContactItem['type'],
+    phone: string,
+    over: Partial<ContactItem> = {},
+  ): ContactItem {
+    return {
+      contactId,
+      type,
+      phone,
+      consent_method: 'inbound_text',
+      created_at: FIXED_CREATED,
+      ...over,
+    } as ContactItem;
+  }
+
+  function nudgeRow(kind: NudgeKind, placementId = 'p-force'): PlacementNudgeItem {
+    return {
+      nudgeId: 'nudge-force',
+      placementId,
+      kind,
+      dueAt: '2026-07-05T09:00:00.000Z',
+      _nudgePartition: 'nudges',
+      createdAt: FIXED_CREATED,
+    };
+  }
+
+  function tenantRig(
+    opts: {
+      stage?: PlacementStage;
+      kind?: NudgeKind;
+      contactOver?: Partial<ContactItem>;
+      convOver?: Partial<ConversationItem>;
+      withConversation?: boolean;
+      throwErr?: Error;
+    } = {},
+  ) {
+    const p = makePlacement({
+      placementId: 'p-force',
+      tenantId: 'contact-tenant-force',
+      unitId: 'unit-force',
+      stage: opts.stage ?? 'awaiting_receipt',
+    });
+    const nudges = makeFakeNudgesRepo([nudgeRow(opts.kind ?? 'receipt_check')]);
+    const row = nudges.rows[0]!;
+    const send = makeSendSpy(opts.throwErr === undefined ? {} : { throwErr: opts.throwErr });
+    const convRepo = makeFakeConversationsRepo(
+      opts.withConversation === false
+        ? []
+        : [
+            {
+              ...conversation('conv-tenant-force', TENANT_PHONE, 'tenant_1to1'),
+              ...opts.convOver,
+            } as ConversationItem,
+          ],
+    );
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: nudges.repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        consenting('contact-tenant-force', 'tenant', TENANT_PHONE, opts.contactOver ?? {}),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([]),
+      conversationsRepo: convRepo,
+      sendMessageService: send.service,
+      // Quiet hours ON (the product default) - the human path must ignore them.
+      settingsRepo: stubSettingsRepo(),
+    };
+    return { deps, send, row, nudges, convRepo };
+  }
+
+  it('force-sends a pending nudge DURING quiet hours with automated: false and stamps sentAt', async () => {
+    const { deps, send, row } = tenantRig();
+
+    // Sanity: the POLLER defers at this instant (backstop), so a send here can
+    // only come from the human path.
+    await runDuePlacementNudges(NOW, deps);
+    expect(send.sent).toHaveLength(0);
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    expect(send.sent).toHaveLength(1);
+    expect(send.sent[0]!.conversationId).toBe('conv-tenant-force');
+    expect(send.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
+    expect(send.sent[0]!.author).toBe('teammate');
+    expect(send.sent[0]!.automated).toBe(false);
+    expect(row.sentAt).toBe(NOW);
+  });
+
+  it('returns not_pending for an already-sent nudge and sends nothing', async () => {
+    const { deps, send, nudges } = tenantRig();
+    await nudges.repo.claimSend('nudge-force', '2026-07-05T09:30:00.000Z');
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(send.sent).toHaveLength(0);
+  });
+
+  it('returns not_pending when the claim is LOST, and sends nothing', async () => {
+    const { deps, send, nudges } = tenantRig();
+    // The row is pending when we read it, but the poll claims it first.
+    nudges.repo.claimSend = async () => false;
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(send.sent).toHaveLength(0);
+  });
+
+  it('refuses sms_sending_disabled WITHOUT claiming - and mints no conversation', async () => {
+    // A LANDLORD rung with no 1:1 thread: the poller would mint one on demand,
+    // so this also proves the absolute gates run BEFORE that side effect.
+    const p = makePlacement({ placementId: 'p-force', stage: 'awaiting_approval', unitId: 'unit-9' });
+    const nudges = makeFakeNudgesRepo([nudgeRow('approval_check')]);
+    const row = nudges.rows[0]!;
+    const send = makeSendSpy();
+    const convRepo = makeFakeConversationsRepo([]);
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: nudges.repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        consenting('contact-landlord-force', 'landlord', LANDLORD_PHONE),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-force', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: convRepo,
+      sendMessageService: send.service,
+      settingsRepo: stubSettingsRepo(),
+    };
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, false, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'sms_sending_disabled' });
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+    expect(row.canceledAt).toBeUndefined();
+    // No thread minted for a send that never happened.
+    expect(await convRepo.findByParticipantPhone(LANDLORD_PHONE)).toHaveLength(0);
+  });
+
+  it('refuses contact_opted_out WITHOUT claiming', async () => {
+    const { deps, send, row } = tenantRig({ contactOver: { sms_opt_out: true } });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_opted_out' });
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+  });
+
+  it('refuses no_consent WITHOUT claiming', async () => {
+    const { deps, send, row } = tenantRig({ contactOver: { consent_method: undefined } });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_consent' });
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+  });
+
+  it('refuses stage_moved and leaves the row PENDING (only the poller retires stale rows)', async () => {
+    // The row chases awaiting_receipt but the placement moved to awaiting_completion.
+    const { deps, send, row, nudges } = tenantRig({ stage: 'awaiting_completion' });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'stage_moved' });
+    expect(send.sent).toHaveLength(0);
+    // NOT claim-skipped: a human refusal must not consume the row (the poller
+    // retires stale rows on ITS ticks).
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+    expect(await nudges.repo.listDue(NOW)).toHaveLength(1);
+  });
+
+  it('refuses placement_missing for a nudgeId that is not on the placement', async () => {
+    const { deps, send } = tenantRig();
+
+    const result = await forceSendNudge('nudge-does-not-exist', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'placement_missing' });
+    expect(send.sent).toHaveLength(0);
+  });
+
+  it('mints the recipient 1:1 on demand when the send actually proceeds (poller parity)', async () => {
+    const p = makePlacement({ placementId: 'p-force', stage: 'awaiting_approval', unitId: 'unit-9' });
+    const nudges = makeFakeNudgesRepo([nudgeRow('approval_check')]);
+    const send = makeSendSpy();
+    const convRepo = makeFakeConversationsRepo([]);
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: nudges.repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        consenting('contact-landlord-force', 'landlord', LANDLORD_PHONE, {
+          firstName: 'Larry',
+          lastName: 'Landlord',
+        }),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-force', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: convRepo,
+      sendMessageService: send.service,
+      settingsRepo: stubSettingsRepo(),
+    };
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    const created = await convRepo.findByParticipantPhone(LANDLORD_PHONE);
+    expect(created).toHaveLength(1);
+    expect(created[0]!.type).toBe('landlord_1to1');
+    expect(send.sent[0]!.conversationId).toBe(created[0]!.conversationId);
+    expect(send.sent[0]!.automated).toBe(false);
+  });
+
+  it('a post-claim SendRefusedError returns refused_post_claim and keeps the claim', async () => {
+    const { deps, send, row } = tenantRig({
+      throwErr: new SendRefusedError('opted out mid-flight', 'contact_opted_out'),
+    });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused_post_claim', reason: 'contact_opted_out' });
+    // The claim IS the sentAt stamp - the row is consumed (poller parity).
+    expect(row.sentAt).toBe(NOW);
+    // Exactly ONE send attempt, and it never reached a provider.
+    expect(send.sent).toHaveLength(1);
   });
 });

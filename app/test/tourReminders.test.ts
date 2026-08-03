@@ -29,8 +29,19 @@ import { createLogger } from '../src/lib/logger.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
-import { createSendMessageService } from '../src/services/sendMessage.js';
-import { armTourReminders, cancelTourReminders, runDueTourReminders } from '../src/jobs/tourReminders.js';
+import {
+  createSendMessageService,
+  SendRefusedError,
+  type SendMessageInput,
+  type SendMessageOutcome,
+  type SendMessageService,
+} from '../src/services/sendMessage.js';
+import {
+  armTourReminders,
+  cancelTourReminders,
+  forceSendReminder,
+  runDueTourReminders,
+} from '../src/jobs/tourReminders.js';
 import { resolveMessage } from '../src/messages/index.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -1808,5 +1819,443 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(1);
     // Never through the 1:1 service either.
     expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ===========================================================================
+  // SEND NOW - forceSendReminder (quiet-hours spec section 7)
+  //
+  // Human-triggered, so it BYPASSES quiet hours, manual mode and the
+  // per-conversation breaker (the 1:1 send goes out with automated: false) but
+  // still RESPECTS the absolute gates - kill switch, opt-out, JIT consent - and
+  // every gate runs BEFORE the claim, so a refusal never leaves a row
+  // claimed-but-unsent. Own February timeline + a fresh world per case.
+  // ===========================================================================
+
+  /** Records every sendMessageService input (the real service hides `automated`). */
+  function makeForceSendSpy(opts: { throwErr?: Error } = {}): {
+    service: SendMessageService;
+    sent: SendMessageInput[];
+  } {
+    const sent: SendMessageInput[] = [];
+    const service: SendMessageService = async (input) => {
+      sent.push(input);
+      if (opts.throwErr) throw opts.throwErr;
+      return {
+        conversationId: input.conversationId,
+        providerSid: 'SM-force-fake',
+        tsMsgId: 'ts-force-fake',
+        status: 'queued',
+      } as SendMessageOutcome;
+    };
+    return { service, sent };
+  }
+
+  /**
+   * A tenant whose contact carries RECORDED CONSENT (consent_method). The force
+   * path sends with automated: false, which IS subject to the JIT consent gate -
+   * so a consent-less contact refuses. seedTenant above deliberately records no
+   * consent (the poller's automated sends were never gated on it).
+   */
+  function seedForceTenant(
+    world: ReturnType<typeof createFakeWorld>,
+    opts: {
+      contactId: string;
+      phone: string;
+      convId?: string;
+      now: string;
+      consent?: boolean;
+      contactOptOut?: boolean;
+      convOptOut?: boolean;
+    },
+  ): void {
+    world.contacts.push({
+      contactId: opts.contactId,
+      type: 'tenant',
+      phone: opts.phone,
+      created_at: opts.now,
+      ...(opts.consent !== false && { consent_method: 'inbound_text' }),
+      ...(opts.contactOptOut === true && { sms_opt_out: true }),
+    } as Parameters<typeof world.contacts.push>[0]);
+    if (opts.convId === undefined) return;
+    world.conversations.set(opts.convId, {
+      conversationId: opts.convId,
+      participant_phone: opts.phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: opts.now,
+      created_at: opts.now,
+      ...(opts.convOptOut === true && { sms_opt_out: true }),
+    });
+  }
+
+  /** A pending self_guided rung on the February timeline. */
+  async function seedForceTour(opts: {
+    tenantId: string;
+    unitId: string;
+    kind: 'confirmation' | 'day_before' | 'morning_of' | 'en_route';
+    tourType?: 'self_guided' | 'landlord_led' | 'pm_team';
+  }) {
+    const tour = await tours.create({
+      tenantId: opts.tenantId,
+      unitId: opts.unitId,
+      scheduledAt: '2026-02-11T20:00:00.000Z',
+      tourType: opts.tourType ?? 'self_guided',
+    });
+    const row = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: opts.kind,
+      dueAt: '2026-02-11T13:00:00.000Z',
+    });
+    return { tour, row };
+  }
+
+  /** Deep inside the DEFAULT window: Feb 10 04:00 EST (America/New_York). */
+  const FORCE_NOW = '2026-02-10T09:00:00.000Z';
+  const SEEDED_AT = '2026-02-09T15:00:00.000Z';
+
+  // ---------------------------------------------------------------------------
+  // Send now 1 - the headline case: it goes out NOW, mid-quiet-hours
+  // ---------------------------------------------------------------------------
+  it('force-sends a pending rung DURING quiet hours with automated: false and stamps sentAt', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const events = createEventBus({ logger });
+    const emitted: Array<{ contactId?: string }> = [];
+    events.on('scheduled.updated', (p) => emitted.push(p));
+    const deps = {
+      ...rig.deps,
+      sendMessageService: spy.service,
+      settingsRepo: stubSettingsRepo(), // quiet hours ON - the force path ignores them
+      events,
+    };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-1',
+      phone: '+15550220001',
+      convId: 'conv-force-1',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-1',
+      unitId: 'unit-force-1',
+      kind: 'confirmation',
+    });
+
+    // Sanity: at this same instant the POLLER defers (backstop) - so a send
+    // here can only come from the human path.
+    await runDueTourReminders(FORCE_NOW, deps);
+    expect(spy.sent).toHaveLength(0);
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]!.conversationId).toBe('conv-force-1');
+    expect(spy.sent[0]!.body).toBe(resolveMessage('tour.confirmation'));
+    expect(spy.sent[0]!.author).toBe('teammate');
+    // automated: false - a human send bypasses manual mode + the breaker.
+    expect(spy.sent[0]!.automated).toBe(false);
+
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+    // The claim told the live surfaces to refetch (advisory tenant contactId).
+    expect(emitted.filter((p) => p.contactId === 'contact-force-1')).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 2 - the row is already terminal: report honestly, send nothing
+  // ---------------------------------------------------------------------------
+  it('force-send returns not_pending for an already-sent rung and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-2',
+      phone: '+15550220002',
+      convId: 'conv-force-2',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-2',
+      unitId: 'unit-force-2',
+      kind: 'day_before',
+    });
+    await tourReminders.claimSend(row.reminderId, '2026-02-10T08:00:00.000Z');
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(spy.sent).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 3 - the poll wins the claim race: exactly one send ever happens
+  // ---------------------------------------------------------------------------
+  it('force-send returns not_pending when the claim is LOST, and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    // The row is pending when we read it, but the poll claims it first.
+    const lostClaimRepo = { ...tourReminders, claimSend: async () => false };
+    const deps = {
+      ...rig.deps,
+      tourRemindersRepo: lostClaimRepo,
+      sendMessageService: spy.service,
+      settingsRepo: stubSettingsRepo(),
+    };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-3',
+      phone: '+15550220003',
+      convId: 'conv-force-3',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-3',
+      unitId: 'unit-force-3',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 4 - kill switch: refuse BEFORE the claim (the row stays pending)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses sms_sending_disabled WITHOUT claiming (row stays pending)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-4',
+      phone: '+15550220004',
+      convId: 'conv-force-4',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-4',
+      unitId: 'unit-force-4',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, false, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'sms_sending_disabled' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.canceledAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 5 - opt-out is absolute, even for a human send
+  // ---------------------------------------------------------------------------
+  it('force-send refuses contact_opted_out WITHOUT claiming', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-5',
+      phone: '+15550220005',
+      convId: 'conv-force-5',
+      now: SEEDED_AT,
+      contactOptOut: true,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-5',
+      unitId: 'unit-force-5',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_opted_out' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 6 - JIT consent: automated: false makes the consent gate apply
+  // ---------------------------------------------------------------------------
+  it('force-send refuses no_consent WITHOUT claiming', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-6',
+      phone: '+15550220006',
+      convId: 'conv-force-6',
+      now: SEEDED_AT,
+      consent: false,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-6',
+      unitId: 'unit-force-6',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_consent' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 7 - an unresolvable target REFUSES; it must NOT claim-skip the rung
+  // (the poller still gets its chance at dueAt)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses no_conversation WITHOUT claim-skipping (the rung survives for the poller)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    // Contact + phone, but NO conversation anywhere in this world.
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-7',
+      phone: '+15550220007',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-7',
+      unitId: 'unit-force-7',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_conversation' });
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.skipReason).toBeUndefined();
+    expect(after?.sentAt).toBeUndefined();
+    // Still live for the poll at its own dueAt.
+    expect((await tourReminders.listDue('2026-02-11T13:01:00.000Z')).map((r) => r.reminderId)).toContain(
+      row.reminderId,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 8 - an unknown rung id refuses (never a 500)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses tour_missing for a reminderId that is not on the tour', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    const { tour } = await seedForceTour({
+      tenantId: 'contact-force-8',
+      unitId: 'unit-force-8',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder('reminder-does-not-exist', tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'tour_missing' });
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 9 - a GROUP-routed tour force-sends through the SAME relay
+  // announcement chain the poll uses (never the 1:1 service)
+  // ---------------------------------------------------------------------------
+  it('force-sends a GROUP-routed rung through the relay announcement path', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    const tenantPhone = '+15550220009';
+    const landlordPhone = '+15550220019';
+    const poolNumber = '+15550190029';
+    const groupConvId = 'conv-group-force-9';
+
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-9',
+      phone: tenantPhone,
+      convId: 'conv-1to1-force-9',
+      now: SEEDED_AT,
+    });
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-force-9', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-force-9b', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: SEEDED_AT,
+    });
+
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-9',
+      unitId: 'unit-force-9',
+      kind: 'confirmation',
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
+    // Never the 1:1 service.
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 10 - the narrow post-claim race (an opt-out landing between the
+  // pre-check and the provider send): the claim is KEPT (poller parity) but the
+  // outcome is reported honestly so the UI can show a real error.
+  // ---------------------------------------------------------------------------
+  it('a post-claim SendRefusedError returns refused_post_claim, keeps the claim, and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy({
+      throwErr: new SendRefusedError('opted out mid-flight', 'contact_opted_out'),
+    });
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-10',
+      phone: '+15550220010',
+      convId: 'conv-force-10',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-10',
+      unitId: 'unit-force-10',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused_post_claim', reason: 'contact_opted_out' });
+    // The claim IS the sentAt stamp - the row is consumed (poller parity).
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+    // ZERO provider sends on either route.
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    // A warn line records the refusal (ids + code only, never PII).
+    const warns = logCapture.atLevel(40).filter((l) => l['reminderId'] === row.reminderId);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!['refusal']).toBe('contact_opted_out');
   });
 });

@@ -114,7 +114,10 @@ import {
   type AudienceResolutionService,
 } from '../../src/services/audienceResolution.js';
 import { type SystemStatusService } from '../../src/services/systemStatus.js';
-import { createSendMessageService } from '../../src/services/sendMessage.js';
+import {
+  createSendMessageService,
+  type SendMessageService,
+} from '../../src/services/sendMessage.js';
 import {
   adminUserItem,
   makeFakeUsersRepo,
@@ -2617,6 +2620,14 @@ export interface HarnessOptions {
    * real default.
    */
   transcodeGate?: Semaphore;
+  /**
+   * Inject the /api router's send service (quiet-hours send-now, Task 6).
+   * The api router otherwise DEFAULT-constructs one, which resolves its own
+   * contacts repo against real DynamoDB - fine for suites that never drive an
+   * outbound send, useless for the ones that do. Pass a spy to assert what the
+   * route sent (body/author/automated) with no provider and no network.
+   */
+  sendMessageService?: SendMessageService;
 }
 
 export interface Harness {
@@ -2714,6 +2725,11 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // unit-photo-transcode (Task 4): thread the injected gate through to the
       // units confirm route (createApiRouter -> createUnitsRouter).
       ...(opts.transcodeGate !== undefined && { transcodeGate: opts.transcodeGate }),
+      // quiet-hours Task 6: the send-now routes drive a real send through this
+      // service; a spy keeps it off the network (see HarnessOptions).
+      ...(opts.sendMessageService !== undefined && {
+        sendMessageService: opts.sendMessageService,
+      }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

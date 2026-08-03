@@ -6,6 +6,10 @@
 //   PATCH /api/tours/:tourId/reminders/:reminderId  { canceled: boolean }
 //        → { reminder: TourReminderView } | 409 (already sent/skipped, or the
 //          transition raced the poll — the honest current state is returned)
+//   POST  /api/tours/:tourId/reminders/:reminderId/send-now
+//        -> { reminder: TourReminderView } | 409 { error, reminder } - "Send
+//           now" (quiet-hours spec section 7): a human sends ONE pending rung
+//           immediately through the poll's own resolve/claim/send path.
 //
 // Mounted under /api/tours (behind requireAuth via the /api mount). GET
 // surfaces each armed reminder rung's state (upcoming|sent|canceled|skipped)
@@ -50,8 +54,17 @@ import {
   type ScheduledSuppression,
 } from '../services/scheduledSendSuppression.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
-import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import {
+  forceSendReminder,
+  readQuietHoursWindow,
+  type RunDueTourRemindersDeps,
+} from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
+import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
+import { createSendMessageService, type SendMessageService } from '../services/sendMessage.js';
+import type { AuthedRequest } from '../middleware/auth.js';
 
 export interface TourRemindersRouterDeps {
   config?: AppConfig;
@@ -63,6 +76,19 @@ export interface TourRemindersRouterDeps {
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  // ---- Send-now deps (quiet-hours spec section 7) --------------------------
+  // The force-send reuses the poll's resolve/claim/send path, so this router
+  // needs the poll's send-side deps too. All optional with factory defaults,
+  // mirroring the dev.ts tick builders; api.ts threads the process-wide
+  // instances so tests that inject fakes keep talking to fakes.
+  /** 1:1 route: the shared send service (force-sends use automated: false). */
+  sendMessageService?: SendMessageService;
+  /** GROUP route: per-member provider sends via sendRelayAnnouncement. */
+  adapter?: MessagingAdapter;
+  /** GROUP route: persists the rung as a system announcement in the thread. */
+  messagesRepo?: MessagesRepo;
+  /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */
+  auditRepo?: AuditRepo;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
    *  scheduled.updated so the Reminders panel + the timelines' Upcoming
    *  buckets refetch. */
@@ -104,7 +130,26 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+
+  // Send-now (POST /:tourId/reminders/:reminderId/send-now) runs the SAME
+  // resolve/claim/send path the worker poll runs, so it takes the poll's dep
+  // bundle. Assembled ONCE at router creation (the dev.ts tick-builder shape):
+  // every factory below only builds a client object, no network at construction.
+  const pollerDeps: RunDueTourRemindersDeps = {
+    tourRemindersRepo: reminders,
+    toursRepo: tours,
+    contactsRepo: contacts,
+    conversationsRepo: conversations,
+    sendMessageService:
+      deps.sendMessageService ?? createSendMessageService({ config, logger: deps.logger }),
+    settingsRepo: settings,
+    adapter: deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger }),
+    messagesRepo: deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger }),
+    events,
+    ...(deps.logger !== undefined && { logger: deps.logger }),
+  };
 
   const router = Router();
 
@@ -174,6 +219,65 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       canceled ? 'tour reminder canceled via api' : 'tour reminder restored via api',
     );
     res.json({ reminder: viewOf(after) });
+  });
+
+  // POST /:tourId/reminders/:reminderId/send-now - "Send now" (quiet-hours spec
+  // section 7). Human-triggered, so it bypasses quiet hours / manual mode / the
+  // breaker but respects the kill switch, opt-out and JIT consent - all checked
+  // BEFORE the claim inside forceSendReminder, so a refusal leaves the rung
+  // pending and the poll still owns it. Auth: any authed staff role via the
+  // /api mount (staff can already send the same text from the composer), and
+  // the mount's csrfOrigin check covers this first POST on the router.
+  //
+  // 200 { reminder } on success; 409 { error, reminder } for every refusal or
+  // lost race, ALWAYS with the re-read (honest) view so the panel can correct
+  // itself; 404 for an unknown tour / rung.
+  router.post('/:tourId/reminders/:reminderId/send-now', json(), async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const reminderId = String(req.params['reminderId'] ?? '');
+    const actor = (req as AuthedRequest).user?.userId;
+
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const rows = await reminders.listByTour(tourId);
+    if (!rows.some((r) => r.reminderId === reminderId)) {
+      res.status(404).json({ error: 'reminder_not_found' });
+      return;
+    }
+
+    const result = await forceSendReminder(
+      reminderId,
+      tourId,
+      new Date().toISOString(),
+      config.smsSendingEnabled,
+      pollerDeps,
+    );
+
+    // Re-read for the HONEST post-write state (the send may have raced the poll).
+    const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+
+    if (result.outcome === 'sent') {
+      await audit.append(`tours#${tourId}`, 'reminder_force_sent', {
+        reminderId,
+        kind: after.kind,
+        ...(actor !== undefined && { actor }),
+      });
+      log.info({ tourId, reminderId, kind: after.kind }, 'tour reminder force-sent via api');
+      res.json({ reminder: viewOf(after) });
+      return;
+    }
+
+    // 'not_pending' (already terminal / lost claim) vs a refusal reason vs the
+    // post-claim race - the UI shows the reason verbatim, never a silent no-op.
+    const error = result.outcome === 'not_pending' ? 'reminder_not_pending' : result.reason;
+    log.info(
+      { tourId, reminderId, kind: after.kind, outcome: result.outcome, error },
+      'tour reminder send-now refused',
+    );
+    res.status(409).json({ error, reminder: viewOf(after) });
   });
 
   router.get('/:tourId/reminders', async (req, res) => {

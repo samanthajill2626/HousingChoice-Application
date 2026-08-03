@@ -16,7 +16,12 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { resolveMessage } from '../src/messages/index.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import type {
+  SendMessageInput,
+  SendMessageOutcome,
+  SendMessageService,
+} from '../src/services/sendMessage.js';
+import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { quietWindowAroundNow } from './helpers/settingsStub.js';
 
@@ -28,7 +33,24 @@ function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
     patch: (path: string) =>
       request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
   };
+}
+
+/** Records every send the route drives (the route asserts on view + audit). */
+function makeSendSpy(): { service: SendMessageService; sent: SendMessageInput[] } {
+  const sent: SendMessageInput[] = [];
+  const service: SendMessageService = async (input) => {
+    sent.push(input);
+    return {
+      conversationId: input.conversationId,
+      providerSid: 'SM-route-fake',
+      tsMsgId: 'ts-route-fake',
+      status: 'queued',
+    } as SendMessageOutcome;
+  };
+  return { service, sent };
 }
 
 /** Seed a reminder row directly on the world fake. */
@@ -470,5 +492,159 @@ describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
       .send({ canceled: true });
     expect(cross.status).toBe(404);
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
+  });
+});
+
+// Send now (quiet-hours spec section 7): any authed staff role - no admin gate
+// (staff can already send the equivalent text from the composer).
+describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
+  /** A tenant with a phone, RECORDED CONSENT and a 1:1 thread + one pending rung. */
+  async function seedSendNowTour(
+    world: FakeWorld,
+    over: { contactOptOut?: boolean; consent?: boolean; suffix?: string } = {},
+  ) {
+    const suffix = over.suffix ?? '1';
+    const tenantId = `contact-sendnow-${suffix}`;
+    const phone = `+1555070${suffix.padStart(4, '0')}`;
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone,
+      created_at: '2026-07-13T00:00:00.000Z',
+      ...(over.consent !== false && { consent_method: 'inbound_text' }),
+      ...(over.contactOptOut === true && { sms_opt_out: true }),
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(`conv-sendnow-${suffix}`, {
+      conversationId: `conv-sendnow-${suffix}`,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: `unit-sendnow-${suffix}`,
+      scheduledAt: '2026-07-20T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: `rem-sendnow-${suffix}`,
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T14:00:00.000Z',
+    });
+    return { tourId: created.tourId, reminderId: `rem-sendnow-${suffix}`, tenantId };
+  }
+
+  it('200s with the re-read sent view, sends automated: false, and records an audit event', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    // Quiet hours ON around the wall clock: the human path must ignore them.
+    Object.assign(world.settings, quietWindowAroundNow());
+    const { tourId, reminderId } = await seedSendNowTour(world);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.reminderId).toBe(reminderId);
+    expect(res.body.reminder.state).toBe('sent');
+    expect(typeof res.body.reminder.sentAt).toBe('string');
+    expect(res.body.reminder.body).toBe(resolveMessage('tour.day_before'));
+
+    // The send went out as a HUMAN send.
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]!.conversationId).toBe('conv-sendnow-1');
+    expect(spy.sent[0]!.automated).toBe(false);
+
+    // Who clicked is recorded on the tour's trail.
+    const ev = world.auditEvents.find((e) => e.event_type === 'reminder_force_sent');
+    expect(ev?.entityKey).toBe(`tours#${tourId}`);
+    expect(ev?.actorId).toBe(TEST_SESSION_USER.userId);
+    expect(ev?.payload).toEqual({
+      reminderId,
+      kind: 'day_before',
+      actor: TEST_SESSION_USER.userId,
+    });
+  });
+
+  it('409s reminder_not_pending with the honest current view when the rung already fired', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '2' });
+    await world.tourRemindersRepo.claimSend(reminderId, '2026-07-19T14:00:05.000Z');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('reminder_not_pending');
+    expect(res.body.reminder.state).toBe('sent');
+    expect(spy.sent).toHaveLength(0);
+    expect(world.auditEvents.some((e) => e.event_type === 'reminder_force_sent')).toBe(false);
+  });
+
+  it('409s contact_opted_out and leaves the rung upcoming (a refusal never consumes the row)', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, {
+      suffix: '3',
+      contactOptOut: true,
+    });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_opted_out');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // Still pending for the poll at its own dueAt.
+    expect(
+      (await world.tourRemindersRepo.listDue('2026-07-19T14:01:00.000Z')).map((r) => r.reminderId),
+    ).toContain(reminderId);
+  });
+
+  it('409s no_consent for a contact with no recorded consent', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '4', consent: false });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('no_consent');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('404s an unknown tour, an unknown rung, and a rung owned by ANOTHER tour', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '5' });
+
+    const ghostTour = await authed(app).post(
+      `/api/tours/no-such-tour/reminders/${reminderId}/send-now`,
+    );
+    expect(ghostTour.status).toBe(404);
+    expect(ghostTour.body).toEqual({ error: 'tour_not_found' });
+
+    const ghostRung = await authed(app).post(
+      `/api/tours/${tourId}/reminders/rem-does-not-exist/send-now`,
+    );
+    expect(ghostRung.status).toBe(404);
+    expect(ghostRung.body).toEqual({ error: 'reminder_not_found' });
+
+    const other = await world.toursRepo.create({
+      tenantId: 'contact-sendnow-other',
+      unitId: 'unit-sendnow-other',
+      scheduledAt: '2026-07-21T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const cross = await authed(app).post(
+      `/api/tours/${other.tourId}/reminders/${reminderId}/send-now`,
+    );
+    expect(cross.status).toBe(404);
+    expect(cross.body).toEqual({ error: 'reminder_not_found' });
+    expect(spy.sent).toHaveLength(0);
   });
 });

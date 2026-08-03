@@ -5,6 +5,10 @@
 //   PATCH /api/placements/:placementId/nudges/:nudgeId  { canceled: boolean }
 //        -> { nudge: PlacementNudgeView } | 409 (already sent, or the cancel/
 //           restore raced the poll's claim -> the honest current state returns)
+//   POST  /api/placements/:placementId/nudges/:nudgeId/send-now
+//        -> { nudge: PlacementNudgeView } | 409 { error, nudge } - "Send now"
+//           (quiet-hours spec section 7): a human sends ONE pending rung
+//           immediately through the poll's own resolve/claim/send path.
 //
 // Mounted under /api/placements (behind requireAuth via the /api mount), a
 // SIBLING router to the placements CRUD router: its only paths are the
@@ -48,9 +52,18 @@ import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isQuietTime } from '../lib/quietHours.js';
 import type { PlacementStage } from '../lib/statusModel.js';
-import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
+import {
+  forceSendNudge,
+  NUDGE_RUNGS,
+  type RunDuePlacementNudgesDeps,
+} from '../jobs/placementNudges.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createSendMessageService, type SendMessageService } from '../services/sendMessage.js';
+import type { AuthedRequest } from '../middleware/auth.js';
 import {
   evaluateScheduledSendSuppression,
   type ScheduledSuppression,
@@ -76,6 +89,19 @@ export interface PlacementNudgesRouterDeps {
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
+  // ---- Send-now deps (quiet-hours spec section 7) --------------------------
+  // The force-send reuses the poll's resolve/claim/send path, so this router
+  // needs the poll's recipient + send deps too. All optional with factory
+  // defaults, mirroring the dev.ts tick builders; api.ts threads the
+  // process-wide instances so tests that inject fakes keep talking to fakes.
+  /** Recipient resolution: tenant contact / landlord contact for the rung. */
+  contactsRepo?: ContactsRepo;
+  /** The recipient's 1:1 thread (found, or minted on demand at send time). */
+  conversationsRepo?: ConversationsRepo;
+  /** The shared send service (force-sends use automated: false). */
+  sendMessageService?: SendMessageService;
+  /** Records WHO clicked Send now (`nudge_force_sent` on `placements#<id>`). */
+  auditRepo?: AuditRepo;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
    *  scheduled.updated so the Deadlines-and-nudges card + the timelines' Upcoming
    *  buckets refetch. */
@@ -160,7 +186,25 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
   const nudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
+
+  // Send-now (POST /:placementId/nudges/:nudgeId/send-now) runs the SAME
+  // resolve/claim/send path the worker poll runs, so it takes the poll's dep
+  // bundle. Assembled ONCE at router creation (the dev.ts tick-builder shape):
+  // every factory below only builds a client object, no network at construction.
+  const pollerDeps: RunDuePlacementNudgesDeps = {
+    placementNudgesRepo: nudges,
+    placementsRepo: placements,
+    contactsRepo: deps.contactsRepo ?? createContactsRepo({ logger: deps.logger }),
+    unitsRepo: units,
+    conversationsRepo: deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger }),
+    sendMessageService:
+      deps.sendMessageService ?? createSendMessageService({ config, logger: deps.logger }),
+    settingsRepo: settings,
+    events,
+    ...(deps.logger !== undefined && { logger: deps.logger }),
+  };
 
   const router = Router();
 
@@ -239,6 +283,65 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
       canceled ? 'placement nudge canceled via api' : 'placement nudge restored via api',
     );
     res.json({ nudge: viewOf(after) });
+  });
+
+  // POST /:placementId/nudges/:nudgeId/send-now - "Send now" (quiet-hours spec
+  // section 7), the twin of the tour-reminder endpoint. Human-triggered, so it
+  // bypasses quiet hours / manual mode / the breaker but respects the kill
+  // switch, opt-out, JIT consent AND the stale-stage check - all checked BEFORE
+  // the claim inside forceSendNudge, so a refusal leaves the rung pending (a
+  // stale row is retired by the POLL, never by a human refusal). Auth: any
+  // authed staff role via the /api mount.
+  //
+  // 200 { nudge } on success; 409 { error, nudge } for every refusal or lost
+  // race, ALWAYS with the re-read (honest) view; 404 for an unknown
+  // placement / rung.
+  router.post('/:placementId/nudges/:nudgeId/send-now', json(), async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    const nudgeId = String(req.params['nudgeId'] ?? '');
+    const actor = (req as AuthedRequest).user?.userId;
+
+    const placement = await placements.getById(placementId);
+    if (!placement) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const rows = await nudges.listByPlacement(placementId);
+    if (!rows.some((r) => r.nudgeId === nudgeId)) {
+      res.status(404).json({ error: 'nudge_not_found' });
+      return;
+    }
+
+    const result = await forceSendNudge(
+      nudgeId,
+      placementId,
+      new Date().toISOString(),
+      config.smsSendingEnabled,
+      pollerDeps,
+    );
+
+    // Re-read for the HONEST post-write state (the send may have raced the poll).
+    const after = (await nudges.listByPlacement(placementId)).find((r) => r.nudgeId === nudgeId)!;
+
+    if (result.outcome === 'sent') {
+      await audit.append(`placements#${placementId}`, 'nudge_force_sent', {
+        nudgeId,
+        kind: after.kind,
+        ...(actor !== undefined && { actor }),
+      });
+      log.info({ placementId, nudgeId, kind: after.kind }, 'placement nudge force-sent via api');
+      res.json({ nudge: viewOf(after) });
+      return;
+    }
+
+    // 'not_pending' (already terminal / lost claim) vs a refusal reason vs the
+    // post-claim race - the UI shows the reason verbatim, never a silent no-op.
+    const error = result.outcome === 'not_pending' ? 'nudge_not_pending' : result.reason;
+    log.info(
+      { placementId, nudgeId, kind: after.kind, outcome: result.outcome, error },
+      'placement nudge send-now refused',
+    );
+    res.status(409).json({ error, nudge: viewOf(after) });
   });
 
   // GET /:placementId/nudges — the detail hub's read of the armed rung ladder.

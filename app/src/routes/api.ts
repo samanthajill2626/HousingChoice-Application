@@ -729,6 +729,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.
       settingsRepo: settings,
+      // Send now (spec section 7): the force-send runs the poll's own
+      // resolve/claim/send path, so hand it the process-wide send service,
+      // provider adapter, message store and audit trail (NOT freshly
+      // constructed inside the router - a test injecting fakes must keep them).
+      sendMessageService: sendMessage,
+      adapter,
+      messagesRepo: messages,
+      auditRepo: audit,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -822,6 +830,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // Quiet hours (spec 2026-08-03): the nudge view's FIRST suppression
       // estimate reads the org window through the SAME repo the armers use.
       settingsRepo: settings,
+      // Send now (spec section 7): the force-send runs the poll's own
+      // resolve/claim/send path, so hand it the process-wide recipient repos,
+      // send service and audit trail (NOT freshly constructed inside the
+      // router - a test injecting fakes must keep them).
+      contactsRepo: contacts,
+      conversationsRepo: conversations,
+      sendMessageService: sendMessage,
+      auditRepo: audit,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),

@@ -8,6 +8,7 @@
 // in M1.9 (the voice/call-triage milestone). See repos/settingsRepo.ts.
 import { Router } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { templateHasOptOutLanguage, WELCOME_SMS } from '../lib/smsCompliance.js';
 import { requireRole, type AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -95,6 +96,34 @@ function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string }
     }
     patch.preRingPauseSeconds = v;
   }
+  // Quiet hours (spec 2026-08-03 section 3). Shape only here; the MERGED
+  // start === end rejection needs the stored settings and lives in the handler.
+  if ('quietHoursEnabled' in b) {
+    const v = b['quietHoursEnabled'];
+    if (typeof v !== 'boolean') return { error: 'quietHoursEnabled must be a boolean' };
+    patch.quietHoursEnabled = v;
+  }
+  if ('quietHoursStart' in b) {
+    const v = b['quietHoursStart'];
+    if (typeof v !== 'string' || !isValidHhMm(v)) {
+      return { error: 'quietHoursStart must be "HH:MM" (24-hour)' };
+    }
+    patch.quietHoursStart = v;
+  }
+  if ('quietHoursEnd' in b) {
+    const v = b['quietHoursEnd'];
+    if (typeof v !== 'string' || !isValidHhMm(v)) {
+      return { error: 'quietHoursEnd must be "HH:MM" (24-hour)' };
+    }
+    patch.quietHoursEnd = v;
+  }
+  if ('timezone' in b) {
+    const v = b['timezone'];
+    if (typeof v !== 'string' || !isValidIanaTimezone(v)) {
+      return { error: 'timezone must be a valid IANA timezone id' };
+    }
+    patch.timezone = v;
+  }
   if ('welcomeText' in b) {
     const v = b['welcomeText'];
     if (v === null) {
@@ -137,6 +166,21 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
     if ('error' in parsed) {
       res.status(400).json({ error: parsed.error });
       return;
+    }
+    // A zero-length window (start === end) is meaningless and would silently
+    // disable the gate, so it is rejected - the way to turn quiet hours off is
+    // quietHoursEnabled: false. The check merges the patch over the STORED
+    // settings (an extra read, deliberately AFTER parsePatch so a malformed
+    // body never costs one), because a ONE-field patch could otherwise sneak a
+    // zero-length window past a patch-only check.
+    if (parsed.patch.quietHoursStart !== undefined || parsed.patch.quietHoursEnd !== undefined) {
+      const current = await settings.getOrgSettings();
+      const start = parsed.patch.quietHoursStart ?? current.quietHoursStart;
+      const end = parsed.patch.quietHoursEnd ?? current.quietHoursEnd;
+      if (start === end) {
+        res.status(400).json({ error: 'quiet_hours_zero_length' });
+        return;
+      }
     }
     const updated = await settings.putOrgSettings(parsed.patch);
     await audit.append(ORG_SETTINGS_ENTITY_KEY, 'settings_updated', {

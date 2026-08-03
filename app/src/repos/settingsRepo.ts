@@ -17,6 +17,7 @@ import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { DEFAULT_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
@@ -46,6 +47,16 @@ export interface OrgSettings {
    * Parameter Store). Defaults to 2; a sane range is 0..10.
    */
   preRingPauseSeconds: number;
+  /** Quiet hours (spec 2026-08-03): automated sends DEFER during this window. */
+  quietHoursEnabled: boolean;
+  /** "HH:MM" 24h local wall clock - window start (start-inclusive). */
+  quietHoursStart: string;
+  /** "HH:MM" 24h local wall clock - window end (end-exclusive). */
+  quietHoursEnd: string;
+  /** IANA org timezone - the FIRST server-side timezone; also used by the
+   *  morning_of tour reminder. Per-recipient override rides the
+   *  resolveQuietHoursTimezone seam (lib/quietHours.ts), not extra fields here. */
+  timezone: string;
   /**
    * OPTIONAL — the housing-fair welcome SMS body; {firstName} is interpolated.
    * Unset → public.ts falls back to WELCOME_TEXT_TEMPLATE. There is no sensible
@@ -65,6 +76,13 @@ export const DEFAULT_ORG_SETTINGS: OrgSettings = {
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me', "I'll call you back soon"],
   preRingPauseSeconds: 2,
+  // Quiet hours default ON (spec 2026-08-03): the safe posture is that a fresh
+  // stack never sends an automated text at 4am. Turn the feature OFF with
+  // quietHoursEnabled: false, never with a zero-length window.
+  quietHoursEnabled: true,
+  quietHoursStart: '21:00',
+  quietHoursEnd: '08:00',
+  timezone: 'America/New_York',
 };
 
 /** A settings patch. `welcomeText` may be `null` — an explicit CLEAR that issues a
@@ -114,6 +132,26 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
         (item['preRingPauseSeconds'] as number) >= 0
           ? (item['preRingPauseSeconds'] as number)
           : DEFAULT_ORG_SETTINGS.preRingPauseSeconds,
+      // Quiet hours: same defensive posture - a malformed stored window (bad
+      // HH:MM, unresolvable timezone) reads as the DEFAULT window, never as a
+      // disabled gate, so garbage in the item can never license a 4am send.
+      quietHoursEnabled:
+        typeof item?.['quietHoursEnabled'] === 'boolean'
+          ? (item['quietHoursEnabled'] as boolean)
+          : DEFAULT_ORG_SETTINGS.quietHoursEnabled,
+      quietHoursStart:
+        typeof item?.['quietHoursStart'] === 'string' &&
+        isValidHhMm(item['quietHoursStart'] as string)
+          ? (item['quietHoursStart'] as string)
+          : DEFAULT_ORG_SETTINGS.quietHoursStart,
+      quietHoursEnd:
+        typeof item?.['quietHoursEnd'] === 'string' && isValidHhMm(item['quietHoursEnd'] as string)
+          ? (item['quietHoursEnd'] as string)
+          : DEFAULT_ORG_SETTINGS.quietHoursEnd,
+      timezone:
+        typeof item?.['timezone'] === 'string' && isValidIanaTimezone(item['timezone'] as string)
+          ? (item['timezone'] as string)
+          : DEFAULT_ORG_SETTINGS.timezone,
       // welcomeText is OPTIONAL (no default): project it ONLY when a string is
       // actually stored — an unset value stays absent so public.ts falls back
       // to its WELCOME_TEXT_TEMPLATE constant.

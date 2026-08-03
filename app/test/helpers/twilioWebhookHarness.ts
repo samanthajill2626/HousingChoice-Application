@@ -1274,6 +1274,13 @@ export function createFakeWorld(): FakeWorld {
         settings.missedCallAutoTextEnabled = patch.missedCallAutoTextEnabled;
       if (patch.quickReplies !== undefined) settings.quickReplies = patch.quickReplies;
       if (patch.preRingPauseSeconds !== undefined) settings.preRingPauseSeconds = patch.preRingPauseSeconds;
+      // Quiet hours (spec 2026-08-03). This merge is hand-enumerated, so EVERY
+      // new OrgSettings field must be added here or its patch is silently
+      // dropped and the route test fails for a reason that is not the code.
+      if (patch.quietHoursEnabled !== undefined) settings.quietHoursEnabled = patch.quietHoursEnabled;
+      if (patch.quietHoursStart !== undefined) settings.quietHoursStart = patch.quietHoursStart;
+      if (patch.quietHoursEnd !== undefined) settings.quietHoursEnd = patch.quietHoursEnd;
+      if (patch.timezone !== undefined) settings.timezone = patch.timezone;
       if (patch.welcomeText === null) {
         // Explicit CLEAR — delete the attribute (mirrors the real repo's REMOVE),
         // so getOrgSettings projects no welcomeText and public.ts falls back.

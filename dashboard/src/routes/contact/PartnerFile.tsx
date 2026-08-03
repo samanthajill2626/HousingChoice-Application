@@ -8,7 +8,7 @@
 // already classified (A2, email-channel-v1). Header pill reads "Partner" via
 // CONTACT_TYPE_LABEL in ContactDetail.
 import type { Contact, ContactPhone } from '../../api/index.js';
-import { Card, CardAction, CardInlineAction, KV, NotesText, PendingPanel } from './Card.js';
+import { BLANK, Card, CardAction, CardInlineAction, KV, NotesText, PendingPanel } from './Card.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { contactStatusLabel, formatPhone } from './format.js';
@@ -54,7 +54,7 @@ export function PartnerFile({
           k="Phone numbers"
           v={
             <>
-              {phoneList || '-'}
+              {phoneList || BLANK}
               {onManagePhones ? (
                 <>
                   {' - '}
@@ -66,7 +66,7 @@ export function PartnerFile({
             </>
           }
         />
-        <KV k="Status" v={contact.status ? contactStatusLabel(contact.type, contact.status) : '-'} />
+        <KV k="Status" v={contact.status ? contactStatusLabel(contact.type, contact.status) : BLANK} />
       </Card>
 
       <Card

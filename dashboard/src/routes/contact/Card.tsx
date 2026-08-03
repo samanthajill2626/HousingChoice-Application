@@ -121,6 +121,12 @@ export function CollapsibleRows({
   );
 }
 
+/** The dashboard-wide placeholder for a value that is not recorded: an em dash
+ *  (U+2014), written as an escape so no file-encoding round-trip can mangle it. The
+ *  Settings numbers table is the ONE deliberate exception and uses an ASCII "-"
+ *  (spec adjudication A10). */
+export const BLANK = '\u2014';
+
 /** A key/value detail row (the Details card). An optional `hint` adds a small ⓘ
  *  next to the key that reveals the explanation on hover (title tooltip) — for
  *  fields whose meaning isn't obvious from the label alone (e.g. the

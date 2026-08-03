@@ -1,5 +1,6 @@
 import { render, screen } from '@testing-library/react';
 import { describe, expect, it } from 'vitest';
+import { BLANK } from './Card.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 
 describe('LandlordOnboardingCard', () => {
@@ -54,16 +55,36 @@ describe('LandlordOnboardingCard', () => {
     expect(screen.queryByText('Park reason')).not.toBeInTheDocument();
   });
 
-  it('omits fields that are unset', () => {
+  it('renders unset fields as the blank placeholder instead of omitting them', () => {
     render(<LandlordOnboardingCard contact={{ registered_landlord: true }} />);
     expect(screen.getByText('Registered landlord')).toBeInTheDocument();
     expect(screen.getByText('Yes')).toBeInTheDocument();
-    expect(screen.queryByText('Contract status')).not.toBeInTheDocument();
-    expect(screen.queryByText('Submits RTA within 48h')).not.toBeInTheDocument();
+    // The four unanswered rows are PRESENT, each reading the placeholder: a gap a
+    // navigator can SEE, not a row that silently disappears.
+    expect(screen.getByText('Contract status')).toBeInTheDocument();
+    expect(screen.getByText('Submits RTA within 48h')).toBeInTheDocument();
+    expect(screen.getByText('Passes inspection first try')).toBeInTheDocument();
+    expect(screen.getByText('Voucher counts as income')).toBeInTheDocument();
+    expect(screen.getAllByText(BLANK)).toHaveLength(4);
   });
 
-  it('renders nothing when no onboarding data is recorded', () => {
-    const { container } = render(<LandlordOnboardingCard contact={{}} />);
-    expect(container.firstChild).toBeNull();
+  it('renders every checklist row as a blank when nothing is recorded', () => {
+    render(<LandlordOnboardingCard contact={{}} />);
+    expect(screen.getByText('Landlord onboarding')).toBeInTheDocument();
+    expect(screen.getByText('Contract status')).toBeInTheDocument();
+    expect(screen.getByText('Registered landlord')).toBeInTheDocument();
+    expect(screen.getByText('Submits RTA within 48h')).toBeInTheDocument();
+    expect(screen.getByText('Passes inspection first try')).toBeInTheDocument();
+    expect(screen.getByText('Voucher counts as income')).toBeInTheDocument();
+    expect(screen.getAllByText(BLANK)).toHaveLength(5);
+    // Park reason is status-scoped, not a checklist item: absent when not parked.
+    expect(screen.queryByText('Park reason')).not.toBeInTheDocument();
+  });
+
+  it('renders the Park reason row as a blank when parked with no reason recorded', () => {
+    render(<LandlordOnboardingCard contact={{ status: 'parked' }} />);
+    expect(screen.getByText('Park reason')).toBeInTheDocument();
+    // Five checklist blanks + the parked-but-unexplained Park reason blank.
+    expect(screen.getAllByText(BLANK)).toHaveLength(6);
   });
 });

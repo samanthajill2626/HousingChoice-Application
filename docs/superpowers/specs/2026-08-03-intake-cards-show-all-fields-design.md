@@ -1,8 +1,8 @@
 # Intake cards show every field, blanks included
 
 Date: 2026-08-03
-Status: DRAFT - awaiting Cameron's review
-Branch: none (small-fix lane, direct on main)
+Status: APPROVED (Cameron, 2026-08-03) - ready for implementation
+Branch: feat/intake-cards-show-all-fields (worktree w:/tmp/intake-cards, cut from main 16ff056f)
 
 ## 1. Context and the decision
 

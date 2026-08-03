@@ -222,3 +222,93 @@ test('hub: an armed nudge shows in the Deadlines card + the tenant Upcoming buck
     timeout: 10_000,
   });
 });
+
+// ==== "Move to" stage menu: viewport clamping =================================
+// The stage ladder is 18 options across 7 phase groups (~880px). Uncapped, the
+// menu ran past the bottom of the window AND grew its scroll container, so the
+// page sprouted a second scrollbar; on a phone the menu was TALLER than the whole
+// viewport and the trigger got pushed off-screen. It must now bound itself to the
+// room below the trigger and scroll internally. Asserted geometrically at both
+// sizes — the accessible tree looks identical either way.
+
+/** How much scroll range the page's own scrollers have right now. Compared before
+ *  vs after opening the menu: the bug was the menu GROWING one of these, so a
+ *  delta is the honest assertion — the page having some scroll of its own is
+ *  normal and depends on seed data. */
+function pageScrollRange(page: Page): Promise<number> {
+  return page.evaluate(() =>
+    Math.max(
+      ...[document.documentElement, ...document.querySelectorAll('main')].map(
+        (s) => s.scrollHeight - s.clientHeight,
+      ),
+    ),
+  );
+}
+
+/** Open PlacementDetail's kebab -> "Move to" stage menu and measure it. */
+async function openStageMenuMetrics(page: Page): Promise<{
+  menuHeight: number;
+  overflowsViewportBy: number;
+  scrollsInternally: boolean;
+  checkedVisible: boolean;
+}> {
+  await page.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('button', { name: /^Placement stage/ }).click();
+  const menu = page.getByRole('menu', { name: 'Placement stage' });
+  await expect(menu).toBeVisible();
+  return menu.evaluate((el) => {
+    const mb = el.getBoundingClientRect();
+    const checked = el.querySelector('[role="menuitemradio"][aria-checked="true"]');
+    const cb = checked?.getBoundingClientRect();
+    return {
+      menuHeight: Math.round(mb.height),
+      overflowsViewportBy: Math.round(mb.bottom - window.innerHeight),
+      scrollsInternally: el.scrollHeight > el.clientHeight + 1,
+      checkedVisible: cb !== undefined && cb.top >= mb.top - 1 && cb.bottom <= mb.bottom + 1,
+    };
+  });
+}
+
+for (const [name, viewport] of [
+  ['desktop', { width: 1440, height: 900 }],
+  ['mobile', { width: 390, height: 844 }],
+] as const) {
+  test(`${name}: the "Move to" stage menu fits the window and scrolls internally`, async ({
+    page,
+  }) => {
+    await page.setViewportSize(viewport);
+    await devLoginAndReset(page);
+    await page.goto(`${NEXT}/placements/placement-0001`);
+
+    const scrollBefore = await pageScrollRange(page);
+    const m = await openStageMenuMetrics(page);
+
+    // Bounded by the window instead of running off the bottom of it.
+    expect(m.overflowsViewportBy, 'stage menu runs past the bottom of the window').toBeLessThanOrEqual(0);
+    expect(m.menuHeight).toBeLessThan(viewport.height);
+    // The full ladder is still reachable — capped, not truncated.
+    expect(m.scrollsInternally, 'a capped menu must scroll to reach the rest of the ladder').toBe(true);
+    // You open "Move to" to move OFF the current stage — so it has to be on screen.
+    expect(m.checkedVisible, 'the current stage is scrolled out of view').toBe(true);
+    // Opening the menu must not lengthen the page — that was the second scrollbar.
+    expect(await pageScrollRange(page), 'opening the menu grew a page scroller').toBe(scrollBefore);
+  });
+}
+
+test('mobile: a stage can still be picked from the scrolled menu', async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await devLoginAndReset(page);
+  await page.goto(`${NEXT}/placements/placement-0001`);
+
+  await page.getByRole('button', { name: 'More actions' }).click();
+  await page.getByRole('button', { name: /^Placement stage/ }).click();
+  // "Send application" sits at the very top of the ladder, above the scrolled-to
+  // current stage — so this only passes if the menu scrolls back up and the item
+  // is genuinely hittable inside the clamped box.
+  await page.getByRole('menuitemradio', { name: 'Send application', exact: true }).click();
+
+  // The move runs the same gated pipeline (a backwards move prompts to confirm).
+  await expect(
+    page.getByRole('dialog').or(placementBanner(page).getByText('Send application')).first(),
+  ).toBeVisible({ timeout: 10_000 });
+});

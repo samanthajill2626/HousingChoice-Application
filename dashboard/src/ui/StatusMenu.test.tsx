@@ -162,4 +162,86 @@ describe('StatusMenu', () => {
     await user.keyboard('{Escape}');
     expect(trigger()).toHaveFocus();
   });
+
+  // The placement stage ladder is 18 items in 7 phase groups — ~880px tall. With
+  // no cap the menu ran off the bottom of the window and grew its scroll
+  // container, so the page sprouted a second scrollbar (worse on a phone, where
+  // the menu was TALLER than the viewport). The menu must bound itself to the
+  // room actually below the trigger and scroll internally instead.
+  describe('viewport clamping', () => {
+    /** Open with the trigger's rect and the window height under our control, and
+     *  hand back the inline max-height the component computed. jsdom reports 0 for
+     *  every rect, so the geometry has to be faked to test the arithmetic. */
+    async function openWithGeometry(triggerBottom: number, innerHeight: number): Promise<string> {
+      const user = userEvent.setup();
+      const spy = vi
+        .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+        .mockReturnValue({
+          top: triggerBottom - 20,
+          bottom: triggerBottom,
+          left: 0,
+          right: 100,
+          width: 100,
+          height: 20,
+          x: 0,
+          y: triggerBottom - 20,
+          toJSON: () => ({}),
+        } as DOMRect);
+      const original = window.innerHeight;
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: innerHeight });
+      try {
+        renderMenu();
+        await user.click(trigger());
+        return screen.getByRole('menu').style.maxHeight;
+      } finally {
+        spy.mockRestore();
+        Object.defineProperty(window, 'innerHeight', { configurable: true, value: original });
+      }
+    }
+
+    it('caps the menu to the space below the trigger', async () => {
+      // Trigger sits 500px down a 700px window => ~188px of room under it once the
+      // bottom gutter is taken off. Well under the design cap, so the room wins.
+      const maxHeight = await openWithGeometry(500, 700);
+      expect(maxHeight).not.toBe('');
+      expect(parseFloat(maxHeight)).toBeLessThanOrEqual(700 - 500);
+    });
+
+    it('never collapses to an unusably short menu when the trigger is near the bottom', async () => {
+      // Trigger 30px off the bottom: clamping alone would leave a few pixels, so a
+      // floor keeps enough rows visible to be worth opening (it scrolls inside).
+      const maxHeight = await openWithGeometry(670, 700);
+      expect(parseFloat(maxHeight)).toBeGreaterThanOrEqual(180);
+    });
+
+    // Capping the menu made it scrollable, which introduced a new way to be
+    // unhelpful: the placement ladder's current stage sits ~11 items down, so the
+    // menu opened showing the TOP of the list with the checked item scrolled out
+    // of sight. You open "Move to" precisely to move off the current stage, so it
+    // has to be the thing you see.
+    it('scrolls the checked item into view on open', async () => {
+      const user = userEvent.setup();
+      // setup.ts stubs scrollIntoView (jsdom has none); spy on that stub so the
+      // spy composes with it instead of replacing and deleting it.
+      const scrollIntoView = vi.spyOn(HTMLElement.prototype, 'scrollIntoView');
+      try {
+        renderMenu();
+        await user.click(trigger());
+        const checked = screen.getByRole('menuitemradio', { name: 'Available' });
+        expect(checked).toHaveFocus();
+        expect(scrollIntoView).toHaveBeenCalled();
+        // It is the CHECKED item that gets revealed, not just any menu row.
+        expect(scrollIntoView.mock.instances).toContain(checked);
+      } finally {
+        scrollIntoView.mockRestore();
+      }
+    });
+
+    it('does not exceed the design cap on a tall window', async () => {
+      // Lots of room below => the design cap (min(60vh, 480px)) is what binds, so
+      // the menu never becomes a full-height wall of options.
+      const maxHeight = await openWithGeometry(100, 2000);
+      expect(parseFloat(maxHeight)).toBeLessThanOrEqual(480);
+    });
+  });
 });

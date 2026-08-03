@@ -22,6 +22,13 @@ if (typeof globalThis.ResizeObserver === 'undefined') {
   } as unknown as typeof ResizeObserver;
 }
 
+// jsdom does no layout and so implements no scrollIntoView, but menus call it to
+// reveal the focused item on open (StatusMenu). A no-op stub lets them render;
+// tests that ASSERT the call spy on this with vi.spyOn (e.g. StatusMenu.test).
+if (typeof HTMLElement.prototype.scrollIntoView !== 'function') {
+  HTMLElement.prototype.scrollIntoView = function scrollIntoView(): void {};
+}
+
 afterEach(() => {
   cleanup();
 });

@@ -104,13 +104,21 @@
   font-weight: var(--fw-semibold);
 }
 
-/* The dropdown, anchored under the trigger. */
+/* The dropdown, anchored under the trigger. A long option list (the placement
+ * stage ladder is 18 items in 7 phase groups) scrolls INSIDE the menu rather than
+ * running off the bottom of the window and growing the page's scroll height —
+ * StatusMenu.tsx narrows this max-height further, to the room actually below the
+ * trigger, and re-measures on scroll/resize. The value here is the fallback for
+ * the frame before that measurement lands (and for jsdom, which has no layout). */
 .menu {
   position: absolute;
   top: calc(100% + var(--sp-1));
   left: 0;
   z-index: 30;
   min-width: 12rem;
+  max-height: min(60vh, 480px);
+  overflow-y: auto;
+  overscroll-behavior: contain; /* don't chain the page scroll past the menu's end */
   padding: var(--sp-1);
   display: flex;
   flex-direction: column;

@@ -6,7 +6,17 @@
 // placement stage (phase-GROUPED options, neutral tone, larger size). The parent
 // owns any gating — onChange may kick off a confirm/reason modal instead of an
 // immediate write; the menu just reports the chosen value.
-import { useEffect, useRef, useState } from 'react';
+//
+// HEIGHT: the menu bounds itself to the room actually below its trigger and
+// scrolls internally. The placement stage ladder is 18 options across 7 phase
+// groups (~880px), which uncapped ran off the bottom of the window AND grew its
+// scroll container, so the page sprouted a second scrollbar — on a phone the menu
+// was taller than the whole viewport. The clamp mirrors the ledger row's
+// StageMenu, the other menu that renders this same ladder. Unlike StageMenu this
+// one does NOT need a portal: its hosts (page headers, the placement kebab) have
+// no overflow-clipping or stacking-context ancestor — verified live — so it stays
+// absolutely positioned and keeps tracking its trigger on scroll.
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { humanize } from '../routes/contact/format.js';
 import styles from './StatusMenu.module.css';
 
@@ -69,6 +79,26 @@ export interface StatusMenuProps {
   error?: string | null;
 }
 
+/** Breathing room between the menu's bottom edge and the viewport's. */
+const VIEWPORT_GUTTER = 12;
+/** The shortest menu worth opening. Below this the clamp would hand back a sliver,
+ *  so we let it overhang slightly instead — it scrolls internally either way. */
+const MIN_MENU_HEIGHT = 200;
+/** Design cap: even with a wall of room, a menu this tall is already too long to
+ *  scan. Mirrors the `min(60vh, 480px)` fallback in the stylesheet. */
+const MAX_MENU_HEIGHT = 480;
+
+/** The menu's max-height in px: the room below `trigger`, bounded by the design
+ *  cap and floored so it stays usable. Returns null when there's no trigger to
+ *  measure (nothing rendered yet), leaving the stylesheet fallback in charge. */
+function clampMenuHeight(trigger: HTMLElement | null): number | null {
+  if (trigger === null) return null;
+  const { bottom } = trigger.getBoundingClientRect();
+  const roomBelow = window.innerHeight - bottom - VIEWPORT_GUTTER;
+  const capped = Math.min(roomBelow, window.innerHeight * 0.6, MAX_MENU_HEIGHT);
+  return Math.max(MIN_MENU_HEIGHT, Math.round(capped));
+}
+
 const TONE_CLASS: Record<StatusTone, string> = {
   available: styles.toneAvailable ?? '',
   placed: styles.tonePlaced ?? '',
@@ -94,6 +124,8 @@ export function StatusMenu({
   error = null,
 }: StatusMenuProps): React.JSX.Element {
   const [open, setOpen] = useState(false);
+  /** Viewport-derived px cap for the open menu; null until it's been measured. */
+  const [maxHeight, setMaxHeight] = useState<number | null>(null);
   const ref = useRef<HTMLSpanElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -135,14 +167,52 @@ export function StatusMenu({
     };
   }, [open]);
 
+  // Measure BEFORE paint (layout effect) so the menu never flashes at full height
+  // and shoves the page's scroll height around on the way to being clamped.
+  // The menu is absolutely positioned, so it follows its trigger on scroll — only
+  // the amount of room below it changes, so we re-measure rather than close.
+  useLayoutEffect(() => {
+    if (!open) return undefined;
+    const measure = (): void => setMaxHeight(clampMenuHeight(triggerRef.current));
+    measure();
+    // Capture phase so a scroll of any ancestor container counts, not just the
+    // window; scrolling INSIDE the menu changes nothing, so ignore that.
+    const onScroll = (e: Event): void => {
+      if (menuRef.current && e.target instanceof Node && menuRef.current.contains(e.target)) return;
+      measure();
+    };
+    window.addEventListener('scroll', onScroll, true);
+    window.addEventListener('resize', measure);
+    return () => {
+      window.removeEventListener('scroll', onScroll, true);
+      window.removeEventListener('resize', measure);
+    };
+  }, [open]);
+
   // On open, move focus INTO the menu — the checked item (radio-menu
   // convention), else the first (APG menu-button pattern).
+  //
+  // Waits for the clamp (maxHeight non-null) rather than running on `open` alone:
+  // focusing while the menu is still full height scrolls nothing, and by the time
+  // the cap lands the browser has no reason to revisit it — which left the current
+  // stage focused but off the bottom of a menu you opened to move off that stage.
+  // The ref keeps this to ONCE per open, so re-measuring on scroll never yanks
+  // focus back while the user is arrowing through the list.
+  const focusedOnOpen = useRef(false);
   useEffect(() => {
-    if (!open) return;
+    if (!open) {
+      focusedOnOpen.current = false;
+      return;
+    }
+    if (maxHeight === null || focusedOnOpen.current) return;
+    focusedOnOpen.current = true;
     const items = menuItems();
-    const checked = items.find((el) => el.getAttribute('aria-checked') === 'true');
-    (checked ?? items[0])?.focus();
-  }, [open]);
+    const target = items.find((el) => el.getAttribute('aria-checked') === 'true') ?? items[0];
+    // preventScroll keeps focus from jerking the PAGE; the scroll we do want is
+    // inside the menu, and 'nearest' is a no-op once the item is already in view.
+    target?.focus({ preventScroll: true });
+    target?.scrollIntoView({ block: 'nearest' });
+  }, [open, maxHeight]);
 
   const allOptions = groups ? groups.flatMap((g) => g.options) : (options ?? []);
   const current = allOptions.find((o) => o.value === value);
@@ -225,7 +295,14 @@ export function StatusMenu({
         <span className={styles.caret} aria-hidden="true">▾</span>
       </button>
       {open ? (
-        <div className={styles.menu} role="menu" aria-label={label} ref={menuRef} onKeyDown={onMenuKeyDown}>
+        <div
+          className={styles.menu}
+          role="menu"
+          aria-label={label}
+          ref={menuRef}
+          onKeyDown={onMenuKeyDown}
+          {...(maxHeight !== null && { style: { maxHeight: `${maxHeight}px` } })}
+        >
           {groups
             ? groups.map((g) => (
                 <div key={g.label} role="group" aria-label={g.label} className={styles.group}>

@@ -370,9 +370,13 @@ describe('TourDetail - Send no-show check-in (manual)', () => {
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
   }
 
+  // makeTour's default scheduledAt (2026-07-10) is in the FUTURE under the pinned
+  // test clock (2026-07-01, see test/setup.ts), which correctly hides the item -
+  // so these tests pass an explicitly PAST start.
+  const PAST_START = '2026-06-30T14:00:00Z'; // a day before the pinned now
+
   it('the kebab shows the item once the tour start has passed (scheduled)', async () => {
-    // makeTour default scheduledAt 2026-07-10 is already in the past -> visible.
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: PAST_START }));
     renderDetail();
     await waitLoaded();
     await openKebab();
@@ -392,7 +396,7 @@ describe('TourDetail - Send no-show check-in (manual)', () => {
   });
 
   it('is available for a no_show tour (send again after marking no-show)', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'no_show' }));
+    getTour.mockResolvedValue(makeTour({ status: 'no_show', scheduledAt: PAST_START }));
     renderDetail();
     await waitLoaded();
     await openKebab();
@@ -400,7 +404,7 @@ describe('TourDetail - Send no-show check-in (manual)', () => {
   });
 
   it('clicking it fetches the copy and prefills the tenant composer with the template', async () => {
-    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', scheduledAt: PAST_START }));
     getNoShowCheckinDraft.mockResolvedValue({ body: CHECKIN });
     renderDetail();
     await waitLoaded();

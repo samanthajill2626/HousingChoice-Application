@@ -227,6 +227,7 @@ describe('EventStreamProvider + useEventStream', () => {
   // watchdog detects the resulting silence and forces a reconnect.
 
   it('watchdog reconnects when the stream goes stale (no events past STALE_MS)', () => {
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
     vi.useFakeTimers();
     render(
       <EventStreamProvider>
@@ -246,6 +247,7 @@ describe('EventStreamProvider + useEventStream', () => {
   });
 
   it('a heartbeat event keeps the stream alive past STALE_MS (no reconnect)', () => {
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
     vi.useFakeTimers();
     render(
       <EventStreamProvider>
@@ -267,6 +269,7 @@ describe('EventStreamProvider + useEventStream', () => {
   });
 
   it('fast-paths a reconnect on window "online" after prolonged silence', () => {
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
     vi.useFakeTimers();
     render(
       <EventStreamProvider>
@@ -289,6 +292,7 @@ describe('EventStreamProvider + useEventStream', () => {
   });
 
   it('fast-paths a reconnect on visibilitychange to visible after prolonged silence', () => {
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
     vi.useFakeTimers();
     render(
       <EventStreamProvider>

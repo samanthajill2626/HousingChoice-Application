@@ -1,14 +1,14 @@
 // EligibilityIntakeCard — the tenant-only "Eligibility intake" section of the
 // Details pane: the structured intake recorded during onboarding (pets, evictions,
-// time at current address, LIF eligibility). Renders only the fields that were
-// actually recorded, and renders nothing at all when none are — so Team can SEE the
-// intake without reopening the editor, without cluttering a fresh tenant's file.
+// time at current address, LIF eligibility). EVERY field always renders - an
+// unrecorded one reads as BLANK - so Team can SEE both what was captured and what
+// is still missing, and so a pending suggestion always has a row to hang its chip on.
 //
 // AI review (conversation-fact-extraction): a field written from an extraction
 // carries an AutoBadge; a pending suggestion for pets/evictions/tenure renders a
 // SuggestionChip on the line below its row.
 import type { Contact, FieldSource, SuggestionItem } from '../../api/index.js';
-import { Card, KV } from './Card.js';
+import { BLANK, Card, KV } from './Card.js';
 import { AutoBadge } from './AutoBadge.js';
 import { SuggestionChip } from './SuggestionChip.js';
 import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
@@ -60,26 +60,40 @@ export function EligibilityIntakeCard({
   onDismissSuggestion,
   suggestionBusy,
   suggestionError,
-}: EligibilityIntakeCardProps): React.JSX.Element | null {
+}: EligibilityIntakeCardProps): React.JSX.Element {
   // Extractable intake rows carry a `field` + its AI provenance stamp so we can
   // attach an AutoBadge + a review chip; the derived rows (LIF, voucher expiry) do
-  // not.
-  const rows: Array<{ k: string; v: string; field?: string; src?: FieldSource }> = [];
-  if (contact.pets)
-    rows.push({ k: 'Pets', v: contact.pets, field: 'pets', ...(aiSource(contact.pets_source) && { src: aiSource(contact.pets_source) }) });
-  if (contact.evictions)
-    rows.push({ k: 'Evictions', v: contact.evictions, field: 'evictions', ...(aiSource(contact.evictions_source) && { src: aiSource(contact.evictions_source) }) });
-  if (contact.tenure)
-    rows.push({ k: 'Time at current address', v: contact.tenure, field: 'tenure', ...(aiSource(contact.tenure_source) && { src: aiSource(contact.tenure_source) }) });
-  if (typeof contact.lifEligible === 'boolean') {
-    rows.push({ k: 'LIF eligible', v: contact.lifEligible ? 'Yes' : 'No' });
-  }
+  // not. EVERY row always renders - an unrecorded field reads as BLANK - so a gap in
+  // the intake is visible, and so a pending suggestion always has a row to hang its
+  // chip on (see intake-card-hides-pending-suggestions).
   const voucherExpires = contact.voucher_expiration_date
     ? friendlyDate(contact.voucher_expiration_date)
     : '';
-  if (voucherExpires) rows.push({ k: 'Voucher expires', v: voucherExpires });
-
-  if (rows.length === 0) return null;
+  const rows: Array<{ k: string; v: string; field?: string; src?: FieldSource }> = [
+    {
+      k: 'Pets',
+      v: contact.pets || BLANK,
+      field: 'pets',
+      ...(aiSource(contact.pets_source) && { src: aiSource(contact.pets_source) }),
+    },
+    {
+      k: 'Evictions',
+      v: contact.evictions || BLANK,
+      field: 'evictions',
+      ...(aiSource(contact.evictions_source) && { src: aiSource(contact.evictions_source) }),
+    },
+    {
+      k: 'Time at current address',
+      v: contact.tenure || BLANK,
+      field: 'tenure',
+      ...(aiSource(contact.tenure_source) && { src: aiSource(contact.tenure_source) }),
+    },
+    {
+      k: 'LIF eligible',
+      v: typeof contact.lifEligible === 'boolean' ? (contact.lifEligible ? 'Yes' : 'No') : BLANK,
+    },
+    { k: 'Voucher expires', v: voucherExpires || BLANK },
+  ];
 
   const chipFor = (target: string): React.JSX.Element | null => {
     const s = suggestionFor(suggestions, target);

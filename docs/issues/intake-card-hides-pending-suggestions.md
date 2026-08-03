@@ -3,7 +3,8 @@ id: intake-card-hides-pending-suggestions
 title: Eligibility-intake card hides when empty - swallowing its pending suggestion chips
 type: bug
 severity: low
-status: open
+status: resolved
+resolved: 2026-08-03
 area: dashboard
 created: 2026-07-21
 refs: dashboard/src/routes/contact/EligibilityIntakeCard.tsx
@@ -22,3 +23,15 @@ card and no chip.
 **Fix shape.** Render the card when EITHER intake content exists OR a
 pending suggestion targets one of its fields (the suggestions list is
 already passed down for the chips).
+
+**Resolution (2026-08-03) - fixed by the general always-render rule.** Both
+structured-intake cards now render EVERY field always, with an em-dash placeholder
+for anything unrecorded, per
+`docs/superpowers/specs/2026-08-03-intake-cards-show-all-fields-design.md`. Because
+chips hang off rows, always-present rows mean a pending suggestion always has a row
+to attach to. This supersedes the narrower fix shape proposed above ("render the card
+when EITHER intake content exists OR a pending suggestion targets one of its fields"),
+which would have surfaced the card but still needed per-row special-casing for the
+suggested field. Human decision (Cameron, 2026-08-03) to resolve it this way. Pinned by
+the `regression: intake-card-hides-pending-suggestions` case in
+`dashboard/src/routes/contact/EligibilityIntakeCard.test.tsx`.

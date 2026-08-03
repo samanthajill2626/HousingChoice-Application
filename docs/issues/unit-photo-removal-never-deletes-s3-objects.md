@@ -10,8 +10,9 @@ updated: 2026-07-21
 refs: app/src/routes/units.ts, app/src/lib/unitMedia.ts
 ---
 
-**Scoped down (2026-07-21).** The removed-photo orphan class this issue was
-opened for is **FIXED** on the unit-media-cloudfront branch (design
+**Scoped down (2026-07-21; branch MERGED 2026-08-03).** The removed-photo orphan class
+this issue was opened for is **FIXED** and now live on main - it shipped with
+unit-media-cloudfront, whose branch + worktree were deleted during cleanup (design
 docs/superpowers/specs/2026-07-21-unit-media-cloudfront-design.md, D1): a
 `unit.media` edit that removes stored keys now best-effort `DeleteObject`s each
 removed own-namespace key (via `deleteRemovedUnitMedia` in

@@ -3,11 +3,18 @@ id: suggestion-event-no-contact-refetch
 title: suggestion.updated refreshes the chips but NOT the contact's field values
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-07-21
+resolved: 2026-08-03
 refs: dashboard/src/routes/contact/useSuggestions.ts, dashboard/src/routes/contact/useContact.ts
 ---
+
+**Resolution (2026-08-03).** Fixed on `feat/suggestion-tombstones`, now MERGED to main
+(branch + worktree deleted during cleanup). `useContact` now live-refetches the contact
+record in place when a `suggestion.updated` event names the viewed contact
+(`dashboard/src/routes/contact/useContact.ts:52`), so direct-written fields and their Auto
+badges appear without a manual reload - matching the chip refresh `useSuggestions` already did.
 
 **Problem (observed live on dev, 2026-07-21).** The event-bridge made the
 worker's `suggestion.updated` emit reach the browser, and

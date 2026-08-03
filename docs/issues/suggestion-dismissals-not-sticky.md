@@ -3,11 +3,20 @@ id: suggestion-dismissals-not-sticky
 title: Dismissed AI suggestions come back on every re-run while the source content is in the window
 type: bug
 severity: medium
-status: open
+status: resolved
 area: app
 created: 2026-07-21
-refs: app/src/services/extraction/apply.ts, app/src/routes/suggestions.ts
+resolved: 2026-08-03
+refs: app/src/services/extraction/apply.ts, app/src/routes/suggestions.ts, app/src/repos/extractionRepo.ts
 ---
+
+**Resolution (2026-08-03).** Dismissal tombstones shipped on `feat/suggestion-tombstones`,
+now MERGED to main (branch + worktree deleted during cleanup). Dismissing writes a permanent
+tombstone recording the target + normalized suggestedValue (`extractionRepo`), and apply's
+suggest path skips any proposal whose normalized value matches a tombstone for that target -
+so a rejected value never returns, while a genuinely DIFFERENT value for the same target
+still surfaces. Per Cameron's ruling, a later human edit does NOT clear the tombstone.
+Pinned by e2e coverage in `e2e/tests/flows/conversation-fact-extraction.spec.ts`.
 
 **Problem (observed live on dev, 2026-07-21).** Dismissing a suggestion
 deletes its row and audits `ai_suggestion_dismissed` - nothing remembers

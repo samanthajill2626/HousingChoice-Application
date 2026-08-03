@@ -3,11 +3,23 @@ id: email-as-first-class-channel
 title: Email is not an in-scope conversation channel (needed for landlord onboarding later)
 type: improvement
 severity: med
-status: open
+status: resolved
 area: app
 created: 2026-06-30
-refs: app/src/repos/messagesRepo.ts:31, infra/modules/ses/main.tf, docs/issues/ses-sandbox-exit.md, documentation/landlord-onboarding-sequence.mermaid
+resolved: 2026-08-03
+refs: app/src/repos/messagesRepo.ts:32, infra/modules/ses/main.tf, docs/issues/ses-sandbox-exit.md, documentation/landlord-onboarding-sequence.mermaid
 ---
+
+**Resolution (2026-08-03).** Both gates are now met, so this closes. (a) `feat/email-channel`
+MERGED to main - `MessageType` in `app/src/repos/messagesRepo.ts:32` is
+`'sms' | 'mms' | 'call' | 'email'` and the branch + worktree were deleted during cleanup.
+(b) The SES infra is ACTIVATED: the `inbound_mail` terraform applied, the DNS records
+(DKIM x3 / MX / SPF) created in Netlify DNS, the receipt-rule-set activated, SES production
+access APPROVED (account out of the sandbox - see `ses-sandbox-exit`), `EMAIL_SENDING_ENABLED`
+flipped on, and dev reseeded + deployed. Email is a first-class conversation channel.
+Follow-on scope stays tracked separately: `email-cc-mirroring`,
+`email-identity-collision-followup`, `email-outbound-stuck-queued-on-crash`, and automated /
+message-catalog email sends.
 
 **Update (email-channel v1, 2026-07-21).** A two-way email channel IS now built, on
 the `feat/email-channel` branch (PENDING MERGE): outbound send + inbound receive +

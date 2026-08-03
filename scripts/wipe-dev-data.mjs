@@ -39,8 +39,9 @@
 //
 // A note on Twilio: pool_numbers rows are wiped like all data, but the
 // purchased Twilio numbers themselves are untouched (still owned, billed and
-// webhooked). There is no re-import path — a fresh relay group buys a NEW
-// number. Fine for dev; see RUNBOOK "Wipe dev data".
+// webhooked). Recover the rows afterwards with `npm run pool:audit -- dev
+// --reimport` (scripts/poolNumbersAudit.mjs reconciles Twilio's inventory
+// against the table); without it a fresh relay group buys a NEW number.
 //
 // What it NEVER touches (PRESERVE):
 //   - SSM Parameter Store (/hc/dev/app/* — Twilio/Google/VAPID/session secrets

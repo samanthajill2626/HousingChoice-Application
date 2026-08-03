@@ -258,9 +258,39 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes, then rest
 - **Caveats:** CloudFront caches `/unit-media/*` for up to 7 days, so wiped unit photos can
   keep serving from the edge until the TTL lapses (no invalidation is issued). Wiped
   `pool_numbers` rows do NOT release the purchased Twilio numbers — they stay owned/billed
-  but unreachable to the app (no re-import path; a fresh relay group buys a new number).
+  but invisible to the app until you re-import them: run
+  `npm run pool:audit -- dev` (report) then `npm run pool:audit -- dev --reimport`
+  (see "Pool-number audit" below).
 - Tables keep `deletion_protection` (we clear rows, not tables), so a wipe needs no Terraform
   change and the next deploy is unaffected. Script: `scripts/wipe-dev-data.mjs`.
+
+### Pool-number audit (Twilio ↔ pool_numbers reconciliation)
+
+Relay/group-text numbers live in two places: Twilio (the purchased numbers, attached to
+our Messaging Service) and the `hc-<env>-pool_numbers` table (the app's routing +
+lifecycle record). A wipe empties the table but leaves the Twilio side untouched, so the
+numbers become invisible to the app (inbound relay SMS stops routing; the next relay
+group buys a NEW number). This reconciles the two:
+
+```powershell
+npm run pool:audit -- dev              # READ-ONLY report
+npm run pool:audit -- dev --reimport   # also re-create rows for stranded numbers
+```
+
+- **How relay numbers are identified** (no Twilio-side tag exists): a number the account
+  owns that is **attached to the Messaging Service** and **not in `OUR_PHONE_NUMBERS`**
+  is a relay pool number. The report classifies every owned number: business / pool
+  tracked (row present) / pool **STRANDED** (no row — the post-wipe case) / unattached
+  (not in the Messaging Service and not business — half-provisioned or console-created,
+  review manually). It also flags **ORPHAN rows** (non-`released` rows whose number
+  Twilio no longer owns).
+- **`--reimport`** re-creates rows for the STRANDED class only: `active`, empty burn set,
+  capabilities + PN SID from Twilio, `reimported_at` provenance. Conditional put — an
+  existing row is never stomped. Empty burn is correct post-wipe (the burned phones
+  referenced wiped contacts).
+- Needs `.env.<env>` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
+  `TWILIO_MESSAGING_SERVICE_SID`, `OUR_PHONE_NUMBERS`; AWS goes through the pinned
+  `housingchoice` profile (account guard first). Script: `scripts/poolNumbersAudit.mjs`.
 
 ### Secrets
 

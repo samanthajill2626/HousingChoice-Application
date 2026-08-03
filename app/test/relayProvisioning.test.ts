@@ -217,6 +217,95 @@ describe('provisionRelayGroup - three-tier result branching (T6)', () => {
 
     expect(conv.status).toBe('connecting'); // group created despite the enqueue failure
   });
+
+  // postalCode threading (area-code preference): the property ZIP rides the
+  // TIER-3 relay.warmNumber payload only - it is a BUY hint, and tiers 1/2
+  // assign an existing number without buying, so they must ignore it.
+  it('tier-3: postalCode rides the RELAY_WARM_JOB payload', async () => {
+    const { repo } = makeConversationsRepo();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    const audit = makeAudit();
+
+    const conversation = await provisionRelayGroup(
+      {
+        conversationsRepo: repo,
+        poolNumbersService: makePool({ kind: 'needs_connecting' }),
+        auditRepo: audit.repo,
+        events: createEventBus(),
+        logger,
+      },
+      {
+        members: [{ phone: T1, contactId: 'c1' }],
+        owner: { type: 'placement', id: 'p1' },
+        postalCode: '30309',
+      },
+    );
+
+    const captured = queue.envelopes
+      .filter((e) => e.jobName === RELAY_WARM_JOB)
+      .map((e) => e.payload);
+    expect(conversation.status).toBe('connecting');
+    expect(captured).toEqual([
+      { conversationId: conversation.conversationId, postalCode: '30309' },
+    ]);
+  });
+
+  it('tier-3 without postalCode: payload carries only the conversationId', async () => {
+    const { repo } = makeConversationsRepo();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    const audit = makeAudit();
+
+    const c = await provisionRelayGroup(
+      {
+        conversationsRepo: repo,
+        poolNumbersService: makePool({ kind: 'needs_connecting' }),
+        auditRepo: audit.repo,
+        events: createEventBus(),
+        logger,
+      },
+      { members: [{ phone: T1, contactId: 'c1' }], owner: { type: null } },
+    );
+
+    const captured = queue.envelopes
+      .filter((e) => e.jobName === RELAY_WARM_JOB)
+      .map((e) => e.payload);
+    // No `postalCode: undefined` key either - the conditional spread OMITS it.
+    expect(captured).toEqual([{ conversationId: c.conversationId }]);
+  });
+
+  it('tiers 1/2 (assigned): postalCode is ignored - no warm job for the group', async () => {
+    const { repo } = makeConversationsRepo();
+    const queue = makeRecordingQueue();
+    configureOutboundQueue(queue);
+    const audit = makeAudit();
+
+    await provisionRelayGroup(
+      {
+        conversationsRepo: repo,
+        poolNumbersService: makePool({
+          kind: 'assigned',
+          poolNumber: '+15550001111',
+          record: FAKE_RECORD,
+          provisioned: false,
+        }),
+        auditRepo: audit.repo,
+        events: createEventBus(),
+        logger,
+      },
+      {
+        members: [{ phone: T1, contactId: 'c1' }],
+        owner: { type: 'tour', id: 't1' },
+        postalCode: '30309',
+      },
+    );
+
+    const captured = queue.envelopes
+      .filter((e) => e.jobName === RELAY_WARM_JOB)
+      .map((e) => e.payload);
+    expect(captured).toEqual([]);
+  });
 });
 
 /** A store-backed connecting-group repo: getById + the conditional assign flip. */

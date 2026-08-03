@@ -49,6 +49,14 @@ export interface ProvisionRelayInput {
   owner?: RelayOwner;
   /** Acting user for the audit (byActor GSI key). */
   actor?: string;
+  /**
+   * Property ZIP (5 digits) for the pool-number buy when this group is owned
+   * by a tour/placement (area-code preference). Used ONLY on the tier-3
+   * connect-when-ready path (rides the warm-job payload); tiers 1/2 assign an
+   * existing number and ignore it. Never required - absent means the
+   * Atlanta-default ladder.
+   */
+  postalCode?: string;
 }
 
 /**
@@ -63,7 +71,7 @@ export async function provisionRelayGroup(
   input: ProvisionRelayInput,
 ): Promise<ConversationItem> {
   const { conversationsRepo, poolNumbersService, auditRepo, events, logger } = deps;
-  const { members, tag, placementId, owner, actor } = input;
+  const { members, tag, placementId, owner, actor, postalCode } = input;
 
   // Resolve canonical owner: explicit `owner` wins; fall back to legacy
   // `placementId`; fall back to standalone (unowned).
@@ -111,8 +119,14 @@ export async function provisionRelayGroup(
     // Warm a dedicated number for THIS connecting group. Best-effort like the
     // intro enqueue: a queue hiccup leaves the group connecting, which the
     // stuck-connecting alert reconciles - never fatal to the created group.
+    // The property ZIP (when the caller resolved one) rides the payload as a
+    // BUY hint, so the search prefers a number local to the unit and the hint
+    // survives job retries. Omitted entirely when absent - never a null key.
     try {
-      await enqueueImmediate(RELAY_WARM_JOB, { conversationId: conversation.conversationId });
+      await enqueueImmediate(RELAY_WARM_JOB, {
+        conversationId: conversation.conversationId,
+        ...(postalCode !== undefined && { postalCode }),
+      });
     } catch (err) {
       logger.error(
         { err, conversationId: conversation.conversationId },

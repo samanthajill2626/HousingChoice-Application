@@ -541,7 +541,9 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       await queueAdapter.settle();
 
       expect(warmOneNumber).toHaveBeenCalledTimes(1);
-      expect(warmOneNumber).toHaveBeenCalledWith('c-1');
+      // The handler always passes BOTH params (area-code preference): a payload
+      // with no postalCode forwards an explicit undefined hint.
+      expect(warmOneNumber).toHaveBeenCalledWith('c-1', undefined);
     });
 
     it('dispatches with undefined when the payload has no conversationId', async () => {
@@ -554,7 +556,20 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       await enqueueImmediate(RELAY_WARM_JOB, {});
       await queueAdapter.settle();
 
-      expect(warmOneNumber).toHaveBeenCalledWith(undefined);
+      expect(warmOneNumber).toHaveBeenCalledWith(undefined, undefined);
+    });
+
+    it('handler forwards postalCode to warmOneNumber', async () => {
+      const warmOneNumber = vi.fn(async () => {});
+      registerRelayWarmJobHandler({
+        poolNumbersService: { warmOneNumber } as unknown as PoolNumbersService,
+        logger,
+      });
+
+      await enqueueImmediate(RELAY_WARM_JOB, { conversationId: 'c-1', postalCode: '30309' });
+      await queueAdapter.settle();
+
+      expect(warmOneNumber).toHaveBeenCalledWith('c-1', '30309');
     });
   });
 
@@ -570,6 +585,15 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
     it('throws on a non-object payload', () => {
       expect(() => parseRelayWarmPayload(null)).toThrow();
       expect(() => parseRelayWarmPayload('nope')).toThrow();
+    });
+    it('a non-empty string postalCode is kept; missing/empty/non-string is dropped', () => {
+      expect(parseRelayWarmPayload({ conversationId: 'c1', postalCode: '30309' })).toEqual({
+        conversationId: 'c1',
+        postalCode: '30309',
+      });
+      expect(parseRelayWarmPayload({ postalCode: '' })).toEqual({});
+      expect(parseRelayWarmPayload({ postalCode: 30309 })).toEqual({});
+      expect(parseRelayWarmPayload({})).toEqual({});
     });
   });
 });

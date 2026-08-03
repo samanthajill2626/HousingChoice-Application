@@ -219,15 +219,24 @@ secrets. Use when you want the dev environment to start fresh.
 
 ```powershell
 npm run wipe:dev            # DRY RUN (default): lists exactly what WOULD be deleted, counts only
-npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
+npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes, then restarts app+worker
 ```
 
-- **Wipes:** every item in every `hc-dev-*` app DynamoDB table (the set is read from the
-  generated `infra/envs/dev/tables.auto.tfvars.json`, so new tables are picked up
-  automatically); every object + version + delete-marker in the `hc-dev-media-<account>`
-  AND `hc-dev-inbound-mail-<account>` S3 buckets; the `hc-dev-jobs` and
-  `hc-dev-inbound-mail` queues + their DLQs (purge); and the log STREAMS in
+(`--dry-run` forces a dry run and WINS over `--yes`.)
+
+- **Wipes, in order:** the `hc-dev-jobs` and `hc-dev-inbound-mail` queues + their DLQs
+  (purged FIRST, so a queued job can't repopulate tables mid-wipe); every item in every
+  `hc-dev-*` app DynamoDB table (the set is read from the generated
+  `infra/envs/dev/tables.auto.tfvars.json`, so new tables are picked up automatically);
+  every object + version + delete-marker in the `hc-dev-media-<account>` AND
+  `hc-dev-inbound-mail-<account>` S3 buckets; and the log STREAMS in
   `/hc/dev/app` + `/hc/dev/worker` + `/hc/dev/system`.
+- **Then restarts app+worker** on the `hc-dev-app` instance (SSM Run Command →
+  `docker compose restart`). Required, not cosmetic: docker's `awslogs` driver creates its
+  log stream once at container start and never recreates it, so after the stream wipe the
+  running containers ship NO CloudWatch logs until restarted. If this step fails the script
+  exits nonzero and prints the manual fallback (`npm run deploy:dev`, or
+  `docker compose restart app worker` on the instance).
 - **Never touches:** SSM Parameter Store (`/hc/dev/app/*` — all Twilio/Google/VAPID/session
   secrets **and** the Terraform-managed config), and every Terraform-managed resource
   *definition* (the tables, bucket, queues, log groups themselves stay). It deletes
@@ -243,6 +252,13 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
   the known app tables from the generated tfvars are targeted (never "all `hc-dev-*`", so the
   TF state/lock can't be caught); missing resources are skipped, not fatal. Always do a dry
   run first.
+- **Robustness:** the operator re-invite runs EVEN IF a wipe phase failed (a partial wipe
+  never leaves dev unloggable-into), and S3 per-object delete failures are surfaced instead
+  of silently swallowed.
+- **Caveats:** CloudFront caches `/unit-media/*` for up to 7 days, so wiped unit photos can
+  keep serving from the edge until the TTL lapses (no invalidation is issued). Wiped
+  `pool_numbers` rows do NOT release the purchased Twilio numbers — they stay owned/billed
+  but unreachable to the app (no re-import path; a fresh relay group buys a new number).
 - Tables keep `deletion_protection` (we clear rows, not tables), so a wipe needs no Terraform
   change and the next deploy is unaffected. Script: `scripts/wipe-dev-data.mjs`.
 

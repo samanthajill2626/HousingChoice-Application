@@ -57,8 +57,10 @@
   "devDependencies": {
     "@aws-sdk/client-cloudwatch-logs": "^3.0.0",
     "@aws-sdk/client-dynamodb": "^3.0.0",
+    "@aws-sdk/client-ec2": "^3.1101.0",
     "@aws-sdk/client-s3": "^3.0.0",
     "@aws-sdk/client-sqs": "^3.0.0",
+    "@aws-sdk/client-ssm": "^3.1101.0",
     "@aws-sdk/client-sts": "^3.0.0",
     "@aws-sdk/credential-providers": "^3.0.0",
     "@types/node": "^24.0.0",

@@ -6,9 +6,11 @@ import {
   ConsoleMessagingDriver,
   MAX_MEDIA_CONTENT_LENGTH,
   MediaFetchRefusedError,
+  NumberUnavailableError,
   PoolFullError,
   SmsSendingDisabledError,
   TwilioMessagingDriver,
+  VoiceCapabilityError,
   createMessagingAdapter,
   mapTwilioStatus,
   type TwilioClientLike,
@@ -600,7 +602,6 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
       client,
       logger: createLogger({ destination: createLogCapture().stream }),
     });
-    const { VoiceCapabilityError } = await import('../src/adapters/messaging.js');
     await expect(driver.provisionPhoneNumber({ voiceCapable: true })).rejects.toBeInstanceOf(
       VoiceCapabilityError,
     );
@@ -658,6 +659,113 @@ describe('ConsoleMessagingDriver — provisioning (M1.7)', () => {
     const driver = new ConsoleMessagingDriver({ logger: createLogger({ destination: capture.stream }) });
     await driver.sendMessage({ to: '+15550100002', from: '+15550109001', body: 'x' });
     expect(capture.lines[0]!['from']).toBe('+15550109001');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Geographic search hints on provisionPhoneNumber (relay area-code preference,
+// 2026-08-03). The adapter stays a SINGLE-search primitive: it threads one hint
+// into the availability search and reports an EMPTY search as a distinct
+// NumberUnavailableError so the poolNumbers ladder can advance a rung without
+// ever re-buying after a successful purchase.
+// ---------------------------------------------------------------------------
+
+/** The AvailablePhoneNumbers list params the driver may send (see TwilioClientLike). */
+type AvailableListParams = {
+  voiceEnabled?: boolean;
+  smsEnabled?: boolean;
+  areaCode?: number;
+  inPostalCode?: string;
+  limit?: number;
+};
+
+describe('provisionPhoneNumber - geographic search hints', () => {
+  /** Stub client capturing AvailablePhoneNumbers list params; scriptable inventory. */
+  function makeProvisionClient(candidates: string[]) {
+    const listCalls: AvailableListParams[] = [];
+    const incoming = ((sid: string) => ({
+      update: async () => ({
+        sid,
+        phoneNumber: '+15550109001',
+        capabilities: { sms: true, voice: true },
+      }),
+    })) as TwilioClientLike['incomingPhoneNumbers'] & object;
+    Object.assign(incoming as object, {
+      create: async (params: { phoneNumber: string }) => ({
+        sid: 'PNstub',
+        phoneNumber: params.phoneNumber,
+        capabilities: { sms: true, voice: true },
+      }),
+      list: async () => [],
+    });
+    const client: TwilioClientLike = {
+      messages: {
+        create: async () => ({ sid: 'SMstub', status: 'queued', dateCreated: new Date() }),
+      },
+      availablePhoneNumbers: () => ({
+        local: {
+          list: async (params: AvailableListParams) => {
+            listCalls.push({ ...params });
+            return candidates.map((phoneNumber) => ({
+              phoneNumber,
+              capabilities: { sms: true, voice: true },
+            }));
+          },
+        },
+      }),
+      incomingPhoneNumbers: incoming as TwilioClientLike['incomingPhoneNumbers'],
+    };
+    return { client, listCalls };
+  }
+
+  function makeDriver(client: TwilioClientLike) {
+    return new TwilioMessagingDriver({
+      accountSid: 'ACtest',
+      apiKeySid: 'SKtest',
+      apiKeySecret: 'secret',
+      messagingServiceSid: 'MGtest',
+      client,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+  }
+
+  it('twilio driver threads AreaCode into the availability search', async () => {
+    const { client, listCalls } = makeProvisionClient(['+14045550100']);
+    await makeDriver(client).provisionPhoneNumber({ voiceCapable: true, areaCode: '404' });
+    expect(listCalls[0]).toMatchObject({ areaCode: 404 });
+    expect(listCalls[0]).not.toHaveProperty('inPostalCode');
+  });
+
+  it('twilio driver threads inPostalCode into the availability search; postalCode wins over areaCode', async () => {
+    const { client, listCalls } = makeProvisionClient(['+14045550100']);
+    await makeDriver(client).provisionPhoneNumber({
+      voiceCapable: true,
+      areaCode: '404',
+      postalCode: '30309',
+    });
+    expect(listCalls[0]).toMatchObject({ inPostalCode: '30309' });
+    expect(listCalls[0]).not.toHaveProperty('areaCode');
+  });
+
+  it('twilio driver throws NumberUnavailableError (a VoiceCapabilityError subclass) when the SEARCH is empty', async () => {
+    const { client } = makeProvisionClient([]);
+    const attempt = makeDriver(client).provisionPhoneNumber({ voiceCapable: true, areaCode: '404' });
+    await expect(attempt).rejects.toBeInstanceOf(NumberUnavailableError);
+    await expect(
+      makeDriver(makeProvisionClient([]).client).provisionPhoneNumber({ voiceCapable: true }),
+    ).rejects.toBeInstanceOf(VoiceCapabilityError); // subclass keeps existing catches working
+  });
+
+  it('console driver marks the winning hint in the fake prefix (postal > areaCode > default)', async () => {
+    const driver = new ConsoleMessagingDriver({
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+    const postal = await driver.provisionPhoneNumber({ voiceCapable: true, postalCode: '30309' });
+    expect(postal.phoneNumber.startsWith('+1303')).toBe(true); // ZIP first-3 marker
+    const area = await driver.provisionPhoneNumber({ voiceCapable: true, areaCode: '470' });
+    expect(area.phoneNumber.startsWith('+1470')).toBe(true);
+    const bare = await driver.provisionPhoneNumber({ voiceCapable: true });
+    expect(bare.phoneNumber.startsWith('+1555010')).toBe(true);
   });
 });
 

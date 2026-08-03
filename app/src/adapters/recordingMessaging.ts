@@ -106,7 +106,12 @@ export class RecordingMessagingDriver implements MessagingAdapter {
   getRecordingStream(url: string): Promise<Readable> {
     return this.inner.getRecordingStream(url);
   }
-  provisionPhoneNumber(opts: { voiceCapable: true; areaCode?: string }): Promise<ProvisionPhoneNumberResult> {
+  provisionPhoneNumber(opts: {
+    voiceCapable: true;
+    areaCode?: string;
+    /** Twilio inPostalCode search - wins over areaCode when both are set. */
+    postalCode?: string;
+  }): Promise<ProvisionPhoneNumberResult> {
     return this.inner.provisionPhoneNumber(opts);
   }
   setVoiceWebhook(phoneNumber: string, voiceUrl: string): Promise<void> {

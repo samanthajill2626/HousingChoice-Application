@@ -143,6 +143,8 @@ export interface MessagingAdapter {
   provisionPhoneNumber(opts: {
     voiceCapable: true;
     areaCode?: string;
+    /** Twilio inPostalCode search - wins over areaCode when both are set. */
+    postalCode?: string;
   }): Promise<ProvisionPhoneNumberResult>;
   /**
    * Point a provisioned number's voice webhook at `voiceUrl` (M1.7 pre-wiring
@@ -307,6 +309,16 @@ export class VoiceCapabilityError extends Error {
 }
 
 /**
+ * The phone-number AVAILABILITY SEARCH returned zero candidates for the given
+ * hint (area code / postal code sold out at Twilio) - distinct from a
+ * post-purchase capability failure so warmOneNumber's hint ladder can advance
+ * to its next hint WITHOUT ever re-buying after a successful purchase.
+ * Subclasses VoiceCapabilityError so every existing catch / 503 mapping keeps
+ * working unchanged.
+ */
+export class NumberUnavailableError extends VoiceCapabilityError {}
+
+/**
  * The outbound-SMS kill-switch (A2P) tripped (config.smsSendingEnabled false):
  * the Twilio driver REFUSES to hand a message to Twilio before A2P approval, so
  * a deployed stack can't emit unregistered-A2P traffic (30034) and damage
@@ -384,6 +396,8 @@ export interface TwilioClientLike {
         voiceEnabled?: boolean;
         smsEnabled?: boolean;
         areaCode?: number;
+        /** ZIP-locality search (relay area-code preference); wins over areaCode. */
+        inPostalCode?: string;
         limit?: number;
       }): Promise<TwilioAvailableNumber[]>;
     };
@@ -616,6 +630,8 @@ export class TwilioMessagingDriver implements MessagingAdapter {
   async provisionPhoneNumber(opts: {
     voiceCapable: true;
     areaCode?: string;
+    /** Twilio inPostalCode search - wins over areaCode when both are set. */
+    postalCode?: string;
   }): Promise<ProvisionPhoneNumberResult> {
     const available = this.client.availablePhoneNumbers;
     const incoming = this.client.incomingPhoneNumbers;
@@ -624,16 +640,27 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     }
     // Search for a voice+sms-capable local number. A misconfigured account or
     // exhausted inventory returns none — fail loud (relay needs voice).
+    // Hint precedence (relay area-code preference 2026-08-03): a postalCode
+    // wins over an areaCode; with neither this stays today's unhinted any-US
+    // search. ONE search per call - the fallback ladder is service policy
+    // (warmOneNumber), never adapter policy.
     const candidates = await available('US').local.list({
       voiceEnabled: true,
       smsEnabled: true,
-      ...(opts.areaCode !== undefined && { areaCode: Number(opts.areaCode) }),
+      ...(opts.postalCode !== undefined
+        ? { inPostalCode: opts.postalCode }
+        : opts.areaCode !== undefined
+          ? { areaCode: Number(opts.areaCode) }
+          : {}),
       limit: 1,
     });
     const candidate = candidates[0];
     if (!candidate) {
-      throw new VoiceCapabilityError(
-        'provisionPhoneNumber: no voice+sms-capable number available to purchase',
+      // SEARCH came back empty (this locality/NPA is sold out) - a distinct
+      // type so the hint ladder can advance. NOTHING was purchased yet, which
+      // is exactly why advancing here cannot leak a bought number.
+      throw new NumberUnavailableError(
+        'provisionPhoneNumber: no voice+sms-capable number available to purchase for this search',
       );
     }
     // Pre-wire SmsUrl (inbound) + VoiceUrl (M1.9 bridge) at purchase time when
@@ -965,13 +992,24 @@ export class ConsoleMessagingDriver implements MessagingAdapter {
   async provisionPhoneNumber(opts: {
     voiceCapable: true;
     areaCode?: string;
+    /** Twilio inPostalCode search - wins over areaCode when both are set. */
+    postalCode?: string;
   }): Promise<ProvisionPhoneNumberResult> {
     // NEVER hits Twilio: a deterministic, always voice+sms-capable fake. The
     // areaCode (when supplied) is honored as a prefix hint so tests can assert
     // it threads through; voiceCapable is always satisfied (the fake has voice).
+    // A postalCode wins over an areaCode (mirroring the Twilio driver) and marks
+    // the fake with the ZIP's first 3 digits, so a test can tell WHICH rung of
+    // the warm ladder won purely from the number. That prefix can collide with a
+    // real NPA - irrelevant, these fakes never leave the local loop.
     this.provisionCounter += 1;
     const seq = String(this.provisionCounter).padStart(4, '0');
-    const prefix = opts.areaCode !== undefined ? `+1${opts.areaCode}` : '+1555010';
+    const prefix =
+      opts.postalCode !== undefined
+        ? `+1${opts.postalCode.slice(0, 3)}`
+        : opts.areaCode !== undefined
+          ? `+1${opts.areaCode}`
+          : '+1555010';
     const phoneNumber = `${prefix}${seq}`.slice(0, 15); // E.164, stable per-call
     this.log.info({ sid: `PNconsole-${seq}` }, 'console messaging driver: phone number "provisioned"');
     return {

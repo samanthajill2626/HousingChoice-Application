@@ -8,7 +8,7 @@
 //
 //   POST .../Calls.json                      ← client.calls.create({to,from,url})
 //   GET  .../AvailablePhoneNumbers/US/Local.json ← availablePhoneNumbers('US').local.list(...)
-//   POST .../IncomingPhoneNumbers.json       ← incomingPhoneNumbers.create({phoneNumber,smsUrl,voiceUrl})
+//   POST .../IncomingPhoneNumbers.json       ← incomingPhoneNumbers.create({phoneNumber,friendlyName,smsUrl,voiceUrl})
 //   GET  .../IncomingPhoneNumbers.json       ← incomingPhoneNumbers.list({phoneNumber})
 //   POST .../IncomingPhoneNumbers/:sid.json  ← incomingPhoneNumbers(sid).update({voiceUrl})
 //   GET  /recordings/:callSid/:recordingSid.mp3 ← the CallEngine-minted recording URL
@@ -142,7 +142,8 @@ export function createVoiceRestRouter(deps: VoiceRestDeps): Router {
     res.status(201).json({
       sid,
       phone_number: phoneNumber,
-      friendly_name: phoneNumber,
+      // Echo the caller's FriendlyName like real Twilio (default: the number).
+      friendly_name: body['FriendlyName'] ?? phoneNumber,
       sms_url: smsUrl ?? null,
       voice_url: voiceUrl ?? null,
       capabilities: { voice: true, sms: true, mms: true, fax: false },

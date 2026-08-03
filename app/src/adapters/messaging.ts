@@ -391,6 +391,7 @@ export interface TwilioClientLike {
   incomingPhoneNumbers?: {
     create(params: {
       phoneNumber: string;
+      friendlyName?: string;
       smsUrl?: string;
       voiceUrl?: string;
     }): Promise<TwilioIncomingNumber>;
@@ -521,6 +522,14 @@ export interface TwilioMessagingDriverDeps {
 const SMS_WEBHOOK_PATH = '/webhooks/twilio/sms';
 const VOICE_WEBHOOK_PATH = '/webhooks/twilio/voice';
 
+/**
+ * FriendlyName stamped on every purchased pool number so the Twilio Console's
+ * number list self-documents what the number is for. Deliberately STATIC (never
+ * a group name): pool numbers multiplex across relay groups and are reused
+ * after retirement, so any per-group label would go stale.
+ */
+const POOL_NUMBER_FRIENDLY_NAME = 'HousingChoice relay (group chats)';
+
 export class TwilioMessagingDriver implements MessagingAdapter {
   private readonly client: TwilioClientLike;
   private readonly log: Logger;
@@ -632,6 +641,7 @@ export class TwilioMessagingDriver implements MessagingAdapter {
     const base = this.deps.publicBaseUrl;
     const purchased = await incoming.create({
       phoneNumber: candidate.phoneNumber,
+      friendlyName: POOL_NUMBER_FRIENDLY_NAME,
       ...(base !== undefined && {
         smsUrl: `${base}${SMS_WEBHOOK_PATH}`,
         voiceUrl: `${base}${VOICE_WEBHOOK_PATH}`,

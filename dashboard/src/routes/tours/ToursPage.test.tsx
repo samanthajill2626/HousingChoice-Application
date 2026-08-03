@@ -24,7 +24,9 @@ import type { ListingsState } from '../listings/useListings.js';
 
 let toursState: ToursPageState = { status: 'loading', upcoming: [], needsBooking: [] };
 let contactsState: ContactsState = { status: 'loading', contacts: [] };
+let deletedContactsState: ContactsState = { status: 'ready', contacts: [] };
 let unitsState: ListingsState = { status: 'loading', units: [] };
+let deletedUnitsState: ListingsState = { status: 'ready', units: [] };
 let closedState: ClosedToursState = { status: 'ready', closed: [] };
 // Spy on the enabled flag so tests can assert the fetch stays OFF by default.
 const useClosedToursSpy = vi.fn(
@@ -36,8 +38,14 @@ vi.mock('./useTours.js', () => ({
   useTours: () => toursState,
   useClosedTours: (enabled: boolean) => useClosedToursSpy(enabled),
 }));
-vi.mock('../contacts/useContacts.js', () => ({ useContacts: () => contactsState }));
-vi.mock('../listings/useListings.js', () => ({ useListings: () => unitsState }));
+// The page cross-references BOTH live and soft-deleted entities (a closed tour
+// often outlives its contact/unit) — the mocks answer per filter arg.
+vi.mock('../contacts/useContacts.js', () => ({
+  useContacts: (filter: string) => (filter === 'deleted' ? deletedContactsState : contactsState),
+}));
+vi.mock('../listings/useListings.js', () => ({
+  useListings: (deleted?: boolean) => (deleted === true ? deletedUnitsState : unitsState),
+}));
 
 // The "+ New tour" dialog (ScheduleTourForm) fetches its own typeahead
 // candidates from the api barrel - stub those so opening it stays offline.
@@ -222,7 +230,9 @@ function readyAll(
 beforeEach(() => {
   toursState = { status: 'loading', upcoming: [], needsBooking: [] };
   contactsState = { status: 'loading', contacts: [] };
+  deletedContactsState = { status: 'ready', contacts: [] };
   unitsState = { status: 'loading', units: [] };
+  deletedUnitsState = { status: 'ready', units: [] };
   closedState = { status: 'ready', closed: [] };
   useClosedToursSpy.mockClear();
 });
@@ -448,6 +458,54 @@ describe('ToursPage', () => {
     expect(screen.getByRole('heading', { level: 1, name: 'Tours' })).toBeInTheDocument();
     expect(screen.queryByRole('region', { name: 'Closed tours' })).not.toBeInTheDocument();
     expect(screen.getByRole('region', { name: 'Upcoming tours' })).toBeInTheDocument();
+  });
+
+  it('Closed view: resolves names for SOFT-DELETED contacts and units (never raw ids)', () => {
+    // A closed tour outlives its entities: the tenant and the property were both
+    // soft-deleted after the tour ended. They exist ONLY in the deleted lists —
+    // the row must still show their real name/address, not the raw uuids.
+    const deletedContact: Contact = {
+      contactId: 'c-del',
+      type: 'tenant',
+      firstName: 'Dora',
+      lastName: 'Departed',
+      phone: '+14040000009',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00Z',
+      updated_at: '2026-01-01T00:00:00Z',
+      deleted_at: '2026-07-20T00:00:00Z',
+    };
+    const deletedUnit: UnitItem = {
+      unitId: 'u-del',
+      landlordId: 'l1',
+      status: 'occupied',
+      jurisdiction: 'atlanta_housing',
+      address: { line1: '789 Gone St', city: 'Atlanta', state: 'GA', zip: '30303' },
+      deleted_at: '2026-07-21T00:00:00Z',
+    };
+    const closedTourDeletedRefs: Tour = {
+      tourId: 'x9',
+      tenantId: 'c-del',
+      unitId: 'u-del',
+      scheduledAt: '2026-07-10T18:00:00Z',
+      tourType: 'self_guided',
+      status: 'closed',
+      outcome: 'not_a_fit',
+      moveForward: false,
+      createdAt: '2026-07-01T10:00:00Z',
+      updatedAt: '2026-07-10T19:00:00Z',
+    };
+    readyAll([], []);
+    deletedContactsState = { status: 'ready', contacts: [deletedContact] };
+    deletedUnitsState = { status: 'ready', units: [deletedUnit] };
+    closedState = { status: 'ready', closed: [closedTourDeletedRefs] };
+    renderPage('/tours/closed');
+
+    const region = screen.getByRole('region', { name: 'Closed tours' });
+    expect(within(region).getByText('Dora Departed')).toBeInTheDocument();
+    expect(within(region).getByText(/789 Gone St/)).toBeInTheDocument();
+    expect(within(region).queryByText('c-del')).not.toBeInTheDocument();
+    expect(within(region).queryByText('u-del')).not.toBeInTheDocument();
   });
 
   it('shows the Closed empty state when there are no closed tours', () => {

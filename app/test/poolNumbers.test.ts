@@ -7,6 +7,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   NumberUnavailableError,
+  VoiceCapabilityError,
   type MessagingAdapter,
   type ProvisionPhoneNumberResult,
 } from '../src/adapters/messaging.js';
@@ -184,6 +185,23 @@ function makeFakeAdapter(
      * empty) INSTEAD of buying - the only error the warm ladder may walk past.
      */
     unavailableWhen?: (o: ProvisionHint) => boolean;
+    /**
+     * Script a NON-availability failure BEFORE the buy (auth/transport: the
+     * search itself blew up, nothing was purchased). Returns the error to throw
+     * for the received opts, or undefined to let the buy proceed. The call is
+     * still recorded in provisionCalls, so a test can prove the ladder made
+     * exactly ONE adapter call and did not walk on.
+     */
+    throwWhen?: (o: ProvisionHint) => Error | undefined;
+    /**
+     * Script a POST-PURCHASE failure: the number IS bought (provisions += 1)
+     * and only then does the call throw - exactly the twilio driver's shape
+     * when the purchased number turns out not to be voice-capable
+     * (adapters/messaging.ts throws a plain VoiceCapabilityError there). This
+     * is the buy-and-leak trap: advancing the ladder past it would buy a
+     * SECOND number and strand the first.
+     */
+    throwAfterBuyWhen?: (o: ProvisionHint) => Error | undefined;
   } = {},
 ): FakeAdapter {
   let provisions = 0;
@@ -218,8 +236,12 @@ function makeFakeAdapter(
       if (opts.unavailableWhen?.(o) === true) {
         throw new NumberUnavailableError('scripted: none available for this hint');
       }
+      const preBuyFailure = opts.throwWhen?.(o);
+      if (preBuyFailure !== undefined) throw preBuyFailure;
       provisions += 1;
       const seq = String(provisions).padStart(4, '0');
+      const postBuyFailure = opts.throwAfterBuyWhen?.(o);
+      if (postBuyFailure !== undefined) throw postBuyFailure; // bought, THEN failed
       return {
         phoneNumber: `+1555020${seq}`,
         capabilities: { sms: true, voice: opts.voice ?? true },
@@ -888,13 +910,18 @@ describe('warmOneNumber - geographic hint ladder (area-code preference)', () => 
     expect(adapter.provisionCalls).toEqual([{ postalCode: '30309' }]);
   });
 
-  it('all hints sold out: falls through to the bare search (no hint keys at all)', async () => {
+  it('all hints sold out: falls through to the bare search (no hint keys at all), logging the hint TYPE only', async () => {
     const repo = makeFakeRepo();
     const adapter = makeFakeAdapter({
       unavailableWhen: (o) => o.postalCode !== undefined || o.areaCode !== undefined,
     });
+    // Own capture: this test also pins the observability contract (the miss/success
+    // events carry the hint TIER, never the ZIP itself).
+    const capture = createLogCapture();
     const svc = createPoolNumbersService({
-      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(),
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      config: cfgWith(['404', '470']),
     });
 
     await svc.warmOneNumber('conv-1', '30309');
@@ -902,6 +929,16 @@ describe('warmOneNumber - geographic hint ladder (area-code preference)', () => 
       { postalCode: '30309' }, { areaCode: '404' }, { areaCode: '470' }, {},
     ]);
     expect(adapter.provisions).toBe(1);
+
+    // One relay_warm_hint_miss per skipped rung, tagged with the TIER only.
+    const misses = capture.lines.filter((l) => l['event'] === 'relay_warm_hint_miss');
+    expect(misses.map((l) => l['hintTier'])).toEqual(['postal', 'areaCode', 'areaCode']);
+    // The success log names the rung that actually landed the buy.
+    const warming = capture.lines.filter((l) => l['event'] === 'relay_number_warming');
+    expect(warming).toHaveLength(1);
+    expect(warming[0]!['hintTier']).toBe('bare');
+    // PII: the ZIP VALUE never appears anywhere in the emitted logs.
+    expect(JSON.stringify(capture.lines)).not.toContain('30309');
   });
 
   it('bare search ALSO unavailable: the final NumberUnavailableError propagates (still a loud failure)', async () => {
@@ -913,15 +950,37 @@ describe('warmOneNumber - geographic hint ladder (area-code preference)', () => 
   });
 
   it('a NON-availability error aborts the ladder immediately - later hints are NEVER tried (no buy-and-leak)', async () => {
-    const adapter = makeFakeAdapter();
     const boom = new Error('twilio 401: auth failure');
-    adapter.provisionPhoneNumber = async () => {
-      throw boom;
-    };
+    // The failure is scripted THROUGH the fake (not by replacing the method), so
+    // provisionCalls still records the attempt - which is what makes "the ladder
+    // did not walk on" assertable. Replacing provisionPhoneNumber wholesale
+    // hides that: a wrongly-advancing ladder rethrows the SAME boom at the last
+    // rung, so `rejects.toBe(boom)` alone passes under BOTH implementations.
+    const adapter = makeFakeAdapter({ throwWhen: () => boom });
     const svc = createPoolNumbersService({
       adapter, poolNumbersRepo: makeFakeRepo(), conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
     });
     await expect(svc.warmOneNumber()).rejects.toBe(boom);
+    expect(adapter.provisionCalls).toEqual([{ areaCode: '404' }]); // EXACTLY one search
+    expect(adapter.provisions).toBe(0); // nothing bought
+  });
+
+  it('a POST-PURCHASE VoiceCapabilityError aborts the ladder - the bought number is never followed by a second buy', async () => {
+    // The buy-and-leak trap: NumberUnavailableError extends VoiceCapabilityError,
+    // so a guard that advanced on the PARENT class would walk past a failure that
+    // already spent money and buy again. The first rung purchases, then throws
+    // the plain parent error (the twilio driver's post-purchase voice check).
+    const adapter = makeFakeAdapter({
+      throwAfterBuyWhen: () => new VoiceCapabilityError('purchased number is not voice-capable'),
+    });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: makeFakeRepo(), conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
+    });
+    const attempt = svc.warmOneNumber('conv-1', '30309');
+    await expect(attempt).rejects.toBeInstanceOf(VoiceCapabilityError);
+    await expect(attempt).rejects.not.toBeInstanceOf(NumberUnavailableError);
+    expect(adapter.provisionCalls).toEqual([{ postalCode: '30309' }]); // rung 0 only
+    expect(adapter.provisions).toBe(1); // bought ONCE - no second purchase
   });
 
   it('empty preferred list + no postalCode: exactly one bare search (today behavior)', async () => {

@@ -369,6 +369,10 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
 
       const warm = queue.envelopes.filter((e) => e.jobName === RELAY_WARM_JOB);
       expect(warm).toHaveLength(2);
+      // Buffer spares are bought for NOBODY: the payload must stay EMPTY so no
+      // group's property ZIP can ever ride along and geo-bias a shared spare
+      // (area-code preference: the hint belongs to tier-3 buys only).
+      for (const envelope of warm) expect(envelope.payload).toEqual({});
     });
 
     it('target 2, but 1 fresh spare + 1 warming already -> enqueues 0 (warming counts; debounce)', async () => {

@@ -628,7 +628,7 @@ function TourDetailLoaded({
 function TourActivityCard({ activity }: { activity: TourActivityState }): React.JSX.Element {
   const { status, rows, hasMore, loadingMore, loadMore } = activity;
   return (
-    <Card title="Activity" aside={rows.length > 0 ? String(rows.length) : undefined}>
+    <Card title="Activity">
       {status === 'loading' ? (
         <Spinner center />
       ) : status === 'error' ? (

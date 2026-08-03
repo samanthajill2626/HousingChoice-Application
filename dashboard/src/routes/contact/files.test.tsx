@@ -346,6 +346,10 @@ describe('LandlordFile', () => {
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L1');
     expect(tourDetailLink).toBeDefined();
     expect(screen.getByText('Scheduled')).toBeInTheDocument();
+    // Headings are bare titles — count asides were removed 2026-08-03 (renderIt
+    // always passes one placement, so both cards would otherwise show a chip).
+    expect(screen.getByRole('heading', { name: 'Tours on their properties' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Placements on their units' })).toBeInTheDocument();
   });
 
   it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {

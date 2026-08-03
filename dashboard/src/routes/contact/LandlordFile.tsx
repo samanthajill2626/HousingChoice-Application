@@ -182,7 +182,7 @@ export function LandlordFile({
         )}
       </Card>
 
-      <Card title="Tours on their properties" aside={tours.length > 0 ? String(tours.length) : undefined}>
+      <Card title="Tours on their properties">
         {tours.length === 0 ? (
           <EmptyRow>No tours on these properties yet.</EmptyRow>
         ) : (
@@ -207,7 +207,7 @@ export function LandlordFile({
         )}
       </Card>
 
-      <Card title="Placements on their units" aside={myPlacements.length > 0 ? String(myPlacements.length) : undefined}>
+      <Card title="Placements on their units">
         {myPlacements.length === 0 ? (
           <EmptyRow>No placements on these units yet.</EmptyRow>
         ) : (

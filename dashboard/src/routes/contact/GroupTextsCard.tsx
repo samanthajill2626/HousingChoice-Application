@@ -34,7 +34,7 @@ export function groupLabel(g: RelayGroupRow): string {
 
 export function GroupTextsCard({ pending, groups }: GroupTextsCardProps): React.JSX.Element {
   return (
-    <Card title="Group texts" aside={groups.length > 0 ? String(groups.length) : undefined}>
+    <Card title="Group texts">
       {pending ? (
         <PendingPanel />
       ) : groups.length === 0 ? (

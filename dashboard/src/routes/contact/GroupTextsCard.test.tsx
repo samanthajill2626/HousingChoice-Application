@@ -39,7 +39,7 @@ describe('GroupTextsCard', () => {
     expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
   });
 
-  it('renders a row per group with the member count and a count aside', () => {
+  it('renders a row per group with the member count; the heading carries no count', () => {
     renderIt({
       pending: false,
       groups: [
@@ -51,8 +51,8 @@ describe('GroupTextsCard', () => {
     expect(screen.getByText('With Ann A & Bob B')).toBeInTheDocument();
     expect(screen.getByText('2 members')).toBeInTheDocument();
     expect(screen.getByText('3 members')).toBeInTheDocument();
-    // The heading count chip.
-    expect(screen.getByRole('heading', { name: /Group texts\s*2/ })).toBeInTheDocument();
+    // The heading is the bare title — count asides were removed 2026-08-03.
+    expect(screen.getByRole('heading', { name: 'Group texts' })).toBeInTheDocument();
   });
 
   it('links every row to its own conversation view, regardless of owner', () => {

@@ -38,6 +38,7 @@ import {
 import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
+import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
@@ -162,6 +163,8 @@ export function ListingDetail(): React.JSX.Element {
   const [editing, setEditing] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this property's unit.
   const [startingPlacement, setStartingPlacement] = useState(false);
+  // The "Schedule a tour" dialog, unit side pre-committed to this property.
+  const [schedulingTour, setSchedulingTour] = useState(false);
   const { setUnit } = state;
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusError, setStatusError] = useState<string | null>(null);
@@ -715,9 +718,14 @@ export function ListingDetail(): React.JSX.Element {
           <Card
             title="Tours on this property"
             aside={
-              tours.status === 'ready' && tours.rows.length > 0
-                ? String(tours.rows.length)
-                : undefined
+              !deleted ? (
+                <CardAction
+                  onClick={() => setSchedulingTour(true)}
+                  label="Schedule a tour on this property"
+                >
+                  + Tour
+                </CardAction>
+              ) : undefined
             }
           >
             {tours.status === 'ready' ? (
@@ -753,7 +761,16 @@ export function ListingDetail(): React.JSX.Element {
 
           <Card
             title="Placements on this property"
-            aside={placementsOnUnit.length > 0 ? String(placementsOnUnit.length) : undefined}
+            aside={
+              !deleted ? (
+                <CardAction
+                  onClick={() => setStartingPlacement(true)}
+                  label="Start a placement on this property"
+                >
+                  + Placement
+                </CardAction>
+              ) : undefined
+            }
           >
             {placementsOnUnit.length === 0 ? (
               <EmptyRow>No placements on this property yet.</EmptyRow>
@@ -933,6 +950,17 @@ export function ListingDetail(): React.JSX.Element {
           onCreated={(p) => {
             setStartingPlacement(false);
             void navigate('/placements/' + p.placementId);
+          }}
+        />
+      ) : null}
+
+      {schedulingTour ? (
+        <ScheduleTourForm
+          initialUnitId={unit.unitId}
+          onClose={() => setSchedulingTour(false)}
+          onCreated={(t) => {
+            setSchedulingTour(false);
+            void navigate('/tours/' + t.tourId);
           }}
         />
       ) : null}

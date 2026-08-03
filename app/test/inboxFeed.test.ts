@@ -545,3 +545,112 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
     ).rejects.toMatchObject({ name: 'InboxBadRequestError' });
   });
 });
+
+describe('aggregateInbox — deleted-contact resurfacing (2026-08-03 spec)', () => {
+  const DELETED_AT = '2026-08-01T00:00:00.000Z';
+  const BEFORE = '2026-07-30T00:00:00.000Z';
+  const AFTER = '2026-08-02T00:00:00.000Z';
+
+  const deletedContact = (over: Partial<ContactItem> = {}): ContactItem => ({
+    contactId: 'c-del',
+    type: 'tenant',
+    firstName: 'Dana',
+    lastName: 'Doe',
+    phone: '+15550000001',
+    deleted_at: DELETED_AT,
+    ...over,
+  });
+
+  it('surfaces a deleted contact with an unread inbound newer than deleted_at (deleted: true)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({
+      kind: 'contact',
+      contactId: 'c-del',
+      deleted: true,
+      unreadCount: 1,
+      preview: 'im back',
+    });
+  });
+
+  it('hides a deleted contact with zero unread (post-deletion inbound already read)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 0 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('hides a deleted contact whose unread inbound PREDATES the deletion', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: BEFORE, unread_count: 2 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'old unread', created_at: BEFORE },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('hides a deleted contact whose latest message is OUTBOUND (even post-deletion, even with unread)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'outbound', body: 'scheduled nudge', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('a surfaced deleted row passes the unread filter', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'unread', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({ contactId: 'c-del', deleted: true });
+  });
+
+  it('a live (restored) contact row never carries the deleted field', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact({ deleted_at: undefined as unknown as string })],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).not.toHaveProperty('deleted');
+  });
+});

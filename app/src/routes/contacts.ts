@@ -1714,7 +1714,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   // deleted_at so the record + ALL its data are retained (POST .../restore brings
   // it back), but it's hidden from the contact lists, inbox, today, and broadcast
   // targeting. Phone routing still resolves the number to this record (no dupes on
-  // re-contact). Audited. 404 when the contact doesn't exist.
+  // re-contact) — and if they message again, the inbox RESURFACES the thread
+  // (row flagged `deleted`) until it's read (deleted-contact resurfacing,
+  // 2026-08-03 spec). Audited. 404 when the contact doesn't exist.
   router.delete('/:contactId', async (req: AuthedRequest, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });

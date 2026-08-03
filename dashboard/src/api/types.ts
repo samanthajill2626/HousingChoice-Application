@@ -694,6 +694,44 @@ export interface TourActivityEvent {
 
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
 
+/**
+ * Why an ARMED scheduled message will not go out at its dueAt. MIRRORS
+ * app/src/services/scheduledSendSuppression.ts `ScheduledSuppressionReason`.
+ * ONE named union for all three surfaces that carry the estimate (tour rungs,
+ * placement nudge rungs, contact-timeline scheduled cards) - they used to
+ * declare three independent inline copies, which could be widened out of step.
+ *
+ * `quiet_hours` is the odd one out and the LEAST severe: every other reason
+ * DROPS the message, quiet hours only DEFERS it to the end of the window
+ * (quiet-hours spec decision 1: defer, never drop). Use `suppressionLead` /
+ * `suppressionNote` so no surface calls a deferral a skip.
+ */
+export type ScheduledSuppressionReason =
+  | 'sms_sending_disabled'
+  | 'contact_opted_out'
+  | 'manual_mode'
+  | 'stale_stage'
+  | 'quiet_hours';
+
+/** The suppression estimate a GET carries on an upcoming rung/card. */
+export interface ScheduledSuppression {
+  reason: ScheduledSuppressionReason;
+}
+
+/** The rendered em dash, by code point, so these source lines stay pure ASCII. */
+const EM_DASH = String.fromCharCode(0x2014);
+
+/** "Will wait" for a DEFERRAL, "Will be skipped" for a real drop. */
+export function suppressionLead(reason: ScheduledSuppressionReason): string {
+  return reason === 'quiet_hours' ? 'Will wait' : 'Will be skipped';
+}
+
+/** The full staff-facing note, em-dashed like the tour + contact surfaces. (The
+ *  placements card composes its own with a plain hyphen, per its copy contract.) */
+export function suppressionNote(reason: ScheduledSuppressionReason, label: string): string {
+  return `${suppressionLead(reason)} ${EM_DASH} ${label}`;
+}
+
 /** The five reminder rungs of a tour's ladder (mirrors the app-side ReminderKind). */
 export type ReminderKind =
   | 'confirmation'
@@ -718,11 +756,19 @@ export interface TourReminderView {
   canceledAt?: string;
   /** ISO 8601 — when the poll retired the rung unsent (state === 'skipped'). */
   skippedAt?: string;
-  /** Why the poll could not deliver it (present when state === 'skipped'). */
-  skipReason?: 'no_conversation' | 'contact_missing' | 'contact_no_phone' | 'tour_missing';
+  /** Why the poll could not deliver it (present when state === 'skipped').
+   *  `quiet_hours_superseded` = release supersession retired this rung because a
+   *  LATER rung of the same tour came due beside it, so its copy was stale. */
+  skipReason?:
+    | 'no_conversation'
+    | 'contact_missing'
+    | 'contact_no_phone'
+    | 'tour_missing'
+    | 'quiet_hours_superseded';
   body: string;
-  /** Present when the rung is armed but will be skipped at fire time. */
-  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+  /** Present when the rung is armed but will not go out at dueAt (skipped - or,
+   *  for `quiet_hours`, DEFERRED to the end of the window). */
+  suppression?: ScheduledSuppression;
 }
 
 /** GET /api/tours/:tourId/reminders response: the ladder + the NEXT rung to fire. */
@@ -741,7 +787,9 @@ export const REMINDER_KIND_LABELS: Readonly<Record<ReminderKind, string>> = {
   no_show_checkin: 'No-show check-in',
 };
 
-/** Human-readable phrasings for why an armed rung will be skipped (staff-facing). */
+/** Human-readable phrasings for why an armed rung will not fire at dueAt
+ *  (staff-facing). Lower-case fragments - they are interpolated mid-sentence by
+ *  `suppressionNote`, which supplies the "Will wait" / "Will be skipped" lead. */
 export const REMINDER_SUPPRESSION_LABELS: Readonly<
   Record<NonNullable<TourReminderView['suppression']>['reason'], string>
 > = {
@@ -749,6 +797,7 @@ export const REMINDER_SUPPRESSION_LABELS: Readonly<
   contact_opted_out: 'contact opted out',
   manual_mode: 'manual mode',
   stale_stage: 'tour no longer at this stage',
+  quiet_hours: 'quiet hours',
 };
 
 /** Human-readable phrasings for why a rung WAS retired unsent (state 'skipped'). */
@@ -759,7 +808,47 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   contact_missing: 'contact missing',
   contact_no_phone: 'no phone on file',
   tour_missing: 'tour missing',
+  quiet_hours_superseded: 'superseded by a later reminder',
 };
+
+/**
+ * The 409 `{ error }` codes the two send-now endpoints return, mapped to copy a
+ * navigator can act on. `ApiError.message` is the RAW machine code, so it must
+ * never be rendered - route every send-now failure through
+ * `sendNowErrorMessage()`. Codes are shared by the reminder and nudge routes
+ * except where noted; unknown codes fall back to the generic retry sentence, so
+ * a newer server can never put a snake_case token in front of staff.
+ */
+const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
+  // Not a refusal - the row was already consumed. The refetched list is honest.
+  reminder_not_pending: 'That reminder is no longer pending - the list now shows its real state.',
+  nudge_not_pending: 'That nudge is no longer pending - the list now shows its real state.',
+  // Pre-claim gates: nothing was sent and the rung is still pending.
+  sms_sending_disabled: 'SMS sending is switched off, so nothing was sent.',
+  contact_opted_out: 'That person opted out of texts, so nothing was sent.',
+  no_consent: 'No SMS consent on file - record consent before sending this by hand.',
+  no_conversation: 'There is no text thread with that person yet, so nothing was sent.',
+  stage_moved: 'The placement moved on from this stage, so the message would be out of date.',
+  tour_missing: 'That tour is gone, so nothing was sent.',
+  placement_missing: 'That placement is gone, so nothing was sent.',
+  unit_missing: 'That property is gone, so nothing was sent.',
+  no_landlord: 'That property has no landlord on file, so nothing was sent.',
+  contact_missing: 'That contact is gone, so nothing was sent.',
+  contact_no_phone: 'That contact has no phone number, so nothing was sent.',
+  unknown_kind: 'This app does not know how to send that nudge.',
+  // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
+  // went out, so these must read as errors, not successes.
+  contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',
+  breaker_open: 'Sending is paused right now - try again shortly.',
+  manual_mode: 'That thread is in manual mode, so nothing was sent.',
+  relay_not_supported: 'That thread cannot take this message.',
+  conversation_not_found: 'That text thread is gone, so nothing was sent.',
+};
+
+/** Staff-facing copy for a send-now failure, given the server's error code. */
+export function sendNowErrorMessage(code: string): string {
+  return SEND_NOW_ERROR_COPY[code] ?? "Couldn't send that just now - please try again.";
+}
 
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
 export interface PlacementAttention {
@@ -882,6 +971,15 @@ export interface PlacementNudgeView {
   /** ISO 8601 — when the poll retired it unsent (present when state === 'skipped'). */
   skippedAt?: string;
   skipReason?: NudgeSkipReason;
+  /** Present on `upcoming` rungs of a GET only (never on the PATCH/send-now
+   *  echo): why the rung will not fire at dueAt - or, for `quiet_hours`, that it
+   *  is DEFERRED to the end of the window. Same shape as
+   *  TourReminderView.suppression so both ladders render through one path.
+   *  NOTE this estimate is a SUBSET of the tour one: the server computes it
+   *  without the per-recipient opt-out / manual-mode lookups (see
+   *  docs/issues/placement-nudge-suppression-opt-out-parity.md), so an absent
+   *  suppression is not proof the rung will go out. */
+  suppression?: ScheduledSuppression;
 }
 
 // --- SSE (legacy reuse — verbatim) ------------------------------------------
@@ -1650,8 +1748,9 @@ export interface TimelineScheduled extends TimelineBase {
   reminderKind?: 'confirmation' | 'day_before' | 'morning_of' | 'en_route' | 'no_show_checkin';
   nudgeKind?: 'receipt_check' | 'completion_check' | 'approval_check' | 'rta_window_closing';
   body: string;
-  /** Present when the message is armed but will be skipped at fire time. */
-  suppression?: { reason: 'sms_sending_disabled' | 'contact_opted_out' | 'manual_mode' | 'stale_stage' };
+  /** Present when the message is armed but will not fire at its time (skipped -
+   *  or, for `quiet_hours`, DEFERRED to the end of the window). */
+  suppression?: ScheduledSuppression;
   refType: 'tour' | 'placement';
   refId: string;
 }

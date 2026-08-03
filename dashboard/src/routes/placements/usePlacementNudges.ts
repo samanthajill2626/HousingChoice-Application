@@ -12,6 +12,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getPlacementNudges,
   patchPlacementNudge,
+  postNudgeSendNow,
+  sendNowErrorMessage,
   useEventStream,
   ApiError,
   type PlacementNudgeView,
@@ -36,13 +38,19 @@ export interface PlacementNudges {
   /** True until the first fetch for the current placementId lands. */
   loading: boolean;
   error: string | null;
-  /** The single in-flight cancel/restore, or null. */
+  /** The single in-flight rung action (cancel/restore/send-now), or null. */
   busyId: string | null;
   /** Force a refetch (used by the follow-up modal's parent after a write). */
   refetch: () => void;
   /** Cancel (upcoming) / restore (canceled) one rung, then refetch the honest
    *  ladder. A 409 (lost race / already sent) resolves silently via the refetch. */
   toggleCanceled: (nudge: PlacementNudgeView) => void;
+  /** Force-send one PENDING rung right now (quiet-hours spec section 7). Unlike
+   *  toggleCanceled, a refusal is NEVER silent - it lands in `actionError`. */
+  sendNow: (nudge: PlacementNudgeView) => void;
+  /** The last send-now refusal, keyed to the rung it belongs to, in staff-facing
+   *  copy (never the raw server code). Cleared by the next rung action. */
+  actionError: { nudgeId: string; message: string } | null;
 }
 
 export function usePlacementNudges(placementId: string): PlacementNudges {
@@ -118,13 +126,45 @@ export function usePlacementNudges(placementId: string): PlacementNudges {
   // and click) - the refetch shows the real state, no error banner. One in-flight
   // action at a time (busyId) so a double-click can't fire two PATCHes.
   const [busyId, setBusyId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<{
+    nudgeId: string;
+    message: string;
+  } | null>(null);
   const toggleCanceled = useCallback(
     (nudge: PlacementNudgeView) => {
       if (busyId !== null) return;
       setBusyId(nudge.nudgeId);
+      setActionError(null);
       patchPlacementNudge(placementId, nudge.nudgeId, nudge.state === 'upcoming')
         .catch(() => {
           /* 409 race / transient - the refetch below reports the honest state */
+        })
+        .finally(() => {
+          setBusyId(null);
+          fetchNow();
+        });
+    },
+    [busyId, placementId, fetchNow],
+  );
+
+  // Send now (quiet-hours spec section 7): force ONE pending rung out
+  // immediately. A HUMAN send - the server bypasses quiet hours, manual mode and
+  // the breaker, but still honors the kill switch, opt-out, consent and the
+  // rung's stage. Unlike toggleCanceled, a 409 must NOT resolve silently: spec
+  // section 7 requires a visible, honest error, so the refusal is stored (in
+  // staff-facing copy, never the raw code) and the card renders it beside the
+  // rung. Shares the single busyId slot with cancel/restore so they cannot race.
+  const sendNow = useCallback(
+    (nudge: PlacementNudgeView) => {
+      if (busyId !== null) return;
+      setBusyId(nudge.nudgeId);
+      setActionError(null);
+      postNudgeSendNow(placementId, nudge.nudgeId)
+        .catch((err: unknown) => {
+          setActionError({
+            nudgeId: nudge.nudgeId,
+            message: sendNowErrorMessage(err instanceof ApiError ? err.code : ''),
+          });
         })
         .finally(() => {
           setBusyId(null);
@@ -141,5 +181,7 @@ export function usePlacementNudges(placementId: string): PlacementNudges {
     busyId,
     refetch: fetchNow,
     toggleCanceled,
+    sendNow,
+    actionError,
   };
 }

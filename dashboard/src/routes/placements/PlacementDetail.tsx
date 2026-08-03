@@ -478,6 +478,8 @@ export function PlacementDetail(): React.JSX.Element {
               nudgesError={nudges.error}
               busyId={nudges.busyId}
               onToggleCanceled={nudges.toggleCanceled}
+              onSendNow={nudges.sendNow}
+              actionError={nudges.actionError}
             />
 
             {/* 3. People and provenance */}

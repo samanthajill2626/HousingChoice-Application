@@ -25,9 +25,11 @@
 import { useCallback, useState } from 'react';
 import {
   clearPlacementFollowUp,
+  suppressionLead,
   type NudgeKind,
   type NudgeSkipReason,
   type PlacementNudgeView,
+  type ScheduledSuppressionReason,
 } from '../../api/index.js';
 import { Card } from '../contact/Card.js';
 import { closesAt, dateTime, expiresOn, sendRelative, wasDue } from './placementsFormat.js';
@@ -51,6 +53,18 @@ const NUDGE_SKIP_REASON_LABELS: Readonly<Record<NudgeSkipReason, string>> = {
   no_landlord: 'no landlord on the property',
   contact_missing: 'recipient no longer exists',
   contact_no_phone: 'recipient has no phone number',
+};
+
+/** Why an ARMED rung will not fire at dueAt (the server's estimate, new with
+ *  quiet hours). Lower-case fragments - suppressionLead supplies the sentence
+ *  head ("Will wait" for a quiet-hours DEFERRAL, "Will be skipped" otherwise).
+ *  Card-local like the skip labels above, in this card's recipient vocabulary. */
+const NUDGE_SUPPRESSION_LABELS: Readonly<Record<ScheduledSuppressionReason, string>> = {
+  sms_sending_disabled: 'SMS sending is off',
+  contact_opted_out: 'recipient opted out',
+  manual_mode: 'manual mode',
+  stale_stage: 'stage moved on',
+  quiet_hours: 'quiet hours',
 };
 
 /** A compact state chip for a single nudge rung (mirrors RemindersPanel's StateChip). */
@@ -95,6 +109,8 @@ export function DeadlinesNudgesCard({
   nudgesError,
   busyId,
   onToggleCanceled,
+  onSendNow,
+  actionError,
 }: {
   placementId: string;
   tenantName: string;
@@ -114,10 +130,15 @@ export function DeadlinesNudgesCard({
   /** True until the first nudge fetch lands. */
   nudgesLoading: boolean;
   nudgesError: string | null;
-  /** The single in-flight cancel/restore rung id, or null. */
+  /** The single in-flight rung-action id (cancel/restore/send-now), or null. */
   busyId: string | null;
   /** Cancel/restore one rung (the shared hook's single-flight PATCH + refetch). */
   onToggleCanceled: (nudge: PlacementNudgeView) => void;
+  /** Force-send one PENDING rung now (the shared hook's single-flight POST). */
+  onSendNow: (nudge: PlacementNudgeView) => void;
+  /** The last send-now refusal in staff-facing copy, keyed to its rung. Rendered
+   *  WITH that row - never in place of the ladder. */
+  actionError: { nudgeId: string; message: string } | null;
 }): React.JSX.Element {
   // Clear the manual follow-up (the write emits placement.updated - the parent
   // refetches the bundle and passes followUpAt=undefined back down).
@@ -207,6 +228,19 @@ export function DeadlinesNudgesCard({
           <ul className={styles.rows}>
             {nudges.map((nudge) => {
               const label = NUDGE_KIND_LABELS[nudge.kind] ?? nudge.kind;
+              // "Will wait - quiet hours" for a DEFERRAL (the rung fires at
+              // quiet-end), "Will be skipped - <reason>" when it really drops.
+              // Plain hyphen, per this card's copy contract.
+              const suppression =
+                nudge.suppression !== undefined
+                  ? `${suppressionLead(nudge.suppression.reason)} - ${
+                      NUDGE_SUPPRESSION_LABELS[nudge.suppression.reason] ?? nudge.suppression.reason
+                    }`
+                  : undefined;
+              const rowError =
+                actionError !== null && actionError.nudgeId === nudge.nudgeId
+                  ? actionError.message
+                  : undefined;
               return (
                 <li key={nudge.nudgeId} className={styles.row}>
                   <div className={styles.rowHead}>
@@ -217,6 +251,20 @@ export function DeadlinesNudgesCard({
                     </span>
                     <span className={styles.recipient}>to {recipientName(nudge.recipient)}</span>
                     <StateChip nudge={nudge} />
+                    {/* Send now: a PENDING rung only. Distinct accessible name
+                        per rung (A10) so repeated "Send now" text stays
+                        addressable in the e2e harness. */}
+                    {nudge.state === 'upcoming' ? (
+                      <button
+                        type="button"
+                        className={`${styles.action} ${styles.rowAction}`}
+                        disabled={busyId !== null}
+                        aria-label={`Send ${label} nudge now`}
+                        onClick={() => onSendNow(nudge)}
+                      >
+                        Send now
+                      </button>
+                    ) : null}
                     {nudge.state === 'upcoming' || nudge.state === 'canceled' ? (
                       <button
                         type="button"
@@ -229,6 +277,14 @@ export function DeadlinesNudgesCard({
                       </button>
                     ) : null}
                   </div>
+                  {suppression !== undefined ? (
+                    <p className={styles.suppression}>{suppression}</p>
+                  ) : null}
+                  {rowError !== undefined ? (
+                    <p className={styles.rowError} role="alert">
+                      {rowError}
+                    </p>
+                  ) : null}
                 </li>
               );
             })}

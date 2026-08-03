@@ -325,6 +325,28 @@ export async function patchPlacementNudge(
   return res.nudge;
 }
 
+/** POST /api/placements/:placementId/nudges/:nudgeId/send-now - force-send one
+ *  PENDING nudge rung immediately. A HUMAN send: it bypasses quiet hours,
+ *  manual mode and the breaker, but still respects the kill switch, opt-out,
+ *  consent and the rung's stage. 200 returns the re-read view (state 'sent').
+ *  409 { error, nudge } on every refusal - nudge_not_pending, stage_moved,
+ *  sms_sending_disabled, contact_opted_out, no_consent, placement_missing,
+ *  unit_missing, no_landlord, contact_missing, contact_no_phone, unknown_kind,
+ *  or a post-claim race code (contact_no_consent / breaker_open / manual_mode /
+ *  relay_not_supported / conversation_not_found) - and the honest current view
+ *  rides along either way. 404 placement_not_found / nudge_not_found. Map the
+ *  code with sendNowErrorMessage(); ApiError.message is the raw code. */
+export async function postNudgeSendNow(
+  placementId: string,
+  nudgeId: string,
+): Promise<PlacementNudgeView> {
+  const res = await request<{ nudge: PlacementNudgeView }>(
+    `/api/placements/${encodeURIComponent(placementId)}/nudges/${encodeURIComponent(nudgeId)}/send-now`,
+    { method: 'POST' },
+  );
+  return res.nudge;
+}
+
 /** POST /api/placements/:placementId/relay — provision the placement's masked
  *  relay group thread (tenant + the unit's landlord, by their SMS numbers) and
  *  link placement.group_thread. Idempotent: 409 relay_exists when an OPEN relay
@@ -1798,6 +1820,27 @@ export async function patchTourReminder(
   const res = await request<{ reminder: TourReminderView }>(
     `/api/tours/${encodeURIComponent(tourId)}/reminders/${encodeURIComponent(reminderId)}`,
     { method: 'PATCH', body: { canceled } },
+  );
+  return res.reminder;
+}
+
+/** POST /api/tours/:tourId/reminders/:reminderId/send-now - force-send one
+ *  PENDING rung immediately. A HUMAN send: it bypasses quiet hours, manual mode
+ *  and the breaker, but still respects the kill switch, opt-out and consent.
+ *  200 returns the re-read view (state 'sent'). 409 { error, reminder } on every
+ *  refusal - reminder_not_pending, sms_sending_disabled, contact_opted_out,
+ *  no_consent, no_conversation, contact_missing, contact_no_phone, tour_missing,
+ *  or a post-claim race code (contact_no_consent / breaker_open / manual_mode /
+ *  relay_not_supported / conversation_not_found) - and the honest current view
+ *  rides along either way. 404 tour_not_found / reminder_not_found. Map the code
+ *  with sendNowErrorMessage(); ApiError.message is the raw code. */
+export async function postReminderSendNow(
+  tourId: string,
+  reminderId: string,
+): Promise<TourReminderView> {
+  const res = await request<{ reminder: TourReminderView }>(
+    `/api/tours/${encodeURIComponent(tourId)}/reminders/${encodeURIComponent(reminderId)}/send-now`,
+    { method: 'POST' },
   );
   return res.reminder;
 }

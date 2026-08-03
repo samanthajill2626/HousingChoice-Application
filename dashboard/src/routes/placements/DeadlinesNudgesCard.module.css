@@ -173,9 +173,27 @@
   color: var(--c-text-muted);
 }
 
-/* The row's Cancel/Restore action, following the chip. */
+/* The row's Send now / Cancel / Restore actions, following the chip. */
 .rowAction {
   flex: 0 0 auto;
+}
+
+/* Why an armed rung will wait (quiet hours) or be skipped - amber "attention"
+ * tone, matching the tour RemindersPanel's suppression note. */
+.suppression {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-evt-amber-text);
+}
+
+/* A Send-now refusal, shown WITH the rung it refers to (the fetch-error
+ * paragraph above replaces the whole ladder - this must not). */
+.rowError {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-danger);
 }
 
 /* --- Re-arm caveat -------------------------------------------------------- */

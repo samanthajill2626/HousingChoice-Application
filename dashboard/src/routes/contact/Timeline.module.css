@@ -122,6 +122,19 @@
   gap: var(--sp-2);
 }
 
+/* Phone: soften the floor so a grown reply box has somewhere to take its space
+ * from. The floor above assumes the leftover pushes to the page's content scroll,
+ * but in the stacked (<=860px) shell .comms is bounded and NOT a scroller, so a
+ * grown composer just overflowed its bottom edge — Send and the reply note ended
+ * up off-screen with nothing to scroll to them. A smaller floor still keeps the
+ * newest exchange in view (the stream scrolls internally), and .upcoming yields
+ * alongside it, so the composer never has to be the thing that gives. */
+@media (max-width: 767.98px) {
+  .stream {
+    min-height: 4rem;
+  }
+}
+
 /* Per-day group. MUST be a flex column so the bubbles' align-self (in→left /
  * out→right) takes effect — a plain block here is what made every bubble fall
  * left and look identical. */
@@ -477,6 +490,19 @@ a.pill:focus-visible {
   overflow-y: auto;
 }
 
+/* Phone: this secondary panel yields BEFORE the composer and the stream do. At
+ * `flex: none` it held a fixed 12rem out of a ~400px column, which (with the
+ * stream at its floor) left the reply box overflowing the bottom of the pane.
+ * It already scrolls internally, so shrinking it costs only scroll position —
+ * where squeezing the composer costs you the box you're typing in. */
+@media (max-width: 767.98px) {
+  .upcoming {
+    flex: 0 1 auto;
+    min-height: 2.5rem;
+    max-height: 7rem;
+  }
+}
+
 .upcomingHead {
   font-size: var(--fs-xs);
   font-weight: var(--fw-semibold);
@@ -711,6 +737,10 @@ a.pill:focus-visible {
   align-items: center;
   gap: var(--sp-2);
   margin-top: var(--sp-1);
+  /* Wrapping matters on a GROUP thread: its reply note names every member, so the
+   * line is far longer than a 1:1's single number and cannot share a row with the
+   * controls at phone width (see the .replyTarget rule below). */
+  flex-wrap: wrap;
 }
 
 /* Attach control: a quiet outlined button that opens the (visually hidden) file
@@ -719,6 +749,8 @@ a.pill:focus-visible {
   display: inline-flex;
   align-items: center;
   gap: 2px;
+  /* Never let a long reply note compress the controls — the note wraps instead. */
+  flex: none;
   background: transparent;
   color: var(--c-text-muted);
   border: 1px solid var(--c-border-strong);
@@ -741,10 +773,12 @@ a.pill:focus-visible {
 .replyTarget {
   font-size: var(--fs-xs);
   color: var(--c-text-muted);
+  min-width: 0;
 }
 
 .sendBtn {
   margin-left: auto;
+  flex: none;
   background: var(--c-brand);
   color: var(--c-text-inverse);
   border: none;
@@ -767,6 +801,19 @@ a.pill:focus-visible {
 .sendBtn:focus-visible {
   outline: 2px solid var(--c-focus-ring);
   outline-offset: 2px;
+}
+
+/* Phone width: there is no room for [Attach] [reply note] [Send] on one row once
+ * the note is a group roster ("everyone in this group text (Ann, Marcus)"). Left
+ * inline it wrapped to three lines mid-row, stealing the composer's height and
+ * squeezing the reply box. Drop it to its own full-width line UNDER the controls
+ * (order:1 sorts it after them despite coming between them in the DOM, which is
+ * the reading order we want: the controls stay put, the note reads as a caption). */
+@media (max-width: 767.98px) {
+  .replyTarget {
+    order: 1;
+    flex: 1 0 100%;
+  }
 }
 
 .srOnly {

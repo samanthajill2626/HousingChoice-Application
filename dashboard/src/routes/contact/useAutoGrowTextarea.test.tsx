@@ -3,31 +3,40 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 
 // jsdom does no layout, so we fake the two measurements the hook reads:
-//   - scrollHeight (content height) via a controllable module var
+//   - scrollHeight (content height) via a controllable module var. `hidden`
+//     models a display:none ancestor (the ≤860px mobile pane), where the real
+//     DOM reports scrollHeight/offsetHeight 0 for a box that has no layout.
 //   - offsetHeight reflects whatever inline height we've set (so autoHeightRef
-//     tracks our own writes, and a manual height shows up as "different")
+//     tracks our own writes, and a manual height shows up as "different"), but
+//     never below MIN_BOX: a real textarea always renders at least its own
+//     padding + borders, so a 0-height write still lays out taller than nothing.
+//     That floor is what makes a hidden->shown reveal a visible size CHANGE.
 // and a ResizeObserver stub that hands us its callback to fire on demand.
+const MIN_BOX = 18;
 function Harness({ value }: { value: string }): React.JSX.Element {
   const ref = useAutoGrowTextarea(value);
   return <textarea ref={ref} aria-label="ta" style={{ maxHeight: '100px' }} />;
 }
 
 let scrollH = 0;
+let hidden = false;
 let fireResize: (() => void) | undefined;
 
 beforeEach(() => {
   scrollH = 0;
+  hidden = false;
   fireResize = undefined;
   Object.defineProperty(HTMLTextAreaElement.prototype, 'offsetHeight', {
     configurable: true,
     get(): number {
-      return parseFloat((this as HTMLTextAreaElement).style.height) || 0;
+      if (hidden) return 0;
+      return Math.max(parseFloat((this as HTMLTextAreaElement).style.height) || 0, MIN_BOX);
     },
   });
   Object.defineProperty(HTMLTextAreaElement.prototype, 'scrollHeight', {
     configurable: true,
     get(): number {
-      return scrollH;
+      return hidden ? 0 : scrollH;
     },
   });
   class MockResizeObserver {
@@ -114,5 +123,60 @@ describe('useAutoGrowTextarea', () => {
     scrollH = 50;
     rerender(<Harness value="next message" />);
     expect(ta.style.height).toBe('50px');
+  });
+
+  // Regression: the composer mounts inside the mobile detail pane that's hidden
+  // behind the Details/Conversation toggle (twoPaneShell `.paneHidden` =>
+  // display:none at <=860px). A hidden box measures scrollHeight 0, so fitting on
+  // it collapsed the textarea to just its borders ("2px") — and because the value
+  // never changes while hidden, nothing ever re-fit it. Typing a long reply then
+  // stayed clipped in that sliver, which is the squished reply box on mobile.
+  it('skips the fit while hidden (display:none pane) and fits when it is shown', () => {
+    hidden = true;
+    scrollH = 24;
+    const { getByLabelText } = render(<Harness value="" />);
+    const ta = getByLabelText('ta') as HTMLTextAreaElement;
+    // No usable measurement => leave the rows=1 height alone rather than write a
+    // borders-only sliver.
+    expect(ta.style.height).toBe('');
+
+    // Tapping "Conversation" reveals the pane: the observer fires with a real box.
+    hidden = false;
+    fireResize?.();
+    expect(ta.style.height).toBe('24px');
+  });
+
+  it('keeps auto-growing after a hidden mount — a reveal is not a manual drag', () => {
+    hidden = true;
+    scrollH = 24;
+    const { getByLabelText, rerender } = render(<Harness value="" />);
+    const ta = getByLabelText('ta') as HTMLTextAreaElement;
+
+    hidden = false;
+    fireResize?.();
+
+    // The 0 -> real-height jump on reveal must NOT be mistaken for the user
+    // dragging the resize handle, or auto-grow stays dead for this whole message.
+    scrollH = 72;
+    rerender(<Harness value="a long reply that needs several lines" />);
+    expect(ta.style.height).toBe('72px');
+  });
+
+  it('ignores the observer while hidden, so hide/show keeps auto-grow armed', () => {
+    scrollH = 24;
+    const { getByLabelText, rerender } = render(<Harness value="" />);
+    const ta = getByLabelText('ta') as HTMLTextAreaElement;
+    expect(ta.style.height).toBe('24px');
+
+    // Switch to the Details tab (pane hidden) and back — the box losing and
+    // regaining its layout is not a resize the user asked for.
+    hidden = true;
+    fireResize?.();
+    hidden = false;
+    fireResize?.();
+
+    scrollH = 72;
+    rerender(<Harness value="a long reply that needs several lines" />);
+    expect(ta.style.height).toBe('72px');
   });
 });

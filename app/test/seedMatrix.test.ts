@@ -578,3 +578,47 @@ describe('seed full profile: one-primary / phone-pointer invariants', () => {
     }
   });
 });
+
+// ---------------------------------------------------------------------------
+// A seeded call recording is only PLAYABLE if two things are seeded together:
+// the message's provider_sid (the timeline exposes it as call_sid, and CallCard
+// mounts the player only when recording_s3_key AND call_sid are both present)
+// and the sid#<CallSid> pointer row (GET /api/calls/:callId/recording resolves
+// through getByProviderSid, which reads that pointer). Seeding one without the
+// other yields either an invisible player or a player that 404s on play - the
+// demo world shipped with the first of those until 2026-08-03.
+// ---------------------------------------------------------------------------
+describe('seed: a recorded call is actually playable', () => {
+  const allMessages = PROFILE['messages'] ?? [];
+  const recordedCalls = allMessages.filter(
+    (m) => m['type'] === 'call' && m['recording_s3_key'] !== undefined,
+  );
+
+  it('has at least one recorded call to demo', () => {
+    expect(recordedCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('every recorded call carries a provider_sid (else the player never renders)', () => {
+    for (const call of recordedCalls) {
+      expect(
+        call['provider_sid'],
+        `recorded call ${String(call['tsMsgId'])} must carry a provider_sid`,
+      ).toBeDefined();
+      expect(typeof call['provider_sid']).toBe('string');
+    }
+  });
+
+  it('every recorded call has a sid pointer row resolving to its real keys', () => {
+    for (const call of recordedCalls) {
+      const sid = call['provider_sid'] as string;
+      const pointer = allMessages.find(
+        (m) => m['conversationId'] === `sid#${sid}` && m['tsMsgId'] === 'ptr',
+      );
+      expect(pointer, `recorded call ${sid} must have a sid#${sid} pointer row`).toBeDefined();
+      // The pointer must aim at the message that actually exists, or the
+      // recording route resolves a phantom and 404s.
+      expect(pointer!['ref_conversationId']).toBe(call['conversationId']);
+      expect(pointer!['ref_tsMsgId']).toBe(call['tsMsgId']);
+    }
+  });
+});

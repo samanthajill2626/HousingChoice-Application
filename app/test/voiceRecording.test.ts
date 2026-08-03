@@ -409,6 +409,100 @@ describe('GET /api/calls/:callId/recording (M1.9c, authed)', () => {
     const logs = JSON.stringify(capture.lines);
     expect(logs).not.toContain('recording-bytes-for');
   });
+
+  // HTTP Range support (2026-08-03): without Accept-Ranges + 206 the browser
+  // treats the audio as NON-SEEKABLE and the native scrubber refuses to move.
+  // The route forwards a single well-formed byte range to S3 and mirrors the
+  // partial response back; everything else degrades to the full 200.
+  /** GET the recording with optional extra headers, buffering the binary body. */
+  function getRecording(app: unknown, headers: Record<string, string> = {}) {
+    let req = request(app as Parameters<typeof request>[0])
+      .get('/api/calls/CAbiz0001/recording')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    for (const [name, value] of Object.entries(headers)) req = req.set(name, value);
+    return req.buffer(true).parse((r, cb) => {
+      const chunks: Buffer[] = [];
+      r.on('data', (c: Buffer) => chunks.push(c));
+      r.on('end', () => cb(null, Buffer.concat(chunks)));
+    });
+  }
+
+  it('advertises Accept-Ranges: bytes on the full 200 (what makes the scrubber seekable)', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+
+    const res = await getRecording(app);
+    expect(res.status).toBe(200);
+    expect(res.headers['accept-ranges']).toBe('bytes');
+  });
+
+  it('answers 206 + Content-Range with the requested slice for a byte range', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+
+    const full = (await getRecording(app)).body as Buffer;
+    const res = await getRecording(app, { Range: 'bytes=0-3' });
+
+    expect(res.status).toBe(206);
+    expect(res.headers['content-range']).toBe(`bytes 0-3/${full.length}`);
+    expect(res.headers['accept-ranges']).toBe('bytes');
+    // Content-Length is the PART length, not the object length.
+    expect(res.headers['content-length']).toBe('4');
+    expect((res.body as Buffer).equals(full.subarray(0, 4))).toBe(true);
+  });
+
+  it('honors an open-ended range and a suffix range', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+    const full = (await getRecording(app)).body as Buffer;
+
+    const openEnded = await getRecording(app, { Range: 'bytes=4-' });
+    expect(openEnded.status).toBe(206);
+    expect(openEnded.headers['content-range']).toBe(`bytes 4-${full.length - 1}/${full.length}`);
+    expect((openEnded.body as Buffer).equals(full.subarray(4))).toBe(true);
+
+    const suffix = await getRecording(app, { Range: 'bytes=-5' });
+    expect(suffix.status).toBe(206);
+    expect((suffix.body as Buffer).equals(full.subarray(full.length - 5))).toBe(true);
+  });
+
+  it('IGNORES a multi-range or malformed Range and serves the full 200 (RFC 7233 permits)', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+    const full = (await getRecording(app)).body as Buffer;
+
+    for (const value of ['bytes=0-3,8-11', 'bytes=', 'bytes=-', 'items=0-3', 'nonsense']) {
+      const res = await getRecording(app, { Range: value });
+      expect(res.status, `Range: ${value}`).toBe(200);
+      expect(res.headers['content-range'], `Range: ${value}`).toBeUndefined();
+      expect((res.body as Buffer).equals(full), `Range: ${value}`).toBe(true);
+    }
+  });
+
+  it('416 + Content-Range: bytes */<size> for an unsatisfiable range', async () => {
+    const world = createFakeWorld();
+    const app = await seedRecordedCall(world);
+    const full = (await getRecording(app)).body as Buffer;
+
+    const res = await getRecording(app, { Range: 'bytes=999999-' });
+    expect(res.status).toBe(416);
+    expect(res.headers['content-range']).toBe(`bytes */${full.length}`);
+  });
+
+  it('ORDERING GUARD: a range request for an absent recording still 404s (never 416)', async () => {
+    const world = createFakeWorld();
+    await seedFounderBridge(world); // no recording callback fired
+    const { app } = founderHarness(world);
+
+    const res = await request(app)
+      .get('/api/calls/CAbiz0001/recording')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .set('Range', 'bytes=0-3');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('recording_not_found');
+  });
 });
 
 describe('recording callback create-leg - VI transcription request (voice-transcription 3.2)', () => {

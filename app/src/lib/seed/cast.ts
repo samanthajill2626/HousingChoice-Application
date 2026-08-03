@@ -1001,6 +1001,16 @@ const CONV_PARKED_LL = convId(SLUG_PARKED_LL);
 
 // The recording S3 key is referenced here; the actual object is seeded in Task 5.
 
+// The bridge call's CallSid. REQUIRED, not decorative: the timeline exposes it as
+// `call_sid` (contactTimeline maps it from provider_sid) and the CallCard renders
+// the recording player ONLY when BOTH recording_s3_key and call_sid are present.
+// Without it the seeded recording was invisible in the demo world - the player
+// never mounted. The player's src is GET /api/calls/<CallSid>/recording, which
+// resolves through the sid#<CallSid> POINTER row seeded alongside the message
+// below (a real append writes that pointer in the same transaction), so the
+// message field and the pointer must always be seeded together.
+const CAST_PARKED_LL_CALL_SID = 'CAseedcast000000000000000000000001';
+
 const parkedLandlord = {
   contact: {
     contactId: C_PARKED_LL,
@@ -1051,6 +1061,7 @@ const parkedLandlord = {
       call_duration: 183,
       masked: false,
       call_party_label: 'Landlord Lead',
+      provider_sid: CAST_PARKED_LL_CALL_SID,
       recording_s3_key: CAST_RECORDING_KEY,
       recording_duration: 183,
       ts: C7,
@@ -1076,6 +1087,18 @@ const parkedLandlord = {
       ts: CB,
     },
   ],
+  // SID pointer for the recorded call, in the SAME shape messagesRepo.append
+  // writes and getByProviderSid reads: { conversationId: sid#<sid>, tsMsgId:
+  // 'ptr' } -> the message's real keys. GET /api/calls/<CallSid>/recording
+  // resolves the call THROUGH this pointer, so without it the player would
+  // mount and then 404 on every play. It is a pointer partition, never a
+  // conversation, so it never appears in a timeline query.
+  callSidPointerRow: {
+    conversationId: `sid#${CAST_PARKED_LL_CALL_SID}`,
+    tsMsgId: 'ptr',
+    ref_conversationId: CONV_PARKED_LL,
+    ref_tsMsgId: `${C7}#msg-cast-park-001`,
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -1261,6 +1284,7 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     ...touredYesTenant.messagesRelay,
     ...neverSignedLandlord.messages,
     ...parkedLandlord.messages,
+    parkedLandlord.callSidPointerRow,
     ...midIntakeUnitLandlord.messages,
   ];
 

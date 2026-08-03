@@ -26,6 +26,7 @@ import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createMessagingAdapter,
+  NumberUnavailableError,
   VoiceCapabilityError,
   type MessagingAdapter,
   type ProvisionPhoneNumberResult,
@@ -217,8 +218,18 @@ export interface PoolNumbersService {
    * given) -> adapter.attachToMessagingService(sid) (start A2P registration). The
    * voice webhook is pre-wired exactly as the group buy does (M1.9). NOT promoted
    * here - promotion is solely the registration event.
+   *
+   * The BUY searches with a geographic-hint LADDER (area-code preference
+   * 2026-08-03): postalCode first when the caller supplied one (a
+   * connect-when-ready buy for a tour/placement group prefers a number local to
+   * the property), then each config.relayPreferredAreaCodes entry in order, then
+   * an unhinted any-US search (today's behavior, and still a loud failure when it
+   * too comes back empty). ONLY a NumberUnavailableError advances a rung - any
+   * other error propagates immediately, so a number that was already PURCHASED
+   * can never be followed by a second purchase. The dedup-resume paths never buy,
+   * so they ignore postalCode entirely.
    */
-  warmOneNumber(conversationId?: string): Promise<void>;
+  warmOneNumber(conversationId?: string, postalCode?: string): Promise<void>;
   /**
    * Clear the connect-when-ready earmark (pending_conversation_id) on EVERY pool
    * record still tagged to this conversation - called when the group OPENS
@@ -645,7 +656,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       }
     },
 
-    async warmOneNumber(conversationId) {
+    async warmOneNumber(conversationId, postalCode) {
       // KILL-SWITCH (M1.7): warming a spare BUYS a real number, so refuse BEFORE
       // the adapter call when relay live provisioning is off - the identical guard
       // provisionForGroup's fresh-buy branch uses, so a deployed stack never
@@ -708,9 +719,52 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // HERE, not at call time. Persist WARMING (NOT active) with the PN sid (D2
       // correlation key) + the connect-when-ready earmark; the number is NOT a
       // usable pool number until the registration event promotes it.
+      // Geographic hint ladder (area-code preference design 2026-08-03):
+      // property ZIP first (when the caller supplied one), then each preferred
+      // area code, then the unhinted search (today's behavior, still loud on
+      // total exhaustion). ONLY a NumberUnavailableError (search empty)
+      // advances to the next hint - any other failure propagates immediately,
+      // so a number that was successfully PURCHASED can never be followed by a
+      // second purchase (no buy-and-leak). PII: log hint TYPE only, never the
+      // ZIP or code value alongside a number.
+      const hints: { areaCode?: string; postalCode?: string }[] = [
+        ...(postalCode !== undefined ? [{ postalCode }] : []),
+        ...config.relayPreferredAreaCodes.map((areaCode) => ({ areaCode })),
+        {},
+      ];
+      const hintTierOf = (h: { areaCode?: string; postalCode?: string }): string =>
+        h.postalCode !== undefined ? 'postal' : h.areaCode !== undefined ? 'areaCode' : 'bare';
+      async function provisionWithHints(): Promise<{
+        bought: ProvisionPhoneNumberResult;
+        hintTier: string;
+      }> {
+        for (let i = 0; i < hints.length; i += 1) {
+          const hint = hints[i]!;
+          try {
+            const bought = await adapter.provisionPhoneNumber({ voiceCapable: true, ...hint });
+            return { bought, hintTier: hintTierOf(hint) };
+          } catch (err) {
+            if (err instanceof NumberUnavailableError && i < hints.length - 1) {
+              log.info(
+                { event: 'relay_warm_hint_miss', hintTier: hintTierOf(hint) },
+                'relay warm: no number available for this search hint - trying the next',
+              );
+              continue;
+            }
+            throw err;
+          }
+        }
+        throw new Error('unreachable: the hint ladder always ends with a bare attempt');
+      }
+
       let candidate: ProvisionPhoneNumberResult | undefined;
+      // Which rung won the accepted buy, for the success log (TYPE only, never
+      // the ZIP/code value). A createWarming collision re-runs the whole ladder,
+      // so the LAST attempt's tier is the one that landed.
+      let winningHintTier = 'bare';
       for (let attempt = 1; attempt <= MAX_PROVISION_ATTEMPTS; attempt += 1) {
-        const bought = await adapter.provisionPhoneNumber({ voiceCapable: true });
+        const { bought, hintTier } = await provisionWithHints();
+        winningHintTier = hintTier;
         if (!bought.capabilities.voice) {
           throw new VoiceCapabilityError(
             `warmOneNumber: provisioned ${bought.sid} lacks voice capability`,
@@ -764,7 +818,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       }
 
       log.info(
-        { event: 'relay_number_warming' },
+        { event: 'relay_number_warming', hintTier: winningHintTier },
         'relay pool number bought and warming (awaiting A2P registration)',
       );
     },

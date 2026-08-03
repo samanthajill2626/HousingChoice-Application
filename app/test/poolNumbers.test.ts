@@ -6,6 +6,7 @@
 // conversationsRepo (getAllByPoolNumber drives the open-group veto).
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
+  NumberUnavailableError,
   type MessagingAdapter,
   type ProvisionPhoneNumberResult,
 } from '../src/adapters/messaging.js';
@@ -166,16 +167,36 @@ function makeFakeRepo(): PoolNumbersRepo & { store: Map<string, PoolNumberItem> 
   };
 }
 
+/** What a buy was searched with: {} is the bare (unhinted) search. */
+type ProvisionHint = { areaCode?: string; postalCode?: string };
+type FakeAdapter = MessagingAdapter & {
+  provisions: number;
+  released: string[];
+  provisionCalls: ProvisionHint[];
+};
+
 function makeFakeAdapter(
-  opts: { voice?: boolean } = {},
-): MessagingAdapter & { provisions: number; released: string[] } {
+  opts: {
+    voice?: boolean;
+    /**
+     * Script a hint as SOLD OUT: when this returns true for the received opts the
+     * fake throws NumberUnavailableError (Twilio's availability search came back
+     * empty) INSTEAD of buying - the only error the warm ladder may walk past.
+     */
+    unavailableWhen?: (o: ProvisionHint) => boolean;
+  } = {},
+): FakeAdapter {
   let provisions = 0;
   const released: string[] = [];
-  const adapter: MessagingAdapter & { provisions: number; released: string[] } = {
+  // Every hint the service actually searched with, in call order, so a test can
+  // assert the whole LADDER and not just which rung won.
+  const provisionCalls: ProvisionHint[] = [];
+  const adapter: FakeAdapter = {
     get provisions() {
       return provisions;
     },
     released,
+    provisionCalls,
     async sendMessage() {
       return { providerSid: 'SMx', status: 'queued', providerTs: new Date().toISOString() };
     },
@@ -185,7 +206,18 @@ function makeFakeAdapter(
     async getRecordingStream() {
       throw new Error('not used');
     },
-    async provisionPhoneNumber(): Promise<ProvisionPhoneNumberResult> {
+    async provisionPhoneNumber(o: {
+      voiceCapable: true;
+      areaCode?: string;
+      postalCode?: string;
+    }): Promise<ProvisionPhoneNumberResult> {
+      provisionCalls.push({
+        ...(o.areaCode !== undefined && { areaCode: o.areaCode }),
+        ...(o.postalCode !== undefined && { postalCode: o.postalCode }),
+      });
+      if (opts.unavailableWhen?.(o) === true) {
+        throw new NumberUnavailableError('scripted: none available for this hint');
+      }
       provisions += 1;
       const seq = String(provisions).padStart(4, '0');
       return {
@@ -821,5 +853,83 @@ describe('poolNumbersService.clearConnectingEarmarks (finding 4 - reclaim on ope
     await svc.clearConnectingEarmarks('conv-none');
 
     expect(await repo.countFreshSpares()).toBe(1); // untouched
+  });
+});
+
+describe('warmOneNumber - geographic hint ladder (area-code preference)', () => {
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  const cfgWith = (codes: string[]) => ({ ...consoleConfig(), relayPreferredAreaCodes: codes });
+
+  it('no postalCode: tries preferred area codes in order, buys on the first hit', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter({
+      unavailableWhen: (o) => o.areaCode === '404', // first code sold out
+    });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
+    });
+
+    await svc.warmOneNumber();
+    expect(adapter.provisionCalls).toEqual([{ areaCode: '404' }, { areaCode: '470' }]);
+    expect(adapter.provisions).toBe(1); // exactly one purchase
+  });
+
+  it('postalCode given: ZIP hint is tried FIRST, before any area code', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter();
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404']),
+    });
+
+    await svc.warmOneNumber('conv-1', '30309');
+    expect(adapter.provisionCalls).toEqual([{ postalCode: '30309' }]);
+  });
+
+  it('all hints sold out: falls through to the bare search (no hint keys at all)', async () => {
+    const repo = makeFakeRepo();
+    const adapter = makeFakeAdapter({
+      unavailableWhen: (o) => o.postalCode !== undefined || o.areaCode !== undefined,
+    });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
+    });
+
+    await svc.warmOneNumber('conv-1', '30309');
+    expect(adapter.provisionCalls).toEqual([
+      { postalCode: '30309' }, { areaCode: '404' }, { areaCode: '470' }, {},
+    ]);
+    expect(adapter.provisions).toBe(1);
+  });
+
+  it('bare search ALSO unavailable: the final NumberUnavailableError propagates (still a loud failure)', async () => {
+    const adapter = makeFakeAdapter({ unavailableWhen: () => true });
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: makeFakeRepo(), conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404']),
+    });
+    await expect(svc.warmOneNumber()).rejects.toBeInstanceOf(NumberUnavailableError);
+  });
+
+  it('a NON-availability error aborts the ladder immediately - later hints are NEVER tried (no buy-and-leak)', async () => {
+    const adapter = makeFakeAdapter();
+    const boom = new Error('twilio 401: auth failure');
+    adapter.provisionPhoneNumber = async () => {
+      throw boom;
+    };
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: makeFakeRepo(), conversationsRepo: makeFakeConversations(), logger, config: cfgWith(['404', '470']),
+    });
+    await expect(svc.warmOneNumber()).rejects.toBe(boom);
+  });
+
+  it('empty preferred list + no postalCode: exactly one bare search (today behavior)', async () => {
+    const adapter = makeFakeAdapter();
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: makeFakeRepo(), conversationsRepo: makeFakeConversations(), logger, config: cfgWith([]),
+    });
+    await svc.warmOneNumber();
+    expect(adapter.provisionCalls).toEqual([{}]);
   });
 });

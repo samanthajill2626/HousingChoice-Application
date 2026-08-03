@@ -18,6 +18,7 @@ import {
   configureJobsLogger,
   configureOutboundQueue,
   configureScheduler,
+  defineJobHandler,
   dispatchJob,
 } from '../src/jobs/jobs.js';
 import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
@@ -25,6 +26,7 @@ import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
 import {
   RelayProvisioningDisabledError,
+  RELAY_WARM_JOB,
   type PoolNumbersService,
 } from '../src/services/poolNumbers.js';
 import { VoiceCapabilityError } from '../src/adapters/messaging.js';
@@ -1503,6 +1505,9 @@ function makeVoiceCapabilityFailingPool(): PoolNumbersService {
 
 describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)', () => {
   let world: FakeWorld;
+  // Kept on a handle so a test can settle the deferred in-process dispatches
+  // before asserting on what a job handler captured.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -1517,7 +1522,8 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
       contactsRepo: world.contactsRepo,
       logger,
     });
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
   });
 
   afterEach(() => {
@@ -1701,6 +1707,8 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
       unitId: 'unit-abc',
       landlordId: 'll-relay-1',
       status: 'available',
+      // ZIP+4 so the relay buy hint exercises the 5-digit truncation.
+      address: { line1: '123 Main St', city: 'Atlanta', state: 'GA', zip: '30309-1234' },
       created_at: '2026-07-01T00:00:00.000Z',
       updated_at: '2026-07-01T00:00:00.000Z',
     });
@@ -1938,6 +1946,34 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     // No conversation created; tour groupThreadId NOT stamped.
     expect([...world.conversations.values()]).toHaveLength(0);
     expect(world.toursMap.get(tourId)?.groupThreadId).toBeUndefined();
+  });
+
+  it('tier-3 relay creation threads the unit ZIP (5 digits) into the warm-job payload', async () => {
+    // A pool service with NO number available now -> tier-3 connect-when-ready,
+    // the only path that enqueues relay.warmNumber (and so carries the hint).
+    const pool: PoolNumbersService = {
+      ...makeFakePoolNumbers(),
+      async provisionForGroup() {
+        return { kind: 'needs_connecting' };
+      },
+    };
+    const captured: Record<string, unknown>[] = [];
+    defineJobHandler(RELAY_WARM_JOB, (payload) => {
+      captured.push(payload as Record<string, unknown>);
+    });
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(201);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ postalCode: '30309' }); // ZIP+4 truncated to 5
   });
 });
 

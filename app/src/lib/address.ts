@@ -93,3 +93,15 @@ export function formatAddress(a: Address | string | undefined): string {
     .join(', ');
   return [street, cityState].filter((s) => s.length > 0).join(', ');
 }
+
+/**
+ * Leading 5-digit ZIP of a structured address, for geographic search hints
+ * (relay pool-number buys). ZIP+4 truncates to the first 5; a legacy plain-
+ * string address, missing/blank zip, or a zip not STARTING with 5 digits all
+ * return undefined (the caller simply omits the hint - never an error).
+ */
+export function zipFive(a: Address | string | undefined): string | undefined {
+  if (a === undefined || typeof a === 'string') return undefined;
+  const match = a.zip?.trim().match(/^(\d{5})/);
+  return match?.[1];
+}

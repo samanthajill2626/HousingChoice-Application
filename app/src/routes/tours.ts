@@ -81,6 +81,7 @@ import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /**
@@ -815,6 +816,14 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       }
     }
 
+    // Property-ZIP hint for a potential tier-3 buy (area-code preference).
+    // Best-effort: a missing unit/address just means no hint - never a 4xx
+    // (the roster resolution above already produced its own errors if the
+    // unit truly matters). The auto-resolve path fetched the unit internally
+    // but does not expose it, and the explicit-members path never loads it.
+    const unitForZip = await units.getById(tour.unitId);
+    const postalCode = zipFive(unitForZip?.address);
+
     // Atomically claim the group-thread slot BEFORE buying anything: the
     // read-guard above is check-then-act, so two overlapping POSTs could both
     // pass it, buy two pool numbers, and orphan the first thread. The claim's
@@ -849,6 +858,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
           members,
           owner: { type: 'tour', id: tourId },
           ...(actor !== undefined && { actor }),
+          ...(postalCode !== undefined && { postalCode }),
         },
       );
     } catch (err) {

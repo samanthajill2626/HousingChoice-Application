@@ -24,6 +24,7 @@
 // LOG LINES are placementId/stage/counts only — never the placement_tag (a name).
 import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
+import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { appEvents, toPlacementUpdatedEvent, type EventBus } from '../lib/events.js';
@@ -993,12 +994,16 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       typeof item.placement_tag === 'string' && item.placement_tag.length > 0
         ? item.placement_tag
         : undefined;
+    // Property-ZIP hint for a potential tier-3 buy (area-code preference): the
+    // unit is already loaded above, so this costs nothing. Best-effort - a
+    // missing/unparseable zip just means no hint (Atlanta-default ladder).
+    const postalCode = zipFive(unit.address);
 
     let conversation;
     try {
       conversation = await provisionRelayGroup(
         { conversationsRepo: conversations, poolNumbersService: poolNumbers, auditRepo: audit, events, logger: log },
-        { members, placementId, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }) },
+        { members, placementId, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }), ...(postalCode !== undefined && { postalCode }) },
       );
     } catch (err) {
       // Kill-switch (M1.7): live provisioning is off pre-A2P — no number bought.

@@ -10,7 +10,7 @@ import styles from './Card.module.css';
 
 export interface CardProps {
   title: string;
-  /** Right-aligned slot: an Edit affordance or a count chip. */
+  /** Right-aligned slot: an Edit/add affordance or a short qualifier (never a bare count). */
   aside?: React.ReactNode;
   children: React.ReactNode;
 }

@@ -238,14 +238,12 @@ export function TenantFile({
       </Card>
 
       <Card
-        title={listingsSent.length > 0 ? `Properties sent (${listingsSent.length})` : 'Properties sent'}
+        title="Properties sent"
         aside={
           onSendProperty ? (
             <CardAction onClick={onSendProperty} label="Send a property to this tenant">
               + Send
             </CardAction>
-          ) : listingsSent.length > 0 ? (
-            String(listingsSent.length)
           ) : undefined
         }
       >

@@ -702,7 +702,7 @@ function PlacementActionsMenu({
 function HistoryPanel({ placementId }: { placementId: string }): React.JSX.Element {
   const { status, rows, hasMore, loadingMore, loadMore } = usePlacementHistory(placementId);
   return (
-    <Card title="History" aside={rows.length > 0 ? String(rows.length) : undefined}>
+    <Card title="History">
       {status === 'loading' ? (
         <Spinner center />
       ) : status === 'error' ? (

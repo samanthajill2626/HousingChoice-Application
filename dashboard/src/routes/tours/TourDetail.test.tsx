@@ -719,6 +719,8 @@ describe('TourDetail - right column cards', () => {
     const list = screen.getByRole('list', { name: 'Tour activity' });
     expect(within(list).getAllByText('Tour scheduled').length).toBe(20);
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+    // The heading is the bare title — count asides were removed 2026-08-03.
+    expect(screen.getByRole('heading', { name: 'Activity' })).toBeInTheDocument();
   });
 });
 

@@ -121,8 +121,10 @@ describe('Today', () => {
     renderToday();
 
     // Group headings present for non-empty groups; absent groups are skipped.
-    expect(screen.getByRole('heading', { name: /Needs you now/i })).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: /Unreplied/i })).toBeInTheDocument();
+    // String names are EXACT matches: the headings are bare labels — the count
+    // chips were removed 2026-08-03 ("Needs you now" has 2 rows here).
+    expect(screen.getByRole('heading', { name: 'Needs you now' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Unreplied' })).toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Tours today/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('heading', { name: /Follow-ups/i })).not.toBeInTheDocument();
 
@@ -145,7 +147,7 @@ describe('Today', () => {
     );
   });
 
-  it('renders the AI suggestions group with its label and count', () => {
+  it('renders the AI suggestions group with its label', () => {
     state = {
       status: 'ready',
       source: 'server',
@@ -191,8 +193,9 @@ describe('Today - relay close-nag card (D5)', () => {
       dismissNag: vi.fn(),
     };
     renderToday();
-    // Its own section (not "all caught up", even though items is empty).
-    expect(screen.getByRole('heading', { name: /Group texts to close/i })).toBeInTheDocument();
+    // Its own section (not "all caught up", even though items is empty). Exact
+    // string name: the heading is a bare label (no count chip).
+    expect(screen.getByRole('heading', { name: 'Group texts to close' })).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
     // Pool number is display DATA (formatted), plus the close-it copy with members.
     expect(screen.getByText('(555) 019-0001')).toBeInTheDocument();

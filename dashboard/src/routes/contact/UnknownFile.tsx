@@ -153,7 +153,7 @@ export function UnknownFile({
         )}
       </Card>
 
-      <Card title="Placements" aside={myPlacements.length > 0 ? String(myPlacements.length) : undefined}>
+      <Card title="Placements">
         {myPlacements.length === 0 ? (
           <EmptyRow>No placements yet.</EmptyRow>
         ) : (

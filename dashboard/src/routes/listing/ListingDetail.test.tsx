@@ -933,6 +933,84 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('button', { name: 'Start placement' })).not.toBeInTheDocument();
   });
 
+  it('Tours card has a "+ Tour" action that opens Schedule-a-tour pre-committed to this property', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
+    });
+    // ScheduleTourForm's mount fetches: tenant candidates + the unit roster (the
+    // roster must contain THIS unit for the pre-commit to take).
+    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+    getUnits.mockResolvedValue({
+      units: [{ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } }],
+      nextCursor: null,
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Schedule a tour on this property' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Schedule a tour' });
+    // Unit side pre-committed like a hand pick (read-only + Clear); tenant side
+    // stays a free typeahead.
+    const unitBox = within(dialog).getByRole('combobox', { name: 'Unit' });
+    await waitFor(() => expect(unitBox).toHaveValue('1450 Joseph Blvd NW'));
+    expect(unitBox).toHaveAttribute('readonly');
+    expect(within(dialog).getByRole('button', { name: 'Clear Unit' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('combobox', { name: 'Tenant' })).toBeInTheDocument();
+  });
+
+  it('Placements card has a "+ Placement" action that opens the create dialog locked to this unit', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, address: { line1: '1450 Joseph Blvd NW' } },
+    });
+    getUnits.mockResolvedValue({ units: [], nextCursor: null });
+    getUnit.mockResolvedValue({ unitId: 'u1', landlordId: 'll1', status: 'available', address: { line1: '1450 Joseph Blvd NW' } });
+    getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+    getPlacementsBy.mockResolvedValue([]);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Start a placement on this property' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'New placement' });
+    expect(within(dialog).queryByRole('combobox', { name: 'Unit' })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(dialog).getByLabelText('Unit')).toHaveTextContent('1450 Joseph Blvd NW'),
+    );
+  });
+
+  it('hides the "+ Tour" and "+ Placement" card actions for a deleted property', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit!, deleted_at: '2026-06-19T00:00:00.000Z' },
+    });
+    renderAt();
+    expect(screen.queryByRole('button', { name: 'Schedule a tour on this property' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Start a placement on this property' })).not.toBeInTheDocument();
+  });
+
+  it('the Tours + Placements card headers hold the action, not a count', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      tours: {
+        status: 'ready',
+        rows: [
+          { tourId: 'tour-1', tenantId: 't1', unitId: 'u1', status: 'requested' },
+          { tourId: 'tour-2', tenantId: 't1', unitId: 'u1', status: 'toured', scheduledAt: '2026-07-05T15:00:00.000Z' },
+        ],
+      },
+    });
+    renderAt();
+    expect(screen.getByRole('heading', { name: /Tours on this property/ })).toHaveTextContent(
+      /^Tours on this property\+ Tour$/,
+    );
+    expect(screen.getByRole('heading', { name: /Placements on this property/ })).toHaveTextContent(
+      /^Placements on this property\+ Placement$/,
+    );
+  });
+
   it('a deleted property shows a display-only status badge — no live status pill', () => {
     useListing.mockReturnValue({
       ...READY,

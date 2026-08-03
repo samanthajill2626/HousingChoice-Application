@@ -180,7 +180,7 @@ describe('TenantFile', () => {
     expect(onSendProperty).toHaveBeenCalled();
   });
 
-  it('Properties sent keeps its count visible next to the action', () => {
+  it('Properties sent title carries no count, even with rows and the action present', () => {
     const send = (unitId: string): ListingSendRow => ({
       unitId,
       contactId: 'T1',
@@ -192,9 +192,24 @@ describe('TenantFile', () => {
       onSendProperty: vi.fn(),
       listingsSent: [send('u1'), send('u2')],
     });
-    // The count lives in the title text itself (not the aside, which is the "+ Send"
-    // action here), so it stays visible even though the aside is now interactive.
-    expect(screen.getByRole('heading', { name: /^Properties sent \(2\)/ })).toBeInTheDocument();
+    // Bare title + the "+ Send" action only — count titles/asides were removed
+    // 2026-08-03.
+    expect(screen.getByRole('heading', { name: /Properties sent/ })).toHaveTextContent(
+      /^Properties sent\+ Send$/,
+    );
+  });
+
+  it('Properties sent shows no count aside when the send action is absent', () => {
+    const send = (unitId: string): ListingSendRow => ({
+      unitId,
+      contactId: 'T1',
+      via: 'broadcast',
+      sentAt: '2026-07-01T12:00:00.000Z',
+    });
+    renderIt({ listingsSentPending: false, listingsSent: [send('u1'), send('u2')] });
+    expect(screen.getByRole('heading', { name: /Properties sent/ })).toHaveTextContent(
+      /^Properties sent$/,
+    );
   });
 
   it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {
@@ -346,6 +361,10 @@ describe('LandlordFile', () => {
     const tourDetailLink = allLinks.find((a) => a.getAttribute('href') === '/tours/tour-L1');
     expect(tourDetailLink).toBeDefined();
     expect(screen.getByText('Scheduled')).toBeInTheDocument();
+    // Headings are bare titles — count asides were removed 2026-08-03 (renderIt
+    // always passes one placement, so both cards would otherwise show a chip).
+    expect(screen.getByRole('heading', { name: 'Tours on their properties' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Placements on their units' })).toBeInTheDocument();
   });
 
   it('renders a timeless (requested) tour row as "Not booked" — never "Invalid Date"', () => {

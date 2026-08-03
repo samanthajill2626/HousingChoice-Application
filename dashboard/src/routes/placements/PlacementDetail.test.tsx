@@ -315,6 +315,8 @@ describe('PlacementDetail', () => {
 
     // Stages are LABELED via STAGE_LABELS, not shown as raw snake_case.
     await waitFor(() => expect(screen.getByText(/Collect RTA → Review RTA/)).toBeInTheDocument());
+    // The heading is the bare title — count asides were removed 2026-08-03.
+    expect(screen.getByRole('heading', { name: 'History' })).toBeInTheDocument();
     const loadMore = screen.getByRole('button', { name: 'Load more' });
     const user = userEvent.setup();
     await user.click(loadMore);

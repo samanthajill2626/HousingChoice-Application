@@ -153,6 +153,7 @@ const EMAIL_REFUSAL_STATUS: Record<EmailSendRefusedError['code'], number> = {
   conversation_contact_mismatch: 409,
   email_sending_disabled: 409,
   email_suppressed: 409,
+  contact_deleted: 409,
   email_attachments_too_large: 409,
   contact_email_missing: 409,
   invalid_cc: 400,

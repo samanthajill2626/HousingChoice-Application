@@ -184,10 +184,7 @@ export function Today(): React.JSX.Element {
 
       {status === 'ready' && hasNags ? (
         <section className={styles.group}>
-          <h2 className={styles.groupHeading}>
-            Group texts to close
-            <span className={styles.count}>{relayCloseNags.length}</span>
-          </h2>
+          <h2 className={styles.groupHeading}>Group texts to close</h2>
           <ul className={styles.rows} aria-label="Group texts to close">
             {relayCloseNags.map((nag) => (
               <RelayCloseNagRow
@@ -206,10 +203,7 @@ export function Today(): React.JSX.Element {
             if (rows.length === 0) return null;
             return (
               <section key={group} className={styles.group}>
-                <h2 className={styles.groupHeading}>
-                  {label}
-                  <span className={styles.count}>{rows.length}</span>
-                </h2>
+                <h2 className={styles.groupHeading}>{label}</h2>
                 <ul className={styles.rows} aria-label={label}>
                   {rows.map((item) => (
                     <Row key={`${item.refType}:${item.refId}`} item={item} />

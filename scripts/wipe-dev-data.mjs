@@ -589,6 +589,19 @@ async function main() {
           `(${SEED_USERS.map((u) => u.email).join(', ')}) so login works (activates on first Google sign-in).\n`
       : `\nDRY RUN only — nothing was changed. Re-run with --yes to execute.\n`,
   );
+  // Purchased Twilio relay numbers survive the wipe with no DB record — until
+  // they are re-imported, inbound relay SMS on them won't route and the next
+  // relay group buys ANOTHER number. Always worth a look after a wipe.
+  process.stdout.write(
+    execute
+      ? `\nNext: the wipe does NOT touch Twilio — any purchased relay numbers now have no\n` +
+          `pool_numbers record (unroutable; a new relay group would buy another number).\n` +
+          `Review and restore them with:\n` +
+          `  npm run pool:audit -- ${ENV}              (read-only report)\n` +
+          `  npm run pool:audit -- ${ENV} --reimport   (re-create the missing rows)\n`
+      : `\nNote: a real wipe leaves purchased Twilio relay numbers with no pool_numbers\n` +
+          `record — review/restore afterwards with: npm run pool:audit -- ${ENV} [--reimport]\n`,
+  );
 }
 
 main().catch((err) => {

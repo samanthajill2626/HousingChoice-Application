@@ -7,13 +7,15 @@
 //   npm run wipe:dev -- --help    usage.
 //
 // What it WIPES (in the pinned HousingChoice dev account, hc-dev-*):
-//   - DynamoDB: every ITEM in the 14 app tables (the tables themselves stay —
-//     they are Terraform-managed with deletion_protection on; we only clear rows).
-//   - S3: every OBJECT **and version + delete-marker** in the media bucket
-//     (the bucket is versioned; the bucket itself stays).
-//   - SQS: the jobs queue + its DLQ are PURGED.
-//   - CloudWatch Logs: the log STREAMS in the app/worker groups are deleted
-//     (the log GROUPS stay — they are Terraform-managed).
+//   - DynamoDB: every ITEM in every app table — the set comes from the
+//     generated infra/envs/dev/tables.auto.tfvars.json, so a newly added table
+//     can never be silently missed (the tables themselves stay — they are
+//     Terraform-managed with deletion_protection on; we only clear rows).
+//   - S3: every OBJECT **and version + delete-marker** in the media bucket AND
+//     the inbound-mail raw-MIME bucket (both versioned; the buckets stay).
+//   - SQS: the jobs queue + DLQ and the inbound-mail queue + DLQ are PURGED.
+//   - CloudWatch Logs: the log STREAMS in the app/worker/system groups are
+//     deleted (the log GROUPS stay — they are Terraform-managed).
 //
 // After the wipe (and ONLY then), it RE-INVITES the operators
 // (cameron@abt-industries.com and sam@housingchoice.org, both admin) so login
@@ -40,6 +42,7 @@
 
 import { parseArgs } from 'node:util';
 import { randomUUID } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 
 import {
   DynamoDBClient,
@@ -77,28 +80,27 @@ import {
 const ENV = 'dev';
 const TABLE_PREFIX = `hc-${ENV}-`;
 
-// The 14 application tables (base names) — keep in sync with
-// app/src/lib/tables.ts. We target THIS explicit set (never "all hc-dev-*") so
-// the wipe can never touch a Terraform state/lock table or any non-app table.
-const APP_TABLE_BASENAMES = [
-  'contacts',
-  'units',
-  'conversations',
-  'messages',
-  'matches',
-  'placements',
-  'invoices',
-  'users',
-  'audit_events',
-  'settings',
-  'pool_numbers',
-  'broadcasts',
-  'activity_events',
-  'listing_sends',
-];
+// The application tables (base names) — read from the GENERATED Terraform
+// tfvars for this env, which `npm run gen:tables` derives from
+// app/src/lib/tables.ts and `npm run plan`/`drift` keep honest. Deriving the
+// set (instead of hand-listing it) means a newly added table can never be
+// silently missed by the wipe (this bit us: the list was 14 while tables.ts
+// had grown to 20). Still an EXPLICIT known set (never "all hc-dev-*"), so a
+// TF state/lock table or any non-app table can't be caught in the blast radius.
+const APP_TABLE_BASENAMES = Object.keys(
+  JSON.parse(
+    readFileSync(new URL(`../infra/envs/${ENV}/tables.auto.tfvars.json`, import.meta.url), 'utf8'),
+  ).tables,
+).sort();
 
-const QUEUE_NAMES = [`hc-${ENV}-jobs`, `hc-${ENV}-jobs-dlq`];
-const LOG_GROUPS = [`/hc/${ENV}/app`, `/hc/${ENV}/worker`];
+const QUEUE_NAMES = [
+  `hc-${ENV}-jobs`,
+  `hc-${ENV}-jobs-dlq`,
+  `hc-${ENV}-inbound-mail`,
+  `hc-${ENV}-inbound-mail-dlq`,
+];
+// app + worker (pino) and the host system log (rsyslog via the CW agent).
+const LOG_GROUPS = [`/hc/${ENV}/app`, `/hc/${ENV}/worker`, `/hc/${ENV}/system`];
 
 // After a wipe empties the users table, re-invite the operators so they can log
 // back in (auth is invite-gated — a Google login is refused without an existing
@@ -345,7 +347,10 @@ async function main() {
   const creds = hcCredentials();
   const cfg = { region: HC_REGION, credentials: creds };
 
-  const bucket = `hc-${ENV}-media-${accountId}`; // infra/modules/s3_media: hc-{env}-media-{accountId}
+  const buckets = [
+    `hc-${ENV}-media-${accountId}`, // infra/modules/s3_media: hc-{env}-media-{accountId}
+    `hc-${ENV}-inbound-mail-${accountId}`, // infra/modules/inbound_mail: SES raw-MIME bucket
+  ];
 
   process.stdout.write(
     `\nwipe-dev-data — ${mode}\n` +
@@ -372,9 +377,11 @@ async function main() {
   process.stdout.write(`  = ${ddbTotal} item(s) across ${APP_TABLE_BASENAMES.length} tables\n`);
 
   // S3
-  process.stdout.write('\nS3 media bucket (objects + versions + delete-markers):\n');
-  const s3r = await wipeBucket(s3, bucket, execute);
-  process.stdout.write(line(bucket, s3r) + '\n');
+  process.stdout.write('\nS3 buckets (objects + versions + delete-markers):\n');
+  for (const bucket of buckets) {
+    const s3r = await wipeBucket(s3, bucket, execute);
+    process.stdout.write(line(bucket, s3r) + '\n');
+  }
 
   // SQS
   process.stdout.write('\nSQS queues (purge):\n');

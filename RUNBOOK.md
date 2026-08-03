@@ -222,9 +222,12 @@ npm run wipe:dev            # DRY RUN (default): lists exactly what WOULD be del
 npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
 ```
 
-- **Wipes:** every item in the 14 `hc-dev-*` DynamoDB tables; every object + version +
-  delete-marker in the `hc-dev-media-<account>` S3 bucket; the `hc-dev-jobs` queue + its
-  DLQ (purge); and the log STREAMS in `/hc/dev/app` + `/hc/dev/worker`.
+- **Wipes:** every item in every `hc-dev-*` app DynamoDB table (the set is read from the
+  generated `infra/envs/dev/tables.auto.tfvars.json`, so new tables are picked up
+  automatically); every object + version + delete-marker in the `hc-dev-media-<account>`
+  AND `hc-dev-inbound-mail-<account>` S3 buckets; the `hc-dev-jobs` and
+  `hc-dev-inbound-mail` queues + their DLQs (purge); and the log STREAMS in
+  `/hc/dev/app` + `/hc/dev/worker` + `/hc/dev/system`.
 - **Never touches:** SSM Parameter Store (`/hc/dev/app/*` — all Twilio/Google/VAPID/session
   secrets **and** the Terraform-managed config), and every Terraform-managed resource
   *definition* (the tables, bucket, queues, log groups themselves stay). It deletes
@@ -237,8 +240,9 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes
   first Google sign-in). Invite anyone else with `npm run user:invite`.
 - **Guards:** hard-pinned to `dev` (no prod path); runs `assertHousingChoiceAccount()` first
   (named `housingchoice` profile must resolve to the pinned account, else it refuses); only
-  the 14 known app tables are targeted (never "all `hc-dev-*`", so the TF state/lock can't be
-  caught); missing resources are skipped, not fatal. Always do a dry run first.
+  the known app tables from the generated tfvars are targeted (never "all `hc-dev-*`", so the
+  TF state/lock can't be caught); missing resources are skipped, not fatal. Always do a dry
+  run first.
 - Tables keep `deletion_protection` (we clear rows, not tables), so a wipe needs no Terraform
   change and the next deploy is unaffected. Script: `scripts/wipe-dev-data.mjs`.
 

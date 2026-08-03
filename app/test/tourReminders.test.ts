@@ -34,6 +34,11 @@ import { armTourReminders, cancelTourReminders, runDueTourReminders } from '../s
 import { resolveMessage } from '../src/messages/index.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import {
+  failingSettingsRepo,
+  quietOffSettingsRepo,
+  stubSettingsRepo,
+} from './helpers/settingsStub.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -67,6 +72,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
   // In-memory fakeWorld for contacts/conversations/sendMessage adapter.
   const world = createFakeWorld();
+
+  // Quiet hours OFF for every test that is NOT about quiet hours: clamping is
+  // identity, so these suites keep their original dueAt fixtures (and never
+  // depend on where a fixture instant happens to fall in the 21:00-08:00
+  // window). The clamp/supersession cases below stub the window explicitly.
+  const quietOff = quietOffSettingsRepo();
 
   // Build a real sendMessageService wired to the fake adapter.
   const sendMessageService = createSendMessageService({
@@ -109,8 +120,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
   it('armTourReminders creates all 4 reminder rows with correct dueAts', async () => {
-    const now = '2026-07-13T10:00:00.000Z';
-    const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d
+    // Quiet hours ON (the product default: 21:00-08:00 America/New_York, EST =
+    // UTC-5 in January). Every rung below lands in daylight, so the clamp is
+    // identity - EXCEPT morning_of, which is now 08:00 ORG-LOCAL on the tour's
+    // local day (it used to be 08:00 UTC = 3am ET, the motivating bug).
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T20:00:00.000Z'; // Jan 20 15:00 EST
 
     const tour = await tours.create({
       tenantId: 'contact-arm-1',
@@ -119,27 +134,28 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
 
     // All 4 armed kinds: confirmation, day_before, morning_of, en_route
     // (no_show_checkin is manual-send only). All dueAts are future relative to now.
     expect(rows).toHaveLength(4);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // confirmation: dueAt = now
+    // confirmation: dueAt = now (10:00 EST - outside the window, unclamped)
     expect(byKind['confirmation']!.dueAt).toBe(now);
 
-    // day_before: scheduledAt - 24h = '2026-07-14T10:00:00.000Z'
-    expect(byKind['day_before']!.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    // day_before: scheduledAt - 24h = Jan 19 15:00 EST (daytime, unclamped)
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-19T20:00:00.000Z');
 
-    // morning_of: date of scheduledAt at 08:00 UTC = '2026-07-15T08:00:00.000Z'
-    expect(byKind['morning_of']!.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // morning_of: 08:00 ORG-LOCAL on the tour's local date = Jan 20 08:00 EST
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
 
-    // en_route: scheduledAt - 2h = '2026-07-15T08:00:00.000Z'
-    // Wait — en_route = scheduledAt - 2h = 2026-07-15T08:00:00.000Z — same as morning_of?
-    // Let's check: 10:00 - 2h = 08:00. morning_of is also 08:00. That's a coincidence
-    // of the test case. Let's just check the actual computed value.
-    expect(byKind['en_route']!.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // en_route: scheduledAt - 2h = Jan 20 13:00 EST (daytime, unclamped)
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T18:00:00.000Z');
 
     // no_show_checkin is manual-send only, so it is NOT auto-armed (absent here).
     expect(byKind['no_show_checkin']).toBeUndefined();
@@ -163,7 +179,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   it('does not auto-arm the no_show_checkin rung (manual send only)', async () => {
     const now = '2026-07-13T10:00:00.000Z';
-    const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d, full future ladder
+    // T+2d, full future ladder. The tour is at 14:00 EDT (not 06:00 EDT as it
+    // once was): a tour that early would have its 08:00-local morning_of land
+    // AFTER the tour start, which the past-event rule now legitimately drops -
+    // this case is about the no_show_checkin guard, not about that rule.
+    const scheduledAt = '2026-07-15T18:00:00.000Z';
 
     const tour = await tours.create({
       tenantId: 'contact-noarm-1',
@@ -172,11 +192,243 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
     const kinds = rows.map((r) => r.kind);
 
     expect(kinds).not.toContain('no_show_checkin');
     expect(kinds).toHaveLength(4);
+  });
+
+  // ===========================================================================
+  // Arm-time quiet-hours clamping + supersession (quiet-hours spec section 5).
+  // Every case pins CONCRETE instants against the default window
+  // (21:00-08:00 America/New_York; January = EST = UTC-5), so nothing here
+  // depends on the wall clock or on the machine's timezone.
+  //
+  // Skip rules under test:
+  //   (a) past-dueAt        - pre-existing: a clamped dueAt still < now
+  //   (b) past-event        - a clamp landing at/after the tour start
+  //   (c) same-slot         - an earlier rung clamped onto a later rung's slot
+  //   (d) stale day_before  - "tour is tomorrow" landing on the tour's local day
+  // ===========================================================================
+
+  // ---------------------------------------------------------------------------
+  // Test 1c - (c) a clamped day_before loses its slot to morning_of
+  // ---------------------------------------------------------------------------
+  it('a day_before clamped onto the morning_of slot is superseded (no day_before row)', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - a 10pm tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-supersede-1',
+      unitId: 'unit-arm-supersede-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // day_before raw = Jan 19 22:00 EST (inside the window) -> clamps to Jan 20
+    // 08:00 EST, which IS the morning_of slot (the tour's LOCAL date is Jan 20).
+    // The later rung's copy is the current one, so day_before is never written.
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+
+    // The rest of the ladder is untouched by the collision.
+    expect(byKind['confirmation']!.dueAt).toBe(now);
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T01:00:00.000Z'); // Jan 20 20:00 EST
+    expect(rows).toHaveLength(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1d - (c) an en_route clamped onto the morning_of slot wins it
+  // ---------------------------------------------------------------------------
+  it('an en_route clamped onto the morning_of slot supersedes morning_of', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T13:30:00.000Z'; // Jan 20 08:30 EST - an early tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-supersede-2',
+      unitId: 'unit-arm-supersede-2',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // en_route raw = Jan 20 06:30 EST (inside the window) -> clamps to 08:00 EST
+    // = the morning_of slot. en_route is the LATER rung, so it survives.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    expect(byKind['morning_of']).toBeUndefined();
+
+    // day_before raw = Jan 19 08:30 EST - outside the window, so no clamp, and
+    // it is already past `now`: dropped by the pre-existing past-dueAt rule.
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['confirmation']!.dueAt).toBe(now);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1e - the confirmation rung clamps out of evening quiet hours
+  // ---------------------------------------------------------------------------
+  it('a confirmation armed inside quiet hours is clamped to quiet-end, not sent at `now`', async () => {
+    const now = '2026-01-19T03:00:00.000Z'; // Jan 18 22:00 EST - staff scheduling late
+    const scheduledAt = '2026-01-25T20:00:00.000Z'; // Jan 25 15:00 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-lateclamp-1',
+      unitId: 'unit-arm-lateclamp-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // 22:00 EST is the evening side of the wrapping window: the window ends at
+    // 08:00 EST the NEXT local morning.
+    expect(byKind['confirmation']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
+    expect(byKind['confirmation']!.dueAt).not.toBe(now);
+    expect(rows).toHaveLength(4);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1f - (b) rungs whose clamp lands at/past the tour start are skipped
+  // ---------------------------------------------------------------------------
+  it('rungs clamped at or past the tour start are skipped (early-morning tour)', async () => {
+    // `now` is TWO days out (not one) so day_before's CLAMPED dueAt is still in
+    // the future: with a Jan 19 arm time the clamped Jan 19 13:00Z is already
+    // past and the pre-existing past-dueAt rule drops it before supersession is
+    // ever consulted - that interaction is pinned by Test 1g instead.
+    const now = '2026-01-18T15:00:00.000Z'; // Jan 18 10:00 EST
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-pastevent-1',
+      unitId: 'unit-arm-pastevent-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // morning_of (Jan 20 08:00 EST) is at/after the 07:30 EST start -> skipped.
+    // en_route raw = Jan 20 05:30 EST (quiet) -> clamps to 08:00 EST, also
+    // at/after the start -> skipped.
+    expect(byKind['morning_of']).toBeUndefined();
+    expect(byKind['en_route']).toBeUndefined();
+
+    // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST.
+    // Its LOCAL date (Jan 19) is not the tour's local date (Jan 20), so the
+    // "tour is tomorrow" copy is still true -> armed.
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
+    expect(rows.map((r) => r.kind).sort()).toEqual(['confirmation', 'day_before']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1g - (a) a clamp that still lands before `now` is dropped
+  // ---------------------------------------------------------------------------
+  it('a rung whose clamped dueAt is still in the past is skipped (past-dueAt rule)', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-pastdue-1',
+      unitId: 'unit-arm-pastdue-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+
+    // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST,
+    // which is STILL before `now` (10:00 EST) -> past-dueAt. Both same-day rungs
+    // clamp at/past the 07:30 start -> past-event. Only confirmation survives.
+    expect(rows.map((r) => r.kind)).toEqual(['confirmation']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1h - quiet hours OFF: no clamping, but morning_of stays org-local
+  // ---------------------------------------------------------------------------
+  it('with quiet hours disabled nothing is clamped, and morning_of is still 08:00 org-local', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - Test 1c's tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-quietoff-1',
+      unitId: 'unit-arm-quietoff-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // The same tour that lost its day_before in Test 1c keeps all 4 rungs: with
+    // the window disabled the 22:00 EST day_before stays at 22:00 EST.
+    expect(rows).toHaveLength(4);
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-20T03:00:00.000Z');
+    // morning_of is 08:00 ORG-LOCAL regardless of the window's enabled flag -
+    // the timezone comes from the same settings row.
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1i - a settings-read failure falls back to the DEFAULT window
+  // ---------------------------------------------------------------------------
+  it('a settings read failure still clamps, using the default window', async () => {
+    const now = '2026-01-19T15:00:00.000Z';
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Test 1c's tour again
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-settingsfail-1',
+      unitId: 'unit-arm-settingsfail-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: failingSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // Identical to Test 1c: the failure falls back to DEFAULT_ORG_SETTINGS
+    // (enabled, 21:00-08:00, America/New_York) - never to "no quiet hours".
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    expect(rows).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -217,7 +469,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm reminders.
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Advance clock to just after day_before dueAt.
     // day_before = '2026-07-14T10:00:00.000Z'
@@ -279,7 +535,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
@@ -322,7 +582,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
@@ -356,8 +620,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   it('cancel + re-arm on reschedule produces new rows with updated dueAts', async () => {
     const now0 = '2026-07-13T11:00:00.000Z';
-    const origScheduledAt = '2026-07-15T11:00:00.000Z';
-    const newScheduledAt = '2026-07-20T14:00:00.000Z'; // rescheduled to T+7d
+    // Both tours sit at 15:00 / 14:00 EDT (they used to be 07:00 / 10:00 EDT):
+    // an early-morning tour drops rungs for reasons this case is not about -
+    // morning_of lands after a 07:00 start (past-event), and a 10:00 start puts
+    // en_route exactly on the 08:00-local morning_of slot (supersession).
+    const origScheduledAt = '2026-07-15T19:00:00.000Z';
+    const newScheduledAt = '2026-07-20T18:00:00.000Z'; // rescheduled to T+7d
 
     const tour = await tours.create({
       tenantId: 'contact-reschedule-1',
@@ -367,7 +635,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm original reminders.
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
     const origRows = await tourReminders.listByTour(tour.tourId);
     expect(origRows).toHaveLength(4);
 
@@ -380,7 +652,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // Patch the tour with the new scheduledAt.
     const patchedTour = await tours.patch(tour.tourId, { scheduledAt: newScheduledAt });
-    await armTourReminders(patchedTour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(patchedTour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // New rows should exist in addition to the canceled ones.
     const allRows = await tourReminders.listByTour(tour.tourId);
@@ -389,7 +665,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // New day_before should reflect the new scheduledAt: newScheduledAt - 24h.
     const dayBefore = newRows.find((r) => r.kind === 'day_before');
-    expect(dayBefore?.dueAt).toBe('2026-07-19T14:00:00.000Z');
+    expect(dayBefore?.dueAt).toBe('2026-07-19T18:00:00.000Z');
 
     // no_show_checkin is manual-send only now, so re-arm does NOT create it.
     const noShow = newRows.find((r) => r.kind === 'no_show_checkin');
@@ -410,7 +686,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Manually mark the confirmation row as sent (simulates one already fired).
     const rows = await tourReminders.listByTour(tour.tourId);
@@ -449,17 +729,23 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
 
-    const rows = await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const kinds = rows.map((r) => r.kind);
 
     // day_before = scheduledAt - 24h = '2026-07-12T14:00:00.000Z' < now0 → SKIPPED
     expect(kinds).not.toContain('day_before');
 
-    // confirmation = now0 → always armed
+    // confirmation = now0 - always armed (quiet hours are OFF for this case)
     expect(kinds).toContain('confirmation');
 
-    // morning_of = 08:00 UTC on 2026-07-13 = '2026-07-13T08:00:00.000Z' < now0 (09:00) → SKIPPED
+    // morning_of = 08:00 ORG-LOCAL on 2026-07-13 (EDT) = '2026-07-13T12:00:00.000Z',
+    // which is the SAME instant as en_route below -> the later rung wins and
+    // morning_of is superseded (it used to be skipped as a past 08:00 UTC row).
     expect(kinds).not.toContain('morning_of');
 
     // en_route = scheduledAt - 2h = '2026-07-13T12:00:00.000Z' > now0 → armed
@@ -483,7 +769,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Only the confirmation row has dueAt=now0 <= now0.
     const dueRows1 = await tourReminders.listDue(now0);
@@ -547,7 +837,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm the confirmation row only (now0 as arm time).
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const racingDeps = {
       tourRemindersRepo: tourReminders,
@@ -615,7 +909,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // List due rows (simulating what runDueTourReminders does internally) —
     // then cancel the tour BEFORE the claim fires.
@@ -826,7 +1124,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Only the confirmation rung is due at now0.
     await runDueTourReminders(now0, rig.deps);
@@ -883,7 +1185,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-group-bucket-1' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Counting bucket: every adapter send must be preceded by one acquire(1) —
     // the same combined A2P rate metering the relay fan-out/intro loops use.
@@ -929,7 +1235,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -967,7 +1277,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -995,7 +1309,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'landlord_led',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1022,7 +1340,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-does-not-exist' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1050,7 +1372,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     // Points at the tenant's own 1:1 thread — exists but is NOT a relay_group.
     await tours.patch(tour.tourId, { groupThreadId: 'conv-1to1-wt-1' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1089,7 +1415,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1136,7 +1466,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1177,7 +1511,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await Promise.all([
       runDueTourReminders(now0, rig.deps),
@@ -1221,7 +1559,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 

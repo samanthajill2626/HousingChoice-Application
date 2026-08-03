@@ -1,8 +1,11 @@
 // Tour reminder arm/cancel/poll (Tours feature, Task 4).
 //
 // armTourReminders — writes the ladder of reminder rows for a tour at the
-//   computed dueAt offsets relative to scheduledAt. Rows whose computed dueAt
-//   is already in the past (relative to `now`) are silently skipped.
+//   computed dueAt offsets relative to scheduledAt, each CLAMPED out of the
+//   org's quiet-hours window (spec 2026-08-03) so a stored dueAt is the real
+//   send time. Rows whose clamped dueAt is already in the past (relative to
+//   `now`), lands at/after the tour start, or collides with a later rung's
+//   slot are silently skipped.
 //
 // cancelTourReminders — marks all pending (unsent) rows as canceled.
 //
@@ -44,34 +47,87 @@ import {
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
 import { resolveMessage } from '../messages/index.js';
+import {
+  clampOutOfQuietHours,
+  instantAtLocalTime,
+  localDateOf,
+  quietHoursWindowOf,
+  resolveQuietHoursTimezone,
+  type QuietHoursWindow,
+} from '../lib/quietHours.js';
+import { DEFAULT_ORG_SETTINGS, type SettingsRepo } from '../repos/settingsRepo.js';
 
 // ---------------------------------------------------------------------------
 // armTourReminders
 // ---------------------------------------------------------------------------
 
 /**
- * Compute the dueAt for each reminder kind relative to scheduledAt.
- * Returns undefined when a kind has no meaningful dueAt (shouldn't happen,
- * but keeps the type safe).
+ * Compute the RAW dueAt for each reminder kind relative to scheduledAt (the
+ * caller clamps it out of quiet hours - see armTourReminders). The window is
+ * passed in because `morning_of` is anchored to the ORG's local day, not UTC.
  */
-function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): string {
+function computeDueAt(
+  kind: ReminderKind,
+  scheduledAt: string,
+  now: string,
+  window: QuietHoursWindow,
+): string {
   const scheduled = new Date(scheduledAt).getTime();
   switch (kind) {
     case 'confirmation':
-      return now; // immediate
+      return now; // immediate (clamped by the caller like every rung)
     case 'day_before':
       return new Date(scheduled - 24 * 60 * 60 * 1000).toISOString();
-    case 'morning_of': {
-      // 08:00 UTC on the day of the tour
-      const d = new Date(scheduledAt);
-      return new Date(
-        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 8, 0, 0, 0),
-      ).toISOString();
-    }
+    case 'morning_of':
+      // 08:00 ORG-LOCAL on the tour's local day (quiet-hours spec 2026-08-03).
+      // It used to be 08:00 UTC = 3-4am Eastern - the motivating 4am-text bug.
+      return instantAtLocalTime(
+        localDateOf(scheduledAt, window.timezone),
+        '08:00',
+        window.timezone,
+      );
     case 'en_route':
       return new Date(scheduled - 2 * 60 * 60 * 1000).toISOString();
     case 'no_show_checkin':
       return new Date(scheduled + 30 * 60 * 1000).toISOString();
+  }
+}
+
+/**
+ * Ladder order by proximity to the event. Supersession keeps the LATEST rung of
+ * a colliding pair: clamping can only push an EARLIER rung forward onto a later
+ * one's slot, and when it does, the earlier rung's copy is the stale one
+ * ("your tour is tomorrow" landing on tour day). Exported for the fire-time
+ * backstop's batch check.
+ */
+export const LADDER_ORDER: ReminderKind[] = [
+  'confirmation',
+  'day_before',
+  'morning_of',
+  'en_route',
+  'no_show_checkin',
+];
+
+/**
+ * Read the org quiet-hours window. A settings failure falls back to the
+ * DEFAULTS rather than breaking arming/sending (the `resolveWithSettings`
+ * posture in messages/resolve.ts) - never to "no quiet hours".
+ */
+export async function readQuietHoursWindow(
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>,
+  log: Logger,
+): Promise<QuietHoursWindow> {
+  try {
+    const settings = await settingsRepo.getOrgSettings();
+    return quietHoursWindowOf({
+      quietHoursEnabled: settings.quietHoursEnabled,
+      quietHoursStart: settings.quietHoursStart,
+      quietHoursEnd: settings.quietHoursEnd,
+      timezone: resolveQuietHoursTimezone(settings),
+    });
+  } catch (err) {
+    log.warn({ err }, 'quiet hours: settings read failed - falling back to defaults');
+    return quietHoursWindowOf(DEFAULT_ORG_SETTINGS);
   }
 }
 
@@ -88,13 +144,21 @@ const REMINDER_KINDS: ReminderKind[] = [
 
 export interface ArmTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
+  /**
+   * Quiet-hours source (REQUIRED so every call site is forced to supply one -
+   * an unclamped armer would re-introduce the 4am text). Narrow read-only shape
+   * (the `resolveWithSettings` precedent) so tests stub one method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
   logger?: Logger;
 }
 
 /**
- * Arm the full reminder ladder for a tour. Rows whose dueAt is already past
- * (< now) are skipped — except `confirmation` which always uses `now` and is
- * therefore always armed.
+ * Arm the full reminder ladder for a tour. Every rung's dueAt is CLAMPED out of
+ * the org's quiet-hours window before it is written, so a stored dueAt is the
+ * real send time. A rung is skipped (no row at all) when its clamped dueAt is
+ * already past, lands at/after the tour start, or collides with a LATER rung's
+ * slot - see the skip-rule comment in the loop below.
  *
  * Returns the created TourReminderItem rows.
  */
@@ -115,12 +179,54 @@ export async function armTourReminders(
     return created;
   }
 
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+  const scheduledIso = new Date(scheduledAt).toISOString();
+
+  // Pass 1: compute every rung's CLAMPED dueAt (the stored time IS the real
+  // send time - the dashboard's honesty depends on it).
+  const dues = new Map<ReminderKind, string>();
   for (const kind of REMINDER_KINDS) {
-    const dueAt = computeDueAt(kind, scheduledAt, now);
+    dues.set(kind, clampOutOfQuietHours(computeDueAt(kind, scheduledAt, now, window), window));
+  }
+
+  // Pass 2: arm, applying the spec's skip rules (a skip creates NO row - the
+  // pre-existing past-dueAt precedent):
+  //  (a) past-dueAt (pre-existing rule),
+  //  (b) past-event: a clamp landing at-or-past the tour start,
+  //  (c) same-slot supersession: an earlier rung clamped onto a later rung's
+  //      slot loses (the later rung's copy is the current one),
+  //  (d) copy-validity: day_before landing on the tour's LOCAL date is stale
+  //      ("your tour is tomorrow" on tour day) regardless of exact slot.
+  const tourLocalDate = localDateOf(scheduledIso, window.timezone);
+  for (const kind of REMINDER_KINDS) {
+    const dueAt = dues.get(kind);
+    if (dueAt === undefined) continue;
     // Skip rows that are already past (they would never be polled).
-    // `confirmation` is always `now`, so it always passes this check.
     if (dueAt < now) {
       log.info({ tourId: tour.tourId, kind, dueAt }, 'tour reminder skipped (dueAt in the past)');
+      continue;
+    }
+    if (dueAt >= scheduledIso) {
+      log.info(
+        { tourId: tour.tourId, kind, dueAt },
+        'tour reminder skipped (quiet-hours clamp lands at/past tour start)',
+      );
+      continue;
+    }
+    const myOrder = LADDER_ORDER.indexOf(kind);
+    const supersededBySlot = REMINDER_KINDS.some((other) => {
+      if (LADDER_ORDER.indexOf(other) <= myOrder) return false;
+      const otherDue = dues.get(other);
+      // The later rung must itself be armable (not past-event) to supersede.
+      return otherDue === dueAt && otherDue < scheduledIso;
+    });
+    const staleDayBefore =
+      kind === 'day_before' && localDateOf(dueAt, window.timezone) === tourLocalDate;
+    if (supersededBySlot || staleDayBefore) {
+      log.info(
+        { tourId: tour.tourId, kind, dueAt },
+        'tour reminder skipped (quiet-hours superseded by a later rung)',
+      );
       continue;
     }
     const row = await deps.tourRemindersRepo.create({ tourId: tour.tourId, kind, dueAt });

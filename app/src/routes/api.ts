@@ -63,7 +63,7 @@ import {
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
-import { type SettingsRepo } from '../repos/settingsRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -411,6 +411,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // (relay-number-lifecycle spec 4.1: the lost-move relay-close hook was removed -
   // nothing auto-closes a relay group; closing is a human choice.)
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  // Quiet hours (spec 2026-08-03): the arm-time dueAt clamp reads the org
+  // window, so every sub-router/armer that writes a scheduled row needs a
+  // settings repo. Constructed ONCE here (the `?? create...` pattern above) and
+  // threaded down - default-constructing it inside each sub-router would make
+  // route tests that inject a fake settings repo talk to the real AWS SDK.
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   // First-class placement deadlines (placement-deadline-model): shared across the
   // placements / status-transition / today / contacts sub-routers so arm/retire
   // and the computed next_deadline read all hit ONE repo.
@@ -690,6 +696,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.toursNow !== undefined && { now: deps.toursNow }),
+      // Quiet-hours clamp at arm time (both armTourReminders call sites).
+      settingsRepo: settings,
       // Relay provisioning deps (Task 5 — POST /api/tours/:tourId/relay).
       conversationsRepo: conversations,
       auditRepo: audit,

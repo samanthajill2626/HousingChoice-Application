@@ -32,6 +32,7 @@ import { createDocumentClient } from '../dynamo.js';
 import { tableName } from '../config.js';
 import { armTourReminders } from '../../jobs/tourReminders.js';
 import { createTourRemindersRepo } from '../../repos/tourRemindersRepo.js';
+import { createSettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementDeadlinesRepo } from '../../repos/placementDeadlinesRepo.js';
 import { deriveStatuses } from '../statusModel.js';
 import { historyItems } from './history.js';
@@ -442,6 +443,12 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // NOT send messages; it only writes reminder rows. This is the exact same
     // code path the booking handler uses, so dueAts always match the worker's view.
     const remindersRepo = createTourRemindersRepo({ doc });
+    // Quiet hours (spec 2026-08-03): the armer clamps every dueAt out of the
+    // org window, so the seeder must hand it the same settings the worker
+    // reads. A fresh seed has no settings row yet, so this resolves to
+    // DEFAULT_ORG_SETTINGS (21:00-08:00 America/New_York) - which is exactly
+    // what the worker would use too.
+    const settingsRepo = createSettingsRepo({ doc });
 
     // Build TourItem shapes matching what the repo would return (needed by armTourReminders).
     const toursArr = staticItems['tours'] ?? [];
@@ -453,7 +460,10 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // morning_of/en_route/no_show_checkin are skipped if their dueAt < now
     // (which is likely for a tour at 14:00 UTC if now is already past those
     // offsets). This mirrors real behavior exactly.
-    const armedToday = await armTourReminders(tourToday, nowIso, { tourRemindersRepo: remindersRepo });
+    const armedToday = await armTourReminders(tourToday, nowIso, {
+      tourRemindersRepo: remindersRepo,
+      settingsRepo,
+    });
     console.log(
       `  seeded   tourReminders (live tour-today): ${armedToday.length} reminder${armedToday.length === 1 ? '' : 's'}`,
     );
@@ -461,14 +471,20 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // Arm TOUR-B (tomorrow, landlord-led): full ladder. confirmation is armed
     // now; day_before/morning_of/en_route/no_show_checkin all have future dueAts
     // (because scheduledAt is tomorrow at 14:00 UTC) — so all 5 rungs should arm.
-    const armedTomorrow = await armTourReminders(tourTomorrow, nowIso, { tourRemindersRepo: remindersRepo });
+    const armedTomorrow = await armTourReminders(tourTomorrow, nowIso, {
+      tourRemindersRepo: remindersRepo,
+      settingsRepo,
+    });
     console.log(
       `  seeded   tourReminders (live tour-tomorrow): ${armedTomorrow.length} reminder${armedTomorrow.length === 1 ? '' : 's'}`,
     );
 
     // Arm TOUR-C (+2 days, scheduled): similar to tomorrow - all 5 rungs should
     // arm since scheduledAt is 2 days in the future.
-    const armedUpcoming = await armTourReminders(tourUpcoming, nowIso, { tourRemindersRepo: remindersRepo });
+    const armedUpcoming = await armTourReminders(tourUpcoming, nowIso, {
+      tourRemindersRepo: remindersRepo,
+      settingsRepo,
+    });
     console.log(
       `  seeded   tourReminders (live tour-upcoming): ${armedUpcoming.length} reminder${armedUpcoming.length === 1 ? '' : 's'}`,
     );

@@ -47,6 +47,8 @@ function sendFailureMessage(err: unknown): string {
         return '';
       case 'contact_opted_out':
         return 'This contact is on the Do-Not-Contact list — texting is disabled. Clear the opt-out from the ⋯ menu to message them.';
+      case 'contact_deleted':
+        return 'This contact is deleted — restore them to reply.';
       case 'manual_mode':
         return 'This conversation is paused (manual mode) — automated sending is off.';
       case 'breaker_open':
@@ -193,6 +195,12 @@ export interface TimelineProps {
   /** Contact is on the Do-Not-Contact list (sms_opt_out) — show a standing note
    *  at the composer so it's clear BEFORE sending (the send is refused too). */
   optedOut?: boolean;
+  /** Contact is soft-deleted (deleted-contact resurfacing, 2026-08-03): the
+   *  composer is REPLACED by a standing note + a Restore action; the send is
+   *  also refused server-side (409 contact_deleted). */
+  deleted?: boolean;
+  /** Restore the deleted contact (the note's button). */
+  onRestore?: () => void;
   /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
    *  consent modal records consent, then retries the send out-of-band of the
    *  composer). The composer restored its draft on the 409 refusal, so it must
@@ -790,6 +798,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onSend,
     onRetry,
     optedOut,
+    deleted,
+    onRestore,
     clearDraftSignal,
     relayRoster,
     relayClosed,
@@ -1213,6 +1223,21 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       ) : null}
 
       <div className={styles.reply}>
+        {/* Soft-deleted contact (deleted-contact resurfacing, 2026-08-03): the WHOLE
+            composer is replaced - channel toggle, EmailComposer and the text composer
+            alike - so there is no way to reply without restoring first. The server
+            refuses too (409 contact_deleted). */}
+        {deleted ? (
+          <>
+            <p className={styles.optOutNote} role="note">
+              🗑 This contact is deleted — restore them to reply.
+            </p>
+            <button type="button" className={styles.restoreBtn} onClick={onRestore}>
+              Restore contact
+            </button>
+          </>
+        ) : (
+          <>
         {showChannelToggle ? (
           <div className={styles.channelSeg} role="group" aria-label="Message channel">
             <button
@@ -1400,6 +1425,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
             {sending ? 'Sending…' : 'Send'}
           </button>
         </div>
+          </>
+        )}
           </>
         )}
       </div>

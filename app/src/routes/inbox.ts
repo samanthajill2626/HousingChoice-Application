@@ -435,16 +435,44 @@ export async function aggregateInbox(
     if (deleted && unreadSum === 0) return undefined;
     const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
     if (deleted) {
-      // Surface ONLY when the newest message is an inbound from AFTER the
-      // deletion. Pre-deletion unread stays hidden (deleting draws a line);
-      // a post-deletion OUTBOUND (e.g. a straggler scheduled send) does not
-      // resurface anyone. Absent createdAt (fallback preview) → stay hidden.
-      const freshInbound =
-        direction === 'inbound' &&
-        typeof createdAt === 'string' &&
+      // Surface ONLY while SOME conversation of this contact is unread AND that
+      // conversation's newest message is an inbound from AFTER the deletion.
+      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
+      // thread looks fresh": a contact owns one thread per participant key, so
+      // the unread and the fresh inbound can sit on different threads. Mixing
+      // them broke the rule both ways — a pre-deletion unread on thread A kept
+      // the row up forever after thread B's fresh inbound was read (single-conv
+      // mark-read from a placement/tour pane), and a newer empty/outbound thread
+      // buried a genuinely unread fresh inbound on an older one.
+      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
+      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
+      // Absent createdAt (no readable message row) → never counts as new.
+      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
+        dir === 'inbound' &&
+        typeof at === 'string' &&
         typeof contact.deleted_at === 'string' &&
-        createdAt > contact.deleted_at;
-      if (!freshInbound) return undefined;
+        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
+        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
+        // can momentarily hide a resurfaced row until the next inbound lands.
+        at > contact.deleted_at;
+
+      let resurfaces = false;
+      for (const c of convs) {
+        // Only an unread thread can resurface the row (spec Decision 3), so read
+        // threads are never probed.
+        if (unreadOf(c) === 0) continue;
+        // maxConv's latest is already in hand for presentation — reuse it rather
+        // than re-reading the same conversation.
+        const latest =
+          c.conversationId === maxConv.conversationId
+            ? { direction, createdAt }
+            : await latestMessageOf(c.conversationId, c);
+        if (isFreshInbound(latest.direction, latest.createdAt)) {
+          resurfaces = true;
+          break; // one qualifying thread is enough
+        }
+      }
+      if (!resurfaces) return undefined;
     }
 
     let placementContext: { placementId: string; label: string } | undefined;

@@ -50,8 +50,10 @@ const NAG_POOL_DISPLAY = '(555) 019-0101'; // dashboard formatPhoneDisplay(NAG_P
 
 // --- Per-run-unique phones ---------------------------------------------------
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
-// numbers (+1555019xxxx) or the seeded rosters (+155501xxxxx / +155502xxxxx). The
-// last-4 of the wall clock + an incrementing counter keep every number unique.
+// numbers (the "019" exchange, whose area segment tracks the buy hint - see
+// POOL_NUMBER_RE in e2e/scenarios/steps.ts) or the seeded rosters (+155501xxxxx /
+// +155502xxxxx). The last-4 of the wall clock + an incrementing counter keep
+// every number unique.
 let uid = 0;
 function uniquePhone(): string {
   uid += 1;

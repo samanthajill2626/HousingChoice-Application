@@ -15,8 +15,10 @@ import { createGroupOpen } from '../../fixtures/relayConnect.js';
 //     numbers heading/table never render.
 // The lean profile the harness boots seeds ZERO pool numbers, so the created
 // group's number is matched directly (no reseed); the number is MINTED
-// dynamically (+1555019XXXX) and captured from the create response - never
-// hardcoded. Read-only feature: this spec asserts no mutation UI.
+// dynamically (POOL_NUMBER_RE in e2e/scenarios/steps.ts: the "019" exchange is
+// the fake's marker, while the AREA segment tracks whichever buy hint won) and
+// captured from the create response - never hardcoded. Read-only feature: this
+// spec asserts no mutation UI.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
 /** Dev-login as a specific persona (founder@example.com -> admin, va@example.com ->
@@ -33,8 +35,10 @@ async function devLoginAs(page: Page, email: string): Promise<void> {
 
 // --- Per-run-unique phones (relay-number-lifecycle.spec.ts idiom) -------------
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
-// numbers (+1555019xxxx) or the seeded rosters. The last-4 of the wall clock plus
-// an incrementing counter keep every number unique across the run.
+// numbers (the "019" exchange, whose area segment tracks the buy hint - see
+// POOL_NUMBER_RE in e2e/scenarios/steps.ts) or the seeded rosters. The last-4 of
+// the wall clock plus an incrementing counter keep every number unique across
+// the run.
 let uid = 0;
 function uniquePhone(): string {
   uid += 1;
@@ -66,8 +70,9 @@ test.describe('Settings - Group text numbers (admin path)', () => {
     // promoted to ACTIVE - exactly the active-state row this admin surface asserts.
     const group = await createGroupOpen(page, [memberA, memberB]);
 
-    // The pool number is MINTED (+1555019XXXX) - capture and reshape to the row's
-    // formatted display; the raw E.164 is never rendered.
+    // The pool number is MINTED (the "019" exchange; the area segment reflects the
+    // winning buy hint) - capture and reshape to the row's formatted display; the
+    // raw E.164 is never rendered.
     const formatted = formatPhoneDisplay(group.pool_number);
 
     await page.goto(`${NEXT}/settings/numbers`);

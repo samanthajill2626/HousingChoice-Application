@@ -21,6 +21,7 @@ import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messa
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createContactsRepo,
+  isDeleted,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import {
@@ -46,6 +47,7 @@ export class SendRefusedError extends Error {
     readonly code:
       | 'conversation_not_found'
       | 'contact_opted_out'
+      | 'contact_deleted'
       | 'contact_no_consent'
       | 'breaker_open'
       | 'manual_mode'
@@ -79,6 +81,14 @@ export class ConversationNotFoundError extends SendRefusedError {
 export class ContactOptedOutError extends SendRefusedError {
   constructor(conversationId: string) {
     super(`contact for conversation ${conversationId} has sms_opt_out — send refused`, 'contact_opted_out');
+  }
+}
+
+/** Soft-deleted contacts are unreachable (human OR automated) until restored
+ *  (deleted-contact resurfacing spec 2026-08-03). */
+export class ContactDeletedError extends SendRefusedError {
+  constructor(conversationId: string) {
+    super(`contact for conversation ${conversationId} is soft-deleted — send refused`, 'contact_deleted');
   }
 }
 
@@ -253,6 +263,15 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
         'send refused: sms_opt_out is set (conversation and/or contact)',
       );
       throw new ContactOptedOutError(conversationId);
+    }
+
+    // (1b) Deleted gate — a soft-deleted contact is unreachable until restored
+    // (deleted-contact resurfacing spec 2026-08-03). Sits between opt-out and
+    // consent: harder than no-consent (the dashboard must show "restore to
+    // reply", never open the consent modal), softer than opt-out (TCPA wins).
+    if (contact !== undefined && isDeleted(contact)) {
+      log.warn({ conversationId, contactId: contact.contactId }, 'send refused: contact is soft-deleted');
+      throw new ContactDeletedError(conversationId);
     }
 
     // (1.5) JIT consent gate (A2P/CTIA, spec §3.4) — AFTER the opt-out gate

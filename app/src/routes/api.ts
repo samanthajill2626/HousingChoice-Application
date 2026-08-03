@@ -128,6 +128,7 @@ import { type SystemStatusService } from '../services/systemStatus.js';
 const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   conversation_not_found: 404,
   contact_opted_out: 409,
+  contact_deleted: 409,
   // JIT consent gate (A2P/CTIA): a proactive human send to a no-consent contact
   // is blocked; the dashboard records consent via PATCH /api/contacts/:id then
   // retries the send.

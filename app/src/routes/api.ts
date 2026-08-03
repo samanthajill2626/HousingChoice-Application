@@ -645,6 +645,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       placementNudgesRepo: placementNudges,
       placementsRepo: placements,
       unitsRepo: units,
+      // Quiet hours (spec 2026-08-03): the Upcoming bucket previews BOTH
+      // ladders, so it needs the same org window the panels read.
+      settingsRepo: settings,
       config,
     }),
   );
@@ -723,6 +726,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
+      // window through the SAME repo the armers use.
+      settingsRepo: settings,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -808,10 +814,14 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/placements',
     createPlacementNudgesRouter({
+      config,
       logger: deps.logger,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       placementNudgesRepo: placementNudges,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // Quiet hours (spec 2026-08-03): the nudge view's FIRST suppression
+      // estimate reads the org window through the SAME repo the armers use.
+      settingsRepo: settings,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),

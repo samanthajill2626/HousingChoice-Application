@@ -18,6 +18,7 @@ import { describe, expect, it } from 'vitest';
 import type { NudgeKind, NudgeSkipReason, PlacementNudgeItem } from '../src/repos/placementNudgesRepo.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { quietWindowAroundNow } from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -164,6 +165,88 @@ describe('GET /api/placements/:placementId/nudges', () => {
     expect(nudge?.skippedAt).toBe('2026-07-14T08:01:00.000Z');
     expect(nudge?.skipReason).toBe('no_landlord');
     expect(nudge?.sentAt).toBeUndefined();
+  });
+
+  // Quiet hours (spec 2026-08-03) brought the FIRST suppression estimate to the
+  // nudge view. It is evaluated against the server wall clock (would this rung
+  // go out right NOW?), so the window stub is computed from the current time -
+  // a fixed 21:00-08:00 fixture would be time-of-day dependent.
+  it('carries a quiet_hours suppression estimate on an upcoming rung while the window contains now', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-1',
+      unitId: 'unit-nudge-quiet-1',
+      stage: 'awaiting_receipt',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-1',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+    });
+    // A terminal rung must never carry an estimate (nothing is going to fire).
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-sent',
+      placementId,
+      kind: 'completion_check',
+      dueAt: '2026-07-13T08:00:00.000Z',
+      sentAt: '2026-07-13T08:00:05.000Z',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.nudges as { nudgeId: string; state: string; suppression?: { reason: string } }[]).map(
+        (n) => [n.nudgeId, n],
+      ),
+    );
+    expect(byId.get('nudge-quiet-1')?.suppression).toEqual({ reason: 'quiet_hours' });
+    expect(byId.get('nudge-quiet-sent')?.suppression).toBeUndefined();
+  });
+
+  it('carries NO suppression when quiet hours are disabled', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-2',
+      unitId: 'unit-nudge-quiet-2',
+      stage: 'awaiting_receipt',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-2',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    expect(nudge?.suppression).toBeUndefined();
+  });
+
+  it('stale_stage outranks quiet_hours on a rung whose placement has moved on', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    // The placement already LEFT awaiting_receipt, so the receipt_check rung
+    // would be retired unsent - a harder reason than "waiting for quiet-end".
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-3',
+      unitId: 'unit-nudge-quiet-3',
+      stage: 'awaiting_completion',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-3',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    expect(nudge?.suppression).toEqual({ reason: 'stale_stage' });
   });
 
   it('returns 404 for an unknown placement id', async () => {

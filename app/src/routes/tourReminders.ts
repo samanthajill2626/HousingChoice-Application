@@ -19,9 +19,11 @@
 // "sending shortly").
 //
 // SUPPRESSION ESTIMATE (upcoming, 1:1-routed rungs only): an honest preview of
-// whether the automated send WOULD be refused at fire time (kill-switch /
-// opt-out / manual mode), computed via the shared evaluateScheduledSendSuppression
-// (Task 1) against config + the tenant's conversation/contact. It is deliberately
+// whether the automated send WOULD be refused (or, for quiet hours, DEFERRED) at
+// fire time - kill-switch / opt-out / manual mode / quiet hours - computed via
+// the shared evaluateScheduledSendSuppression (Task 1) against config, the
+// tenant's conversation/contact, and the org quiet-hours window evaluated
+// against the server WALL CLOCK (see the GET handler). It is deliberately
 // scoped to rungs that route 1:1 — for THIS task, that is the unambiguous
 // self_guided route; Task 4 exports resolveUsableGroup and tightens the
 // group-routed (landlord_led / pm_team) case. Non-1:1 rungs carry no estimate.
@@ -47,6 +49,9 @@ import {
   evaluateScheduledSendSuppression,
   type ScheduledSuppression,
 } from '../services/scheduledSendSuppression.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import { isQuietTime } from '../lib/quietHours.js';
 
 export interface TourRemindersRouterDeps {
   config?: AppConfig;
@@ -55,6 +60,9 @@ export interface TourRemindersRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
+  /** Quiet-hours window source for the suppression estimate (narrow read-only
+   *  shape - the `resolveWithSettings` precedent). */
+  settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
    *  scheduled.updated so the Reminders panel + the timelines' Upcoming
    *  buckets refetch. */
@@ -95,6 +103,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -184,10 +193,23 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // unambiguous self_guided route (Task 4 tightens the group case). A
     // non-self_guided tour never gets an estimate here.
     const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
-    const suppression =
-      tour.tourType === 'self_guided' && hasUpcoming
-        ? await resolveTenantSuppression(tour, config, contacts, conversations)
-        : undefined;
+    let suppression: ScheduledSuppression | undefined;
+    if (tour.tourType === 'self_guided' && hasUpcoming) {
+      // Quiet hours (spec 2026-08-03): the estimate answers "would this rung's
+      // automated send go out RIGHT NOW?", so the window is evaluated against
+      // the server wall clock - not against each rung's dueAt. A rung due at
+      // 22:00 shows the chip once 22:00 arrives, which is exactly when the
+      // poller would defer it.
+      const window = await readQuietHoursWindow(settings, log);
+      const quietNow = isQuietTime(new Date().toISOString(), window);
+      suppression = await resolveTenantSuppression(
+        tour,
+        config,
+        contacts,
+        conversations,
+        quietNow,
+      );
+    }
 
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
@@ -253,6 +275,7 @@ async function resolveTenantSuppression(
   config: AppConfig,
   contacts: ContactsRepo,
   conversations: ConversationsRepo,
+  quietNow: boolean,
 ): Promise<ScheduledSuppression | undefined> {
   const contact = await contacts.getById(tour.tenantId);
   const phone = contact?.phone;
@@ -267,5 +290,6 @@ async function resolveTenantSuppression(
     convOptOut: conv?.sms_opt_out,
     contactOptOut: contact?.sms_opt_out === true,
     aiMode: conv?.ai_mode,
+    quietNow,
   });
 }

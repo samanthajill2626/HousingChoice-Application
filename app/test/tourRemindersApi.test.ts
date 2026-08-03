@@ -18,6 +18,7 @@ import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersR
 import { resolveMessage } from '../src/messages/index.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import { quietWindowAroundNow } from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -219,6 +220,140 @@ describe('GET /api/tours/:tourId/reminders', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
     expect(res.status).toBe(200);
 
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
+  // Quiet hours (spec 2026-08-03): the estimate answers "would this rung go out
+  // right NOW?", so it is evaluated against the server wall clock - hence the
+  // window-around-now stub rather than a fixed 21:00-08:00 fixture (which would
+  // make the case pass or fail depending on when the suite runs).
+  it('carries a quiet_hours suppression estimate while the org window contains now', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+
+    const tenantPhone = '+15550600011';
+    const tenantId = 'contact-quiet-view-1';
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone: tenantPhone,
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set('conv-quiet-view-1', {
+      conversationId: 'conv-quiet-view-1',
+      participant_phone: tenantPhone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: 'unit-quiet-view-1',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-1',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-14T10:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+
+    const tenantPhone = '+15550600012';
+    const tenantId = 'contact-quiet-view-2';
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone: tenantPhone,
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set('conv-quiet-view-2', {
+      conversationId: 'conv-quiet-view-2',
+      participant_phone: tenantPhone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: 'unit-quiet-view-2',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-2',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-14T10:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toBeUndefined();
+  });
+
+  it('a harder reason still outranks quiet hours (opted-out tenant inside the window)', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+
+    const tenantPhone = '+15550600013';
+    const tenantId = 'contact-quiet-view-3';
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone: tenantPhone,
+      sms_opt_out: true,
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set('conv-quiet-view-3', {
+      conversationId: 'conv-quiet-view-3',
+      participant_phone: tenantPhone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: 'unit-quiet-view-3',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-3',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-14T10:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    expect(res.status).toBe(200);
     const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
       (r) => r.state === 'upcoming',
     );

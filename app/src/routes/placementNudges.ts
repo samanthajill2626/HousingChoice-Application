@@ -20,6 +20,18 @@
 // exactly one outcome — a lost race 409s with the row's real state instead of
 // lying. Restoring a PAST-DUE rung is allowed and fires on the next poll tick.
 //
+// SUPPRESSION ESTIMATE (GET, upcoming rungs only - quiet-hours spec
+// 2026-08-03): an honest preview of whether the automated send would be
+// DEFERRED or refused at fire time, in the SAME shape the tour-reminder view
+// uses (TourReminderView.suppression) so the dashboard renders one chip for
+// both ladders. Fed only the inputs this read already has in hand: the
+// quiet-hours window (server wall clock), the kill switch (config) and the
+// stale-stage check (the placement is already loaded). Per-recipient opt-out
+// and per-conversation manual mode are deliberately NOT resolved - they need a
+// new per-row contact/conversation lookup whose recipient differs per rung -
+// so this estimate is a SUBSET of the tour view's. Gap tracked in
+// docs/issues/placement-nudge-suppression-opt-out-parity.md.
+//
 // recipient is DERIVED from kind per the nudge ladder (NUDGE_RUNGS in
 // jobs/placementNudges.ts): the approval_check + rta_window_closing rungs route
 // to the landlord, every other rung to the tenant. The cancel/restore emit keys
@@ -31,9 +43,18 @@
 // PII (doc §9): the response carries state/ids to the authed client; log lines
 // stay ids/counts only.
 import { json, Router } from 'express';
+import { loadConfig, type AppConfig } from '../lib/config.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { isQuietTime } from '../lib/quietHours.js';
+import type { PlacementStage } from '../lib/statusModel.js';
 import { NUDGE_RUNGS } from '../jobs/placementNudges.js';
+import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import {
+  evaluateScheduledSendSuppression,
+  type ScheduledSuppression,
+} from '../services/scheduledSendSuppression.js';
 import {
   createPlacementNudgesRepo,
   type NudgeKind,
@@ -46,10 +67,15 @@ import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 
 export interface PlacementNudgesRouterDeps {
   logger?: Logger;
+  /** Kill-switch input for the suppression estimate (config.smsSendingEnabled). */
+  config?: AppConfig;
   placementsRepo?: PlacementsRepo;
   placementNudgesRepo?: PlacementNudgesRepo;
   /** Landlord resolution: a landlord-routed nudge keys its emit on unit.landlordId. */
   unitsRepo?: UnitsRepo;
+  /** Quiet-hours window source for the suppression estimate (narrow read-only
+   *  shape - the `resolveWithSettings` precedent). */
+  settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
    *  scheduled.updated so the Deadlines-and-nudges card + the timelines' Upcoming
    *  buckets refetch. */
@@ -73,7 +99,20 @@ export interface PlacementNudgeView {
   canceledAt?: string;
   skippedAt?: string;
   skipReason?: NudgeSkipReason;
+  /** Only computed for `upcoming` rungs on GET (see the SUPPRESSION ESTIMATE
+   *  note in the file header). Same shape as TourReminderView.suppression so
+   *  the dashboard renders both ladders through one chip. */
+  suppression?: ScheduledSuppression;
 }
+
+// kind -> the stage whose rung it is, derived ONCE from the single-source nudge
+// ladder (mirrors the poller's private STAGE_BY_KIND) so the stale-stage
+// estimate can never drift from the stale-stage claim-skip.
+const STAGE_BY_KIND = Object.fromEntries(
+  (Object.entries(NUDGE_RUNGS) as Array<[PlacementStage, { kind: NudgeKind } | undefined]>)
+    .filter((entry): entry is [PlacementStage, { kind: NudgeKind }] => entry[1] !== undefined)
+    .map(([stage, rung]) => [rung.kind, stage]),
+) as Partial<Record<NudgeKind, PlacementStage>>;
 
 // kind -> recipient, derived ONCE from the single-source nudge ladder so it can
 // never drift from the poll's routing (jobs/placementNudges.ts). A kind absent
@@ -116,9 +155,11 @@ function viewOf(row: PlacementNudgeItem): PlacementNudgeView {
 
 export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
+  const config = deps.config ?? loadConfig();
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
   const nudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
   const router = Router();
@@ -211,12 +252,48 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
     }
 
     const rows = await nudges.listByPlacement(placementId);
+
+    // SUPPRESSION ESTIMATE (upcoming rungs only) - see the file header for what
+    // is and is NOT evaluated here. The quiet-hours window is read once per
+    // request and only when something could still fire.
+    const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
+    let quietNow = false;
+    if (hasUpcoming) {
+      const window = await readQuietHoursWindow(settings, log);
+      quietNow = isQuietTime(new Date().toISOString(), window);
+    }
+    const suppressionFor = (row: PlacementNudgeItem): ScheduledSuppression | undefined => {
+      const rungStage = STAGE_BY_KIND[row.kind];
+      return evaluateScheduledSendSuppression({
+        smsSendingEnabled: config.smsSendingEnabled,
+        // Per-recipient opt-out and per-conversation manual mode are NOT
+        // evaluated here: both live on the RECIPIENT's 1:1 conversation/contact
+        // and a tenant rung and a landlord rung target different people, so
+        // reading them is a new per-row IO chain this endpoint does not do
+        // today. Tracked in
+        // docs/issues/placement-nudge-suppression-opt-out-parity.md.
+        convOptOut: undefined,
+        contactOptOut: undefined,
+        aiMode: undefined,
+        staleStage: rungStage !== undefined && rungStage !== placement.stage,
+        quietNow,
+      });
+    };
+
     const nudgeViews: PlacementNudgeView[] = rows
-      .map(viewOf)
+      .map((row) => {
+        const view = viewOf(row);
+        if (view.state !== 'upcoming') return view;
+        const suppression = suppressionFor(row);
+        return suppression === undefined ? view : { ...view, suppression };
+      })
       // DESCENDING by dueAt (newest-due first — the card leads with the latest rung).
       .sort((a, b) => (a.dueAt < b.dueAt ? 1 : a.dueAt > b.dueAt ? -1 : 0));
 
-    log.info({ placementId, count: nudgeViews.length }, 'placement nudges read');
+    log.info(
+      { placementId, count: nudgeViews.length, quietNow },
+      'placement nudges read',
+    );
     res.json({ nudges: nudgeViews });
   });
 

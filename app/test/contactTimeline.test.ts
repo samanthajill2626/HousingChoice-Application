@@ -19,6 +19,11 @@ import type { AppConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
+import {
+  quietNowSettingsRepo,
+  quietOffSettingsRepo,
+  type SettingsReadRepo,
+} from './helpers/settingsStub.js';
 
 const TENANT = 'c-tenant';
 const PHONE_A = '+15550100001';
@@ -628,7 +633,12 @@ const DAY_BEFORE_BODY = resolveMessage('tour.day_before');
 const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 
 describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
-  function makeGatherHarness(): { world: FakeWorld; app: Express } {
+  function makeGatherHarness(
+    // Quiet hours OFF by default so these cases keep asserting the pre-quiet
+    // reasons regardless of the time of day the suite runs; the quiet cases
+    // pass a window-around-now stub explicitly.
+    settingsRepo: SettingsReadRepo = quietOffSettingsRepo(),
+  ): { world: FakeWorld; app: Express } {
     const world = createFakeWorld();
     const logger = createLogger({ destination: createLogCapture().stream });
     const config = {
@@ -638,6 +648,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const router = createContactTimelineRouter({
       logger,
       config,
+      settingsRepo,
       contactsRepo: world.contactsRepo,
       conversationsRepo: world.conversationsRepo,
       messagesRepo: world.messagesRepo,
@@ -804,6 +815,70 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     await world.tourRemindersRepo.create({ tourId: tour.tourId, kind: 'confirmation', dueAt: '2099-01-05T10:00:00.000Z' });
 
     const res = await request(app).get('/api/contacts/ct-5/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
+  // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator caller,
+  // so a rung deferred by the window must read the same here as on the tour /
+  // placement panels. Evaluated against the server wall clock, hence the
+  // window-around-now stub (never a fixed HH:MM - that would be time-of-day
+  // dependent).
+  it('inside the quiet window BOTH ladders carry suppression quiet_hours', async () => {
+    const { world, app } = makeGatherHarness(quietNowSettingsRepo());
+    const phone = '+15550600007';
+    world.contacts.push({ contactId: 'ct-7', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-7', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-7',
+      unitId: 'u-7',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-7',
+      unitId: 'u-7',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      dueAt: '2099-01-06T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-7/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up.map((i) => i.source)).toEqual(['tour_reminder', 'placement_nudge']);
+    expect(up.every((i) => JSON.stringify(i.suppression) === JSON.stringify({ reason: 'quiet_hours' }))).toBe(true);
+  });
+
+  it('an opted-out tenant inside the quiet window still reports contact_opted_out (quiet is LAST)', async () => {
+    const { world, app } = makeGatherHarness(quietNowSettingsRepo());
+    const phone = '+15550600008';
+    world.contacts.push({ contactId: 'ct-8', type: 'tenant', status: 'active', phone, sms_opt_out: true });
+    seedConv(world, 'conv-ct-8', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-8',
+      unitId: 'u-8',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-8/timeline');
     expect(res.status).toBe(200);
     const up = res.body.upcoming as Array<Record<string, unknown>>;
     expect(up).toHaveLength(1);

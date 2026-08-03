@@ -82,10 +82,17 @@ import {
   evaluateScheduledSendSuppression,
   type ScheduledSuppression,
 } from '../services/scheduledSendSuppression.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import { isQuietTime } from '../lib/quietHours.js';
 
 export interface ContactTimelineRouterDeps {
   logger?: Logger;
   config?: AppConfig;
+  /** Quiet-hours window source for the `upcoming[]` suppression preview - it
+   *  covers BOTH ladders here (narrow read-only shape, the
+   *  `resolveWithSettings` precedent). */
+  settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
   messagesRepo?: MessagesRepo;
@@ -565,9 +572,12 @@ async function gatherUpcoming(params: {
   config: AppConfig;
   conversationsRepo: ConversationsRepo;
   repos: ScheduledGatherRepos;
+  /** Is the SERVER WALL CLOCK inside the org quiet-hours window right now? The
+   *  caller computes it once per request (this gather stays clock-free). */
+  quietNow: boolean;
   log: Logger;
 }): Promise<TimelineScheduled[]> {
-  const { contact, config, conversationsRepo, repos, log } = params;
+  const { contact, config, conversationsRepo, repos, quietNow, log } = params;
   const contactId = contact.contactId;
 
   // Resolve the contact's 1:1 threads the SAME way the pollers do — from the
@@ -592,6 +602,10 @@ async function gatherUpcoming(params: {
       contactOptOut,
       aiMode: conv?.ai_mode,
       staleStage,
+      // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator
+      // caller, so a deferred rung reads the same here as on the tour /
+      // placement panels.
+      quietNow,
     });
 
   /** Map upcoming nudge rows of ONE recipient on ONE placement → items. */
@@ -721,6 +735,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
 
   // Scheduled-send gather repos (Part B): used ONLY when ALL are injected — we
   // deliberately do NOT default-construct them (a default would open a live
@@ -897,11 +912,16 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     let upcoming: TimelineScheduled[] = [];
     if (boundaryKey === undefined && kinds.has('scheduled') && scheduledRepos !== undefined) {
       try {
+        // Quiet hours (spec 2026-08-03): "would this rung go out RIGHT NOW?" -
+        // evaluated against the server wall clock, matching the tour-reminder
+        // and placement-nudge panels.
+        const window = await readQuietHoursWindow(settings, log);
         upcoming = await gatherUpcoming({
           contact,
           config,
           conversationsRepo: conversations,
           repos: scheduledRepos,
+          quietNow: isQuietTime(new Date().toISOString(), window),
           log,
         });
       } catch (err) {

@@ -182,6 +182,9 @@ function makeServiceConfig(): AppConfig {
     messagingDriver: 'console',
     relayLiveProvisioning: true,
     relayNumberReleaseEnabled: false,
+    // Typed explicitly: a bare [] infers never[], which is NOT comparable to
+    // AppConfig's string[] and makes tsc reject this `as AppConfig` cast.
+    relayPreferredAreaCodes: [] as string[],
   } as AppConfig;
 }
 

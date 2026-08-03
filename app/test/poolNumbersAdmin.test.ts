@@ -616,6 +616,9 @@ const RELEASE_ENABLED_CONFIG = {
   messagingDriver: 'console',
   relayLiveProvisioning: true,
   relayNumberReleaseEnabled: true,
+  // Typed explicitly: a bare [] infers never[], which is NOT comparable to
+  // AppConfig's string[] and makes tsc reject this `as AppConfig` cast.
+  relayPreferredAreaCodes: [] as string[],
 } as AppConfig;
 
 type ParityCase = {

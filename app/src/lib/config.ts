@@ -125,6 +125,16 @@ export interface AppConfig {
    */
   relayWarmingMaxWaitMs: number;
   /**
+   * Preferred NANP area codes for relay pool-number PURCHASES (area-code
+   * preference design 2026-08-03). warmOneNumber's search ladder tries each in
+   * order (after any property-ZIP hint) before falling back to an unhinted US
+   * search. Read from RELAY_PREFERRED_AREA_CODES (comma-separated 3-digit
+   * codes); DEFAULT Atlanta metro 404,470,678,770,943. An EXPLICIT empty value
+   * means no preference ([]). Fail-fast: a malformed entry refuses boot (a
+   * typo must not silently degrade every purchase to the bare search).
+   */
+  relayPreferredAreaCodes: string[];
+  /**
    * Outbound-SMS kill-switch (A2P safety). When false, every real-Twilio SMS
    * send is REFUSED before the provider call (the send wrapper throws a
    * SendRefusedError; the Twilio driver also refuses as a backstop), so a
@@ -699,6 +709,33 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
+  // Preferred area codes for relay pool-number purchases (area-code preference
+  // design 2026-08-03). Unset -> Atlanta-metro default. Explicit empty -> []
+  // (no preference). Malformed entry -> throw (fail-fast, matching
+  // RELAY_SPARE_BUFFER_TARGET's posture - a typo must not silently turn every
+  // buy into the unhinted search). Deliberate hybrid of two idioms in this
+  // file: the `let x = X_DEFAULT` shape of the RELAY_WARMING_MAX_WAIT block
+  // above (this knob needs a NON-empty default on unset, so it cannot use the
+  // `(env.X ?? '')` chain of OAUTH_ALLOWED_DOMAINS / OUR_PHONE_NUMBERS - only
+  // an `=== undefined` check distinguishes unset from explicitly empty) plus
+  // that pair's split/trim/filter chain and bare-throw validation loop.
+  const RELAY_PREFERRED_AREA_CODES_DEFAULT = ['404', '470', '678', '770', '943'];
+  let relayPreferredAreaCodes: string[];
+  if (env.RELAY_PREFERRED_AREA_CODES === undefined) {
+    relayPreferredAreaCodes = RELAY_PREFERRED_AREA_CODES_DEFAULT;
+  } else {
+    relayPreferredAreaCodes = env.RELAY_PREFERRED_AREA_CODES.split(',')
+      .map((s) => s.trim())
+      .filter((s) => s.length > 0);
+    for (const code of relayPreferredAreaCodes) {
+      if (!/^\d{3}$/.test(code)) {
+        throw new Error(
+          `RELAY_PREFERRED_AREA_CODES entries must be 3-digit NANP area codes, got: ${code}`,
+        );
+      }
+    }
+  }
+
   // Outbound-SMS kill-switch (A2P) — same shape/posture as RELAY_LIVE_PROVISIONING:
   // default OFF on the deployed (twilio) stacks so NO real SMS is sent before A2P
   // approval (an unregistered-number send draws Twilio 30034 and hurts sender
@@ -1146,6 +1183,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     relayNumberReleaseEnabled,
     relaySpareBufferTarget,
     relayWarmingMaxWaitMs,
+    relayPreferredAreaCodes,
     smsSendingEnabled,
     twilioAccountSid: env.TWILIO_ACCOUNT_SID,
     twilioApiKeySid: env.TWILIO_API_KEY_SID,

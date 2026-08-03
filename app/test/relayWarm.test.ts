@@ -45,6 +45,9 @@ function makeConfig(over: Partial<AppConfig> = {}): AppConfig {
     relayLiveProvisioning: true,
     relaySpareBufferTarget: 0,
     relayWarmingMaxWaitMs: 30 * 60_000,
+    // Buy-side geographic hints (area-code preference). EMPTY here so every
+    // pre-existing test keeps today's behavior: one unhinted search per buy.
+    relayPreferredAreaCodes: [],
     ...over,
   } as AppConfig;
 }

@@ -634,6 +634,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const config = {
       smsSendingEnabled: true,
       ourPhoneNumbers: [OUR_NUMBER],
+      relayPreferredAreaCodes: [],
     } as unknown as AppConfig;
     const router = createContactTimelineRouter({
       logger,

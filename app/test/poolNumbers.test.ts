@@ -247,6 +247,9 @@ function makeConfig(over: Partial<AppConfig>): AppConfig {
     // test opts in (the target-0 refill assertion below wires a recording queue).
     relaySpareBufferTarget: 0,
     relayWarmingMaxWaitMs: 30 * 60_000,
+    // Buy-side geographic hints (area-code preference). EMPTY here so every
+    // pre-existing test keeps today's behavior: one unhinted search per buy.
+    relayPreferredAreaCodes: [],
     ...over,
   } as AppConfig;
 }

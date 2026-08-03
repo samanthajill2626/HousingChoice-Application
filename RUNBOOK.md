@@ -365,6 +365,21 @@ Effect: every outstanding session cookie stops opening = **forced global logout*
 back in via Google). No data loss — sessions live only inside the cookies themselves. Rotate on any
 suspicion the secret leaked.
 
+### Relay preferred area codes (`RELAY_PREFERRED_AREA_CODES`)
+
+- **`RELAY_PREFERRED_AREA_CODES`** (default `404,470,678,770,943` - Atlanta metro) is the
+  comma-separated list of 3-digit NANP area codes tried IN ORDER for every relay pool-number
+  purchase. It is an app-behavior flag (an `.env.<env>` key like `RELAY_LIVE_PROVISIONING`:
+  push it with `secrets:push` then deploy; NOT Terraform-managed). A malformed entry refuses
+  boot; an explicitly EMPTY value means no preference (every buy is the plain any-US search).
+- **Connect-when-ready buys try the property ZIP first**, ahead of the area-code list, so a
+  number bought for a tour/placement group is local to that unit when Twilio has inventory
+  there. Buffer refills (fresh spares, no group yet) carry no ZIP and start at the area codes.
+- **Watch `relay_warm_hint_miss` and `hintTier` on `relay_number_warming`** to see which rung
+  of the ladder actually bought the number. A steady drift to `bare` means the preferred
+  metro codes are dry at Twilio - widen the list (add neighboring NPAs) or accept non-local
+  numbers. Both log lines carry the hint TYPE only, never a ZIP or a phone number.
+
 ### Relay number release (`RELAY_NUMBER_RELEASE_ENABLED`)
 
 `RELAY_NUMBER_RELEASE_ENABLED` is an app-behavior flag (an `.env.<env>` key like

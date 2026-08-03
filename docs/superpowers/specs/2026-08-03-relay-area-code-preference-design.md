@@ -177,5 +177,8 @@ Success log gains the winning hint TYPE (`relay_number_warming` +
 - Observability: `relay_warm_hint_miss` (per skipped hint) and `hintTier` on
   `relay_number_warming` tell ops whether metro inventory is drying up (a
   steady drift to `bare` means the preferred NPAs are exhausted at Twilio).
-- No infra/Terraform change; no new IAM; no schema change (no new attributes
-  on pool records).
+- No infra/Terraform, IAM, or schema change is ANTICIPATED (no new attributes
+  on pool records). This is an expectation, not a non-goal: if the build
+  surfaces a genuinely needed infra change (or a best-practices conformance
+  fix), it is in scope - land it on the branch with the feature. Applying
+  infra to any environment remains an explicit Cameron go, per house rule.

@@ -11,6 +11,7 @@ import request, { type Test } from 'supertest';
 import twilio from 'twilio';
 import { buildApp } from '../../src/app.js';
 import type { MediaStore } from '../../src/adapters/mediaStore.js';
+import { RangeNotSatisfiableError } from '../../src/adapters/mediaStore.js';
 import type { Semaphore } from '../../src/lib/semaphore.js';
 import type {
   InitiateCallParams,
@@ -2378,13 +2379,47 @@ export function createFakeWorld(): FakeWorld {
         ...(contentType !== undefined && { contentType }),
       });
     },
-    async getStream(key) {
+    async getStream(key, opts) {
       const obj = mediaObjects.get(key);
       if (!obj) return undefined;
+      const contentType = obj.contentType;
+      const range = opts?.range;
+      if (range === undefined) {
+        return {
+          body: Readable.from([obj.body]),
+          ...(contentType !== undefined && { contentType }),
+          contentLength: obj.body.length,
+        };
+      }
+      // Mimic S3's single-byte-range semantics closely enough for the serving
+      // route's tests: suffix ranges, open-ended ranges, EOF clamping, and an
+      // InvalidRange (-> RangeNotSatisfiableError) when the start is past the
+      // end. The route forwards ONLY single well-formed byte ranges, so this
+      // never has to handle a multi-range value.
+      const total = obj.body.length;
+      const parsed = /^bytes=(\d*)-(\d*)$/.exec(range);
+      if (!parsed) throw new RangeNotSatisfiableError();
+      const startRaw = parsed[1] ?? '';
+      const endRaw = parsed[2] ?? '';
+      let start: number;
+      let end: number;
+      if (startRaw === '') {
+        const suffixLen = Number(endRaw);
+        if (!Number.isFinite(suffixLen) || suffixLen <= 0) throw new RangeNotSatisfiableError();
+        start = Math.max(0, total - suffixLen);
+        end = total - 1;
+      } else {
+        start = Number(startRaw);
+        if (start >= total) throw new RangeNotSatisfiableError();
+        end = endRaw === '' ? total - 1 : Math.min(Number(endRaw), total - 1);
+        if (end < start) throw new RangeNotSatisfiableError();
+      }
+      const slice = obj.body.subarray(start, end + 1);
       return {
-        body: Readable.from([obj.body]),
-        ...(obj.contentType !== undefined && { contentType: obj.contentType }),
-        contentLength: obj.body.length,
+        body: Readable.from([slice]),
+        ...(contentType !== undefined && { contentType }),
+        contentLength: slice.length,
+        contentRange: `bytes ${start}-${end}/${total}`,
       };
     },
     async getBytes(key) {

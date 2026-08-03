@@ -128,13 +128,19 @@ const READY: ListingState = {
 
 // Default contacts so the placement card can resolve tenantId 't1' → "Fixture Tenant"
 // (a name unique to this file, so it can't collide with other rows' contact names).
+// The page asks for BOTH the live ('all') and soft-deleted ('deleted') lists —
+// answer per filter (deleted empty by default).
 beforeEach(() => {
-  useContacts.mockReturnValue({
-    status: 'ready',
-    contacts: [
-      { contactId: 't1', type: 'tenant', status: 'active', firstName: 'Fixture', lastName: 'Tenant', phone: '+14045550111' },
-    ],
-  });
+  useContacts.mockImplementation((filter: string) =>
+    filter === 'deleted'
+      ? { status: 'ready', contacts: [] }
+      : {
+          status: 'ready',
+          contacts: [
+            { contactId: 't1', type: 'tenant', status: 'active', firstName: 'Fixture', lastName: 'Tenant', phone: '+14045550111' },
+          ],
+        },
+  );
 });
 
 afterEach(() => vi.restoreAllMocks());
@@ -326,6 +332,29 @@ describe('ListingDetail', () => {
     expect(row).toHaveAttribute('href', '/placements/c1');
     // The raw tenantId must never be surfaced.
     expect(screen.queryByText('t1')).not.toBeInTheDocument();
+  });
+
+  it('resolves a SOFT-DELETED tenant to their name on the placements card (never the raw id)', () => {
+    // The placement outlived its tenant (deleted after move-in/loss): the contact
+    // exists ONLY in the deleted list, and the row must still show the name.
+    useContacts.mockImplementation((filter: string) =>
+      filter === 'deleted'
+        ? {
+            status: 'ready',
+            contacts: [
+              { contactId: 't-del', type: 'tenant', status: 'active', firstName: 'Dora', lastName: 'Departed', phone: '+14045550999', deleted_at: '2026-07-20T00:00:00Z' },
+            ],
+          }
+        : { status: 'ready', contacts: [] },
+    );
+    useListing.mockReturnValue({
+      ...READY,
+      placementsOnUnit: [{ placementId: 'c9', tenantId: 't-del', unitId: 'u1', stage: 'moved_in' }],
+    });
+    renderAt();
+    const row = screen.getByRole('link', { name: /Dora Departed/ });
+    expect(row).toHaveAttribute('href', '/placements/c9');
+    expect(screen.queryByText('t-del')).not.toBeInTheDocument();
   });
 
   it('renders the "Tours on this property" card: tenant name + date rows linking to the tour, status on the right', () => {

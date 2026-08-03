@@ -24,7 +24,37 @@ export const UNIT_PHOTO_PRESIGN_POST_TTL_SECONDS = 300;
 export interface MediaObject {
   body: Readable;
   contentType?: string;
+  /** On a PARTIAL (ranged) read this is the PART length, not the object's. */
   contentLength?: number;
+  /**
+   * S3's ContentRange for a partial read, e.g. `bytes 0-1023/98765`. Its
+   * PRESENCE is the partial signal - there is deliberately no separate
+   * `partial` boolean, because two fields encoding one fact can disagree.
+   */
+  contentRange?: string;
+}
+
+/**
+ * Thrown by getStream when a Range WAS requested and the object cannot satisfy
+ * it (S3 InvalidRange / HTTP 416). Callers answer 416; every other error keeps
+ * bubbling. A typed error keeps the 416 path explicit without widening the
+ * return type for the callers that never pass a range.
+ */
+export class RangeNotSatisfiableError extends Error {
+  constructor(message = 'range not satisfiable') {
+    super(message);
+    this.name = 'RangeNotSatisfiableError';
+  }
+}
+
+/** S3 reports an unsatisfiable range as InvalidRange / HTTP 416. */
+function isUnsatisfiableRangeError(err: unknown): boolean {
+  if (typeof err !== 'object' || err === null) return false;
+  return (
+    (err as { name?: string }).name === 'InvalidRange' ||
+    (err as { Code?: string }).Code === 'InvalidRange' ||
+    (err as { $metadata?: { httpStatusCode?: number } }).$metadata?.httpStatusCode === 416
+  );
 }
 
 /** Metadata for a stored object (outbound MMS: HeadObject before presigning). */
@@ -49,8 +79,16 @@ export interface MediaStore {
    * buffers the whole object. Returns undefined when the key does not exist
    * (NoSuchKey) so the caller can answer 404. The s3:GetObject permission is
    * already granted on MEDIA_BUCKET (the ec2 IAM role) — no new infra.
+   *
+   * `opts.range` forwards an HTTP Range header value VERBATIM to S3 (call
+   * recordings must be seekable: the browser range-requests as you scrub). S3
+   * owns the RFC 7233 semantics - suffix ranges, open-ended ranges, EOF
+   * clamping - so we never reimplement them. A satisfiable range comes back
+   * with `contentRange` set; an unsatisfiable one throws
+   * RangeNotSatisfiableError. The param is OPTIONAL: callers that omit it get
+   * byte-identical behavior to before.
    */
-  getStream(key: string): Promise<MediaObject | undefined>;
+  getStream(key: string, opts?: { range?: string }): Promise<MediaObject | undefined>;
   /**
    * Read an object fully into a Buffer (outbound MMS transcode: confirm needs the
    * bytes to decode). Bounded by the presign source cap upstream. Returns undefined
@@ -125,10 +163,15 @@ export class S3MediaStore implements MediaStore {
     }
   }
 
-  async getStream(key: string): Promise<MediaObject | undefined> {
+  async getStream(key: string, opts?: { range?: string }): Promise<MediaObject | undefined> {
+    const range = opts?.range;
     try {
       const out = await this.client.send(
-        new GetObjectCommand({ Bucket: this.bucket, Key: key }),
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+          ...(range !== undefined && { Range: range }),
+        }),
       );
       if (out.Body === undefined) return undefined;
       // In Node the SDK's Body is a Readable (IncomingMessage) — stream it.
@@ -136,8 +179,15 @@ export class S3MediaStore implements MediaStore {
         body: out.Body as Readable,
         ...(out.ContentType !== undefined && { contentType: out.ContentType }),
         ...(out.ContentLength !== undefined && { contentLength: out.ContentLength }),
+        ...(out.ContentRange !== undefined && { contentRange: out.ContentRange }),
       };
     } catch (err) {
+      // An unsatisfiable RANGE is a client error (416), not an absent object
+      // and not a 500. Gated on us having actually asked for a range, so a
+      // stray InvalidRange on a plain read still bubbles as a real error.
+      if (range !== undefined && isUnsatisfiableRangeError(err)) {
+        throw new RangeNotSatisfiableError();
+      }
       // A missing object → undefined (caller answers 404). The S3 SDK throws
       // NoSuchKey (and sometimes a 404 NotFound) for an absent key; anything
       // else (auth/network) is a real error and re-thrown.

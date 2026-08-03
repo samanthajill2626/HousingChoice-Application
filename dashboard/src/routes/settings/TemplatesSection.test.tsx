@@ -35,6 +35,13 @@ const SETTINGS: OrgSettings = {
   missedCallAutoTextEnabled: true,
   quickReplies: ['Please text me'],
   preRingPauseSeconds: 2,
+  // Quiet hours lives on the same OrgSettings record (edited on the System tab,
+  // not here) - the fixture carries the backend defaults so the literal stays a
+  // complete OrgSettings.
+  quietHoursEnabled: true,
+  quietHoursStart: '21:00',
+  quietHoursEnd: '08:00',
+  timezone: 'America/New_York',
 };
 
 /** The read-only built-in welcome body served alongside the settings. */

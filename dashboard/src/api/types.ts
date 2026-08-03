@@ -100,7 +100,7 @@ export interface PoolNumberRow {
   groups: PoolNumberGroupRow[];
 }
 
-// --- Settings: OrgSettings (founder-editable call-triage templates) ----------
+// --- Settings: OrgSettings (founder-editable templates + quiet hours) --------
 // MIRRORS app/src/repos/settingsRepo.ts `OrgSettings`. The dashboard cannot
 // import from app/src, so the shape is duplicated; keep it in sync. `welcomeText`
 // is OPTIONAL (absent until the operator sets it — the backend falls back to its
@@ -116,6 +116,15 @@ export interface OrgSettings {
   quickReplies: string[];
   /** The pre-ring <Pause> before the founder-bridge dial (whole seconds, 0..10). */
   preRingPauseSeconds: number;
+  /** Quiet hours (spec 2026-08-03): automated sends DEFER during this window. */
+  quietHoursEnabled: boolean;
+  /** "HH:MM" 24h local wall clock - window start (start-inclusive). */
+  quietHoursStart: string;
+  /** "HH:MM" 24h local wall clock - window end (end-exclusive). */
+  quietHoursEnd: string;
+  /** IANA org timezone - the FIRST server-side timezone; also used by the
+   *  morning_of tour reminder. Displayed read-only in the UI this phase. */
+  timezone: string;
   /** OPTIONAL housing-fair welcome SMS body; {firstName} is interpolated.
    *  Absent → the backend falls back to WELCOME_TEXT_TEMPLATE. */
   welcomeText?: string;

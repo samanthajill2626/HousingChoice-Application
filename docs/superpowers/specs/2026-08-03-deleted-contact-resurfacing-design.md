@@ -80,8 +80,11 @@ Notes:
 deleted contact are refused with a 409 (`contact_deleted` reason), mirroring
 the existing opt-out refusal pattern, in the SMS and email send paths the
 dashboard composer uses. Broadcast targeting already excludes deleted contacts
-(`listByHousingAuthority` filter). Relay-group sends are out of scope (group
-threads are not contact-keyed and are unaffected by member deletion).
+(`listByHousingAuthority` filter). Relay-group sends are out of scope here, but
+note the blind spot: deletion does NOTHING to relay-group membership today (a
+deleted member still receives group sends and their group texts still relay) -
+tracked as its own decision in
+`docs/issues/relay-groups-ignore-member-deletion.md`.
 
 ## Dashboard
 

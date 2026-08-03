@@ -207,8 +207,20 @@ export function hoursFromNow(hours: number): string {
   return new Date(Date.now() + hours * 3_600_000).toISOString();
 }
 
-/** Masked relay pool numbers minted by the fake (+1555019xxxx). */
-const POOL_NUMBER_RE = /^\+1555019\d{4}$/;
+/**
+ * Masked relay pool numbers minted by the fake's AvailablePhoneNumbers search.
+ * `019` is the exchange the fake reserves for mintable candidates and is the
+ * ONLY invariant part; the area-code segment now mirrors the buy's geographic
+ * search hint (area-code preference, 2026-08-03): +1303019xxxx for a
+ * property-ZIP-hinted buy (scenario units are zip 30314), +1404019xxxx for the
+ * Atlanta-default area-code rung, +1555019xxxx for an unhinted search and for
+ * the seeded pool numbers. Hence the wildcard segment rather than an
+ * enumeration. This stays a POOL-vs-not discriminator: freshContact mints
+ * members as `+1555<5 clock digits><2-digit seq>` and a member number is only
+ * ever an INBOUND `from`, while both call sites read a group's pool number or
+ * an OUTBOUND `from` - so no member number can be mistaken for a pool number.
+ */
+const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
 
 export class Scenario {
   private activeContactId: string | null = null;
@@ -1469,7 +1481,8 @@ export class Scenario {
   //     never auto-created; reminders route to the GROUP for landlord_led/pm_team
   //     tours with a group, and to the tenant 1:1 otherwise (incl. ALL self_guided).
   //   - Group proof-of-send = the fake threads: every member receives from the
-  //     POOL number (+1555019xxxx), member messages arrive masked as "Name: body".
+  //     POOL number (see POOL_NUMBER_RE - the segment tracks the buy hint),
+  //     member messages arrive masked as "Name: body".
   //   - The tick seam (POST /__dev/tour-reminders/tick) is GLOBAL — assertions
   //     scope to THIS scenario's phones; the worker's 60s wall-clock poll may
   //     also fire a due rung, so we assert ARRIVAL, never which trigger fired.
@@ -2144,6 +2157,12 @@ export class Scenario {
       expect(got.groupThreadId).toBeUndefined();
       const threads = await listThreads(this.request);
       const thread = threads.find((x) => x.partyNumber === t.phone);
+      // The ABSENCE proof: nothing reached the tenant from a masked pool number.
+      // POOL_NUMBER_RE must keep matching whatever prefix the fake would mint for
+      // a real group buy (any hinted area-code segment since 2026-08-03) - a
+      // regex narrower than the live prefixes would make this pass vacuously,
+      // catching no regression at all. Only OUR outbound legs are considered, so
+      // the tenant's own (inbound) number can never trip it.
       const introFromPool =
         thread?.messages.some(
           (m) => m.direction === 'outbound' && POOL_NUMBER_RE.test(m.from),

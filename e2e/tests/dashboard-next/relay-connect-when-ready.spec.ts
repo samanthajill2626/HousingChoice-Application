@@ -50,7 +50,8 @@ const INTRO_NEEDLE = 'Reply STOP to opt out';
 
 // --- Per-run-unique phones ---------------------------------------------------
 // +1 555 8XX XXXX: the "8" exchange never collides with the fake's minted pool
-// numbers (+1555019xxxx) or the seeded rosters. The last-4 of the wall clock + an
+// numbers (the fake mints them on the 019 exchange: +1<hint segment>019xxxx, so
+// +1404019xxxx here) or the seeded rosters. The last-4 of the wall clock + an
 // incrementing counter keep every number unique across the run.
 let uid = 0;
 function uniquePhone(): string {
@@ -263,6 +264,18 @@ test('connect-when-ready: a connecting group queues a team send, then opens + de
   // --- Act: discover the warmed number (bought+recorded async by the warm job)
   //     and fire the readiness signal. ---
   const warmedNumber = await pollWarmingNumber(request);
+
+  // Area-code preference (2026-08-03), proven end-to-end: this STANDALONE group
+  // carries no property ZIP, so the buy's first search hint is the first
+  // configured preferred area code - the Atlanta default 404 (the hermetic stack
+  // sets no RELAY_PREFERRED_AREA_CODES). The fake echoes the winning hint back as
+  // the minted number's area-code segment, so the warmed number is the witness
+  // that the hint really threaded app -> twilio driver -> AvailablePhoneNumbers
+  // search (a ZIP-hinted tour/placement buy mints +1303019xxxx instead).
+  expect(warmedNumber, 'the warm buy searched with the preferred area-code hint').toMatch(
+    /^\+1404019\d{4}$/,
+  );
+
   await registerNumber(request, warmedNumber);
 
   // --- Assert: the group OPENS on that now-dedicated number. ---

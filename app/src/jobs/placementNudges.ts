@@ -45,7 +45,11 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { resolveMessage } from '../messages/index.js';
-import { clampOutOfQuietHours } from '../lib/quietHours.js';
+import {
+  clampOutOfQuietHours,
+  isQuietTime,
+  type QuietHoursWindow,
+} from '../lib/quietHours.js';
 import type { SettingsRepo } from '../repos/settingsRepo.js';
 // The quiet-hours window reader is single-sourced with the tour-reminder armer
 // (same defensive fallback, same log line) - not a new copy here.
@@ -211,6 +215,13 @@ export interface RunDuePlacementNudgesDeps {
   unitsRepo: UnitsRepo;
   conversationsRepo: ConversationsRepo;
   sendMessageService: SendMessageService;
+  /**
+   * Quiet-hours source for the FIRE-TIME BACKSTOP (REQUIRED - an unfenced
+   * poller would still fire every legacy overnight row). Read ONCE per tick.
+   * Narrow read-only shape (the `resolveWithSettings` precedent) so tests stub
+   * one method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
   /** Live-update bus: a claim-skip retires a rung the panels show as upcoming,
    *  so poke them to refetch (best-effort; mirrors tourReminders' claimSkipRow).
    *  Optional, but worker.ts now passes appEvents so these pokes cross the event
@@ -274,9 +285,13 @@ export async function runDuePlacementNudges(
 
   log.info({ count: dueRows.length, now: nowIso }, 'placement nudge poll: processing due rows');
 
+  // ONE settings read per tick (not per row) - the window is the same for every
+  // row in the batch, and a settings failure falls back to the defaults.
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+
   for (const row of dueRows) {
     try {
-      await processNudgeRow(row, nowIso, deps, log);
+      await processNudgeRow(row, nowIso, window, deps, log);
     } catch (err) {
       // Per-row errors are isolated: log + continue so one bad row doesn't block
       // the rest of the batch.
@@ -291,9 +306,25 @@ export async function runDuePlacementNudges(
 async function processNudgeRow(
   row: PlacementNudgeItem,
   nowIso: string,
+  window: QuietHoursWindow,
   deps: RunDuePlacementNudgesDeps,
   log: Logger,
 ): Promise<void> {
+  // QUIET-HOURS BACKSTOP (spec 2026-08-03 section 6), PRE-CLAIM and FIRST.
+  // Normal rows are clamped at arm time, so this only fires for legacy rows and
+  // worker-downtime catch-up. Returning WITHOUT claiming leaves the row in
+  // listDue - it re-fires within one poll tick of quiet-end. This must NEVER
+  // become a post-claim refusal: claimSend IS the sentAt stamp, so a refusal
+  // after it would destroy the message permanently. No supersession twin here -
+  // the ladder arms ONE rung per stage, so a nudge cannot self-collide.
+  if (isQuietTime(nowIso, window)) {
+    log.info(
+      { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
+      'placement nudge due during quiet hours - deferred (not claimed)',
+    );
+    return;
+  }
+
   // Resolve the placement.
   const placement = await deps.placementsRepo.getById(row.placementId);
   if (!placement) {

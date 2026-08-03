@@ -50,6 +50,7 @@ import { resolveMessage } from '../messages/index.js';
 import {
   clampOutOfQuietHours,
   instantAtLocalTime,
+  isQuietTime,
   localDateOf,
   quietHoursWindowOf,
   resolveQuietHoursTimezone,
@@ -270,6 +271,13 @@ export interface RunDueTourRemindersDeps {
   conversationsRepo: ConversationsRepo;
   sendMessageService: SendMessageService;
   /**
+   * Quiet-hours source for the FIRE-TIME BACKSTOP (REQUIRED - an unfenced
+   * poller would still fire every legacy 4am row). Read ONCE per tick. Narrow
+   * read-only shape (the `resolveWithSettings` precedent) so tests stub one
+   * method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
    * Direct provider sends for the GROUP route (landlord_led / pm_team tours
    * with a usable group thread). Named `adapter` to match the repo idiom
    * (RelayFanOutJobDeps / SendMessageServiceDeps). The group route CANNOT go
@@ -335,9 +343,13 @@ export async function runDueTourReminders(
 
   log.info({ count: dueRows.length, now }, 'tour reminder poll: processing due rows');
 
+  // ONE settings read per tick (not per row) - the window is the same for every
+  // row in the batch, and a settings failure falls back to the defaults.
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+
   for (const row of dueRows) {
     try {
-      await processReminderRow(row, now, deps, log);
+      await processReminderRow(row, now, window, dueRows, deps, log);
     } catch (err) {
       // Per-row errors are isolated: log + continue so one bad row doesn't
       // block the rest of the batch.
@@ -374,9 +386,51 @@ async function claimSkipRow(
 async function processReminderRow(
   row: TourReminderItem,
   now: string,
+  window: QuietHoursWindow,
+  batch: TourReminderItem[],
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
+  // Both quiet-hours checks below run FIRST - above the tour fetch and above
+  // the group-route branch (which returns early), so landlord_led / pm_team
+  // rungs are covered too.
+
+  // RELEASE SUPERSESSION (the backstop twin of arm-time supersession): if a
+  // LATER rung of the SAME tour is also due in this batch, this rung's copy is
+  // stale ("your tour is tomorrow" beside "your tour is today"), so retire it
+  // unsent. Covers legacy rows released together at quiet-end (e.g. a
+  // pre-feature 08:00-UTC morning_of alongside a deferred day_before). The
+  // batch is deliberately the ONE listDue snapshot the tick started with.
+  const myOrder = LADDER_ORDER.indexOf(row.kind);
+  const supersededInBatch = batch.some(
+    (other) =>
+      other.tourId === row.tourId &&
+      other.reminderId !== row.reminderId &&
+      LADDER_ORDER.indexOf(other.kind) > myOrder,
+  );
+  if (supersededInBatch) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder superseded by a later due rung - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'quiet_hours_superseded', now, deps);
+    return;
+  }
+
+  // QUIET-HOURS BACKSTOP (spec section 6), PRE-CLAIM. Normal rows are clamped
+  // at arm time, so this only fires for legacy rows and worker-downtime
+  // catch-up. Returning WITHOUT claiming leaves the row in listDue - it
+  // re-fires within one poll tick of quiet-end. This must NEVER become a
+  // post-claim refusal: claimSend IS the sentAt stamp, so a refusal after it
+  // would destroy the message permanently.
+  if (isQuietTime(now, window)) {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder due during quiet hours - deferred (not claimed)',
+    );
+    return;
+  }
+
   // Resolve the tour.
   const tour = await deps.toursRepo.get(row.tourId);
   if (!tour) {

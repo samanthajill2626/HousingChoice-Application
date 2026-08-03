@@ -16,6 +16,7 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -297,6 +298,7 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         messagesRepo: world.messagesRepo,
         sendMessageService,
         adapter: world.adapter,
+        settingsRepo: quietOffSettingsRepo(),
         logger,
       },
     });
@@ -368,11 +370,12 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     expect(res.status).toBe(200);
     expect(res.body).toEqual({ ok: true, now: '2026-07-14T18:01:00.000Z' });
 
-    // Both due rows (confirmation @ FIXED_NOW, day_before @ T-24h with .000
-    // milliseconds) fired against the normalized now.
-    expect(world.sent.map((s) => s.body).sort()).toEqual(
-      [CONFIRMATION_BODY, DAY_BEFORE_BODY].sort(),
-    );
+    // The day_before row (dueAt @ T-24h, carrying .000 milliseconds) fired
+    // against the normalized now - proof the ms-less input collapsed. The
+    // confirmation rung is due in the SAME batch and is retired unsent by
+    // release supersession (quiet-hours spec section 5: only the rung closest
+    // to the event sends when a catch-up tick releases several at once).
+    expect(world.sent.map((s) => s.body)).toEqual([DAY_BEFORE_BODY]);
   });
 
   it('defaults now to the wall clock when the body carries none', async () => {
@@ -457,6 +460,7 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
         unitsRepo: world.unitsRepo,
         conversationsRepo: world.conversationsRepo,
         sendMessageService,
+        settingsRepo: quietOffSettingsRepo(),
         logger,
       },
     });

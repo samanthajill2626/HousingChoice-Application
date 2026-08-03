@@ -428,6 +428,7 @@ describe('runDuePlacementNudges', () => {
         conversation('conv-tenant-1', tenantPhone, 'tenant_1to1'),
       ]),
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     return { repo, deps, send, row, tenantPhone };
   }
@@ -469,6 +470,7 @@ describe('runDuePlacementNudges', () => {
         conversation('conv-landlord-1', landlordPhone, 'landlord_1to1'),
       ]),
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await runDuePlacementNudges(NOW, deps);
     expect(send.sent).toHaveLength(1);
@@ -499,6 +501,31 @@ describe('runDuePlacementNudges', () => {
     expect(await repo.listDue(NOW)).toHaveLength(0);
   });
 
+  // QUIET-HOURS BACKSTOP (spec 2026-08-03 section 6): the check is PRE-CLAIM -
+  // the row is left untouched in listDue and re-fires after quiet-end. A
+  // post-claim refusal would stamp sentAt and destroy the message forever.
+  // NOW (10:00Z) is 06:00 America/New_York in July - inside the default
+  // 21:00-08:00 window; 12:05Z is 08:05 local, just outside it.
+  it('defers a due nudge while `now` is inside quiet hours WITHOUT claiming it, then sends it after the window', async () => {
+    const { deps: baseDeps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check');
+    const deps = { ...baseDeps, settingsRepo: stubSettingsRepo() };
+
+    await runDuePlacementNudges(NOW, deps);
+    expect(send.sent).toHaveLength(0);
+    // Untouched: no sentAt (the claim IS the sentAt stamp), no skip, no cancel.
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+    expect(row.canceledAt).toBeUndefined();
+    // Still live in listDue - the next tick re-lists it.
+    expect(await repo.listDue(NOW)).toHaveLength(1);
+
+    const afterWindow = '2026-07-05T12:05:00.000Z';
+    await runDuePlacementNudges(afterWindow, deps);
+    expect(send.sent).toHaveLength(1);
+    expect(send.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
+    expect(row.sentAt).toBe(afterWindow);
+  });
+
   it('SendRefusedError keeps the claim stamped and does not throw', async () => {
     const { repo, deps: baseDeps, row } = tenantRig('awaiting_receipt', 'receipt_check');
     const refusingSend = makeSendSpy({ throwErr: new SendRefusedError('conv-tenant-1', 'manual_mode') });
@@ -527,6 +554,7 @@ describe('runDuePlacementNudges', () => {
       unitsRepo: makeFakeUnitsRepo([]),
       conversationsRepo: makeFakeConversationsRepo([]),
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
     expect(send.sent).toHaveLength(0);
@@ -554,6 +582,7 @@ describe('runDuePlacementNudges', () => {
       unitsRepo: makeFakeUnitsRepo([{ unitId: 'unit-nl' } as UnitItem]),
       conversationsRepo: makeFakeConversationsRepo([]),
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
     expect(send.sent).toHaveLength(0);
@@ -603,6 +632,7 @@ describe('runDuePlacementNudges', () => {
       ]),
       conversationsRepo: convRepo,
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await runDuePlacementNudges(NOW, deps);
 
@@ -639,6 +669,7 @@ describe('runDuePlacementNudges', () => {
       ]),
       conversationsRepo: convRepo,
       sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await runDuePlacementNudges(NOW, deps);
 
@@ -673,6 +704,7 @@ describe('runDuePlacementNudges', () => {
       ]),
       conversationsRepo: convRepo,
       sendMessageService: refusingSend.service,
+      settingsRepo: quietOffSettingsRepo(),
     };
     await expect(runDuePlacementNudges(NOW, deps)).resolves.toBeUndefined();
 

@@ -39,7 +39,10 @@ export type ReminderSkipReason =
   | 'no_conversation'
   | 'contact_missing'
   | 'contact_no_phone'
-  | 'tour_missing';
+  | 'tour_missing'
+  /** A LATER rung of the same tour was due in the same release batch, so this
+   *  rung's copy is stale (quiet-hours spec 2026-08-03, section 5). */
+  | 'quiet_hours_superseded';
 
 export interface TourReminderItem {
   /** PK */

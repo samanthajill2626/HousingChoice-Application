@@ -51,6 +51,33 @@ describe('evaluateScheduledSendSuppression precedence', () => {
   it('stale stage (nudge)', () => {
     expect(evaluateScheduledSendSuppression({ ...base, staleStage: true })).toEqual({ reason: 'stale_stage' });
   });
+
+  // Quiet hours (spec 2026-08-03) is LAST in the precedence order: it is the
+  // least severe reason (the send DEFERS to quiet-end rather than being
+  // dropped), so every other reason outranks it.
+  it('quiet hours alone', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, quietNow: true })).toEqual({ reason: 'quiet_hours' });
+  });
+  it('kill switch outranks quiet hours', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, smsSendingEnabled: false, quietNow: true }))
+      .toEqual({ reason: 'sms_sending_disabled' });
+  });
+  it('opt-out outranks quiet hours', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, contactOptOut: true, quietNow: true }))
+      .toEqual({ reason: 'contact_opted_out' });
+  });
+  it('manual mode outranks quiet hours', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, aiMode: 'manual', quietNow: true }))
+      .toEqual({ reason: 'manual_mode' });
+  });
+  it('stale stage outranks quiet hours (quiet_hours is the LAST branch)', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, staleStage: true, quietNow: true }))
+      .toEqual({ reason: 'stale_stage' });
+  });
+  it('quietNow false / absent suppresses nothing', () => {
+    expect(evaluateScheduledSendSuppression({ ...base, quietNow: false })).toBeUndefined();
+    expect(evaluateScheduledSendSuppression(base)).toBeUndefined();
+  });
 });
 
 // --- M1 regression: sendMessage gate ORDER is unchanged after predicate extraction.

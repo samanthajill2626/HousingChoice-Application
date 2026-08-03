@@ -45,6 +45,9 @@
   text-transform: none;
   letter-spacing: 0;
   cursor: pointer;
+  /* Short action labels ("+ Placement") must never wrap mid-label next to a
+   * long card title — let the title wrap instead. */
+  white-space: nowrap;
 }
 
 .asideBtn:hover {

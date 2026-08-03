@@ -132,6 +132,7 @@ describe('POST /api/conversations/:conversationId/email', () => {
       { code: 'conversation_not_found', status: 404 },
       { code: 'email_sending_disabled', status: 409 }, // ADJ-6: 409, not 503
       { code: 'email_suppressed', status: 409 },
+      { code: 'contact_deleted', status: 409 },
       { code: 'email_attachments_too_large', status: 409 },
       { code: 'contact_email_missing', status: 409 },
       { code: 'invalid_cc', status: 400 },

@@ -44,6 +44,17 @@ describe('Timeline - deleted-contact composer lock', () => {
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
   });
 
+  it('deleted with no onRestore: the note still renders, but no dead Restore button', () => {
+    render(
+      <MemoryRouter>
+        <Timeline {...base} deleted />
+      </MemoryRouter>,
+    );
+    expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Restore contact' })).toBeNull();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+  });
+
   it('not deleted: the Reply textbox renders as usual', () => {
     render(
       <MemoryRouter>

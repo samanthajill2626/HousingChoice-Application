@@ -10,6 +10,7 @@ import { loadConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import {
   CircuitBreakerOpenError,
+  ContactDeletedError,
   ContactNoConsentError,
   ContactOptedOutError,
   ConversationNotFoundError,
@@ -86,6 +87,7 @@ describe('POST /api/conversations/:conversationId/messages', () => {
     const cases = [
       { err: new ConversationNotFoundError('conv-1'), status: 404, code: 'conversation_not_found' },
       { err: new ContactOptedOutError('conv-1'), status: 409, code: 'contact_opted_out' },
+      { err: new ContactDeletedError('conv-1'), status: 409, code: 'contact_deleted' },
       // A2P/CTIA JIT gate: a proactive human send to a no-consent contact → 409.
       { err: new ContactNoConsentError('conv-1'), status: 409, code: 'contact_no_consent' },
       { err: new CircuitBreakerOpenError('conv-1'), status: 429, code: 'breaker_open' },

@@ -83,6 +83,11 @@ function firstNameOf(c: Contact | null): string | null {
   return f && f.length > 0 ? f : null;
 }
 
+/** True when the contact is soft-deleted (ContactDetail's own `deleted` test). */
+function isDeletedContact(c: Contact | null): boolean {
+  return typeof c?.deleted_at === 'string' && c.deleted_at.length > 0;
+}
+
 export function PlacementConversation({
   placement,
   unit,
@@ -143,6 +148,14 @@ export function PlacementConversation({
   // same as the contact page's reply box); the group tab passes none - its
   // composer matches ConversationDetail's group view.
   const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
+  // Soft-deleted contact -> the 1:1 composer is REPLACED by the standing restore
+  // note, exactly as on the contact page (uniform lock on every Timeline surface;
+  // the server refuses the send too, 409 contact_deleted). Both 1:1 panes get it:
+  // the parent already loads both Contact objects. No onRestore is passed - this
+  // is a read-only surface, so Timeline renders the note WITHOUT a dead button
+  // and restoring stays on the contact page.
+  const oneToOneDeleted =
+    activeKey === 'landlord' ? isDeletedContact(landlord) : isDeletedContact(tenant);
 
   // Group provisioning lives HERE (not delegated to a parent onOpenGroup like the
   // tour page): [Open group text] calls provisionPlacementRelay, then injects the
@@ -260,6 +273,7 @@ export function PlacementConversation({
             key={active.conversationId}
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+            deleted={oneToOneDeleted}
             clearDraftSignal={clearSignals[oneToOneKey]}
             onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({
@@ -282,6 +296,7 @@ export function PlacementConversation({
             contactId={oneToOneContactId}
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
+            deleted={oneToOneDeleted}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
             clearDraftSignal={clearSignals[oneToOneKey]}
             onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
@@ -380,12 +395,16 @@ function isConsentRefusal(err: unknown): boolean {
 function ContactThread({
   conversationId,
   replyToPhone,
+  deleted,
   clearDraftSignal,
   onConsentRefused,
 }: {
   conversationId: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
+  /** The contact is soft-deleted -> Timeline replaces the composer with the
+   *  restore note (no onRestore here: restoring lives on the contact page). */
+  deleted: boolean;
   /** Post-consent retry landed -> clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
   /** The consent gate refused this send (409 contact_no_consent) - the parent
@@ -425,6 +444,7 @@ function ContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      deleted={deleted}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       resetScrollKey={conversationId}
     />
@@ -438,6 +458,7 @@ function NewContactThread({
   contactId,
   name,
   replyToPhone,
+  deleted,
   onCreated,
   clearDraftSignal,
   onConsentRefused,
@@ -446,6 +467,8 @@ function NewContactThread({
   name: string;
   /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
   replyToPhone?: string;
+  /** The contact is soft-deleted - see ContactThread. */
+  deleted: boolean;
   onCreated: (conversationId: string) => void;
   /** Post-consent retry landed -> clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
@@ -483,6 +506,7 @@ function NewContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      deleted={deleted}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       emptyLabel={`No messages with ${name} yet`}
       resetScrollKey={`new:${contactId}`}

@@ -140,3 +140,34 @@ describe('TourConversation - no-show check-in seed', () => {
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
   });
 });
+
+// The composer lock is UNIFORM across every 1:1 Timeline surface (2026-08-03
+// deleted-contact resurfacing spec, human-approved scope amendment): a deleted
+// contact's pane shows the standing restore note instead of the composer here
+// exactly as on the contact page. Restoring itself stays on the contact page, so
+// no onRestore is passed and no (dead) Restore button renders.
+describe('TourConversation - deleted-contact composer lock', () => {
+  const DELETED_AT = '2026-08-01T00:00:00.000Z';
+
+  it('a soft-deleted tenant locks the tenant 1:1: note shown, no Reply textbox, no dead Restore', async () => {
+    renderConvo(baseProps({ tenant: { ...tenantContact(), deleted_at: DELETED_AT } }));
+
+    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Restore contact' })).toBeNull();
+  });
+
+  it('the lock is per pane: a deleted landlord locks only the landlord 1:1', async () => {
+    renderConvo(baseProps({ landlord: { ...landlordContact(), deleted_at: DELETED_AT } }));
+
+    // The (live) tenant pane still composes normally...
+    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toBeInTheDocument();
+
+    // ...while the deleted landlord's pane is locked.
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+  });
+});

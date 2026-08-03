@@ -104,6 +104,20 @@ tracked as its own decision in
   notice ("This contact is deleted - restore them to reply") plus a Restore
   button wired to the existing `onRestore`. `canSend` also gates on
   `!deleted` so no send path renders live.
+- **Uniform 1:1 composer lock (amended 2026-08-03, operator-approved).** The
+  lock is NOT contact-page-only: every 1:1 Timeline surface shows the same
+  standing note instead of a composer when the contact is deleted. That means
+  the placement page's tenant AND landlord panes
+  (PlacementConversation.tsx) and the tour page's tenant AND landlord panes
+  (TourConversation.tsx) - both parents already hold the two Contact objects, so
+  each pane just computes the flag and passes `deleted` down. This supersedes
+  the earlier posture that those composers stay live and rely on the server's
+  409; a composer that looks live but cannot send is the worse experience.
+  - Those surfaces pass `deleted` ONLY, never `onRestore`: Timeline renders the
+    note WITHOUT a button in that case, because **Restore lives on
+    ContactDetail** (one deliberate place to bring a contact back).
+  - ConversationDetail is out of scope: a plain 1:1 there redirects to the
+    contact page, and its Timeline renders relay groups only.
 
 ## Testing
 

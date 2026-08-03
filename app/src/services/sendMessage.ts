@@ -84,8 +84,15 @@ export class ContactOptedOutError extends SendRefusedError {
   }
 }
 
-/** Soft-deleted contacts are unreachable (human OR automated) until restored
- *  (deleted-contact resurfacing spec 2026-08-03). */
+/** Soft-deleted contacts are unreachable (human OR automated) THROUGH THIS GATE
+ *  until restored (deleted-contact resurfacing spec 2026-08-03). Two send paths
+ *  bypass it and still reach a deleted contact — both pre-existing, both filed,
+ *  neither in this feature's scope:
+ *    - relay-group fan-out / announcements (deletion does nothing to group
+ *      membership) — docs/issues/relay-groups-ignore-member-deletion.md
+ *    - outbound voice (originateCall has no deleted check) —
+ *      docs/issues/outbound-voice-ignores-deleted-contacts.md
+ *  So "unreachable" is true of 1:1 SMS/email, not of the contact as a whole. */
 export class ContactDeletedError extends SendRefusedError {
   constructor(conversationId: string) {
     super(`contact for conversation ${conversationId} is soft-deleted — send refused`, 'contact_deleted');

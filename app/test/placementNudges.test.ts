@@ -41,6 +41,11 @@ import {
   type RunDuePlacementNudgesDeps,
 } from '../src/jobs/placementNudges.js';
 import { resolveMessage } from '../src/messages/index.js';
+import {
+  failingSettingsRepo,
+  quietOffSettingsRepo,
+  stubSettingsRepo,
+} from './helpers/settingsStub.js';
 
 const FIXED_CREATED = '2026-07-03T00:00:00.000Z';
 
@@ -248,7 +253,12 @@ function conversation(
 // ---------------------------------------------------------------------------
 
 describe('armNudgeForStage', () => {
-  const NOW = '2026-07-03T10:00:00.000Z';
+  // 08:30 EDT: the ONE hour of the day where both a +24h rung (08:30 next
+  // morning) and a +36h rung (20:30 that evening) land OUTSIDE the default
+  // quiet window (21:00-08:00 America/New_York) - so with quiet hours ON the
+  // clamp is identity and these cases still assert the raw ladder offsets.
+  // The clamping cases below pick their own instants.
+  const NOW = '2026-07-03T12:30:00.000Z';
   const H = 60 * 60 * 1000;
 
   it('creates the right kind + dueAt for each staged rung', async () => {
@@ -261,7 +271,10 @@ describe('armNudgeForStage', () => {
     for (const c of cases) {
       const { repo, rows } = makeFakeNudgesRepo();
       const p = makePlacement({ placementId: `p-${c.stage}`, stage: c.stage });
-      await armNudgeForStage(p, c.stage, NOW, { placementNudgesRepo: repo });
+      await armNudgeForStage(p, c.stage, NOW, {
+        placementNudgesRepo: repo,
+        settingsRepo: stubSettingsRepo(),
+      });
       const pending = rows.filter((r) => r.canceledAt === undefined);
       expect(pending).toHaveLength(1);
       expect(pending[0]!.kind).toBe(c.kind);
@@ -281,7 +294,10 @@ describe('armNudgeForStage', () => {
     };
     const { repo, rows } = makeFakeNudgesRepo([stale]);
     const p = makePlacement({ placementId: 'p-1', stage: 'awaiting_completion' });
-    await armNudgeForStage(p, 'awaiting_completion', NOW, { placementNudgesRepo: repo });
+    await armNudgeForStage(p, 'awaiting_completion', NOW, {
+      placementNudgesRepo: repo,
+      settingsRepo: stubSettingsRepo(),
+    });
 
     expect(rows.find((r) => r.nudgeId === 'nudge-old')!.canceledAt).toBeDefined();
     const pending = rows.filter((r) => r.canceledAt === undefined);
@@ -300,7 +316,10 @@ describe('armNudgeForStage', () => {
     };
     const { repo, rows } = makeFakeNudgesRepo([stale]);
     const p = makePlacement({ placementId: 'p-1', stage: 'collect_rta' });
-    await armNudgeForStage(p, 'collect_rta', NOW, { placementNudgesRepo: repo });
+    await armNudgeForStage(p, 'collect_rta', NOW, {
+      placementNudgesRepo: repo,
+      settingsRepo: stubSettingsRepo(),
+    });
 
     expect(rows.find((r) => r.nudgeId === 'nudge-old')!.canceledAt).toBeDefined();
     expect(rows.filter((r) => r.canceledAt === undefined)).toHaveLength(0);
@@ -317,10 +336,66 @@ describe('armNudgeForStage', () => {
     };
     const { repo, rows } = makeFakeNudgesRepo([stale]);
     const p = makePlacement({ placementId: 'p-1', stage: 'lost' });
-    await armNudgeForStage(p, 'lost', NOW, { placementNudgesRepo: repo });
+    await armNudgeForStage(p, 'lost', NOW, {
+      placementNudgesRepo: repo,
+      settingsRepo: stubSettingsRepo(),
+    });
 
     expect(rows.find((r) => r.nudgeId === 'nudge-old')!.canceledAt).toBeDefined();
     expect(rows.filter((r) => r.canceledAt === undefined)).toHaveLength(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Arm-time quiet-hours clamping (quiet-hours spec section 5). A nudge arms
+  // ONE rung per stage and so cannot self-collide - no supersession here.
+  // January = EST = UTC-5; the default window is 21:00-08:00 America/New_York.
+  // -------------------------------------------------------------------------
+
+  it('clamps a rung that would land inside quiet hours to quiet-end', async () => {
+    const now = '2026-01-19T04:00:00.000Z'; // Jan 18 23:00 EST
+    const { repo, rows } = makeFakeNudgesRepo();
+    const p = makePlacement({ placementId: 'p-quiet-1', stage: 'awaiting_receipt' });
+
+    await armNudgeForStage(p, 'awaiting_receipt', now, {
+      placementNudgesRepo: repo,
+      settingsRepo: stubSettingsRepo(),
+    });
+
+    // raw = now + 24h = Jan 19 23:00 EST (inside the window) -> Jan 20 08:00 EST.
+    const pending = rows.filter((r) => r.canceledAt === undefined);
+    expect(pending).toHaveLength(1);
+    expect(pending[0]!.kind).toBe('receipt_check');
+    expect(pending[0]!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+  });
+
+  it('stores the raw now + delay when quiet hours are disabled', async () => {
+    const now = '2026-01-19T04:00:00.000Z';
+    const { repo, rows } = makeFakeNudgesRepo();
+    const p = makePlacement({ placementId: 'p-quiet-2', stage: 'awaiting_receipt' });
+
+    await armNudgeForStage(p, 'awaiting_receipt', now, {
+      placementNudgesRepo: repo,
+      settingsRepo: quietOffSettingsRepo(),
+    });
+
+    const pending = rows.filter((r) => r.canceledAt === undefined);
+    expect(pending[0]!.dueAt).toBe('2026-01-20T04:00:00.000Z'); // unclamped
+  });
+
+  it('still clamps with the DEFAULT window when the settings read fails', async () => {
+    const now = '2026-01-19T04:00:00.000Z';
+    const { repo, rows } = makeFakeNudgesRepo();
+    const p = makePlacement({ placementId: 'p-quiet-3', stage: 'awaiting_receipt' });
+
+    await armNudgeForStage(p, 'awaiting_receipt', now, {
+      placementNudgesRepo: repo,
+      settingsRepo: failingSettingsRepo(),
+    });
+
+    // A settings failure must never break arming - and must fall back to the
+    // defaults, not to "no quiet hours".
+    const pending = rows.filter((r) => r.canceledAt === undefined);
+    expect(pending[0]!.dueAt).toBe('2026-01-20T13:00:00.000Z');
   });
 });
 

@@ -45,6 +45,11 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { resolveMessage } from '../messages/index.js';
+import { clampOutOfQuietHours } from '../lib/quietHours.js';
+import type { SettingsRepo } from '../repos/settingsRepo.js';
+// The quiet-hours window reader is single-sourced with the tour-reminder armer
+// (same defensive fallback, same log line) - not a new copy here.
+import { readQuietHoursWindow } from './tourReminders.js';
 
 // ---------------------------------------------------------------------------
 // The ladder: stage → the single nudge rung armed on entry.
@@ -114,6 +119,12 @@ function contactDisplayName(contact: ContactItem): string | null {
 export interface ArmNudgeForStageDeps {
   placementNudgesRepo: PlacementNudgesRepo;
   /**
+   * Quiet-hours source (REQUIRED so every call site is forced to supply one -
+   * an unclamped armer would schedule a 2am chase). Narrow read-only shape (the
+   * `resolveWithSettings` precedent) so tests stub one method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
    * Optional event bus (scheduled-message-visibility Task 6). When present, a
    * best-effort `scheduled.updated` is emitted after every arm/cancel so the
    * contact timeline's pinned "Upcoming" section refetches live. NEVER throws /
@@ -169,7 +180,14 @@ export async function armNudgeForStage(
     return;
   }
 
-  const dueAt = new Date(Date.parse(nowIso) + rung.delayMs).toISOString();
+  // Quiet hours (spec 2026-08-03): clamp BEFORE the row is written, so the
+  // stored dueAt is the real send time (a rung is never re-timed later). One
+  // rung per stage, so there is nothing to supersede here.
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+  const dueAt = clampOutOfQuietHours(
+    new Date(Date.parse(nowIso) + rung.delayMs).toISOString(),
+    window,
+  );
   const row = await deps.placementNudgesRepo.create({
     placementId: placement.placementId,
     kind: rung.kind,

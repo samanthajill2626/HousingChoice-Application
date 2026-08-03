@@ -838,6 +838,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       armStageNudge: (placement, toStage, nowIso) =>
         armNudgeForStage(placement, toStage, nowIso, {
           placementNudgesRepo: placementNudges,
+          // Quiet-hours clamp at arm time (spec 2026-08-03).
+          settingsRepo: settings,
           // Task 6: best-effort scheduled.updated so the timeline's "Upcoming"
           // section refetches live when a nudge is armed/canceled on a stage move.
           events,

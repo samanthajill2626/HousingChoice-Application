@@ -58,6 +58,7 @@ async function tick(ms: number): Promise<void> {
 beforeEach(() => {
   getBroadcastResults.mockReset();
   sse = {};
+  vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
   vi.useFakeTimers();
 });
 afterEach(() => {

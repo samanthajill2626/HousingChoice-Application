@@ -248,6 +248,7 @@ describe('nextReminderRefetchDelay (pure)', () => {
 
 describe('RemindersPanel — dueAt-anchored self-refetch', () => {
   it('refetches on its own just after the next rung fires, then stops once nothing is upcoming', async () => {
+    vi.useRealTimers(); // release the global Date pin (test/setup.ts) first
     vi.useFakeTimers();
     try {
       const soon = new Date(Date.now() + 5_000).toISOString();

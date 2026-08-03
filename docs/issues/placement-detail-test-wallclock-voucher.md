@@ -3,9 +3,10 @@ id: placement-detail-test-wallclock-voucher
 title: PlacementDetail header test hardcodes a voucher date and goes red once it passes
 type: bug
 severity: med
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-03
+resolved: 2026-08-03
 refs: dashboard/src/routes/placements/PlacementDetail.test.tsx:94, dashboard/src/routes/placements/PlacementDetail.test.tsx:211
 ---
 
@@ -42,3 +43,32 @@ bumping the constant (bumping just re-arms the same bomb for a later date):
 
 Worth a sweep for sibling cases while fixing: other specs that hardcode dates
 near the seeded "now" will expire the same way.
+
+**Resolution (2026-08-03).** Fixed the CLASS, not the one test: the dashboard
+vitest setup (dashboard/src/test/setup.ts) now pins the clock to a fixed instant
+(2026-07-01T12:00:00Z) via a BARE `vi.setSystemTime` - vitest's standalone
+date-mocking mode, which fakes ONLY Date; timers stay real so waitFor/userEvent
+are unaffected. Pinned at module level (so module-scope now-relative fixtures
+like ToursPage.test's todayAt() read the same frozen clock as components) and
+re-pinned in a global beforeEach. Under the pin the original fixture (voucher
+2026-08-02) is future again, so the failing test and its assertion are unchanged.
+Fixture dates in component tests structurally cannot expire anymore; the
+year-2999 defusals in sibling suites (DeadlinesNudgesCard, PlacementNowCard)
+keep working as-is.
+
+Collateral the pin required/exposed:
+
+- Suites installing FULL fake timers (useEventStream, useBroadcastResults,
+  RemindersPanel) now call `vi.useRealTimers()` first to release the Date pin -
+  vitest THROWS a self-explanatory error if a future suite forgets (it refuses
+  `useFakeTimers` while a bare `setSystemTime` mock is active), so the
+  convention is self-enforcing. Their fake clocks anchor to the real now,
+  exactly as before the pin.
+- The pin EXPOSED a latent reverse-direction sibling: TourDetail's no-show
+  check-in tests relied on the makeTour default scheduledAt (2026-07-10) being
+  "already in the past" on the real clock - true only after 2026-07-10. They
+  now pass an explicitly past start relative to the pinned instant.
+
+The sweep found no other armed dates: app/ tests have none, and the Playwright
+e2e layer was already immune (Date.now()-relative steps, now-relative seed,
+tours-page's own pinned browser clock).

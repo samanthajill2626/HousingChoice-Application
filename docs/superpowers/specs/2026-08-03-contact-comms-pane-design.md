@@ -1,7 +1,8 @@
 # Contact comms pane - person-centric 1:1 tabs on tour and placement pages
 
-- Date: 2026-08-03 (v2 - revised after adversarial spec review, see
-  .superpowers/review/spec-adversarial.md; v1 superseded in-place)
+- Date: 2026-08-03 (v3 - revised after adversarial spec review + its v2
+  addendum, see .superpowers/review/spec-adversarial.md; earlier versions
+  superseded in-place)
 - Status: approved (Cameron, this session)
 - Branch: feat/contact-comms-pane  Worktree: w:/tmp/contact-comms-pane
 
@@ -85,9 +86,23 @@ Rejected alternatives:
 
 New `ActivityEventType` members: `tour_group_opened`, `tour_converted`
 (app/src/repos/activityEventsRepo.ts:31). Dashboard: add both to the
-TimelineMilestoneType union, milestoneVariant colour mapping, and label
-handling in Timeline.tsx (deep-link refType 'tour' / 'placement' as
-appropriate).
+TimelineMilestoneType union and the milestoneVariant + milestoneHref
+mappings in Timeline.tsx. Labels are SERVER-owned (MilestonePin renders
+`ms.label` verbatim) and both mappings have `default:` branches, so this
+dashboard work is cosmetic-only and cannot block (addendum A-m2).
+
+LANDLORD RESOLUTION RULE (addendum A-M3, decided): events are recorded
+against whoever `unit.landlordId` resolves to AT EVENT TIME (point-in-time
+ownership - a later unit re-assignment neither transfers pin history to the
+new landlord nor strips it from the old one). This deliberately differs from
+the property-audit interleave's retroactive current-owner walk, which after
+this change carries only broadcast/status/contact pins. Mechanics: the
+recorders gain the unitId (already in scope at every call site) and one
+best-effort `units.getById` per recorded event; a resolve failure or a
+landlord-less unit skips the landlord write silently and NEVER fails the
+route. `tours.ts` and `placements.ts` already inject `units`; the
+transition service (below) gains a `unitsRepo` dependency in
+StatusTransitionDeps.
 
 Write sites:
 
@@ -100,33 +115,70 @@ Write sites:
   (outcome).
 - Group-open route (tours.ts:882, currently `tours#` audit only): also record
   `tour_group_opened` person events for tenant AND landlord (label "Group
-  text opened", refType 'tour').
+  text opened", refType 'tour'). Update the in-code comment at
+  tours.ts:877-879 in the same change (it currently documents the OPPOSITE
+  decision - "the tenant timeline ... deliberately do NOT carry it").
+  Connect-when-ready nuance (addendum A-m3): the pin fires at open time even
+  when the group is still `connecting` (no pool number yet) - accepted; the
+  tour Activity card already shows the event for that case, so this is
+  parity, not a new claim.
 - Tour conversion (placements.ts:736, currently `tours#` audit only): also
   record `tour_converted` person events for tenant AND landlord (label
   "Converted to placement", refType 'tour'; the placement_opened event
   already fires separately).
 - `recordPlacementMilestone` (placements.ts:436): record against the
-  placement's unit landlord too (same resolve-at-event-time rule). Call
-  sites: placements.ts:565, 750, 855-871.
+  placement's unit landlord too. Call sites: placements.ts:565, 750,
+  855-871. NOTE: these stage/closed sites belong to the raw PATCH handler
+  the dashboard does NOT use; they are kept dual-party for consistency, but
+  the operative writer is the next item.
+- THE REAL PLACEMENT-STAGE WRITER (addendum A-B1): the dashboard moves
+  stages via POST /api/placements/:id/transition ->
+  `services/statusTransition.ts` transitionPlacement, which records
+  `placement_closed` / `stage_changed` against the tenant at
+  statusTransition.ts:224/226. BOTH of those writes gain the dual-party
+  landlord recording (resolve via placement.unitId -> units.getById; add
+  `unitsRepo` to StatusTransitionDeps and inject it where the service is
+  constructed). The two writers serve different routes, so no single
+  operation double-writes; each route records once, dual-party.
+  `setTenantStatus` / `deriveTenantStatus` stay tenant-only
+  (contact_status_changed is inherently per-person).
 - The `tours#<tourId>` and `units#<unitId>` audit writes are UNCHANGED (the
   tour page's own activity card and the property activity card keep their
   sources).
+- Known pre-existing duplicate, accepted (addendum A-m4): the legacy
+  `tour_date` PATCH path (placements.ts:871) writes a `tour_scheduled` pin
+  with refType 'placement' while first-class tours write the same-typed pin
+  with refType 'tour'; dual-party recording copies that duplicate to the
+  landlord feed IF that legacy path is ever driven. Not fixed here - noted
+  as a watch item, file an issue if observed in practice.
 
 Dedup at the read side: remove the tour_* members from `LANDLORD_FEED_TYPES`
 (app/src/routes/contactTimeline.ts:228) so a landlord-typed contact does not
-get the same tour twice (direct event + property-audit interleave).
-`broadcast_sent`, `listing_status_changed`, `unit_contact_added/removed`
-stay interleaved (no direct-event equivalent). Consequence, accepted:
-pre-change tours stop showing on landlord contact pages (their pins exist
-only as audit rows) - dev-only history, regenerated on reseed.
+get the same tour twice (direct event + property-audit interleave). ALSO
+delete the now-unreachable tour branches in `unitAuditToMilestone`
+(contactTimeline.ts:505-517) so no reader assumes the interleave still
+carries tours (addendum A-m6). `broadcast_sent`, `listing_status_changed`,
+`unit_contact_added/removed` stay interleaved (no direct-event equivalent).
+Consequence, accepted: pre-change tours stop showing on landlord contact
+pages (their pins exist only as audit rows) - dev-only history, regenerated
+on reseed. The de-facto regression proof for this swap is
+e2e/tests/dashboard-next/landlord-activity.spec.ts:66-131 (labels + hrefs of
+the direct writer match the interleave's, so it must pass UNCHANGED -
+addendum A-m5).
 
-Seeds: extend seed history (app/src/lib/seed/history.ts - it already models
-tour_group_opened/tour_converted rows for the `tours#` trail) to ALSO write
-the new person activity events for both parties, so demo-world landlord tabs
-match live-write behavior. WATCH: the lean profile is the byte-stable e2e
-world - if lean seeds gain events, update the affected e2e expectations
-deliberately in the same slice; never let full-profile-only work leak into
-lean.
+Seeds (scope corrected by addendum A-M1/A-m1): the target is VOCABULARY
+PARITY WITH THE LIVE WRITERS FOR BOTH PARTIES, not just the two new types.
+`tourMilestones` (history.ts:670-694) today emits only tour_scheduled +
+tour_took_place, tenant-only, while `tourTrail` models the full vocabulary -
+once the injection is removed, seeded no-show/canceled/outcome tours would
+lose their pins in the demo world. Extend `tourMilestones` to the full
+vocabulary (scheduled / rescheduled / took_place / no_show / canceled /
+outcome / group_opened / converted) for tenant AND landlord, and
+`placementMilestones` (history.ts:632) to cover the landlord. Blast-radius
+fact: `historyItems` runs in the FULL profile only (seed/index.ts:119-138)
+and e2e reseeds default to LEAN - so history.ts changes have ZERO e2e blast
+radius; the seed work is demo/live-QA-world only. The standing rule is
+simply: do not add activity events to lean.ts.
 
 ### 2. New shared component: `ContactCommsPane`
 
@@ -164,6 +216,18 @@ already exists and is hook/util-factored):
   onManageEmails, suppressed} - plus optional `emptyLabel` passthrough
   (review M6: the tour/placement tabs pass "No messages with <name> yet",
   preserving today's copy and TourDetail.test.tsx:1045).
+- "Comms only" toggle persistence (addendum A-M2): Timeline's `commsOnly` is
+  per-mount state today, and this design remounts the pane on every tab
+  switch / seed nonce - the quieting mechanism the parity decision leans on
+  must survive that. Timeline gains an optional CONTROLLED pair
+  (`commsOnly` / `onCommsOnlyChange`); the pane passes them through; tour
+  and placement pages hold ONE toggle state per page visit, shared by both
+  1:1 tabs, above the remount boundary. ContactDetail stays uncontrolled
+  (per-mount default off, today's behavior). Accepted residual (watch item):
+  a landlord feed heavy with pins can fill the 50-item first page with no
+  messages until the operator toggles Comms only - the toggle now at least
+  stays put; a client `limit` bump or default kinds filter is the future
+  lever if live QA shows it hurting.
 
 Local contact override: the pane holds `effectiveContact` (prop, overridden
 by EmailManager/consent updates); phones/emails/optedOut/emailSuppressed
@@ -298,9 +362,11 @@ messages/calls/emails).
 Protected state C (new): person activity-event completeness.
 - Mutators: tours.ts recordTourEvent + group-open route (MODIFIED),
   placements.ts recordPlacementMilestone + conversion (MODIFIED),
-  contacts.ts / relayGroups.ts / broadcastFanOut.ts / suggestions.ts /
-  statusTransition.ts recorders (UNTOUCHED - assert no change), seed
-  history.ts (MODIFIED).
+  services/statusTransition.ts transitionPlacement stage/closed recorders
+  (MODIFIED - the writer the dashboard actually drives, addendum A-B1; its
+  setTenantStatus/deriveTenantStatus contact-status recorders UNTOUCHED),
+  contacts.ts / relayGroups.ts / broadcastFanOut.ts / suggestions.ts
+  recorders (UNTOUCHED - assert no change), seed history.ts (MODIFIED).
 - Readers/renderers: contactTimeline.ts merge + LANDLORD_FEED_TYPES
   interleave (MODIFIED - tour_* removed), dashboard Timeline milestone
   variant/label/link mapping (MODIFIED - two new types), tour page activity
@@ -336,10 +402,16 @@ Unit:
   states, emptyLabel copy.
 - Server: recordTourEvent/recordPlacementMilestone dual-party recording
   (landlord resolved, landlord absent, resolve failure best-effort);
+  transitionPlacement stage/closed dual-party recording (addendum A-B1 -
+  drive the TRANSITION route, not the raw PATCH, in at least one test);
   group-open + conversion person events; LANDLORD_FEED_TYPES no longer
-  interleaves tour_*; new-type wire mapping. Pinning test (review M3):
+  interleaves tour_* and the dead unitAuditToMilestone tour branches are
+  gone; new-type wire mapping; seed tourMilestones/placementMilestones
+  vocabulary parity for both parties. Pinning test (review M3):
   conversationsForContact can never return a relay_group (pool-number
   participant_phone), so the mark-read fan-out cannot touch the group.
+- Timeline controlled commsOnly: toggle state survives a pane remount on
+  tour/placement pages; ContactDetail behavior unchanged.
 - inbox route: fan-out behavior byte-for-byte unchanged (no scope flag).
 
 E2e (extend existing specs; the email fixtures live in
@@ -363,6 +435,9 @@ flows/email-inbound.spec.ts / flows/email-outbound.spec.ts):
    dashboard-next/outbound-mms.spec.ts, dashboard-next/a2p-compliance.spec.ts
    (consent modal) - all pass unchanged. The reply-target picker and onRetry
    have UNIT coverage only; live-QA covers them by hand.
+7. dashboard-next/landlord-activity.spec.ts passes UNCHANGED - the named
+   proof that the LANDLORD_FEED_TYPES swap dropped no landlord tour pins
+   (addendum A-m5).
 
 Live self-QA (harness per profile): drive a tour page - email + call rows
 render in the Tenant tab, tab dots behave (group dot survives), composer
@@ -388,7 +463,12 @@ tourdetail-composer-footer-suite-flake, inbox-specs-flaky-shared-tasha-state
   moves into the pane unchanged; suggestion accepts stay in ContactDetail).
 - n4: a 1:1 conversation with no participants roster (untriaged unknown
   thread pre-capture) stays invisible to the tab dot - same as today.
-- Lean-seed byte-stability when history.ts gains person events (section 1).
+- Seed guard: history.ts is full-profile-only (zero e2e blast radius) - the
+  rule is simply never add activity events to lean.ts (addendum A-m1).
+- A-m4: the legacy tour_date PATCH duplicate tour_scheduled pin (see
+  section 1) - watch, file an issue if observed.
+- A-M2 residual: landlord-feed pin volume vs the 50-item first page (see
+  section 2) - check during live QA.
 - Build order (review n5, adapted): (1) server write-side + types + seeds +
   dashboard type mapping; (2) extract ContactCommsPane with ContactDetail
   behavior-identical (its existing test suite is the net); (3) channel hooks

@@ -489,9 +489,106 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     expect(merged.some((r) => r.type === 'tour_took_place')).toBe(true);
   });
 
-  it('a requested (timeless) tour yields NO milestones', () => {
-    const requested = TOURS.find((t) => t['status'] === 'requested');
-    if (requested) expect(tourMilestones(requested).length).toBe(0);
+  // A requested (timeless) tour emits NO scheduling milestones - but the group
+  // OPEN is not gated on a schedule (the provisioning route has no status gate),
+  // so a requested tour carrying a groupThreadId pins exactly [tour_group_opened],
+  // matching what tourTrail already models for the same tour.
+  it('a requested (timeless) tour yields ONLY a group-open pin (and none without a group)', () => {
+    const requested = TOURS.find((t) => t['status'] === 'requested' && typeof t['groupThreadId'] === 'string');
+    expect(requested).toBeDefined();
+    const rows = tourMilestones(requested!);
+    expect(rows.map((r) => r.type)).toEqual(['tour_group_opened']);
+    expect(rows[0]!.label).toBe('Group text opened');
+    expect(rows[0]!.refType).toBe('tour');
+
+    const bare = TOURS.find((t) => t['status'] === 'requested' && t['groupThreadId'] === undefined);
+    expect(bare).toBeDefined();
+    expect(tourMilestones(bare!)).toHaveLength(0);
+  });
+
+  it('mirrors the live writer vocabulary: no_show / canceled / outcome / converted', () => {
+    const noShow = TOURS.find((t) => t['status'] === 'no_show');
+    expect(noShow).toBeDefined();
+    const noShowRows = tourMilestones(noShow!);
+    const ns = noShowRows.find((r) => r.type === 'tour_no_show');
+    expect(ns).toBeDefined();
+    expect(ns!.label).toBe('Tour no-show'); // tours.ts recordTourEvent
+    expect(ns!.refId).toBe(noShow!['tourId']);
+    expect(noShowRows.some((r) => r.type === 'tour_took_place')).toBe(false);
+
+    const canceled = TOURS.find((t) => t['status'] === 'canceled');
+    expect(canceled).toBeDefined();
+    const cn = tourMilestones(canceled!).find((r) => r.type === 'tour_canceled');
+    expect(cn).toBeDefined();
+    expect(cn!.label).toBe('Tour canceled');
+
+    const decided = TOURS.find((t) => t['outcome'] === 'move_forward');
+    expect(decided).toBeDefined();
+    const oc = tourMilestones(decided!).find((r) => r.type === 'tour_outcome');
+    expect(oc).toBeDefined();
+    expect(oc!.label).toBe('Tour outcome - moved forward');
+    const notAFit = TOURS.find((t) => t['outcome'] === 'not_a_fit');
+    expect(notAFit).toBeDefined();
+    expect(tourMilestones(notAFit!).find((r) => r.type === 'tour_outcome')!.label).toBe(
+      'Tour outcome - not a fit',
+    );
+
+    // A converted tour (convertedPlacementId set) pins the final chapter.
+    const converted: Record<string, unknown> = { ...decided!, convertedPlacementId: 'placement-seed-x' };
+    const cv = tourMilestones(converted).find((r) => r.type === 'tour_converted');
+    expect(cv).toBeDefined();
+    expect(cv!.label).toBe('Converted to placement');
+    expect(cv!.refType).toBe('tour');
+    expect(cv!.refId).toBe(converted['tourId']);
+  });
+
+  it('mirrors every tour milestone onto the landlord when one is supplied', () => {
+    const toured = TOURS.find((t) => t['status'] === 'toured');
+    expect(toured).toBeDefined();
+    const tenantOnly = tourMilestones(toured!);
+    const dual = tourMilestones(toured!, 'll-seed-1');
+    expect(dual).toHaveLength(tenantOnly.length * 2);
+    // The tenant rows are byte-identical to the no-landlord call (pure addition).
+    expect(dual.filter((r) => r.contactId === toured!['tenantId'])).toEqual(tenantOnly);
+    const landlordRows = dual.filter((r) => r.contactId === 'll-seed-1');
+    expect(landlordRows.map((r) => r.type).sort()).toEqual(tenantOnly.map((r) => r.type).sort());
+    for (const r of landlordRows) {
+      expect(r.refType).toBe('tour');
+      expect(r.refId).toBe(toured!['tourId']);
+    }
+    // Deterministic ids differ per contact (contactId is in the id hash), so the
+    // landlord copy can never overwrite the tenant's on Put.
+    expect(new Set(dual.map((r) => r.eventId)).size).toBe(dual.length);
+
+    // A blank landlordId, or a landlord who IS the tenant, adds nothing.
+    expect(tourMilestones(toured!, '')).toEqual(tenantOnly);
+    expect(tourMilestones(toured!, String(toured!['tenantId']))).toEqual(tenantOnly);
+  });
+
+  it('mirrors placement milestones onto the landlord, leaving the tenant rows byte-identical', () => {
+    const p = PLACEMENTS.find((x) => TERMINAL_STAGES.has(String(x['stage']) as PlacementStage));
+    expect(p).toBeDefined();
+    const tenantOnly = placementMilestones(p!);
+    const dual = placementMilestones(p!, 'll-seed-2');
+    expect(dual).toHaveLength(tenantOnly.length * 2);
+    expect(dual.filter((r) => r.contactId === p!['tenantId'])).toEqual(tenantOnly);
+    const landlordRows = dual.filter((r) => r.contactId === 'll-seed-2');
+    expect(landlordRows.map((r) => r.type)).toEqual(tenantOnly.map((r) => r.type));
+    expect(landlordRows.map((r) => r.label)).toEqual(tenantOnly.map((r) => r.label));
+    expect(landlordRows.every((r) => r.refType === 'placement')).toBe(true);
+    // No-landlord call is byte-identical to today's tenant-only output.
+    expect(placementMilestones(p!)).toEqual(tenantOnly);
+  });
+
+  it('the orchestrator gives owning landlords the tour + placement pins of their own units', () => {
+    const unitById = new Map(UNITS.map((u) => [String(u['unitId']), u]));
+    const tour = TOURS.find(
+      (t) => typeof unitById.get(String(t['unitId']))?.['landlordId'] === 'string',
+    );
+    expect(tour).toBeDefined();
+    const landlordId = String(unitById.get(String(tour!['unitId']))!['landlordId']);
+    const landlordRows = byContact.get(landlordId) ?? [];
+    expect(landlordRows.some((r) => r.refType === 'tour' && r.refId === tour!['tourId'])).toBe(true);
   });
 
   it('listing_sends produce a faithful listing_sent milestone (no response label)', () => {

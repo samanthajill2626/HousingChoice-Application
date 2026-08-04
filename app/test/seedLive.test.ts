@@ -183,13 +183,20 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       }));
       const rows = Items ?? [];
       // confirmation would have been sent at 05:00 EDT - it is clamped to 08:00
-      // EDT, collides with morning_of/en_route there, and the LAST rung (the
-      // one whose copy is still true) is the only row written.
-      expect(rows.map((r) => r['kind'])).toEqual(['en_route']);
-      expect(rows[0]!['dueAt']).toBe(
+      // EDT and collides with morning_of/en_route there. The LAST rung (the one
+      // whose copy is still true) is the only PENDING row; the losers are now
+      // written as VISIBLE skipped rows (the panel trace, 2026-08-04) instead
+      // of silently absent. day_before (yesterday, past-dueAt) stays row-less.
+      const pending = rows.filter((r) => r['skippedAt'] === undefined);
+      expect(pending.map((r) => r['kind'])).toEqual(['en_route']);
+      expect(pending[0]!['dueAt']).toBe(
         instantAtLocalTime(FIXED_NOW_ISO.slice(0, 10), '08:00', QUIET_WINDOW.timezone),
       );
-      expect(rows.find((r) => r['kind'] === 'confirmation')).toBeUndefined();
+      const confirmation = rows.find((r) => r['kind'] === 'confirmation');
+      expect(confirmation?.['skipReason']).toBe('quiet_hours_superseded');
+      const morningOf = rows.find((r) => r['kind'] === 'morning_of');
+      expect(morningOf?.['skipReason']).toBe('quiet_hours_superseded');
+      expect(rows.find((r) => r['kind'] === 'day_before')).toBeUndefined();
     });
   });
 
@@ -215,15 +222,19 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       // day_before = 14:00 today (future, daytime - unclamped)
       // morning_of = 08:00 EDT tomorrow = 12:00 UTC tomorrow
       // en_route = 12:00 UTC tomorrow - the SAME instant as morning_of, so the
-      //   later rung supersedes morning_of and no morning_of row is written.
+      //   later rung supersedes morning_of, which is written as a VISIBLE
+      //   skipped row (the arm-time trace, 2026-08-04), not left absent.
       // no_show_checkin is manual-send only now, so it is NOT auto-armed.
       expect(Items).toBeDefined();
-      expect(Items!.length).toBe(3);
-      expect((Items ?? []).map((r) => r['kind']).sort()).toEqual([
+      expect(Items!.length).toBe(4);
+      const pending = (Items ?? []).filter((r) => r['skippedAt'] === undefined);
+      expect(pending.map((r) => r['kind']).sort()).toEqual([
         'confirmation',
         'day_before',
         'en_route',
       ]);
+      const morningOf = (Items ?? []).find((r) => r['kind'] === 'morning_of');
+      expect(morningOf?.['skipReason']).toBe('quiet_hours_superseded');
     });
 
     it('each reminder dueAt matches computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO)', async () => {
@@ -239,14 +250,16 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         byKind.set(item['kind'] as string, item['dueAt'] as string);
       }
       // morning_of clamps onto the SAME instant as en_route (both 08:00 EDT on
-      // tour day), so the arm-time supersession rule writes no morning_of row -
-      // asserted explicitly rather than skipped, so a regression that starts
-      // writing it again fails here.
+      // tour day), so the arm-time supersession rule births it as a VISIBLE
+      // skipped row (2026-08-04) - asserted explicitly, so a regression that
+      // arms it as PENDING again fails here.
       const superseded: ReminderKind[] = ['morning_of'];
       for (const kind of REMINDER_KINDS) {
         const expectedDueAt = computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO);
         if (superseded.includes(kind)) {
-          expect(byKind.get(kind), `superseded kind '${kind}' must have no row`).toBeUndefined();
+          const row = (Items ?? []).find((r) => r['kind'] === kind);
+          expect(row?.['skippedAt'], `superseded kind '${kind}' must be a skipped row`).toBeDefined();
+          expect(row?.['skipReason']).toBe('quiet_hours_superseded');
           continue;
         }
         // Only assert for kinds that should have been armed (dueAt >= FIXED_NOW_ISO).

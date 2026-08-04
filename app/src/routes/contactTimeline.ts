@@ -231,15 +231,17 @@ const MAX_LANDLORD_UNITS = 25;
  * 2026-07-03): lifecycle only. Routine field-edit churn
  * (`unit_created`/`unit_updated`/`unit_deleted`/`unit_restored`) stays in the
  * audit trail as provenance but is NEVER interleaved.
+ *
+ * The tour_* types are DELIBERATELY absent (contact-comms-pane, 2026-08-03): a
+ * landlord's own activity feed now carries every tour lifecycle event directly
+ * (dual-party writes in routes/tours.ts), so interleaving the property-audit
+ * copy too would pin the same tour twice. What stays here is exactly what has
+ * NO direct-event equivalent. Consequence, accepted: tours recorded BEFORE that
+ * change exist only as audit rows and no longer show on a landlord's page
+ * (dev-only history, regenerated on reseed).
  */
 const LANDLORD_FEED_TYPES: ReadonlySet<string> = new Set([
   'broadcast_sent',
-  'tour_scheduled',
-  'tour_rescheduled',
-  'tour_took_place',
-  'tour_no_show',
-  'tour_canceled',
-  'tour_outcome',
   'listing_status_changed',
   'unit_contact_added',
   'unit_contact_removed',
@@ -441,55 +443,11 @@ function toTimelineMilestone(e: ActivityEventItem): TimelineMilestone {
 }
 
 /**
- * Map a tour AUDIT `event_type` → the closest existing milestone
- * `ActivityEventType`. The frontend renders a milestone by its `type` (colour +
- * deep-link kind), so a milestone `type` MUST be an existing member — never a
- * raw audit string. `tour_rescheduled` has no dedicated member → reuse
- * `tour_scheduled`; the rest map 1:1 to the same-named member. The human wording
- * lives in the `label` (see `tourAuditLabel`).
- */
-function mapTourAuditToMilestoneType(auditType: string): ActivityEventType {
-  switch (auditType) {
-    case 'tour_took_place':
-      return 'tour_took_place';
-    case 'tour_no_show':
-      return 'tour_no_show';
-    case 'tour_canceled':
-      return 'tour_canceled';
-    case 'tour_outcome':
-      return 'tour_outcome';
-    case 'tour_scheduled':
-    case 'tour_rescheduled':
-    default:
-      return 'tour_scheduled';
-  }
-}
-
-/** Human label for a tour AUDIT `event_type` (carries the wording; type drives colour). */
-function tourAuditLabel(auditType: string): string {
-  switch (auditType) {
-    case 'tour_rescheduled':
-      return 'Tour rescheduled';
-    case 'tour_took_place':
-      return 'Tour took place';
-    case 'tour_no_show':
-      return 'Tour no-show';
-    case 'tour_canceled':
-      return 'Tour canceled';
-    case 'tour_outcome':
-      return 'Tour outcome';
-    case 'tour_scheduled':
-    default:
-      return 'Tour scheduled';
-  }
-}
-
-/**
  * Map ONE owned-unit audit row → a `TimelineMilestone` for the landlord's
  * timeline, or `null` when the row is not a surfaced lifecycle type. The milestone
  * `type` REUSES an existing `ActivityEventType` (colour/link only); the `label`
  * carries the human wording; `refType`/`refId` deep-link out (broadcast → the
- * broadcast, tour → the tour, else the property/unit). PII-safe: labels/ids only,
+ * broadcast, else the property/unit). PII-safe: labels/ids only,
  * never a phone/body. `id` = the raw audit SK (`<ISO>#<rand>`) so the merged
  * cursor lives in the SAME lexical space as the audit `before` bound (page-safe).
  */
@@ -509,19 +467,6 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
         ...(typeof p['broadcastId'] === 'string' && { refId: p['broadcastId'] }),
       };
     }
-    case 'tour_scheduled':
-    case 'tour_rescheduled':
-    case 'tour_took_place':
-    case 'tour_no_show':
-    case 'tour_canceled':
-    case 'tour_outcome':
-      return {
-        ...base,
-        type: mapTourAuditToMilestoneType(e.event_type),
-        label: tourAuditLabel(e.event_type),
-        refType: 'tour',
-        ...(typeof p['tourId'] === 'string' && { refId: p['tourId'] }),
-      };
     case 'listing_status_changed': {
       const to = typeof p['to'] === 'string' ? p['to'] : '';
       return {

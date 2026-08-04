@@ -549,7 +549,7 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     });
     world.units.set('u1', { unitId: 'u1', landlordId: 'll1', status: 'available' });
     await world.auditRepo.append('units#u1', 'broadcast_sent', { broadcastId: 'b1', tenantCount: 4 });
-    await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't1' });
+    await world.auditRepo.append('units#u1', 'tour_scheduled', { tourId: 't1' }); // EXCLUDED (person feed owns tours)
     await world.auditRepo.append('units#u1', 'listing_status_changed', { to: 'under_application' });
     await world.auditRepo.append('units#u1', 'unit_updated', { fields: ['rent_min'] }); // EXCLUDED
     // A historical listing_response_set row (the response label was removed):
@@ -563,12 +563,14 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
     expect(res.status).toBe(200);
 
     const ms = res.body.items.filter((i: { kind: string }) => i.kind === 'milestone');
-    // ONLY the three lifecycle rows interleave — the unit_updated field-edit is
-    // filtered out (never surfaced on any timeline; it stays in the audit trail),
-    // and the historical listing_response_set row maps to null (stops rendering).
-    expect(ms).toHaveLength(3);
+    // ONLY the two remaining lifecycle rows interleave - the unit_updated
+    // field-edit is filtered out (never surfaced on any timeline; it stays in the
+    // audit trail), the historical listing_response_set row maps to null (stops
+    // rendering), and tour_* rows no longer interleave AT ALL: the landlord's own
+    // person feed carries those pins directly (contact-comms-pane).
+    expect(ms).toHaveLength(2);
     const types = ms.map((m: { type: string }) => m.type);
-    expect(types).toContain('tour_scheduled'); // tour_* maps 1:1 to the same-named type
+    expect(types).not.toContain('tour_scheduled');
     expect(types).not.toContain('unit_updated');
     expect(types).not.toContain('listing_reviewed');
 
@@ -584,9 +586,6 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
       label: expect.stringContaining('4'),
     });
 
-    const tr = ms.find((m: { refType?: string }) => m.refType === 'tour');
-    expect(tr).toMatchObject({ type: 'tour_scheduled', refType: 'tour', refId: 't1' });
-
     // The status-change row humanizes the raw enum via LISTING_STATUS_LABELS,
     // matching the property Activity card ('under_application' → 'Under application').
     const st = ms.find((m: { type: string }) => m.type === 'stage_changed');
@@ -596,6 +595,47 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
       refId: 'u1',
       label: 'Property status → Under application',
     });
+  });
+
+  it('shows a landlord tour pin ONCE, sourced from the person feed (not the property audit)', async () => {
+    const h = makeWebhookHarness();
+    const app = h.app;
+    const world = h.world;
+    world.contacts.push({
+      contactId: 'll2',
+      type: 'landlord',
+      status: 'active',
+      phone: '+15550100011',
+      phones: [{ phone: '+15550100011', primary: true }],
+    });
+    world.units.set('u3', { unitId: 'u3', landlordId: 'll2', status: 'available' });
+    // BOTH sources exist for the same tour, exactly as the live writers leave
+    // them: the units# audit row (the property Activity card's source) AND the
+    // landlord's own dual-party activity event.
+    await world.auditRepo.append('units#u3', 'tour_scheduled', { tourId: 't9' });
+    await world.activityEventsRepo.record({
+      contactId: 'll2',
+      type: 'tour_scheduled',
+      label: 'Tour scheduled',
+      refType: 'tour',
+      refId: 't9',
+    });
+    // A broadcast row has no direct-event equivalent, so it STILL interleaves.
+    await world.auditRepo.append('units#u3', 'broadcast_sent', { broadcastId: 'b9', tenantCount: 2 });
+
+    const res = await authedGet(app, '/api/contacts/ll2/timeline');
+    expect(res.status).toBe(200);
+
+    const ms = res.body.items.filter((i: { kind: string }) => i.kind === 'milestone');
+    const tours = ms.filter((m: { refType?: string }) => m.refType === 'tour');
+    expect(tours).toHaveLength(1);
+    expect(tours[0]).toMatchObject({
+      type: 'tour_scheduled',
+      label: 'Tour scheduled',
+      refType: 'tour',
+      refId: 't9',
+    });
+    expect(ms.some((m: { refType?: string }) => m.refType === 'broadcast')).toBe(true);
   });
 
   it('does NOT interleave property activity for a tenant contact', async () => {

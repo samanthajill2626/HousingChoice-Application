@@ -3,9 +3,10 @@ id: tour-1to1-optimistic-team-label
 title: "Tour page 1:1 tabs: optimistic bubble briefly shows a 'Team' sender label"
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-07-08
+resolved: 2026-08-04
 refs: dashboard/src/routes/conversation/useRelayThread.ts:117, dashboard/src/routes/tours/TourConversation.tsx:256, dashboard/src/routes/contact/Timeline.tsx:138
 ---
 
@@ -23,3 +24,7 @@ refetch; display-only.
 variant for 1:1 use), or have TourConversation's ContactThread strip it from
 optimistic items. Add a test pinning that a 1:1 optimistic bubble renders no
 attribution line.
+
+**Resolution (2026-08-04).** Resolved by feat/contact-comms-pane - the
+tour/placement 1:1 tabs now render ContactCommsPane, whose optimistic sends go
+through useContactTimeline.addOptimistic and never stamp relay_sender_key.

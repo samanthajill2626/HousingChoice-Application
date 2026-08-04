@@ -39,11 +39,10 @@ function messageInstant(m: Message): string {
   return /^\d{4}-\d{2}-\d{2}T/.test(prefix) ? prefix : '';
 }
 
-/** Map a persisted Message -> a TimelineMessage bubble. Call records (type
- *  'call') are dropped - a relay thread carries only sms/mms. Email (type
- *  'email') is defensively dropped too (ADJ-12): a relay/group thread must never
- *  carry email, so an email message that somehow reached here is not rendered as
- *  a relay bubble (email lives only on the 1:1 contact timeline). */
+/** Map a persisted Message -> a TimelineMessage bubble, or null to drop it.
+ *  Relay threads never carry email or 1:1 call content: inbound email and
+ *  calls thread into 1:1 conversations server-side, so a relay-group fetch
+ *  never sees them - the check below is the relay-only contract, not defense. */
 export function toTimelineMessage(m: Message): TimelineMessage | null {
   if (m.type === 'call' || m.type === 'email') return null;
   const at = messageInstant(m);

@@ -581,9 +581,10 @@ describe('TwilioMessagingDriver — pool-number provisioning (M1.7)', () => {
     expect(result.phoneNumber).toBe('+15550109001');
     expect(result.capabilities).toEqual({ sms: true, voice: true });
     expect(result.sid).toBe('PN123');
-    // Pre-wired both webhooks at purchase.
+    // Pre-wired both webhooks + the static self-labeling FriendlyName at purchase.
     expect(created[0]).toMatchObject({
       phoneNumber: '+15550109001',
+      friendlyName: 'HousingChoice relay (group chats)',
       smsUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/sms',
       voiceUrl: 'https://dxxxx.cloudfront.example/webhooks/twilio/voice',
     });

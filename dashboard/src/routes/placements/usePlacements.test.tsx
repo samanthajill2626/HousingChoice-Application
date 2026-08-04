@@ -34,6 +34,14 @@ function Probe(): React.JSX.Element {
       <span data-testid="ids">{s.placements.map((c) => c.placementId).join(',')}</span>
       <span data-testid="attention">{c1?.attention ? 'yes' : 'no'}</span>
       <span data-testid="deadline">{c1?.next_deadline_at ?? '-'}</span>
+      <span data-testid="contact-names">
+        {[...s.contacts.values()].map((c) => c.firstName).join(',')}
+      </span>
+      <span data-testid="unit-lines">
+        {[...s.units.values()]
+          .map((u) => (typeof u.address === 'object' ? u.address.line1 : (u.address ?? '')))
+          .join(',')}
+      </span>
     </div>
   );
 }
@@ -129,6 +137,52 @@ describe('usePlacements', () => {
     // Attention dot lights up; the cleared deadline is removed (not kept).
     await waitFor(() => expect(screen.getByTestId('attention')).toHaveTextContent('yes'));
     expect(screen.getByTestId('deadline')).toHaveTextContent('-');
+  });
+
+  it('includes SOFT-DELETED tenants and units in the lookup maps (live wins an id collision)', async () => {
+    // A closed placement outlives its tenant/unit: both were soft-deleted after
+    // move-in/loss. The lookup maps must still carry them so the ledger shows
+    // names, not raw ids. On a (defensive) id collision the LIVE record wins.
+    getPlacements.mockResolvedValue({
+      placements: [{ placementId: 'c1', tenantId: 't-del', unitId: 'u-del', stage: 'moved_in' }],
+      nextCursor: null,
+    });
+    getContacts.mockImplementation((params: { deleted?: boolean }) =>
+      params.deleted === true
+        ? Promise.resolve({
+            contacts: [
+              { contactId: 't-del', type: 'tenant', firstName: 'Dora', lastName: 'Departed' },
+              // Defensive collision: a deleted record sharing a live id must LOSE.
+              { contactId: 't1', type: 'tenant', firstName: 'Stale', lastName: 'Copy' },
+            ],
+            nextCursor: null,
+          })
+        : Promise.resolve({
+            contacts: [{ contactId: 't1', type: 'tenant', firstName: 'Alice', lastName: 'Live' }],
+            nextCursor: null,
+          }),
+    );
+    getUnits.mockImplementation((params: { deleted?: boolean }) =>
+      params?.deleted === true
+        ? Promise.resolve({
+            units: [{ unitId: 'u-del', address: { line1: '789 Gone St' } }],
+            nextCursor: null,
+          })
+        : Promise.resolve({
+            units: [{ unitId: 'u1', address: { line1: '123 Live Ave' } }],
+            nextCursor: null,
+          }),
+    );
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    const names = screen.getByTestId('contact-names').textContent ?? '';
+    expect(names).toContain('Dora'); // deleted tenant present
+    expect(names).toContain('Alice'); // live tenant present
+    expect(names).not.toContain('Stale'); // live wins the collision
+    const lines = screen.getByTestId('unit-lines').textContent ?? '';
+    expect(lines).toContain('789 Gone St'); // deleted unit present
+    expect(lines).toContain('123 Live Ave'); // live unit present
   });
 
   it('M3: pages through ALL placements (page-2 placements appear on the board)', async () => {

@@ -94,6 +94,8 @@ function sendFailureMessage(err: unknown): string {
         return 'Email sending is turned off right now.';
       case 'email_suppressed':
         return 'This contact is not receiving email - they opted out or a message bounced.';
+      case 'contact_deleted':
+        return 'This contact is deleted - restore them to reply.';
       case 'email_attachments_too_large':
         return 'Attachments exceed the 25 MB total limit. Remove one and try again.';
       case 'contact_email_missing':

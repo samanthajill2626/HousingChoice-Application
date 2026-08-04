@@ -168,10 +168,13 @@ export interface ContactItem {
   voice_opt_out?: boolean;
   /**
    * Soft-delete marker (ISO 8601). PRESENT → the contact is "deleted": hidden
-   * from the normal lists, inbox, today, and broadcast targeting, but the record
+   * from the normal lists, today, and broadcast targeting, but the record
    * and ALL its data are retained so it can be restored (clear the stamp). Phone
    * routing (findByPhone) deliberately ignores it, so an inbound from a deleted
    * contact's number still maps to their record rather than spawning a duplicate.
+   * The INBOX hides them too, with ONE exception: a deleted contact resurfaces
+   * (row flagged `deleted`) while an UNREAD inbound newer than this stamp exists
+   * — deleted-contact resurfacing, 2026-08-03 spec (see routes/inbox.ts).
    */
   deleted_at?: string;
   /** How the record came to exist (M1.2 auto-capture: 'inbound_sms'). */
@@ -394,6 +397,8 @@ export interface ContactsRepo {
    * Soft-delete: stamp `deleted_at` (ISO 8601 `at`) so the contact is hidden from
    * lists/inbox/today/broadcasts while every field is retained. ConditionExpression
    * guards existence (route → 404). Returns the post-update item (ALL_NEW).
+   * Inbox caveat: the thread resurfaces while an unread post-deletion inbound
+   * exists (deleted-contact resurfacing, 2026-08-03 spec).
    */
   softDelete(contactId: string, at: string): Promise<ContactItem>;
   /** Restore a soft-deleted contact: REMOVE `deleted_at`. ALL_NEW; 404-guarded. */

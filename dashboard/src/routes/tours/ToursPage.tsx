@@ -21,8 +21,10 @@
 //
 // Each row links to /tours/:tourId (the TourDetail page). Tenant names and unit
 // labels are resolved from the full contacts + units lists (same cross-reference
-// pattern used by PlacementsBoard / TenantFile). Staff-facing vocabulary: "property"
-// for the unit (per GLOSSARY.md).
+// pattern used by PlacementsBoard / TenantFile) — INCLUDING soft-deleted records:
+// a closed tour routinely outlives its contact/unit (tenant placed, property
+// removed from inventory), and a live-only map rendered raw uuids for those rows.
+// Staff-facing vocabulary: "property" for the unit (per GLOSSARY.md).
 import { useMemo, useState } from 'react';
 import { Link, useNavigate } from 'react-router-dom';
 import {
@@ -178,6 +180,10 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
   const { status: toursStatus, upcoming, needsBooking } = useTours();
   const { status: contactsStatus, contacts: contactsList } = useContacts('all');
   const { status: unitsStatus, units: unitsList } = useListings();
+  // Soft-deleted contacts/units still back rows (closed tours especially) — fetch
+  // them too so those rows show real names instead of raw ids.
+  const { status: deletedContactsStatus, contacts: deletedContactsList } = useContacts('deleted');
+  const { status: deletedUnitsStatus, units: deletedUnitsList } = useListings(true);
 
   // The "+ New tour" dialog (Active view only) - the SAME Schedule-a-tour form
   // the tenant file opens, here with BOTH sides as free typeaheads (no locked
@@ -187,25 +193,36 @@ export function ToursPage({ closed = false }: ToursPageProps): React.JSX.Element
   // Closed tours are fetched only when the Closed view is showing.
   const { status: closedStatus, closed: closedTours } = useClosedTours(closed);
 
-  const crossRefLoading = contactsStatus === 'loading' || unitsStatus === 'loading';
-  const crossRefError = contactsStatus === 'error' || unitsStatus === 'error';
+  const crossRefLoading =
+    contactsStatus === 'loading' ||
+    unitsStatus === 'loading' ||
+    deletedContactsStatus === 'loading' ||
+    deletedUnitsStatus === 'loading';
+  const crossRefError =
+    contactsStatus === 'error' ||
+    unitsStatus === 'error' ||
+    deletedContactsStatus === 'error' ||
+    deletedUnitsStatus === 'error';
   const loading = closed
     ? closedStatus === 'loading' || closedStatus === 'idle' || crossRefLoading
     : toursStatus === 'loading' || crossRefLoading;
   const error = closed ? closedStatus === 'error' || crossRefError : toursStatus === 'error' || crossRefError;
 
-  // Build lookup maps for cross-referencing.
+  // Build lookup maps for cross-referencing. Live records are set LAST so a
+  // (defensive, shouldn't-happen) id collision resolves to the live record.
   const contactsMap = useMemo(() => {
     const m = new Map<string, Contact>();
+    for (const c of deletedContactsList) m.set(c.contactId, c);
     for (const c of contactsList) m.set(c.contactId, c);
     return m;
-  }, [contactsList]);
+  }, [contactsList, deletedContactsList]);
 
   const unitsMap = useMemo(() => {
     const m = new Map<string, UnitItem>();
+    for (const u of deletedUnitsList) m.set(u.unitId, u);
     for (const u of unitsList) m.set(u.unitId, u);
     return m;
-  }, [unitsList]);
+  }, [unitsList, deletedUnitsList]);
 
   // Group upcoming tours by local date key, preserving soonest-first order.
   const upcomingGroups = useMemo(() => {

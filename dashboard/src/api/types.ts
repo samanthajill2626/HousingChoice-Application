@@ -2146,6 +2146,11 @@ export interface InboxRow {
   direction?: 'inbound' | 'outbound'; // 'outbound' → render "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  /** Deleted-contact resurfacing (2026-08-03 spec): present/true ONLY on a
+   *  soft-deleted contact row surfaced by an unread post-deletion inbound —
+   *  the dashboard renders a "Deleted" chip. Absent on live contacts and
+   *  non-contact rows. */
+  deleted?: boolean;
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
   status?: 'open' | 'closed'; // the relay group's lifecycle status

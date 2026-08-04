@@ -47,10 +47,14 @@ unconditional hide with:
   line already does this for live contacts; deleted contacts now share it).
 - Hide when `unreadSum === 0` (fast path - costs one conversations query for a
   deleted contact encountered in the walk, nothing more).
-- Otherwise fetch the newest conversation's latest message (already fetched for
-  row rendering) and **surface only when it is inbound AND newer than
-  `deleted_at`**. `DerivedLatest` gains the latest message's `created_at` to
-  make the comparison possible.
+- Otherwise apply the freshness rule PER CONVERSATION: **surface only when SOME
+  open conversation of the contact has `unread > 0` AND that conversation's
+  latest message is inbound AND newer than `deleted_at`**. Only unread threads
+  are probed, the newest conversation's latest message is already in hand for
+  row rendering (so it is reused, never re-read), and the walk short-circuits on
+  the first qualifying thread. `DerivedLatest` gains the latest message's
+  `created_at` to make the comparison possible; an absent `created_at` (no
+  readable message row) never counts as new.
 - A surfaced row is the normal `kind:'contact'` row plus a new optional
   `deleted: true` field (API contract + dashboard types).
 
@@ -65,13 +69,18 @@ Notes:
 - Restore needs no new wiring: the stamp clears, `isDeleted` goes false, the
   row renders as a normal contact. SSE contact-deleted/restored events already
   trigger dashboard refetches.
-- Multi-conversation edge: the inbound-recency check reads the NEWEST
-  conversation's latest message. A post-deletion outbound (e.g. a pre-scheduled
-  send landing after deletion) on the newest thread can mask an older thread's
-  fresh inbound; accepted - rare, and the unread badge state still shows on the
-  contact page.
-- Perf: zero added cost for non-deleted rows; deleted contacts cost 1-2 extra
-  queries only when encountered in the page walk. The pager remains
+- Multi-conversation contacts: the surfacing DECISION is per conversation (see
+  the bullet above), so a newer thread that is outbound-only or empty no longer
+  buries an older thread's unread post-deletion inbound, and pre-deletion unread
+  on one thread no longer pins the row up after the fresh inbound on another was
+  read. (This supersedes the originally accepted "newest thread can mask an
+  older one" degradation.) What still derives from the NEWEST conversation is
+  PRESENTATION only - preview, channel, direction and `lastActivityAt` - so an
+  empty newest thread renders the fallback preview while an older thread is what
+  earned the row.
+- Perf: zero added cost for non-deleted rows; a deleted contact encountered in
+  the page walk costs one conversations query plus at most one latest-message
+  read per UNREAD thread (nothing when no thread is unread). The pager remains
   O(page size), never a scan (see
   `docs/issues/inbox-filter-tabs-full-walk.md` for the pre-existing filter-tab
   tail, which this feature does not worsen).
@@ -96,6 +105,20 @@ tracked as its own decision in
   notice ("This contact is deleted - restore them to reply") plus a Restore
   button wired to the existing `onRestore`. `canSend` also gates on
   `!deleted` so no send path renders live.
+- **Uniform 1:1 composer lock (amended 2026-08-03, operator-approved).** The
+  lock is NOT contact-page-only: every 1:1 Timeline surface shows the same
+  standing note instead of a composer when the contact is deleted. That means
+  the placement page's tenant AND landlord panes
+  (PlacementConversation.tsx) and the tour page's tenant AND landlord panes
+  (TourConversation.tsx) - both parents already hold the two Contact objects, so
+  each pane just computes the flag and passes `deleted` down. This supersedes
+  the earlier posture that those composers stay live and rely on the server's
+  409; a composer that looks live but cannot send is the worse experience.
+  - Those surfaces pass `deleted` ONLY, never `onRestore`: Timeline renders the
+    note WITHOUT a button in that case, because **Restore lives on
+    ContactDetail** (one deliberate place to bring a contact back).
+  - ConversationDetail is out of scope: a plain 1:1 there redirects to the
+    contact page, and its Timeline renders relay groups only.
 
 ## Testing
 

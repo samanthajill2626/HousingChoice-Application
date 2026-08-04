@@ -47,6 +47,8 @@ function sendFailureMessage(err: unknown): string {
         return '';
       case 'contact_opted_out':
         return 'This contact is on the Do-Not-Contact list — texting is disabled. Clear the opt-out from the ⋯ menu to message them.';
+      case 'contact_deleted':
+        return 'This contact is deleted — restore them to reply.';
       case 'manual_mode':
         return 'This conversation is paused (manual mode) — automated sending is off.';
       case 'breaker_open':
@@ -193,6 +195,12 @@ export interface TimelineProps {
   /** Contact is on the Do-Not-Contact list (sms_opt_out) — show a standing note
    *  at the composer so it's clear BEFORE sending (the send is refused too). */
   optedOut?: boolean;
+  /** Contact is soft-deleted (deleted-contact resurfacing, 2026-08-03): the
+   *  composer is REPLACED by a standing note + a Restore action; the send is
+   *  also refused server-side (409 contact_deleted). */
+  deleted?: boolean;
+  /** Restore the deleted contact (the note's button). */
+  onRestore?: () => void;
   /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
    *  consent modal records consent, then retries the send out-of-band of the
    *  composer). The composer restored its draft on the 409 refusal, so it must
@@ -790,6 +798,8 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onSend,
     onRetry,
     optedOut,
+    deleted,
+    onRestore,
     clearDraftSignal,
     relayRoster,
     relayClosed,
@@ -1213,193 +1223,215 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
       ) : null}
 
       <div className={styles.reply}>
-        {showChannelToggle ? (
-          <div className={styles.channelSeg} role="group" aria-label="Message channel">
-            <button
-              type="button"
-              className={`${styles.channelBtn} ${effectiveChannel === 'text' ? styles.channelOn ?? '' : ''}`}
-              aria-pressed={effectiveChannel === 'text'}
-              onClick={() => setChannel('text')}
-            >
-              Text
-            </button>
-            <button
-              type="button"
-              className={`${styles.channelBtn} ${effectiveChannel === 'email' ? styles.channelOn ?? '' : ''}`}
-              aria-pressed={hasEmail ? effectiveChannel === 'email' : undefined}
-              {...(hasEmail
-                ? {}
-                : { 'aria-disabled': true, title: 'No email on file - add one' })}
-              onClick={() => {
-                if (hasEmail) setChannel('email');
-                else emailChannel?.onManageEmails();
-              }}
-            >
-              Email
-            </button>
-            {!hasEmail ? (
-              <button
-                type="button"
-                className={styles.channelAdd}
-                onClick={() => emailChannel?.onManageEmails()}
-              >
-                Add email
+        {/* Soft-deleted contact (deleted-contact resurfacing, 2026-08-03): the WHOLE
+            composer is replaced - channel toggle, EmailComposer and the text composer
+            alike - so there is no way to reply without restoring first. The server
+            refuses too (409 contact_deleted). */}
+        {deleted ? (
+          <>
+            <p className={styles.optOutNote} role="note">
+              🗑 This contact is deleted — restore them to reply.
+            </p>
+            {/* Only render the CTA when a handler exists — a caller may pass
+                `deleted` without `onRestore` (read-only surface), and a button
+                that silently does nothing is worse than no button. */}
+            {onRestore !== undefined ? (
+              <button type="button" className={styles.restoreBtn} onClick={onRestore}>
+                Restore contact
               </button>
             ) : null}
-          </div>
-        ) : null}
-        {emailChannel !== undefined && effectiveChannel === 'email' ? (
-          <EmailComposer
-            emails={emailChannel.emails}
-            onSend={emailChannel.onSendEmail}
-            {...(emailChannel.suppressed !== undefined && { suppressed: emailChannel.suppressed })}
-          />
+          </>
         ) : (
           <>
-        {optedOut ? (
-          <p className={styles.optOutNote} role="note">
-            ⛔ On the Do-Not-Contact list — texting is disabled for this contact.
-          </p>
-        ) : null}
-        {relayClosed ? (
-          <p className={styles.optOutNote} role="note">
-            🔒 This group is closed — reopen it to send.
-          </p>
-        ) : null}
-        {relayConnecting ? (
-          <p className={styles.optOutNote} role="note">
-            Queued - messages will send when the group connects.
-          </p>
-        ) : null}
-        <label className={styles.srOnly} htmlFor="reply-box">
-          Reply message
-        </label>
-        <textarea
-          ref={replyRef}
-          id="reply-box"
-          className={styles.replyBox}
-          aria-label="Reply message"
-          placeholder="Type a reply…"
-          rows={1}
-          value={draft}
-          onChange={(e) => setDraft(e.target.value)}
-          onKeyDown={handleKeyDown}
-        />
-        {attachments.length > 0 ? (
-          <ul className={styles.chips} aria-label="Attachments">
-            {attachments.map((a) => (
-              <li
-                key={a.localId}
-                className={`${styles.chip} ${a.status === 'error' ? styles.chipError ?? '' : ''}`}
-                aria-busy={a.status === 'uploading'}
-              >
-                {a.previewUrl !== undefined ? (
-                  <img className={styles.chipThumb} src={a.previewUrl} alt="" />
-                ) : (
-                  <span className={styles.chipIcon} aria-hidden="true">
-                    {a.contentType === 'application/pdf' ? 'PDF' : 'FILE'}
-                  </span>
-                )}
-                <span className={styles.chipName}>{a.name}</span>
-                <span className={styles.chipMeta}>
-                  {a.status === 'uploading'
-                    ? 'Uploading...'
-                    : a.status === 'error'
-                      ? a.error ?? 'Upload failed'
-                      : formatBytes(a.size)}
-                </span>
-                {a.status === 'done' && (a.pdfPageCount ?? 0) > 1 ? (
-                  <span className={styles.chipMeta}>
-                    PDF - only the first page will be sent as an image.
-                  </span>
-                ) : null}
+            {showChannelToggle ? (
+              <div className={styles.channelSeg} role="group" aria-label="Message channel">
                 <button
                   type="button"
-                  className={styles.chipRemove}
-                  onClick={() => removeAttachment(a.localId)}
-                  aria-label={`Remove ${a.name}`}
+                  className={`${styles.channelBtn} ${effectiveChannel === 'text' ? styles.channelOn ?? '' : ''}`}
+                  aria-pressed={effectiveChannel === 'text'}
+                  onClick={() => setChannel('text')}
                 >
-                  <span aria-hidden="true">x</span>
+                  Text
                 </button>
-              </li>
-            ))}
-          </ul>
-        ) : null}
-        {hasErrored ? (
-          <p className={styles.error} role="alert">
-            An attachment failed to upload. Remove it to send.
-          </p>
-        ) : null}
-        {attachError ? (
-          <p className={styles.error} role="alert">
-            {attachError}
-          </p>
-        ) : null}
-        {sendError ? (
-          <p className={styles.error} role="alert">
-            {sendError}
-          </p>
-        ) : null}
-        <div className={styles.replyFoot}>
-          <label className={styles.srOnly} htmlFor="mms-attach-input">
-            Attach files
-          </label>
-          <input
-            ref={fileInputRef}
-            id="mms-attach-input"
-            className={styles.srOnly}
-            type="file"
-            multiple
-            accept={MMS_ACCEPT}
-            aria-label="Attach files"
-            onChange={onPickFiles}
-          />
-          <button
-            type="button"
-            className={styles.attachBtn}
-            onClick={() => fileInputRef.current?.click()}
-            aria-label="Attach a file"
-          >
-            <span aria-hidden="true">+</span> Attach
-          </button>
-          <span className={styles.replyTarget}>
-            {relayRoster !== undefined ? (
-              // A relay GROUP: a reply fans out to every member, so naming a
-              // single contact/number here would be wrong (and was: the shared
-              // "this contact" fallback). Say who it actually reaches.
-              <GroupReplyNote roster={relayRoster} />
-            ) : (
-              <ReplyTargetPicker
-                {...(replyToPhone !== undefined && { replyToPhone })}
-                {...(replyToLabel !== undefined && { replyToLabel })}
-                targets={replyTargets ?? []}
-                {...(selectedConversationId !== undefined && { selectedConversationId })}
-                {...(onSelectTarget !== undefined && { onSelectTarget })}
+                <button
+                  type="button"
+                  className={`${styles.channelBtn} ${effectiveChannel === 'email' ? styles.channelOn ?? '' : ''}`}
+                  aria-pressed={hasEmail ? effectiveChannel === 'email' : undefined}
+                  {...(hasEmail
+                    ? {}
+                    : { 'aria-disabled': true, title: 'No email on file - add one' })}
+                  onClick={() => {
+                    if (hasEmail) setChannel('email');
+                    else emailChannel?.onManageEmails();
+                  }}
+                >
+                  Email
+                </button>
+                {!hasEmail ? (
+                  <button
+                    type="button"
+                    className={styles.channelAdd}
+                    onClick={() => emailChannel?.onManageEmails()}
+                  >
+                    Add email
+                  </button>
+                ) : null}
+              </div>
+            ) : null}
+            {emailChannel !== undefined && effectiveChannel === 'email' ? (
+              <EmailComposer
+                emails={emailChannel.emails}
+                onSend={emailChannel.onSendEmail}
+                {...(emailChannel.suppressed !== undefined && { suppressed: emailChannel.suppressed })}
               />
+            ) : (
+              <>
+            {optedOut ? (
+              <p className={styles.optOutNote} role="note">
+                ⛔ On the Do-Not-Contact list — texting is disabled for this contact.
+              </p>
+            ) : null}
+            {relayClosed ? (
+              <p className={styles.optOutNote} role="note">
+                🔒 This group is closed — reopen it to send.
+              </p>
+            ) : null}
+            {relayConnecting ? (
+              <p className={styles.optOutNote} role="note">
+                Queued - messages will send when the group connects.
+              </p>
+            ) : null}
+            <label className={styles.srOnly} htmlFor="reply-box">
+              Reply message
+            </label>
+            <textarea
+              ref={replyRef}
+              id="reply-box"
+              className={styles.replyBox}
+              aria-label="Reply message"
+              placeholder="Type a reply…"
+              rows={1}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onKeyDown={handleKeyDown}
+            />
+            {attachments.length > 0 ? (
+              <ul className={styles.chips} aria-label="Attachments">
+                {attachments.map((a) => (
+                  <li
+                    key={a.localId}
+                    className={`${styles.chip} ${a.status === 'error' ? styles.chipError ?? '' : ''}`}
+                    aria-busy={a.status === 'uploading'}
+                  >
+                    {a.previewUrl !== undefined ? (
+                      <img className={styles.chipThumb} src={a.previewUrl} alt="" />
+                    ) : (
+                      <span className={styles.chipIcon} aria-hidden="true">
+                        {a.contentType === 'application/pdf' ? 'PDF' : 'FILE'}
+                      </span>
+                    )}
+                    <span className={styles.chipName}>{a.name}</span>
+                    <span className={styles.chipMeta}>
+                      {a.status === 'uploading'
+                        ? 'Uploading...'
+                        : a.status === 'error'
+                          ? a.error ?? 'Upload failed'
+                          : formatBytes(a.size)}
+                    </span>
+                    {a.status === 'done' && (a.pdfPageCount ?? 0) > 1 ? (
+                      <span className={styles.chipMeta}>
+                        PDF - only the first page will be sent as an image.
+                      </span>
+                    ) : null}
+                    <button
+                      type="button"
+                      className={styles.chipRemove}
+                      onClick={() => removeAttachment(a.localId)}
+                      aria-label={`Remove ${a.name}`}
+                    >
+                      <span aria-hidden="true">x</span>
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+            {hasErrored ? (
+              <p className={styles.error} role="alert">
+                An attachment failed to upload. Remove it to send.
+              </p>
+            ) : null}
+            {attachError ? (
+              <p className={styles.error} role="alert">
+                {attachError}
+              </p>
+            ) : null}
+            {sendError ? (
+              <p className={styles.error} role="alert">
+                {sendError}
+              </p>
+            ) : null}
+            <div className={styles.replyFoot}>
+              <label className={styles.srOnly} htmlFor="mms-attach-input">
+                Attach files
+              </label>
+              <input
+                ref={fileInputRef}
+                id="mms-attach-input"
+                className={styles.srOnly}
+                type="file"
+                multiple
+                accept={MMS_ACCEPT}
+                aria-label="Attach files"
+                onChange={onPickFiles}
+              />
+              <button
+                type="button"
+                className={styles.attachBtn}
+                onClick={() => fileInputRef.current?.click()}
+                aria-label="Attach a file"
+              >
+                <span aria-hidden="true">+</span> Attach
+              </button>
+              <span className={styles.replyTarget}>
+                {relayRoster !== undefined ? (
+                  // A relay GROUP: a reply fans out to every member, so naming a
+                  // single contact/number here would be wrong (and was: the shared
+                  // "this contact" fallback). Say who it actually reaches.
+                  <GroupReplyNote roster={relayRoster} />
+                ) : (
+                  <ReplyTargetPicker
+                    {...(replyToPhone !== undefined && { replyToPhone })}
+                    {...(replyToLabel !== undefined && { replyToLabel })}
+                    targets={replyTargets ?? []}
+                    {...(selectedConversationId !== undefined && { selectedConversationId })}
+                    {...(onSelectTarget !== undefined && { onSelectTarget })}
+                  />
+                )}
+              </span>
+              <button
+                type="button"
+                className={styles.sendBtn}
+                onClick={() => void handleSend()}
+                disabled={
+                  !canSend ||
+                  sending ||
+                  hasUploading ||
+                  hasErrored ||
+                  (draft.trim().length === 0 && uploadedKeys.length === 0)
+                }
+                title={
+                  canSend
+                    ? hasErrored
+                      ? 'Remove the failed attachment to send'
+                      : undefined
+                    : 'No single conversation to send into yet'
+                }
+              >
+                {sending ? 'Sending…' : 'Send'}
+              </button>
+            </div>
+              </>
             )}
-          </span>
-          <button
-            type="button"
-            className={styles.sendBtn}
-            onClick={() => void handleSend()}
-            disabled={
-              !canSend ||
-              sending ||
-              hasUploading ||
-              hasErrored ||
-              (draft.trim().length === 0 && uploadedKeys.length === 0)
-            }
-            title={
-              canSend
-                ? hasErrored
-                  ? 'Remove the failed attachment to send'
-                  : undefined
-                : 'No single conversation to send into yet'
-            }
-          >
-            {sending ? 'Sending…' : 'Send'}
-          </button>
-        </div>
           </>
         )}
       </div>

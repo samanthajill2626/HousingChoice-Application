@@ -13,6 +13,7 @@ import type { MessagesRepo, NewMessage } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
 import {
   CircuitBreakerOpenError,
+  ContactDeletedError,
   ContactNoConsentError,
   ContactOptedOutError,
   ConversationNotFoundError,
@@ -532,5 +533,55 @@ describe('sendMessage service', () => {
       });
       expect(f.counterValue).toBe(0);
     });
+  });
+});
+
+describe('deleted-contact send guard (2026-08-03 spec)', () => {
+  it('refuses sends to soft-deleted contacts with a typed error (nothing sent, nothing persisted)', async () => {
+    const f = makeFakes({
+      contact: {
+        contactId: 'contact-1',
+        type: 'tenant',
+        phone: '+15550100001',
+        consent_method: 'inbound_text',
+        deleted_at: '2026-08-01T00:00:00.000Z',
+      },
+    });
+    await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
+      ContactDeletedError,
+    );
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('also refuses AUTOMATED sends to soft-deleted contacts (no straggler scheduled nudges)', async () => {
+    const f = makeFakes({
+      contact: {
+        contactId: 'contact-1',
+        type: 'tenant',
+        phone: '+15550100001',
+        consent_method: 'inbound_text',
+        deleted_at: '2026-08-01T00:00:00.000Z',
+      },
+    });
+    await expect(
+      f.service({ conversationId: 'conv-1', body: 'x', automated: true }),
+    ).rejects.toBeInstanceOf(ContactDeletedError);
+    expect(f.sent).toHaveLength(0);
+  });
+
+  it('the opt-out gate still fires first on a contact that is BOTH opted out and deleted', async () => {
+    const f = makeFakes({
+      contact: {
+        contactId: 'contact-1',
+        type: 'tenant',
+        phone: '+15550100001',
+        sms_opt_out: true,
+        deleted_at: '2026-08-01T00:00:00.000Z',
+      },
+    });
+    await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
+      ContactOptedOutError,
+    );
   });
 });

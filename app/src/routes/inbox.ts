@@ -82,6 +82,11 @@ export interface InboxRow {
   direction?: 'inbound' | 'outbound'; // 'outbound' → "You: …" — OMITTED on relay_group rows
   lastActivityAt: string; // ISO; sort key (newest first)
   needsTriage: boolean; // true for untriaged unknowns; ALWAYS false for relay_group
+  /** Deleted-contact resurfacing (2026-08-03 spec): present/true ONLY on a
+   *  soft-deleted contact row surfaced by an unread post-deletion inbound —
+   *  the dashboard renders a "Deleted" chip. Absent on live contacts and
+   *  non-contact rows. */
+  deleted?: boolean;
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
   status?: 'open' | 'closed' | 'connecting'; // the relay group's lifecycle status (D9: connecting = awaiting its number)
@@ -217,6 +222,10 @@ interface DerivedLatest {
   channel: InboxChannel;
   direction: 'inbound' | 'outbound';
   preview: string;
+  /** The latest message's created_at (ISO). Absent when no message row was
+   *  readable (fallback preview) — callers needing recency must treat absent
+   *  as "unknown", never as "new". */
+  createdAt?: string;
 }
 
 /**
@@ -226,7 +235,7 @@ interface DerivedLatest {
  * sms/inbound) when no message is available — never throws.
  */
 function deriveLatest(
-  latest: { type?: unknown; direction?: unknown; body?: unknown; mediaUrls?: unknown; media_attachments?: unknown } | undefined,
+  latest: { type?: unknown; direction?: unknown; body?: unknown; mediaUrls?: unknown; media_attachments?: unknown; created_at?: unknown } | undefined,
   conv: ConversationItem,
 ): DerivedLatest {
   const fallbackPreview =
@@ -252,7 +261,8 @@ function deriveLatest(
   }
   const direction: 'inbound' | 'outbound' = latest.direction === 'outbound' ? 'outbound' : 'inbound';
   const preview = typeof latest.body === 'string' && latest.body.length > 0 ? latest.body : fallbackPreview;
-  return { channel, direction, preview };
+  const createdAt = typeof latest.created_at === 'string' ? latest.created_at : undefined;
+  return { channel, direction, preview, ...(createdAt !== undefined && { createdAt }) };
 }
 
 // --- The aggregator ----------------------------------------------------------
@@ -405,9 +415,11 @@ export async function aggregateInbox(
       };
     }
 
-    // Soft-deleted contact → hidden from the inbox (record retained; restore
-    // resurfaces it). findByPhone stays unfiltered for routing, so filter here.
-    if (isDeleted(contact)) return undefined;
+    // Soft-deleted contact → hidden from the inbox EXCEPT while an unread
+    // post-deletion inbound exists (deleted-contact resurfacing, 2026-08-03
+    // spec): the thread resurfaces with deleted:true until read or restored.
+    // findByPhone stays unfiltered for routing, so the decision lives here.
+    const deleted = isDeleted(contact);
 
     if (emittedContacts.has(contact.contactId)) return undefined; // one row per page
     const convs = await contactConversations(contact);
@@ -419,7 +431,49 @@ export async function aggregateInbox(
     if (maxConv.conversationId !== conv.conversationId) return undefined;
 
     const unreadSum = convs.reduce((sum, c) => sum + unreadOf(c), 0);
-    const { channel, direction, preview } = await latestMessageOf(maxConv.conversationId, maxConv);
+    // Deleted fast-path: nothing unread → hidden, no message read needed.
+    if (deleted && unreadSum === 0) return undefined;
+    const { channel, direction, preview, createdAt } = await latestMessageOf(maxConv.conversationId, maxConv);
+    if (deleted) {
+      // Surface ONLY while SOME conversation of this contact is unread AND that
+      // conversation's newest message is an inbound from AFTER the deletion.
+      // The predicate is PER CONVERSATION, not "unread anywhere + the newest
+      // thread looks fresh": a contact owns one thread per participant key, so
+      // the unread and the fresh inbound can sit on different threads. Mixing
+      // them broke the rule both ways — a pre-deletion unread on thread A kept
+      // the row up forever after thread B's fresh inbound was read (single-conv
+      // mark-read from a placement/tour pane), and a newer empty/outbound thread
+      // buried a genuinely unread fresh inbound on an older one.
+      // Pre-deletion unread stays hidden (deleting draws a line); a post-deletion
+      // OUTBOUND (e.g. a straggler scheduled send) does not resurface anyone.
+      // Absent createdAt (no readable message row) → never counts as new.
+      const isFreshInbound = (dir: 'inbound' | 'outbound', at: string | undefined): boolean =>
+        dir === 'inbound' &&
+        typeof at === 'string' &&
+        typeof contact.deleted_at === 'string' &&
+        // CLOCK CAVEAT: created_at is OUR ingest timestamp while message ordering
+        // (tsMsgId) uses the PROVIDER timestamp, so clock skew around the delete
+        // can momentarily hide a resurfaced row until the next inbound lands.
+        at > contact.deleted_at;
+
+      let resurfaces = false;
+      for (const c of convs) {
+        // Only an unread thread can resurface the row (spec Decision 3), so read
+        // threads are never probed.
+        if (unreadOf(c) === 0) continue;
+        // maxConv's latest is already in hand for presentation — reuse it rather
+        // than re-reading the same conversation.
+        const latest =
+          c.conversationId === maxConv.conversationId
+            ? { direction, createdAt }
+            : await latestMessageOf(c.conversationId, c);
+        if (isFreshInbound(latest.direction, latest.createdAt)) {
+          resurfaces = true;
+          break; // one qualifying thread is enough
+        }
+      }
+      if (!resurfaces) return undefined;
+    }
 
     let placementContext: { placementId: string; label: string } | undefined;
     if (typeof maxConv.placementId === 'string' && maxConv.placementId.length > 0) {
@@ -451,6 +505,7 @@ export async function aggregateInbox(
       direction,
       lastActivityAt: maxConv.last_activity_at,
       needsTriage: role === 'unknown',
+      ...(deleted && { deleted: true }),
     };
   };
 

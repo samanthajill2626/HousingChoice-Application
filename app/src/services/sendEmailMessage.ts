@@ -37,6 +37,7 @@ import {
   contactEmails,
   contactPhones,
   createContactsRepo,
+  isDeleted,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { isKillSwitchOff } from './scheduledSendSuppression.js';
@@ -51,6 +52,7 @@ export class EmailSendRefusedError extends Error {
     readonly code:
       | 'email_sending_disabled'
       | 'email_suppressed'
+      | 'contact_deleted'
       | 'email_attachments_too_large'
       | 'contact_email_missing'
       | 'invalid_cc'
@@ -128,6 +130,13 @@ export class EmailAttachmentsTooLargeError extends EmailSendRefusedError {
 export class EmailSuppressedError extends EmailSendRefusedError {
   constructor() {
     super('contact is suppressed for email - send refused', 'email_suppressed');
+  }
+}
+
+/** The contact is soft-deleted - restore them to reply (deleted-contact resurfacing spec 2026-08-03). */
+export class EmailContactDeletedError extends EmailSendRefusedError {
+  constructor() {
+    super('contact is soft-deleted - email send refused', 'contact_deleted');
   }
 }
 
@@ -283,6 +292,13 @@ export function createSendEmailMessageService(deps: SendEmailServiceDeps = {}): 
     if (contact.email_opt_out === true || contact.email_unreachable === true) {
       log.warn({ conversationId, contactId }, 'email send refused: contact suppressed');
       throw new EmailSuppressedError();
+    }
+
+    // (3b) Deleted gate (deleted-contact resurfacing spec 2026-08-03): a
+    // soft-deleted contact is unreachable until restored.
+    if (isDeleted(contact)) {
+      log.warn({ conversationId, contactId }, 'email send refused: contact is soft-deleted');
+      throw new EmailContactDeletedError();
     }
 
     // (4) Attachments: normalize {key, filename?}, validate each key (own prefix +

@@ -445,9 +445,13 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     const remindersRepo = createTourRemindersRepo({ doc });
     // Quiet hours (spec 2026-08-03): the armer clamps every dueAt out of the
     // org window, so the seeder must hand it the same settings the worker
-    // reads. A fresh seed has no settings row yet, so this resolves to
-    // DEFAULT_ORG_SETTINGS (21:00-08:00 America/New_York) - which is exactly
-    // what the worker would use too.
+    // reads. In a real 'full' reseed the settings row ALREADY exists by now -
+    // seedAll's Put loop runs before seedLive (lib/seed/index.ts) and writes
+    // quietHoursEnabled: false - so these ladders arm UNCLAMPED, which is what
+    // keeps the demo world time-of-day independent. DEFAULT_ORG_SETTINGS
+    // (21:00-08:00 America/New_York) applies only when seedLive runs against an
+    // EMPTY settings table: a direct call from a unit test
+    // (app/test/seedLive.test.ts), never the product path.
     const settingsRepo = createSettingsRepo({ doc });
 
     // Build TourItem shapes matching what the repo would return (needed by armTourReminders).

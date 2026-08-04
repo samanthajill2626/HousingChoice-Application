@@ -36,3 +36,16 @@ whether the deleted-contact send guard interacts. Once calls bump unread, the
 deleted-contact resurfacing rule (unread inbound newer than `deleted_at`) picks
 up missed calls automatically - build order is deleted-resurfacing first, then
 this.
+
+**Update (2026-08-04, contact-comms-pane).** The VISIBILITY half is now fixed on
+the tour and placement hubs, though not on the surface this issue tracks. Spec
+`docs/superpowers/specs/2026-08-03-contact-comms-pane-design.md` rebuilt both
+pages' 1:1 tabs on the person-centric comms pane, so those tabs render
+`GET /api/contacts/:id/timeline` - which carries `kind:'call'` rows - instead of
+the single relay transcript that dropped them. A call placed to or from a tenant
+or landlord is therefore visible from their tour/placement tab and from the
+contact page. The INBOX surface is untouched and this issue stays open: calls
+still do not stamp `last_activity_at`, do not re-sort or re-preview the thread,
+and never bump `unread_count`, so an inbound call still cannot surface a row an
+operator is not already looking at (and still cannot resurface a deleted
+contact's thread). Status: open.

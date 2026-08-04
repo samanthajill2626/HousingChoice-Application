@@ -236,9 +236,18 @@ const MAX_LANDLORD_UNITS = 25;
  * landlord's own activity feed now carries every tour lifecycle event directly
  * (dual-party writes in routes/tours.ts), so interleaving the property-audit
  * copy too would pin the same tour twice. What stays here is exactly what has
- * NO direct-event equivalent. Consequence, accepted: tours recorded BEFORE that
- * change exist only as audit rows and no longer show on a landlord's page
- * (dev-only history, regenerated on reseed).
+ * NO direct-event equivalent.
+ *
+ * Two consequences, both accepted. PERMANENT: landlord tour pins are now
+ * point-in-time. This interleave walks the CURRENT owner's units, so while it
+ * carried tours, re-assigning `unit.landlordId` handed that unit's whole tour
+ * history to the new owner and took it off the old one's page. Direct
+ * dual-party events do not move: the landlord who owned the unit at event time
+ * keeps those pins forever, and the new owner's contact page shows no tour that
+ * happened before the re-assignment (see lib/personEvents.ts for the same rule
+ * on the write side). ONE-TIME: tours recorded BEFORE that change exist only as
+ * audit rows and no longer show on a landlord's page (dev-only history,
+ * regenerated on reseed).
  */
 const LANDLORD_FEED_TYPES: ReadonlySet<string> = new Set([
   'broadcast_sent',

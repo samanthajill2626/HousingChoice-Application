@@ -6,11 +6,15 @@
 // services/statusTransition.ts do not each re-implement (and drift on) the
 // landlord resolve plus the best-effort guarding.
 //
-// LANDLORD RESOLUTION IS POINT-IN-TIME: the landlord is whoever
-// `unit.landlordId` resolves to AT EVENT TIME. A later unit re-assignment
-// neither transfers pin history to the new landlord nor strips it from the old
-// one. That deliberately differs from the contact timeline's property-audit
-// interleave, which walks the CURRENT owner's units retroactively.
+// LANDLORD RESOLUTION IS POINT-IN-TIME, PERMANENTLY: the landlord is whoever
+// `unit.landlordId` resolves to AT EVENT TIME, and the pin never moves after
+// that. Re-assigning `unit.landlordId` later does NOT hand existing tour /
+// placement pins to the new landlord and does not strip them from the old one:
+// the landlord who owned the unit at event time keeps them forever, and the new
+// landlord's contact page shows nothing that happened before the re-assignment
+// (a property changing management companies is the everyday case). That is the
+// standing product rule, not a migration artifact - routes/contactTimeline.ts's
+// LANDLORD_FEED_TYPES note states the same rule on the read side.
 //
 // Every write is independently guarded and NONE may fail the caller's route -
 // the state each event describes is already persisted. A landlord-less unit, a
@@ -61,13 +65,19 @@ export async function recordPersonMilestone(
   const { activityEvents, log } = deps;
   if (!activityEvents) return;
   const { tenantId, unitId, type, label, refType, refId } = input;
+  // A blank tenant suppresses the WHOLE milestone, landlord copy included - the
+  // pre-existing semantics of the recorders this helper absorbed
+  // (placements.ts recordPlacementMilestone / statusTransition.ts
+  // recordStageMilestone both opened with this guard). It returns BEFORE the
+  // landlord resolve, so an unusable input costs no unit read either. In
+  // practice unreachable (every route requires a tenantId), which is exactly why
+  // it should stay a hard stop rather than a half-written pair.
+  if (typeof tenantId !== 'string' || tenantId.length === 0) return;
 
-  if (typeof tenantId === 'string' && tenantId.length > 0) {
-    try {
-      await activityEvents.record({ contactId: tenantId, type, label, refType, refId });
-    } catch (err) {
-      log.error({ err, refType, refId }, `${type} milestone record failed (best-effort)`);
-    }
+  try {
+    await activityEvents.record({ contactId: tenantId, type, label, refType, refId });
+  } catch (err) {
+    log.error({ err, refType, refId }, `${type} milestone record failed (best-effort)`);
   }
 
   const landlordId = await resolveLandlordId(deps, unitId);

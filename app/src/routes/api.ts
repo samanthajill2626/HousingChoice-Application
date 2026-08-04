@@ -63,7 +63,7 @@ import {
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
-import { type SettingsRepo } from '../repos/settingsRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { type ContactVocabularyRepo } from '../repos/contactVocabularyRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -413,6 +413,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // (relay-number-lifecycle spec 4.1: the lost-move relay-close hook was removed -
   // nothing auto-closes a relay group; closing is a human choice.)
   const placementNudges = deps.placementNudgesRepo ?? createPlacementNudgesRepo({ logger: deps.logger });
+  // Quiet hours (spec 2026-08-03): the arm-time dueAt clamp reads the org
+  // window, so every sub-router/armer that writes a scheduled row needs a
+  // settings repo. Constructed ONCE here (the `?? create...` pattern above) and
+  // threaded down - default-constructing it inside each sub-router would make
+  // route tests that inject a fake settings repo talk to the real AWS SDK.
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   // First-class placement deadlines (placement-deadline-model): shared across the
   // placements / status-transition / today / contacts sub-routers so arm/retire
   // and the computed next_deadline read all hit ONE repo.
@@ -641,6 +647,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       placementNudgesRepo: placementNudges,
       placementsRepo: placements,
       unitsRepo: units,
+      // Quiet hours (spec 2026-08-03): the Upcoming bucket previews BOTH
+      // ladders, so it needs the same org window the panels read.
+      settingsRepo: settings,
       config,
     }),
   );
@@ -692,6 +701,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.toursNow !== undefined && { now: deps.toursNow }),
+      // Quiet-hours clamp at arm time (both armTourReminders call sites).
+      settingsRepo: settings,
       // Relay provisioning deps (Task 5 — POST /api/tours/:tourId/relay).
       conversationsRepo: conversations,
       auditRepo: audit,
@@ -717,6 +728,17 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
+      // window through the SAME repo the armers use.
+      settingsRepo: settings,
+      // Send now (spec section 7): the force-send runs the poll's own
+      // resolve/claim/send path, so hand it the process-wide send service,
+      // provider adapter, message store and audit trail (NOT freshly
+      // constructed inside the router - a test injecting fakes must keep them).
+      sendMessageService: sendMessage,
+      adapter,
+      messagesRepo: messages,
+      auditRepo: audit,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -802,10 +824,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/placements',
     createPlacementNudgesRouter({
+      config,
       logger: deps.logger,
       ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
       placementNudgesRepo: placementNudges,
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
+      // Quiet hours (spec 2026-08-03): the nudge view's FIRST suppression
+      // estimate reads the org window through the SAME repo the armers use.
+      settingsRepo: settings,
+      // Send now (spec section 7): the force-send runs the poll's own
+      // resolve/claim/send path, so hand it the process-wide recipient repos,
+      // send service and audit trail (NOT freshly constructed inside the
+      // router - a test injecting fakes must keep them).
+      contactsRepo: contacts,
+      conversationsRepo: conversations,
+      sendMessageService: sendMessage,
+      auditRepo: audit,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -832,6 +866,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       armStageNudge: (placement, toStage, nowIso) =>
         armNudgeForStage(placement, toStage, nowIso, {
           placementNudgesRepo: placementNudges,
+          // Quiet-hours clamp at arm time (spec 2026-08-03).
+          settingsRepo: settings,
           // Task 6: best-effort scheduled.updated so the timeline's "Upcoming"
           // section refetches live when a nudge is armed/canceled on a stage move.
           events,

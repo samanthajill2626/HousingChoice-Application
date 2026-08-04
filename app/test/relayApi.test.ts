@@ -27,6 +27,7 @@ import {
 } from '../src/services/poolNumbers.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 
 const ALICE = '+15550100001';
@@ -1303,6 +1304,9 @@ describe('relay-group API (M1.7)', () => {
       await world.toursRepo.patch(tour.tourId, { groupThreadId: conversationId });
       await armTourReminders(tour, '2026-08-01T10:00:00.000Z', {
         tourRemindersRepo: world.tourRemindersRepo,
+        // Not a quiet-hours case: the window is stubbed OFF so the ladder's
+        // dueAts stay exactly the raw offsets this bucket asserts on.
+        settingsRepo: quietOffSettingsRepo(),
         logger,
       });
       return { tour, conversationId };

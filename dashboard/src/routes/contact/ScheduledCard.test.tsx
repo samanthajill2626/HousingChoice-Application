@@ -80,4 +80,15 @@ describe('ScheduledCard', () => {
     render(<ScheduledCard item={BASE} now={NOW} />);
     expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
   });
+
+  // Quiet hours (2026-08-03) DEFERS the send to quiet-end - it never drops it,
+  // so this one reason must NOT reuse the "Will be skipped" sentence.
+  // (This table is not exhaustively typed, so the row above would not have
+  // caught a missing quiet_hours case - it is asserted explicitly here.)
+  it('reads a quiet_hours suppression as a WAIT, never as a skip', () => {
+    const EM = String.fromCharCode(0x2014); // rendered em dash, ASCII source
+    render(<ScheduledCard item={{ ...BASE, suppression: { reason: 'quiet_hours' } }} now={NOW} />);
+    expect(screen.getByText(`Will wait ${EM} quiet hours`)).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).not.toBeInTheDocument();
+  });
 });

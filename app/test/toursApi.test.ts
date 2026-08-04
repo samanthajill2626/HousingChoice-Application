@@ -979,13 +979,19 @@ describe('PATCH guards: requested lifecycle + exit-gate coupling', () => {
 });
 
 describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
+  // Arm-time clock, injected so these cases never depend on the wall clock:
+  // BASE_CREATE_BODY's tour is a FIXED calendar date, and arm-time quiet-hours
+  // clamping retires every rung of a tour whose start is already past (the
+  // clamped dueAt lands at/after the tour), so a real `now` would arm nothing
+  // once that date expires. 10:00 EDT - outside the quiet window.
+  const ARM_NOW = '2026-07-13T14:00:00.000Z';
   const pendingRows = (world: FakeWorld, tourId: string) =>
     [...world.tourRemindersMap.values()].filter(
       (r) => r.tourId === tourId && r.sentAt === undefined && r.canceledAt === undefined,
     );
 
   it('PATCH {scheduledAt, status:canceled} cancels — it must NOT arm a ladder on a dead tour', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
@@ -999,7 +1005,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   });
 
   it("PATCH {status:'toured'} cancels the still-pending rungs (no 'missed your tour' after attending)", async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     expect(pendingRows(world, tourId).length).toBeGreaterThan(0);
@@ -1010,7 +1016,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   });
 
   it('bare {scheduledAt} on a canceled tour auto-advances to scheduled and re-arms', async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1025,7 +1031,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   });
 
   it("status-only revival {status:'scheduled'} on a canceled tour re-arms off the stored time", async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1037,7 +1043,7 @@ describe('Reminder side effects key on the EFFECTIVE post-patch status', () => {
   });
 
   it("status-only {status:'no_show'} cancels the pending rows (the check-in is a manual send now)", async () => {
-    const { app, world } = makeWebhookHarness();
+    const { app, world } = makeWebhookHarness({ toursNow: () => ARM_NOW });
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     const before = pendingRows(world, tourId).map((r) => r.reminderId).sort();
@@ -1141,8 +1147,12 @@ describe('Exit gate: NO placement created, tenant status untouched', () => {
 
 describe('Tour reminders — injected clock produces assertable dueAts', () => {
   it('POST /api/tours arms reminders with dueAts relative to the injected now', async () => {
-    const FIXED_NOW = '2026-07-13T10:00:00.000Z';
-    const SCHEDULED_AT = '2026-07-15T10:00:00.000Z';
+    // Both instants are DAYTIME Eastern (10:00 / 14:00 EDT): the default quiet
+    // window (21:00-08:00 America/New_York) is on in these route suites, so an
+    // early-morning fixture would be clamped and this case is about the clock
+    // seam, not the clamp (clamping has its own cases in tourReminders.test.ts).
+    const FIXED_NOW = '2026-07-13T14:00:00.000Z';
+    const SCHEDULED_AT = '2026-07-15T18:00:00.000Z';
     const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
 
     const res = await authed(app).post('/api/tours').send({
@@ -1158,20 +1168,21 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = SCHEDULED_AT - 24h = '2026-07-14T10:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
-    // morning_of = 08:00 UTC on 2026-07-15 = '2026-07-15T08:00:00.000Z'
-    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
-    // en_route = SCHEDULED_AT - 2h = '2026-07-15T08:00:00.000Z'
-    expect(byKind['en_route']?.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // day_before = SCHEDULED_AT - 24h = '2026-07-14T18:00:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
+    // morning_of = 08:00 ORG-LOCAL (EDT) on 2026-07-15 = '2026-07-15T12:00:00.000Z'
+    expect(byKind['morning_of']?.dueAt).toBe('2026-07-15T12:00:00.000Z');
+    // en_route = SCHEDULED_AT - 2h = '2026-07-15T16:00:00.000Z'
+    expect(byKind['en_route']?.dueAt).toBe('2026-07-15T16:00:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
 
   it('PATCH reschedule re-arms with dueAts relative to the injected now', async () => {
-    const FIXED_NOW = '2026-07-13T11:00:00.000Z';
-    const ORIG_SCHEDULED = '2026-07-15T11:00:00.000Z';
-    const NEW_SCHEDULED = '2026-07-20T14:00:00.000Z';
+    // Daytime Eastern instants (11:00 / 15:00 / 14:00 EDT) - see the case above.
+    const FIXED_NOW = '2026-07-13T15:00:00.000Z';
+    const ORIG_SCHEDULED = '2026-07-15T19:00:00.000Z';
+    const NEW_SCHEDULED = '2026-07-20T18:00:00.000Z';
     const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
 
     const created = await authed(app).post('/api/tours').send({
@@ -1194,16 +1205,18 @@ describe('Tour reminders — injected clock produces assertable dueAts', () => {
 
     // confirmation = FIXED_NOW (injected)
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    // day_before = NEW_SCHEDULED - 24h = '2026-07-19T14:00:00.000Z'
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T14:00:00.000Z');
+    // day_before = NEW_SCHEDULED - 24h = '2026-07-19T18:00:00.000Z'
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-19T18:00:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
 
   it('PATCH -> no_show cancels the still-pending rungs (no auto no-show check-in)', async () => {
-    const FIXED_NOW = '2026-07-13T10:00:00.000Z';
-    // Future tour, so day_before/morning_of/en_route are all still upcoming.
-    const SCHEDULED_AT = '2026-07-20T10:00:00.000Z';
+    const FIXED_NOW = '2026-07-13T14:00:00.000Z';
+    // Future tour at 14:00 EDT, so day_before/morning_of/en_route are all still
+    // upcoming (an early-morning tour would lose its same-day rungs to the
+    // at/past-tour-start rule).
+    const SCHEDULED_AT = '2026-07-20T18:00:00.000Z';
     const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
 
     const created = await authed(app)
@@ -1310,8 +1323,10 @@ describe('POST /api/tours — timeless create (no scheduledAt → requested)', (
 });
 
 describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
-  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
-  const BOOKED_AT = '2026-07-15T10:00:00.000Z';
+  // Daytime Eastern (10:00 / 14:00 EDT): outside the default quiet window, so
+  // the booked ladder's dueAts are the raw offsets this describe asserts on.
+  const FIXED_NOW = '2026-07-13T14:00:00.000Z';
+  const BOOKED_AT = '2026-07-15T18:00:00.000Z';
 
   it('scheduledAt alone auto-advances requested → scheduled and arms the ladder off the injected now', async () => {
     const { app, world } = makeWebhookHarness({ toursNow: () => FIXED_NOW });
@@ -1335,7 +1350,7 @@ describe('PATCH /api/tours/:tourId — booking a requested tour', () => {
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
     // day_before = BOOKED_AT - 24h
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-14T18:00:00.000Z');
     // no_show_checkin is manual-send only now, so it is not auto-armed.
     expect(byKind['no_show_checkin']).toBeUndefined();
   });
@@ -2130,8 +2145,13 @@ describe('PATCH /api/tours — requested → scheduled transition', () => {
 
     // Assert the dueAts are computed from FIXED_NOW / NEW_SCHED.
     const byKind = Object.fromEntries(rowsAfter.map((r) => [r.kind, r]));
+    // FIXED_NOW is 08:00 EDT - exactly quiet-END, so the confirmation is stored
+    // unclamped (the window is end-EXCLUSIVE).
     expect(byKind['confirmation']?.dueAt).toBe(FIXED_NOW);
-    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T10:00:00.000Z'); // NEW_SCHED - 24h
+    // day_before raw = NEW_SCHED - 24h = 06:00 EDT, INSIDE the default quiet
+    // window -> stored pre-clamped at 08:00 EDT. (NEW_SCHED is a 06:00-EDT
+    // tour, so morning_of/en_route land at/after its start and are skipped.)
+    expect(byKind['day_before']?.dueAt).toBe('2026-07-24T12:00:00.000Z');
     expect(byKind['no_show_checkin']).toBeUndefined(); // manual-send only, not auto-armed
   });
 

@@ -222,6 +222,7 @@ runWithContext(bootContext, () => {
   const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
   const { createMessagingAdapter } = await import('./adapters/messaging.js');
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
   const { runDueTourReminders } = await import('./jobs/tourReminders.js');
 
   const tourReminderDeps = {
@@ -242,6 +243,9 @@ runWithContext(bootContext, () => {
     // (relay fan-out/intro, broadcast) — the COMBINED outbound rate must stay
     // under the registered tier; group reminder rungs are N member sends each.
     tokenBucket: a2pBucket,
+    // Quiet hours (spec 2026-08-03): the pre-claim fire-time backstop reads the
+    // org window once per tick, so legacy/catch-up rows never fire overnight.
+    settingsRepo: createSettingsRepo({ logger }),
     logger,
   };
 
@@ -266,6 +270,7 @@ runWithContext(bootContext, () => {
   const { createUnitsRepo } = await import('./repos/unitsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
   const { appEvents } = await import('./lib/events.js');
   const { runDuePlacementNudges } = await import('./jobs/placementNudges.js');
 
@@ -276,6 +281,9 @@ runWithContext(bootContext, () => {
     unitsRepo: createUnitsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
     sendMessageService: createSendMessageService({ config, logger }),
+    // Quiet hours (spec 2026-08-03): the pre-claim fire-time backstop reads the
+    // org window once per tick, so legacy/catch-up rows never fire overnight.
+    settingsRepo: createSettingsRepo({ logger }),
     // The bridge (lib/eventBridge.ts) forwards these claim-skip pokes to app
     // SSE clients when EVENT_BRIDGE_URL is set; an unbridged emit is a no-op.
     events: appEvents,

@@ -30,6 +30,7 @@ import {
 import { createTourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createToursRepo } from '../repos/toursRepo.js';
 import { createMessagesRepo } from '../repos/messagesRepo.js';
+import { createSettingsRepo } from '../repos/settingsRepo.js';
 import { createSendMessageService } from '../services/sendMessage.js';
 import { runDueTourReminders, type RunDueTourRemindersDeps } from '../jobs/tourReminders.js';
 import { createPlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
@@ -249,6 +250,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       messagesRepo: createMessagesRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
       adapter: createMessagingAdapter({ config, logger: log }),
+      // Quiet hours (spec 2026-08-03): the tick runs the SAME pre-claim
+      // backstop the worker poll does, so an e2e tick with an in-window `now`
+      // defers instead of sending.
+      settingsRepo: createSettingsRepo({ logger: log }),
       logger: log,
     };
     return tickDeps;
@@ -290,6 +295,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       unitsRepo: createUnitsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
+      // Quiet hours (spec 2026-08-03): same pre-claim backstop as the worker
+      // poll, so an e2e tick with an in-window `now` defers instead of sending.
+      settingsRepo: createSettingsRepo({ logger: log }),
       logger: log,
     };
     return nudgeTickDeps;

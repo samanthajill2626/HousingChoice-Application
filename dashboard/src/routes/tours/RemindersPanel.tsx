@@ -28,6 +28,9 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   getTourReminders,
   patchTourReminder,
+  postReminderSendNow,
+  sendNowErrorMessage,
+  suppressionNote,
   useEventStream,
   ApiError,
   REMINDER_KIND_LABELS,
@@ -205,13 +208,48 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
   // no error banner needed, the ladder IS the answer. One in-flight action at
   // a time (busyId) so a double-click can't fire two PATCHes.
   const [busyId, setBusyId] = useState<string | null>(null);
+  // The last Send-now refusal, keyed to the rung it belongs to (see onSendNow).
+  const [actionError, setActionError] = useState<{
+    reminderId: string;
+    message: string;
+  } | null>(null);
   const onToggleCanceled = useCallback(
     (rung: TourReminderView) => {
       if (busyId !== null) return;
       setBusyId(rung.reminderId);
+      setActionError(null);
       patchTourReminder(tourId, rung.reminderId, rung.state === 'upcoming')
         .catch(() => {
           /* 409 race / transient — the refetch below reports the honest state */
+        })
+        .finally(() => {
+          setBusyId(null);
+          fetchNow();
+        });
+    },
+    [busyId, tourId, fetchNow],
+  );
+
+  // Send now (quiet-hours spec section 7): force ONE pending rung out
+  // immediately - a human send, so the server bypasses quiet hours, manual mode
+  // and the breaker but still honors the kill switch, opt-out and consent.
+  // Unlike cancel/restore, a refusal must be VISIBLE and never a silent no-op,
+  // so the failure lands in a PER-RUNG slot beside the row. It deliberately does
+  // NOT reuse `state.error` - that path REPLACES the whole ladder, and erasing
+  // the list is exactly the wrong answer to "this one rung would not send".
+  // Shares the single `busyId` slot with Cancel so the two can never race.
+  const onSendNow = useCallback(
+    (rung: TourReminderView) => {
+      if (busyId !== null) return;
+      setBusyId(rung.reminderId);
+      setActionError(null);
+      postReminderSendNow(tourId, rung.reminderId)
+        .catch((err: unknown) => {
+          setActionError({
+            reminderId: rung.reminderId,
+            // NEVER err.message - that is the raw machine code.
+            message: sendNowErrorMessage(err instanceof ApiError ? err.code : ''),
+          });
         })
         .finally(() => {
           setBusyId(null);
@@ -241,9 +279,20 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
         <ul className={styles.rows}>
           {reminders.map((rung) => {
             const isNext = rung.reminderId === nextId;
+            const kindLabel = REMINDER_KIND_LABELS[rung.kind] ?? rung.kind;
+            // "Will wait" for quiet hours (a DEFERRAL - the rung fires at
+            // quiet-end), "Will be skipped" for every reason that really drops
+            // the message. suppressionNote owns that branch for all surfaces.
             const suppression =
               rung.suppression !== undefined
-                ? REMINDER_SUPPRESSION_LABELS[rung.suppression.reason] ?? rung.suppression.reason
+                ? suppressionNote(
+                    rung.suppression.reason,
+                    REMINDER_SUPPRESSION_LABELS[rung.suppression.reason] ?? rung.suppression.reason,
+                  )
+                : undefined;
+            const rowError =
+              actionError !== null && actionError.reminderId === rung.reminderId
+                ? actionError.message
                 : undefined;
             return (
               <li
@@ -255,16 +304,30 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   <span
                     className={`${styles.kind} ${rung.state === 'canceled' ? styles.struck : ''}`}
                   >
-                    {REMINDER_KIND_LABELS[rung.kind] ?? rung.kind}
+                    {kindLabel}
                   </span>
                   {isNext ? <span className={styles.nextTag}>Next</span> : null}
                   <StateChip rung={rung} />
+                  {/* Send now: only a PENDING rung can be forced out. Distinct
+                      accessible name per rung (A10) - a bare repeated "Send now"
+                      would be a strict-mode violation for the e2e harness. */}
+                  {rung.state === 'upcoming' ? (
+                    <button
+                      type="button"
+                      className={styles.action}
+                      disabled={busyId !== null}
+                      aria-label={`Send ${kindLabel} reminder now`}
+                      onClick={() => onSendNow(rung)}
+                    >
+                      Send now
+                    </button>
+                  ) : null}
                   {rung.state === 'upcoming' || rung.state === 'canceled' ? (
                     <button
                       type="button"
                       className={styles.action}
                       disabled={busyId !== null}
-                      aria-label={`${rung.state === 'upcoming' ? 'Cancel' : 'Restore'} ${REMINDER_KIND_LABELS[rung.kind] ?? rung.kind} reminder`}
+                      aria-label={`${rung.state === 'upcoming' ? 'Cancel' : 'Restore'} ${kindLabel} reminder`}
                       onClick={() => onToggleCanceled(rung)}
                     >
                       {rung.state === 'upcoming' ? 'Cancel' : 'Restore'}
@@ -275,7 +338,12 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   {rung.body}
                 </p>
                 {suppression !== undefined ? (
-                  <p className={styles.suppression}>Will be skipped — {suppression}</p>
+                  <p className={styles.suppression}>{suppression}</p>
+                ) : null}
+                {rowError !== undefined ? (
+                  <p className={styles.rowError} role="alert">
+                    {rowError}
+                  </p>
                 ) : null}
               </li>
             );

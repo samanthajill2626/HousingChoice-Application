@@ -153,7 +153,6 @@ export interface TourTimes {
   scheduledAtLocal: string;
   /** dueAt of each pre-computed rung, full-ms ISO — feed `justAfter(x)` to the tick. */
   dayBefore: string;
-  morningOf: string;
   enRoute: string;
   noShowCheckin: string;
 }
@@ -173,6 +172,12 @@ function toDatetimeLocal(d: Date): string {
  * parsing the same string here yields byte-identical dueAt ISO strings.
  * `confirmation` is not computed — its dueAt is the server's arm-time "now"
  * (tick with no `now` fires it immediately).
+ *
+ * `morning_of` is deliberately NOT mirrored here (worklist A13): since the
+ * quiet-hours change it fires at 08:00 ORG-LOCAL (America/New_York) on the
+ * tour's local day, which this host-local helper cannot compute. The field it
+ * used to expose was 08:00 UTC and was never read by any spec, so it was
+ * removed rather than left as a wrong answer waiting to be used.
  */
 export function tourSchedule(hoursFromNow = 48): TourTimes {
   const sched = new Date(Date.now() + hoursFromNow * 3_600_000);
@@ -183,9 +188,6 @@ export function tourSchedule(hoursFromNow = 48): TourTimes {
   return {
     scheduledAtLocal,
     dayBefore: new Date(t - 24 * 3_600_000).toISOString(),
-    morningOf: new Date(
-      Date.UTC(parsed.getUTCFullYear(), parsed.getUTCMonth(), parsed.getUTCDate(), 8, 0, 0, 0),
-    ).toISOString(),
     enRoute: new Date(t - 2 * 3_600_000).toISOString(),
     noShowCheckin: new Date(t + 30 * 60_000).toISOString(),
   };

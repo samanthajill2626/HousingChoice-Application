@@ -16,8 +16,19 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { NudgeKind, NudgeSkipReason, PlacementNudgeItem } from '../src/repos/placementNudgesRepo.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import { resolveMessage } from '../src/messages/index.js';
+import type {
+  SendMessageInput,
+  SendMessageOutcome,
+  SendMessageService,
+} from '../src/services/sendMessage.js';
+import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import {
+  isoHoursFromNow,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -27,7 +38,24 @@ function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
     patch: (path: string) =>
       request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
   };
+}
+
+/** Records every send the route drives (the route asserts on view + audit). */
+function makeSendSpy(): { service: SendMessageService; sent: SendMessageInput[] } {
+  const sent: SendMessageInput[] = [];
+  const service: SendMessageService = async (input) => {
+    sent.push(input);
+    return {
+      conversationId: input.conversationId,
+      providerSid: 'SM-route-fake',
+      tsMsgId: 'ts-route-fake',
+      status: 'queued',
+    } as SendMessageOutcome;
+  };
+  return { service, sent };
 }
 
 /** Seed a placement row directly on the world fake. */
@@ -72,6 +100,22 @@ function seedNudge(
     ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.placementNudgesMap.set(item.nudgeId, item);
+}
+
+/**
+ * Seed a placement whose stage MATCHES its rung (a mismatched stage would report
+ * the harder stale_stage reason) plus one upcoming receipt_check rung due at
+ * `dueAt`, and return the placementId. One placement per rung keeps each
+ * quiet-hours case a clean read of that rung's own dueAt.
+ */
+async function seedQuietNudge(world: FakeWorld, suffix: string, dueAt: string): Promise<string> {
+  const placementId = await seedPlacement(world, {
+    tenantId: `contact-nudge-quiet-${suffix}`,
+    unitId: `unit-nudge-quiet-${suffix}`,
+    stage: 'awaiting_receipt',
+  });
+  seedNudge(world, { nudgeId: `nudge-quiet-${suffix}`, placementId, kind: 'receipt_check', dueAt });
+  return placementId;
 }
 
 describe('GET /api/placements/:placementId/nudges', () => {
@@ -164,6 +208,132 @@ describe('GET /api/placements/:placementId/nudges', () => {
     expect(nudge?.skippedAt).toBe('2026-07-14T08:01:00.000Z');
     expect(nudge?.skipReason).toBe('no_landlord');
     expect(nudge?.sentAt).toBeUndefined();
+  });
+
+  // Quiet hours (spec 2026-08-03) brought the FIRST suppression estimate to the
+  // nudge view. The chip is a claim about the FUTURE ("Will wait"), so it is a
+  // property of the RUNG - its own dueAt against the daily-recurring window -
+  // not of the server wall clock. The window stub is still computed from the
+  // current time; a fixed 21:00-08:00 fixture would be time-of-day dependent.
+  it('carries a quiet_hours suppression estimate on a rung due inside a window occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-1',
+      unitId: 'unit-nudge-quiet-1',
+      stage: 'awaiting_receipt',
+    });
+    // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-1',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: isoHoursFromNow(24),
+    });
+    // A terminal rung must never carry an estimate (nothing is going to fire).
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-sent',
+      placementId,
+      kind: 'completion_check',
+      dueAt: '2026-07-13T08:00:00.000Z',
+      sentAt: '2026-07-13T08:00:05.000Z',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.nudges as { nudgeId: string; state: string; suppression?: { reason: string } }[]).map(
+        (n) => [n.nudgeId, n],
+      ),
+    );
+    expect(byId.get('nudge-quiet-1')?.suppression).toEqual({ reason: 'quiet_hours' });
+    expect(byId.get('nudge-quiet-sent')?.suppression).toBeUndefined();
+  });
+
+  /** The first (only) rung's suppression on a placement, via the real route. */
+  async function suppressionOf(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    placementId: string,
+  ): Promise<unknown> {
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    return nudge?.suppression;
+  }
+
+  // The SF1 false positive: inside the window the wall clock says "quiet", but a
+  // rung due days from now will not wait for tonight's window - while a rung
+  // already due IS being held by the fire-time backstop right now.
+  it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    // Three days out at a time of day outside EVERY occurrence of the window.
+    const far = await seedQuietNudge(world, 'far', isoHoursFromNow(3 * 24 + 6));
+    // Already due, with a dueAt outside every occurrence: the poll is deferring
+    // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    const overdue = await seedQuietNudge(world, 'overdue', isoHoursFromNow(-30));
+
+    expect(await suppressionOf(app, far)).toBeUndefined();
+    expect(await suppressionOf(app, overdue)).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The other half of SF1: during business hours a rung genuinely due at 23:00
+  // tonight WILL be deferred, so it must chip even though the clock is outside
+  // the window - exactly when staff are looking at the card.
+  it('outside the window, still chips a rung due inside tonight occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAwayFromNow());
+    const tonight = await seedQuietNudge(world, 'tonight', isoHoursFromNow(4));
+    const before = await seedQuietNudge(world, 'before', isoHoursFromNow(1));
+
+    expect(await suppressionOf(app, tonight)).toEqual({ reason: 'quiet_hours' });
+    expect(await suppressionOf(app, before)).toBeUndefined();
+  });
+
+  it('carries NO suppression when quiet hours are disabled', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-2',
+      unitId: 'unit-nudge-quiet-2',
+      stage: 'awaiting_receipt',
+    });
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-2',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-14T08:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    expect(nudge?.suppression).toBeUndefined();
+  });
+
+  it('stale_stage outranks quiet_hours on a rung whose placement has moved on', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    // The placement already LEFT awaiting_receipt, so the receipt_check rung
+    // would be retired unsent - a harder reason than "waiting for quiet-end".
+    const placementId = await seedPlacement(world, {
+      tenantId: 'contact-nudge-quiet-3',
+      unitId: 'unit-nudge-quiet-3',
+      stage: 'awaiting_completion',
+    });
+    // A dueAt inside tomorrow's occurrence, so quiet hours WOULD chip this rung
+    // on its own - stale_stage has to outrank it, not merely fill a gap.
+    seedNudge(world, {
+      nudgeId: 'nudge-quiet-3',
+      placementId,
+      kind: 'receipt_check',
+      dueAt: isoHoursFromNow(24),
+    });
+
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    expect(nudge?.suppression).toEqual({ reason: 'stale_stage' });
   });
 
   it('returns 404 for an unknown placement id', async () => {
@@ -341,5 +511,194 @@ describe('PATCH /api/placements/:placementId/nudges/:nudgeId', () => {
       .send({ canceled: true });
     expect(cross.status).toBe(404);
     expect(cross.body).toEqual({ error: 'nudge_not_found' });
+  });
+});
+
+// Send now (quiet-hours spec section 7): any authed staff role - no admin gate.
+describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
+  /** A tenant-routed rung whose placement is still on the rung's stage. */
+  async function seedSendNowNudge(
+    world: FakeWorld,
+    over: {
+      suffix?: string;
+      stage?: string;
+      contactOptOut?: boolean;
+      consent?: boolean;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
+    } = {},
+  ) {
+    const suffix = over.suffix ?? '1';
+    const tenantId = `contact-nudge-sendnow-${suffix}`;
+    const phone = `+1555071${suffix.padStart(4, '0')}`;
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone,
+      created_at: '2026-07-13T00:00:00.000Z',
+      ...(over.consent !== false && { consent_method: 'inbound_text' }),
+      ...(over.contactOptOut === true && { sms_opt_out: true }),
+      ...(over.deletedAt !== undefined && { deleted_at: over.deletedAt }),
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(`conv-nudge-sendnow-${suffix}`, {
+      conversationId: `conv-nudge-sendnow-${suffix}`,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+    const placementId = await seedPlacement(world, {
+      tenantId,
+      unitId: `unit-nudge-sendnow-${suffix}`,
+      ...(over.stage !== undefined && { stage: over.stage }),
+    });
+    const nudgeId = `nudge-sendnow-${suffix}`;
+    seedNudge(world, {
+      nudgeId,
+      placementId,
+      kind: 'receipt_check',
+      dueAt: '2026-07-19T10:00:00.000Z',
+    });
+    return { placementId, nudgeId, tenantId };
+  }
+
+  it('200s with the re-read sent view, sends automated: false, and records an audit event', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    // Quiet hours ON around the wall clock: the human path must ignore them.
+    Object.assign(world.settings, quietWindowAroundNow());
+    const { placementId, nudgeId } = await seedSendNowNudge(world);
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.nudge.nudgeId).toBe(nudgeId);
+    expect(res.body.nudge.state).toBe('sent');
+    expect(typeof res.body.nudge.sentAt).toBe('string');
+    expect(res.body.nudge.recipient).toBe('tenant');
+
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]!.conversationId).toBe('conv-nudge-sendnow-1');
+    expect(spy.sent[0]!.body).toBe(resolveMessage('nudge.receipt_check'));
+    expect(spy.sent[0]!.automated).toBe(false);
+
+    const ev = world.auditEvents.find((e) => e.event_type === 'nudge_force_sent');
+    expect(ev?.entityKey).toBe(`placements#${placementId}`);
+    expect(ev?.actorId).toBe(TEST_SESSION_USER.userId);
+    expect(ev?.payload).toEqual({
+      nudgeId,
+      kind: 'receipt_check',
+      actor: TEST_SESSION_USER.userId,
+    });
+  });
+
+  it('409s nudge_not_pending with the honest current view when the rung already fired', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { placementId, nudgeId } = await seedSendNowNudge(world, { suffix: '2' });
+    await world.placementNudgesRepo.claimSend(nudgeId, '2026-07-19T10:00:05.000Z');
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('nudge_not_pending');
+    expect(res.body.nudge.state).toBe('sent');
+    expect(spy.sent).toHaveLength(0);
+    expect(world.auditEvents.some((e) => e.event_type === 'nudge_force_sent')).toBe(false);
+  });
+
+  it('409s stage_moved and leaves the rung PENDING (only the poll retires stale rows)', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    // The rung chases awaiting_receipt; the placement already moved on.
+    const { placementId, nudgeId } = await seedSendNowNudge(world, {
+      suffix: '3',
+      stage: 'awaiting_completion',
+    });
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('stage_moved');
+    expect(res.body.nudge.state).toBe('upcoming');
+    expect(res.body.nudge.skippedAt).toBeUndefined();
+    expect(spy.sent).toHaveLength(0);
+    // Still the poll's to retire on its own tick.
+    expect(
+      (await world.placementNudgesRepo.listDue('2026-07-19T10:01:00.000Z')).map((n) => n.nudgeId),
+    ).toContain(nudgeId);
+  });
+
+  it('409s contact_opted_out and leaves the rung upcoming', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { placementId, nudgeId } = await seedSendNowNudge(world, {
+      suffix: '4',
+      contactOptOut: true,
+    });
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_opted_out');
+    expect(res.body.nudge.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('409s contact_deleted for a soft-deleted recipient and leaves the rung upcoming', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { placementId, nudgeId } = await seedSendNowNudge(world, {
+      suffix: '6',
+      deletedAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_deleted');
+    expect(res.body.nudge.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('404s an unknown placement, an unknown rung, and a rung owned by ANOTHER placement', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { placementId, nudgeId } = await seedSendNowNudge(world, { suffix: '5' });
+
+    const ghostPlacement = await authed(app).post(
+      `/api/placements/no-such-placement/nudges/${nudgeId}/send-now`,
+    );
+    expect(ghostPlacement.status).toBe(404);
+    expect(ghostPlacement.body).toEqual({ error: 'placement_not_found' });
+
+    const ghostRung = await authed(app).post(
+      `/api/placements/${placementId}/nudges/nudge-does-not-exist/send-now`,
+    );
+    expect(ghostRung.status).toBe(404);
+    expect(ghostRung.body).toEqual({ error: 'nudge_not_found' });
+
+    const other = await seedPlacement(world, {
+      tenantId: 'contact-nudge-sendnow-other',
+      unitId: 'unit-nudge-sendnow-other',
+    });
+    const cross = await authed(app).post(
+      `/api/placements/${other}/nudges/${nudgeId}/send-now`,
+    );
+    expect(cross.status).toBe(404);
+    expect(cross.body).toEqual({ error: 'nudge_not_found' });
+    expect(spy.sent).toHaveLength(0);
   });
 });

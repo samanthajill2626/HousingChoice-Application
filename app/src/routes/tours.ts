@@ -56,6 +56,7 @@ import {
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { armTourReminders, cancelTourReminders } from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import {
@@ -162,6 +163,8 @@ export interface ToursRouterDeps {
   logger?: Logger;
   toursRepo?: ToursRepo;
   tourRemindersRepo?: TourRemindersRepo;
+  /** Quiet-hours window for arm-time dueAt clamping (quiet-hours spec 2026-08-03). */
+  settingsRepo?: SettingsRepo;
   /** For relay provisioning (Task 5). */
   conversationsRepo?: ConversationsRepo;
   auditRepo?: AuditRepo;
@@ -185,6 +188,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const config = deps.config ?? loadConfig();
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const settingsRepo = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const conversations =
     deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
@@ -293,7 +297,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // Arm the reminder ladder (best-effort side effect) — only once a time exists.
     // Invariant: no reminder rows may ever exist for a 'requested' / time-less tour.
     if (scheduledAt !== undefined) {
-      await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+      await armTourReminders(tour, getNow(), {
+        tourRemindersRepo: reminders,
+        settingsRepo,
+        logger: log,
+      });
       // A reminder ladder now exists — nudge the contact timeline's pinned
       // "Upcoming" section to refetch live (scheduled-message-visibility Task 6).
       // ID-only, advisory payload; a requested/timeless create arms nothing so
@@ -584,7 +592,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     let ladderChanged = false;
     if (armable && rearmTrigger) {
       await cancelTourReminders(tourId, { tourRemindersRepo: reminders, logger: log });
-      await armTourReminders(tour, getNow(), { tourRemindersRepo: reminders, logger: log });
+      await armTourReminders(tour, getNow(), {
+        tourRemindersRepo: reminders,
+        settingsRepo,
+        logger: log,
+      });
       ladderChanged = true;
     } else if (
       effectiveStatus === 'canceled' ||

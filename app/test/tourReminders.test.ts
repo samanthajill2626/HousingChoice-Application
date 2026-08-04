@@ -29,11 +29,27 @@ import { createLogger } from '../src/lib/logger.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
-import { createSendMessageService } from '../src/services/sendMessage.js';
-import { armTourReminders, cancelTourReminders, runDueTourReminders } from '../src/jobs/tourReminders.js';
+import {
+  createSendMessageService,
+  SendRefusedError,
+  type SendMessageInput,
+  type SendMessageOutcome,
+  type SendMessageService,
+} from '../src/services/sendMessage.js';
+import {
+  armTourReminders,
+  cancelTourReminders,
+  forceSendReminder,
+  runDueTourReminders,
+} from '../src/jobs/tourReminders.js';
 import { resolveMessage } from '../src/messages/index.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
+import {
+  failingSettingsRepo,
+  quietOffSettingsRepo,
+  stubSettingsRepo,
+} from './helpers/settingsStub.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -68,6 +84,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // In-memory fakeWorld for contacts/conversations/sendMessage adapter.
   const world = createFakeWorld();
 
+  // Quiet hours OFF for every test that is NOT about quiet hours: clamping is
+  // identity, so these suites keep their original dueAt fixtures (and never
+  // depend on where a fixture instant happens to fall in the 21:00-08:00
+  // window). The clamp/supersession cases below stub the window explicitly.
+  const quietOff = quietOffSettingsRepo();
+
   // Build a real sendMessageService wired to the fake adapter.
   const sendMessageService = createSendMessageService({
     logger,
@@ -90,6 +112,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     messagesRepo: world.messagesRepo,
     sendMessageService,
     adapter: createAdapterSpy().adapter,
+    // Quiet hours OFF: the fire-time backstop is a no-op, so these poller cases
+    // keep their original fixture instants. The backstop cases below override
+    // this with the default (enabled) window.
+    settingsRepo: quietOff,
     logger,
   };
 
@@ -109,8 +135,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // Test 1 — arm: correct ladder dueAts for a future tour
   // ---------------------------------------------------------------------------
   it('armTourReminders creates all 4 reminder rows with correct dueAts', async () => {
-    const now = '2026-07-13T10:00:00.000Z';
-    const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d
+    // Quiet hours ON (the product default: 21:00-08:00 America/New_York, EST =
+    // UTC-5 in January). Every rung below lands in daylight, so the clamp is
+    // identity - EXCEPT morning_of, which is now 08:00 ORG-LOCAL on the tour's
+    // local day (it used to be 08:00 UTC = 3am ET, the motivating bug).
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T20:00:00.000Z'; // Jan 20 15:00 EST
 
     const tour = await tours.create({
       tenantId: 'contact-arm-1',
@@ -119,27 +149,28 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
 
     // All 4 armed kinds: confirmation, day_before, morning_of, en_route
     // (no_show_checkin is manual-send only). All dueAts are future relative to now.
     expect(rows).toHaveLength(4);
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // confirmation: dueAt = now
+    // confirmation: dueAt = now (10:00 EST - outside the window, unclamped)
     expect(byKind['confirmation']!.dueAt).toBe(now);
 
-    // day_before: scheduledAt - 24h = '2026-07-14T10:00:00.000Z'
-    expect(byKind['day_before']!.dueAt).toBe('2026-07-14T10:00:00.000Z');
+    // day_before: scheduledAt - 24h = Jan 19 15:00 EST (daytime, unclamped)
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-19T20:00:00.000Z');
 
-    // morning_of: date of scheduledAt at 08:00 UTC = '2026-07-15T08:00:00.000Z'
-    expect(byKind['morning_of']!.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // morning_of: 08:00 ORG-LOCAL on the tour's local date = Jan 20 08:00 EST
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
 
-    // en_route: scheduledAt - 2h = '2026-07-15T08:00:00.000Z'
-    // Wait — en_route = scheduledAt - 2h = 2026-07-15T08:00:00.000Z — same as morning_of?
-    // Let's check: 10:00 - 2h = 08:00. morning_of is also 08:00. That's a coincidence
-    // of the test case. Let's just check the actual computed value.
-    expect(byKind['en_route']!.dueAt).toBe('2026-07-15T08:00:00.000Z');
+    // en_route: scheduledAt - 2h = Jan 20 13:00 EST (daytime, unclamped)
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T18:00:00.000Z');
 
     // no_show_checkin is manual-send only, so it is NOT auto-armed (absent here).
     expect(byKind['no_show_checkin']).toBeUndefined();
@@ -163,7 +194,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // ---------------------------------------------------------------------------
   it('does not auto-arm the no_show_checkin rung (manual send only)', async () => {
     const now = '2026-07-13T10:00:00.000Z';
-    const scheduledAt = '2026-07-15T10:00:00.000Z'; // T+2d, full future ladder
+    // T+2d, full future ladder. The tour is at 14:00 EDT (not 06:00 EDT as it
+    // once was): a tour that early would have its 08:00-local morning_of land
+    // AFTER the tour start, which the past-event rule now legitimately drops -
+    // this case is about the no_show_checkin guard, not about that rule.
+    const scheduledAt = '2026-07-15T18:00:00.000Z';
 
     const tour = await tours.create({
       tenantId: 'contact-noarm-1',
@@ -172,11 +207,243 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    const rows = await armTourReminders(tour, now, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
     const kinds = rows.map((r) => r.kind);
 
     expect(kinds).not.toContain('no_show_checkin');
     expect(kinds).toHaveLength(4);
+  });
+
+  // ===========================================================================
+  // Arm-time quiet-hours clamping + supersession (quiet-hours spec section 5).
+  // Every case pins CONCRETE instants against the default window
+  // (21:00-08:00 America/New_York; January = EST = UTC-5), so nothing here
+  // depends on the wall clock or on the machine's timezone.
+  //
+  // Skip rules under test:
+  //   (a) past-dueAt        - pre-existing: a clamped dueAt still < now
+  //   (b) past-event        - a clamp landing at/after the tour start
+  //   (c) same-slot         - an earlier rung clamped onto a later rung's slot
+  //   (d) stale day_before  - "tour is tomorrow" landing on the tour's local day
+  // ===========================================================================
+
+  // ---------------------------------------------------------------------------
+  // Test 1c - (c) a clamped day_before loses its slot to morning_of
+  // ---------------------------------------------------------------------------
+  it('a day_before clamped onto the morning_of slot is superseded (no day_before row)', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - a 10pm tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-supersede-1',
+      unitId: 'unit-arm-supersede-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // day_before raw = Jan 19 22:00 EST (inside the window) -> clamps to Jan 20
+    // 08:00 EST, which IS the morning_of slot (the tour's LOCAL date is Jan 20).
+    // The later rung's copy is the current one, so day_before is never written.
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+
+    // The rest of the ladder is untouched by the collision.
+    expect(byKind['confirmation']!.dueAt).toBe(now);
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-21T01:00:00.000Z'); // Jan 20 20:00 EST
+    expect(rows).toHaveLength(3);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1d - (c) an en_route clamped onto the morning_of slot wins it
+  // ---------------------------------------------------------------------------
+  it('an en_route clamped onto the morning_of slot supersedes morning_of', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T13:30:00.000Z'; // Jan 20 08:30 EST - an early tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-supersede-2',
+      unitId: 'unit-arm-supersede-2',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // en_route raw = Jan 20 06:30 EST (inside the window) -> clamps to 08:00 EST
+    // = the morning_of slot. en_route is the LATER rung, so it survives.
+    expect(byKind['en_route']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    expect(byKind['morning_of']).toBeUndefined();
+
+    // day_before raw = Jan 19 08:30 EST - outside the window, so no clamp, and
+    // it is already past `now`: dropped by the pre-existing past-dueAt rule.
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['confirmation']!.dueAt).toBe(now);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1e - the confirmation rung clamps out of evening quiet hours
+  // ---------------------------------------------------------------------------
+  it('a confirmation armed inside quiet hours is clamped to quiet-end, not sent at `now`', async () => {
+    const now = '2026-01-19T03:00:00.000Z'; // Jan 18 22:00 EST - staff scheduling late
+    const scheduledAt = '2026-01-25T20:00:00.000Z'; // Jan 25 15:00 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-lateclamp-1',
+      unitId: 'unit-arm-lateclamp-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // 22:00 EST is the evening side of the wrapping window: the window ends at
+    // 08:00 EST the NEXT local morning.
+    expect(byKind['confirmation']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
+    expect(byKind['confirmation']!.dueAt).not.toBe(now);
+    expect(rows).toHaveLength(4);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1f - (b) rungs whose clamp lands at/past the tour start are skipped
+  // ---------------------------------------------------------------------------
+  it('rungs clamped at or past the tour start are skipped (early-morning tour)', async () => {
+    // `now` is TWO days out (not one) so day_before's CLAMPED dueAt is still in
+    // the future: with a Jan 19 arm time the clamped Jan 19 13:00Z is already
+    // past and the pre-existing past-dueAt rule drops it before supersession is
+    // ever consulted - that interaction is pinned by Test 1g instead.
+    const now = '2026-01-18T15:00:00.000Z'; // Jan 18 10:00 EST
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-pastevent-1',
+      unitId: 'unit-arm-pastevent-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // morning_of (Jan 20 08:00 EST) is at/after the 07:30 EST start -> skipped.
+    // en_route raw = Jan 20 05:30 EST (quiet) -> clamps to 08:00 EST, also
+    // at/after the start -> skipped.
+    expect(byKind['morning_of']).toBeUndefined();
+    expect(byKind['en_route']).toBeUndefined();
+
+    // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST.
+    // Its LOCAL date (Jan 19) is not the tour's local date (Jan 20), so the
+    // "tour is tomorrow" copy is still true -> armed.
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
+    expect(rows.map((r) => r.kind).sort()).toEqual(['confirmation', 'day_before']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1g - (a) a clamp that still lands before `now` is dropped
+  // ---------------------------------------------------------------------------
+  it('a rung whose clamped dueAt is still in the past is skipped (past-dueAt rule)', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-20T12:30:00.000Z'; // Jan 20 07:30 EST
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-pastdue-1',
+      unitId: 'unit-arm-pastdue-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: stubSettingsRepo(),
+      logger,
+    });
+
+    // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST,
+    // which is STILL before `now` (10:00 EST) -> past-dueAt. Both same-day rungs
+    // clamp at/past the 07:30 start -> past-event. Only confirmation survives.
+    expect(rows.map((r) => r.kind)).toEqual(['confirmation']);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1h - quiet hours OFF: no clamping, but morning_of stays org-local
+  // ---------------------------------------------------------------------------
+  it('with quiet hours disabled nothing is clamped, and morning_of is still 08:00 org-local', async () => {
+    const now = '2026-01-19T15:00:00.000Z'; // Jan 19 10:00 EST
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Jan 20 22:00 EST - Test 1c's tour
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-quietoff-1',
+      unitId: 'unit-arm-quietoff-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // The same tour that lost its day_before in Test 1c keeps all 4 rungs: with
+    // the window disabled the 22:00 EST day_before stays at 22:00 EST.
+    expect(rows).toHaveLength(4);
+    expect(byKind['day_before']!.dueAt).toBe('2026-01-20T03:00:00.000Z');
+    // morning_of is 08:00 ORG-LOCAL regardless of the window's enabled flag -
+    // the timezone comes from the same settings row.
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 1i - a settings-read failure falls back to the DEFAULT window
+  // ---------------------------------------------------------------------------
+  it('a settings read failure still clamps, using the default window', async () => {
+    const now = '2026-01-19T15:00:00.000Z';
+    const scheduledAt = '2026-01-21T03:00:00.000Z'; // Test 1c's tour again
+
+    const tour = await tours.create({
+      tenantId: 'contact-arm-settingsfail-1',
+      unitId: 'unit-arm-settingsfail-1',
+      scheduledAt,
+      tourType: 'self_guided',
+    });
+
+    const rows = await armTourReminders(tour, now, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: failingSettingsRepo(),
+      logger,
+    });
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+
+    // Identical to Test 1c: the failure falls back to DEFAULT_ORG_SETTINGS
+    // (enabled, 21:00-08:00, America/New_York) - never to "no quiet hours".
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    expect(rows).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -217,17 +484,24 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm reminders.
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
-    // Advance clock to just after day_before dueAt.
-    // day_before = '2026-07-14T10:00:00.000Z'
+    // Tick 1 - just after the confirmation dueAt: that rung alone is due.
+    await runDueTourReminders('2026-07-13T10:01:00.000Z', runDeps);
+
+    // Tick 2 - just after day_before dueAt ('2026-07-14T10:00:00.000Z').
+    // en_route ('2026-07-15T08:00:00.000Z') is still future.
+    // (The two rungs are released by SEPARATE ticks on purpose: one catch-up
+    // tick releasing both would hit release supersession - a later rung of the
+    // same tour retires the earlier one. That rule has its own case below.)
     const pollAt = '2026-07-14T10:01:00.000Z';
     await runDueTourReminders(pollAt, runDeps);
 
-    // Should have sent: confirmation (dueAt=now0 <= pollAt) AND day_before (dueAt='..T10:00' <= pollAt).
-    // en_route (08:00) is also <= pollAt? No: '2026-07-15T08:00:00.000Z' > '2026-07-14T10:01:00.000Z'.
-    // morning_of (08:00 on 15th) is also in the future.
-    // So only confirmation + day_before should have fired.
+    // confirmation + day_before fired, one per tick.
     expect(world.sent).toHaveLength(2);
     const sentBodies = world.sent.map((s) => s.body);
     expect(sentBodies).toContain(resolveMessage('tour.confirmation'));
@@ -279,13 +553,19 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
     events.on('scheduled.updated', (p) => emitted.push(p));
 
-    // Same window as Test 2: confirmation + day_before fire.
+    // Same two ticks as Test 2 (separate releases - see the supersession note
+    // there): confirmation fires on the first, day_before on the second.
+    await runDueTourReminders('2026-07-13T10:01:00.000Z', { ...runDeps, events });
     await runDueTourReminders('2026-07-14T10:01:00.000Z', { ...runDeps, events });
     expect(emitted).toHaveLength(2);
     for (const p of emitted) expect(p.contactId).toBe(contactId);
@@ -322,7 +602,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'self_guided',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const events = createEventBus({ logger });
     const emitted: Array<{ contactId?: string }> = [];
@@ -351,13 +635,282 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await expect(tourReminders.claimSend(confirmation!.reminderId, pollAt)).resolves.toBe(false);
   });
 
+  // ===========================================================================
+  // FIRE-TIME BACKSTOP (quiet-hours spec 2026-08-03, section 6)
+  //
+  // These cases live on their OWN January timeline (2026-01-15), so no row from
+  // any other test in this file is ever due at their polls, and each uses a
+  // FRESH world (createGroupTestRig) so send counts are isolated. Rows are
+  // written straight to the repo with in-window dueAts - exactly the LEGACY
+  // shape the backstop exists for (rows armed before clamping shipped, plus
+  // worker-downtime catch-up). America/New_York is UTC-5 (EST) in January.
+  // ===========================================================================
+
+  /** The product default window: enabled, 21:00-08:00 America/New_York. */
+  const quietOnDeps = <T extends object>(deps: T) => ({ ...deps, settingsRepo: stubSettingsRepo() });
+
+  // ---------------------------------------------------------------------------
+  // Test 2d - a due rung inside the window is DEFERRED, never claimed
+  // ---------------------------------------------------------------------------
+  it('defers a due rung while `now` is inside quiet hours WITHOUT claiming it, then sends it after the window', async () => {
+    const rig = createGroupTestRig();
+    const deps = quietOnDeps(rig.deps);
+    const tenantPhone = '+15550210001';
+    const armedAt = '2026-01-14T15:00:00.000Z';
+    seedTenant(rig.world, 'contact-quiet-1', tenantPhone, 'conv-quiet-1', armedAt);
+
+    const tour = await tours.create({
+      tenantId: 'contact-quiet-1',
+      unitId: 'unit-quiet-1',
+      scheduledAt: '2026-01-15T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // The pre-feature 08:00-UTC morning_of dueAt = 03:00 EST: arm-time clamping
+    // would never produce it, so only the backstop can stop it.
+    const legacy = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-01-15T08:00:00.000Z',
+    });
+
+    const inWindow = '2026-01-15T09:00:00.000Z'; // Jan 15 04:00 EST
+    await runDueTourReminders(inWindow, deps);
+
+    // Nothing sent on either route.
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    // NOT claimed: claimSend IS the sentAt stamp, so a post-claim refusal would
+    // destroy the message. The defer leaves every terminal marker unset.
+    const deferred = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === legacy.reminderId,
+    );
+    expect(deferred?.sentAt).toBeUndefined();
+    expect(deferred?.skippedAt).toBeUndefined();
+    expect(deferred?.canceledAt).toBeUndefined();
+    // Still live in listDue - it re-fires on the next tick.
+    expect((await tourReminders.listDue(inWindow)).map((r) => r.reminderId)).toContain(
+      legacy.reminderId,
+    );
+
+    // One tick past quiet-end (08:05 EST) - the deferred rung goes out.
+    const afterWindow = '2026-01-15T13:05:00.000Z';
+    await runDueTourReminders(afterWindow, deps);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.morning_of'));
+    expect(
+      (await tourReminders.listByTour(tour.tourId)).find((r) => r.reminderId === legacy.reminderId)
+        ?.sentAt,
+    ).toBe(afterWindow);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 2e - the backstop sits ABOVE the group branch, so GROUP-routed rungs
+  // (landlord_led / pm_team) are covered too
+  // ---------------------------------------------------------------------------
+  it('defers a GROUP-routed rung as well (the check runs before the tourType branch)', async () => {
+    const rig = createGroupTestRig();
+    const deps = quietOnDeps(rig.deps);
+    const now0 = '2026-01-14T15:00:00.000Z';
+    const tenantPhone = '+15550210002';
+    const landlordPhone = '+15550210012';
+    const poolNumber = '+15550190021';
+    const groupConvId = 'conv-group-quiet-1';
+
+    seedTenant(rig.world, 'contact-quiet-2', tenantPhone, 'conv-1to1-quiet-2', now0);
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-quiet-2', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-quiet-2b', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: now0,
+    });
+
+    const tour = await tours.create({
+      tenantId: 'contact-quiet-2',
+      unitId: 'unit-quiet-2',
+      scheduledAt: '2026-01-15T20:00:00.000Z',
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+    const legacy = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2026-01-15T08:00:00.000Z',
+    });
+
+    const inWindow = '2026-01-15T09:00:00.000Z';
+    await runDueTourReminders(inWindow, deps);
+
+    // No member text at 4am, and the rung is untouched.
+    expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(0);
+    const deferred = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === legacy.reminderId,
+    );
+    expect(deferred?.sentAt).toBeUndefined();
+    expect(deferred?.skippedAt).toBeUndefined();
+
+    // After quiet-end the whole group is texted from the pool number.
+    await runDueTourReminders('2026-01-15T13:05:00.000Z', deps);
+    expect(rig.groupSends).toHaveLength(2);
+    expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 2f - RELEASE SUPERSESSION: legacy rungs released together at quiet-end
+  // must not double-fire; the earlier rung retires unsent
+  // ---------------------------------------------------------------------------
+  it('release supersession: an earlier rung due beside a LATER rung of the SAME tour is claim-skipped quiet_hours_superseded', async () => {
+    const rig = createGroupTestRig();
+    const deps = quietOnDeps(rig.deps);
+    const tenantPhone = '+15550210003';
+    seedTenant(rig.world, 'contact-quiet-3', tenantPhone, 'conv-quiet-3', '2026-01-14T15:00:00.000Z');
+
+    const tour = await tours.create({
+      tenantId: 'contact-quiet-3',
+      unitId: 'unit-quiet-3',
+      scheduledAt: '2026-01-16T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Both sat inside the window and are released by the SAME tick.
+    const dayBefore = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: '2026-01-15T08:00:00.000Z',
+    });
+    const morningOf = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-01-15T12:00:00.000Z',
+    });
+
+    const afterWindow = '2026-01-15T13:05:00.000Z';
+    await runDueTourReminders(afterWindow, deps);
+
+    const rows = await tourReminders.listByTour(tour.tourId);
+    const earlier = rows.find((r) => r.reminderId === dayBefore.reminderId);
+    const later = rows.find((r) => r.reminderId === morningOf.reminderId);
+    // The stale rung is RETIRED (skip stamp, never a sent stamp).
+    expect(earlier?.sentAt).toBeUndefined();
+    expect(earlier?.skippedAt).toBe(afterWindow);
+    expect(earlier?.skipReason).toBe('quiet_hours_superseded');
+    // The current rung sends.
+    expect(later?.sentAt).toBe(afterWindow);
+    // EXACTLY one text about this tour.
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.morning_of'));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 2f-off - release supersession is DELIBERATELY unconditional: it applies
+  // with quiet hours switched OFF too. Its job is "never text stale copy on a
+  // catch-up tick", and worker downtime stacks same-tour rungs regardless of the
+  // window. Pinned here so nobody "fixes" it into a quiet-hours-only rule.
+  // ---------------------------------------------------------------------------
+  it('release supersession applies with quiet hours DISABLED too (catch-up staleness, not a window rule)', async () => {
+    const rig = createGroupTestRig();
+    const deps = { ...rig.deps, settingsRepo: quietOffSettingsRepo() };
+    const tenantPhone = '+15550210009';
+    seedTenant(rig.world, 'contact-quiet-off-1', tenantPhone, 'conv-quiet-off-1', '2026-01-14T15:00:00.000Z');
+
+    const tour = await tours.create({
+      tenantId: 'contact-quiet-off-1',
+      unitId: 'unit-quiet-off-1',
+      scheduledAt: '2026-01-15T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Midday dueAts (nowhere near 21:00-08:00) that a stalled worker lists in ONE
+    // catch-up batch.
+    const morningOf = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-01-15T16:00:00.000Z',
+    });
+    const enRoute = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'en_route',
+      dueAt: '2026-01-15T16:05:00.000Z',
+    });
+
+    const catchUp = '2026-01-15T16:06:00.000Z';
+    await runDueTourReminders(catchUp, deps);
+
+    const rows = await tourReminders.listByTour(tour.tourId);
+    const earlier = rows.find((r) => r.reminderId === morningOf.reminderId);
+    const later = rows.find((r) => r.reminderId === enRoute.reminderId);
+    expect(earlier?.sentAt).toBeUndefined();
+    expect(earlier?.skippedAt).toBe(catchUp);
+    // The token is NOT renamed for the off case: the panel reads it as
+    // "superseded by a later reminder", which is accurate either way.
+    expect(earlier?.skipReason).toBe('quiet_hours_superseded');
+    expect(later?.sentAt).toBe(catchUp);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.en_route'));
+  });
+
+  // ---------------------------------------------------------------------------
+  // Test 2g - supersession is per-TOUR: two tenants' rungs never cancel each other
+  // ---------------------------------------------------------------------------
+  it('rungs of DIFFERENT tours never supersede each other (both send)', async () => {
+    const rig = createGroupTestRig();
+    const deps = quietOnDeps(rig.deps);
+    const phoneA = '+15550210004';
+    const phoneB = '+15550210005';
+    seedTenant(rig.world, 'contact-quiet-4a', phoneA, 'conv-quiet-4a', '2026-01-14T15:00:00.000Z');
+    seedTenant(rig.world, 'contact-quiet-4b', phoneB, 'conv-quiet-4b', '2026-01-14T15:00:00.000Z');
+
+    const tourA = await tours.create({
+      tenantId: 'contact-quiet-4a',
+      unitId: 'unit-quiet-4a',
+      scheduledAt: '2026-01-16T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const tourB = await tours.create({
+      tenantId: 'contact-quiet-4b',
+      unitId: 'unit-quiet-4b',
+      scheduledAt: '2026-01-15T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // A's EARLIER rung + B's LATER rung, both released by the same tick.
+    const rowA = await tourReminders.create({
+      tourId: tourA.tourId,
+      kind: 'day_before',
+      dueAt: '2026-01-15T08:00:00.000Z',
+    });
+    const rowB = await tourReminders.create({
+      tourId: tourB.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-01-15T12:00:00.000Z',
+    });
+
+    const afterWindow = '2026-01-15T13:05:00.000Z';
+    await runDueTourReminders(afterWindow, deps);
+
+    const a = (await tourReminders.listByTour(tourA.tourId)).find((r) => r.reminderId === rowA.reminderId);
+    const b = (await tourReminders.listByTour(tourB.tourId)).find((r) => r.reminderId === rowB.reminderId);
+    expect(a?.sentAt).toBe(afterWindow);
+    expect(a?.skipReason).toBeUndefined();
+    expect(b?.sentAt).toBe(afterWindow);
+    expect(b?.skipReason).toBeUndefined();
+    expect(rig.world.sent).toHaveLength(2);
+    expect(rig.world.sent.map((s) => s.body).sort()).toEqual(
+      [resolveMessage('tour.day_before'), resolveMessage('tour.morning_of')].sort(),
+    );
+  });
+
   // ---------------------------------------------------------------------------
   // Test 3 — reschedule: cancel old reminders, re-arm with new scheduledAt
   // ---------------------------------------------------------------------------
   it('cancel + re-arm on reschedule produces new rows with updated dueAts', async () => {
     const now0 = '2026-07-13T11:00:00.000Z';
-    const origScheduledAt = '2026-07-15T11:00:00.000Z';
-    const newScheduledAt = '2026-07-20T14:00:00.000Z'; // rescheduled to T+7d
+    // Both tours sit at 15:00 / 14:00 EDT (they used to be 07:00 / 10:00 EDT):
+    // an early-morning tour drops rungs for reasons this case is not about -
+    // morning_of lands after a 07:00 start (past-event), and a 10:00 start puts
+    // en_route exactly on the 08:00-local morning_of slot (supersession).
+    const origScheduledAt = '2026-07-15T19:00:00.000Z';
+    const newScheduledAt = '2026-07-20T18:00:00.000Z'; // rescheduled to T+7d
 
     const tour = await tours.create({
       tenantId: 'contact-reschedule-1',
@@ -367,7 +920,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm original reminders.
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
     const origRows = await tourReminders.listByTour(tour.tourId);
     expect(origRows).toHaveLength(4);
 
@@ -380,7 +937,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // Patch the tour with the new scheduledAt.
     const patchedTour = await tours.patch(tour.tourId, { scheduledAt: newScheduledAt });
-    await armTourReminders(patchedTour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(patchedTour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // New rows should exist in addition to the canceled ones.
     const allRows = await tourReminders.listByTour(tour.tourId);
@@ -389,7 +950,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // New day_before should reflect the new scheduledAt: newScheduledAt - 24h.
     const dayBefore = newRows.find((r) => r.kind === 'day_before');
-    expect(dayBefore?.dueAt).toBe('2026-07-19T14:00:00.000Z');
+    expect(dayBefore?.dueAt).toBe('2026-07-19T18:00:00.000Z');
 
     // no_show_checkin is manual-send only now, so re-arm does NOT create it.
     const noShow = newRows.find((r) => r.kind === 'no_show_checkin');
@@ -410,7 +971,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Manually mark the confirmation row as sent (simulates one already fired).
     const rows = await tourReminders.listByTour(tour.tourId);
@@ -449,17 +1014,23 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
 
-    const rows = await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    const rows = await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const kinds = rows.map((r) => r.kind);
 
     // day_before = scheduledAt - 24h = '2026-07-12T14:00:00.000Z' < now0 → SKIPPED
     expect(kinds).not.toContain('day_before');
 
-    // confirmation = now0 → always armed
+    // confirmation = now0 - always armed (quiet hours are OFF for this case)
     expect(kinds).toContain('confirmation');
 
-    // morning_of = 08:00 UTC on 2026-07-13 = '2026-07-13T08:00:00.000Z' < now0 (09:00) → SKIPPED
+    // morning_of = 08:00 ORG-LOCAL on 2026-07-13 (EDT) = '2026-07-13T12:00:00.000Z',
+    // which is the SAME instant as en_route below -> the later rung wins and
+    // morning_of is superseded (it used to be skipped as a past 08:00 UTC row).
     expect(kinds).not.toContain('morning_of');
 
     // en_route = scheduledAt - 2h = '2026-07-13T12:00:00.000Z' > now0 → armed
@@ -483,7 +1054,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Only the confirmation row has dueAt=now0 <= now0.
     const dueRows1 = await tourReminders.listDue(now0);
@@ -547,7 +1122,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // Arm the confirmation row only (now0 as arm time).
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     const racingDeps = {
       tourRemindersRepo: tourReminders,
@@ -557,6 +1136,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       messagesRepo: racingWorld.messagesRepo,
       sendMessageService: racingSend,
       adapter: createAdapterSpy().adapter,
+      settingsRepo: quietOff,
       logger,
     };
 
@@ -615,7 +1195,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
 
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // List due rows (simulating what runDueTourReminders does internally) —
     // then cancel the tour BEFORE the claim fires.
@@ -635,6 +1219,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       messagesRepo: cancelWorld.messagesRepo,
       sendMessageService: cancelSend,
       adapter: createAdapterSpy().adapter,
+      settingsRepo: quietOff,
       logger,
     };
     await runDueTourReminders(now0, cancelDeps);
@@ -743,6 +1328,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       messagesRepo: world.messagesRepo,
       sendMessageService: send,
       adapter: spy.adapter,
+      settingsRepo: quietOff,
       logger,
     };
     return { world, deps, groupSends: spy.sends };
@@ -826,7 +1412,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Only the confirmation rung is due at now0.
     await runDueTourReminders(now0, rig.deps);
@@ -883,7 +1473,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-group-bucket-1' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     // Counting bucket: every adapter send must be preceded by one acquire(1) —
     // the same combined A2P rate metering the relay fan-out/intro loops use.
@@ -929,7 +1523,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'pm_team',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -967,7 +1565,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'self_guided',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -995,7 +1597,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       scheduledAt,
       tourType: 'landlord_led',
     });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1022,7 +1628,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: 'conv-does-not-exist' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1050,7 +1660,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     // Points at the tenant's own 1:1 thread — exists but is NOT a relay_group.
     await tours.patch(tour.tourId, { groupThreadId: 'conv-1to1-wt-1' });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1089,7 +1703,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1136,7 +1754,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1177,7 +1799,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await Promise.all([
       runDueTourReminders(now0, rig.deps),
@@ -1221,7 +1847,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       tourType: 'landlord_led',
     });
     await tours.patch(tour.tourId, { groupThreadId: groupConvId });
-    await armTourReminders(tour, now0, { tourRemindersRepo: tourReminders, logger });
+    await armTourReminders(tour, now0, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
 
     await runDueTourReminders(now0, rig.deps);
 
@@ -1236,5 +1866,485 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(1);
     // Never through the 1:1 service either.
     expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ===========================================================================
+  // SEND NOW - forceSendReminder (quiet-hours spec section 7)
+  //
+  // Human-triggered, so it BYPASSES quiet hours, manual mode and the
+  // per-conversation breaker (the 1:1 send goes out with automated: false) but
+  // still RESPECTS the absolute gates - kill switch, opt-out, JIT consent - and
+  // every gate runs BEFORE the claim, so a refusal never leaves a row
+  // claimed-but-unsent. Own February timeline + a fresh world per case.
+  // ===========================================================================
+
+  /** Records every sendMessageService input (the real service hides `automated`). */
+  function makeForceSendSpy(opts: { throwErr?: Error } = {}): {
+    service: SendMessageService;
+    sent: SendMessageInput[];
+  } {
+    const sent: SendMessageInput[] = [];
+    const service: SendMessageService = async (input) => {
+      sent.push(input);
+      if (opts.throwErr) throw opts.throwErr;
+      return {
+        conversationId: input.conversationId,
+        providerSid: 'SM-force-fake',
+        tsMsgId: 'ts-force-fake',
+        status: 'queued',
+      } as SendMessageOutcome;
+    };
+    return { service, sent };
+  }
+
+  /**
+   * A tenant whose contact carries RECORDED CONSENT (consent_method). The force
+   * path sends with automated: false, which IS subject to the JIT consent gate -
+   * so a consent-less contact refuses. seedTenant above deliberately records no
+   * consent (the poller's automated sends were never gated on it).
+   */
+  function seedForceTenant(
+    world: ReturnType<typeof createFakeWorld>,
+    opts: {
+      contactId: string;
+      phone: string;
+      convId?: string;
+      now: string;
+      consent?: boolean;
+      contactOptOut?: boolean;
+      convOptOut?: boolean;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
+    },
+  ): void {
+    world.contacts.push({
+      contactId: opts.contactId,
+      type: 'tenant',
+      phone: opts.phone,
+      created_at: opts.now,
+      ...(opts.consent !== false && { consent_method: 'inbound_text' }),
+      ...(opts.contactOptOut === true && { sms_opt_out: true }),
+      ...(opts.deletedAt !== undefined && { deleted_at: opts.deletedAt }),
+    } as Parameters<typeof world.contacts.push>[0]);
+    if (opts.convId === undefined) return;
+    world.conversations.set(opts.convId, {
+      conversationId: opts.convId,
+      participant_phone: opts.phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: opts.now,
+      created_at: opts.now,
+      ...(opts.convOptOut === true && { sms_opt_out: true }),
+    });
+  }
+
+  /** A pending self_guided rung on the February timeline. */
+  async function seedForceTour(opts: {
+    tenantId: string;
+    unitId: string;
+    kind: 'confirmation' | 'day_before' | 'morning_of' | 'en_route';
+    tourType?: 'self_guided' | 'landlord_led' | 'pm_team';
+  }) {
+    const tour = await tours.create({
+      tenantId: opts.tenantId,
+      unitId: opts.unitId,
+      scheduledAt: '2026-02-11T20:00:00.000Z',
+      tourType: opts.tourType ?? 'self_guided',
+    });
+    const row = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: opts.kind,
+      dueAt: '2026-02-11T13:00:00.000Z',
+    });
+    return { tour, row };
+  }
+
+  /** Deep inside the DEFAULT window: Feb 10 04:00 EST (America/New_York). */
+  const FORCE_NOW = '2026-02-10T09:00:00.000Z';
+  const SEEDED_AT = '2026-02-09T15:00:00.000Z';
+
+  // ---------------------------------------------------------------------------
+  // Send now 1 - the headline case: it goes out NOW, mid-quiet-hours
+  // ---------------------------------------------------------------------------
+  it('force-sends a pending rung DURING quiet hours with automated: false and stamps sentAt', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const events = createEventBus({ logger });
+    const emitted: Array<{ contactId?: string }> = [];
+    events.on('scheduled.updated', (p) => emitted.push(p));
+    const deps = {
+      ...rig.deps,
+      sendMessageService: spy.service,
+      settingsRepo: stubSettingsRepo(), // quiet hours ON - the force path ignores them
+      events,
+    };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-1',
+      phone: '+15550220001',
+      convId: 'conv-force-1',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-1',
+      unitId: 'unit-force-1',
+      kind: 'confirmation',
+    });
+
+    // Sanity: at this same instant the POLLER defers (backstop) - so a send
+    // here can only come from the human path.
+    await runDueTourReminders(FORCE_NOW, deps);
+    expect(spy.sent).toHaveLength(0);
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]!.conversationId).toBe('conv-force-1');
+    expect(spy.sent[0]!.body).toBe(resolveMessage('tour.confirmation'));
+    expect(spy.sent[0]!.author).toBe('teammate');
+    // automated: false - a human send bypasses manual mode + the breaker.
+    expect(spy.sent[0]!.automated).toBe(false);
+
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+    // The claim told the live surfaces to refetch (advisory tenant contactId).
+    expect(emitted.filter((p) => p.contactId === 'contact-force-1')).toHaveLength(1);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 2 - the row is already terminal: report honestly, send nothing
+  // ---------------------------------------------------------------------------
+  it('force-send returns not_pending for an already-sent rung and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-2',
+      phone: '+15550220002',
+      convId: 'conv-force-2',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-2',
+      unitId: 'unit-force-2',
+      kind: 'day_before',
+    });
+    await tourReminders.claimSend(row.reminderId, '2026-02-10T08:00:00.000Z');
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(spy.sent).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 3 - the poll wins the claim race: exactly one send ever happens
+  // ---------------------------------------------------------------------------
+  it('force-send returns not_pending when the claim is LOST, and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    // The row is pending when we read it, but the poll claims it first.
+    const lostClaimRepo = { ...tourReminders, claimSend: async () => false };
+    const deps = {
+      ...rig.deps,
+      tourRemindersRepo: lostClaimRepo,
+      sendMessageService: spy.service,
+      settingsRepo: stubSettingsRepo(),
+    };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-3',
+      phone: '+15550220003',
+      convId: 'conv-force-3',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-3',
+      unitId: 'unit-force-3',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'not_pending' });
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 4 - kill switch: refuse BEFORE the claim (the row stays pending)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses sms_sending_disabled WITHOUT claiming (row stays pending)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-4',
+      phone: '+15550220004',
+      convId: 'conv-force-4',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-4',
+      unitId: 'unit-force-4',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, false, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'sms_sending_disabled' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.canceledAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 5 - opt-out is absolute, even for a human send
+  // ---------------------------------------------------------------------------
+  it('force-send refuses contact_opted_out WITHOUT claiming', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-5',
+      phone: '+15550220005',
+      convId: 'conv-force-5',
+      now: SEEDED_AT,
+      contactOptOut: true,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-5',
+      unitId: 'unit-force-5',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_opted_out' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 6 - JIT consent: automated: false makes the consent gate apply
+  // ---------------------------------------------------------------------------
+  it('force-send refuses no_consent WITHOUT claiming', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-6',
+      phone: '+15550220006',
+      convId: 'conv-force-6',
+      now: SEEDED_AT,
+      consent: false,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-6',
+      unitId: 'unit-force-6',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_consent' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 6b - a SOFT-DELETED contact refuses PRE-claim. sendMessage refuses
+  // any 1:1 to a deleted contact (ContactDeletedError), so without this gate the
+  // click would claim the row (the claim IS the sentAt stamp) and only then
+  // throw - burning the rung for a state we can check up front.
+  // ---------------------------------------------------------------------------
+  it('force-send refuses contact_deleted WITHOUT claiming (the rung stays pending)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-6b',
+      phone: '+15550220016',
+      convId: 'conv-force-6b',
+      now: SEEDED_AT,
+      deletedAt: '2026-02-09T18:00:00.000Z',
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-6b',
+      unitId: 'unit-force-6b',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_deleted' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    // The row is UNTOUCHED: restoring the contact must still leave it deliverable.
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.canceledAt).toBeUndefined();
+    expect((await tourReminders.listDue('2026-02-11T13:01:00.000Z')).map((r) => r.reminderId)).toContain(
+      row.reminderId,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 7 - an unresolvable target REFUSES; it must NOT claim-skip the rung
+  // (the poller still gets its chance at dueAt)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses no_conversation WITHOUT claim-skipping (the rung survives for the poller)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    // Contact + phone, but NO conversation anywhere in this world.
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-7',
+      phone: '+15550220007',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-7',
+      unitId: 'unit-force-7',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_conversation' });
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.skipReason).toBeUndefined();
+    expect(after?.sentAt).toBeUndefined();
+    // Still live for the poll at its own dueAt.
+    expect((await tourReminders.listDue('2026-02-11T13:01:00.000Z')).map((r) => r.reminderId)).toContain(
+      row.reminderId,
+    );
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 8 - an unknown rung id refuses (never a 500)
+  // ---------------------------------------------------------------------------
+  it('force-send refuses tour_missing for a reminderId that is not on the tour', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    const { tour } = await seedForceTour({
+      tenantId: 'contact-force-8',
+      unitId: 'unit-force-8',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder('reminder-does-not-exist', tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'tour_missing' });
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 9 - a GROUP-routed tour force-sends through the SAME relay
+  // announcement chain the poll uses (never the 1:1 service)
+  // ---------------------------------------------------------------------------
+  it('force-sends a GROUP-routed rung through the relay announcement path', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    const tenantPhone = '+15550220009';
+    const landlordPhone = '+15550220019';
+    const poolNumber = '+15550190029';
+    const groupConvId = 'conv-group-force-9';
+
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-9',
+      phone: tenantPhone,
+      convId: 'conv-1to1-force-9',
+      now: SEEDED_AT,
+    });
+    seedRelayGroup(rig.world, {
+      convId: groupConvId,
+      poolNumber,
+      participants: [
+        { contactId: 'contact-force-9', phone: tenantPhone, name: 'Tina Tenant' },
+        { contactId: 'contact-force-9b', phone: landlordPhone, name: 'Larry Landlord' },
+      ],
+      now: SEEDED_AT,
+    });
+
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-9',
+      unitId: 'unit-force-9',
+      kind: 'confirmation',
+      tourType: 'landlord_led',
+    });
+    await tours.patch(tour.tourId, { groupThreadId: groupConvId });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'sent' });
+    expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
+    // Never the 1:1 service.
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 10 - the narrow post-claim race (an opt-out landing between the
+  // pre-check and the provider send): the claim is KEPT (poller parity) but the
+  // outcome is reported honestly so the UI can show a real error.
+  // ---------------------------------------------------------------------------
+  it('a post-claim SendRefusedError returns refused_post_claim, keeps the claim, and sends nothing', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy({
+      throwErr: new SendRefusedError('opted out mid-flight', 'contact_opted_out'),
+    });
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-10',
+      phone: '+15550220010',
+      convId: 'conv-force-10',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-10',
+      unitId: 'unit-force-10',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused_post_claim', reason: 'contact_opted_out' });
+    // The claim IS the sentAt stamp - the row is consumed (poller parity).
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBe(FORCE_NOW);
+    // ZERO provider sends on either route.
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    // A warn line records the refusal (ids + code only, never PII).
+    const warns = logCapture.atLevel(40).filter((l) => l['reminderId'] === row.reminderId);
+    expect(warns).toHaveLength(1);
+    expect(warns[0]!['refusal']).toBe('contact_opted_out');
   });
 });

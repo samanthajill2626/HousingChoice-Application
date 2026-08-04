@@ -30,6 +30,7 @@ import { TemplatesSection } from './routes/settings/TemplatesSection.js';
 import { NotificationsSection } from './routes/settings/NotificationsSection.js';
 import { VoiceSection } from './routes/settings/VoiceSection.js';
 import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
+import { QuietHoursSection } from './routes/settings/QuietHoursSection.js';
 import { NumbersSection } from './routes/settings/NumbersSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
@@ -183,11 +184,17 @@ function AuthedApp(): React.JSX.Element {
               {/* Voice: self cell verification — reachable by any logged-in
                   user (NOT admin-guarded). */}
               <Route path="voice" element={<VoiceSection />} />
+              {/* System: quiet hours sits ABOVE the readiness panel - it is the
+                  one editable control on the tab, and the AdminRoute guard is
+                  what keeps it admin-only (the section carries no role gate). */}
               <Route
                 path="system"
                 element={
                   <AdminRoute>
-                    <SystemStatusSection />
+                    <>
+                      <QuietHoursSection />
+                      <SystemStatusSection />
+                    </>
                   </AdminRoute>
                 }
               />

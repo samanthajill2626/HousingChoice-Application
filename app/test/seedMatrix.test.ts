@@ -378,6 +378,19 @@ describe('seed matrix: settings', () => {
     const orgSettings = allSettings.find((s) => s['settingId'] === 'org');
     expect(orgSettings).toBeDefined();
   });
+
+  // seedAll writes a FULL-ITEM PutCommand per item, so the last settingId 'org'
+  // row in the merged array is the one the world actually runs on. Every writer
+  // must therefore carry quietHoursEnabled: false, or the full profile silently
+  // re-enables quiet hours and the seeded world goes time-of-day dependent again
+  // (the exact drift the lean row exists to prevent).
+  it('EVERY org settings row in the merged full profile keeps quiet hours OFF', () => {
+    const orgRows = allSettings.filter((s) => s['settingId'] === 'org');
+    expect(orgRows.length).toBeGreaterThan(0);
+    for (const row of orgRows) {
+      expect(row['quietHoursEnabled']).toBe(false);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -41,6 +41,30 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
+// EmailManager is the address-roster dialog; its own PATCH/DELETE plumbing has
+// nothing to do with the pane's three-pronged save seam (local override ->
+// timeline.refetch() -> the optional onContactUpdated). Stub it down to a single
+// "save" button that hands back the updated Contact the real one would.
+const emailManagerSaved = vi.fn();
+vi.mock('./EmailManager.js', () => ({
+  EmailManager: ({
+    onChanged,
+    onClose,
+  }: {
+    onChanged: (updated: import('../../api/index.js').Contact) => void;
+    onClose: () => void;
+  }) => (
+    <div role="dialog" aria-label="Manage email addresses">
+      <button type="button" onClick={() => onChanged(emailManagerSaved())}>
+        stub save
+      </button>
+      <button type="button" onClick={onClose}>
+        stub close
+      </button>
+    </div>
+  ),
+}));
+
 import { ContactCommsPane, type ContactCommsPaneProps } from './ContactCommsPane.js';
 import { useContactTimeline } from './useContactTimeline.js';
 
@@ -554,6 +578,112 @@ describe('ContactCommsPane - local contact override', () => {
     );
     await waitFor(() =>
       expect(screen.getByText(/Do-Not-Contact list/i)).toBeInTheDocument(),
+    );
+  });
+});
+
+// The EmailManager save seam (spec Testing/Unit: "EmailManager save -> refetch +
+// override"). It is THREE-pronged and each prong has a different owner:
+//   - setOverride    so THIS pane re-derives instantly on any caller;
+//   - timeline.refetch()  so the address change's own rows land without waiting
+//     on an unrelated SSE;
+//   - onContactUpdated    handed up ONLY by a caller that holds contact state
+//     (the contact page). The tour/placement tabs omit it on purpose.
+// Plus decision 12's rule: a later props.contact identity from the caller WINS,
+// clearing the override (the caller's record is the source of truth).
+describe('ContactCommsPane - EmailManager save', () => {
+  // A contact with NO address: the composer shows the [Add email] affordance,
+  // which is the only opener of the dialog.
+  const NO_EMAIL: Contact = { ...TENANT, contactId: 'k9' };
+  const WITH_EMAIL: Contact = {
+    ...NO_EMAIL,
+    email: 'tasha@example.com',
+    emails: [{ email: 'tasha@example.com', primary: true }],
+  };
+
+  beforeEach(() => {
+    emailManagerSaved.mockReturnValue(WITH_EMAIL);
+  });
+
+  it('applies the local override, refetches the timeline, and reports up when asked', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContactTimeline.mockResolvedValue(TIMELINE);
+    const onContactUpdated = vi.fn();
+    renderPane({ contact: NO_EMAIL, onContactUpdated });
+
+    await screen.findByText('Hi');
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(1));
+    // No address on file yet: the composer offers to add one.
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+    await user.click(
+      within(await screen.findByRole('dialog', { name: 'Manage email addresses' })).getByRole(
+        'button',
+        { name: 'stub save' },
+      ),
+    );
+
+    // 1. Local override: the pane re-derives from the SAVED contact, so the
+    //    email channel is live and the add-one affordance is gone - even though
+    //    the caller's `contact` prop never changed.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Add email' })).not.toBeInTheDocument(),
+    );
+    expect(screen.getByRole('button', { name: 'Email' })).toHaveAttribute('aria-pressed', 'false');
+    // 2. The timeline was refetched (debounced, hence waitFor).
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(2));
+    // 3. ...and handed up to the caller that holds contact state.
+    expect(onContactUpdated).toHaveBeenCalledWith(WITH_EMAIL);
+  });
+
+  it('works with NO onContactUpdated (the tour/placement tab wiring)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContactTimeline.mockResolvedValue(TIMELINE);
+    renderPane({ contact: NO_EMAIL });
+
+    await screen.findByText('Hi');
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+    await user.click(
+      within(await screen.findByRole('dialog', { name: 'Manage email addresses' })).getByRole(
+        'button',
+        { name: 'stub save' },
+      ),
+    );
+
+    // The override alone keeps the pane fresh - no crash from the absent optional.
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Add email' })).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(getContactTimeline).toHaveBeenCalledTimes(2));
+  });
+
+  it('a later props.contact identity from the caller CLEARS the override (decision 12)', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContactTimeline.mockResolvedValue(TIMELINE);
+    const { rerender } = renderPane({ contact: NO_EMAIL });
+
+    await screen.findByText('Hi');
+    await user.click(screen.getByRole('button', { name: 'Add email' }));
+    await user.click(
+      within(await screen.findByRole('dialog', { name: 'Manage email addresses' })).getByRole(
+        'button',
+        { name: 'stub save' },
+      ),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole('button', { name: 'Add email' })).not.toBeInTheDocument(),
+    );
+
+    // A NEW object from the caller (its own refetch landed) wins, override gone.
+    rerender(
+      <MemoryRouter>
+        <PaneHarness contact={{ ...NO_EMAIL }} />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Add email' })).toBeInTheDocument(),
     );
   });
 });

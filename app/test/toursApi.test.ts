@@ -713,6 +713,20 @@ describe('tour lifecycle activity events - dual-party (tenant + unit landlord)',
     ).toHaveLength(1);
   });
 
+  it('records ONE pin when the tenant IS the unit landlord (degenerate self-landlord)', async () => {
+    // personEvents.ts's de-dupe branch, which until now was pinned on the SEED
+    // twin only (seedHistory.test.ts). Mirrors the tour relay roster's one-slot
+    // rule: one contact, one feed, one pin - never two rows on the same person.
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, TENANT);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(TENANT);
+  });
+
   it('skips the landlord write when the unit has no landlord (tenant pin only)', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnitWithLandlord(world, ''); // legacy/landlord-less unit

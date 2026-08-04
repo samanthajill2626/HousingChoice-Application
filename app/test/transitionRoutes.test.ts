@@ -83,6 +83,35 @@ describe('status-model transition routes', () => {
       expect((await authedPost('/api/placements/placement-ghost/transition', { toStage: 'collect_rta', source: 'manual' })).status).toBe(404);
     });
 
+    // The dashboard moves stages THROUGH THIS ROUTE, so the dual-party
+    // milestone (contact-comms-pane) is pinned here end-to-end, not only at the
+    // service level: a landlord's contact timeline must carry the placement
+    // stage moves of their own property.
+    it('records the stage_changed milestone for the tenant AND the unit landlord', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, { toStage: 'collect_rta', source: 'manual' });
+      expect(res.status).toBe(200);
+      const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+      expect(ev).toHaveLength(2);
+      expect(ev.map((e) => e.contactId).sort()).toEqual(['ll-1', 'tenant-1']);
+      for (const e of ev) {
+        expect(e).toMatchObject({ refType: 'placement', refId: c.placementId });
+      }
+    });
+
+    it('records the placement_closed milestone for both parties on a terminal move', async () => {
+      const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
+      const res = await authedPost(`/api/placements/${c.placementId}/transition`, {
+        toStage: 'lost',
+        source: 'manual',
+        lostReason: { category: 'stalled' },
+      });
+      expect(res.status).toBe(200);
+      const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
+      expect(ev).toHaveLength(2);
+      expect(ev.map((e) => e.contactId).sort()).toEqual(['ll-1', 'tenant-1']);
+    });
+
     it("writes inspection_outcome on the inspection-complete move (awaiting_inspection → determine_rent)", async () => {
       const c = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'awaiting_inspection' });
       const res = await authedPost(`/api/placements/${c.placementId}/transition`, {

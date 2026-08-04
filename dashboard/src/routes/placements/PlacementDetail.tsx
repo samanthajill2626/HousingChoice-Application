@@ -218,7 +218,7 @@ export function PlacementDetail(): React.JSX.Element {
     setBusy(true);
     setError(null);
     void provisionPlacementRelay(placementId)
-      .then(({ conversationId }) => channels.setConversationId('group', conversationId))
+      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
       .catch(() => setError('Could not open the group text. Please try again.'))
       .finally(() => setBusy(false));
   }, [busy, placementId, channels]);

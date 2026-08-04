@@ -249,7 +249,7 @@ function TourDetailLoaded({
       const { tour: updated } = await createTourRelay(tourId);
       setTour(updated);
       if (typeof updated.groupThreadId === 'string') {
-        channels.setConversationId('group', updated.groupThreadId);
+        channels.setGroupConversationId(updated.groupThreadId);
       }
     } catch (err) {
       if (err instanceof ApiError) {

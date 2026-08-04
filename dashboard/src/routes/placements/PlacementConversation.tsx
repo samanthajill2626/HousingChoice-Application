@@ -102,18 +102,15 @@ export function PlacementConversation({
     placement.group_thread ? 'group' : 'tenant',
   );
 
-  const active = channels[activeKey];
-
-  // Viewing a tab marks its SINGLE conversation read + clears the tab dot. Runs on
-  // the initial tab and every switch; re-runs when the active channel resolves an
-  // id or gains unread. We pass the active channel's CURRENT conversationId +
-  // unread as ARGUMENTS (rather than have markRead read a ref) so the INITIAL
-  // active tab marks read on the loading->ready commit: a ref would be written by
-  // a parent effect that runs AFTER this child effect, so it would still be stale
-  // here. markRead no-ops at unread 0, so this never loops.
-  useEffect(() => {
-    channels.markRead(activeKey, active.conversationId, active.unread);
-  }, [activeKey, active.conversationId, active.unread, channels]);
+  // TRANSITIONAL (Slice 4 replaces both 1:1 panes with the shared contact comms
+  // pane, which is keyed by CONTACT): the 1:1 channels no longer carry a
+  // conversationId - the hook reports only their unread - so a 1:1 tab opens on
+  // the create-on-demand path and holds the id it just created here, keeping the
+  // fresh thread mounted exactly as the injected channel id used to.
+  const [createdIds, setCreatedIds] = useState<{ tenant: string | null; landlord: string | null }>({
+    tenant: null,
+    landlord: null,
+  });
 
   const tenantFirst = firstNameOf(tenant);
   const landlordFirst = firstNameOf(landlord);
@@ -157,6 +154,26 @@ export function PlacementConversation({
   const oneToOneDeleted =
     activeKey === 'landlord' ? isDeletedContact(landlord) : isDeletedContact(tenant);
 
+  const oneToOneConversationId = createdIds[oneToOneKey];
+
+  // Viewing a tab marks it read + clears the tab dot. Runs on the initial tab and
+  // every switch; re-runs when the active channel resolves an id or gains unread.
+  // The GROUP tab reads its SINGLE conversation; a 1:1 tab reads the PERSON (the
+  // contact-wide inbox fan-out), so it needs no conversationId at all. We pass the
+  // active channel's CURRENT values as ARGUMENTS (rather than have the hook read a
+  // ref) so the INITIAL active tab marks read on the loading->ready commit: a ref
+  // would be written by a parent effect that runs AFTER this child effect, so it
+  // would still be stale here. Both marks no-op at unread 0, so this never loops.
+  const groupConversationId = channels.group.conversationId;
+  const activeUnread = channels[activeKey].unread;
+  useEffect(() => {
+    if (activeKey === 'group') {
+      channels.markGroupRead(groupConversationId, activeUnread);
+      return;
+    }
+    channels.markPersonRead(activeKey, oneToOneContactId, activeUnread);
+  }, [activeKey, oneToOneContactId, groupConversationId, activeUnread, channels]);
+
   // Group provisioning lives HERE (not delegated to a parent onOpenGroup like the
   // tour page): [Open group text] calls provisionPlacementRelay, then injects the
   // fresh conversationId so the relay thread mounts immediately.
@@ -167,7 +184,7 @@ export function PlacementConversation({
     setOpenGroupBusy(true);
     setGroupError(null);
     void provisionPlacementRelay(placement.placementId)
-      .then(({ conversationId }) => channels.setConversationId('group', conversationId))
+      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
       .catch(() => setGroupError('Could not open the group text. Please try again.'))
       .finally(() => setOpenGroupBusy(false));
   }
@@ -203,7 +220,7 @@ export function PlacementConversation({
             attachmentOriginalKeys: retry.attachmentOriginalKeys,
           }),
       });
-      if (retry.conversationId === null) channels.setConversationId(retry.key, convId);
+      if (retry.conversationId === null) setCreatedIds((p) => ({ ...p, [retry.key]: convId }));
       setClearSignals((s) => ({ ...s, [retry.key]: s[retry.key] + 1 }));
     })().catch(() => {
       /* the draft is still in the box for another try */
@@ -235,8 +252,8 @@ export function PlacementConversation({
 
       <div className={styles.channelPane}>
         {activeKey === 'group' ? (
-          active.conversationId !== null ? (
-            <GroupChannel conversationId={active.conversationId} />
+          groupConversationId !== null ? (
+            <GroupChannel conversationId={groupConversationId} />
           ) : (
             <div className={styles.channelEmpty}>
               <p className={styles.emptyTitle}>No group text yet</p>
@@ -263,15 +280,15 @@ export function PlacementConversation({
           <div className={styles.channelEmpty}>
             <p className={styles.emptyNote}>The landlord for this property is not resolved yet.</p>
           </div>
-        ) : active.conversationId !== null ? (
+        ) : oneToOneConversationId !== null ? (
           // key by conversation identity so switching the Tenant<->Landlord 1:1
           // REMOUNTS a fresh Timeline. Both tabs render <ContactThread> at the same
           // JSX position; without a key React reuses the fiber and Timeline's
           // in-progress draft survives the switch, so a Send would post it to the
           // newly-selected party. Also clears the stale-transcript flash.
           <ContactThread
-            key={active.conversationId}
-            conversationId={active.conversationId}
+            key={oneToOneConversationId}
+            conversationId={oneToOneConversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             deleted={oneToOneDeleted}
             clearDraftSignal={clearSignals[oneToOneKey]}
@@ -280,7 +297,7 @@ export function PlacementConversation({
                 key: oneToOneKey,
                 contactId: oneToOneContactId,
                 name: oneToOneName,
-                conversationId: active.conversationId,
+                conversationId: oneToOneConversationId,
                 body,
                 ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
                 ...(attachmentOriginalKeys !== undefined &&
@@ -297,7 +314,7 @@ export function PlacementConversation({
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             deleted={oneToOneDeleted}
-            onCreated={(id) => channels.setConversationId(activeKey, id)}
+            onCreated={(id) => setCreatedIds((p) => ({ ...p, [oneToOneKey]: id }))}
             clearDraftSignal={clearSignals[oneToOneKey]}
             onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
               setPendingConsent({

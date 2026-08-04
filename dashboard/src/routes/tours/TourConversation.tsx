@@ -130,18 +130,15 @@ export function TourConversation({
     }
   }, [noShowDraft?.nonce, noShowDraft?.body]);
 
-  const active = channels[activeKey];
-
-  // Viewing a tab marks its SINGLE conversation read + clears the tab dot. Runs on
-  // the initial tab and every switch; re-runs when the active channel resolves an
-  // id or gains unread. We pass the active channel's CURRENT conversationId +
-  // unread as ARGUMENTS (rather than have markRead read a ref) so the INITIAL
-  // active tab marks read on the loading->ready commit: a ref would be written by
-  // a parent effect that runs AFTER this child effect, so it would still be stale
-  // here. markRead no-ops at unread 0, so this never loops.
-  useEffect(() => {
-    channels.markRead(activeKey, active.conversationId, active.unread);
-  }, [activeKey, active.conversationId, active.unread, channels]);
+  // TRANSITIONAL (Slice 4 replaces both 1:1 panes with the shared contact comms
+  // pane, which is keyed by CONTACT): the 1:1 channels no longer carry a
+  // conversationId - the hook reports only their unread - so a 1:1 tab opens on
+  // the create-on-demand path and holds the id it just created here, keeping the
+  // fresh thread mounted exactly as the injected channel id used to.
+  const [createdIds, setCreatedIds] = useState<{ tenant: string | null; landlord: string | null }>({
+    tenant: null,
+    landlord: null,
+  });
 
   const isPm = tour.tourType === 'pm_team';
   const tenantFirst = firstNameOf(tenant);
@@ -199,6 +196,26 @@ export function TourConversation({
   const isTenantChannel = oneToOneKey === 'tenant';
   const tenantSeed = isTenantChannel && seededBody !== null ? seededBody : undefined;
 
+  const oneToOneConversationId = createdIds[oneToOneKey];
+
+  // Viewing a tab marks it read + clears the tab dot. Runs on the initial tab and
+  // every switch; re-runs when the active channel resolves an id or gains unread.
+  // The GROUP tab reads its SINGLE conversation; a 1:1 tab reads the PERSON (the
+  // contact-wide inbox fan-out), so it needs no conversationId at all. We pass the
+  // active channel's CURRENT values as ARGUMENTS (rather than have the hook read a
+  // ref) so the INITIAL active tab marks read on the loading->ready commit: a ref
+  // would be written by a parent effect that runs AFTER this child effect, so it
+  // would still be stale here. Both marks no-op at unread 0, so this never loops.
+  const groupConversationId = channels.group.conversationId;
+  const activeUnread = channels[activeKey].unread;
+  useEffect(() => {
+    if (activeKey === 'group') {
+      channels.markGroupRead(groupConversationId, activeUnread);
+      return;
+    }
+    channels.markPersonRead(activeKey, oneToOneContactId, activeUnread);
+  }, [activeKey, oneToOneContactId, groupConversationId, activeUnread, channels]);
+
   // Just-in-time consent gate (ContactDetail parity): the refused send held while
   // the ConsentCaptureModal is open, and a per-channel clear-draft signal for the
   // post-consent retry (per-channel so the OTHER tab's in-progress draft is never
@@ -230,7 +247,7 @@ export function TourConversation({
             attachmentOriginalKeys: retry.attachmentOriginalKeys,
           }),
       });
-      if (retry.conversationId === null) channels.setConversationId(retry.key, convId);
+      if (retry.conversationId === null) setCreatedIds((p) => ({ ...p, [retry.key]: convId }));
       setClearSignals((s) => ({ ...s, [retry.key]: s[retry.key] + 1 }));
     })().catch(() => {
       /* the draft is still in the box for another try */
@@ -262,9 +279,9 @@ export function TourConversation({
 
       <div className={styles.channelPane}>
         {activeKey === 'group' ? (
-          active.conversationId !== null ? (
+          groupConversationId !== null ? (
             <GroupChannel
-              conversationId={active.conversationId}
+              conversationId={groupConversationId}
               {...(tourMilestones !== undefined && { tourMilestones })}
             />
           ) : (
@@ -294,15 +311,15 @@ export function TourConversation({
               The landlord for this property is not resolved yet.
             </p>
           </div>
-        ) : active.conversationId !== null ? (
+        ) : oneToOneConversationId !== null ? (
           // key by conversation identity so switching the Tenant<->Landlord 1:1
           // REMOUNTS a fresh Timeline. Both tabs render <ContactThread> at the same
           // JSX position; without a key React reuses the fiber and Timeline's
           // in-progress draft survives the switch, so a Send would post it to the
           // newly-selected party. Also clears the stale-transcript flash (MINOR 3).
           <ContactThread
-            key={`${active.conversationId}:${isTenantChannel ? seedKey : 'x'}`}
-            conversationId={active.conversationId}
+            key={`${oneToOneConversationId}:${isTenantChannel ? seedKey : 'x'}`}
+            conversationId={oneToOneConversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
             deleted={oneToOneDeleted}
@@ -314,7 +331,7 @@ export function TourConversation({
                 key: oneToOneKey,
                 contactId: oneToOneContactId,
                 name: oneToOneName,
-                conversationId: active.conversationId,
+                conversationId: oneToOneConversationId,
                 body,
                 ...(attachmentKeys !== undefined &&
                   attachmentKeys.length > 0 && { attachmentKeys }),
@@ -333,7 +350,7 @@ export function TourConversation({
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
             deleted={oneToOneDeleted}
-            onCreated={(id) => channels.setConversationId(activeKey, id)}
+            onCreated={(id) => setCreatedIds((p) => ({ ...p, [oneToOneKey]: id }))}
             clearDraftSignal={clearSignals[oneToOneKey]}
             {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
             onDraftSeeded={() => setSeededBody(null)}

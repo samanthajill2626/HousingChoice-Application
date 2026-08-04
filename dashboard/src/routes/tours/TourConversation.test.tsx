@@ -63,10 +63,11 @@ function makeChannels(): TourChannelsState {
   return {
     status: 'ready',
     group: { conversationId: null, unread: 0 },
-    tenant: { conversationId: null, unread: 0 },
-    landlord: { conversationId: null, unread: 0 },
-    setConversationId: vi.fn(),
-    markRead: vi.fn(),
+    tenant: { unread: 0 },
+    landlord: { unread: 0 },
+    setGroupConversationId: vi.fn(),
+    markGroupRead: vi.fn(),
+    markPersonRead: vi.fn(),
   };
 }
 

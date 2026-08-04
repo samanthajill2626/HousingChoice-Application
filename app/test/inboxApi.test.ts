@@ -15,6 +15,7 @@ import {
   makeWebhookHarness,
   ORIGIN_SECRET,
 } from './helpers/twilioWebhookHarness.js';
+import { conversationsForContact } from '../src/lib/contactThreads.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
@@ -325,6 +326,142 @@ describe('POST /api/inbox/:contactId/read (C8)', () => {
       .post('/api/inbox/c-1/read')
       .set('x-origin-verify', ORIGIN_SECRET);
     expect(res.status).toBe(401);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// INVARIANT PIN (contact-comms-pane spec M3). The tour/placement 1:1 tabs now
+// mark-read through THIS contact fan-out instead of one conversation, so the
+// group tab's unread depends on the fan-out never touching a relay group. There
+// is no type filter in the route: the guarantee is STRUCTURAL - a relay group
+// fronts the POOL number as participant_phone and never carries a
+// participant_email, so neither of conversationsForContact's queries can return
+// one. These tests pin that structure (the harness fakes ARE the GSI predicates:
+// participant_phone === phone / participant_email === email), so they would go
+// red the day a relay group started carrying a member's number or email.
+// ---------------------------------------------------------------------------
+describe('relay-group exclusion from the contact fan-out (spec M3 pin)', () => {
+  const TENANT_PHONE = '+15550000020';
+  const TENANT_EMAIL = 'dana@example.com';
+  const POOL_NUMBER = '+15559990001';
+
+  /** A contact + their phone 1:1 + email 1:1 + a relay group they are IN. */
+  function seedRelayWorld(world: World): ContactItem {
+    const contact = seedContact(world, {
+      contactId: 'c-relay-1',
+      type: 'tenant',
+      firstName: 'Dana',
+      lastName: 'Doe',
+      phone: TENANT_PHONE,
+      email: TENANT_EMAIL,
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+    seedConversation(world, 'conv-1to1', {
+      participant_phone: TENANT_PHONE,
+      last_activity_at: '2026-06-10T10:00:00.000Z',
+      unread_count: 4,
+    });
+    seedConversation(world, 'conv-email', {
+      participant_phone: '',
+      participant_email: TENANT_EMAIL,
+      last_activity_at: '2026-06-11T10:00:00.000Z',
+      unread_count: 2,
+    });
+    // The relay group: the POOL number is its participant_phone (createRelayGroup
+    // stamps it), the member's own number lives ONLY in the participants roster,
+    // and there is no participant_email at all.
+    seedConversation(world, 'conv-group', {
+      participant_phone: POOL_NUMBER,
+      pool_number: POOL_NUMBER,
+      type: 'relay_group',
+      last_activity_at: '2026-06-12T10:00:00.000Z',
+      unread_count: 6,
+      participants: [
+        { contactId: 'c-relay-1', phone: TENANT_PHONE },
+        { contactId: 'c-landlord-1', phone: '+15550000021' },
+      ],
+    });
+    return contact;
+  }
+
+  it("returns the contact's 1:1s only - never the relay group they are a member of", async () => {
+    const { world } = makeWebhookHarness();
+    const contact = seedRelayWorld(world);
+
+    const found = await conversationsForContact(contact, world.conversationsRepo);
+
+    expect(found.map((c) => c.conversationId).sort()).toEqual(['conv-1to1', 'conv-email']);
+    expect(found.some((c) => c.type === 'relay_group')).toBe(false);
+  });
+
+  it('POST /:contactId/read zeroes every 1:1 and leaves the relay group unread INTACT', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedRelayWorld(world);
+
+    const res = await auth(request(app).post('/api/inbox/c-relay-1/read'));
+
+    expect(res.status).toBe(200);
+    // Both of the person's threads (phone AND email) are read...
+    expect(world.conversations.get('conv-1to1')?.unread_count).toBe(0);
+    expect(world.conversations.get('conv-email')?.unread_count).toBe(0);
+    // ...and the group text they are in keeps its unread: viewing a 1:1 tab must
+    // never clear the Group tab's dot.
+    expect(world.conversations.get('conv-group')?.unread_count).toBe(6);
+  });
+});
+
+// The deleted-contact resurfacing predicate (2026-08-03) is per-conversation
+// unread state, so every mark-read path is load-bearing for it. The tour and
+// placement 1:1 tabs now fire the CONTACT fan-out, which clears all of a
+// person's threads at once - so opening one of those tabs dismisses a
+// resurfaced inbox row in a single view. ACCEPTED (contact-page parity, which
+// already did exactly this); pinned here so it stays deliberate.
+describe('deleted-contact resurfacing x the contact fan-out', () => {
+  const DELETED_AT = '2026-08-01T00:00:00.000Z';
+  const AFTER = '2026-08-02T00:00:00.000Z';
+
+  it('the fan-out read dismisses a resurfaced row', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-del',
+      type: 'tenant',
+      firstName: 'Dana',
+      lastName: 'Doe',
+      phone: '+15550000030',
+      deleted_at: DELETED_AT,
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+    seedConversation(world, 'conv-del', {
+      participant_phone: '+15550000030',
+      last_activity_at: AFTER,
+      unread_count: 2,
+    });
+    seedMessage(world, 'conv-del', {
+      type: 'sms',
+      direction: 'inbound',
+      body: 'im back',
+      provider_ts: AFTER,
+    });
+
+    // An unread POST-deletion inbound resurfaces the row (deleted: true).
+    const before = await auth(request(app).get('/api/inbox'));
+    expect(before.status).toBe(200);
+    expect(before.body.rows).toHaveLength(1);
+    expect(before.body.rows[0]).toMatchObject({
+      contactId: 'c-del',
+      deleted: true,
+      unreadCount: 2,
+    });
+
+    // Viewing their 1:1 tab on a tour/placement page fires exactly this.
+    const read = await auth(request(app).post('/api/inbox/c-del/read'));
+    expect(read.status).toBe(200);
+    expect(world.conversations.get('conv-del')?.unread_count).toBe(0);
+
+    // Nothing unread is left to resurface them: the row is gone.
+    const after = await auth(request(app).get('/api/inbox'));
+    expect(after.status).toBe(200);
+    expect(after.body.rows).toHaveLength(0);
   });
 });
 

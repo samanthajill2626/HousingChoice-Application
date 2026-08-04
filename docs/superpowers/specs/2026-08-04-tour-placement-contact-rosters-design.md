@@ -75,7 +75,7 @@ management changes is immediately correct on every tour that never deviated.
 
 The override MATERIALIZES on two events:
 
-1. A human edit (add, remove, or exclude a member).
+1. A human edit (adding or removing a member).
 2. OPENING THE GROUP TEXT.
 
 Materialize-on-open is what makes goal 4 an invariant rather than a slogan.
@@ -155,7 +155,7 @@ ROUTING - group-routed rungs are for `landlord_led` / `pm_team`, and
 Landlord resolution for MILESTONES is unchanged and stays point-in-time, as
 `app/src/lib/personEvents.ts` documents. Milestones are DUAL-PARTY (tenant +
 the unit's landlord at event time) regardless of the roster - so a tenant
-excluded from a group text still receives every lifecycle pin.
+REMOVED from the roster still receives every lifecycle pin (D6).
 
 ### D4. A placement inherits the tour's roster at conversion
 
@@ -173,34 +173,48 @@ because the tour converted at 7:00 AM.
 
 ### D5. The People card is the roster editor; every action persists on click
 
-"Edit" flips the card into edit mode. Each add, remove, and exclude persists
+"Edit" flips the card into edit mode. Each add and each remove persists
 the moment it is clicked. "Done" is a view toggle and nothing more - navigating
 away can never lose a change, because there is never a pending one. This suits
 the server side, which is already per-member and idempotent with a
 `409 roster_conflict` on a concurrent write.
 
-### D6. ON THE TOUR and ON THE GROUP TEXT are different states
+### D6. ONE membership. Anyone can be removed, including the tenant
 
-A roster member is on the tour (a row on the card, a 1:1 tab, a party for
-calls and milestones). Whether they are on the GROUP TEXT is a separate,
-per-member state with four values:
+There is exactly one question about a person: are they on this tour's roster or
+not. Being on it means a row on the card, a 1:1 tab, a seat on the group text,
+and a leg on a masked call. There is no second "on the tour but not on the
+text" state - two overlapping membership concepts is precisely the drift this
+spec exists to remove.
 
-- `on` - a member of the group text
-- `off_no_phone` - no mobile number on the contact (derived, not chosen)
-- `off_opted_out` - the contact has sent STOP (derived; member-level opt-out
-  suppresses that leg at send time, `app/src/routes/relayGroups.ts`)
-- `off_excluded` - deliberately excluded by the operator
+THE TENANT CAN BE REMOVED like anyone else. A caseworker handling all landlord
+contact on the tenant's behalf is a real arrangement, and the roster should be
+able to say so plainly.
 
-THE GROUP ROSTER IS THE `on` SUBSET of the People card. All three `off_*`
-states render the same way - a muted row with the reason - because to the
-operator they are the same fact: this person is on the tour and will not
-receive the text.
+Nothing is lost by removing them:
 
-THE TENANT CANNOT BE REMOVED from a tour/placement roster (they are the subject
-of it), but CAN be `off_excluded`. That covers the real case - a caseworker
-handling landlord contact on the tenant's behalf - without a tenant-less tour,
-without losing the tenant's 1:1 tab, and without making the empty roster
-reachable. Everyone else can be removed outright.
+- `tour.tenantId` still records WHOSE tour it is. The roster answers a
+  different question - who we communicate with about it.
+- MILESTONES ARE UNAFFECTED. They are dual-party by rule (tenant + the unit's
+  landlord at event time, `app/src/lib/personEvents.ts`), independent of the
+  roster, so a removed tenant's timeline still receives every lifecycle pin.
+- Their 1:1 conversation survives in full on their contact page.
+
+What IS lost, knowingly: the tenant can no longer be off the group text while
+keeping a 1:1 tab on the tour page. If that arrangement turns out to matter,
+the answer is to add them back, not to reintroduce two states.
+
+The only floor: THE LAST MEMBER CANNOT BE REMOVED (an empty roster is
+unreachable, `[]` is never stored). A single-member roster is legal but cannot
+open a group text - see the too-thin rule in 6.2.
+
+DELIVERABILITY IS NOT MEMBERSHIP. A member with no mobile number, or one who
+has sent STOP (member-level opt-out suppresses that leg at send time,
+`app/src/routes/relayGroups.ts`), is fully on the roster and keeps their tab -
+their row is muted with the reason, and they are excluded from the SMS fan-out
+and from the confirm dialog's recipient count. These states are DERIVED at read
+time and never stored, so a contact who gains a number or revokes STOP needs no
+roster edit.
 
 ### D7. Quiet hours defer membership AND message together
 
@@ -218,7 +232,7 @@ and in both cases the MEMBERSHIP defers with the message, so nobody receives a
 group text before being introduced and no surface has to pretend. The pending
 state is visible on the card with an explicit human override.
 
-REMOVAL and EXCLUSION are immediate and never defer: `app/src/routes/
+REMOVAL is immediate and never defers: `app/src/routes/
 relayGroups.ts` drops a member silently (audit + a `removed_from_group_text`
 milestone on that contact), sending nothing to anyone.
 
@@ -319,11 +333,14 @@ Invariants stay EXACTLY as built - do not "restore" one that never held:
 RosterEntry {
   contactId?: string          // preferred; absent only for legacy/bare members
   phone?: string              // E.164; only for a participant with no contact
-  groupText?: 'on' | 'off'    // operator choice; absent = 'on'
 }
 
 roster?: RosterEntry[]        // absent = resolve from the property
 ```
+
+There is no per-member membership flag: presence in the array IS membership
+(D6). Deliverability (`no_phone`, `opted_out`) is derived at read time and
+never stored.
 
 `contactId` is preferred and is what the card, the tabs, and milestones key on.
 Phones and display names for contact-backed members are resolved AT USE TIME,
@@ -332,11 +349,7 @@ stale denormalized copy. `phone` exists only to represent a participant with no
 contact record - a legacy group backfilled per D1, or a member added through
 the relay API directly.
 
-`groupText` records only the OPERATOR'S choice. The derived off-states
-(`off_no_phone`, `off_opted_out`) are computed at read time and are never
-stored, so a contact who gains a number or revokes STOP needs no roster edit.
-
-Order is preserved; the tenant is first.
+Order is preserved; the tenant is first when present.
 
 Once materialized, the override PERSISTS until "Reset to property default." It
 does not auto-clear when its contents happen to match the current default
@@ -439,24 +452,27 @@ Property        1428 Oak St SE   [2 BR] [$1,450/mo]
 - When the tenant has a `caseworker` name on file and no roster member matches
   it, an italic hint reads "Caseworker on file: D. Okafor - not a contact
   record." A nudge at the moment of review, not an affordance.
-- A member who is not on the group text renders muted with the reason: "not on
-  the group text - no mobile number" / "- opted out" / "- excluded".
+- A member the group text cannot reach renders muted with the reason: "not on
+  the group text - no mobile number" / "- opted out". They are still on the
+  roster and still have a tab (D6).
 - When the roster differs from the current property default: "Customized for
   this tour - the property's default is <name>. Reset to property default."
   Reset is DISABLED while a group is open, with the reason.
-- When fewer than two members are `on`: "No property-side contact - a group
-  text needs at least two people," and [Open group text] is DISABLED with that
-  reason rather than failing at click time with today's
+- When fewer than two members are reachable by SMS: "Not enough people to open
+  a group text - two reachable members are needed," and [Open group text] is
+  DISABLED with that reason rather than failing at click time with today's
   `400 relay_member_unresolvable`. The route keeps its guard regardless.
 
 Edit mode:
 
-- per-row remove, anchored to the NAME line; the TENANT's remove is disabled
-  with the reason, and their row instead offers "exclude from group text"
-- per-row exclude / include for the group text
-- the property's other roster members offered inline: "Also on this property:
-  Alicia Grant - PM - primary contact  [+ Add]", so the common swap (remove the
-  owner, add the PM) is two clicks and needs no recall of the PM's name
+- per-row remove, anchored to the NAME line. ANY member is removable, the
+  tenant included (D6); only the LAST remaining member's remove is disabled,
+  with the reason.
+- inline suggestions for the people who belong here but are not on the roster -
+  the property's other roster members AND any missing structural party:
+  "Also on this property: Alicia Grant - PM - primary contact  [+ Add]",
+  "On this tour: Tasha Nguyen - tenant  [+ Add]". This is what makes the common
+  swap two clicks, and what makes a removed tenant one click to restore.
 - "Add any contact..." - general contact search
 - rows are NOT links while editing
 - "Done" returns to read mode
@@ -484,8 +500,8 @@ Same shape, showing the `relay.member_added` body, per-member deliverability,
 and the recipient count. Buttons: [Cancel] [Send now anyway]
 [Add and notify at 8:00 AM].
 
-Pre-open (no group yet), adding, removing and excluding are silent and confirm
-nothing - nothing has been sent and the roster is only a plan.
+Pre-open (no group yet), adding and removing are silent and confirm nothing -
+nothing has been sent and the roster is only a plan.
 
 ### 6.5 Pending state on the card
 
@@ -539,7 +555,8 @@ RESOLUTION
 ROSTER WRITES - per-member, never a whole-array PATCH
 
 Roster edits are PER-MEMBER endpoints on the tour/placement (add one, remove
-one, set groupText on/off, reset to default). A concurrent edit must conflict
+one, reset to default). Remove refuses the LAST member (409). A concurrent edit
+must conflict
 rather than clobber. The exact sequence, because this is the one place a
 whole-array write will sneak in:
 
@@ -559,15 +576,12 @@ CALL-THROUGH TO A LIVE GROUP
   STORED ON THAT ROW. `DELETE /api/conversations/:id/members/:phone` is
   phone-keyed, so a re-resolved phone silently no-ops when a contact's number
   was corrected after they joined.
-- Exclude behaves as remove on the wire; include behaves as add (and therefore
-  confirms and defers like any add).
-
 PREVIEW
 
 - New endpoints returning the SERVER-composed `relay.intro` and
   `relay.member_added` bodies for a given owner and prospective roster, plus
-  per-member deliverability (`on` / `off_no_phone` / `off_opted_out` /
-  `off_excluded`) and the true recipient count.
+  per-member deliverability (`reachable` / `no_phone` / `opted_out`) and the
+  true recipient count.
 
 VOICE (D10)
 
@@ -638,8 +652,11 @@ which is why the read-only card lands before the editor.
   state; both confirms; the tab rail.
 - E2E: the swap-the-landlord flow end to end (property has a PM -> tour
   defaults to the PM -> override on one tour -> open the group -> verify the
-  roster on the conversation); a tenant excluded from the group text who still
-  has a tab and still receives milestones; the quiet-hours deferral including
+  roster on the conversation); a tour whose TENANT has been removed - the
+  caseworker-to-PM arrangement - proving the tenant keeps every lifecycle
+  milestone on their contact timeline, that a masked call from their number is
+  refused as a non-member, and that one click restores them; the quiet-hours
+  deferral including
   "Send now anyway"; assert sent bodies and recipients via `GET /__dev/outbox`;
   a 360px pass over every surface.
 - Seed: the FULL profile gains a PM-managed property (owner of record plus a PM

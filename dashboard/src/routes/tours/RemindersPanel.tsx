@@ -338,7 +338,17 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                   {rung.body}
                 </p>
                 {suppression !== undefined ? (
-                  <p className={styles.suppression}>{suppression}</p>
+                  // Quiet hours is a calm "sends later", not a problem - muted
+                  // tone (Cameron 2026-08-04); every real suppression stays amber.
+                  <p
+                    className={
+                      rung.suppression?.reason === 'quiet_hours'
+                        ? styles.suppressionMuted
+                        : styles.suppression
+                    }
+                  >
+                    {suppression}
+                  </p>
                 ) : null}
                 {rowError !== undefined ? (
                   <p className={styles.rowError} role="alert">

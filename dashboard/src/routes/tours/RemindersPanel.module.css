@@ -155,6 +155,15 @@
   color: var(--c-evt-amber-text);
 }
 
+/* The quiet-hours DEFERRAL note: "sends later, nothing wrong" - muted, so it
+ * never reads as a warning (real suppressions keep the amber above). */
+.suppressionMuted {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  color: var(--c-text-muted);
+}
+
 /* A Send-now refusal, shown WITH the rung it refers to. Deliberately separate
  * from the fetch-error paragraph above, which replaces the whole ladder. */
 .rowError {

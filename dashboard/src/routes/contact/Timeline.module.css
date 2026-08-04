@@ -565,6 +565,15 @@ a.pill:focus-visible {
   font-weight: var(--fw-medium);
 }
 
+/* The quiet-hours DEFERRAL note: "sends later, nothing wrong" - muted, so it
+ * never reads as a warning (real suppressions keep the amber above). */
+.scheduledSkipMuted {
+  margin: var(--sp-1) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
 /* --- Reply box ------------------------------------------------------------ */
 
 .reply {

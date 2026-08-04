@@ -63,7 +63,17 @@ export function ScheduledCard({
       </div>
       <div className={styles.scheduledBody}>{item.body}</div>
       {suppression !== undefined ? (
-        <p className={styles.scheduledSkip}>{suppression}</p>
+        // Quiet hours is a calm "sends later", not a problem - muted tone;
+        // every real suppression stays amber.
+        <p
+          className={
+            item.suppression?.reason === 'quiet_hours'
+              ? styles.scheduledSkipMuted
+              : styles.scheduledSkip
+          }
+        >
+          {suppression}
+        </p>
       ) : null}
     </div>
   );

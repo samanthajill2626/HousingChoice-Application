@@ -278,7 +278,17 @@ export function DeadlinesNudgesCard({
                     ) : null}
                   </div>
                   {suppression !== undefined ? (
-                    <p className={styles.suppression}>{suppression}</p>
+                    // Quiet hours is a calm "sends later", not a problem - muted
+                    // tone; every real suppression stays amber.
+                    <p
+                      className={
+                        nudge.suppression?.reason === 'quiet_hours'
+                          ? styles.suppressionMuted
+                          : styles.suppression
+                      }
+                    >
+                      {suppression}
+                    </p>
                   ) : null}
                   {rowError !== undefined ? (
                     <p className={styles.rowError} role="alert">

@@ -1,10 +1,15 @@
 # Contact comms pane - person-centric 1:1 tabs on tour and placement pages
 
-- Date: 2026-08-03 (v3 - revised after adversarial spec review + its v2
-  addendum, see .superpowers/review/spec-adversarial.md; earlier versions
-  superseded in-place)
+- Date: 2026-08-03 (v4 - v3 rebased onto main @b9734745 after the
+  quiet-hours / relay-area-code / listing-card-actions / call-recording-range
+  / deleted-contact-resurfacing merges; adversarial review + addendum in
+  .superpowers/review/spec-adversarial.md; earlier versions superseded
+  in-place)
 - Status: approved (Cameron, this session)
 - Branch: feat/contact-comms-pane  Worktree: w:/tmp/contact-comms-pane
+- File:line refs were verified against the PRE-merge base and may have
+  drifted a few lines (contactTimeline.ts shifted ~+17); treat them as
+  anchors and re-verify at build time.
 
 ## Problem
 
@@ -197,6 +202,15 @@ already exists and is hook/util-factored):
   phone-thread fallback, `ensureEmailConversation` fallback for phoneless
   contacts, optimistic EmailCard.
 - Retry-failed-send (`onRetry`).
+- Deleted-contact lock (deleted-contact resurfacing, merged 2026-08-03): the
+  pane computes `deleted` from its effective contact (`deleted_at` set),
+  gates `canSend` with `!deleted`, and passes `deleted` to Timeline. New
+  optional `onRestore?` prop: ContactDetail passes its restore handler (the
+  note keeps its Restore button there); tour/placement pages omit it, so
+  those tabs render the note WITHOUT a button, byte-for-byte the behavior
+  their just-merged `oneToOneDeleted` plumbing has today (that plumbing is
+  deleted along with ContactThread/NewContactThread - the pane supersedes
+  it).
 - Just-in-time consent gate: 409 `contact_no_consent` -> ConsentCaptureModal
   holding the pending send, deferred retry via `deferredSend`, internal
   clear-draft signal on success. After consent is recorded the pane applies
@@ -212,8 +226,8 @@ already exists and is hook/util-factored):
   key, status, items, upcoming, source, replyToPhone,
   replyToLabel=defaultPhoneLabel(phones), replyTargets,
   selectedConversationId, onSelectTarget, canSend, onSend, onRetry, optedOut,
-  clearDraftSignal, resetScrollKey, emailChannel {emails, onSendEmail,
-  onManageEmails, suppressed} - plus optional `emptyLabel` passthrough
+  deleted, onRestore, clearDraftSignal, resetScrollKey, emailChannel {emails,
+  onSendEmail, onManageEmails, suppressed} - plus optional `emptyLabel` passthrough
   (review M6: the tour/placement tabs pass "No messages with <name> yet",
   preserving today's copy and TourDetail.test.tsx:1045).
 - "Comms only" toggle persistence (addendum A-M2): Timeline's `commsOnly` is
@@ -317,15 +331,36 @@ edit form, and all six external `timeline.refetch()` call sites
   no participant_email, so `conversationsForContact` cannot return them);
   pinned by a new unit test on conversationsForContact/inbox route rather
   than by a scope flag (review M3).
+- DELETED-CONTACT RESURFACING interaction (merged 2026-08-03, inbox.ts): a
+  soft-deleted contact's inbox row resurfaces while an unread POST-deletion
+  inbound exists, and its predicate is per-conversation unread state - so
+  mark-read paths are now load-bearing for it. With the fan-out, viewing a
+  deleted tenant's 1:1 tab on a tour/placement page clears ALL their threads
+  and therefore dismisses the resurfaced inbox row in one view. ACCEPTED as
+  contact-page parity (opening their contact page already does exactly
+  this); pin with a unit test so the interaction is deliberate, not
+  accidental.
 
 ### 6. Honesty cleanup
 
 `useRelayThread` returns to being genuinely relay-only. Update its email/call
 drop comment to state the invariant plainly (relay threads never carry
-email/call 1:1 content). No behavior change in that file. Close
-`docs/issues/tour-1to1-optimistic-team-label.md` at handback - the pane uses
-useContactTimeline.addOptimistic, which never stamps relay_sender_key
-(review m9).
+email/call 1:1 content). No behavior change in that file.
+
+Issues closed BY CONSTRUCTION at handback:
+- `docs/issues/tour-1to1-optimistic-team-label.md` - the pane uses
+  useContactTimeline.addOptimistic, which never stamps relay_sender_key
+  (review m9).
+- `docs/issues/comms-panes-missing-optout-note.md` (filed 2026-08-03) - the
+  pane passes `optedOut` from its effective contact on every surface, so the
+  Do-Not-Contact standing note reaches the tour/placement tabs exactly as on
+  the contact page. Mind its closing caveat: the note's copy is text-channel
+  wording and those tabs now also carry the email channel toggle.
+
+Free parity ride-alongs from the 2026-08-03 merges (no design work, verify
+in QA): the person timeline's `upcoming[]` now carries quiet-hours
+suppression previews and the ScheduledCard's send-now affordances - the
+tour/placement 1:1 tabs inherit both through the pane automatically.
 
 ## Performance note (review M7, accepted)
 
@@ -399,7 +434,13 @@ Unit:
   untouched, markPersonRead gating + local zeroing, new state shape.
 - TourConversation / PlacementConversation: tab switching, no-show seed
   INCLUDING the nonce-while-already-on-Tenant-tab case (review M1), empty
-  states, emptyLabel copy.
+  states, emptyLabel copy; deleted-contact lock parity (note WITHOUT a
+  restore button on these tabs, WITH it on the contact page - keep the
+  just-merged TourConversation deleted-lock tests green through the
+  rewrite).
+- Deleted-contact resurfacing x fan-out mark-read: viewing a deleted
+  contact's 1:1 tab dismisses their resurfaced inbox row (deliberate,
+  contact-page-parity - see section 5).
 - Server: recordTourEvent/recordPlacementMilestone dual-party recording
   (landlord resolved, landlord absent, resolve failure best-effort);
   transitionPlacement stage/closed dual-party recording (addendum A-B1 -

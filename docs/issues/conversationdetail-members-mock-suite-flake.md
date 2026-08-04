@@ -45,3 +45,5 @@ The module-level default-mock fix below is approved work, sized as a small
 slice.
 
 **Third sighting (2026-07-21).** Same shape (getConversationMembers mock undefined -> .then TypeError) in the "HARD-disables the composer when the group is closed" case during the unit-photo-transcode planner gate run (full dashboard suite); passed solo 16/16 immediately after on the same commit (040951e1). Untouched surface.
+
+**Fourth sighting (2026-08-03).** Identical shape and case ("HARD-disables the composer...", `.then` TypeError at ConversationDetail.tsx:193) during the relay-area-code-preference gate run; branch touches zero dashboard files. Solo: 1 file green; immediate full `npm test` re-run: green (221/133/32/13). Still the approved-but-unscheduled module-level default-mock fix.

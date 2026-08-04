@@ -756,15 +756,18 @@ export interface TourReminderView {
   canceledAt?: string;
   /** ISO 8601 — when the poll retired the rung unsent (state === 'skipped'). */
   skippedAt?: string;
-  /** Why the poll could not deliver it (present when state === 'skipped').
-   *  `quiet_hours_superseded` = release supersession retired this rung because a
-   *  LATER rung of the same tour came due beside it, so its copy was stale. */
+  /** Why the rung was retired unsent (present when state === 'skipped').
+   *  `quiet_hours_superseded` = a LATER rung of the same tour owns this slot
+   *  (stamped by release supersession OR at arm time). `past_event` = the
+   *  rung's clamped dueAt lands at/after the tour start, so it was born
+   *  skipped as a visible trace (near-tour night bookings). */
   skipReason?:
     | 'no_conversation'
     | 'contact_missing'
     | 'contact_no_phone'
     | 'tour_missing'
-    | 'quiet_hours_superseded';
+    | 'quiet_hours_superseded'
+    | 'past_event';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -809,6 +812,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   contact_no_phone: 'no phone on file',
   tour_missing: 'tour missing',
   quiet_hours_superseded: 'superseded by a later reminder',
+  past_event: 'would land after the tour starts',
 };
 
 /**

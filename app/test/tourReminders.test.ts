@@ -254,14 +254,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // day_before raw = Jan 19 22:00 EST (inside the window) -> clamps to Jan 20
     // 08:00 EST, which IS the morning_of slot (the tour's LOCAL date is Jan 20).
-    // The later rung's copy is the current one, so day_before is never written.
-    expect(byKind['day_before']).toBeUndefined();
+    // The later rung's copy is the current one, so day_before is written as a
+    // VISIBLE skipped row (the panel's honest trace), never as a pending rung.
+    expect(byKind['day_before']!.skippedAt).toBe(now);
+    expect(byKind['day_before']!.skipReason).toBe('quiet_hours_superseded');
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
+    expect(byKind['morning_of']!.skippedAt).toBeUndefined();
 
     // The rest of the ladder is untouched by the collision.
     expect(byKind['confirmation']!.dueAt).toBe(now);
     expect(byKind['en_route']!.dueAt).toBe('2026-01-21T01:00:00.000Z'); // Jan 20 20:00 EST
-    expect(rows).toHaveLength(3);
+    expect(rows).toHaveLength(4);
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -286,12 +290,17 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
     // en_route raw = Jan 20 06:30 EST (inside the window) -> clamps to 08:00 EST
-    // = the morning_of slot. en_route is the LATER rung, so it survives.
+    // = the morning_of slot. en_route is the LATER rung, so it survives;
+    // morning_of stays behind as a VISIBLE skipped row.
     expect(byKind['en_route']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
-    expect(byKind['morning_of']).toBeUndefined();
+    expect(byKind['en_route']!.skippedAt).toBeUndefined();
+    expect(byKind['morning_of']!.skippedAt).toBe(now);
+    expect(byKind['morning_of']!.skipReason).toBe('quiet_hours_superseded');
 
     // day_before raw = Jan 19 08:30 EST - outside the window, so no clamp, and
-    // it is already past `now`: dropped by the pre-existing past-dueAt rule.
+    // it is already past `now`: dropped by the pre-existing past-dueAt rule,
+    // which stays a SILENT skip (a rung whose moment simply passed pre-booking
+    // is unremarkable - only quiet-hours retirements get the visible trace).
     expect(byKind['day_before']).toBeUndefined();
     expect(byKind['confirmation']!.dueAt).toBe(now);
   });
@@ -349,17 +358,22 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
     const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
 
-    // morning_of (Jan 20 08:00 EST) is at/after the 07:30 EST start -> skipped.
-    // en_route raw = Jan 20 05:30 EST (quiet) -> clamps to 08:00 EST, also
-    // at/after the start -> skipped.
-    expect(byKind['morning_of']).toBeUndefined();
-    expect(byKind['en_route']).toBeUndefined();
+    // morning_of (Jan 20 08:00 EST) is at/after the 07:30 EST start -> retired
+    // as a VISIBLE skipped row (past_event). en_route raw = Jan 20 05:30 EST
+    // (quiet) -> clamps to 08:00 EST, also at/after the start -> same trace.
+    expect(byKind['morning_of']!.skippedAt).toBe(now);
+    expect(byKind['morning_of']!.skipReason).toBe('past_event');
+    expect(byKind['en_route']!.skippedAt).toBe(now);
+    expect(byKind['en_route']!.skipReason).toBe('past_event');
 
     // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST.
     // Its LOCAL date (Jan 19) is not the tour's local date (Jan 20), so the
     // "tour is tomorrow" copy is still true -> armed.
     expect(byKind['day_before']!.dueAt).toBe('2026-01-19T13:00:00.000Z');
-    expect(rows.map((r) => r.kind).sort()).toEqual(['confirmation', 'day_before']);
+    expect(byKind['day_before']!.skippedAt).toBeUndefined();
+    expect(
+      rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind).sort(),
+    ).toEqual(['confirmation', 'day_before']);
   });
 
   // ---------------------------------------------------------------------------
@@ -383,9 +397,14 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     });
 
     // day_before raw = Jan 19 07:30 EST (quiet) -> clamps to Jan 19 08:00 EST,
-    // which is STILL before `now` (10:00 EST) -> past-dueAt. Both same-day rungs
-    // clamp at/past the 07:30 start -> past-event. Only confirmation survives.
-    expect(rows.map((r) => r.kind)).toEqual(['confirmation']);
+    // which is STILL before `now` (10:00 EST) -> past-dueAt (silent, no row).
+    // Both same-day rungs clamp at/past the 07:30 start -> past-event, retired
+    // as VISIBLE skipped rows. Only confirmation is actually pending.
+    const byKind = Object.fromEntries(rows.map((r) => [r.kind, r]));
+    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['morning_of']!.skipReason).toBe('past_event');
+    expect(byKind['en_route']!.skipReason).toBe('past_event');
+    expect(rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind)).toEqual(['confirmation']);
   });
 
   // ---------------------------------------------------------------------------
@@ -441,9 +460,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     // Identical to Test 1c: the failure falls back to DEFAULT_ORG_SETTINGS
     // (enabled, 21:00-08:00, America/New_York) - never to "no quiet hours".
-    expect(byKind['day_before']).toBeUndefined();
+    expect(byKind['day_before']!.skippedAt).toBe(now);
+    expect(byKind['day_before']!.skipReason).toBe('quiet_hours_superseded');
     expect(byKind['morning_of']!.dueAt).toBe('2026-01-20T13:00:00.000Z');
-    expect(rows).toHaveLength(3);
+    expect(rows.filter((r) => r.skippedAt === undefined)).toHaveLength(3);
   });
 
   // ---------------------------------------------------------------------------
@@ -986,7 +1006,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await cancelTourReminders(tour.tourId, { tourRemindersRepo: tourReminders, logger });
 
     const afterCancel = await tourReminders.listByTour(tour.tourId);
-    const stillPending = afterCancel.filter((r) => r.sentAt === undefined && r.canceledAt === undefined);
+    // Pending = the same definition cancelForTour uses: no terminal stamp at
+    // all. (This 06:00 EDT tour births morning_of as a past_event skipped row -
+    // a visible trace, not a pending rung, so cancel rightly leaves it alone.)
+    const stillPending = afterCancel.filter(
+      (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
+    );
     expect(stillPending).toHaveLength(0);
 
     // The already-sent row should still be sent (not double-canceled).
@@ -1020,24 +1045,28 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       logger,
     });
 
-    const kinds = rows.map((r) => r.kind);
+    const armedKinds = rows.filter((r) => r.skippedAt === undefined).map((r) => r.kind);
 
-    // day_before = scheduledAt - 24h = '2026-07-12T14:00:00.000Z' < now0 → SKIPPED
-    expect(kinds).not.toContain('day_before');
+    // day_before = scheduledAt - 24h = '2026-07-12T14:00:00.000Z' < now0 → past-dueAt,
+    // the pre-existing SILENT skip (no row at all).
+    expect(rows.map((r) => r.kind)).not.toContain('day_before');
 
     // confirmation = now0 - always armed (quiet hours are OFF for this case)
-    expect(kinds).toContain('confirmation');
+    expect(armedKinds).toContain('confirmation');
 
     // morning_of = 08:00 ORG-LOCAL on 2026-07-13 (EDT) = '2026-07-13T12:00:00.000Z',
     // which is the SAME instant as en_route below -> the later rung wins and
-    // morning_of is superseded (it used to be skipped as a past 08:00 UTC row).
-    expect(kinds).not.toContain('morning_of');
+    // morning_of is retired as a VISIBLE skipped row (the panel's honest trace).
+    const morningOf = rows.find((r) => r.kind === 'morning_of');
+    expect(morningOf?.skippedAt).toBe(now0);
+    expect(morningOf?.skipReason).toBe('quiet_hours_superseded');
+    expect(armedKinds).not.toContain('morning_of');
 
     // en_route = scheduledAt - 2h = '2026-07-13T12:00:00.000Z' > now0 → armed
-    expect(kinds).toContain('en_route');
+    expect(armedKinds).toContain('en_route');
 
     // no_show_checkin is manual-send only now, so it is never auto-armed.
-    expect(kinds).not.toContain('no_show_checkin');
+    expect(rows.map((r) => r.kind)).not.toContain('no_show_checkin');
   });
 
   // ---------------------------------------------------------------------------

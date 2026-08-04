@@ -40,9 +40,14 @@ export type ReminderSkipReason =
   | 'contact_missing'
   | 'contact_no_phone'
   | 'tour_missing'
-  /** A LATER rung of the same tour was due in the same release batch, so this
-   *  rung's copy is stale (quiet-hours spec 2026-08-03, section 5). */
-  | 'quiet_hours_superseded';
+  /** A LATER rung of the same tour was due in the same release batch - or, at
+   *  ARM time, clamped onto this rung's slot / made its copy stale - so this
+   *  rung's copy is not the current one (quiet-hours spec 2026-08-03, sec 5). */
+  | 'quiet_hours_superseded'
+  /** ARM time: the rung's (clamped) dueAt lands at/after the tour start, so
+   *  sending it would be pointless - born skipped as a visible trace (a
+   *  near-tour night booking must not silently arm nothing). */
+  | 'past_event';
 
 export interface TourReminderItem {
   /** PK */
@@ -68,7 +73,16 @@ export interface TourReminderItem {
 }
 
 export interface TourRemindersRepo {
-  create(input: { tourId: string; kind: ReminderKind; dueAt: string }): Promise<TourReminderItem>;
+  /** `skipped` births the row already retired (skippedAt/skipReason stamped):
+   *  the arm-time visible-trace shape. listDue never returns such a row and
+   *  claimSend/claimSkip/cancel all refuse it (their conditions require
+   *  attribute_not_exists(skippedAt)), so it is display-only from birth. */
+  create(input: {
+    tourId: string;
+    kind: ReminderKind;
+    dueAt: string;
+    skipped?: { at: string; reason: ReminderSkipReason };
+  }): Promise<TourReminderItem>;
   listByTour(tourId: string): Promise<TourReminderItem[]>;
   /** Returns pending reminders due at or before `now` (no sentAt, no canceledAt). */
   listDue(now: string): Promise<TourReminderItem[]>;
@@ -125,6 +139,10 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
         kind: input.kind,
         dueAt: input.dueAt,
         _reminderPartition: 'reminders',
+        ...(input.skipped !== undefined && {
+          skippedAt: input.skipped.at,
+          skipReason: input.skipped.reason,
+        }),
         createdAt: now,
       };
       await doc.send(

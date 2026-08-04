@@ -166,9 +166,11 @@ export interface ArmTourRemindersDeps {
 /**
  * Arm the full reminder ladder for a tour. Every rung's dueAt is CLAMPED out of
  * the org's quiet-hours window before it is written, so a stored dueAt is the
- * real send time. A rung is skipped (no row at all) when its clamped dueAt is
- * already past, lands at/after the tour start, or collides with a LATER rung's
- * slot - see the skip-rule comment in the loop below.
+ * real send time. A rung whose clamped dueAt is already past is skipped with no
+ * row (pre-existing rule); one that lands at/after the tour start or collides
+ * with a LATER rung's slot is written as a VISIBLE skipped row (skippedAt +
+ * skipReason stamped at birth) so the panel shows an honest trace instead of a
+ * silent gap - see the skip-rule comment in the loop below.
  *
  * Returns the created TourReminderItem rows.
  */
@@ -217,9 +219,19 @@ export async function armTourReminders(
       continue;
     }
     if (dueAt >= scheduledIso) {
+      // Born skipped, not silently absent: a near-tour night booking would
+      // otherwise arm NOTHING with no UI trace (Cameron 2026-08-04). The row is
+      // display-only from birth - listDue and every claim exclude skippedAt.
+      const row = await deps.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind,
+        dueAt,
+        skipped: { at: now, reason: 'past_event' },
+      });
+      created.push(row);
       log.info(
-        { tourId: tour.tourId, kind, dueAt },
-        'tour reminder skipped (quiet-hours clamp lands at/past tour start)',
+        { tourId: tour.tourId, kind, dueAt, reminderId: row.reminderId },
+        'tour reminder retired at arm (lands at/past tour start) - visible skipped row',
       );
       continue;
     }
@@ -233,9 +245,17 @@ export async function armTourReminders(
     const staleDayBefore =
       kind === 'day_before' && localDateOf(dueAt, window.timezone) === tourLocalDate;
     if (supersededBySlot || staleDayBefore) {
+      // Same visible-trace shape as past_event above.
+      const row = await deps.tourRemindersRepo.create({
+        tourId: tour.tourId,
+        kind,
+        dueAt,
+        skipped: { at: now, reason: 'quiet_hours_superseded' },
+      });
+      created.push(row);
       log.info(
-        { tourId: tour.tourId, kind, dueAt },
-        'tour reminder skipped (quiet-hours superseded by a later rung)',
+        { tourId: tour.tourId, kind, dueAt, reminderId: row.reminderId },
+        'tour reminder retired at arm (superseded by a later rung) - visible skipped row',
       );
       continue;
     }

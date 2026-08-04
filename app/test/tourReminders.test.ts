@@ -804,6 +804,53 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Test 2f-off - release supersession is DELIBERATELY unconditional: it applies
+  // with quiet hours switched OFF too. Its job is "never text stale copy on a
+  // catch-up tick", and worker downtime stacks same-tour rungs regardless of the
+  // window. Pinned here so nobody "fixes" it into a quiet-hours-only rule.
+  // ---------------------------------------------------------------------------
+  it('release supersession applies with quiet hours DISABLED too (catch-up staleness, not a window rule)', async () => {
+    const rig = createGroupTestRig();
+    const deps = { ...rig.deps, settingsRepo: quietOffSettingsRepo() };
+    const tenantPhone = '+15550210009';
+    seedTenant(rig.world, 'contact-quiet-off-1', tenantPhone, 'conv-quiet-off-1', '2026-01-14T15:00:00.000Z');
+
+    const tour = await tours.create({
+      tenantId: 'contact-quiet-off-1',
+      unitId: 'unit-quiet-off-1',
+      scheduledAt: '2026-01-15T20:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Midday dueAts (nowhere near 21:00-08:00) that a stalled worker lists in ONE
+    // catch-up batch.
+    const morningOf = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'morning_of',
+      dueAt: '2026-01-15T16:00:00.000Z',
+    });
+    const enRoute = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'en_route',
+      dueAt: '2026-01-15T16:05:00.000Z',
+    });
+
+    const catchUp = '2026-01-15T16:06:00.000Z';
+    await runDueTourReminders(catchUp, deps);
+
+    const rows = await tourReminders.listByTour(tour.tourId);
+    const earlier = rows.find((r) => r.reminderId === morningOf.reminderId);
+    const later = rows.find((r) => r.reminderId === enRoute.reminderId);
+    expect(earlier?.sentAt).toBeUndefined();
+    expect(earlier?.skippedAt).toBe(catchUp);
+    // The token is NOT renamed for the off case: the panel reads it as
+    // "superseded by a later reminder", which is accurate either way.
+    expect(earlier?.skipReason).toBe('quiet_hours_superseded');
+    expect(later?.sentAt).toBe(catchUp);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.en_route'));
+  });
+
+  // ---------------------------------------------------------------------------
   // Test 2g - supersession is per-TOUR: two tenants' rungs never cancel each other
   // ---------------------------------------------------------------------------
   it('rungs of DIFFERENT tours never supersede each other (both send)', async () => {

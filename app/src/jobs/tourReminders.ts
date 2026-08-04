@@ -492,6 +492,15 @@ async function processReminderRow(
   // unsent. Covers legacy rows released together at quiet-end (e.g. a
   // pre-feature 08:00-UTC morning_of alongside a deferred day_before). The
   // batch is deliberately the ONE listDue snapshot the tick started with.
+  //
+  // DELIBERATELY UNGATED on window.enabled: the defect it prevents is stale copy
+  // on a CATCH-UP tick (worker downtime, a slow tick, a paused container stacks
+  // same-tour rungs into one batch), and that happens whether or not quiet hours
+  // are on - quiet-end release is just its most common cause. The skip token
+  // keeps its name for the same reason the panel's label does
+  // ("superseded by a later reminder"): both stay accurate in either mode. Pinned
+  // by 'release supersession applies with quiet hours DISABLED too' in
+  // app/test/tourReminders.test.ts.
   const myOrder = LADDER_ORDER.indexOf(row.kind);
   const supersededInBatch = batch.some(
     (other) =>

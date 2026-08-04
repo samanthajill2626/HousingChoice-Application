@@ -15,9 +15,10 @@
 // Unread + mark-read follow the same split: a tab's dot is its channel's unread,
 // and viewing it marks read through the channels hook - the group by its SINGLE
 // conversation (markConversationRead), a 1:1 by the PERSON (the contact-wide
-// inbox fan-out, contact-page parity). The 1:1 fan-out only fires when the
-// operator can actually see the pane (commsVisible + a loaded contact + a
-// foreground tab) - see the mark-read effect for why.
+// inbox fan-out, contact-page parity). Only the GROUP mark runs here. The 1:1
+// fan-out runs inside ContactCommsTab, which gates it on the operator actually
+// being able to see the pane (commsVisible + a loaded contact + a READY timeline
+// + a foreground browser tab) - see that file's effect for why.
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
 // never fetch all three up front). Empty states render in place: the group offers
@@ -55,7 +56,11 @@ import { Timeline } from '../contact/Timeline.js';
 import { ContactCommsTab } from '../contact/ContactCommsTab.js';
 import { contactDisplayName } from '../contact/format.js';
 import { useRelayThread } from '../conversation/useRelayThread.js';
-import { type PlacementChannelKey, type PlacementChannelsState } from './usePlacementChannels.js';
+import {
+  type PlacementChannelKey,
+  type PlacementChannelsState,
+  type PlacementPersonKey,
+} from './usePlacementChannels.js';
 // Reuse the tour page's comms CSS verbatim (scoped CSS module, tokens only) - the
 // pill rail / pane / empty-state styling is identical for both hubs.
 import styles from '../tours/TourDetail.module.css';
@@ -126,6 +131,7 @@ export function PlacementConversation({
   // A placement has no `status`; a group text cannot be opened once the deal is
   // terminal (moved_in / lost).
   const groupDead = TERMINAL_STAGES.has(placement.stage);
+  const oneToOneKey: PlacementPersonKey = activeKey === 'landlord' ? 'landlord' : 'tenant';
   const oneToOneContactId = activeKey === 'landlord' ? landlordId : placement.tenantId;
   const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
   // The pane needs a LOADED Contact - it derives the numbers, addresses and the
@@ -140,57 +146,29 @@ export function PlacementConversation({
       ? 'The landlord for this property is not resolved yet.'
       : `We could not load ${oneToOneName}'s contact record.`;
 
-  // Viewing a tab marks it read + clears the tab dot. Runs on the initial tab and
-  // every switch; re-runs when the active channel resolves an id or gains unread.
-  // The GROUP tab reads its SINGLE conversation; a 1:1 tab reads the PERSON (the
-  // contact-wide inbox fan-out), so it needs no conversationId at all. We pass the
-  // active channel's CURRENT values as ARGUMENTS (rather than have the hook read a
-  // ref) so the INITIAL active tab marks read on the loading->ready commit: a ref
-  // would be written by a parent effect that runs AFTER this child effect, so it
-  // would still be stale here. Both marks no-op at unread 0, so this never loops.
+  // Viewing the GROUP tab marks its SINGLE conversation read + clears the tab dot.
+  // Runs on the initial tab and every switch; re-runs when the channel resolves an
+  // id or gains unread. We pass the channel's CURRENT values as ARGUMENTS (rather
+  // than have the hook read a ref) so the INITIAL active tab marks read on the
+  // loading->ready commit: a ref would be written by a parent effect that runs
+  // AFTER this child effect, so it would still be stale here. markGroupRead no-ops
+  // at unread 0, so this never loops.
   //
-  // The 1:1 fan-out carries THREE extra gates, because it is one-way data loss:
-  // it clears unread on every thread that person owns and the product has no
-  // mark-unread anywhere. "Viewing a 1:1 tab" (spec s5) has to mean the operator
-  // could actually SEE it, so we require -
-  //   1. commsVisible: at <=860px the shell hides the non-selected pane with
-  //      display:none but keeps it MOUNTED, and both hubs open on Details. Merely
-  //      landing on /placements/:id from a phone must not consume the tenant's
-  //      inbox row; the mark fires when the operator reveals the Conversation pane.
-  //   2. oneToOneContact !== null: when the page's best-effort getContact failed
-  //      the tab body is a bare "we could not load ..." note - no transcript, no
-  //      composer. Nothing was read, so nothing is marked read.
-  //   3. document.visibilityState: the contact page's own gate
-  //      (useMarkContactRead.ts:22) - a page parked in a BACKGROUND tab must not
-  //      silently swallow arriving unreads. Unlike that hook we do NOT re-fire on
-  //      visibilitychange: the channels hook's SSE refetch raises unread again
-  //      and re-runs this effect, which is the same convergence by another route.
-  // DELETED contacts are deliberately NOT gated - useMarkContactRead marks a
-  // soft-deleted contact read exactly like any other, and this pane's whole
-  // contract is parity with it (spec s5's resurfacing note, pinned in
-  // app/test/inboxApi.test.ts).
-  // The GROUP branch is untouched: markGroupRead is a single-conversation read
-  // that predates this pane, and gating it is out of scope.
+  // The 1:1 tabs read the PERSON instead (the contact-wide inbox fan-out), and
+  // that mark deliberately does NOT live here: it is one-way data loss - it clears
+  // unread on every thread the person owns and the product has no mark-unread
+  // anywhere - so it is gated on the PANE's own timeline actually being ready,
+  // which only ContactCommsTab can see. It runs there, over the same commsVisible
+  // and unread values this component holds; see that file's effect for the full
+  // gate list and why each one exists. This branch is untouched by that split:
+  // markGroupRead is a single-conversation read that predates the pane, and gating
+  // it is out of scope.
   const groupConversationId = channels.group.conversationId;
   const activeUnread = channels[activeKey].unread;
   useEffect(() => {
-    if (activeKey === 'group') {
-      channels.markGroupRead(groupConversationId, activeUnread);
-      return;
-    }
-    if (!commsVisible) return;
-    if (oneToOneContact === null) return;
-    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
-    channels.markPersonRead(activeKey, oneToOneContactId, activeUnread);
-  }, [
-    activeKey,
-    oneToOneContactId,
-    oneToOneContact,
-    commsVisible,
-    groupConversationId,
-    activeUnread,
-    channels,
-  ]);
+    if (activeKey !== 'group') return;
+    channels.markGroupRead(groupConversationId, activeUnread);
+  }, [activeKey, groupConversationId, activeUnread, channels]);
 
   // Group provisioning lives HERE (not delegated to a parent onOpenGroup like the
   // tour page): [Open group text] calls provisionPlacementRelay, then injects the
@@ -273,6 +251,9 @@ export function PlacementConversation({
             emptyLabel={`No messages with ${oneToOneName} yet`}
             commsOnly={commsOnly}
             onCommsOnlyChange={setCommsOnly}
+            commsVisible={commsVisible}
+            unread={activeUnread}
+            onMarkRead={(u) => channels.markPersonRead(oneToOneKey, oneToOneContactId, u)}
           />
         )}
       </div>

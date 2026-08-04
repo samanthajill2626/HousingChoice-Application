@@ -11,11 +11,16 @@
 // emptyLabel copy, the GROUP tab rendering its relay thread RAW (the placement
 // page injects no milestones on any tab, before or after the rewire), and the
 // 1:1 mark-read gates (a fan-out only from a pane the operator could see).
-import { render, screen, waitFor } from '@testing-library/react';
+import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Contact, PlacementItem, UnitItem } from '../../api/index.js';
+import type {
+  Contact,
+  ContactTimelinePage,
+  PlacementItem,
+  UnitItem,
+} from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
 const getConversations = vi.fn();
@@ -354,7 +359,9 @@ describe('PlacementConversation - group tab', () => {
 // really could have read the tab. Mirrors TourConversation.test's gate suite.
 // `commsVisible` is the page's answer to "is the comms column on screen?"
 // (false = the <=860px shell is showing Details, with this component still
-// MOUNTED behind display:none).
+// MOUNTED behind display:none). The gate itself lives in ContactCommsTab (only IT
+// can see the pane's timeline status); these drive it through the page, which is
+// the surface the behavior is claimed on.
 describe('PlacementConversation - 1:1 mark-read gates', () => {
   const unreadTenant = () => makeChannels({ tenant: { unread: 7 } });
 
@@ -424,5 +431,80 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
 
     await screen.findByRole('textbox', { name: 'Reply message' });
     expect(channels.markPersonRead).not.toHaveBeenCalled();
+  });
+
+  it('foregrounding the browser tab again DOES fan out (visibilitychange re-fire)', async () => {
+    // The quiescent case: texts land while the operator is in another browser
+    // tab, the gate withholds the mark, then the tenant stops texting. Nothing
+    // re-renders a React tree because a browser tab was foregrounded, so without
+    // a visibilitychange listener the operator could read the whole pane and the
+    // dot would sit there until some unrelated render happened to occur.
+    setVisibility('hidden');
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+
+    // Same idiom as useMarkContactRead.test: flip the state, dispatch the event.
+    setVisibility('visible');
+    act(() => document.dispatchEvent(new Event('visibilitychange')));
+
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+  });
+
+  it('a PENDING timeline does not fan out - the tab dot outlives an unrendered pane', async () => {
+    // The tab dot and the transcript are DIFFERENT requests: getConversations has
+    // already said unread 7, but GET /api/contacts/:id/timeline is still open, so
+    // there is nothing on screen for the operator to have read.
+    getContactTimeline.mockReturnValue(new Promise(() => {}));
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+
+    // Anchor on the pane's own loading state so this is not a race won by luck.
+    expect(await screen.findByRole('status', { name: 'Loading' })).toBeInTheDocument();
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+  });
+
+  it('a FAILED timeline NEVER fans out (an error pane means nothing was read)', async () => {
+    // The M1 repro: the cheap inbox count says 7 unread while the expensive
+    // /timeline route 500s. The pane renders the error paragraph and NO
+    // transcript - marking here would zero every thread this person owns, in one
+    // direction, for messages nobody ever saw.
+    getContactTimeline.mockRejectedValue(new Error('timeline 500'));
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+
+    expect(await screen.findByText(/couldn't load this timeline/i)).toBeInTheDocument();
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+    // And it stays withheld - 'error' is terminal for this mount, not a delay.
+    await act(async () => {});
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+  });
+
+  it('the fan-out fires exactly ONCE, and only once the timeline resolves READY', async () => {
+    // The success path, deferred: hold /timeline open (mark withheld), then let it
+    // land and watch the SAME mount fan out - one call, on the ready commit.
+    let land: (page: ContactTimelinePage) => void = () => {};
+    getContactTimeline.mockReturnValue(
+      new Promise<ContactTimelinePage>((res) => {
+        land = res;
+      }),
+    );
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+
+    expect(await screen.findByRole('status', { name: 'Loading' })).toBeInTheDocument();
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+
+    await act(async () => {
+      land({ nextCursor: null, items: [] });
+    });
+
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+    expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });
 });

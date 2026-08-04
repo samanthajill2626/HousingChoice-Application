@@ -70,6 +70,13 @@ function baseProps(over: Partial<ContactCommsTabProps> = {}): ContactCommsTabPro
     emptyLabel: 'No messages with Ann Tenant yet',
     commsOnly: false,
     onCommsOnlyChange: vi.fn(),
+    // The mark-read fan-out this component gates. Defaults are the DESKTOP,
+    // already-read reading (visible column, nothing unread) so the cases above
+    // are unaffected by it; the gate itself is driven end-to-end through the
+    // pages, in TourConversation.test / PlacementConversation.test.
+    commsVisible: true,
+    unread: 0,
+    onMarkRead: vi.fn(),
     ...over,
   };
 }

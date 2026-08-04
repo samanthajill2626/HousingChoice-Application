@@ -251,35 +251,43 @@ rather than the exception. The server endpoints are finished; this is a UI
 build against them, and `primaryContact` should become editable in the same
 mission where it gains its second meaning.
 
-### D10. Masked calls follow the THREAD's roster, not the unit
+### D10. Masked calls ALREADY follow the thread's roster - retire the one override
 
-A masked call arrives on the RELAY GROUP's own pool number, and that
-conversation carries `owner: { type: 'tour' | 'placement', id }`
-(`app/src/repos/conversationsRepo.ts`). The tour or placement is therefore
-unambiguous at call time - the number IS the thread - so there is no
-"which of several tours" problem that would force a per-unit answer.
+Masked-call bridging is not being re-pointed. It already resolves from the
+thread's own roster (`app/src/routes/webhooks/voice.ts`):
 
-Today `app/src/routes/webhooks/voice.ts` does the inverse: on a PLACEMENT-linked
-relay, when the caller is the tenant, it substitutes the unit's
-`primary_voice_contact` for the roster number, "with the roster number as the
-fallback." That substitution only earns its keep if voice and text can point at
-different people, which the one-`primaryContact` decision (D2) rules out.
+```
+const roster  = relay.participants ?? [];
+const caller  = roster.find((m) => m.phone === From);
+const callees = roster.filter((m) => m.phone !== From);
+...
+for (const callee of callees) { dial.number({ ... }) }
+```
 
-New rule: A MASKED CALL ON A TOUR/PLACEMENT RELAY BRIDGES THE CALLER TO THE
-COUNTERPART PARTY ON THAT THREAD'S ROSTER.
+The call arrives on the relay group's OWN pool number, so the tour or placement
+is unambiguous - the number IS the thread - and every other member is dialed
+simultaneously. DO NOT "improve" this into a single side-based counterpart:
+ringing all other members is deliberate and must be preserved.
 
-- tenant-side caller -> the property-side primary: the roster member carrying
-  `primaryContact` on the unit roster, else the first property-side member
-- property-side caller -> the tenant side: the tenant, else the first
-  tenant-side member when the tenant is `off_excluded`
-- unresolvable counterpart -> today's existing fallback behavior, unchanged
+The ONE deviation is the `landlordVoiceOverride` block: on a PLACEMENT-linked
+relay, when the caller is the placement's tenant, the landlord leg's dial number
+is swapped for the unit's `primary_voice_contact` (roster number as fallback,
+leg identified by contactId).
 
-The unit-level call-time substitution is retired. Its intent survives, because
-the roster is seeded from `primaryContact` in the first place. The guard
-against bridging a caller to their own number is preserved verbatim.
+That substitution is a NO-OP whenever the roster came from the property default,
+because the roster member already IS the primary contact. It only takes effect
+once an operator has overridden the roster - and then it does the one thing this
+spec exists to prevent: it overrides the person they deliberately chose. It also
+only earns its keep if voice and text can point at different people, which the
+one-`primaryContact` decision (D2) rules out.
 
-This means a tour-level override moves CALLS as well as texts, which is the
-coherent reading of "who we contact about this tour."
+So: THE SUBSTITUTION IS RETIRED, and nothing else about call routing changes.
+The self-bridge guard, the refusal cases (closed thread, non-member caller, no
+callee, no pool number), the whisper/press-1 gate, and the never-crash-on-
+resolution posture are all preserved verbatim.
+
+Consequence, for free: a tour-level override moves CALLS as well as texts,
+because the roster it edits is the same roster the bridge already reads.
 
 ## 5. Data model
 
@@ -563,10 +571,10 @@ PREVIEW
 
 VOICE (D10)
 
-- `app/src/routes/webhooks/voice.ts`: resolve the bridge target from the
-  relay's owner roster (counterpart party), retiring the unit
-  `primary_contact` call-time substitution. Preserve the self-bridge guard and
-  the never-crash-on-resolution posture verbatim.
+- `app/src/routes/webhooks/voice.ts`: DELETE the `landlordVoiceOverride` block
+  (and the units/placements reads it exists for) so the roster's own number is
+  dialed. Everything else in the bridge path is untouched - callee selection,
+  simultaneous ring, refusal cases, whisper gate, self-bridge guard.
 
 QUIET HOURS
 
@@ -588,29 +596,33 @@ which is why the read-only card lands before the editor.
 
 1. RENAME. `primaryVoice` -> `primaryContact`, scalar, error class, 409 code,
    glossary. Purely mechanical, no behavior.
-2. VOICE ROUTING (D10). Masked calls resolve the counterpart from the thread's
-   roster; retire the unit substitution. Small, isolated, and safest before the
-   roster gains an override that would change its meaning mid-flight.
-3. PROPERTY ROSTER EDITOR. Edit mode on the property page's Contacts card,
+2. PROPERTY ROSTER EDITOR. Edit mode on the property page's Contacts card,
    including the promotion confirm and the 409 settle.
-4. ROSTER MODEL + READ-ONLY CARD. `roster` override, materialize-on-open,
+3. ROSTER MODEL + READ-ONLY CARD. `roster` override, materialize-on-open,
    backfill, new resolution, conversion inheritance, derived roles, the
-   group-text states, caseworker hint, `placement_group_opened`. The People
-   card renders the roster; no editing yet.
-5. ROSTER-DRIVEN TABS. Retire `TourPersonKey`, contactId-keyed channels,
+   group-text states, caseworker hint, `placement_group_opened`, and the D10
+   substitution removal (it belongs here: the substitution is a no-op until
+   overrides exist, and harmful the moment they do). The People card renders
+   the roster; no editing yet.
+4. ROSTER-DRIVEN TABS. Retire `TourPersonKey`, contactId-keyed channels,
    scrolling rail with edge fade and carried unread dot.
-6. CARD EDIT MODE + CONFIRMS. Per-member endpoints with the materialize
+5. CARD EDIT MODE + CONFIRMS. Per-member endpoints with the materialize
    discipline, call-through, preview endpoints, both confirm dialogs, the
    too-thin disabled state.
-7. DEFERRED OPEN + ADD. `PendingRosterAction`, the poller, pending rows,
+6. DEFERRED OPEN + ADD. `PendingRosterAction`, the poller, pending rows,
    visible skipped rows, the reminder-wait coupling, "Send now anyway".
 
 ## 9. Testing
 
 - Unit: resolution (override present/absent, each group-text off-state, tenant
   === primary contact de-dupe, no primary contact on the roster, shared phone,
-  dangling contactId); the rename; derived role labels; counterpart resolution
-  for calls; the quiet-hours evaluation of both actions.
+  dangling contactId); the rename; derived role labels; the quiet-hours
+  evaluation of both actions.
+- Voice: the EXISTING masked-bridge tests are the regression net for D10 and
+  must keep passing unchanged - callee selection from the roster, simultaneous
+  ring of every other member, and all four refusal cases. Add one test proving
+  an overridden roster's number is now dialed where the retired substitution
+  would have swapped it.
 - API: property roster CRUD including the landlord-of-record 409, the
   at-most-one-primary behavior and the auto-promotion; tour/placement roster
   round-trip; the materialize-then-apply race (two concurrent first edits must
@@ -636,9 +648,11 @@ which is why the read-only card lands before the editor.
 
 ## 10. Risks
 
-- The rename touches live masked-call routing, and slice 2 re-points it
-  outright. Both are isolated and separately gated for exactly that reason.
-- Slice 7 is the heaviest and most novel (a new scheduled-action family with a
+- The rename touches live masked-call routing, and slice 3 deletes the one
+  override in that path. Both are small and separately gated for exactly that
+  reason, and both want a live dev smoke call after they land - green gates are
+  not proof a real bridge still connects.
+- Slice 6 is the heaviest and most novel (a new scheduled-action family with a
   poller). It is last so the feature is useful without it; if it is cut,
   opening and adding simply send immediately and the spec's quiet-hours claims
   are not shipped.

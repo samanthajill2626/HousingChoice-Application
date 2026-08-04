@@ -5,6 +5,7 @@
 // fake adapter (deterministic numbers; never touches Twilio) + a minimal fake
 // conversationsRepo (getAllByPoolNumber drives the open-group veto).
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   NumberUnavailableError,
   VoiceCapabilityError,
@@ -981,6 +982,57 @@ describe('warmOneNumber - geographic hint ladder (area-code preference)', () => 
     await expect(attempt).rejects.not.toBeInstanceOf(NumberUnavailableError);
     expect(adapter.provisionCalls).toEqual([{ postalCode: '30309' }]); // rung 0 only
     expect(adapter.provisions).toBe(1); // bought ONCE - no second purchase
+  });
+
+  it('collision retry re-runs the ladder without corrupting hint order', async () => {
+    // createWarming's attribute_not_exists guard can fire (a leftover row in the
+    // shared dev table), and the retry loop then buys a FRESH number. The retry
+    // must re-run the WHOLE ladder from rung 0 in the same order - never resume
+    // mid-ladder or reuse the losing rung - and the success log must name the
+    // tier of the attempt that actually LANDED (winningHintTier is re-set per
+    // attempt; a bookkeeping bug leaves it at its 'bare' initializer).
+    const repo = makeFakeRepo();
+    const realCreateWarming = repo.createWarming;
+    let createWarmingCalls = 0;
+    repo.createWarming = async (input) => {
+      createWarmingCalls += 1;
+      if (createWarmingCalls === 1) {
+        throw new ConditionalCheckFailedException({
+          message: 'pool number already exists',
+          $metadata: {},
+        });
+      }
+      return realCreateWarming(input);
+    };
+    // First preferred code dry on BOTH runs, so the ladder has a non-trivial
+    // order to corrupt and the winning rung is the SECOND one each time.
+    const adapter = makeFakeAdapter({ unavailableWhen: (o) => o.areaCode === '404' });
+    const capture = createLogCapture();
+    const svc = createPoolNumbersService({
+      adapter, poolNumbersRepo: repo, conversationsRepo: makeFakeConversations(),
+      logger: createLogger({ level: 'info', destination: capture.stream }),
+      config: cfgWith(['404', '470']),
+    });
+
+    await svc.warmOneNumber();
+
+    // The full hint sequence appears TWICE, in order.
+    expect(adapter.provisionCalls).toEqual([
+      { areaCode: '404' }, { areaCode: '470' },
+      { areaCode: '404' }, { areaCode: '470' },
+    ]);
+    // Exactly one purchase per ladder run: the collision cost one extra buy, not more.
+    expect(adapter.provisions).toBe(2);
+    expect(createWarmingCalls).toBe(2);
+    // Only the second (accepted) number persisted.
+    expect([...repo.store.values()].map((i) => i.lifecycle_state)).toEqual(['warming']);
+    // One miss per dry rung per run - the ladder really walked twice.
+    const misses = capture.lines.filter((l) => l['event'] === 'relay_warm_hint_miss');
+    expect(misses.map((l) => l['hintTier'])).toEqual(['areaCode', 'areaCode']);
+    // The success log reflects the LAST attempt's winning rung.
+    const warming = capture.lines.filter((l) => l['event'] === 'relay_number_warming');
+    expect(warming).toHaveLength(1);
+    expect(warming[0]!['hintTier']).toBe('areaCode');
   });
 
   it('empty preferred list + no postalCode: exactly one bare search (today behavior)', async () => {

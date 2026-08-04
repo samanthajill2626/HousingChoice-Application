@@ -22,6 +22,7 @@ import {
   Scenario,
   freshTenant,
   tourSchedule,
+  tourScheduleFullLadder,
   justAfter,
   hoursFromNow,
   TOUR_REMINDER_BODIES,
@@ -78,7 +79,11 @@ async function bookedSelfGuidedTour(
   await flow.seedTenantSearching();
   await flow.tenantAsksToTour(unit);
   await flow.teamCreatesTourFromInterest(unit, 'Self-guided');
-  const times = tourSchedule();
+  // Full-ladder-safe booking (14:00 local, 2 days out): Part A asserts EVERY
+  // rung upcoming, and a now-relative tourSchedule() run between 00:00 and
+  // 08:00 local books a pre-08:00 tour whose morning_of is born skipped
+  // (past_event) - the 00:00-08:00 wall-clock flake, root-caused 2026-08-04.
+  const times = tourScheduleFullLadder();
   await flow.teamBooksTour(times);
   return { tenant, tenantId, unit, times };
 }

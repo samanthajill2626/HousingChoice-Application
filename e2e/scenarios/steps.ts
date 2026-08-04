@@ -182,6 +182,30 @@ function toDatetimeLocal(d: Date): string {
 export function tourSchedule(hoursFromNow = 48): TourTimes {
   const sched = new Date(Date.now() + hoursFromNow * 3_600_000);
   sched.setSeconds(0, 0);
+  return timesFor(sched);
+}
+
+/**
+ * A tour whose reminder ladder ALWAYS arms in full: `daysOut` days ahead at
+ * 14:00 local. Plain tourSchedule() books at "now + 48h", which inherits the
+ * suite's time-of-day - run between 00:00 and 08:00 local, that tour STARTS
+ * before 08:00, so its morning_of (08:00 tour-day, org-local) lands at/after
+ * the start and is born SKIPPED (past_event); at exactly 10:00, en_route lands
+ * ON the morning_of slot and supersedes it. That made the full-ladder
+ * assertion a 00:00-08:00 wall-clock flake (root-caused 2026-08-04). 14:00
+ * keeps every rung distinct and pre-start: day_before 14:00 D-1 < morning_of
+ * 08:00 D < en_route 12:00 D < start. Use this whenever a spec asserts the
+ * WHOLE ladder; keep plain tourSchedule() for quiet-hours flows that need
+ * dueAts anchored to the wall clock's own time-of-day.
+ */
+export function tourScheduleFullLadder(daysOut = 2): TourTimes {
+  const sched = new Date(Date.now() + daysOut * 24 * 3_600_000);
+  sched.setHours(14, 0, 0, 0);
+  return timesFor(sched);
+}
+
+/** Shared tail: pre-compute the ladder dueAts exactly as the backend will. */
+function timesFor(sched: Date): TourTimes {
   const scheduledAtLocal = toDatetimeLocal(sched);
   const parsed = new Date(scheduledAtLocal); // mirror the backend's parse of the raw form value
   const t = parsed.getTime();

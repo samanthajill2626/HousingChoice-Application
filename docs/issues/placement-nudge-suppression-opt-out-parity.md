@@ -15,7 +15,9 @@ but it is a SUBSET of what the other two evaluator callers compute. It feeds
 `evaluateScheduledSendSuppression` only the inputs already in hand for that
 request:
 
-- `quietNow` (org quiet-hours window vs. the server wall clock),
+- `quietNow` (per rung: will the org quiet-hours window hold THIS rung - its
+  dueAt falls inside a window occurrence, or it is due now while the window
+  is active),
 - `smsSendingEnabled` (the kill switch, from config),
 - `staleStage` (the placement is already loaded).
 

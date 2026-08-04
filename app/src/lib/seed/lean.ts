@@ -283,6 +283,25 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       created_at: T0,
     },
   ],
+  // Org settings singleton (repos/settingsRepo.ts: table `settings`, PK
+  // settingId = ORG_SETTINGS_ID). Only the fields that must DIFFER from
+  // DEFAULT_ORG_SETTINGS are stored - getOrgSettings merges the item over the
+  // defaults, so everything omitted here still reads its product default.
+  //
+  // quietHoursEnabled: false is a LEAN-SEED-ONLY posture (worklist A1). The
+  // PRODUCT default stays ON (a fresh stack must never text at 4am), but with
+  // it on, arm-time clamping makes every tour-booking e2e time-of-day
+  // dependent: a night run would clamp the confirmation rung to 08:00 and the
+  // tick seams would stop firing the rungs their specs expect. Turning it off
+  // for the seeded e2e/dev world keeps those specs clock-independent;
+  // e2e/tests/scenarios/quiet-hours.spec.ts enables it explicitly (and
+  // restores it) for its own scenarios.
+  settings: [
+    {
+      settingId: 'org',
+      quietHoursEnabled: false,
+    },
+  ],
   // auditRepo.append writes event_type + payload (the actor is hoisted to the
   // top-level actorId GSI key from payload.actor). The seed mirrors that shape:
   // `action`/`detail` would be silently stored and never read back.

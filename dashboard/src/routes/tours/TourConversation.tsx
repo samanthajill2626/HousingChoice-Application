@@ -1,28 +1,29 @@
 // TourConversation - the tour page's LEFT pane: a three-channel switcher (Group
 // text / Tenant 1:1 / Landlord-or-PM 1:1). All three tabs always render; the
 // initial tab is Group when the tour already has a group thread, else Tenant, and
-// it NEVER auto-switches after load (only a user click moves it). Each tab shows
-// an unread dot from its conversation's unread_count; viewing a tab marks that
-// SINGLE conversation read (via the channels hook -> markConversationRead, never
-// the contact-wide inbox fan-out).
+// it NEVER auto-switches after load (only a user click moves it).
 //
-// The active tab lazily mounts ONE transcript: only the active conversation's
-// useRelayThread fetches (we never fetch all three up front). Transcripts reuse
-// the shared <Timeline> + useRelayThread + sendMessage machinery. Empty states
-// render in place: the group offers [Open group text]; a 1:1 with no thread yet
-// offers a live composer that creates the conversation on the first send.
+// The two 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
+// ContactCommsPane, the same component the contact page renders), not a
+// single-conversation relay transcript: they show the PERSON's whole feed - every
+// number's thread, email, calls and the lifecycle pins the server writes - and
+// they own reply-target resolution, create-on-demand sending, retry, the
+// just-in-time consent gate and the deleted-contact composer lock. The GROUP tab
+// stays a relay transcript (useRelayThread + roster + closed state) with THIS
+// tour's milestones interleaved.
 //
-// A2P/CTIA just-in-time consent gate (§3.4, ContactDetail parity): a proactive
-// 1:1 send to a no-consent contact is refused server-side with a 409
-// `contact_no_consent`. The 1:1 threads report that refusal UP (onConsentRefused)
-// so this component holds the pending send + opens the SAME hard-block
-// ConsentCaptureModal the contact page uses; recording consent retries the exact
-// send and clears the composer's restored draft. Without this the refusal was
-// SILENT here — the optimistic bubble vanished, the draft came back, no error.
+// Unread + mark-read follow the same split: a tab's dot is its channel's unread,
+// and viewing it marks read through the channels hook - the group by its SINGLE
+// conversation (markConversationRead), a 1:1 by the PERSON (the contact-wide
+// inbox fan-out, contact-page parity).
+//
+// The active tab lazily mounts ONE pane: only the active channel fetches (we
+// never fetch all three up front). Empty states render in place: the group offers
+// [Open group text]; a 1:1 whose contact is unresolved says so (the pane requires
+// a LOADED Contact), and a contact with no thread yet gets a live composer that
+// creates the conversation on the first send.
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
-  ApiError,
-  ensureContactConversation,
   getConversation,
   getConversationMembers,
   sendMessage,
@@ -34,23 +35,11 @@ import {
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Timeline } from '../contact/Timeline.js';
-import { ConsentCaptureModal } from '../contact/ConsentCaptureModal.js';
+import { ContactCommsTab } from '../contact/ContactCommsTab.js';
 import { contactDisplayName } from '../contact/format.js';
 import { useRelayThread } from '../conversation/useRelayThread.js';
 import { type TourChannelKey, type TourChannelsState } from './useTourChannels.js';
 import styles from './TourDetail.module.css';
-
-/** A 1:1 send refused by the consent gate, held while the modal is open. */
-interface PendingConsentSend {
-  key: 'tenant' | 'landlord';
-  contactId: string;
-  name: string;
-  /** Null when the thread didn't exist yet — the retry ensures it first. */
-  conversationId: string | null;
-  body: string;
-  attachmentKeys?: string[];
-  attachmentOriginalKeys?: string[];
-}
 
 export interface TourConversationProps {
   tour: Tour;
@@ -63,9 +52,10 @@ export interface TourConversationProps {
    *  the page header banner. */
   onOpenGroup: () => void;
   openGroupBusy: boolean;
-  /** THIS tour's lifecycle events as shared-Timeline milestone pins (oldest →
-   *  newest), interleaved into ALL THREE transcripts so the panes show tour
-   *  activity, not just comms. The Timeline's "Comms only" toggle hides them. */
+  /** THIS tour's lifecycle events as shared-Timeline milestone pins (oldest ->
+   *  newest), interleaved into the GROUP transcript so it shows tour activity,
+   *  not just comms. The 1:1 tabs get their pins from the PERSON feed instead
+   *  (the server writes them per-party), so nothing is injected there. */
   tourMilestones?: TimelineMilestone[];
   /** "Send no-show check-in" from the tour header: when nonce bumps to a new
    *  positive value, switch to the Tenant tab and PREFILL its composer with body
@@ -89,11 +79,6 @@ function withMilestones(
 function firstNameOf(c: Contact | null): string | null {
   const f = c?.firstName?.trim();
   return f && f.length > 0 ? f : null;
-}
-
-/** True when the contact is soft-deleted (ContactDetail's own `deleted` test). */
-function isDeletedContact(c: Contact | null): boolean {
-  return typeof c?.deleted_at === 'string' && c.deleted_at.length > 0;
 }
 
 export function TourConversation({
@@ -130,15 +115,11 @@ export function TourConversation({
     }
   }, [noShowDraft?.nonce, noShowDraft?.body]);
 
-  // TRANSITIONAL (Slice 4 replaces both 1:1 panes with the shared contact comms
-  // pane, which is keyed by CONTACT): the 1:1 channels no longer carry a
-  // conversationId - the hook reports only their unread - so a 1:1 tab opens on
-  // the create-on-demand path and holds the id it just created here, keeping the
-  // fresh thread mounted exactly as the injected channel id used to.
-  const [createdIds, setCreatedIds] = useState<{ tenant: string | null; landlord: string | null }>({
-    tenant: null,
-    landlord: null,
-  });
+  // ONE "Comms only" filter per page visit, shared by BOTH 1:1 tabs and held
+  // ABOVE their keyed remount. Timeline's own copy is per-mount state, so without
+  // this the filter would reset on every tab switch and every seed nonce - and a
+  // pin-heavy person feed is exactly where an operator reaches for it (spec A-M2).
+  const [commsOnly, setCommsOnly] = useState(false);
 
   const isPm = tour.tourType === 'pm_team';
   const tenantFirst = firstNameOf(tenant);
@@ -176,27 +157,23 @@ export function TourConversation({
   const oneToOneKey: 'tenant' | 'landlord' = activeKey === 'landlord' ? 'landlord' : 'tenant';
   const oneToOneContactId = activeKey === 'landlord' ? landlordId : tour.tenantId;
   const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
-  // The 1:1 composer footer shows WHO the reply sends to (the contact's number,
-  // same as the contact page's reply box); the group tab passes none - its
-  // composer matches ConversationDetail's group view.
-  const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
-  // Soft-deleted contact -> the 1:1 composer is REPLACED by the standing restore
-  // note, exactly as on the contact page (uniform lock on every Timeline surface;
-  // the server refuses the send too, 409 contact_deleted). Both 1:1 panes get it -
-  // this page already receives both Contact objects as props. No onRestore is
-  // passed: this is a read-only surface, so Timeline renders the note WITHOUT a
-  // dead button and restoring stays on the contact page.
-  const oneToOneDeleted =
-    activeKey === 'landlord' ? isDeletedContact(landlord) : isDeletedContact(tenant);
+  // The pane needs a LOADED Contact - it derives the numbers, addresses and the
+  // deleted / opted-out send gates from it, so an id alone is not enough.
+  const oneToOneContact = activeKey === 'landlord' ? landlord : tenant;
+  // Two ways it can be missing, and they are different facts: the unit has no
+  // landlordId at all (nothing to load), or the page's best-effort getContact
+  // failed. Say which - a bare "no messages yet" would be a lie.
+  const oneToOneMissingNote =
+    oneToOneContactId === undefined
+      ? 'The landlord for this property is not resolved yet.'
+      : `We could not load ${oneToOneName}'s contact record.`;
 
   // The no-show check-in seed reaches the TENANT 1:1 composer ONLY: guarded by
-  // isTenantChannel so the landlord/PM pane never receives it (its key suffix is
-  // the constant 'x', so a seedKey bump never remounts it), and cleared to
-  // undefined once consumed (seededBody null) so a later Tenant remount is empty.
+  // isTenantChannel so the landlord/PM pane never receives it (its key carries no
+  // seedKey, so a bump cannot remount it), and cleared to undefined once consumed
+  // (seededBody null) so a later Tenant remount is empty.
   const isTenantChannel = oneToOneKey === 'tenant';
   const tenantSeed = isTenantChannel && seededBody !== null ? seededBody : undefined;
-
-  const oneToOneConversationId = createdIds[oneToOneKey];
 
   // Viewing a tab marks it read + clears the tab dot. Runs on the initial tab and
   // every switch; re-runs when the active channel resolves an id or gains unread.
@@ -215,44 +192,6 @@ export function TourConversation({
     }
     channels.markPersonRead(activeKey, oneToOneContactId, activeUnread);
   }, [activeKey, oneToOneContactId, groupConversationId, activeUnread, channels]);
-
-  // Just-in-time consent gate (ContactDetail parity): the refused send held while
-  // the ConsentCaptureModal is open, and a per-channel clear-draft signal for the
-  // post-consent retry (per-channel so the OTHER tab's in-progress draft is never
-  // wiped by this one's retry landing).
-  const [pendingConsent, setPendingConsent] = useState<PendingConsentSend | null>(null);
-  const [clearSignals, setClearSignals] = useState<{ tenant: number; landlord: number }>({
-    tenant: 0,
-    landlord: 0,
-  });
-
-  // Consent recorded → retry the EXACT refused send out-of-band of the composer
-  // (the composer restored its draft on the 409; the clear signal removes it once
-  // the retry lands — a fresh failure leaves the draft, nothing is lost). The
-  // sent message itself arrives via the thread's SSE-driven refetch. The modal's
-  // updated Contact is ignored here: tenant/landlord are parent-owned props and
-  // the tour page displays no consent state.
-  function onConsentRecorded(): void {
-    const retry = pendingConsent;
-    setPendingConsent(null);
-    if (retry === null) return;
-    void (async () => {
-      const convId = retry.conversationId ?? (await ensureContactConversation(retry.contactId));
-      await sendMessage(convId, {
-        body: retry.body,
-        ...(retry.attachmentKeys !== undefined &&
-          retry.attachmentKeys.length > 0 && { attachmentKeys: retry.attachmentKeys }),
-        ...(retry.attachmentOriginalKeys !== undefined &&
-          retry.attachmentOriginalKeys.length > 0 && {
-            attachmentOriginalKeys: retry.attachmentOriginalKeys,
-          }),
-      });
-      if (retry.conversationId === null) setCreatedIds((p) => ({ ...p, [retry.key]: convId }));
-      setClearSignals((s) => ({ ...s, [retry.key]: s[retry.key] + 1 }));
-    })().catch(() => {
-      /* the draft is still in the box for another try */
-    });
-  }
 
   return (
     <div className={styles.convo}>
@@ -305,80 +244,30 @@ export function TourConversation({
               ) : null}
             </div>
           )
-        ) : oneToOneContactId === undefined ? (
+        ) : oneToOneContact === null ? (
           <div className={styles.channelEmpty}>
-            <p className={styles.emptyNote}>
-              The landlord for this property is not resolved yet.
-            </p>
+            <p className={styles.emptyNote}>{oneToOneMissingNote}</p>
           </div>
-        ) : oneToOneConversationId !== null ? (
-          // key by conversation identity so switching the Tenant<->Landlord 1:1
-          // REMOUNTS a fresh Timeline. Both tabs render <ContactThread> at the same
-          // JSX position; without a key React reuses the fiber and Timeline's
-          // in-progress draft survives the switch, so a Send would post it to the
-          // newly-selected party. Also clears the stale-transcript flash (MINOR 3).
-          <ContactThread
-            key={`${oneToOneConversationId}:${isTenantChannel ? seedKey : 'x'}`}
-            conversationId={oneToOneConversationId}
-            {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
-            {...(tourMilestones !== undefined && { tourMilestones })}
-            deleted={oneToOneDeleted}
-            clearDraftSignal={clearSignals[oneToOneKey]}
-            {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
-            onDraftSeeded={() => setSeededBody(null)}
-            onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
-              setPendingConsent({
-                key: oneToOneKey,
-                contactId: oneToOneContactId,
-                name: oneToOneName,
-                conversationId: oneToOneConversationId,
-                body,
-                ...(attachmentKeys !== undefined &&
-                  attachmentKeys.length > 0 && { attachmentKeys }),
-                ...(attachmentOriginalKeys !== undefined &&
-                  attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-              })
-            }
-          />
         ) : (
-          // key by channel so a create-on-demand Tenant/Landlord tab also remounts
-          // on switch (conversationId is null here, so it cannot key the pane).
-          <NewContactThread
-            key={`${activeKey}:${isTenantChannel ? seedKey : 'x'}`}
-            contactId={oneToOneContactId}
-            name={oneToOneName}
-            {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
-            {...(tourMilestones !== undefined && { tourMilestones })}
-            deleted={oneToOneDeleted}
-            onCreated={(id) => setCreatedIds((p) => ({ ...p, [oneToOneKey]: id }))}
-            clearDraftSignal={clearSignals[oneToOneKey]}
+          // key so switching the Tenant<->Landlord 1:1 REMOUNTS a fresh pane. Both
+          // tabs render <ContactCommsTab> at the same JSX position; without a key
+          // React reuses the fiber and the composer's in-progress draft survives
+          // the switch, so a Send would post it to the newly-selected party.
+          // The TENANT key also carries seedKey: initialDraft is a MOUNT-ONLY
+          // initializer, so a "Send no-show check-in" fired while ALREADY on the
+          // Tenant tab has to remount the pane to land (spec M1). The landlord key
+          // is the contactId alone - no seed ever reaches it.
+          <ContactCommsTab
+            key={isTenantChannel ? `${tour.tenantId}:${seedKey}` : oneToOneContact.contactId}
+            contact={oneToOneContact}
+            emptyLabel={`No messages with ${oneToOneName} yet`}
             {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
             onDraftSeeded={() => setSeededBody(null)}
-            onConsentRefused={(body, attachmentKeys, attachmentOriginalKeys) =>
-              setPendingConsent({
-                key: oneToOneKey,
-                contactId: oneToOneContactId,
-                name: oneToOneName,
-                conversationId: null,
-                body,
-                ...(attachmentKeys !== undefined &&
-                  attachmentKeys.length > 0 && { attachmentKeys }),
-                ...(attachmentOriginalKeys !== undefined &&
-                  attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-              })
-            }
+            commsOnly={commsOnly}
+            onCommsOnlyChange={setCommsOnly}
           />
         )}
       </div>
-
-      {pendingConsent !== null ? (
-        <ConsentCaptureModal
-          contactId={pendingConsent.contactId}
-          contactName={pendingConsent.name}
-          onCancel={() => setPendingConsent(null)}
-          onRecorded={onConsentRecorded}
-        />
-      ) : null}
     </div>
   );
 }
@@ -447,161 +336,6 @@ function GroupChannel({
       relayRoster={members}
       relayClosed={closed}
       resetScrollKey={conversationId}
-    />
-  );
-}
-
-/** True when a send was refused by the A2P/CTIA just-in-time consent gate. */
-function isConsentRefusal(err: unknown): boolean {
-  return err instanceof ApiError && err.status === 409 && err.code === 'contact_no_consent';
-}
-
-/** A 1:1 transcript for an EXISTING conversation. Optimistic send via the shared
- *  relay-thread trio. Mounts only while its tab is active (lazy fetch). */
-function ContactThread({
-  conversationId,
-  replyToPhone,
-  tourMilestones,
-  deleted,
-  clearDraftSignal,
-  initialDraft,
-  onDraftSeeded,
-  onConsentRefused,
-}: {
-  conversationId: string;
-  /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
-  replyToPhone?: string;
-  /** Tour lifecycle pins to interleave with the messages. */
-  tourMilestones?: TimelineMilestone[];
-  /** The contact is soft-deleted → Timeline replaces the composer with the
-   *  restore note (no onRestore here: restoring lives on the contact page). */
-  deleted: boolean;
-  /** Post-consent retry landed → clear the draft the 409 refusal restored. */
-  clearDraftSignal?: number;
-  /** Seed the composer once on mount (no-show check-in prefill). */
-  initialDraft?: string;
-  /** Fired once when a non-empty initialDraft seeded the composer. */
-  onDraftSeeded?: () => void;
-  /** The consent gate refused this send (409 contact_no_consent) — the parent
-   *  opens the capture modal holding it. Still rethrown so the composer restores
-   *  the draft (the modal shows WHY; no inline error — ContactDetail parity). */
-  onConsentRefused?: (
-    body: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ) => void;
-}): React.JSX.Element {
-  const thread = useRelayThread(conversationId);
-  const items = useMemo(
-    () => withMilestones(thread.items, tourMilestones),
-    [thread.items, tourMilestones],
-  );
-  const onSend = (
-    body: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ): Promise<void> => {
-    const tempId = thread.addOptimistic(conversationId, body, undefined, attachmentKeys);
-    return sendMessage(conversationId, {
-      body,
-      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
-      ...(attachmentOriginalKeys !== undefined &&
-        attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-    })
-      .then((result) => thread.resolveOptimistic(tempId, result))
-      .catch((err: unknown) => {
-        thread.failOptimistic(tempId);
-        if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys, attachmentOriginalKeys);
-        throw err;
-      });
-  };
-  return (
-    <Timeline
-      status={thread.status}
-      items={items}
-      source="server"
-      canSend
-      onSend={onSend}
-      {...(replyToPhone !== undefined && { replyToPhone })}
-      deleted={deleted}
-      {...(clearDraftSignal !== undefined && { clearDraftSignal })}
-      {...(initialDraft !== undefined && { initialDraft })}
-      {...(onDraftSeeded !== undefined && { onDraftSeeded })}
-      resetScrollKey={conversationId}
-    />
-  );
-}
-
-/** A 1:1 with NO thread yet: an empty stream + a live composer. The first send
- *  creates-or-gets the contact's conversation, sends into it, then reports the
- *  new id so the parent swaps in the real ContactThread. */
-function NewContactThread({
-  contactId,
-  name,
-  replyToPhone,
-  tourMilestones,
-  deleted,
-  onCreated,
-  clearDraftSignal,
-  initialDraft,
-  onDraftSeeded,
-  onConsentRefused,
-}: {
-  contactId: string;
-  name: string;
-  /** The contact's number, shown in the composer footer ("Reply sends to ..."). */
-  replyToPhone?: string;
-  /** Tour lifecycle pins — shown even before the first message exists. */
-  tourMilestones?: TimelineMilestone[];
-  /** The contact is soft-deleted - see ContactThread. */
-  deleted: boolean;
-  onCreated: (conversationId: string) => void;
-  /** Post-consent retry landed → clear the draft the 409 refusal restored. */
-  clearDraftSignal?: number;
-  /** Seed the composer once on mount (no-show check-in prefill). */
-  initialDraft?: string;
-  /** Fired once when a non-empty initialDraft seeded the composer. */
-  onDraftSeeded?: () => void;
-  /** The consent gate refused this send — see ContactThread. */
-  onConsentRefused?: (
-    body: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ) => void;
-}): React.JSX.Element {
-  const onSend = async (
-    body: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ): Promise<void> => {
-    const conversationId = await ensureContactConversation(contactId);
-    try {
-      await sendMessage(conversationId, {
-        body,
-        ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
-        ...(attachmentOriginalKeys !== undefined &&
-          attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-      });
-    } catch (err) {
-      if (isConsentRefusal(err)) onConsentRefused?.(body, attachmentKeys, attachmentOriginalKeys);
-      throw err;
-    }
-    onCreated(conversationId);
-  };
-  return (
-    <Timeline
-      status="ready"
-      items={tourMilestones ?? []}
-      source="server"
-      canSend
-      onSend={onSend}
-      {...(replyToPhone !== undefined && { replyToPhone })}
-      deleted={deleted}
-      {...(clearDraftSignal !== undefined && { clearDraftSignal })}
-      {...(initialDraft !== undefined && { initialDraft })}
-      {...(onDraftSeeded !== undefined && { onDraftSeeded })}
-      emptyLabel={`No messages with ${name} yet`}
-      resetScrollKey={`new:${contactId}`}
     />
   );
 }

@@ -34,6 +34,14 @@ const getConversations = vi.fn();
 const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
+// The 1:1 tabs are contact-keyed panes now: every render mounts
+// useContactTimeline for the active party, and viewing an unread 1:1 tab marks
+// the CONTACT read (the inbox fan-out). Both are mocked in EVERY test - an
+// unmocked timeline fetch would reject into the pane's error state, and
+// markInboxRead's return value is `.catch()`ed by the channels hook (a bare
+// vi.fn() returns undefined -> TypeError).
+const getContactTimeline = vi.fn();
+const markInboxRead = vi.fn();
 // Deadlines-and-nudges card deps: quiet the nudge fetch so the card renders its
 // empty ladder (this suite exercises the header + right-pane structure; the card
 // has its own tests in DeadlinesNudgesCard.test.tsx).
@@ -59,6 +67,8 @@ vi.mock('../../api/index.js', async () => {
     getConversation: (...a: unknown[]) => getConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
+    getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
+    markInboxRead: (...a: unknown[]) => markInboxRead(...a),
     getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
     setPlacementFollowUp: (...a: unknown[]) => setPlacementFollowUp(...a),
     clearPlacementFollowUp: (...a: unknown[]) => clearPlacementFollowUp(...a),
@@ -132,6 +142,8 @@ beforeEach(() => {
   });
   markConversationRead.mockReset().mockResolvedValue(undefined);
   provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
+  getContactTimeline.mockReset().mockResolvedValue({ items: [], nextCursor: null });
+  markInboxRead.mockReset().mockResolvedValue(undefined);
   getPlacementNudges.mockReset().mockResolvedValue([]);
   setPlacementFollowUp.mockReset().mockResolvedValue(undefined);
   clearPlacementFollowUp.mockReset().mockResolvedValue(undefined);

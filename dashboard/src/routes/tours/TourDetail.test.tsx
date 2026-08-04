@@ -27,6 +27,11 @@ const getNoShowCheckinDraft = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversation = vi.fn();
 const getConversationMembers = vi.fn();
+// The 1:1 tabs are contact-keyed panes now, so every render of this page mounts
+// useContactTimeline for the active party. Mocked in EVERY test (not just the
+// conversation ones) - left unmocked it would reject and the pane would render
+// its error state into unrelated assertions.
+const getContactTimeline = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
@@ -50,6 +55,7 @@ vi.mock('../../api/index.js', async () => {
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversation: (...a: unknown[]) => getConversation(...a),
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
+    getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
@@ -167,6 +173,7 @@ beforeEach(() => {
     participants: [],
   });
   getConversationMembers.mockResolvedValue([]);
+  getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
   // The 1:1 panes create their thread on first send (ensureContactConversation);
@@ -755,7 +762,7 @@ describe('TourDetail - three-channel switcher', () => {
     expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('shows an unread dot on a non-active channel and never loads an inactive transcript', async () => {
+  it('shows an unread dot on a non-active channel and loads ONLY the active tab feed', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
       conversations: [
@@ -768,10 +775,19 @@ describe('TourDetail - three-channel switcher', () => {
     await waitLoaded();
     // The Landlord tab (unread 2) exposes an accessible "unread" hint.
     await waitFor(() => expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument());
-    // Lazy-load: the INACTIVE channel's transcript is never fetched. (The ACTIVE
-    // 1:1 transcript no longer comes from getConversationMessages - the 1:1 panes
-    // are contact-keyed now - so only the negative half applies here.)
+    // Lazy-load, now measured on the PERSON feed (a 1:1 tab is a contact-keyed
+    // pane, so its stream comes from getContactTimeline): the ACTIVE tab's
+    // contact IS fetched, the inactive tab's contact is NOT.
     await screen.findByRole('textbox', { name: 'Reply message' });
+    await waitFor(() =>
+      expect(getContactTimeline).toHaveBeenCalledWith('tenant-1', {}, expect.any(AbortSignal)),
+    );
+    expect(getContactTimeline).not.toHaveBeenCalledWith(
+      'landlord-1',
+      expect.anything(),
+      expect.anything(),
+    );
+    // ...and no single-conversation transcript is fetched for a 1:1 tab at all.
     expect(getConversationMessages).not.toHaveBeenCalledWith('c-landlord', expect.anything());
   });
 
@@ -910,32 +926,56 @@ describe('TourDetail - three-channel switcher', () => {
     expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
       'Reply sends to everyone in this group text (Ann, Marcus)',
     );
-    // Tenant 1:1 tab: the footer names the tenant's number (the contact-page pattern).
+    // Tenant 1:1 tab: the footer names the tenant's number (the contact-page
+    // pattern). Byte-for-byte the contact page's own copy now that the shared
+    // pane renders it - including the "(primary)" qualifier the pane passes as
+    // replyToLabel=defaultPhoneLabel(phones), which the old bespoke 1:1
+    // transcript did not have.
     await userEvent.click(screen.getByRole('tab', { name: /Tenant - Ann/ }));
     await waitFor(() =>
       expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
-        'Reply sends to (404) 555-0111',
+        'Reply sends to (404) 555-0111 (primary)',
       ),
     );
   });
 });
 
 describe('TourDetail - tour milestones interleave into the conversation panes', () => {
-  it('the 1:1 transcript shows the tour lifecycle pins; "Comms only" hides them', async () => {
+  it('the 1:1 transcript shows the lifecycle pins from the PERSON feed; "Comms only" hides them', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
       conversations: [conv('c-tenant', 'tenant-1', 0)],
       nextCursor: null,
     });
-    // Newest-first, like the API serves them.
-    getTourActivity.mockResolvedValue([
-      { id: '2026-07-03T00:00:00Z#1', at: '2026-07-03T00:00:00Z', type: 'tour_rescheduled' },
-      { id: '2026-07-01T00:00:00Z#0', at: '2026-07-01T00:00:00Z', type: 'tour_scheduled' },
-    ]);
+    // A 1:1 tab is the contact-keyed pane now, so its pins arrive on the PERSON
+    // timeline (the server writes a dual-party event per tour milestone) - there
+    // is no client-side injection left on this surface.
+    getContactTimeline.mockResolvedValue({
+      nextCursor: null,
+      items: [
+        {
+          kind: 'milestone',
+          id: '2026-07-01T00:00:00.000Z#0',
+          at: '2026-07-01T00:00:00.000Z',
+          type: 'tour_scheduled',
+          label: 'Tour scheduled',
+        },
+        {
+          kind: 'milestone',
+          id: '2026-07-03T00:00:00.000Z#1',
+          at: '2026-07-03T00:00:00.000Z',
+          type: 'tour_scheduled',
+          label: 'Tour rescheduled',
+        },
+      ],
+    });
+    // The tour ACTIVITY rows (the old injection source) stay empty, so a pin in
+    // this transcript can only have come from the person feed.
+    getTourActivity.mockResolvedValue([]);
     renderDetail();
     await waitLoaded();
 
-    // Scope to the TRANSCRIPT region — the right-column Activity card shows the
+    // Scope to the TRANSCRIPT region - the right-column Activity card shows the
     // same labels, and it must not satisfy these assertions.
     const transcript = screen.getByRole('region', { name: /Communications/i });
     await waitFor(() => expect(within(transcript).getByText('Tour scheduled')).toBeInTheDocument());
@@ -943,7 +983,9 @@ describe('TourDetail - tour milestones interleave into the conversation panes', 
 
     // The "Comms only" toggle hides the pins (they are milestones, not comms).
     await userEvent.click(within(transcript).getByRole('button', { name: /Comms only/i }));
-    expect(within(transcript).queryByText('Tour scheduled')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(transcript).queryByText('Tour scheduled')).not.toBeInTheDocument(),
+    );
     expect(within(transcript).queryByText('Tour rescheduled')).not.toBeInTheDocument();
   });
 

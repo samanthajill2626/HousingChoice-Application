@@ -1,22 +1,47 @@
-// TourConversation tests - the manual "Send no-show check-in" seed threading
-// (Plan Task 4 / slice S4). Verifies the two invariants that make the seed safe:
-//   1) TENANT ONLY: a noShowDraft nonce bump selects the Tenant tab and prefills
-//      the tenant 1:1 composer (never the landlord/PM pane).
+// TourConversation tests - the three-channel switcher now that both 1:1 tabs are
+// the SHARED person-centric comms pane (ContactCommsTab -> ContactCommsPane).
+// Verifies the properties the rewire had to preserve or newly guarantee:
+//   1) TENANT ONLY seed: a noShowDraft nonce bump selects the Tenant tab and
+//      prefills the tenant composer (never the landlord/PM pane) - including a
+//      bump fired while the Tenant tab is ALREADY active (spec M1: the pane keys
+//      on `${tenantId}:${seedKey}`, so the nonce still remounts it).
 //   2) ONE-SHOT: the seed is consumed on mount, so a later MANUAL return to the
-//      Tenant tab starts with an EMPTY composer (no persistent re-seed).
+//      Tenant tab starts with an EMPTY composer, and a draft never crosses tabs.
+//   3) The deleted-contact composer lock survives the rewrite, per pane.
+//   4) "Comms only" is page-level state ABOVE the remount, so it survives a tab
+//      switch (Timeline's own copy is per-mount).
 //
 // TourConversation is rendered DIRECTLY with a hand-built `channels` stub (the
-// real useTourChannels is covered by its own suite + TourDetail.test). Both 1:1
-// channels resolve to a null conversationId -> the synchronous NewContactThread
-// path (no useRelayThread, no network), and the group channel is left unresolved
-// so the initial Group pane is the empty state - so the whole tree renders with
-// no api mock at all.
-import { render, screen } from '@testing-library/react';
+// real useTourChannels has its own suite + TourDetail.test). Unlike before the
+// rewire the 1:1 panes DO fetch - they run useContactTimeline for their contact -
+// so the api barrel is mocked here now.
+import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Contact, ContactTimelinePage, Tour } from '../../api/index.js';
+
+const getContactTimeline = vi.fn();
+const getConversations = vi.fn();
+const getConversationMessages = vi.fn();
+const sendMessage = vi.fn();
+const ensureContactConversation = vi.fn();
+
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
+    getConversations: (...a: unknown[]) => getConversations(...a),
+    getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
+    sendMessage: (...a: unknown[]) => sendMessage(...a),
+    ensureContactConversation: (...a: unknown[]) => ensureContactConversation(...a),
+    // No SSE in unit tests (the timeline hook subscribes).
+    useEventStream: () => {},
+  };
+});
+
 import { TourConversation, type TourConversationProps } from './TourConversation.js';
-import type { Contact, Tour } from '../../api/index.js';
 import type { TourChannelsState } from './useTourChannels.js';
 
 const SEED = 'Hi! We noticed you may have missed your tour. Want to reschedule?';
@@ -57,9 +82,27 @@ function landlordContact(): Contact {
   };
 }
 
-// Both 1:1 channels unresolved (null id -> NewContactThread), and the group
-// unresolved so the initial Group pane is the empty state (fully synchronous).
-function makeChannels(): TourChannelsState {
+/** A person feed carrying ONE lifecycle pin - the server-side write of this
+ *  tour's events, which is what replaced the old client-side injection. */
+function pinnedFeed(label: string): ContactTimelinePage {
+  return {
+    nextCursor: null,
+    items: [
+      {
+        kind: 'milestone',
+        id: '2026-07-01T00:00:00.000Z#a',
+        at: '2026-07-01T00:00:00.000Z',
+        type: 'tour_scheduled',
+        label,
+      },
+    ],
+  };
+}
+
+// Both 1:1 channels report unread only (they resolve a PERSON, not one
+// conversation); the group is left unresolved so the initial Group pane is the
+// empty state.
+function makeChannels(over: Partial<TourChannelsState> = {}): TourChannelsState {
   return {
     status: 'ready',
     group: { conversationId: null, unread: 0 },
@@ -68,6 +111,7 @@ function makeChannels(): TourChannelsState {
     setGroupConversationId: vi.fn(),
     markGroupRead: vi.fn(),
     markPersonRead: vi.fn(),
+    ...over,
   };
 }
 
@@ -91,6 +135,15 @@ function renderConvo(props: TourConversationProps, draft?: TourConversationProps
     </MemoryRouter>,
   );
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
+  getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
+  getConversationMessages.mockResolvedValue([]);
+  sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
+  ensureContactConversation.mockResolvedValue('c-new');
+});
 
 describe('TourConversation - no-show check-in seed', () => {
   it('switches to the tenant tab and seeds the composer when noShowDraft nonce bumps', async () => {
@@ -119,6 +172,28 @@ describe('TourConversation - no-show check-in seed', () => {
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(SEED);
   });
 
+  it('re-seeds a nonce bump fired while the Tenant tab is ALREADY active (spec M1)', async () => {
+    const props = baseProps({ tour: makeTour({ groupThreadId: undefined }) });
+    const { rerender } = renderConvo(props);
+
+    // Self-guided tour -> the Tenant tab is the initial tab, its pane already
+    // mounted and its composer empty.
+    expect(screen.getByRole('tab', { name: /Tenant/ })).toHaveAttribute('aria-selected', 'true');
+    expect(await screen.findByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+
+    // "Send no-show check-in" with no tab change to ride: the seed key alone must
+    // remount the pane (initialDraft is a MOUNT-ONLY initializer).
+    rerender(
+      <MemoryRouter>
+        <TourConversation {...props} noShowDraft={{ body: SEED, nonce: 1 }} />
+      </MemoryRouter>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(SEED),
+    );
+  });
+
   it('never seeds the landlord pane, and a later return to Tenant starts EMPTY', async () => {
     const props = baseProps();
     const { rerender } = renderConvo(props);
@@ -136,9 +211,99 @@ describe('TourConversation - no-show check-in seed', () => {
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
 
     // Invariant 2: a later MANUAL return to the Tenant tab remounts a fresh pane
-    // with no seed (the one-shot seed was consumed, not persisted).
+    // with no seed (the one-shot seed was consumed, not persisted). This is also
+    // the wrong-party-send guard: a draft never survives a tab switch.
     await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
+  });
+});
+
+describe('TourConversation - 1:1 panes', () => {
+  it('shows the emptyLabel with the contact FULL display name when the feed is empty', async () => {
+    renderConvo(baseProps({ tour: makeTour({ groupThreadId: undefined }) }));
+
+    expect(await screen.findByText('No messages with Ann Tenant yet')).toBeInTheDocument();
+  });
+
+  it('renders the person feed pins - no client-side milestone injection remains', async () => {
+    getContactTimeline.mockResolvedValue(pinnedFeed('Tour scheduled'));
+    renderConvo(
+      baseProps({
+        tour: makeTour({ groupThreadId: undefined }),
+        tourMilestones: [
+          {
+            kind: 'milestone',
+            id: 'inj-1',
+            at: '2026-07-01T00:00:00.000Z',
+            type: 'tour_scheduled',
+            label: 'INJECTED pin',
+          },
+        ],
+      }),
+    );
+
+    // The pin comes from the PERSON feed...
+    expect(await screen.findByText('Tour scheduled')).toBeInTheDocument();
+    // ...and tourMilestones never reaches a 1:1 pane (the pane has no injection
+    // prop at all - the group tab is its only consumer now).
+    expect(screen.queryByText('INJECTED pin')).not.toBeInTheDocument();
+  });
+
+  it('shows the unread dot from the channel aggregate', () => {
+    renderConvo(
+      baseProps({
+        tour: makeTour({ groupThreadId: undefined }),
+        channels: makeChannels({ landlord: { unread: 4 } }),
+      }),
+    );
+
+    expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).not.toHaveAccessibleName(/unread/i);
+  });
+
+  it('an unresolved landlord shows the empty state, never a pane', async () => {
+    renderConvo(
+      baseProps({
+        tour: makeTour({ groupThreadId: undefined }),
+        landlordId: undefined,
+        landlord: null,
+      }),
+    );
+
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    expect(
+      screen.getByText('The landlord for this property is not resolved yet.'),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+  });
+
+  it('a contact whose record failed to load shows the empty state, never a pane', async () => {
+    renderConvo(baseProps({ tour: makeTour({ groupThreadId: undefined }), tenant: null }));
+
+    expect(
+      await screen.findByText("We could not load the tenant's contact record."),
+    ).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    // The pane is what fetches a timeline - it never mounted, so nothing did.
+    expect(getContactTimeline).not.toHaveBeenCalled();
+  });
+
+  it('"Comms only" is page-level: the filter survives a tab switch (spec A-M2)', async () => {
+    getContactTimeline.mockResolvedValue(pinnedFeed('Tour scheduled'));
+    renderConvo(baseProps({ tour: makeTour({ groupThreadId: undefined }) }));
+
+    expect(await screen.findByText('Tour scheduled')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: /Comms only/i }));
+    await waitFor(() => expect(screen.queryByText('Tour scheduled')).not.toBeInTheDocument());
+
+    // Switch to the Landlord pane: it REMOUNTS (fresh draft), but the filter is
+    // held above the remount so it is still on.
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    expect(screen.getByRole('button', { name: /Comms only/i })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    await waitFor(() => expect(screen.queryByText('Tour scheduled')).not.toBeInTheDocument());
   });
 });
 

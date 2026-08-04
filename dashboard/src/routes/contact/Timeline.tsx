@@ -305,14 +305,16 @@ function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): Reac
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
- *  green markers). number_added = amber; group-text add/remove = purple;
- *  the positive outcome-ish ones = green; everything else neutral. */
+ *  green markers). number_added = amber; group-text add/remove/open = purple;
+ *  the positive outcome-ish ones = green; everything else neutral (including
+ *  tour_converted - the placement_opened pin beside it carries the same news). */
 function milestoneVariant(type: TimelineMilestoneType): string {
   switch (type) {
     case 'number_added':
       return styles.amber ?? '';
     case 'added_to_group_text':
     case 'removed_from_group_text':
+    case 'tour_group_opened':
       return styles.purple ?? '';
     case 'tour_scheduled':
     case 'tour_took_place':

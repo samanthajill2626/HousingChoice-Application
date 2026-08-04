@@ -75,6 +75,7 @@ import {
   type PlacementItem,
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -745,6 +746,21 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         'tour_converted tour audit failed (best-effort)',
       );
     }
+    // ...and the same chapter on BOTH parties' contact timelines
+    // (contact-comms-pane): the tenant's and the unit landlord's. refType 'tour'
+    // - the pin points back at the tour that ended, not at the new placement
+    // (placement_opened below is the placement's own pin). Best-effort.
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      {
+        tenantId: created.tenantId,
+        unitId: created.unitId,
+        type: 'tour_converted',
+        label: 'Converted to placement',
+        refType: 'tour',
+        refId: tour.tourId,
+      },
+    );
     // Live tour-page refresh (tour-detail-page 1a): the finalize patch above
     // just closed the tour. ID + status only (no PII).
     events.emit('tour.updated', { tourId: tour.tourId, status: 'closed' });

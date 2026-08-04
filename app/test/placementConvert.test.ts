@@ -174,6 +174,70 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect(tourUpdates[0]!.payload).toEqual({ tourId, status: 'closed' });
   });
 
+  it('records tour_converted person milestones for BOTH the tenant and the unit landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId, landlordId } = seedTenantAndUnit(world);
+
+    const tourId = 'tour-convert-person';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+
+    const converted = world.activityEvents.filter((e) => e.type === 'tour_converted');
+    expect(converted).toHaveLength(2);
+    expect(converted.map((e) => e.contactId).sort()).toEqual([landlordId, tenantId].sort());
+    for (const pin of converted) {
+      // The pin points back at the TOUR (its final chapter), not the placement.
+      expect(pin).toMatchObject({
+        type: 'tour_converted',
+        label: 'Converted to placement',
+        refType: 'tour',
+        refId: tourId,
+      });
+    }
+
+    // The pre-existing placement_opened tenant milestone is untouched by this.
+    expect(
+      world.activityEvents.filter((e) => e.type === 'placement_opened' && e.contactId === tenantId),
+    ).toHaveLength(1);
+  });
+
+  it('a landlord-less unit converts fine with a tenant-only tour_converted pin', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    world.units.set(unitId, { ...world.units.get(unitId)!, landlordId: '' });
+
+    const tourId = 'tour-convert-nolandlord';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'self_guided',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+    const converted = world.activityEvents.filter((e) => e.type === 'tour_converted');
+    expect(converted).toHaveLength(1);
+    expect(converted[0]?.contactId).toBe(tenantId);
+  });
+
   it('a failing tours# tour_converted audit write does NOT fail the conversion (best-effort)', async () => {
     const world = createFakeWorld();
     const { tenantId, unitId } = seedTenantAndUnit(world);

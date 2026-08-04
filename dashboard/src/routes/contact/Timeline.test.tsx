@@ -308,6 +308,50 @@ describe('Timeline', () => {
     expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();
   });
 
+  // CONTROLLED "Comms only" (spec A-M2): the tour/placement pages hold ONE toggle
+  // state per page visit ABOVE the pane's remount boundary, so the filter has to
+  // survive a tab switch. Passing BOTH props hands the value to the caller; the
+  // buttons then only REPORT (no internal flip), so what renders is whatever the
+  // caller last said.
+  it('CONTROLLED "Comms only": renders the caller\'s value and reports clicks without self-flipping', () => {
+    const onCommsOnlyChange = vi.fn();
+    renderTimeline({
+      items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED],
+      commsOnly: true,
+      onCommsOnlyChange,
+    });
+    // Filtered on the FIRST render - no click needed. This is the state a remount
+    // must be able to restore.
+    expect(screen.queryByText(/Placement opened/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Now also texting/)).not.toBeInTheDocument();
+    expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Comms only' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(onCommsOnlyChange).toHaveBeenCalledWith(false);
+    // Nothing came back: the caller owns the value, so the pins stay hidden until
+    // it re-renders us with commsOnly={false}.
+    expect(screen.queryByText(/Placement opened/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Comms only' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('CONTROLLED "Comms only": clicking the filter reports true and hides nothing itself', () => {
+    const onCommsOnlyChange = vi.fn();
+    renderTimeline({ items: [MESSAGE_IN, MILESTONE], commsOnly: false, onCommsOnlyChange });
+    expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Comms only' }));
+    expect(onCommsOnlyChange).toHaveBeenCalledWith(true);
+    expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
+  });
+
   it('disables Send (with a tooltip) when no conversation is resolvable', () => {
     renderTimeline({ items: [MESSAGE_IN], canSend: false });
     const send = screen.getByRole('button', { name: /Send/i });

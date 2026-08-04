@@ -545,3 +545,196 @@ describe('aggregateInbox — cursor paging (split-proof)', () => {
     ).rejects.toMatchObject({ name: 'InboxBadRequestError' });
   });
 });
+
+describe('aggregateInbox — deleted-contact resurfacing (2026-08-03 spec)', () => {
+  const DELETED_AT = '2026-08-01T00:00:00.000Z';
+  const BEFORE = '2026-07-30T00:00:00.000Z';
+  const AFTER = '2026-08-02T00:00:00.000Z';
+
+  /** Newest of all: used as the empty-conversation last_activity_at. */
+  const LATER = '2026-08-03T00:00:00.000Z';
+
+  const deletedContact = (over: Partial<ContactItem> = {}): ContactItem => ({
+    contactId: 'c-del',
+    type: 'tenant',
+    firstName: 'Dana',
+    lastName: 'Doe',
+    phone: '+15550000001',
+    deleted_at: DELETED_AT,
+    ...over,
+  });
+
+  /**
+   * The same stub with the deletion stamp REMOVED — a properly-built live
+   * contact (never an `undefined as unknown as string` cast, which would type a
+   * value the repo can never produce: `deleted_at` is optional, not nullable).
+   */
+  const liveContact = (over: Partial<ContactItem> = {}): ContactItem => {
+    const c = deletedContact(over);
+    delete c.deleted_at;
+    return c;
+  };
+
+  it('surfaces a deleted contact with an unread inbound newer than deleted_at (deleted: true)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({
+      kind: 'contact',
+      contactId: 'c-del',
+      deleted: true,
+      unreadCount: 1,
+      preview: 'im back',
+    });
+  });
+
+  it('hides a deleted contact with zero unread (post-deletion inbound already read)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 0 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('hides a deleted contact whose unread inbound PREDATES the deletion', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: BEFORE, unread_count: 2 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'old unread', created_at: BEFORE },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('hides a deleted contact whose latest message is OUTBOUND (even post-deletion, even with unread)', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'outbound', body: 'scheduled nudge', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it('a surfaced deleted row passes the unread filter', async () => {
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'unread', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({ contactId: 'c-del', deleted: true });
+  });
+
+  it('a live (restored) contact row never carries the deleted field', async () => {
+    const deps = makeDeps({
+      contacts: [liveContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).not.toHaveProperty('deleted');
+  });
+
+  // --- Multi-conversation contacts (the rule is PER CONVERSATION) -------------
+  // A contact owns one conversation per participant key, so "unread" and
+  // "newest post-deletion inbound" can live on DIFFERENT threads. Mixing a
+  // cross-thread unread SUM with a newest-thread-only freshness probe breaks the
+  // spec rule both ways — these three pin the per-conversation predicate.
+
+  it('STUCK ROW: pre-deletion unread on an older thread does NOT keep the row up once the fresh inbound is read', async () => {
+    // Staff read the post-deletion inbound from a placement/tour pane, which
+    // marks only THAT conversation read. The older thread still carries
+    // pre-deletion unread, so a cross-thread unreadSum stays > 0 forever.
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-old', participant_phone: '+15550000001', last_activity_at: BEFORE, unread_count: 2 }),
+        conv({ conversationId: 'conv-new', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 0 }),
+      ],
+      latestMessage: {
+        'conv-old': { type: 'sms', direction: 'inbound', body: 'old unread', created_at: BEFORE },
+        'conv-new': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+
+  it("EMPTY NEWEST: a brand-new empty conversation does not bury an older thread's unread post-deletion inbound", async () => {
+    // conv-empty has the freshest last_activity_at but no messages, so it wins
+    // the newest-conversation race for PRESENTATION while carrying no recency
+    // signal of its own. The unread fresh inbound on conv-old must still surface.
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-old', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+        conv({ conversationId: 'conv-empty', participant_phone: '+15550000001', last_activity_at: LATER, unread_count: 0 }),
+      ],
+      latestMessage: {
+        'conv-old': { type: 'sms', direction: 'inbound', body: 'im back', created_at: AFTER },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(1);
+    expect(page.rows[0]).toMatchObject({
+      kind: 'contact',
+      contactId: 'c-del',
+      deleted: true,
+      unreadCount: 1,
+      // Presentation still derives from the NEWEST conversation (the empty one):
+      // fallback preview, its last_activity_at.
+      preview: '',
+      lastActivityAt: LATER,
+    });
+  });
+
+  it('ABSENT created_at on the probed conversation never counts as new (stays hidden)', async () => {
+    // The message row is readable but carries no created_at, so the freshness
+    // comparison is unknowable — treat it as NOT new (this is the branch
+    // contactSoftDelete.test.ts relies on for its message-less world).
+    const deps = makeDeps({
+      contacts: [deletedContact()],
+      conversations: [
+        conv({ conversationId: 'conv-1', participant_phone: '+15550000001', last_activity_at: AFTER, unread_count: 1 }),
+      ],
+      latestMessage: {
+        'conv-1': { type: 'sms', direction: 'inbound', body: 'no timestamp' },
+      },
+    });
+    const page = await aggregateInbox({ filter: 'all', limit: 25 }, deps);
+    expect(page.rows).toHaveLength(0);
+  });
+});

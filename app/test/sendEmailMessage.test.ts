@@ -16,6 +16,7 @@ import { EMAIL_MAX_TOTAL_BYTES } from '../src/lib/mediaTypes.js';
 import {
   ContactEmailMissingError,
   EmailAttachmentsTooLargeError,
+  EmailContactDeletedError,
   EmailSendingDisabledError,
   EmailSuppressedError,
   InvalidAttachmentError,
@@ -487,5 +488,14 @@ describe('sendEmailMessage - conf-MED: outbound reply threading (In-Reply-To/Ref
     const sent = f.send.mock.calls[0]![0] as { inReplyTo?: string; references?: string[] };
     expect(sent.inReplyTo).toBeUndefined();
     expect(sent.references).toBeUndefined();
+  });
+});
+
+describe('sendEmailMessage - deleted-contact guard (2026-08-03 spec)', () => {
+  it('refuses contact_deleted when the contact is soft-deleted (nothing persisted, nothing sent)', async () => {
+    const f = makeFakes({ contact: { deleted_at: '2026-08-01T00:00:00.000Z' } as Partial<ContactItem> });
+    await expect(f.service(input())).rejects.toBeInstanceOf(EmailContactDeletedError);
+    expect(f.append).not.toHaveBeenCalled();
+    expect(f.send).not.toHaveBeenCalled();
   });
 });

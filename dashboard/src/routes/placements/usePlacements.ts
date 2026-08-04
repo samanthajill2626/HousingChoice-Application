@@ -8,8 +8,11 @@
 //     the new stage; we patch the in-memory placement's stage/attention/tour/deadline).
 //
 // Name/address resolution: contacts + units back small lookup maps so a card can
-// show the tenant's name (home) and the property's address. A contact/unit we
-// don't have falls back to the id (honest — never fabricated).
+// show the tenant's name (home) and the property's address — INCLUDING soft-deleted
+// records: a closed placement routinely outlives its contact/unit (tenant moved in,
+// property removed from inventory), and a live-only map rendered raw ids for those
+// rows (same bug/fix as the tours list, 2026-08-03). A contact/unit we don't have
+// falls back to the id (honest — never fabricated).
 import { useCallback, useEffect, useState } from 'react';
 import {
   getPlacements,
@@ -65,17 +68,20 @@ async function loadAllPlacements(signal: AbortSignal): Promise<PlacementItem[]> 
   return all;
 }
 
-/** Best-effort fetch of ALL tenant contacts (paging through nextCursor) — never
- *  throws (except AbortError); a failure just means cards fall back to the tenant
- *  id. The Contacts API requires a `type` filter, so we ask for tenants (the only
- *  contacts a placement's tenant can be). */
-async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
+/** Best-effort page-walk of one tenant-contacts view (live or soft-deleted) —
+ *  never throws (except AbortError); a failure just means cards fall back to the
+ *  tenant id for that view. The Contacts API requires a `type` filter, so we ask
+ *  for tenants (the only contacts a placement's tenant can be). */
+async function loadContactPages(deleted: boolean, signal: AbortSignal): Promise<Contact[]> {
   try {
     const all: Contact[] = [];
     let cursor: string | undefined;
     let pages = 0;
     do {
-      const page = await getContacts({ type: 'tenant', ...(cursor !== undefined && { cursor }) }, signal);
+      const page = await getContacts(
+        { type: 'tenant', ...(deleted && { deleted: true }), ...(cursor !== undefined && { cursor }) },
+        signal,
+      );
       all.push(...page.contacts);
       cursor = page.nextCursor ?? undefined;
       pages += 1;
@@ -91,16 +97,27 @@ async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
   }
 }
 
-/** Best-effort fetch of ALL units (paging through nextCursor) for card property
- *  addresses — never throws (except AbortError); a failure falls back to the unit
- *  id. */
-async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {
+/** All tenant contacts a placement can reference: soft-deleted THEN live, so the
+ *  Map construction (last write wins) resolves a defensive id collision to the
+ *  live record. Each view is independently best-effort. */
+async function loadContacts(signal: AbortSignal): Promise<Contact[]> {
+  const [deleted, live] = await Promise.all([
+    loadContactPages(true, signal),
+    loadContactPages(false, signal),
+  ]);
+  return [...deleted, ...live];
+}
+
+/** Best-effort page-walk of one units view (live or soft-deleted) for card
+ *  property addresses — never throws (except AbortError); a failure falls back
+ *  to the unit id for that view. */
+async function loadUnitPages(deleted: boolean, signal: AbortSignal): Promise<UnitItem[]> {
   try {
     const all: UnitItem[] = [];
     let cursor: string | undefined;
     let pages = 0;
     do {
-      const page = await getUnits({ cursor }, signal);
+      const page = await getUnits({ ...(deleted && { deleted: true }), cursor }, signal);
       all.push(...page.units);
       cursor = page.nextCursor ?? undefined;
       pages += 1;
@@ -114,6 +131,16 @@ async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {
     if (err instanceof DOMException && err.name === 'AbortError') throw err;
     return [];
   }
+}
+
+/** All units a placement can reference: soft-deleted THEN live (live wins a
+ *  defensive id collision in the Map). Each view is independently best-effort. */
+async function loadUnits(signal: AbortSignal): Promise<UnitItem[]> {
+  const [deleted, live] = await Promise.all([
+    loadUnitPages(true, signal),
+    loadUnitPages(false, signal),
+  ]);
+  return [...deleted, ...live];
 }
 
 interface CommittedState {

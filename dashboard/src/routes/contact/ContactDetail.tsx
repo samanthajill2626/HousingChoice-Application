@@ -259,7 +259,11 @@ export function ContactDetail(): React.JSX.Element {
   // Sendable when a thread already resolves OR the contact has a number to start
   // one with — a BRAND-NEW contact has no conversation yet, so the first send
   // creates it (ensureContactConversation in onSend) instead of graying out.
-  const canSend = sendConvId !== null || target !== undefined;
+  // Soft-deleted contact: the composer is locked (restore to reply). canSend
+  // gates the Send affordances; the server also refuses with 409
+  // contact_deleted (belt and braces).
+  const deleted = typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
+  const canSend = (sendConvId !== null || target !== undefined) && !deleted;
   // Email channel (A6): the contact's addresses + which conversation an email
   // sends into. Prefer an existing email thread; else the default (phone) thread;
   // else onSendEmail creates/gets the 1:1. The A5 route attaches the email claim
@@ -534,7 +538,7 @@ export function ContactDetail(): React.JSX.Element {
   // out of the normal views — so on success we navigate back to the Contacts list
   // (it can be restored from the Deleted tab). Restore stays on the page and
   // applies the returned contact in place so the Deleted banner clears.
-  const deleted = typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
+  // (`deleted` itself is computed higher up, beside canSend.)
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
@@ -652,7 +656,8 @@ export function ContactDetail(): React.JSX.Element {
         <div className={styles.deletedBanner} role="status">
           <span>
             This contact is <strong>deleted</strong> — hidden from the contact lists,
-            inbox, and today. Its data is retained.
+            inbox, and today. If they message again, the thread resurfaces in the
+            inbox until read. Data is retained.
           </span>
           <Button variant="secondary" size="sm" type="button" onClick={onRestore} disabled={deleteBusy}>
             Restore
@@ -704,6 +709,8 @@ export function ContactDetail(): React.JSX.Element {
             onSend={onSend}
             onRetry={onRetry}
             optedOut={optedOut}
+            deleted={deleted}
+            onRestore={onRestore}
             clearDraftSignal={clearDraftSignal}
             resetScrollKey={contactId}
             emailChannel={{
@@ -938,7 +945,9 @@ export function ContactDetail(): React.JSX.Element {
         >
           <p>
             <strong>{name}</strong> will be hidden from the contact lists, inbox, and today.
-            Nothing is erased — you can restore them from the Contacts <em>Deleted</em> view.
+            If they message you again, the conversation resurfaces in the inbox so you can
+            review it. Nothing is erased — you can restore them from the Contacts{' '}
+            <em>Deleted</em> view.
           </p>
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>

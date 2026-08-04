@@ -371,7 +371,7 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
       const nowIso = new Date().toISOString();
       const wallClockQuiet = isQuietTime(nowIso, window);
       quietFor = (dueAt: string): boolean =>
-        isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso);
+        (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso);
     }
     const suppressionFor = (row: PlacementNudgeItem): ScheduledSuppression | undefined => {
       const rungStage = STAGE_BY_KIND[row.kind];

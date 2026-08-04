@@ -928,7 +928,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
           conversationsRepo: conversations,
           repos: scheduledRepos,
           quietFor: (dueAt: string) =>
-            isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso),
+            (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
           log,
         });
       } catch (err) {

@@ -304,11 +304,15 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // OWN time against the DAILY-RECURRING window - knowable in advance - and
       // the chip is a claim about the future ("Will wait"). So it is evaluated
       // PER ROW, as two disjuncts:
-      //   1. isQuietTime(dueAt) - the rung's own due instant falls inside an
-      //      occurrence of the window, so the fire-time backstop WILL defer it
-      //      when it comes due. A legacy/unclamped row due at 04:00 chips
-      //      honestly around the clock (including at noon), while a rung due
-      //      Friday afternoon never chips at 03:00.
+      //   1. dueAt > now && isQuietTime(dueAt) - a FUTURE rung whose due
+      //      instant falls inside an occurrence of the window, so the fire-time
+      //      backstop WILL defer it when it comes due. A legacy/unclamped row
+      //      due at 04:00 tomorrow chips honestly around the clock (including
+      //      at noon), while a rung due Friday afternoon never chips at 03:00.
+      //      The dueAt > now guard is the stalled-poller edge (N1): an OVERDUE
+      //      rung whose dueAt sat inside a now-ENDED occurrence is one poll
+      //      tick from sending - "Will wait" would be a lie about the past, so
+      //      overdue rungs are disjunct 2's business alone.
       //   2. wallClockQuiet && dueAt <= now - a rung already due while the
       //      window is running is being deferred by that backstop RIGHT NOW even
       //      when its dueAt sits outside the window (worker-downtime catch-up
@@ -326,7 +330,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // them lexicographically against the normalized nowIso.
       const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
       suppressionOf = (dueAt: string): ScheduledSuppression | undefined =>
-        evaluate(isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso));
+        evaluate((dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso));
     }
 
     const reminderViews: TourReminderView[] = rows

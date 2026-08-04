@@ -942,6 +942,37 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up[1]!.suppression).toEqual({ reason: 'quiet_hours' });
   });
 
+  // N1 (stalled-poller edge): once the window has ENDED, an overdue rung is one
+  // poll tick from sending - "Will wait" would be a lie about the past. Its
+  // in-window dueAt must not chip it via the rung-time disjunct; only a rung
+  // still in the FUTURE reads its own dueAt against the window.
+  it('outside the window, an OVERDUE rung with an in-window dueAt is not chipped', async () => {
+    const { world, app } = makeGatherHarness(quietLaterSettingsRepo());
+    const phone = '+15550600019';
+    world.contacts.push({ contactId: 'ct-19', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-19', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-19',
+      unitId: 'u-19',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Overdue, and its wall time sits inside a PAST occurrence of the window
+    // (-20h = the same wall time as +4h): the poller already released it when
+    // that occurrence ended, so nothing is holding it now.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(-20),
+    });
+
+    const res = await request(app).get('/api/contacts/ct-19/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(1);
+    expect(up[0]!.suppression).toBeUndefined();
+  });
+
   it('an opted-out tenant inside the quiet window still reports contact_opted_out (quiet is LAST)', async () => {
     const { world, app } = makeGatherHarness(quietNowSettingsRepo());
     const phone = '+15550600008';

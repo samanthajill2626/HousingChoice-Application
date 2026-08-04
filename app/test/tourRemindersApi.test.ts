@@ -376,6 +376,32 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(byId.get('rem-quiet-before')?.suppression).toBeUndefined();
   });
 
+  // N1 (stalled-poller edge): once the window has ENDED, an overdue rung is one
+  // poll tick from sending - "Will wait" would be a lie about the past. Its
+  // in-window dueAt must not chip it via the rung-time disjunct; only a rung
+  // still in the FUTURE reads its own dueAt against the window.
+  it('outside the window, an OVERDUE rung with an in-window dueAt is not chipped', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAwayFromNow());
+    const tourId = await seedQuietTour(world, 'view-7', '+15550600017');
+    // Overdue, and its wall time sits inside a PAST occurrence of the window
+    // (-20h = the same wall time as +4h): the poller already released it when
+    // that occurrence ended, so nothing is holding it now.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-staleheld',
+      tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(-20),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toBeUndefined();
+  });
+
   it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
     const { app, world } = makeWebhookHarness();
     world.settings.quietHoursEnabled = false;

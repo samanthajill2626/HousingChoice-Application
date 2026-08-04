@@ -29,8 +29,9 @@
 // DEFERRED or refused at fire time, in the SAME shape the tour-reminder view
 // uses (TourReminderView.suppression) so the dashboard renders one chip for
 // both ladders. Fed only the inputs this read already has in hand: the
-// quiet-hours window (server wall clock), the kill switch (config) and the
-// stale-stage check (the placement is already loaded). Per-recipient opt-out
+// quiet-hours window (against each rung's OWN dueAt - see the GET below), the
+// kill switch (config) and the stale-stage check (the placement is already
+// loaded). Per-recipient opt-out
 // and per-conversation manual mode are deliberately NOT resolved - they need a
 // new per-row contact/conversation lookup whose recipient differs per rung -
 // so this estimate is a SUBSET of the tour view's. Gap tracked in
@@ -360,10 +361,17 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
     // is and is NOT evaluated here. The quiet-hours window is read once per
     // request and only when something could still fire.
     const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
-    let quietNow = false;
+    // Quiet hours is evaluated PER ROW - the rung's own dueAt falls inside an
+    // occurrence of the daily-recurring window, or it is already due while the
+    // window is running. Full rationale at the same call site in
+    // routes/tourReminders.ts.
+    let quietFor: (dueAt: string) => boolean = () => false;
     if (hasUpcoming) {
       const window = await readQuietHoursWindow(settings, log);
-      quietNow = isQuietTime(new Date().toISOString(), window);
+      const nowIso = new Date().toISOString();
+      const wallClockQuiet = isQuietTime(nowIso, window);
+      quietFor = (dueAt: string): boolean =>
+        isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso);
     }
     const suppressionFor = (row: PlacementNudgeItem): ScheduledSuppression | undefined => {
       const rungStage = STAGE_BY_KIND[row.kind];
@@ -379,7 +387,7 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
         contactOptOut: undefined,
         aiMode: undefined,
         staleStage: rungStage !== undefined && rungStage !== placement.stage,
-        quietNow,
+        quietNow: quietFor(row.dueAt),
       });
     };
 
@@ -394,7 +402,11 @@ export function createPlacementNudgesRouter(deps: PlacementNudgesRouterDeps = {}
       .sort((a, b) => (a.dueAt < b.dueAt ? 1 : a.dueAt > b.dueAt ? -1 : 0));
 
     log.info(
-      { placementId, count: nudgeViews.length, quietNow },
+      {
+        placementId,
+        count: nudgeViews.length,
+        suppressed: nudgeViews.some((v) => v.suppression !== undefined),
+      },
       'placement nudges read',
     );
     res.json({ nudges: nudgeViews });

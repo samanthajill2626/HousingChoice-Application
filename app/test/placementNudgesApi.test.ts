@@ -24,7 +24,11 @@ import type {
 } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { quietWindowAroundNow } from './helpers/settingsStub.js';
+import {
+  isoHoursFromNow,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -96,6 +100,22 @@ function seedNudge(
     ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.placementNudgesMap.set(item.nudgeId, item);
+}
+
+/**
+ * Seed a placement whose stage MATCHES its rung (a mismatched stage would report
+ * the harder stale_stage reason) plus one upcoming receipt_check rung due at
+ * `dueAt`, and return the placementId. One placement per rung keeps each
+ * quiet-hours case a clean read of that rung's own dueAt.
+ */
+async function seedQuietNudge(world: FakeWorld, suffix: string, dueAt: string): Promise<string> {
+  const placementId = await seedPlacement(world, {
+    tenantId: `contact-nudge-quiet-${suffix}`,
+    unitId: `unit-nudge-quiet-${suffix}`,
+    stage: 'awaiting_receipt',
+  });
+  seedNudge(world, { nudgeId: `nudge-quiet-${suffix}`, placementId, kind: 'receipt_check', dueAt });
+  return placementId;
 }
 
 describe('GET /api/placements/:placementId/nudges', () => {
@@ -191,10 +211,11 @@ describe('GET /api/placements/:placementId/nudges', () => {
   });
 
   // Quiet hours (spec 2026-08-03) brought the FIRST suppression estimate to the
-  // nudge view. It is evaluated against the server wall clock (would this rung
-  // go out right NOW?), so the window stub is computed from the current time -
-  // a fixed 21:00-08:00 fixture would be time-of-day dependent.
-  it('carries a quiet_hours suppression estimate on an upcoming rung while the window contains now', async () => {
+  // nudge view. The chip is a claim about the FUTURE ("Will wait"), so it is a
+  // property of the RUNG - its own dueAt against the daily-recurring window -
+  // not of the server wall clock. The window stub is still computed from the
+  // current time; a fixed 21:00-08:00 fixture would be time-of-day dependent.
+  it('carries a quiet_hours suppression estimate on a rung due inside a window occurrence', async () => {
     const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAroundNow());
     const placementId = await seedPlacement(world, {
@@ -202,11 +223,12 @@ describe('GET /api/placements/:placementId/nudges', () => {
       unitId: 'unit-nudge-quiet-1',
       stage: 'awaiting_receipt',
     });
+    // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
     seedNudge(world, {
       nudgeId: 'nudge-quiet-1',
       placementId,
       kind: 'receipt_check',
-      dueAt: '2026-07-14T08:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
     // A terminal rung must never carry an estimate (nothing is going to fire).
     seedNudge(world, {
@@ -226,6 +248,46 @@ describe('GET /api/placements/:placementId/nudges', () => {
     );
     expect(byId.get('nudge-quiet-1')?.suppression).toEqual({ reason: 'quiet_hours' });
     expect(byId.get('nudge-quiet-sent')?.suppression).toBeUndefined();
+  });
+
+  /** The first (only) rung's suppression on a placement, via the real route. */
+  async function suppressionOf(
+    app: ReturnType<typeof makeWebhookHarness>['app'],
+    placementId: string,
+  ): Promise<unknown> {
+    const res = await authed(app).get(`/api/placements/${placementId}/nudges`);
+    expect(res.status).toBe(200);
+    const [nudge] = res.body.nudges as { suppression?: { reason: string } }[];
+    return nudge?.suppression;
+  }
+
+  // The SF1 false positive: inside the window the wall clock says "quiet", but a
+  // rung due days from now will not wait for tonight's window - while a rung
+  // already due IS being held by the fire-time backstop right now.
+  it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    // Three days out at a time of day outside EVERY occurrence of the window.
+    const far = await seedQuietNudge(world, 'far', isoHoursFromNow(3 * 24 + 6));
+    // Already due, with a dueAt outside every occurrence: the poll is deferring
+    // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    const overdue = await seedQuietNudge(world, 'overdue', isoHoursFromNow(-30));
+
+    expect(await suppressionOf(app, far)).toBeUndefined();
+    expect(await suppressionOf(app, overdue)).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The other half of SF1: during business hours a rung genuinely due at 23:00
+  // tonight WILL be deferred, so it must chip even though the clock is outside
+  // the window - exactly when staff are looking at the card.
+  it('outside the window, still chips a rung due inside tonight occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAwayFromNow());
+    const tonight = await seedQuietNudge(world, 'tonight', isoHoursFromNow(4));
+    const before = await seedQuietNudge(world, 'before', isoHoursFromNow(1));
+
+    expect(await suppressionOf(app, tonight)).toEqual({ reason: 'quiet_hours' });
+    expect(await suppressionOf(app, before)).toBeUndefined();
   });
 
   it('carries NO suppression when quiet hours are disabled', async () => {
@@ -259,11 +321,13 @@ describe('GET /api/placements/:placementId/nudges', () => {
       unitId: 'unit-nudge-quiet-3',
       stage: 'awaiting_completion',
     });
+    // A dueAt inside tomorrow's occurrence, so quiet hours WOULD chip this rung
+    // on its own - stale_stage has to outrank it, not merely fill a gap.
     seedNudge(world, {
       nudgeId: 'nudge-quiet-3',
       placementId,
       kind: 'receipt_check',
-      dueAt: '2026-07-14T08:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
 
     const res = await authed(app).get(`/api/placements/${placementId}/nudges`);

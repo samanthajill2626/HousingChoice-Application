@@ -27,9 +27,9 @@ export function evaluateScheduledSendSuppression(input: {
   contactOptOut: boolean | undefined;
   aiMode: string | undefined;
   staleStage?: boolean;
-  /** Is the evaluation instant inside the org's quiet-hours window
-   *  (lib/quietHours.ts isQuietTime)? Callers compute it; this module stays
-   *  clock-free. */
+  /** Will quiet hours hold THIS row: its due instant is inside a window
+   *  occurrence, or it is due now while the window is active? Callers compute
+   *  it (lib/quietHours.ts isQuietTime); this module stays clock-free. */
   quietNow?: boolean;
 }): ScheduledSuppression | undefined {
   if (isKillSwitchOff(input.smsSendingEnabled)) return { reason: 'sms_sending_disabled' };

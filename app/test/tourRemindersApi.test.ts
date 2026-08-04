@@ -23,7 +23,11 @@ import type {
 } from '../src/services/sendMessage.js';
 import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
-import { quietWindowAroundNow } from './helpers/settingsStub.js';
+import {
+  isoHoursFromNow,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -80,6 +84,38 @@ function seedReminder(
     ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.tourRemindersMap.set(item.reminderId, item);
+}
+
+/**
+ * Seed a tenant + their 1:1 thread + a self_guided tour (the unambiguous 1:1
+ * route, the only shape that gets a suppression estimate) and return its tourId.
+ * Nothing here suppresses on its own, so the quiet cases below assert purely on
+ * each rung's dueAt.
+ */
+async function seedQuietTour(world: FakeWorld, suffix: string, phone: string): Promise<string> {
+  const tenantId = `contact-quiet-${suffix}`;
+  world.contacts.push({
+    contactId: tenantId,
+    type: 'tenant',
+    phone,
+    created_at: '2026-07-13T00:00:00.000Z',
+  } as Parameters<typeof world.contacts.push>[0]);
+  world.conversations.set(`conv-quiet-${suffix}`, {
+    conversationId: `conv-quiet-${suffix}`,
+    participant_phone: phone,
+    status: 'open',
+    type: 'tenant_1to1',
+    ai_mode: 'auto',
+    last_activity_at: '2026-07-13T00:00:00.000Z',
+    created_at: '2026-07-13T00:00:00.000Z',
+  });
+  const created = await world.toursRepo.create({
+    tenantId,
+    unitId: `unit-quiet-${suffix}`,
+    scheduledAt: '2099-01-10T10:00:00.000Z',
+    tourType: 'self_guided',
+  });
+  return created.tourId;
 }
 
 describe('GET /api/tours/:tourId/reminders', () => {
@@ -248,51 +284,96 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
-  // Quiet hours (spec 2026-08-03): the estimate answers "would this rung go out
-  // right NOW?", so it is evaluated against the server wall clock - hence the
-  // window-around-now stub rather than a fixed 21:00-08:00 fixture (which would
-  // make the case pass or fail depending on when the suite runs).
-  it('carries a quiet_hours suppression estimate while the org window contains now', async () => {
+  // Quiet hours (spec 2026-08-03): the chip is a claim about the FUTURE ("Will
+  // wait"), so it is a property of the RUNG - its own dueAt against the
+  // daily-recurring window - not of the server wall clock. The window stub is
+  // still built from the current time (never a fixed 21:00-08:00, which would
+  // make these cases pass or fail depending on when the suite runs).
+  it('carries a quiet_hours suppression estimate for a rung due inside a window occurrence', async () => {
     const { app, world } = makeWebhookHarness();
     Object.assign(world.settings, quietWindowAroundNow());
-
-    const tenantPhone = '+15550600011';
-    const tenantId = 'contact-quiet-view-1';
-    world.contacts.push({
-      contactId: tenantId,
-      type: 'tenant',
-      phone: tenantPhone,
-      created_at: '2026-07-13T00:00:00.000Z',
-    } as Parameters<typeof world.contacts.push>[0]);
-    world.conversations.set('conv-quiet-view-1', {
-      conversationId: 'conv-quiet-view-1',
-      participant_phone: tenantPhone,
-      status: 'open',
-      type: 'tenant_1to1',
-      ai_mode: 'auto',
-      last_activity_at: '2026-07-13T00:00:00.000Z',
-      created_at: '2026-07-13T00:00:00.000Z',
-    });
-
-    const created = await world.toursRepo.create({
-      tenantId,
-      unitId: 'unit-quiet-view-1',
-      scheduledAt: '2026-07-15T10:00:00.000Z',
-      tourType: 'self_guided',
-    });
+    const tourId = await seedQuietTour(world, 'view-1', '+15550600011');
+    // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
     seedReminder(world, {
       reminderId: 'rem-quiet-view-1',
-      tourId: created.tourId,
+      tourId,
       kind: 'day_before',
-      dueAt: '2026-07-14T10:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
 
-    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
     expect(res.status).toBe(200);
     const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
       (r) => r.state === 'upcoming',
     );
     expect(upcoming?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The SF1 false positive: at 03:00 the wall clock is quiet, but a rung due
+  // Friday afternoon will not wait for anything, so it must NOT be chipped -
+  // while a rung already due IS being held by the fire-time backstop right now.
+  it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const tourId = await seedQuietTour(world, 'view-5', '+15550600015');
+    // Three days out at a time of day outside EVERY occurrence of the window.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-far',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(3 * 24 + 6),
+    });
+    // Already due, with a dueAt outside every occurrence: the poll is deferring
+    // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    seedReminder(world, {
+      reminderId: 'rem-quiet-overdue',
+      tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(-30),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-quiet-far')?.suppression).toBeUndefined();
+    expect(byId.get('rem-quiet-overdue')?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The other half of SF1: during business hours a rung genuinely due at 23:00
+  // tonight WILL be deferred, so it must chip even though the clock is outside
+  // the window - exactly when staff are looking at the panel.
+  it('outside the window, still chips a rung due inside tonight occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAwayFromNow());
+    const tourId = await seedQuietTour(world, 'view-6', '+15550600016');
+    seedReminder(world, {
+      reminderId: 'rem-quiet-tonight',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(4), // inside tonight's occurrence
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-before',
+      tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(1), // future, but before the window opens
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-quiet-tonight')?.suppression).toEqual({ reason: 'quiet_hours' });
+    expect(byId.get('rem-quiet-before')?.suppression).toBeUndefined();
   });
 
   it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
@@ -367,11 +448,13 @@ describe('GET /api/tours/:tourId/reminders', () => {
       scheduledAt: '2026-07-15T10:00:00.000Z',
       tourType: 'self_guided',
     });
+    // A dueAt inside tomorrow's occurrence, so quiet hours WOULD chip this rung
+    // on its own - the opt-out has to outrank it, not merely fill a gap.
     seedReminder(world, {
       reminderId: 'rem-quiet-view-3',
       tourId: created.tourId,
       kind: 'day_before',
-      dueAt: '2026-07-14T10:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
 
     const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);

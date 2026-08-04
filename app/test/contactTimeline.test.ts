@@ -20,6 +20,8 @@ import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import type { ConversationItem, ConversationType } from '../src/repos/conversationsRepo.js';
 import {
+  isoHoursFromNow,
+  quietLaterSettingsRepo,
   quietNowSettingsRepo,
   quietOffSettingsRepo,
   type SettingsReadRepo,
@@ -823,9 +825,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
 
   // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator caller,
   // so a rung deferred by the window must read the same here as on the tour /
-  // placement panels. Evaluated against the server wall clock, hence the
-  // window-around-now stub (never a fixed HH:MM - that would be time-of-day
-  // dependent).
+  // placement panels - including the per-RUNG scoping: the chip is a claim
+  // about the future, so it follows each rung's own dueAt against the
+  // daily-recurring window, not the server wall clock. The window stub is built
+  // from the current time (never a fixed HH:MM - time-of-day dependent).
   it('inside the quiet window BOTH ladders carry suppression quiet_hours', async () => {
     const { world, app } = makeGatherHarness(quietNowSettingsRepo());
     const phone = '+15550600007';
@@ -837,10 +840,12 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       scheduledAt: '2099-01-10T10:00:00.000Z',
       tourType: 'self_guided',
     });
+    // Both rungs are due at the same wall time tomorrow: inside TOMORROW's
+    // occurrence of the window (the rung due later sorts second).
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
       kind: 'confirmation',
-      dueAt: '2099-01-05T10:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
     const placement = await world.placementsRepo.create({
       tenantId: 'ct-7',
@@ -850,7 +855,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     await world.placementNudgesRepo.create({
       placementId: placement.placementId,
       kind: 'receipt_check',
-      dueAt: '2099-01-06T10:00:00.000Z',
+      dueAt: isoHoursFromNow(24.5),
     });
 
     const res = await request(app).get('/api/contacts/ct-7/timeline');
@@ -859,6 +864,81 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up).toHaveLength(2);
     expect(up.map((i) => i.source)).toEqual(['tour_reminder', 'placement_nudge']);
     expect(up.every((i) => JSON.stringify(i.suppression) === JSON.stringify({ reason: 'quiet_hours' }))).toBe(true);
+  });
+
+  // The SF1 false positive: inside the window the wall clock says "quiet", but a
+  // rung due days from now will not wait for tonight's window - while a rung
+  // already due IS being held by the fire-time backstop right now.
+  it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
+    const { world, app } = makeGatherHarness(quietNowSettingsRepo());
+    const phone = '+15550600017';
+    world.contacts.push({ contactId: 'ct-17', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-17', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-17',
+      unitId: 'u-17',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Already due, with a dueAt outside every occurrence: the poll is deferring
+    // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(-30),
+    });
+    // Three days out at a time of day outside EVERY occurrence of the window.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(3 * 24 + 6),
+    });
+
+    const res = await request(app).get('/api/contacts/ct-17/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.suppression).toEqual({ reason: 'quiet_hours' });
+    expect(up[1]!.reminderKind).toBe('day_before');
+    expect(up[1]!.suppression).toBeUndefined();
+  });
+
+  // The other half of SF1: during business hours a rung genuinely due at 23:00
+  // tonight WILL be deferred, so it must chip even though the clock is outside
+  // the window - exactly when staff are looking at the timeline.
+  it('outside the window, still chips a rung due inside tonight occurrence', async () => {
+    const { world, app } = makeGatherHarness(quietLaterSettingsRepo());
+    const phone = '+15550600018';
+    world.contacts.push({ contactId: 'ct-18', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-18', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-18',
+      unitId: 'u-18',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // Future, but before the window opens.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(1),
+    });
+    // Inside tonight's occurrence.
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(4),
+    });
+
+    const res = await request(app).get('/api/contacts/ct-18/timeline');
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(2);
+    expect(up[0]!.reminderKind).toBe('confirmation');
+    expect(up[0]!.suppression).toBeUndefined();
+    expect(up[1]!.reminderKind).toBe('day_before');
+    expect(up[1]!.suppression).toEqual({ reason: 'quiet_hours' });
   });
 
   it('an opted-out tenant inside the quiet window still reports contact_opted_out (quiet is LAST)', async () => {
@@ -872,10 +952,12 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
       scheduledAt: '2099-01-10T10:00:00.000Z',
       tourType: 'self_guided',
     });
+    // Inside tomorrow's occurrence, so quiet hours WOULD chip this rung on its
+    // own - the opt-out has to outrank it, not merely fill a gap.
     await world.tourRemindersRepo.create({
       tourId: tour.tourId,
       kind: 'confirmation',
-      dueAt: '2099-01-05T10:00:00.000Z',
+      dueAt: isoHoursFromNow(24),
     });
 
     const res = await request(app).get('/api/contacts/ct-8/timeline');

@@ -572,12 +572,13 @@ async function gatherUpcoming(params: {
   config: AppConfig;
   conversationsRepo: ConversationsRepo;
   repos: ScheduledGatherRepos;
-  /** Is the SERVER WALL CLOCK inside the org quiet-hours window right now? The
-   *  caller computes it once per request (this gather stays clock-free). */
-  quietNow: boolean;
+  /** Will quiet hours hold a rung due at `dueAt`? The caller builds it once per
+   *  request from the org window + the wall clock (this gather stays
+   *  clock-free); see routes/tourReminders.ts for the formula's rationale. */
+  quietFor: (dueAt: string) => boolean;
   log: Logger;
 }): Promise<TimelineScheduled[]> {
-  const { contact, config, conversationsRepo, repos, quietNow, log } = params;
+  const { contact, config, conversationsRepo, repos, quietFor, log } = params;
   const contactId = contact.contactId;
 
   // Resolve the contact's 1:1 threads the SAME way the pollers do — from the
@@ -595,6 +596,7 @@ async function gatherUpcoming(params: {
   const suppressionFor = (
     conv: ConversationItem | undefined,
     staleStage: boolean,
+    dueAt: string,
   ): ScheduledSuppression | undefined =>
     evaluateScheduledSendSuppression({
       smsSendingEnabled: config.smsSendingEnabled,
@@ -604,8 +606,8 @@ async function gatherUpcoming(params: {
       staleStage,
       // Quiet hours (spec 2026-08-03): the timeline is the THIRD evaluator
       // caller, so a deferred rung reads the same here as on the tour /
-      // placement panels.
-      quietNow,
+      // placement panels - including the per-RUNG scoping.
+      quietNow: quietFor(dueAt),
     });
 
   /** Map upcoming nudge rows of ONE recipient on ONE placement → items. */
@@ -620,7 +622,7 @@ async function gatherUpcoming(params: {
       if (row.sentAt !== undefined || row.canceledAt !== undefined) continue; // upcoming only
       const info = NUDGE_RUNG_BY_KIND.get(row.kind);
       if (info === undefined || info.recipient !== recipient) continue; // scope to this recipient
-      const suppression = suppressionFor(conv, placement.stage !== info.stage);
+      const suppression = suppressionFor(conv, placement.stage !== info.stage, row.dueAt);
       items.push({
         kind: 'scheduled',
         id: `sched#placement_nudge#${row.nudgeId}`,
@@ -660,7 +662,7 @@ async function gatherUpcoming(params: {
         }
         if (!routes1to1) return [];
         return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
-          const suppression = suppressionFor(tenantConv, false);
+          const suppression = suppressionFor(tenantConv, false, row.dueAt);
           return {
             kind: 'scheduled',
             id: `sched#tour_reminder#${row.reminderId}`,
@@ -912,16 +914,21 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     let upcoming: TimelineScheduled[] = [];
     if (boundaryKey === undefined && kinds.has('scheduled') && scheduledRepos !== undefined) {
       try {
-        // Quiet hours (spec 2026-08-03): "would this rung go out RIGHT NOW?" -
-        // evaluated against the server wall clock, matching the tour-reminder
-        // and placement-nudge panels.
+        // Quiet hours (spec 2026-08-03): evaluated PER ROW - the rung's own
+        // dueAt falls inside an occurrence of the daily-recurring window, or it
+        // is already due while the window is running. Full rationale at the same
+        // call site in routes/tourReminders.ts; the tour-reminder and
+        // placement-nudge panels use the same formula.
         const window = await readQuietHoursWindow(settings, log);
+        const nowIso = new Date().toISOString();
+        const wallClockQuiet = isQuietTime(nowIso, window);
         upcoming = await gatherUpcoming({
           contact,
           config,
           conversationsRepo: conversations,
           repos: scheduledRepos,
-          quietNow: isQuietTime(new Date().toISOString(), window),
+          quietFor: (dueAt: string) =>
+            isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso),
           log,
         });
       } catch (err) {

@@ -27,7 +27,7 @@
 // fire time - kill-switch / opt-out / manual mode / quiet hours - computed via
 // the shared evaluateScheduledSendSuppression (Task 1) against config, the
 // tenant's conversation/contact, and the org quiet-hours window evaluated
-// against the server WALL CLOCK (see the GET handler). It is deliberately
+// against each rung's OWN dueAt (see the GET handler). It is deliberately
 // scoped to rungs that route 1:1 — for THIS task, that is the unambiguous
 // self_guided route; Task 4 exports resolveUsableGroup and tightens the
 // group-routed (landlord_led / pm_team) case. Non-1:1 rungs carry no estimate.
@@ -297,27 +297,43 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // unambiguous self_guided route (Task 4 tightens the group case). A
     // non-self_guided tour never gets an estimate here.
     const hasUpcoming = rows.some((r) => stateOf(r) === 'upcoming');
-    let suppression: ScheduledSuppression | undefined;
+    let suppressionOf: ((dueAt: string) => ScheduledSuppression | undefined) | undefined;
     if (tour.tourType === 'self_guided' && hasUpcoming) {
-      // Quiet hours (spec 2026-08-03): the estimate answers "would this rung's
-      // automated send go out RIGHT NOW?", so the window is evaluated against
-      // the server wall clock - not against each rung's dueAt. A rung due at
-      // 22:00 shows the chip once 22:00 arrives, which is exactly when the
-      // poller would defer it.
+      // Quiet hours (spec 2026-08-03): unlike the state-dependent reasons
+      // (opt-out, manual mode), a rung's quiet-ness is a function of the RUNG's
+      // OWN time against the DAILY-RECURRING window - knowable in advance - and
+      // the chip is a claim about the future ("Will wait"). So it is evaluated
+      // PER ROW, as two disjuncts:
+      //   1. isQuietTime(dueAt) - the rung's own due instant falls inside an
+      //      occurrence of the window, so the fire-time backstop WILL defer it
+      //      when it comes due. A legacy/unclamped row due at 04:00 chips
+      //      honestly around the clock (including at noon), while a rung due
+      //      Friday afternoon never chips at 03:00.
+      //   2. wallClockQuiet && dueAt <= now - a rung already due while the
+      //      window is running is being deferred by that backstop RIGHT NOW even
+      //      when its dueAt sits outside the window (worker-downtime catch-up
+      //      that crossed window-start: the backstop's own motivating case).
+      // Post-feature rows are clamped OUT of the window at arm time, so they
+      // never chip - correct, they really will fire at their stored dueAt.
+      // routes/placementNudges.ts and routes/contactTimeline.ts apply the same
+      // formula; this comment is the single explanation for all three.
       const window = await readQuietHoursWindow(settings, log);
-      const quietNow = isQuietTime(new Date().toISOString(), window);
-      suppression = await resolveTenantSuppression(
-        tour,
-        config,
-        contacts,
-        conversations,
-        quietNow,
-      );
+      const nowIso = new Date().toISOString();
+      const wallClockQuiet = isQuietTime(nowIso, window);
+      // The tenant's contact/thread inputs cost IO and back EVERY 1:1-routed
+      // rung identically, so they are resolved once; only the quiet flag is
+      // per-row. Stored dueAts are already normalized ISO, so `<=` compares
+      // them lexicographically against the normalized nowIso.
+      const evaluate = await resolveTenantSuppression(tour, config, contacts, conversations);
+      suppressionOf = (dueAt: string): ScheduledSuppression | undefined =>
+        evaluate(isQuietTime(dueAt, window) || (wallClockQuiet && dueAt <= nowIso));
     }
 
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
         const state = stateOf(row);
+        const suppression =
+          state === 'upcoming' && suppressionOf !== undefined ? suppressionOf(row.dueAt) : undefined;
         const view: TourReminderView = {
           reminderId: row.reminderId,
           kind: row.kind,
@@ -328,7 +344,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
           ...(row.skipReason !== undefined && { skipReason: row.skipReason }),
-          ...(state === 'upcoming' && suppression !== undefined && { suppression }),
+          ...(suppression !== undefined && { suppression }),
         };
         return view;
       })
@@ -338,7 +354,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     const next = reminderViews.find((v) => v.state === 'upcoming');
 
     log.info(
-      { tourId, count: reminderViews.length, hasNext: next !== undefined, suppressed: suppression !== undefined },
+      {
+        tourId,
+        count: reminderViews.length,
+        hasNext: next !== undefined,
+        suppressed: reminderViews.some((v) => v.suppression !== undefined),
+      },
       'tour reminders read',
     );
 
@@ -372,15 +393,19 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
  * poll's 1:1 route (jobs/tourReminders.ts): the tenant contact → primary phone →
  * their 1:1 conversation → conversation/contact opt-out + conversation ai_mode,
  * fed through the shared evaluator. `staleStage` is nudge-only, so it is never
- * passed for tour reminders. Returns undefined when nothing suppresses the send.
+ * passed for tour reminders.
+ *
+ * Returns an EVALUATOR rather than one verdict: those inputs are per-TENANT and
+ * cost IO, but quiet-ness is per-RUNG (see the call site), so the caller passes
+ * its own flag per row. The returned function yields undefined when nothing
+ * suppresses the send.
  */
 async function resolveTenantSuppression(
   tour: TourItem,
   config: AppConfig,
   contacts: ContactsRepo,
   conversations: ConversationsRepo,
-  quietNow: boolean,
-): Promise<ScheduledSuppression | undefined> {
+): Promise<(quietNow: boolean) => ScheduledSuppression | undefined> {
   const contact = await contacts.getById(tour.tenantId);
   const phone = contact?.phone;
   const convs =
@@ -389,11 +414,12 @@ async function resolveTenantSuppression(
       : [];
   const conv = convs.find((c) => c.type === 'tenant_1to1' || c.type === 'unknown_1to1');
 
-  return evaluateScheduledSendSuppression({
-    smsSendingEnabled: config.smsSendingEnabled,
-    convOptOut: conv?.sms_opt_out,
-    contactOptOut: contact?.sms_opt_out === true,
-    aiMode: conv?.ai_mode,
-    quietNow,
-  });
+  return (quietNow: boolean) =>
+    evaluateScheduledSendSuppression({
+      smsSendingEnabled: config.smsSendingEnabled,
+      convOptOut: conv?.sms_opt_out,
+      contactOptOut: contact?.sms_opt_out === true,
+      aiMode: conv?.ai_mode,
+      quietNow,
+    });
 }

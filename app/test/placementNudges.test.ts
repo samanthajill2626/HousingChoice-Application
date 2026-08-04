@@ -903,6 +903,25 @@ describe('forceSendNudge', () => {
     expect(row.skippedAt).toBeUndefined();
   });
 
+  // A SOFT-DELETED recipient refuses PRE-claim. sendMessage refuses any 1:1 to a
+  // deleted contact (ContactDeletedError), so without this gate the click would
+  // claim the row (the claim IS the sentAt stamp) and only then throw - burning
+  // the rung for a state we can check up front.
+  it('refuses contact_deleted WITHOUT claiming (the rung stays pending)', async () => {
+    const { deps, send, row } = tenantRig({
+      contactOver: { deleted_at: '2026-07-04T12:00:00.000Z' },
+    });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_deleted' });
+    expect(send.sent).toHaveLength(0);
+    // The row is UNTOUCHED: restoring the contact must still leave it deliverable.
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+    expect(row.canceledAt).toBeUndefined();
+  });
+
   it('refuses stage_moved and leaves the row PENDING (only the poller retires stale rows)', async () => {
     // The row chases awaiting_receipt but the placement moved to awaiting_completion.
     const { deps, send, row, nudges } = tenantRig({ stage: 'awaiting_completion' });

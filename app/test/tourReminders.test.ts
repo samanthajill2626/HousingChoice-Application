@@ -1866,6 +1866,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       consent?: boolean;
       contactOptOut?: boolean;
       convOptOut?: boolean;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
     },
   ): void {
     world.contacts.push({
@@ -1875,6 +1877,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       created_at: opts.now,
       ...(opts.consent !== false && { consent_method: 'inbound_text' }),
       ...(opts.contactOptOut === true && { sms_opt_out: true }),
+      ...(opts.deletedAt !== undefined && { deleted_at: opts.deletedAt }),
     } as Parameters<typeof world.contacts.push>[0]);
     if (opts.convId === undefined) return;
     world.conversations.set(opts.convId, {
@@ -2114,6 +2117,45 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     );
     expect(after?.sentAt).toBeUndefined();
     expect(after?.skippedAt).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Send now 6b - a SOFT-DELETED contact refuses PRE-claim. sendMessage refuses
+  // any 1:1 to a deleted contact (ContactDeletedError), so without this gate the
+  // click would claim the row (the claim IS the sentAt stamp) and only then
+  // throw - burning the rung for a state we can check up front.
+  // ---------------------------------------------------------------------------
+  it('force-send refuses contact_deleted WITHOUT claiming (the rung stays pending)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-6b',
+      phone: '+15550220016',
+      convId: 'conv-force-6b',
+      now: SEEDED_AT,
+      deletedAt: '2026-02-09T18:00:00.000Z',
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-6b',
+      unitId: 'unit-force-6b',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'contact_deleted' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    // The row is UNTOUCHED: restoring the contact must still leave it deliverable.
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
+    expect(after?.canceledAt).toBeUndefined();
+    expect((await tourReminders.listDue('2026-02-11T13:01:00.000Z')).map((r) => r.reminderId)).toContain(
+      row.reminderId,
+    );
   });
 
   // ---------------------------------------------------------------------------

@@ -826,6 +826,7 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   // Pre-claim gates: nothing was sent and the rung is still pending.
   sms_sending_disabled: 'SMS sending is switched off, so nothing was sent.',
   contact_opted_out: 'That person opted out of texts, so nothing was sent.',
+  contact_deleted: 'That contact was deleted - restore them to send.',
   no_consent: 'No SMS consent on file - record consent before sending this by hand.',
   no_conversation: 'There is no text thread with that person yet, so nothing was sent.',
   stage_moved: 'The placement moved on from this stage, so the message would be out of date.',

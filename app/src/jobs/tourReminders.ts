@@ -22,8 +22,8 @@
 // forceSendReminder - "Send now": a human sends ONE pending rung immediately
 //   through the SAME resolve/claim/send path (resolveReminderTarget is shared
 //   with the poll). It bypasses quiet hours, manual mode and the breaker
-//   (automated: false) but respects the kill switch, opt-out and JIT consent -
-//   all checked BEFORE the claim, so a refusal never consumes the row.
+//   (automated: false) but respects the kill switch, opt-out, soft-deletion and
+//   JIT consent - all checked BEFORE the claim, so a refusal never consumes the row.
 //
 // IDEMPOTENCY: listDue filters out rows with sentAt or canceledAt. claimSend
 // atomically stamps sentAt BEFORE the send; the conditional also blocks
@@ -33,7 +33,7 @@
 import type { MessagingAdapter } from '../adapters/messaging.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
+import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type {
   ConversationItem,
   ConversationParticipant,
@@ -750,6 +750,7 @@ async function announceGroupReminder(
 export type ForceSendRefusal =
   | 'sms_sending_disabled'
   | 'contact_opted_out'
+  | 'contact_deleted'
   | 'no_consent'
   | ReminderResolutionFailure;
 
@@ -769,7 +770,7 @@ export type ForceSendResult =
  * Semantics (spec section 7): being human-triggered it BYPASSES quiet hours,
  * manual mode and the per-conversation circuit breaker - the 1:1 send goes out
  * with `automated: false`. It still RESPECTS the absolute gates (kill switch,
- * opt-out) and the JIT consent gate, and EVERY gate runs BEFORE `claimSend`,
+ * opt-out, soft-deleted contact) and the JIT consent gate, and EVERY gate runs BEFORE `claimSend`,
  * because the claim IS the sentAt stamp: a refusal after it would leave the row
  * claimed-but-unsent and destroy the message. A refusal therefore leaves the row
  * exactly as it found it - still pending, still the poll's to deliver at dueAt
@@ -828,6 +829,13 @@ export async function forceSendReminder(
     if (isOptedOut(target.conversation.sms_opt_out, target.contact.sms_opt_out === true)) {
       return refuse('contact_opted_out');
     }
+    // A soft-deleted contact is unreachable until restored: sendMessage refuses
+    // the 1:1 with ContactDeletedError regardless of `automated`. Deleted-ness is
+    // DETERMINISTIC and already in hand, so it is checked here rather than left
+    // to the post-claim race - otherwise the claim (which IS the sentAt stamp)
+    // would land first and burn the rung. Mirrors sendMessage's own ordering:
+    // after opt-out (TCPA wins), before consent.
+    if (isDeleted(target.contact)) return refuse('contact_deleted');
     if (!hasSmsConsent(target.contact)) return refuse('no_consent');
   }
 

@@ -501,7 +501,13 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
   /** A tenant with a phone, RECORDED CONSENT and a 1:1 thread + one pending rung. */
   async function seedSendNowTour(
     world: FakeWorld,
-    over: { contactOptOut?: boolean; consent?: boolean; suffix?: string } = {},
+    over: {
+      contactOptOut?: boolean;
+      consent?: boolean;
+      suffix?: string;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
+    } = {},
   ) {
     const suffix = over.suffix ?? '1';
     const tenantId = `contact-sendnow-${suffix}`;
@@ -513,6 +519,7 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
       created_at: '2026-07-13T00:00:00.000Z',
       ...(over.consent !== false && { consent_method: 'inbound_text' }),
       ...(over.contactOptOut === true && { sms_opt_out: true }),
+      ...(over.deletedAt !== undefined && { deleted_at: over.deletedAt }),
     } as Parameters<typeof world.contacts.push>[0]);
     world.conversations.set(`conv-sendnow-${suffix}`, {
       conversationId: `conv-sendnow-${suffix}`,
@@ -613,6 +620,22 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('no_consent');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('409s contact_deleted for a soft-deleted contact and leaves the rung upcoming', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, {
+      suffix: '6',
+      deletedAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_deleted');
     expect(res.body.reminder.state).toBe('upcoming');
     expect(spy.sent).toHaveLength(0);
   });

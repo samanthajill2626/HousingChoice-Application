@@ -460,6 +460,8 @@ describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
       stage?: string;
       contactOptOut?: boolean;
       consent?: boolean;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
     } = {},
   ) {
     const suffix = over.suffix ?? '1';
@@ -472,6 +474,7 @@ describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
       created_at: '2026-07-13T00:00:00.000Z',
       ...(over.consent !== false && { consent_method: 'inbound_text' }),
       ...(over.contactOptOut === true && { sms_opt_out: true }),
+      ...(over.deletedAt !== undefined && { deleted_at: over.deletedAt }),
     } as Parameters<typeof world.contacts.push>[0]);
     world.conversations.set(`conv-nudge-sendnow-${suffix}`, {
       conversationId: `conv-nudge-sendnow-${suffix}`,
@@ -584,6 +587,24 @@ describe('POST /api/placements/:placementId/nudges/:nudgeId/send-now', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('contact_opted_out');
+    expect(res.body.nudge.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('409s contact_deleted for a soft-deleted recipient and leaves the rung upcoming', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { placementId, nudgeId } = await seedSendNowNudge(world, {
+      suffix: '6',
+      deletedAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post(
+      `/api/placements/${placementId}/nudges/${nudgeId}/send-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_deleted');
     expect(res.body.nudge.state).toBe('upcoming');
     expect(spy.sent).toHaveLength(0);
   });

@@ -468,6 +468,25 @@ describe('RemindersPanel - Send now', () => {
     expect((again as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it('a contact_deleted 409 tells the navigator to restore the contact', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-d', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    postReminderSendNow.mockReset();
+    postReminderSendNow.mockRejectedValue(
+      new ApiError(409, 'contact_deleted', 'contact_deleted', { error: 'contact_deleted' }),
+    );
+    render(<RemindersPanel tourId="tour-1" />);
+
+    (await screen.findByRole('button', { name: 'Send Day before reminder now' })).click();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/restore them to send/i);
+    // The raw machine code never reaches a navigator.
+    expect(alert).not.toHaveTextContent('contact_deleted');
+  });
+
   it('an unmapped refusal code still says something human', async () => {
     getTourReminders.mockReset();
     getTourReminders.mockResolvedValue({

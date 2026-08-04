@@ -30,7 +30,7 @@ import type { EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { PlacementStage } from '../lib/statusModel.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
-import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
+import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationItem, ConversationsRepo } from '../repos/conversationsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
@@ -583,6 +583,7 @@ async function processNudgeRow(
 export type NudgeForceSendRefusal =
   | 'sms_sending_disabled'
   | 'contact_opted_out'
+  | 'contact_deleted'
   | 'no_consent'
   | NudgeSkipReason;
 
@@ -602,7 +603,7 @@ export type NudgeForceSendResult =
  *
  * - BYPASSES quiet hours, manual mode and the per-conversation breaker (the send
  *   goes out with `automated: false`).
- * - RESPECTS the kill switch, opt-out, JIT consent AND the staleness check (a
+ * - RESPECTS the kill switch, opt-out, soft-deletion, JIT consent AND the staleness check (a
  *   nudge whose placement has moved on refuses rather than sending stale copy).
  * - EVERY gate runs BEFORE `claimSend`, because the claim IS the sentAt stamp: a
  *   refusal after it would leave the row claimed-but-unsent. A refusal therefore
@@ -662,6 +663,13 @@ export async function forceSendNudge(
   if (isOptedOut(existing?.sms_opt_out, target.contact.sms_opt_out === true)) {
     return refuse('contact_opted_out');
   }
+  // A soft-deleted recipient is unreachable until restored: sendMessage refuses
+  // the 1:1 with ContactDeletedError regardless of `automated`. Deleted-ness is
+  // DETERMINISTIC and already in hand, so it is checked here rather than left to
+  // the post-claim race - otherwise the claim (which IS the sentAt stamp) would
+  // land first and burn the rung. Mirrors sendMessage's own ordering: after
+  // opt-out (TCPA wins), before consent.
+  if (isDeleted(target.contact)) return refuse('contact_deleted');
   if (!hasSmsConsent(target.contact)) return refuse('no_consent');
 
   const conv =

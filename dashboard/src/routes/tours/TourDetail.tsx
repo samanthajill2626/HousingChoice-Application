@@ -33,7 +33,7 @@ import {
   type TourStatus,
   type UnitItem,
 } from '../../api/index.js';
-import { Button, Spinner, StatusBadge } from '../../ui/index.js';
+import { Button, Spinner, StatusBadge, useTwoPaneNarrow } from '../../ui/index.js';
 import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
 import {
   contactDisplayName,
@@ -161,6 +161,14 @@ function TourDetailLoaded({
 
   // Mobile pane: DETAILS first on narrow widths (per the 2026-07-08 decision).
   const [pane, setPane] = useState<'details' | 'conversation'>('details');
+  // Is the comms column actually on SCREEN? Wide: always (both panes render and
+  // `pane` only styles the toggle). Narrow: only when the operator picked
+  // Conversation - the other pane is display:none but still MOUNTED, so the
+  // conversation cannot work this out for itself. TourConversation needs it to
+  // decide whether a 1:1 tab was really "viewed" (mark-read is a one-way,
+  // whole-inbox-row fan-out).
+  const narrowShell = useTwoPaneNarrow();
+  const commsVisible = !narrowShell || pane === 'conversation';
   const [modal, setModal] = useState<'book' | 'reschedule' | 'outcome' | 'cancel' | null>(null);
   const [busy, setBusy] = useState(false);
   const [actionError, setActionError] = useState<string | null>(null);
@@ -489,6 +497,7 @@ function TourDetailLoaded({
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
             tourMilestones={tourMilestones}
+            commsVisible={commsVisible}
             {...(noShowSeed !== null && { noShowDraft: noShowSeed })}
           />
         </div>

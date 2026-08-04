@@ -242,7 +242,10 @@ export function useTourChannels(tour: Tour, landlordId: string | undefined): Tou
   // the consumer's every-render effect from POSTing in a loop.
   const markPersonRead = useCallback(
     (key: TourPersonKey, contactId: string | undefined, unread: number) => {
-      if (contactId === undefined || unread <= 0) return;
+      // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read. The
+      // placement twin really does build a placeholder with tenantId: '' while
+      // its bundle loads, so the guard has to reject '' as well as undefined.
+      if (!contactId || unread <= 0) return;
       setState((prev) => (prev[key].unread === 0 ? prev : { ...prev, [key]: { unread: 0 } }));
       void markInboxRead({ contactId }).catch(() => {
         /* best-effort - a failed mark-read must not break the view */

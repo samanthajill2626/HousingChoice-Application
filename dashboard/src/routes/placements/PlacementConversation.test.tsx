@@ -8,8 +8,9 @@
 //
 // Covered: tab switching + draft isolation (no wrong-party send), the
 // deleted-contact composer lock per pane, both "no contact" empty states, the
-// emptyLabel copy, and the GROUP tab rendering its relay thread RAW (the
-// placement page injects no milestones on any tab, before or after the rewire).
+// emptyLabel copy, the GROUP tab rendering its relay thread RAW (the placement
+// page injects no milestones on any tab, before or after the rewire), and the
+// 1:1 mark-read gates (a fan-out only from a pane the operator could see).
 import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
@@ -111,6 +112,9 @@ function baseProps(over: Partial<PlacementConversationProps> = {}): PlacementCon
     tenant: tenantContact(),
     landlord: landlordContact(),
     channels: makeChannels(),
+    // Default = the DESKTOP two-pane reading (both panes on screen), which is
+    // what PlacementDetail computes above 860px. The mobile cases pass false.
+    commsVisible: true,
     ...over,
   };
 }
@@ -124,8 +128,15 @@ function renderConvo(props: PlacementConversationProps) {
   );
 }
 
+/** jsdom's document is always 'visible'; the mark-read gate mirrors the contact
+ *  page's document.visibilityState check, so one test drives it. */
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
   getConversationMessages.mockResolvedValue([]);
@@ -334,5 +345,84 @@ describe('PlacementConversation - group tab', () => {
     await waitFor(() =>
       expect(channels.setGroupConversationId).toHaveBeenCalledWith('g-new'),
     );
+  });
+});
+
+// The 1:1 mark-read fan-out (markPersonRead -> POST /api/inbox/:id/read) clears
+// unread on EVERY thread the person owns, and the product has no mark-unread
+// anywhere - so it is one-way data loss and must only fire when the operator
+// really could have read the tab. Mirrors TourConversation.test's gate suite.
+// `commsVisible` is the page's answer to "is the comms column on screen?"
+// (false = the <=860px shell is showing Details, with this component still
+// MOUNTED behind display:none).
+describe('PlacementConversation - 1:1 mark-read gates', () => {
+  const unreadTenant = () => makeChannels({ tenant: { unread: 7 } });
+
+  it('DESKTOP: the initial 1:1 tab with unread fans out on mount, no click', async () => {
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+  });
+
+  it('MOBILE: a details-first mount does NOT fan out; revealing the pane fires it once', async () => {
+    const channels = unreadTenant();
+    const props = baseProps({ channels, commsVisible: false });
+    const { rerender } = renderConvo(props);
+
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+
+    rerender(
+      <MemoryRouter>
+        <PlacementConversation {...props} commsVisible={true} />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+    expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('a contact whose record FAILED to load never fans out (dead-end tab, unread kept)', async () => {
+    const channels = makeChannels({ landlord: { unread: 4 } });
+    renderConvo(baseProps({ landlord: null, channels }));
+
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    // Scoped to the LANDLORD: the initial (loaded, unread-0) Tenant tab legitimately
+    // calls through and the hook no-ops it, which is not what this pins.
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord', 'landlord-1', 4);
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith(
+      'landlord',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('the GROUP tab is unaffected by the visibility gate (single-conversation read)', async () => {
+    const channels = makeChannels({ group: { conversationId: 'g1', unread: 5 } });
+    renderConvo(
+      baseProps({
+        placement: makePlacement({ group_thread: 'g1' }),
+        channels,
+        commsVisible: false,
+      }),
+    );
+
+    await waitFor(() => expect(channels.markGroupRead).toHaveBeenCalledWith('g1', 5));
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+  });
+
+  it('a BACKGROUND browser tab does not fan out (contact-page parity)', async () => {
+    setVisibility('hidden');
+    const channels = unreadTenant();
+    renderConvo(baseProps({ channels, commsVisible: true }));
+
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
   });
 });

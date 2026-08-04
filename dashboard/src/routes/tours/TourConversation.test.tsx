@@ -10,6 +10,9 @@
 //   3) The deleted-contact composer lock survives the rewrite, per pane.
 //   4) "Comms only" is page-level state ABOVE the remount, so it survives a tab
 //      switch (Timeline's own copy is per-mount).
+//   5) The 1:1 mark-read fan-out only fires from a pane the operator could
+//      actually see: commsVisible + a LOADED contact + a foreground browser tab.
+//      The group tab's single-conversation read is exempt.
 //
 // TourConversation is rendered DIRECTLY with a hand-built `channels` stub (the
 // real useTourChannels has its own suite + TourDetail.test). Unlike before the
@@ -124,6 +127,9 @@ function baseProps(over: Partial<TourConversationProps> = {}): TourConversationP
     channels: makeChannels(),
     onOpenGroup: vi.fn(),
     openGroupBusy: false,
+    // Default = the DESKTOP two-pane reading (both panes on screen), which is
+    // what TourDetail computes above 860px. The mobile cases pass false.
+    commsVisible: true,
     ...over,
   };
 }
@@ -136,8 +142,15 @@ function renderConvo(props: TourConversationProps, draft?: TourConversationProps
   );
 }
 
+/** jsdom's document is always 'visible'; the mark-read gate mirrors the contact
+ *  page's document.visibilityState check, so one test drives it. */
+function setVisibility(state: 'visible' | 'hidden'): void {
+  Object.defineProperty(document, 'visibilityState', { value: state, configurable: true });
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
+  setVisibility('visible');
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
   getConversationMessages.mockResolvedValue([]);
@@ -335,5 +348,101 @@ describe('TourConversation - deleted-contact composer lock', () => {
     await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
     expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+  });
+});
+
+// The 1:1 mark-read fan-out (markPersonRead -> POST /api/inbox/:id/read) clears
+// unread on EVERY thread the person owns, and the product has no mark-unread
+// anywhere - so it is one-way data loss and must only fire when the operator
+// really could have read the tab. These pin the three gates plus the group tab's
+// deliberate exemption. `commsVisible` is the page's answer to "is the comms
+// column on screen?" (false = the <=860px shell is showing Details, with this
+// component still MOUNTED behind display:none).
+describe('TourConversation - 1:1 mark-read gates', () => {
+  const unreadTenant = () => makeChannels({ tenant: { unread: 7 } });
+
+  it('DESKTOP: the initial 1:1 tab with unread fans out on mount, no click', async () => {
+    const channels = unreadTenant();
+    renderConvo(
+      baseProps({ tour: makeTour({ groupThreadId: undefined }), channels, commsVisible: true }),
+    );
+
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+  });
+
+  it('MOBILE: a details-first mount does NOT fan out; revealing the pane fires it once', async () => {
+    const channels = unreadTenant();
+    const props = baseProps({
+      tour: makeTour({ groupThreadId: undefined }),
+      channels,
+      commsVisible: false,
+    });
+    const { rerender } = renderConvo(props);
+
+    // The whole comms column is display:none behind the Details pane. Mounting it
+    // is not reading it - the tenant's inbox row must be untouched.
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+
+    // The operator taps "Conversation": now the pane is genuinely on screen.
+    rerender(
+      <MemoryRouter>
+        <TourConversation {...props} commsVisible={true} />
+      </MemoryRouter>,
+    );
+    await waitFor(() =>
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+    );
+    expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('a contact whose record FAILED to load never fans out (dead-end tab, unread kept)', async () => {
+    // The adversarial probe, inverted: landlord id resolved, landlord record
+    // null, landlord unread 4, one click on the Landlord tab.
+    const channels = makeChannels({ landlord: { unread: 4 } });
+    renderConvo(
+      baseProps({
+        tour: makeTour({ groupThreadId: undefined }),
+        landlord: null,
+        landlordId: 'landlord-1',
+        channels,
+      }),
+    );
+
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
+    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    // Scoped to the LANDLORD: the initial (loaded, unread-0) Tenant tab legitimately
+    // calls through and the hook no-ops it, which is not what this pins.
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord', 'landlord-1', 4);
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith(
+      'landlord',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('the GROUP tab is unaffected by the visibility gate (single-conversation read)', async () => {
+    const channels = makeChannels({ group: { conversationId: 'g1', unread: 5 } });
+    renderConvo(baseProps({ channels, commsVisible: false }));
+
+    // Group tab is initial (the tour has a groupThreadId). Its read is a
+    // single-conversation markConversationRead that predates this pane, so the
+    // 1:1 gates deliberately do not apply to it.
+    await waitFor(() => expect(channels.markGroupRead).toHaveBeenCalledWith('g1', 5));
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
+  });
+
+  it('a BACKGROUND browser tab does not fan out (contact-page parity)', async () => {
+    // Same idiom + same guard as useMarkContactRead.test's setVisibility.
+    setVisibility('hidden');
+    const channels = unreadTenant();
+    renderConvo(
+      baseProps({ tour: makeTour({ groupThreadId: undefined }), channels, commsVisible: true }),
+    );
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(channels.markPersonRead).not.toHaveBeenCalled();
   });
 });

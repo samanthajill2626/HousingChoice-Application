@@ -92,6 +92,9 @@ function Probe({
       <button type="button" onClick={() => s.markPersonRead('tenant', undefined, s.tenant.unread)}>
         markTenantUnresolved
       </button>
+      <button type="button" onClick={() => s.markPersonRead('tenant', '', s.tenant.unread)}>
+        markTenantEmptyId
+      </button>
       <button type="button" onClick={() => s.markGroupRead(s.group.conversationId, s.group.unread)}>
         markGroup
       </button>
@@ -257,6 +260,21 @@ describe('usePlacementChannels', () => {
     await userEvent.click(screen.getByRole('button', { name: 'markTenantUnresolved' }));
     expect(markInboxRead).not.toHaveBeenCalled();
     // ...and the unread stays put (nothing was read).
+    expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3');
+  });
+
+  it('markPersonRead no-ops on an EMPTY contactId (never POST /api/inbox//read)', async () => {
+    // The guard is falsy, not `=== undefined`: PlacementDetail really does build
+    // a loading placeholder with tenantId: '' for this hook, so '' has to be
+    // rejected too.
+    getConversations.mockResolvedValue({
+      conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
+      nextCursor: null,
+    });
+    render(<Probe placement={makePlacement()} landlordId="lord-1" />);
+    await waitFor(() => expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3'));
+    await userEvent.click(screen.getByRole('button', { name: 'markTenantEmptyId' }));
+    expect(markInboxRead).not.toHaveBeenCalled();
     expect(screen.getByTestId('tenant')).toHaveTextContent('unread:3');
   });
 

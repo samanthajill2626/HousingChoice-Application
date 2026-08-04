@@ -13,7 +13,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { Contact, Tour, UnitItem } from '../../api/index.js';
 
@@ -1120,6 +1120,29 @@ describe('TourDetail - conversation empty states', () => {
 });
 
 describe('TourDetail - mobile', () => {
+  // jsdom has no matchMedia, so useTwoPaneNarrow reads WIDE by default and every
+  // other test in this file exercises the desktop two-pane path (both panes on
+  // screen). These stub it narrow.
+  function stubNarrow(matches: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('max-width: 860px') ? matches : false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('exposes a Details | Conversation toggle with Details pressed initially', async () => {
     renderDetail();
     await waitLoaded();
@@ -1127,5 +1150,55 @@ describe('TourDetail - mobile', () => {
     const conversation = screen.getByRole('button', { name: 'Conversation' });
     expect(details).toHaveAttribute('aria-pressed', 'true');
     expect(conversation).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('landing on the page does NOT clear the tenant inbox row until the pane is revealed', async () => {
+    // The MF1 repro: at <=860px the comms column is display:none behind the
+    // Details pane, but it still MOUNTS - so merely opening /tours/:id from a
+    // phone used to fire the contact-wide fan-out and consume unread the
+    // operator never saw (there is no mark-unread anywhere in the product).
+    stubNarrow(true);
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 3),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+
+    // The Tenant tab is active and its dot is showing - and NOTHING was marked
+    // read. Wait for the pane itself to mount so this is not a race won by luck.
+    await screen.findByRole('tab', { name: /Tenant - Ann.*unread/i });
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(markInboxRead).not.toHaveBeenCalled();
+
+    // The operator taps "Conversation": now they are genuinely looking at it.
+    await userEvent.click(
+      within(screen.getByRole('group', { name: 'View' })).getByRole('button', {
+        name: 'Conversation',
+      }),
+    );
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('the WIDE two-pane page still auto-marks on load (both panes are on screen)', async () => {
+    // The same stub, resolving WIDE - the desktop contract MF1 had to keep.
+    stubNarrow(false);
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 3),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
   });
 });

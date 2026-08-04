@@ -250,7 +250,10 @@ export function usePlacementChannels(
   // the consumer's every-render effect from POSTing in a loop.
   const markPersonRead = useCallback(
     (key: PlacementPersonKey, contactId: string | undefined, unread: number) => {
-      if (contactId === undefined || unread <= 0) return;
+      // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read, and
+      // PlacementDetail really does build a placeholder with tenantId: '' for
+      // this hook while its bundle loads.
+      if (!contactId || unread <= 0) return;
       setState((prev) => (prev[key].unread === 0 ? prev : { ...prev, [key]: { unread: 0 } }));
       void markInboxRead({ contactId }).catch(() => {
         /* best-effort - a failed mark-read must not break the view */

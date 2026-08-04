@@ -123,6 +123,8 @@
   /* default (wide): visible */
 }
 
+/* 860px is ALSO declared as TWO_PANE_BREAKPOINT_PX in twoPaneShell.ts (the JS
+ * side needs it to know whether a pane is really on screen). Change both. */
 @media (max-width: 860px) {
   /* Header: the actions drop to their own row so the identity gets the full
    * width beside any leading element — otherwise wide action buttons starve the

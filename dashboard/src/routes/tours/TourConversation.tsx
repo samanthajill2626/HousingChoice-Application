@@ -15,7 +15,9 @@
 // Unread + mark-read follow the same split: a tab's dot is its channel's unread,
 // and viewing it marks read through the channels hook - the group by its SINGLE
 // conversation (markConversationRead), a 1:1 by the PERSON (the contact-wide
-// inbox fan-out, contact-page parity).
+// inbox fan-out, contact-page parity). The 1:1 fan-out only fires when the
+// operator can actually see the pane (commsVisible + a loaded contact + a
+// foreground tab) - see the mark-read effect for why.
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
 // never fetch all three up front). Empty states render in place: the group offers
@@ -62,6 +64,10 @@ export interface TourConversationProps {
    *  (the editable no_show_checkin template). The tenant pane is remounted so the
    *  seed lands via the Timeline initialDraft initializer. */
   noShowDraft?: { body: string; nonce: number };
+  /** Is this pane actually ON SCREEN? The page owns the answer (its Details /
+   *  Conversation pane state + the shell breakpoint); we are always MOUNTED, so
+   *  we cannot tell. Gates the 1:1 mark-read fan-out only - see the effect. */
+  commsVisible: boolean;
 }
 
 /** A pane's stream: its messages + the tour milestone pins, oldest→newest. Both
@@ -91,6 +97,7 @@ export function TourConversation({
   openGroupBusy,
   tourMilestones,
   noShowDraft,
+  commsVisible,
 }: TourConversationProps): React.JSX.Element {
   // Initial tab decided ONCE from the tour at first render; never re-synced.
   const [activeKey, setActiveKey] = useState<TourChannelKey>(
@@ -183,6 +190,29 @@ export function TourConversation({
   // ref) so the INITIAL active tab marks read on the loading->ready commit: a ref
   // would be written by a parent effect that runs AFTER this child effect, so it
   // would still be stale here. Both marks no-op at unread 0, so this never loops.
+  //
+  // The 1:1 fan-out carries THREE extra gates, because it is one-way data loss:
+  // it clears unread on every thread that person owns and the product has no
+  // mark-unread anywhere. "Viewing a 1:1 tab" (spec s5) has to mean the operator
+  // could actually SEE it, so we require -
+  //   1. commsVisible: at <=860px the shell hides the non-selected pane with
+  //      display:none but keeps it MOUNTED, and both hubs open on Details. Merely
+  //      landing on /tours/:id from a phone must not consume the tenant's inbox
+  //      row; the mark fires when the operator reveals the Conversation pane.
+  //   2. oneToOneContact !== null: when the page's best-effort getContact failed
+  //      the tab body is a bare "we could not load ..." note - no transcript, no
+  //      composer. Nothing was read, so nothing is marked read.
+  //   3. document.visibilityState: the contact page's own gate
+  //      (useMarkContactRead.ts:22) - a page parked in a BACKGROUND tab must not
+  //      silently swallow arriving unreads. Unlike that hook we do NOT re-fire on
+  //      visibilitychange: the channels hook's SSE refetch raises unread again
+  //      and re-runs this effect, which is the same convergence by another route.
+  // DELETED contacts are deliberately NOT gated - useMarkContactRead marks a
+  // soft-deleted contact read exactly like any other, and this pane's whole
+  // contract is parity with it (spec s5's resurfacing note, pinned in
+  // app/test/inboxApi.test.ts).
+  // The GROUP branch is untouched: markGroupRead is a single-conversation read
+  // that predates this pane, and gating it is out of scope.
   const groupConversationId = channels.group.conversationId;
   const activeUnread = channels[activeKey].unread;
   useEffect(() => {
@@ -190,8 +220,19 @@ export function TourConversation({
       channels.markGroupRead(groupConversationId, activeUnread);
       return;
     }
+    if (!commsVisible) return;
+    if (oneToOneContact === null) return;
+    if (typeof document !== 'undefined' && document.visibilityState !== 'visible') return;
     channels.markPersonRead(activeKey, oneToOneContactId, activeUnread);
-  }, [activeKey, oneToOneContactId, groupConversationId, activeUnread, channels]);
+  }, [
+    activeKey,
+    oneToOneContactId,
+    oneToOneContact,
+    commsVisible,
+    groupConversationId,
+    activeUnread,
+    channels,
+  ]);
 
   return (
     <div className={styles.convo}>

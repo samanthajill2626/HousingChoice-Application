@@ -246,6 +246,15 @@ export interface TimelineProps {
     /** Contact is suppressed for email (opt-out/unreachable) - standing note. */
     suppressed?: boolean;
   };
+  /** "Comms only" filter, CONTROLLED. Pass this WITH onCommsOnlyChange to let a
+   *  caller own the toggle above a remount boundary - the tour/placement pages
+   *  hold one value per page visit so the filter survives a tab switch. Pass
+   *  NEITHER (the contact page) and the toggle stays per-mount internal state,
+   *  defaulting to off. */
+  commsOnly?: boolean;
+  /** Reports a toggle click when `commsOnly` is controlled. Nothing renders
+   *  differently until the caller re-renders us with the new value. */
+  onCommsOnlyChange?: (v: boolean) => void;
   /** Seed the composer textarea with this body ON MOUNT ONLY (read by the draft
    *  useState initializer). Used by the tour page's "Send no-show check-in" to
    *  prefill the tenant 1:1 composer with the editable template. Changing it
@@ -305,14 +314,16 @@ function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): Reac
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
- *  green markers). number_added = amber; group-text add/remove = purple;
- *  the positive outcome-ish ones = green; everything else neutral. */
+ *  green markers). number_added = amber; group-text add/remove/open = purple;
+ *  the positive outcome-ish ones = green; everything else neutral (including
+ *  tour_converted - the placement_opened pin beside it carries the same news). */
 function milestoneVariant(type: TimelineMilestoneType): string {
   switch (type) {
     case 'number_added':
       return styles.amber ?? '';
     case 'added_to_group_text':
     case 'removed_from_group_text':
+    case 'tour_group_opened':
       return styles.purple ?? '';
     case 'tour_scheduled':
     case 'tour_took_place':
@@ -815,7 +826,17 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
   // segment is disabled, so the effective channel stays 'text' until one exists.
   const showChannelToggle = emailChannel !== undefined && relayRoster === undefined;
   const effectiveChannel: 'text' | 'email' = showChannelToggle && hasEmail ? channel : 'text';
-  const [commsOnly, setCommsOnly] = useState(false);
+  // "Comms only" is a CONTROLLED/UNCONTROLLED pair. With BOTH props the caller
+  // owns the value (it lives above the pane's remount boundary on tour/placement
+  // pages, so a tab switch can't reset the filter) and the buttons only report.
+  // With neither, this is exactly the old per-mount internal state.
+  const [ownCommsOnly, setOwnCommsOnly] = useState(false);
+  const commsOnlyControlled = props.commsOnly !== undefined && props.onCommsOnlyChange !== undefined;
+  const commsOnly = commsOnlyControlled ? props.commsOnly === true : ownCommsOnly;
+  const setCommsOnly = (v: boolean): void => {
+    if (commsOnlyControlled) props.onCommsOnlyChange?.(v);
+    else setOwnCommsOnly(v);
+  };
   const [draft, setDraft] = useState(props.initialDraft ?? '');
   const [sending, setSending] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);

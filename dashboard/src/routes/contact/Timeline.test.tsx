@@ -261,6 +261,43 @@ describe('Timeline', () => {
     expect(link).toHaveAttribute('href', '/tours/tour-55');
   });
 
+  it("renders a tour_group_opened milestone as a purple pin linking to the tour", () => {
+    const groupOpened: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms-group-open',
+      at: '2026-06-08T08:00:00',
+      type: 'tour_group_opened',
+      label: 'Group text opened',
+      refType: 'tour',
+      refId: 't1',
+    };
+    renderTimeline({ items: [groupOpened] });
+    const link = screen.getByRole('link', { name: 'Group text opened' });
+    expect(link).toHaveAttribute('href', '/tours/t1');
+    // Same purple family as added_to_group_text - a group-text membership cue.
+    expect(link.parentElement?.className).toContain('purple');
+  });
+
+  // PIN (not a failing-first lever): tour_converted's variant is deliberately the
+  // neutral default and its label is SERVER-owned, so the only compile-time proof
+  // is the type union (npm run typecheck). This render pin guards the generic
+  // refType 'tour' deep-link and the verbatim label passthrough.
+  it("renders a tour_converted milestone as a neutral pin linking to the tour", () => {
+    const converted: TimelineItem = {
+      kind: 'milestone',
+      id: 'ms-converted',
+      at: '2026-06-08T09:00:00',
+      type: 'tour_converted',
+      label: 'Converted to placement',
+      refType: 'tour',
+      refId: 't1',
+    };
+    renderTimeline({ items: [converted] });
+    const link = screen.getByRole('link', { name: 'Converted to placement' });
+    expect(link).toHaveAttribute('href', '/tours/t1');
+    expect(link.parentElement?.className).toContain('neutral');
+  });
+
   it('hides milestones when "Comms only" is toggled', () => {
     renderTimeline({ items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED] });
     expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
@@ -269,6 +306,50 @@ describe('Timeline', () => {
     expect(screen.queryByText(/Now also texting/)).not.toBeInTheDocument();
     // Messages survive the toggle.
     expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();
+  });
+
+  // CONTROLLED "Comms only" (spec A-M2): the tour/placement pages hold ONE toggle
+  // state per page visit ABOVE the pane's remount boundary, so the filter has to
+  // survive a tab switch. Passing BOTH props hands the value to the caller; the
+  // buttons then only REPORT (no internal flip), so what renders is whatever the
+  // caller last said.
+  it('CONTROLLED "Comms only": renders the caller\'s value and reports clicks without self-flipping', () => {
+    const onCommsOnlyChange = vi.fn();
+    renderTimeline({
+      items: [MESSAGE_IN, MILESTONE, NUMBER_ADDED],
+      commsOnly: true,
+      onCommsOnlyChange,
+    });
+    // Filtered on the FIRST render - no click needed. This is the state a remount
+    // must be able to restore.
+    expect(screen.queryByText(/Placement opened/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Now also texting/)).not.toBeInTheDocument();
+    expect(screen.getByText('Hi, looking for a 2 bedroom.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Comms only' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+    expect(screen.getByRole('button', { name: 'All' })).toHaveAttribute('aria-pressed', 'false');
+
+    fireEvent.click(screen.getByRole('button', { name: 'All' }));
+    expect(onCommsOnlyChange).toHaveBeenCalledWith(false);
+    // Nothing came back: the caller owns the value, so the pins stay hidden until
+    // it re-renders us with commsOnly={false}.
+    expect(screen.queryByText(/Placement opened/)).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Comms only' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    );
+  });
+
+  it('CONTROLLED "Comms only": clicking the filter reports true and hides nothing itself', () => {
+    const onCommsOnlyChange = vi.fn();
+    renderTimeline({ items: [MESSAGE_IN, MILESTONE], commsOnly: false, onCommsOnlyChange });
+    expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole('button', { name: 'Comms only' }));
+    expect(onCommsOnlyChange).toHaveBeenCalledWith(true);
+    expect(screen.getByText(/Placement opened/)).toBeInTheDocument();
   });
 
   it('disables Send (with a tooltip) when no conversation is resolvable', () => {

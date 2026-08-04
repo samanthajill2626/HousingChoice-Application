@@ -17,3 +17,4 @@ export {
   type StatusMenuSize,
   type StatusTone,
 } from './StatusMenu.js';
+export { TWO_PANE_BREAKPOINT_PX, useTwoPaneNarrow } from './twoPaneShell.js';

@@ -13,7 +13,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import { describe, expect, it, vi, beforeEach } from 'vitest';
+import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
 import type { Contact, Tour, UnitItem } from '../../api/index.js';
 
@@ -27,6 +27,11 @@ const getNoShowCheckinDraft = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversation = vi.fn();
 const getConversationMembers = vi.fn();
+// The 1:1 tabs are contact-keyed panes now, so every render of this page mounts
+// useContactTimeline for the active party. Mocked in EVERY test (not just the
+// conversation ones) - left unmocked it would reject and the pane would render
+// its error state into unrelated assertions.
+const getContactTimeline = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
@@ -50,6 +55,7 @@ vi.mock('../../api/index.js', async () => {
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversation: (...a: unknown[]) => getConversation(...a),
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
+    getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
@@ -167,7 +173,15 @@ beforeEach(() => {
     participants: [],
   });
   getConversationMembers.mockResolvedValue([]);
+  getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   markConversationRead.mockResolvedValue(undefined);
+  markInboxRead.mockResolvedValue(undefined);
+  // The 1:1 panes create their thread on first send (ensureContactConversation);
+  // resolve a DISTINCT id per contact so a send's target still proves which party
+  // it went to.
+  ensureContactConversation.mockImplementation((id: string) =>
+    Promise.resolve(id === 'landlord-1' ? 'c-landlord' : 'c-tenant'),
+  );
   getNoShowCheckinDraft.mockResolvedValue({
     body: 'Hi! We noticed you may have missed your tour. Want to reschedule?',
   });
@@ -748,7 +762,7 @@ describe('TourDetail - three-channel switcher', () => {
     expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'true');
   });
 
-  it('shows an unread dot on a non-active channel and lazy-loads ONLY the active transcript', async () => {
+  it('shows an unread dot on a non-active channel and loads ONLY the active tab feed', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
       conversations: [
@@ -761,12 +775,23 @@ describe('TourDetail - three-channel switcher', () => {
     await waitLoaded();
     // The Landlord tab (unread 2) exposes an accessible "unread" hint.
     await waitFor(() => expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument());
-    // Lazy-load: only the ACTIVE (tenant) conversation was fetched.
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    // Lazy-load, now measured on the PERSON feed (a 1:1 tab is a contact-keyed
+    // pane, so its stream comes from getContactTimeline): the ACTIVE tab's
+    // contact IS fetched, the inactive tab's contact is NOT.
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    await waitFor(() =>
+      expect(getContactTimeline).toHaveBeenCalledWith('tenant-1', {}, expect.any(AbortSignal)),
+    );
+    expect(getContactTimeline).not.toHaveBeenCalledWith(
+      'landlord-1',
+      expect.anything(),
+      expect.anything(),
+    );
+    // ...and no single-conversation transcript is fetched for a 1:1 tab at all.
     expect(getConversationMessages).not.toHaveBeenCalledWith('c-landlord', expect.anything());
   });
 
-  it('viewing an unread tab marks the SINGLE conversation read - never the inbox fan-out', async () => {
+  it('viewing an unread 1:1 tab marks the CONTACT read (inbox fan-out) - never one conversation', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
       conversations: [
@@ -779,11 +804,13 @@ describe('TourDetail - three-channel switcher', () => {
     await waitLoaded();
     await screen.findByRole('tab', { name: /Landlord - Lon.*unread/i });
     // The tenant tab (active, unread 0) triggered no mark-read.
-    expect(markConversationRead).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
-    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('c-landlord'));
-    // The contact-wide fan-out read must NEVER be used (it would clear sibling tabs).
     expect(markInboxRead).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    // Contact-page parity: the 1:1 tab reads the PERSON, clearing every thread
+    // they own (which is exactly what the tab's summed dot counted).
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'landlord-1' }));
+    // The single-conversation read belongs to the GROUP tab alone now.
+    expect(markConversationRead).not.toHaveBeenCalled();
   });
 
   it('composer targets the ACTIVE tab, before and after switching', async () => {
@@ -798,19 +825,22 @@ describe('TourDetail - three-channel switcher', () => {
     sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
     await waitLoaded();
-    // Wait for the tenant channel to resolve + its real thread to mount (so the
-    // composer sends into the existing conversation, not create-on-demand).
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    // Wait for the tenant pane's composer to mount.
+    await screen.findByRole('textbox', { name: 'Reply message' });
     // Tenant tab active: send targets the tenant conversation.
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(sendMessage).toHaveBeenLastCalledWith('c-tenant', { body: 'hi tenant' });
-    // Switch to landlord: its thread mounts, then send targets the landlord conversation.
+    await waitFor(() => expect(sendMessage).toHaveBeenLastCalledWith('c-tenant', { body: 'hi tenant' }));
+    // Switch to landlord: its pane mounts, then send targets the landlord conversation.
     await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-landlord', expect.anything()));
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /Landlord - Lon/ })).toHaveAttribute('aria-selected', 'true'),
+    );
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi landlord');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
-    expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'hi landlord' });
+    await waitFor(() =>
+      expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'hi landlord' }),
+    );
   });
 
   it('a draft typed on Tenant does NOT carry to Landlord on a tab switch (no wrong-party send) (MAJOR 1)', async () => {
@@ -825,8 +855,8 @@ describe('TourDetail - three-channel switcher', () => {
     sendMessage.mockResolvedValue({ tsMsgId: 'm1', status: 'queued' });
     renderDetail();
     await waitLoaded();
-    // Tenant tab active + its real thread mounted.
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    // Tenant tab active + its pane mounted.
+    await screen.findByRole('textbox', { name: 'Reply message' });
     // Type a tenant-intended draft but DO NOT send.
     await userEvent.type(
       screen.getByRole('textbox', { name: 'Reply message' }),
@@ -835,14 +865,18 @@ describe('TourDetail - three-channel switcher', () => {
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('PRIVATE note for the tenant');
     // Switch to the Landlord tab WITHOUT sending.
     await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-landlord', expect.anything()));
+    await waitFor(() =>
+      expect(screen.getByRole('tab', { name: /Landlord - Lon/ })).toHaveAttribute('aria-selected', 'true'),
+    );
     // The remount gives a FRESH composer: the tenant draft is gone (not carried over).
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
     // Compose + send on the Landlord tab.
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'note for the landlord');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
     // The send targets the LANDLORD conversation with the AFTER-switch body...
-    expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'note for the landlord' });
+    await waitFor(() =>
+      expect(sendMessage).toHaveBeenLastCalledWith('c-landlord', { body: 'note for the landlord' }),
+    );
     // ...and the tenant-intended draft NEVER went anywhere (no wrong-party leak).
     expect(
       sendMessage.mock.calls.some(
@@ -864,11 +898,12 @@ describe('TourDetail - three-channel switcher', () => {
     await waitLoaded();
     // The reviewer's exact repro: initial Tenant tab, tenant 1:1 unread 3, NO
     // interaction. The ref-based markRead no-op'd on the loading->ready commit.
-    await waitFor(() => expect(markConversationRead).toHaveBeenCalledWith('c-tenant'));
-    expect(markConversationRead.mock.calls.filter((c) => c[0] === 'c-tenant')).toHaveLength(1);
-    // The inactive landlord tab (unread 0) is never marked; never the inbox fan-out.
-    expect(markConversationRead).not.toHaveBeenCalledWith('c-landlord');
-    expect(markInboxRead).not.toHaveBeenCalled();
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
+    expect(markInboxRead.mock.calls.filter((c) => (c[0] as { contactId: string }).contactId === 'tenant-1')).toHaveLength(1);
+    // The inactive landlord tab (unread 0) is never marked; the 1:1 tabs never
+    // take the single-conversation read.
+    expect(markInboxRead).not.toHaveBeenCalledWith({ contactId: 'landlord-1' });
+    expect(markConversationRead).not.toHaveBeenCalled();
   });
 
   it('composer footer: the group tab names the WHOLE roster; 1:1 tabs show the reply number', async () => {
@@ -891,33 +926,56 @@ describe('TourDetail - three-channel switcher', () => {
     expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
       'Reply sends to everyone in this group text (Ann, Marcus)',
     );
-    // Tenant 1:1 tab: the footer names the tenant's number (the contact-page pattern).
+    // Tenant 1:1 tab: the footer names the tenant's number (the contact-page
+    // pattern). Byte-for-byte the contact page's own copy now that the shared
+    // pane renders it - including the "(primary)" qualifier the pane passes as
+    // replyToLabel=defaultPhoneLabel(phones), which the old bespoke 1:1
+    // transcript did not have.
     await userEvent.click(screen.getByRole('tab', { name: /Tenant - Ann/ }));
     await waitFor(() =>
       expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
-        'Reply sends to (404) 555-0111',
+        'Reply sends to (404) 555-0111 (primary)',
       ),
     );
   });
 });
 
 describe('TourDetail - tour milestones interleave into the conversation panes', () => {
-  it('the 1:1 transcript shows the tour lifecycle pins; "Comms only" hides them', async () => {
+  it('the 1:1 transcript shows the lifecycle pins from the PERSON feed; "Comms only" hides them', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
       conversations: [conv('c-tenant', 'tenant-1', 0)],
       nextCursor: null,
     });
-    // Newest-first, like the API serves them.
-    getTourActivity.mockResolvedValue([
-      { id: '2026-07-03T00:00:00Z#1', at: '2026-07-03T00:00:00Z', type: 'tour_rescheduled' },
-      { id: '2026-07-01T00:00:00Z#0', at: '2026-07-01T00:00:00Z', type: 'tour_scheduled' },
-    ]);
+    // A 1:1 tab is the contact-keyed pane now, so its pins arrive on the PERSON
+    // timeline (the server writes a dual-party event per tour milestone) - there
+    // is no client-side injection left on this surface.
+    getContactTimeline.mockResolvedValue({
+      nextCursor: null,
+      items: [
+        {
+          kind: 'milestone',
+          id: '2026-07-01T00:00:00.000Z#0',
+          at: '2026-07-01T00:00:00.000Z',
+          type: 'tour_scheduled',
+          label: 'Tour scheduled',
+        },
+        {
+          kind: 'milestone',
+          id: '2026-07-03T00:00:00.000Z#1',
+          at: '2026-07-03T00:00:00.000Z',
+          type: 'tour_scheduled',
+          label: 'Tour rescheduled',
+        },
+      ],
+    });
+    // The tour ACTIVITY rows (the old injection source) stay empty, so a pin in
+    // this transcript can only have come from the person feed.
+    getTourActivity.mockResolvedValue([]);
     renderDetail();
     await waitLoaded();
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
 
-    // Scope to the TRANSCRIPT region — the right-column Activity card shows the
+    // Scope to the TRANSCRIPT region - the right-column Activity card shows the
     // same labels, and it must not satisfy these assertions.
     const transcript = screen.getByRole('region', { name: /Communications/i });
     await waitFor(() => expect(within(transcript).getByText('Tour scheduled')).toBeInTheDocument());
@@ -925,7 +983,9 @@ describe('TourDetail - tour milestones interleave into the conversation panes', 
 
     // The "Comms only" toggle hides the pins (they are milestones, not comms).
     await userEvent.click(within(transcript).getByRole('button', { name: /Comms only/i }));
-    expect(within(transcript).queryByText('Tour scheduled')).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(within(transcript).queryByText('Tour scheduled')).not.toBeInTheDocument(),
+    );
     expect(within(transcript).queryByText('Tour rescheduled')).not.toBeInTheDocument();
   });
 
@@ -966,7 +1026,7 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
     updateContact.mockResolvedValue({ ...tenantContact(), consent_method: 'verbal_phone' });
     renderDetail();
     await waitLoaded();
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    await screen.findByRole('textbox', { name: 'Reply message' });
 
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -1006,7 +1066,7 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
     sendMessage.mockRejectedValue(new ApiError(409, 'contact_no_consent', 'contact_no_consent'));
     renderDetail();
     await waitLoaded();
-    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledWith('c-tenant', expect.anything()));
+    await screen.findByRole('textbox', { name: 'Reply message' });
 
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi tenant');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -1060,6 +1120,29 @@ describe('TourDetail - conversation empty states', () => {
 });
 
 describe('TourDetail - mobile', () => {
+  // jsdom has no matchMedia, so useTwoPaneNarrow reads WIDE by default and every
+  // other test in this file exercises the desktop two-pane path (both panes on
+  // screen). These stub it narrow.
+  function stubNarrow(matches: boolean): void {
+    vi.stubGlobal(
+      'matchMedia',
+      vi.fn().mockImplementation((query: string) => ({
+        matches: query.includes('max-width: 860px') ? matches : false,
+        media: query,
+        onchange: null,
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+  }
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
   it('exposes a Details | Conversation toggle with Details pressed initially', async () => {
     renderDetail();
     await waitLoaded();
@@ -1067,5 +1150,55 @@ describe('TourDetail - mobile', () => {
     const conversation = screen.getByRole('button', { name: 'Conversation' });
     expect(details).toHaveAttribute('aria-pressed', 'true');
     expect(conversation).toHaveAttribute('aria-pressed', 'false');
+  });
+
+  it('landing on the page does NOT clear the tenant inbox row until the pane is revealed', async () => {
+    // The MF1 repro: at <=860px the comms column is display:none behind the
+    // Details pane, but it still MOUNTS - so merely opening /tours/:id from a
+    // phone used to fire the contact-wide fan-out and consume unread the
+    // operator never saw (there is no mark-unread anywhere in the product).
+    stubNarrow(true);
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 3),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+
+    // The Tenant tab is active and its dot is showing - and NOTHING was marked
+    // read. Wait for the pane itself to mount so this is not a race won by luck.
+    await screen.findByRole('tab', { name: /Tenant - Ann.*unread/i });
+    await screen.findByRole('textbox', { name: 'Reply message' });
+    expect(markInboxRead).not.toHaveBeenCalled();
+
+    // The operator taps "Conversation": now they are genuinely looking at it.
+    await userEvent.click(
+      within(screen.getByRole('group', { name: 'View' })).getByRole('button', {
+        name: 'Conversation',
+      }),
+    );
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
+    expect(markInboxRead).toHaveBeenCalledTimes(1);
+  });
+
+  it('the WIDE two-pane page still auto-marks on load (both panes are on screen)', async () => {
+    // The same stub, resolving WIDE - the desktop contract MF1 had to keep.
+    stubNarrow(false);
+    getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
+    getConversations.mockResolvedValue({
+      conversations: [
+        conv('c-tenant', 'tenant-1', 3),
+        conv('c-landlord', 'landlord-1', 0, 'landlord_1to1'),
+      ],
+      nextCursor: null,
+    });
+    renderDetail();
+    await waitLoaded();
+
+    await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
   });
 });

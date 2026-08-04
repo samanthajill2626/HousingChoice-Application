@@ -82,6 +82,7 @@ import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
 import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
@@ -203,8 +204,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Best-effort triple-write of a tour lifecycle event to THREE surfaces: the
-  // tenant's contact timeline (activity event), the property's Activity card
+  // Best-effort write of a tour lifecycle event to THREE surfaces: BOTH
+  // parties' contact timelines (the tenant's and the unit landlord's - one
+  // activity event each, via lib/personEvents), the property's Activity card
   // (a `units#<unitId>` audit row), and the tour's OWN history (a
   // `tours#<tourId>` audit row - tour-detail-page 1a, feeds
   // GET /api/tours/:tourId/activity). Each write is independently guarded -
@@ -216,17 +218,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     auditType: string,
     label: string,
   ): Promise<void> {
-    try {
-      await activityEvents.record({
-        contactId: tour.tenantId,
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      {
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
         type: activityType,
         label,
         refType: 'tour',
         refId: tour.tourId,
-      });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${activityType} milestone record failed (best-effort)`);
-    }
+      },
+    );
     try {
       await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
     } catch (err) {
@@ -908,10 +910,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // than open - "opened" would be premature, so mark the audit/log accordingly.
     const connecting = conversation.status === 'connecting';
 
-    // Tour-history milestone (tour-detail-page 1a): a tours#-ONLY audit row (the
-    // tenant timeline + property card deliberately do NOT carry it - recordTourEvent
-    // is not used here). Best-effort: a failed write must never fail the 201. IDs
-    // only. `connecting` distinguishes a deferred-open (connect-when-ready) group.
+    // Tour-history milestone (tour-detail-page 1a): a tours#<tourId> audit row
+    // carrying the opened thread id. Best-effort: a failed write must never fail
+    // the 201. IDs only. `connecting` distinguishes a deferred-open
+    // (connect-when-ready) group.
     try {
       await audit.append(`tours#${tourId}`, 'tour_group_opened', {
         tourId,
@@ -922,6 +924,30 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     } catch (err) {
       log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
     }
+
+    // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP.
+    // This one is roster-driven, NOT dual-party (lib/personEvents explains the
+    // split): "Group text opened" asserts membership of this conversation, so
+    // it follows `members` - the roster we just provisioned - the same way
+    // added_to_group_text follows the member it names. Auto-resolved rosters
+    // ARE [tenant, unit landlord], so the founder flow pins exactly those two;
+    // an explicit roster (a caseworker standing in for the tenant, a PM for the
+    // owner) pins who is actually there, and no absent tour party. Kept OUTSIDE
+    // recordTourEvent because the property (units#) Activity card deliberately
+    // carries no row for it - the tour's own trail already does. The pin fires
+    // even on the `connecting` path (no pool number yet): the route has no
+    // status gate and the tour Activity card already shows it, so this is
+    // parity, not a new claim. Best-effort, like every write above.
+    await recordRosterMilestone(
+      { activityEvents, log },
+      {
+        members,
+        type: 'tour_group_opened',
+        label: 'Group text opened',
+        refType: 'tour',
+        refId: tourId,
+      },
+    );
 
     // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
     events.emit('tour.updated', { tourId, status: updatedTour.status });

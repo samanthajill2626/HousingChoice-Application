@@ -75,6 +75,7 @@ import {
   type PlacementItem,
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -430,7 +431,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     }
   }
 
-  // BE2/C2: record one placement milestone against the tenant contact.
+  // BE2/C2: record one placement milestone against the tenant contact AND the
+  // placement unit's landlord (contact-comms-pane dual-party - lib/personEvents
+  // resolves unit.landlordId point-in-time and guards every write).
   // Best-effort — a log failure must NEVER fail the operator's board action (the
   // placement is already persisted); follows the neighbors' try/catch+log
   // convention.
@@ -439,13 +442,12 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     type: 'placement_opened' | 'placement_closed' | 'stage_changed' | 'tour_scheduled' | 'tour_took_place',
     label: string,
     placementId: string,
+    unitId: string,
   ): Promise<void> {
-    if (typeof tenantId !== 'string' || tenantId.length === 0) return;
-    try {
-      await activityEvents.record({ contactId: tenantId, type, label, refType: 'placement', refId: placementId });
-    } catch (err) {
-      log.error({ err, placementId, type }, 'placement milestone record failed (best-effort)');
-    }
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      { tenantId, unitId, type, label, refType: 'placement', refId: placementId },
+    );
   }
 
   const router = Router();
@@ -562,8 +564,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       unitId: created.unitId,
       stage: created.stage,
     });
-    // BE2/C2: a new placement is a "placement opened" milestone on the tenant's timeline.
-    await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
+    // BE2/C2: a new placement is a "placement opened" milestone on the tenant's
+    // timeline - and on the unit landlord's (dual-party).
+    await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId, created.unitId);
     // Arm the tenant's voucher_expiration deadline from the contact date (best-effort).
     await armVoucherFromTenant(created.placementId, created.tenantId);
     await emitPlacementUpdated(created);
@@ -745,10 +748,25 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         'tour_converted tour audit failed (best-effort)',
       );
     }
+    // ...and the same chapter on BOTH parties' contact timelines
+    // (contact-comms-pane): the tenant's and the unit landlord's. refType 'tour'
+    // - the pin points back at the tour that ended, not at the new placement
+    // (placement_opened below is the placement's own pin). Best-effort.
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      {
+        tenantId: created.tenantId,
+        unitId: created.unitId,
+        type: 'tour_converted',
+        label: 'Converted to placement',
+        refType: 'tour',
+        refId: tour.tourId,
+      },
+    );
     // Live tour-page refresh (tour-detail-page 1a): the finalize patch above
     // just closed the tour. ID + status only (no PII).
     events.emit('tour.updated', { tourId: tour.tourId, status: 'closed' });
-    await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId);
+    await recordPlacementMilestone(created.tenantId, 'placement_opened', 'Placement opened', created.placementId, created.unitId);
     // Arm the tenant's voucher_expiration deadline from the contact date (best-effort).
     await armVoucherFromTenant(created.placementId, created.tenantId);
     await emitPlacementUpdated(created);
@@ -858,9 +876,10 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
             'placement_closed',
             `Placement closed - ${stageLabel(item.stage)}${reason}`,
             placementId,
+            item.unitId,
           );
         } else {
-          await recordPlacementMilestone(tenantId, 'stage_changed', `Stage → ${stageLabel(item.stage)}`, placementId);
+          await recordPlacementMilestone(tenantId, 'stage_changed', `Stage → ${stageLabel(item.stage)}`, placementId, item.unitId);
         }
       }
       // tour_date NEWLY set (absent/changed → a value) → tour_scheduled.
@@ -869,7 +888,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         item.tour_date.length > 0 &&
         item.tour_date !== before.tour_date
       ) {
-        await recordPlacementMilestone(tenantId, 'tour_scheduled', `Tour scheduled - ${item.tour_date}`, placementId);
+        await recordPlacementMilestone(tenantId, 'tour_scheduled', `Tour scheduled - ${item.tour_date}`, placementId, item.unitId);
       }
       // NOTE: tour_took_place milestone was derived from placement.tours[], which
       // is retired. When re-implemented against the first-class tours API,

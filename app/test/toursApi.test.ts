@@ -500,8 +500,12 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
   it('emits tour_scheduled activity + units# tour_scheduled audit on create-scheduled', async () => {
     const { app, world } = makeWebhookHarness();
     const tourId = await seedScheduledTour(app, world);
+    // TENANT-scoped: the seeded unit has a landlord, so the landlord carries a
+    // copy of every one of these pins too (dual-party; its own suite below).
     expect(
-      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_scheduled' && e.refId === tourId && e.contactId === 'contact-tenant-1',
+      ),
     ).toHaveLength(1);
     expect(
       world.auditEvents.filter(
@@ -527,7 +531,11 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
     const tourId = await seedScheduledTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' }).expect(200);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' }).expect(200); // re-write, no re-emit
-    expect(world.activityEvents.filter((e) => e.type === 'tour_canceled')).toHaveLength(1);
+    expect(
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_canceled' && e.contactId === 'contact-tenant-1',
+      ),
+    ).toHaveLength(1);
     expect(
       world.auditEvents.filter(
         (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_canceled',
@@ -539,7 +547,11 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
     const { app, world } = makeWebhookHarness();
     const tourId = await seedScheduledTour(app, world);
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
-    expect(world.activityEvents.filter((e) => e.type === 'tour_no_show')).toHaveLength(1);
+    expect(
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_no_show' && e.contactId === 'contact-tenant-1',
+      ),
+    ).toHaveLength(1);
     expect(
       world.auditEvents.filter(
         (e) => e.entityKey === 'units#unit-abc' && e.event_type === 'tour_no_show',
@@ -561,7 +573,9 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
     ).toHaveLength(1);
     // The tenant activity for a reschedule is the tour_scheduled type.
     expect(
-      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_scheduled' && e.refId === tourId && e.contactId === 'contact-tenant-1',
+      ),
     ).toHaveLength(2); // one on create + one on reschedule
 
     // No-op reschedule (MINOR 5): re-PATCH the IDENTICAL time -> nothing new on
@@ -576,7 +590,9 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
       ),
     ).toHaveLength(1);
     expect(
-      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.refId === tourId),
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_scheduled' && e.refId === tourId && e.contactId === 'contact-tenant-1',
+      ),
     ).toHaveLength(2);
   });
 
@@ -588,8 +604,16 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
       .patch(`/api/tours/${tourId}`)
       .send({ outcome: 'move_forward', moveForward: true })
       .expect(200);
-    expect(world.activityEvents.filter((e) => e.type === 'tour_took_place')).toHaveLength(1);
-    expect(world.activityEvents.filter((e) => e.type === 'tour_outcome')).toHaveLength(1);
+    expect(
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_took_place' && e.contactId === 'contact-tenant-1',
+      ),
+    ).toHaveLength(1);
+    expect(
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_outcome' && e.contactId === 'contact-tenant-1',
+      ),
+    ).toHaveLength(1);
     expect(
       world.activityEvents.find((e) => e.type === 'tour_outcome')?.label,
     ).toContain('moved forward');
@@ -617,10 +641,143 @@ describe('PATCH/POST /api/tours — activity + property audit propagation', () =
       .patch(`/api/tours/${tourId}`)
       .send({ outcome: 'not_a_fit', moveForward: false })
       .expect(200);
-    expect(world.activityEvents.filter((e) => e.type === 'tour_outcome')).toHaveLength(1);
+    expect(
+      world.activityEvents.filter(
+        (e) => e.type === 'tour_outcome' && e.contactId === 'contact-tenant-1',
+      ),
+    ).toHaveLength(1);
     expect(
       world.activityEvents.find((e) => e.type === 'tour_outcome')?.label,
     ).toContain('not a fit');
+  });
+});
+
+// ============================================================================
+// Dual-party tour lifecycle events (contact-comms-pane Slice 1): every
+// recordTourEvent write lands on the tenant AND on the unit's landlord, so a
+// landlord's contact timeline carries the same tour pins from the person feed.
+// Landlord = unit.landlordId resolved POINT-IN-TIME (at event time).
+// ============================================================================
+
+describe('tour lifecycle activity events - dual-party (tenant + unit landlord)', () => {
+  const TENANT = BASE_CREATE_BODY.tenantId;
+
+  function seedUnitWithLandlord(world: FakeWorld, landlordId: string): void {
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId,
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  it('records the SAME tour_scheduled pin for the tenant and the unit landlord', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, 'c-ll');
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    const tourId = created.body.tour.tourId as string;
+
+    const tenantPins = world.activityEvents.filter(
+      (e) => e.type === 'tour_scheduled' && e.contactId === TENANT,
+    );
+    const landlordPins = world.activityEvents.filter(
+      (e) => e.type === 'tour_scheduled' && e.contactId === 'c-ll',
+    );
+    expect(tenantPins).toHaveLength(1);
+    expect(landlordPins).toHaveLength(1);
+    // Same label + deep-link target on both sides (one event, two feeds).
+    expect(landlordPins[0]).toMatchObject({
+      contactId: 'c-ll',
+      type: 'tour_scheduled',
+      label: 'Tour scheduled',
+      refType: 'tour',
+      refId: tourId,
+    });
+    expect(tenantPins[0]).toMatchObject({ label: 'Tour scheduled', refType: 'tour', refId: tourId });
+  });
+
+  it('carries every PATCH transition to the landlord too (no_show)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, 'c-ll');
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'no_show' }).expect(200);
+
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_no_show' && e.contactId === 'c-ll'),
+    ).toHaveLength(1);
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_no_show' && e.contactId === TENANT),
+    ).toHaveLength(1);
+  });
+
+  it('records ONE pin when the tenant IS the unit landlord (degenerate self-landlord)', async () => {
+    // personEvents.ts's de-dupe branch, which until now was pinned on the SEED
+    // twin only (seedHistory.test.ts). Mirrors the tour relay roster's one-slot
+    // rule: one contact, one feed, one pin - never two rows on the same person.
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, TENANT);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(TENANT);
+  });
+
+  it('skips the landlord write when the unit has no landlord (tenant pin only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, ''); // legacy/landlord-less unit
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(TENANT);
+  });
+
+  it('skips the landlord write when the unit row is missing entirely', async () => {
+    const { app, world } = makeWebhookHarness();
+    // No world.units entry for unit-abc at all.
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(TENANT);
+  });
+
+  it('never fails the route when the unit lookup throws (tenant pin survives)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, 'c-ll');
+    world.unitsRepo.getById = async () => {
+      throw new Error('boom');
+    };
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_scheduled');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(TENANT);
+  });
+
+  it('never fails the route when the LANDLORD record throws (tenant pin survives)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedUnitWithLandlord(world, 'c-ll');
+    const realRecord = world.activityEventsRepo.record.bind(world.activityEventsRepo);
+    world.activityEventsRepo.record = async (input) => {
+      if (input.contactId === 'c-ll') throw new Error('boom');
+      return realRecord(input);
+    };
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    expect(
+      world.activityEvents.filter((e) => e.type === 'tour_scheduled' && e.contactId === TENANT),
+    ).toHaveLength(1);
   });
 });
 
@@ -1637,15 +1794,38 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
   });
 
-  it('relay success records a tours#-ONLY tour_group_opened milestone + emits tour.updated (1a)', async () => {
+  // Seeds the tour's unit WITH a landlord so the dual-party person write has
+  // somebody to resolve (contact-comms-pane Slice 1).
+  function seedLandlordedUnit(w: FakeWorld): void {
+    w.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'c-ll',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  const groupOpenedPins = (w: FakeWorld, contactId: string) =>
+    w.activityEvents.filter((e) => e.type === 'tour_group_opened' && e.contactId === contactId);
+
+  it('pins tour_group_opened on the ROSTER THAT WAS OPENED - never on tour parties who are not in it', async () => {
+    // The roster decides who gets the pin, exactly like the add/remove-member
+    // milestones (routes/relayGroups.ts records against THAT member's contact).
+    // Here a caseworker and a PM are texting instead of the tenant and the
+    // unit's landlord: "Group text opened" belongs on the two feeds of the
+    // people actually in the chat, and on NEITHER absent party's.
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
-    const activityCountBefore = world.activityEvents.length;
 
     const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
-      members: [{ phone: '+15550200001', name: 'Alice' }],
+      members: [
+        { phone: '+15550200001', contactId: 'c-caseworker', name: 'Casey' },
+        { phone: '+15550200002', contactId: 'c-pm', name: 'Pat' },
+      ],
     });
     expect(res.status).toBe(201);
     const conversationId = (res.body.conversation as Record<string, unknown>)['conversationId'];
@@ -1658,9 +1838,25 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(opened[0]!.payload).toMatchObject({ tourId, conversationId });
     expect(opened[0]!.actorId).toBe('usr_testva00000000000000000');
 
-    // tours#-ONLY: no units# row and no tenant activity event for group-opened.
+    // The two people IN the chat each get the pin...
+    for (const contactId of ['c-caseworker', 'c-pm']) {
+      const pins = groupOpenedPins(world, contactId);
+      expect(pins).toHaveLength(1);
+      expect(pins[0]).toMatchObject({
+        type: 'tour_group_opened',
+        label: 'Group text opened',
+        refType: 'tour',
+        refId: tourId,
+      });
+    }
+    // ...and the tour's tenant + the unit's landlord, both ABSENT from the
+    // roster, get nothing: they are not in this conversation.
+    expect(groupOpenedPins(world, BASE_CREATE_BODY.tenantId)).toHaveLength(0);
+    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(0);
+
+    // The property (units#) audit card deliberately still carries NO row for
+    // group-open - the tour's own trail and the person feeds cover it.
     expect(world.auditEvents.some((e) => e.entityKey.startsWith('units#') && e.event_type === 'tour_group_opened')).toBe(false);
-    expect(world.activityEvents.length).toBe(activityCountBefore);
 
     // tour.updated advised dashboards (ID + status only).
     const updates = world.emitted.filter((e) => e.event === 'tour.updated');
@@ -1668,9 +1864,102 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(updates[updates.length - 1]!.payload).toEqual({ tourId, status: 'scheduled' });
   });
 
+  it('the AUTO-resolved roster IS [tenant, landlord], so both of them get the pin', async () => {
+    // The dashboard's [Open group text] sends no roster, so this is the shape
+    // the product actually produces today: roster-driven and tour-parties-driven
+    // agree, because auto-resolve builds the roster FROM those two parties.
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    world.contacts.push({
+      contactId: 'contact-tenant-1',
+      type: 'tenant',
+      phone: '+15550200011',
+      firstName: 'Tina',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'c-ll',
+      type: 'landlord',
+      phone: '+15550200012',
+      firstName: 'Larry',
+      lastName: 'Lord',
+    });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    expect(groupOpenedPins(world, 'contact-tenant-1')).toHaveLength(1);
+    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(1);
+  });
+
+  it('pins the roster even when the group is still CONNECTING (no number yet)', async () => {
+    // Tier-3 connect-when-ready: provisioning defers, the conversation is
+    // `connecting`, and the route has NO status gate - the pin fires at open
+    // time, matching what the tour Activity card already shows for this case.
+    const pool: PoolNumbersService = {
+      ...makeFakePoolNumbers(),
+      async provisionForGroup() {
+        return { kind: 'needs_connecting' };
+      },
+    };
+    defineJobHandler(RELAY_WARM_JOB, () => {});
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', contactId: 'c-caseworker', name: 'Casey' }],
+    });
+    await queueAdapter.settle();
+    expect(res.status).toBe(201);
+    expect((res.body.conversation as Record<string, unknown>)['status']).toBe('connecting');
+
+    expect(groupOpenedPins(world, 'c-caseworker')).toHaveLength(1);
+  });
+
+  it('a roster member with no contactId gets no pin (mirrors add/remove-member)', async () => {
+    // A bare phone on the roster has no person feed to write to - the same rule
+    // routes/relayGroups.ts applies to added_to_group_text.
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(201);
+
+    expect(world.activityEvents.filter((e) => e.type === 'tour_group_opened')).toHaveLength(0);
+  });
+
+  it('pins ONCE for a contact holding two roster slots (two numbers, one feed)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [
+        { phone: '+15550200001', contactId: 'c-two-phones', name: 'Casey' },
+        { phone: '+15550200002', contactId: 'c-two-phones', name: 'Casey' },
+      ],
+    });
+    expect(res.status).toBe(201);
+
+    expect(groupOpenedPins(world, 'c-two-phones')).toHaveLength(1);
+  });
+
   it('a REFUSED relay provision (409 tour_not_active) records NO tour_group_opened milestone', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1682,6 +1971,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(
       world.auditEvents.some((e) => e.event_type === 'tour_group_opened'),
     ).toBe(false);
+    expect(world.activityEvents.some((e) => e.type === 'tour_group_opened')).toBe(false);
   });
 
   it('404 for a missing tour', async () => {
@@ -2009,8 +2299,9 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     const tourId = created.body.tour.tourId as string;
 
     // Break the units repo only AFTER the tour exists, and drive the
-    // EXPLICIT-members path: the ZIP hint is then the ONLY unit read this
-    // request makes, so the throw lands squarely on the best-effort lookup.
+    // EXPLICIT-members path (no auto-resolve read). Both remaining unit reads -
+    // the ZIP hint and the group-open person milestone's landlord resolve - are
+    // best-effort, so the throw must still leave a 201 with the hint omitted.
     world.unitsRepo.getById = async () => {
       throw new Error('dynamodb: ProvisionedThroughputExceededException');
     };

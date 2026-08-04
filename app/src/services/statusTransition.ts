@@ -43,6 +43,7 @@ import {
 import { type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 import { armRelayCloseNagIfOpen } from './relayCloseNag.js';
 
 /**
@@ -206,28 +207,39 @@ export function createStatusTransitionService(
     }
   }
 
-  // Best-effort placement stage milestone on a REAL stage move. A terminal move
-  // posts `placement_closed` (with the VALIDATED lost CATEGORY only — never the
-  // free text); a non-terminal move posts `stage_changed`. Never throws out of
-  // the transition; PII-safe log (ids only, never the label).
+  // Best-effort placement stage milestone on a REAL stage move, recorded for the
+  // tenant AND the placement unit's landlord (contact-comms-pane dual-party -
+  // lib/personEvents owns the point-in-time landlord resolve and the guarding;
+  // it tolerates our OPTIONAL activityEventsRepo, so an absent repo still skips
+  // the whole milestone). A terminal move posts `placement_closed` (with the
+  // VALIDATED lost CATEGORY only - never the free text); a non-terminal move
+  // posts `stage_changed`. Never throws out of the transition; PII-safe log
+  // (ids only, never the label).
   async function recordStageMilestone(
     tenantId: string,
     placementId: string,
     toStage: PlacementStage,
     lostCategory: string | undefined,
     lostHasText: boolean,
+    unitId: string,
   ): Promise<void> {
-    if (!activityEventsRepo || typeof tenantId !== 'string' || tenantId.length === 0) return;
-    try {
-      if (TERMINAL_STAGES.has(toStage)) {
-        const reason = lostCategory && lostCategory.length > 0 ? ` - ${lostCategory}` : (lostHasText ? ' - reason on file' : '');
-        await activityEventsRepo.record({ contactId: tenantId, type: 'placement_closed', label: `Placement closed - ${STAGE_LABELS[toStage]}${reason}`, refType: 'placement', refId: placementId });
-      } else {
-        await activityEventsRepo.record({ contactId: tenantId, type: 'stage_changed', label: `Stage → ${STAGE_LABELS[toStage]}`, refType: 'placement', refId: placementId });
-      }
-    } catch (err) {
-      log.error({ err, placementId }, 'placement stage milestone record failed (best-effort)');
-    }
+    const terminal = TERMINAL_STAGES.has(toStage);
+    const reason = terminal
+      ? (lostCategory && lostCategory.length > 0 ? ` - ${lostCategory}` : (lostHasText ? ' - reason on file' : ''))
+      : '';
+    await recordPersonMilestone(
+      { activityEvents: activityEventsRepo, units: unitsRepo, log },
+      {
+        tenantId,
+        unitId,
+        type: terminal ? 'placement_closed' : 'stage_changed',
+        label: terminal
+          ? `Placement closed - ${STAGE_LABELS[toStage]}${reason}`
+          : `Stage → ${STAGE_LABELS[toStage]}`,
+        refType: 'placement',
+        refId: placementId,
+      },
+    );
   }
 
   /**
@@ -386,6 +398,7 @@ export function createStatusTransitionService(
           toStage,
           updated.lost_reason?.category,
           typeof updated.lost_reason?.text === 'string' && updated.lost_reason.text.length > 0,
+          existing.unitId,
         );
       }
 

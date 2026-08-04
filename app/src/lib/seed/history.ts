@@ -561,12 +561,16 @@ export function entityHistory(
 //   • placement_closed  routes/placements.ts:552  ("Placement closed - <stage>[ - <cat>]")
 //   • listing_sent      jobs/broadcastFanOut.ts:309 ("Property sent", ref unit)
 //   • number_added      routes/contacts.ts:1473    ("Number added", no ref)
-//   • tour_scheduled/tour_took_place — tours emit NO milestone at runtime today
-//     (research §WRITE-SHAPES.3: tour_took_place retired, tour_scheduled only from the
-//     legacy placement tour_date path). We materialize them directly from the tour
-//     entity so a tenant's timeline reflects their tour journey; labels follow the
-//     legacy `Tour scheduled - <date>` shape (placements.ts:565) and the repo's own
-//     documented `Tour took place - Toured` example (activityEventsRepo.ts:59).
+//   • tour_* (scheduled/took_place/no_show/canceled/outcome/group_opened/
+//     converted) - materialized directly from the tour entity, mirroring
+//     recordTourEvent + the relay/conversion routes' vocabulary (see tourTrail
+//     below, the source of truth for the per-status sequence). The two oldest
+//     labels keep their richer seed shape - the legacy `Tour scheduled - <date>`
+//     (placements.ts) and the repo's documented `Tour took place - Toured`
+//     example (activityEventsRepo.ts:59); the rest are the live writers' strings
+//     verbatim.
+// Every placement/tour milestone is DUAL-PARTY (contact-comms-pane): recorded for
+// the tenant AND the unit's landlord, exactly as lib/personEvents does at runtime.
 // Deterministic evt-* ids (hash8 of row identity) — the byte-stable analog of the
 // repo's random `evt-<uuid>`, extending matrix's deterministic evt-mx-… pattern.
 // ---------------------------------------------------------------------------
@@ -623,31 +627,55 @@ function closedReasonSuffix(placement: Record<string, unknown>, stage: Placement
 }
 
 /**
- * A placement-linked tenant's milestone timeline: `placement_opened` at hop 0
- * (the create instant), a `stage_changed` at each non-terminal stage entry, and a
+ * The parties one milestone is recorded against: the tenant it is about, plus
+ * the unit's landlord when the caller resolved one. Mirrors the live writers'
+ * dual-party rule (lib/personEvents): a blank landlordId, or a landlord who IS
+ * the tenant, yields the tenant alone. Order is tenant-first so an existing
+ * tenant-only expectation still sees its rows in the same relative order.
+ */
+function partiesFor(tenantId: string, landlordId: string | undefined): string[] {
+  return landlordId !== undefined && landlordId.length > 0 && landlordId !== tenantId
+    ? [tenantId, landlordId]
+    : [tenantId];
+}
+
+/**
+ * A placement's milestone timeline: `placement_opened` at hop 0 (the create
+ * instant), a `stage_changed` at each non-terminal stage entry, and a
  * `placement_closed` at a terminal (`moved_in`/`lost`). Each `at` is the SAME
  * `T[k]` the audit trail uses (placementWalk), so the person-timeline and the
  * placement drawer share one clock (§4.6). Returns [] for a pointer/invalid placement.
+ *
+ * Recorded for the tenant AND - when `landlordId` is supplied - the unit's
+ * landlord, mirroring the live dual-party writers (routes/placements.ts +
+ * services/statusTransition.ts via lib/personEvents). Omit `landlordId` and the
+ * output is byte-identical to the tenant-only original.
  */
-export function placementMilestones(placement: Record<string, unknown>): ActivityRow[] {
+export function placementMilestones(
+  placement: Record<string, unknown>,
+  landlordId?: string,
+): ActivityRow[] {
   const w = placementWalk(placement);
   if (w === null || w.tenantId === '') return [];
   const { placementId, tenantId, walk, T } = w;
   const ref = { refType: 'placement', refId: placementId };
+  const parties = partiesFor(tenantId, landlordId);
   const rows: ActivityRow[] = [];
-  // POST /api/placements → placement_opened on the tenant's timeline (create instant).
-  rows.push(makeActivityRow(tenantId, T[0]!, 'placement_opened', 'Placement opened', ref));
-  // Each subsequent stage entry → the PATCH milestone (stage_changed, or a terminal close).
-  for (let k = 1; k < walk.length; k++) {
-    const stage = walk[k]!;
-    const at = T[k]!;
-    if (TERMINAL_STAGES.has(stage)) {
-      const reason = closedReasonSuffix(placement, stage);
-      rows.push(
-        makeActivityRow(tenantId, at, 'placement_closed', `Placement closed - ${STAGE_LABELS[stage]}${reason}`, ref),
-      );
-    } else {
-      rows.push(makeActivityRow(tenantId, at, 'stage_changed', `Stage → ${STAGE_LABELS[stage]}`, ref));
+  for (const contactId of parties) {
+    // POST /api/placements → placement_opened on the timeline (create instant).
+    rows.push(makeActivityRow(contactId, T[0]!, 'placement_opened', 'Placement opened', ref));
+    // Each subsequent stage entry → the PATCH milestone (stage_changed, or a terminal close).
+    for (let k = 1; k < walk.length; k++) {
+      const stage = walk[k]!;
+      const at = T[k]!;
+      if (TERMINAL_STAGES.has(stage)) {
+        const reason = closedReasonSuffix(placement, stage);
+        rows.push(
+          makeActivityRow(contactId, at, 'placement_closed', `Placement closed - ${STAGE_LABELS[stage]}${reason}`, ref),
+        );
+      } else {
+        rows.push(makeActivityRow(contactId, at, 'stage_changed', `Stage → ${STAGE_LABELS[stage]}`, ref));
+      }
     }
   }
   return rows;
@@ -660,35 +688,151 @@ export function placementMilestones(placement: Record<string, unknown>): Activit
  */
 const TOUR_TOOK_PLACE: ReadonlySet<TourStatus> = new Set<TourStatus>(['toured', 'closed']);
 
+/** VERBATIM live-writer labels (routes/tours.ts relay route + routes/placements.ts
+ *  conversion) - e2e pins these strings byte-exact, so never reword them here. */
+const TOUR_GROUP_OPENED_LABEL = 'Group text opened';
+const TOUR_CONVERTED_LABEL = 'Converted to placement';
+
 /**
- * A tour-owning tenant's milestones: `tour_scheduled` once the tour has a
- * scheduled time (a timeless `requested` tour → none), and `tour_took_place` when
- * the tour actually happened (toured/closed). Keyed on the tour's `tenantId`.
- * refType `tour` (the tour itself) — mirrors the real writer recordTourEvent
- * (routes/tours.ts), so the milestone deep-links to /tours/<id>, not the property.
+ * A tour's person-timeline milestones, in the LIVE writers' full vocabulary:
+ * tour_scheduled / tour_took_place / tour_no_show / tour_canceled / tour_outcome
+ * (routes/tours.ts recordTourEvent) + tour_group_opened (the relay route) +
+ * tour_converted (the conversion route). refType `tour` (the tour itself) so each
+ * milestone deep-links to /tours/<id>, not the property.
+ *
+ * Per-status sequence + appendices + instants are a deliberate MIRROR of
+ * `tourTrail` below (the tours# audit trail), which is this vocabulary's source
+ * of truth: the two must tell one same-clock story. `tour_rescheduled` has no
+ * seeded signal (no seeded tour records a reschedule) and the trail models none,
+ * so none is emitted.
+ *
+ * Recorded for the tenant AND - when `landlordId` is supplied - the unit's
+ * landlord (dual-party, mirroring lib/personEvents). Omit `landlordId` and only
+ * the tenant's rows are produced.
  */
-export function tourMilestones(tour: Record<string, unknown>): ActivityRow[] {
+export function tourMilestones(
+  tour: Record<string, unknown>,
+  landlordId?: string,
+): ActivityRow[] {
   const tenantId = String(tour['tenantId'] ?? '');
   const tourId = String(tour['tourId'] ?? '');
   const status = String(tour['status'] ?? '') as TourStatus;
-  const scheduledAt = tour['scheduledAt'];
+  const scheduledAtRaw = tour['scheduledAt'];
   const createdAt = String(tour['createdAt'] ?? tour['updatedAt'] ?? '');
   if (tenantId === '' || !(status in TOUR_STATUS_LABELS)) return [];
-  const hasSchedule = typeof scheduledAt === 'string' && scheduledAt.length > 0;
-  if (!hasSchedule) return []; // requested (timeless) → no scheduled/took-place milestones
   const ref = tourId !== '' ? { refType: 'tour', refId: tourId } : undefined;
+  const groupThreadIdRaw = tour['groupThreadId'];
+  const groupThreadId =
+    typeof groupThreadIdRaw === 'string' && groupThreadIdRaw.length > 0 ? groupThreadIdRaw : '';
+
+  // One milestone to emit: its instant (the string actually stored), a stable
+  // priority to order same-instant rows, its type and its label.
+  interface Desc {
+    at: string;
+    ms: number;
+    prio: number;
+    type: string;
+    label: string;
+  }
+  const descs: Desc[] = [];
+
+  if (status === 'requested') {
+    // TIMELESS: no scheduling milestones (the runtime writer emits nothing on a
+    // timeless create) - but a provisioned group thread still pins its open. The
+    // provisioning route has NO status gate, so a requested tour with a group
+    // carries exactly [tour_group_opened] (same rule as tourTrail).
+    if (groupThreadId === '' || createdAt === '') return [];
+    const requestedMs = Date.parse(createdAt);
+    if (Number.isNaN(requestedMs)) return [];
+    descs.push({ at: createdAt, ms: requestedMs, prio: 1, type: 'tour_group_opened', label: TOUR_GROUP_OPENED_LABEL });
+  } else {
+    const scheduledAt =
+      typeof scheduledAtRaw === 'string' && scheduledAtRaw.length > 0 ? scheduledAtRaw : '';
+    if (scheduledAt === '') return []; // non-requested tour without a schedule -> skip
+    const schedMs = Date.parse(scheduledAt);
+    if (Number.isNaN(schedMs)) return [];
+    // The booking happened at tour creation (these seed tours are created already-
+    // scheduled); label follows the legacy `Tour scheduled - <date>` shape.
+    const bookedAt = createdAt !== '' ? createdAt : scheduledAt;
+    const bookingMs = Date.parse(bookedAt);
+    if (Number.isNaN(bookingMs)) return [];
+
+    descs.push({
+      at: bookedAt,
+      ms: bookingMs,
+      prio: 0,
+      type: 'tour_scheduled',
+      label: `Tour scheduled - ${scheduledAt.slice(0, 10)}`,
+    });
+    if (groupThreadId !== '') {
+      descs.push({ at: bookedAt, ms: bookingMs, prio: 1, type: 'tour_group_opened', label: TOUR_GROUP_OPENED_LABEL });
+    }
+    if (TOUR_TOOK_PLACE.has(status)) {
+      // The tour happened at its scheduled time; label = the `toured` transition.
+      descs.push({
+        at: scheduledAt,
+        ms: schedMs,
+        prio: 2,
+        type: 'tour_took_place',
+        label: `Tour took place - ${TOUR_STATUS_LABELS['toured']}`,
+      });
+    } else if (status === 'no_show') {
+      descs.push({ at: scheduledAt, ms: schedMs, prio: 2, type: 'tour_no_show', label: 'Tour no-show' });
+    } else if (status === 'canceled') {
+      const canceledAtRaw = tour['canceledAt'];
+      let cancelMs =
+        typeof canceledAtRaw === 'string' && canceledAtRaw.length > 0 && !Number.isNaN(Date.parse(canceledAtRaw))
+          ? Date.parse(canceledAtRaw)
+          : Math.floor((bookingMs + schedMs) / 2); // deterministic mid-instant
+      if (cancelMs > schedMs) cancelMs = schedMs; // never after it would have happened
+      if (cancelMs < bookingMs) cancelMs = bookingMs; // never before booking
+      descs.push({
+        at: new Date(cancelMs).toISOString(),
+        ms: cancelMs,
+        prio: 2,
+        type: 'tour_canceled',
+        label: 'Tour canceled',
+      });
+    }
+
+    // Outcome appendix (the exit gate, recorded after the visit): updatedAt when
+    // later than scheduledAt, else scheduledAt + a small fixed offset.
+    const outcome = tour['outcome'];
+    let outcomeMs: number | undefined;
+    if (typeof outcome === 'string' && outcome.length > 0) {
+      const updatedMs = Date.parse(String(tour['updatedAt'] ?? ''));
+      outcomeMs =
+        !Number.isNaN(updatedMs) && updatedMs > schedMs ? updatedMs : schedMs + TOUR_APPENDIX_OFFSET_MS;
+      const movedForward = tour['moveForward'] === true || outcome === 'move_forward';
+      descs.push({
+        at: new Date(outcomeMs).toISOString(),
+        ms: outcomeMs,
+        prio: 3,
+        type: 'tour_outcome',
+        label: `Tour outcome - ${movedForward ? 'moved forward' : 'not a fit'}`,
+      });
+    }
+
+    // Converted appendix (the tour's final chapter): after the outcome instant
+    // when present, else after the visit.
+    const convertedPlacementId = tour['convertedPlacementId'];
+    if (typeof convertedPlacementId === 'string' && convertedPlacementId.length > 0) {
+      const base = outcomeMs !== undefined ? outcomeMs : schedMs;
+      const convertedMs = base + TOUR_APPENDIX_OFFSET_MS;
+      descs.push({
+        at: new Date(convertedMs).toISOString(),
+        ms: convertedMs,
+        prio: 4,
+        type: 'tour_converted',
+        label: TOUR_CONVERTED_LABEL,
+      });
+    }
+  }
+
+  descs.sort((a, b) => a.ms - b.ms || a.prio - b.prio);
   const rows: ActivityRow[] = [];
-  // The booking happened at tour creation (these seed tours are created already-
-  // scheduled); label follows the legacy `Tour scheduled - <date>` shape.
-  const bookedAt = createdAt !== '' ? createdAt : scheduledAt;
-  rows.push(
-    makeActivityRow(tenantId, bookedAt, 'tour_scheduled', `Tour scheduled - ${scheduledAt.slice(0, 10)}`, ref),
-  );
-  if (TOUR_TOOK_PLACE.has(status)) {
-    // The tour happened at its scheduled time; label = the `toured` transition.
-    rows.push(
-      makeActivityRow(tenantId, scheduledAt, 'tour_took_place', `Tour took place - ${TOUR_STATUS_LABELS['toured']}`, ref),
-    );
+  for (const contactId of partiesFor(tenantId, landlordId)) {
+    for (const d of descs) rows.push(makeActivityRow(contactId, d.at, d.type, d.label, ref));
   }
   return rows;
 }
@@ -961,15 +1105,34 @@ export function historyItems(tables: Record<string, Record<string, unknown>[]>):
   }) as AuditRow[];
 
   // ---- activity_events (Contact Timeline milestones, §4.6) ----
+  // Dual-party (contact-comms-pane): the live writers record every tour/placement
+  // milestone against the tenant AND the unit's landlord, so the seeded demo world
+  // must too - otherwise a landlord's contact page looks empty where production
+  // shows their property's whole story. The unit -> landlord map is the seam
+  // (placements and tours each carry unitId; the units table carries landlordId).
+  const landlordByUnitId = new Map<string, string>();
+  for (const u of units) {
+    const unitId = String(u['unitId'] ?? '');
+    const owner = u['landlordId'];
+    if (unitId !== '' && typeof owner === 'string' && owner.length > 0) {
+      landlordByUnitId.set(unitId, owner);
+    }
+  }
+  const ownerOf = (row: Record<string, unknown>): string | undefined =>
+    landlordByUnitId.get(String(row['unitId'] ?? ''));
+
   const generatedActivity: ActivityRow[] = [];
-  for (const p of placements) generatedActivity.push(...placementMilestones(p));
-  for (const t of tours) generatedActivity.push(...tourMilestones(t));
+  for (const p of placements) generatedActivity.push(...placementMilestones(p, ownerOf(p)));
+  for (const t of tours) generatedActivity.push(...tourMilestones(t, ownerOf(t)));
   for (const s of listingSends) generatedActivity.push(...listingSendMilestones(s));
   for (const c of contacts) generatedActivity.push(...contactPhoneMilestones(c));
 
   // Dedupe/supersede (§4.7): a pre-existing activity row is dropped for any contact
   // this module produced ≥1 milestone for (its regenerated timeline is authoritative);
   // pre-existing rows for contacts we do NOT cover are preserved verbatim.
+  // NOTE (accepted): landlord contactIds now enter `coveredContactIds`, so a
+  // landlord's hand-authored matrix/cast activity rows are superseded by these
+  // real lifecycle pins rather than sitting alongside them.
   const coveredContactIds = new Set(generatedActivity.map((r) => r.contactId));
   const keptPreActivity = preActivity.filter(
     (r) => !coveredContactIds.has(String(r['contactId'])),

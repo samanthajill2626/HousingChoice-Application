@@ -969,25 +969,55 @@ describe('statusTransition — placement stage milestone', () => {
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
   });
 
-  it('records a stage_changed milestone on a non-terminal move', async () => {
+  it('records a stage_changed milestone on a non-terminal move, for the tenant AND the unit landlord', async () => {
     const svc = makeServiceWithActivity(world);
     const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     await svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual', actor: 'usr_va' });
     const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
-    expect(ev).toHaveLength(1);
-    expect(ev[0]).toMatchObject({ contactId: 'tenant-1', refType: 'placement', refId: p.placementId, label: expect.stringContaining('Collect RTA') });
+    expect(ev).toHaveLength(2);
+    expect(ev.map((e) => e.contactId).sort()).toEqual(['ll-1', 'tenant-1']);
+    for (const e of ev) {
+      expect(e).toMatchObject({ refType: 'placement', refId: p.placementId, label: expect.stringContaining('Collect RTA') });
+    }
   });
 
-  it('records a placement_closed milestone (with lost category, no free text) on a terminal move', async () => {
+  it('records a placement_closed milestone (with lost category, no free text) on a terminal move, for both parties', async () => {
     const svc = makeServiceWithActivity(world);
     const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
     // Category MUST be a valid lost-reason category (statusModel.ts:303-311) or
     // transitionPlacement drops it (isLostReasonCategory guard) → label omits it.
     await svc.transitionPlacement(p.placementId, { toStage: 'lost', source: 'manual', lostReason: { category: 'tenant_withdrew', text: 'secret note' } });
     const ev = world.activityEvents.filter((e) => e.type === 'placement_closed');
+    expect(ev).toHaveLength(2);
+    expect(ev.map((e) => e.contactId).sort()).toEqual(['ll-1', 'tenant-1']);
+    for (const e of ev) {
+      // The lost CATEGORY rides the label; the free text never does - on EITHER
+      // feed (the landlord copy must not leak what the tenant copy hides).
+      expect(e.label).toContain('tenant_withdrew');
+      expect(e.label).not.toContain('secret note');
+    }
+  });
+
+  it('skips the landlord copy when the placement unit has no landlord', async () => {
+    await world.unitsRepo.create({ unitId: 'unit-nl', landlordId: '', status: 'available' });
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-nl', stage: 'send_application' });
+    await svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual' });
+    const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
     expect(ev).toHaveLength(1);
-    expect(ev[0]!.label).toContain('tenant_withdrew');
-    expect(ev[0]!.label).not.toContain('secret note');
+    expect(ev[0]?.contactId).toBe('tenant-1');
+  });
+
+  it('never throws out of the transition when the unit lookup fails (tenant pin survives)', async () => {
+    const svc = makeServiceWithActivity(world);
+    const p = await world.placementsRepo.create({ tenantId: 'tenant-1', unitId: 'unit-1', stage: 'send_application' });
+    world.unitsRepo.getById = async () => { throw new Error('boom'); };
+    await expect(
+      svc.transitionPlacement(p.placementId, { toStage: 'collect_rta', source: 'manual' }),
+    ).resolves.toBeTruthy();
+    const ev = world.activityEvents.filter((e) => e.type === 'stage_changed');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]?.contactId).toBe('tenant-1');
   });
 });
 

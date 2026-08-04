@@ -326,7 +326,7 @@ describe('placements API — BE2/C2 activity milestones', () => {
   const milestonesFor = (tenantId: string) =>
     world.activityEvents.filter((e) => e.contactId === tenantId);
 
-  it('placement create emits placement_opened against the tenant (refType placement)', async () => {
+  it('placement create emits placement_opened against the tenant AND the unit landlord (refType placement)', async () => {
     await world.contactsRepo.create({ contactId: 'c-keisha', type: 'tenant', status: 'searching' });
     await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'll-1', status: 'available' });
     const res = await authedPost('/api/placements', { tenantId: 'c-keisha', unitId: 'unit-1' });
@@ -334,6 +334,20 @@ describe('placements API — BE2/C2 activity milestones', () => {
     const ev = milestonesFor('c-keisha');
     expect(ev).toHaveLength(1);
     expect(ev[0]).toMatchObject({ type: 'placement_opened', refType: 'placement', refId: placementId });
+    // Dual-party (contact-comms-pane): the landlord's feed carries the same pin.
+    const llEv = milestonesFor('ll-1');
+    expect(llEv).toHaveLength(1);
+    expect(llEv[0]).toMatchObject({ type: 'placement_opened', label: 'Placement opened', refType: 'placement', refId: placementId });
+  });
+
+  it('placement create on a landlord-less unit emits the tenant pin only', async () => {
+    await world.contactsRepo.create({ contactId: 'c-solo', type: 'tenant', status: 'searching' });
+    await world.unitsRepo.create({ unitId: 'unit-nl', landlordId: '', status: 'available' });
+    const res = await authedPost('/api/placements', { tenantId: 'c-solo', unitId: 'unit-nl' });
+    expect(res.status).toBe(201);
+    const opened = world.activityEvents.filter((e) => e.type === 'placement_opened');
+    expect(opened).toHaveLength(1);
+    expect(opened[0]?.contactId).toBe('c-solo');
   });
 
   // NOTE: stage moves no longer go through the legacy CRUD PATCH (§8 — they

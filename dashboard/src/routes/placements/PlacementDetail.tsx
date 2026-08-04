@@ -41,7 +41,13 @@ import {
   type PlacementStage,
   type UnitItem,
 } from '../../api/index.js';
-import { Button, Spinner, StatusMenu, type StatusMenuGroup } from '../../ui/index.js';
+import {
+  Button,
+  Spinner,
+  StatusMenu,
+  useTwoPaneNarrow,
+  type StatusMenuGroup,
+} from '../../ui/index.js';
 import { Card, EmptyRow, KV, NotesText, Row } from '../contact/Card.js';
 import { formatMoney } from '../listing/listingFormat.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
@@ -107,6 +113,14 @@ export function PlacementDetail(): React.JSX.Element {
   const [error, setError] = useState<string | null>(null);
   // Mobile pane: DETAILS first on narrow widths (matches the tour page).
   const [pane, setPane] = useState<'details' | 'conversation'>('details');
+  // Is the comms column actually on SCREEN? Wide: always (both panes render and
+  // `pane` only styles the toggle). Narrow: only when the operator picked
+  // Conversation - the other pane is display:none but still MOUNTED, so the
+  // conversation cannot work this out for itself. PlacementConversation needs it
+  // to decide whether a 1:1 tab was really "viewed" (mark-read is a one-way,
+  // whole-inbox-row fan-out).
+  const narrowShell = useTwoPaneNarrow();
+  const commsVisible = !narrowShell || pane === 'conversation';
   // The "Set follow-up" kebab action + the Deadlines-and-nudges card's Set/Change
   // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
@@ -218,7 +232,7 @@ export function PlacementDetail(): React.JSX.Element {
     setBusy(true);
     setError(null);
     void provisionPlacementRelay(placementId)
-      .then(({ conversationId }) => channels.setConversationId('group', conversationId))
+      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
       .catch(() => setError('Could not open the group text. Please try again.'))
       .finally(() => setBusy(false));
   }, [busy, placementId, channels]);
@@ -442,6 +456,7 @@ export function PlacementDetail(): React.JSX.Element {
             tenant={tenant}
             landlord={landlord}
             channels={channels}
+            commsVisible={commsVisible}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>

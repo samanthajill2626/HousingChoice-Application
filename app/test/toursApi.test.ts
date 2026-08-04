@@ -1809,7 +1809,12 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
   const groupOpenedPins = (w: FakeWorld, contactId: string) =>
     w.activityEvents.filter((e) => e.type === 'tour_group_opened' && e.contactId === contactId);
 
-  it('relay success records tour_group_opened on BOTH person feeds + the tours# audit row + emits tour.updated (1a)', async () => {
+  it('pins tour_group_opened on the ROSTER THAT WAS OPENED - never on tour parties who are not in it', async () => {
+    // The roster decides who gets the pin, exactly like the add/remove-member
+    // milestones (routes/relayGroups.ts records against THAT member's contact).
+    // Here a caseworker and a PM are texting instead of the tenant and the
+    // unit's landlord: "Group text opened" belongs on the two feeds of the
+    // people actually in the chat, and on NEITHER absent party's.
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
     seedLandlordedUnit(world);
@@ -1817,7 +1822,10 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     const tourId = created.body.tour.tourId as string;
 
     const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
-      members: [{ phone: '+15550200001', name: 'Alice' }],
+      members: [
+        { phone: '+15550200001', contactId: 'c-caseworker', name: 'Casey' },
+        { phone: '+15550200002', contactId: 'c-pm', name: 'Pat' },
+      ],
     });
     expect(res.status).toBe(201);
     const conversationId = (res.body.conversation as Record<string, unknown>)['conversationId'];
@@ -1830,23 +1838,24 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(opened[0]!.payload).toMatchObject({ tourId, conversationId });
     expect(opened[0]!.actorId).toBe('usr_testva00000000000000000');
 
-    // Opening the group is now ALSO a person milestone on both sides of the
-    // deal (contact-comms-pane): the tenant's and the landlord's timelines.
-    const tenantPins = groupOpenedPins(world, BASE_CREATE_BODY.tenantId);
-    const landlordPins = groupOpenedPins(world, 'c-ll');
-    expect(tenantPins).toHaveLength(1);
-    expect(landlordPins).toHaveLength(1);
-    for (const pin of [tenantPins[0], landlordPins[0]]) {
-      expect(pin).toMatchObject({
+    // The two people IN the chat each get the pin...
+    for (const contactId of ['c-caseworker', 'c-pm']) {
+      const pins = groupOpenedPins(world, contactId);
+      expect(pins).toHaveLength(1);
+      expect(pins[0]).toMatchObject({
         type: 'tour_group_opened',
         label: 'Group text opened',
         refType: 'tour',
         refId: tourId,
       });
     }
+    // ...and the tour's tenant + the unit's landlord, both ABSENT from the
+    // roster, get nothing: they are not in this conversation.
+    expect(groupOpenedPins(world, BASE_CREATE_BODY.tenantId)).toHaveLength(0);
+    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(0);
 
     // The property (units#) audit card deliberately still carries NO row for
-    // group-open - the tour's own trail and the two person feeds cover it.
+    // group-open - the tour's own trail and the person feeds cover it.
     expect(world.auditEvents.some((e) => e.entityKey.startsWith('units#') && e.event_type === 'tour_group_opened')).toBe(false);
 
     // tour.updated advised dashboards (ID + status only).
@@ -1855,7 +1864,38 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(updates[updates.length - 1]!.payload).toEqual({ tourId, status: 'scheduled' });
   });
 
-  it('pins tour_group_opened on both feeds even when the group is still CONNECTING (no number yet)', async () => {
+  it('the AUTO-resolved roster IS [tenant, landlord], so both of them get the pin', async () => {
+    // The dashboard's [Open group text] sends no roster, so this is the shape
+    // the product actually produces today: roster-driven and tour-parties-driven
+    // agree, because auto-resolve builds the roster FROM those two parties.
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    world.contacts.push({
+      contactId: 'contact-tenant-1',
+      type: 'tenant',
+      phone: '+15550200011',
+      firstName: 'Tina',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'c-ll',
+      type: 'landlord',
+      phone: '+15550200012',
+      firstName: 'Larry',
+      lastName: 'Lord',
+    });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    expect(groupOpenedPins(world, 'contact-tenant-1')).toHaveLength(1);
+    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(1);
+  });
+
+  it('pins the roster even when the group is still CONNECTING (no number yet)', async () => {
     // Tier-3 connect-when-ready: provisioning defers, the conversation is
     // `connecting`, and the route has NO status gate - the pin fires at open
     // time, matching what the tour Activity card already shows for this case.
@@ -1872,20 +1912,21 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     const tourId = created.body.tour.tourId as string;
 
     const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
-      members: [{ phone: '+15550200001', name: 'Alice' }],
+      members: [{ phone: '+15550200001', contactId: 'c-caseworker', name: 'Casey' }],
     });
     await queueAdapter.settle();
     expect(res.status).toBe(201);
     expect((res.body.conversation as Record<string, unknown>)['status']).toBe('connecting');
 
-    expect(groupOpenedPins(world, BASE_CREATE_BODY.tenantId)).toHaveLength(1);
-    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(1);
+    expect(groupOpenedPins(world, 'c-caseworker')).toHaveLength(1);
   });
 
-  it('skips the landlord pin when the unit has no landlord (tenant pin only)', async () => {
+  it('a roster member with no contactId gets no pin (mirrors add/remove-member)', async () => {
+    // A bare phone on the roster has no person feed to write to - the same rule
+    // routes/relayGroups.ts applies to added_to_group_text.
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
-    // No units row for unit-abc at all -> nothing to resolve.
+    seedLandlordedUnit(world);
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
 
@@ -1894,9 +1935,25 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     });
     expect(res.status).toBe(201);
 
-    const pins = world.activityEvents.filter((e) => e.type === 'tour_group_opened');
-    expect(pins).toHaveLength(1);
-    expect(pins[0]?.contactId).toBe(BASE_CREATE_BODY.tenantId);
+    expect(world.activityEvents.filter((e) => e.type === 'tour_group_opened')).toHaveLength(0);
+  });
+
+  it('pins ONCE for a contact holding two roster slots (two numbers, one feed)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [
+        { phone: '+15550200001', contactId: 'c-two-phones', name: 'Casey' },
+        { phone: '+15550200002', contactId: 'c-two-phones', name: 'Casey' },
+      ],
+    });
+    expect(res.status).toBe(201);
+
+    expect(groupOpenedPins(world, 'c-two-phones')).toHaveLength(1);
   });
 
   it('a REFUSED relay provision (409 tour_not_active) records NO tour_group_opened milestone', async () => {

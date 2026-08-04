@@ -1,10 +1,26 @@
-// Dual-party person milestones (contact-comms-pane, 2026-08-03).
+// Person milestones for tour/placement events (contact-comms-pane, 2026-08-03).
 //
-// A tour/placement lifecycle event is news for BOTH sides of the deal: the
-// TENANT whose tour/placement it is, and the LANDLORD who owns the unit. This
-// helper is that pair of writes, once, so tours.ts / placements.ts /
-// services/statusTransition.ts do not each re-implement (and drift on) the
-// landlord resolve plus the best-effort guarding.
+// TWO SHAPES, and which one an event takes is decided by what the event
+// ASSERTS - not by convenience:
+//
+//   recordPersonMilestone (DUAL-PARTY) - for a lifecycle fact about the deal:
+//     scheduled, took place, no-show, canceled, outcome, stage moves. It is
+//     news for BOTH sides: the TENANT whose tour/placement it is, and the
+//     LANDLORD who owns the unit, whether or not either is on any group text.
+//
+//   recordRosterMilestone (ROSTER) - for an event that asserts MEMBERSHIP OF A
+//     CONVERSATION ("Group text opened"). Those follow the roster that was
+//     actually provisioned, because a pin claiming someone is in a chat they
+//     are not in is simply false. This mirrors the rule the add/remove-member
+//     milestones already follow (routes/relayGroups.ts records
+//     added_to_group_text / removed_from_group_text against THAT member's
+//     contact). A tour party who is not on the roster - a tenant represented
+//     by a caseworker, an owner whose PM does the texting - gets no pin, and a
+//     non-party who IS on the roster does.
+//
+// Both live here so tours.ts / placements.ts / services/statusTransition.ts do
+// not each re-implement (and drift on) the landlord resolve plus the
+// best-effort guarding.
 //
 // LANDLORD RESOLUTION IS POINT-IN-TIME, PERMANENTLY: the landlord is whoever
 // `unit.landlordId` resolves to AT EVENT TIME, and the pin never moves after
@@ -89,6 +105,53 @@ export async function recordPersonMilestone(
     await activityEvents.record({ contactId: landlordId, type, label, refType, refId });
   } catch (err) {
     log.error({ err, refType, refId, unitId }, `${type} landlord milestone record failed (best-effort)`);
+  }
+}
+
+export interface RosterMilestoneInput {
+  /**
+   * The roster that was ACTUALLY provisioned (conversation participants). Only
+   * members carrying a contactId have a person feed to write to - a bare phone
+   * is skipped, exactly as routes/relayGroups.ts skips it for
+   * added_to_group_text.
+   */
+  members: ReadonlyArray<{ contactId?: string }>;
+  type: ActivityEventType;
+  /** Human text - SERVER-owned, rendered verbatim. Never logged. */
+  label: string;
+  refType: ActivityEventRefType;
+  refId: string;
+}
+
+/**
+ * Record ONE milestone on the feed of every ROSTER MEMBER (see the two-shapes
+ * note at the top of this file). Each write is independently guarded and this
+ * never throws, so callers can await it on a route whose state is already
+ * persisted. A contact holding several roster slots (two numbers, one person)
+ * is pinned ONCE - they have one feed.
+ */
+export async function recordRosterMilestone(
+  deps: Pick<PersonMilestoneDeps, 'activityEvents' | 'log'>,
+  input: RosterMilestoneInput,
+): Promise<void> {
+  const { activityEvents, log } = deps;
+  if (!activityEvents) return;
+  const { members, type, label, refType, refId } = input;
+
+  const pinned = new Set<string>();
+  for (const member of members) {
+    const contactId = member.contactId;
+    if (typeof contactId !== 'string' || contactId.length === 0) continue;
+    if (pinned.has(contactId)) continue;
+    pinned.add(contactId);
+    try {
+      await activityEvents.record({ contactId, type, label, refType, refId });
+    } catch (err) {
+      log.error(
+        { err, refType, refId, contactId },
+        `${type} roster milestone record failed (best-effort)`,
+      );
+    }
   }
 }
 

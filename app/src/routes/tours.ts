@@ -82,7 +82,7 @@ import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { recordPersonMilestone } from '../lib/personEvents.js';
+import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
 import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
@@ -925,19 +925,23 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
     }
 
-    // ...and a person milestone on BOTH parties' contact timelines
-    // (contact-comms-pane): opening the group text is the moment the tenant and
-    // the landlord start talking, so it belongs in each person's feed. Kept
-    // OUTSIDE recordTourEvent because the property (units#) Activity card
-    // deliberately carries no row for it - the tour's own trail already does.
-    // The pin fires even on the `connecting` path (no pool number yet): the
-    // route has no status gate and the tour Activity card already shows it,
-    // so this is parity, not a new claim. Best-effort, like every write above.
-    await recordPersonMilestone(
-      { activityEvents, units, log },
+    // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP.
+    // This one is roster-driven, NOT dual-party (lib/personEvents explains the
+    // split): "Group text opened" asserts membership of this conversation, so
+    // it follows `members` - the roster we just provisioned - the same way
+    // added_to_group_text follows the member it names. Auto-resolved rosters
+    // ARE [tenant, unit landlord], so the founder flow pins exactly those two;
+    // an explicit roster (a caseworker standing in for the tenant, a PM for the
+    // owner) pins who is actually there, and no absent tour party. Kept OUTSIDE
+    // recordTourEvent because the property (units#) Activity card deliberately
+    // carries no row for it - the tour's own trail already does. The pin fires
+    // even on the `connecting` path (no pool number yet): the route has no
+    // status gate and the tour Activity card already shows it, so this is
+    // parity, not a new claim. Best-effort, like every write above.
+    await recordRosterMilestone(
+      { activityEvents, log },
       {
-        tenantId: tour.tenantId,
-        unitId: tour.unitId,
+        members,
         type: 'tour_group_opened',
         label: 'Group text opened',
         refType: 'tour',

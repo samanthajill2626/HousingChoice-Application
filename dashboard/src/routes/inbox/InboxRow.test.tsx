@@ -121,3 +121,15 @@ describe('InboxRow', () => {
     expect(screen.getByText('Closed')).toBeInTheDocument();
   });
 });
+
+describe('InboxRow - Deleted chip (deleted-contact resurfacing)', () => {
+  it('renders the Deleted chip when row.deleted is true', () => {
+    renderRow(mkRow({ deleted: true }));
+    expect(screen.getByText('Deleted')).toBeInTheDocument();
+  });
+
+  it('renders NO Deleted chip on a live contact row', () => {
+    renderRow(mkRow());
+    expect(screen.queryByText('Deleted')).toBeNull();
+  });
+});

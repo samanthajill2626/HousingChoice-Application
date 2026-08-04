@@ -91,6 +91,11 @@ function firstNameOf(c: Contact | null): string | null {
   return f && f.length > 0 ? f : null;
 }
 
+/** True when the contact is soft-deleted (ContactDetail's own `deleted` test). */
+function isDeletedContact(c: Contact | null): boolean {
+  return typeof c?.deleted_at === 'string' && c.deleted_at.length > 0;
+}
+
 export function TourConversation({
   tour,
   tenant,
@@ -178,6 +183,14 @@ export function TourConversation({
   // same as the contact page's reply box); the group tab passes none - its
   // composer matches ConversationDetail's group view.
   const oneToOnePhone = activeKey === 'landlord' ? landlord?.phone : tenant?.phone;
+  // Soft-deleted contact -> the 1:1 composer is REPLACED by the standing restore
+  // note, exactly as on the contact page (uniform lock on every Timeline surface;
+  // the server refuses the send too, 409 contact_deleted). Both 1:1 panes get it -
+  // this page already receives both Contact objects as props. No onRestore is
+  // passed: this is a read-only surface, so Timeline renders the note WITHOUT a
+  // dead button and restoring stays on the contact page.
+  const oneToOneDeleted =
+    activeKey === 'landlord' ? isDeletedContact(landlord) : isDeletedContact(tenant);
 
   // The no-show check-in seed reaches the TENANT 1:1 composer ONLY: guarded by
   // isTenantChannel so the landlord/PM pane never receives it (its key suffix is
@@ -292,6 +305,7 @@ export function TourConversation({
             conversationId={active.conversationId}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
+            deleted={oneToOneDeleted}
             clearDraftSignal={clearSignals[oneToOneKey]}
             {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
             onDraftSeeded={() => setSeededBody(null)}
@@ -318,6 +332,7 @@ export function TourConversation({
             name={oneToOneName}
             {...(oneToOnePhone !== undefined && { replyToPhone: oneToOnePhone })}
             {...(tourMilestones !== undefined && { tourMilestones })}
+            deleted={oneToOneDeleted}
             onCreated={(id) => channels.setConversationId(activeKey, id)}
             clearDraftSignal={clearSignals[oneToOneKey]}
             {...(tenantSeed !== undefined && { initialDraft: tenantSeed })}
@@ -430,6 +445,7 @@ function ContactThread({
   conversationId,
   replyToPhone,
   tourMilestones,
+  deleted,
   clearDraftSignal,
   initialDraft,
   onDraftSeeded,
@@ -440,6 +456,9 @@ function ContactThread({
   replyToPhone?: string;
   /** Tour lifecycle pins to interleave with the messages. */
   tourMilestones?: TimelineMilestone[];
+  /** The contact is soft-deleted → Timeline replaces the composer with the
+   *  restore note (no onRestore here: restoring lives on the contact page). */
+  deleted: boolean;
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
   /** Seed the composer once on mount (no-show check-in prefill). */
@@ -487,6 +506,7 @@ function ContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      deleted={deleted}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       {...(initialDraft !== undefined && { initialDraft })}
       {...(onDraftSeeded !== undefined && { onDraftSeeded })}
@@ -503,6 +523,7 @@ function NewContactThread({
   name,
   replyToPhone,
   tourMilestones,
+  deleted,
   onCreated,
   clearDraftSignal,
   initialDraft,
@@ -515,6 +536,8 @@ function NewContactThread({
   replyToPhone?: string;
   /** Tour lifecycle pins — shown even before the first message exists. */
   tourMilestones?: TimelineMilestone[];
+  /** The contact is soft-deleted - see ContactThread. */
+  deleted: boolean;
   onCreated: (conversationId: string) => void;
   /** Post-consent retry landed → clear the draft the 409 refusal restored. */
   clearDraftSignal?: number;
@@ -556,6 +579,7 @@ function NewContactThread({
       canSend
       onSend={onSend}
       {...(replyToPhone !== undefined && { replyToPhone })}
+      deleted={deleted}
       {...(clearDraftSignal !== undefined && { clearDraftSignal })}
       {...(initialDraft !== undefined && { initialDraft })}
       {...(onDraftSeeded !== undefined && { onDraftSeeded })}

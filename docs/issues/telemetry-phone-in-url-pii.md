@@ -36,3 +36,19 @@ same fix covers it.
 - **Structural (better, more work):** stop putting phones in URLs — the two
   routes could take the phone in the BODY (or address by an opaque id),
   eliminating the class. Consider during the next touch of those routes.
+
+**Related sighting (2026-08-03, relay area-code preference).** The same class
+shows up on the OUTBOUND side: on a transport failure the twilio SDK re-throws
+the raw axios error, whose own-enumerable `config.params` / `request` carry the
+full request URL and query params, and pino's default `err` serializer copies
+them into CloudWatch (`createLogger`'s redact list covers headers only). That
+branch **sanitized the one path it created** - the ZIP-bearing
+`AvailablePhoneNumbers` search in the twilio driver's `provisionPhoneNumber`,
+which now re-throws a plain Error carrying only the message plus a code/status
+(no `cause`, no reference to the original). Still exposed and tracked here: the
+**purchase / messages** paths of the same driver (they leak whatever their own
+params hold), and the bare `HttpInstrumentation` in `app/src/lib/otel.ts`, which
+records **outgoing** request targets on client spans with no
+`ignoreOutgoingRequestHook` - so once the OTLP endpoint is set those spans carry
+the same URLs. A generic `err` serializer that strips `config`/`request`/
+`response` would cover the log side of the whole class in one place.

@@ -30,8 +30,10 @@ import type { EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { PlacementStage } from '../lib/statusModel.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
-import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
-import type { ConversationsRepo } from '../repos/conversationsRepo.js';
+import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
+import type { ConversationItem, ConversationsRepo } from '../repos/conversationsRepo.js';
+import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
 import type {
   NudgeKind,
   NudgeSkipReason,
@@ -45,6 +47,15 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { resolveMessage } from '../messages/index.js';
+import {
+  clampOutOfQuietHours,
+  isQuietTime,
+  type QuietHoursWindow,
+} from '../lib/quietHours.js';
+import type { SettingsRepo } from '../repos/settingsRepo.js';
+// The quiet-hours window reader is single-sourced with the tour-reminder armer
+// (same defensive fallback, same log line) - not a new copy here.
+import { readQuietHoursWindow } from './tourReminders.js';
 
 // ---------------------------------------------------------------------------
 // The ladder: stage → the single nudge rung armed on entry.
@@ -114,6 +125,12 @@ function contactDisplayName(contact: ContactItem): string | null {
 export interface ArmNudgeForStageDeps {
   placementNudgesRepo: PlacementNudgesRepo;
   /**
+   * Quiet-hours source (REQUIRED so every call site is forced to supply one -
+   * an unclamped armer would schedule a 2am chase). Narrow read-only shape (the
+   * `resolveWithSettings` precedent) so tests stub one method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
+  /**
    * Optional event bus (scheduled-message-visibility Task 6). When present, a
    * best-effort `scheduled.updated` is emitted after every arm/cancel so the
    * contact timeline's pinned "Upcoming" section refetches live. NEVER throws /
@@ -169,7 +186,14 @@ export async function armNudgeForStage(
     return;
   }
 
-  const dueAt = new Date(Date.parse(nowIso) + rung.delayMs).toISOString();
+  // Quiet hours (spec 2026-08-03): clamp BEFORE the row is written, so the
+  // stored dueAt is the real send time (a rung is never re-timed later). One
+  // rung per stage, so there is nothing to supersede here.
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+  const dueAt = clampOutOfQuietHours(
+    new Date(Date.parse(nowIso) + rung.delayMs).toISOString(),
+    window,
+  );
   const row = await deps.placementNudgesRepo.create({
     placementId: placement.placementId,
     kind: rung.kind,
@@ -193,6 +217,13 @@ export interface RunDuePlacementNudgesDeps {
   unitsRepo: UnitsRepo;
   conversationsRepo: ConversationsRepo;
   sendMessageService: SendMessageService;
+  /**
+   * Quiet-hours source for the FIRE-TIME BACKSTOP (REQUIRED - an unfenced
+   * poller would still fire every legacy overnight row). Read ONCE per tick.
+   * Narrow read-only shape (the `resolveWithSettings` precedent) so tests stub
+   * one method.
+   */
+  settingsRepo: Pick<SettingsRepo, 'getOrgSettings'>;
   /** Live-update bus: a claim-skip retires a rung the panels show as upcoming,
    *  so poke them to refetch (best-effort; mirrors tourReminders' claimSkipRow).
    *  Optional, but worker.ts now passes appEvents so these pokes cross the event
@@ -256,9 +287,13 @@ export async function runDuePlacementNudges(
 
   log.info({ count: dueRows.length, now: nowIso }, 'placement nudge poll: processing due rows');
 
+  // ONE settings read per tick (not per row) - the window is the same for every
+  // row in the batch, and a settings failure falls back to the defaults.
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+
   for (const row of dueRows) {
     try {
-      await processNudgeRow(row, nowIso, deps, log);
+      await processNudgeRow(row, nowIso, window, deps, log);
     } catch (err) {
       // Per-row errors are isolated: log + continue so one bad row doesn't block
       // the rest of the batch.
@@ -270,47 +305,59 @@ export async function runDuePlacementNudges(
   }
 }
 
-async function processNudgeRow(
+/** The resolved recipient of one due rung (no claim, no send, no side effects). */
+interface NudgeTarget {
+  placement: PlacementItem;
+  rung: NudgeRung;
+  rungStage: PlacementStage;
+  contactId: string;
+  contact: ContactItem;
+  phone: string;
+}
+
+/**
+ * Resolve a rung's recipient: placement -> rung -> STALENESS -> tenant/landlord
+ * contact -> phone. Read-only (it deliberately stops SHORT of the on-demand
+ * conversation mint) so each caller decides what "unresolvable" MEANS: the poll
+ * retires the row with a claim-skip carrying exactly the returned reason, a
+ * human force-send refuses and leaves it pending. Every failure value is a
+ * NudgeSkipReason, so the poll's behavior is unchanged.
+ */
+async function resolveNudgeTarget(
   row: PlacementNudgeItem,
-  nowIso: string,
   deps: RunDuePlacementNudgesDeps,
   log: Logger,
-): Promise<void> {
-  // Resolve the placement.
+): Promise<NudgeTarget | { unresolvable: NudgeSkipReason; tenantId?: string }> {
   const placement = await deps.placementsRepo.getById(row.placementId);
   if (!placement) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId },
-      'placement nudge: placement not found — retiring (claim-skipped)',
+      'placement nudge: placement not found',
     );
-    await claimSkipRow(row, 'placement_missing', nowIso, deps);
-    return;
+    return { unresolvable: 'placement_missing' };
   }
 
   const rungStage = STAGE_BY_KIND[row.kind];
   const rung = rungStage ? NUDGE_RUNGS[rungStage] : undefined;
   if (!rungStage || !rung) {
-    // A row with an unknown kind (no rung) — retire it so it never reappears.
+    // A row with an unknown kind (no rung).
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
-      'placement nudge: no rung for kind — retiring (claim-skipped)',
+      'placement nudge: no rung for kind',
     );
-    await claimSkipRow(row, 'unknown_kind', nowIso, deps, placement.tenantId);
-    return;
+    return { unresolvable: 'unknown_kind', tenantId: placement.tenantId };
   }
 
-  // STALE-STAGE GUARD: the placement already LEFT the stage this row chases.
-  // Claim-skip retires it (so it never reappears) WITHOUT sending — and without
-  // stamping sentAt, which would make the card report "Sent" for a text the
-  // recipient never got. A late row for a stage the placement has moved past is
-  // skipped, not delivered.
+  // STALE-STAGE GUARD: the placement already LEFT the stage this row chases, so
+  // its copy is stale. The poll retires it (claim-skip) WITHOUT sending - and
+  // without stamping sentAt, which would make the card report "Sent" for a text
+  // the recipient never got; a force-send refuses rather than send stale copy.
   if (placement.stage !== rungStage) {
-    await claimSkipRow(row, 'stage_moved', nowIso, deps, placement.tenantId);
     log.info(
       { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind, currentStage: placement.stage, rungStage },
-      'placement nudge: stage moved on — stale row retired (claim-skipped)',
+      'placement nudge: stage moved on - stale row',
     );
-    return;
+    return { unresolvable: 'stage_moved', tenantId: placement.tenantId };
   }
 
   // Resolve the recipient contact: tenant = placement.tenantId; landlord =
@@ -323,18 +370,16 @@ async function processNudgeRow(
     if (!unit) {
       log.warn(
         { nudgeId: row.nudgeId, placementId: row.placementId, unitId: placement.unitId, kind: row.kind },
-        'placement nudge: unit not found — retiring (claim-skipped)',
+        'placement nudge: unit not found',
       );
-      await claimSkipRow(row, 'unit_missing', nowIso, deps, placement.tenantId);
-      return;
+      return { unresolvable: 'unit_missing', tenantId: placement.tenantId };
     }
     if (typeof unit.landlordId !== 'string' || unit.landlordId.length === 0) {
       log.warn(
         { nudgeId: row.nudgeId, placementId: row.placementId, unitId: placement.unitId, kind: row.kind },
-        'placement nudge: unit has no landlordId — retiring (claim-skipped)',
+        'placement nudge: unit has no landlordId',
       );
-      await claimSkipRow(row, 'no_landlord', nowIso, deps, placement.tenantId);
-      return;
+      return { unresolvable: 'no_landlord', tenantId: placement.tenantId };
     }
     contactId = unit.landlordId;
   }
@@ -343,10 +388,9 @@ async function processNudgeRow(
   if (!contact) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
-      'placement nudge: recipient contact not found — retiring (claim-skipped)',
+      'placement nudge: recipient contact not found',
     );
-    await claimSkipRow(row, 'contact_missing', nowIso, deps, placement.tenantId);
-    return;
+    return { unresolvable: 'contact_missing', tenantId: placement.tenantId };
   }
 
   // Primary phone (scalar back-compat, never logged).
@@ -354,52 +398,122 @@ async function processNudgeRow(
   if (typeof phone !== 'string' || phone.length === 0) {
     log.warn(
       { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
-      'placement nudge: recipient contact has no phone — retiring (claim-skipped)',
+      'placement nudge: recipient contact has no phone',
     );
-    await claimSkipRow(row, 'contact_no_phone', nowIso, deps, placement.tenantId);
+    return { unresolvable: 'contact_no_phone', tenantId: placement.tenantId };
+  }
+
+  return { placement, rung, rungStage, contactId, contact, phone };
+}
+
+/**
+ * The recipient's existing 1:1 among the phone's conversations. A tenant rung
+ * routes to tenant_1to1 (or an unresolved unknown_1to1); a landlord rung to
+ * landlord_1to1 (or unknown_1to1). NEVER the masked group (founder 2026-07-02).
+ */
+function findNudgeConversation(
+  convs: ConversationItem[],
+  rung: NudgeRung,
+): ConversationItem | undefined {
+  const wantedType = rung.recipient === 'tenant' ? 'tenant_1to1' : 'landlord_1to1';
+  return convs.find((c) => c.type === wantedType || c.type === 'unknown_1to1');
+}
+
+/**
+ * No usable 1:1 yet - CREATE it on demand so the send can proceed. This unblocks
+ * the DESIGNED landlord flow where all prior traffic went through the masked
+ * pool number, so no landlord_1to1 was ever minted (approval_check /
+ * rta_window_closing used to silently skip). Thread existence is NOT a consent
+ * mechanism: every gate (sms_sending_disabled, opt-out, JIT consent, breaker,
+ * manual mode) is enforced by sendMessageService at send time and still fires.
+ * Mirrors the contacts "text a brand-new contact" fix (9a45085):
+ * createOrGetByParticipantPhone is the same one-active-conversation-per-phone
+ * claim every inbound path uses, so a racing inbound never creates a duplicate.
+ *
+ * SIDE-EFFECTING by design, so callers invoke it only once a send is actually
+ * going to be attempted (forceSendNudge runs its refusal gates first).
+ */
+async function mintNudgeConversation(
+  row: PlacementNudgeItem,
+  contact: ContactItem,
+  phone: string,
+  contactId: string,
+  rung: NudgeRung,
+  deps: RunDuePlacementNudgesDeps,
+  log: Logger,
+): Promise<ConversationItem> {
+  let conv = await deps.conversationsRepo.createOrGetByParticipantPhone(
+    phone,
+    conversationTypeFor(contact),
+  );
+  // Best-effort display-name denorm so the NEW inbox row shows the person, not a
+  // bare phone (mirrors 9a45085). A failure here must NEVER block the send - and
+  // no explicit event emit is needed: the send emits conversation.updated from
+  // touchLastActivity's ALL_NEW, which carries this name to the live inbox.
+  const displayName = contactDisplayName(contact);
+  if (displayName !== null && conv.participant_display_name !== displayName) {
+    try {
+      conv = await deps.conversationsRepo.applyTriage(conv.conversationId, { displayName });
+    } catch (err) {
+      log.warn(
+        { err, nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
+        'placement nudge: display-name denorm failed (best-effort) - sending anyway',
+      );
+    }
+  }
+  log.info(
+    { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind, recipient: rung.recipient, conversationId: conv.conversationId },
+    'placement nudge: no 1:1 conversation - created on demand',
+  );
+  return conv;
+}
+
+async function processNudgeRow(
+  row: PlacementNudgeItem,
+  nowIso: string,
+  window: QuietHoursWindow,
+  deps: RunDuePlacementNudgesDeps,
+  log: Logger,
+): Promise<void> {
+  // QUIET-HOURS BACKSTOP (spec 2026-08-03 section 6), PRE-CLAIM and FIRST.
+  // Normal rows are clamped at arm time, so this only fires for legacy rows and
+  // worker-downtime catch-up. Returning WITHOUT claiming leaves the row in
+  // listDue - it re-fires within one poll tick of quiet-end. This must NEVER
+  // become a post-claim refusal: claimSend IS the sentAt stamp, so a refusal
+  // after it would destroy the message permanently. No supersession twin here -
+  // the ladder arms ONE rung per stage, so a nudge cannot self-collide.
+  if (isQuietTime(nowIso, window)) {
+    log.info(
+      { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
+      'placement nudge due during quiet hours - deferred (not claimed)',
+    );
     return;
   }
 
-  // Find (or create) the recipient's 1:1 conversation via phone lookup. A tenant
-  // rung routes to tenant_1to1 (or an unresolved unknown_1to1); a landlord rung to
-  // landlord_1to1 (or unknown_1to1). NEVER the masked group (founder 2026-07-02).
-  const convs = await deps.conversationsRepo.findByParticipantPhone(phone);
-  const wantedType = rung.recipient === 'tenant' ? 'tenant_1to1' : 'landlord_1to1';
-  let conv = convs.find((c) => c.type === wantedType || c.type === 'unknown_1to1');
-  if (!conv) {
-    // No usable 1:1 yet — CREATE it on demand and proceed to send. This unblocks
-    // the DESIGNED landlord flow where all prior traffic went through the masked
-    // pool number, so no landlord_1to1 was ever minted (approval_check /
-    // rta_window_closing used to silently skip). Thread existence is NOT a consent
-    // mechanism: every gate (sms_sending_disabled, opt-out, JIT consent, breaker,
-    // manual mode) is enforced by sendMessageService at send time and still fires.
-    // Mirrors the contacts "text a brand-new contact" fix (9a45085):
-    // createOrGetByParticipantPhone is the same one-active-conversation-per-phone
-    // claim every inbound path uses, so a racing inbound never creates a duplicate.
-    conv = await deps.conversationsRepo.createOrGetByParticipantPhone(
-      phone,
-      conversationTypeFor(contact),
-    );
-    // Best-effort display-name denorm so the NEW inbox row shows the person, not a
-    // bare phone (mirrors 9a45085). A failure here must NEVER block the send — and
-    // no explicit event emit is needed: the send below emits conversation.updated
-    // from touchLastActivity's ALL_NEW, which carries this name to the live inbox.
-    const displayName = contactDisplayName(contact);
-    if (displayName !== null && conv.participant_display_name !== displayName) {
-      try {
-        conv = await deps.conversationsRepo.applyTriage(conv.conversationId, { displayName });
-      } catch (err) {
-        log.warn(
-          { err, nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
-          'placement nudge: display-name denorm failed (best-effort) — sending anyway',
-        );
-      }
-    }
+  // Resolve the recipient (placement -> rung -> staleness -> contact -> phone).
+  // Shared with forceSendNudge so a human send can never route differently from
+  // the poll; the POLL retires an unresolvable row with the same claim-skip
+  // reasons it always used - including 'stage_moved'.
+  const target = await resolveNudgeTarget(row, deps, log);
+  if ('unresolvable' in target) {
     log.info(
-      { nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind, recipient: rung.recipient, conversationId: conv.conversationId },
-      'placement nudge: no 1:1 conversation — created on demand',
+      {
+        nudgeId: row.nudgeId,
+        placementId: row.placementId,
+        kind: row.kind,
+        reason: target.unresolvable,
+      },
+      'placement nudge undeliverable - retiring (claim-skipped)',
     );
+    await claimSkipRow(row, target.unresolvable, nowIso, deps, target.tenantId);
+    return;
   }
+  const { rung, contactId, contact, phone } = target;
+
+  // Find (or create) the recipient's 1:1 conversation.
+  const conv =
+    findNudgeConversation(await deps.conversationsRepo.findByParticipantPhone(phone), rung) ??
+    (await mintNudgeConversation(row, contact, phone, contactId, rung, deps, log));
 
   // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two
   // concurrent poll ticks both see the same due row but only the first to claim
@@ -456,6 +570,163 @@ async function processNudgeRow(
     log.error(
       { err, nudgeId: row.nudgeId, placementId: row.placementId, contactId, kind: row.kind },
       'placement nudge send failed (non-refusal) — claim already stamped, not retried',
+    );
+    throw err;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// forceSendNudge (Send now - quiet-hours spec section 7)
+// ---------------------------------------------------------------------------
+
+/** Why a human force-send was refused BEFORE the row was claimed. */
+export type NudgeForceSendRefusal =
+  | 'sms_sending_disabled'
+  | 'contact_opted_out'
+  | 'contact_deleted'
+  | 'no_consent'
+  | NudgeSkipReason;
+
+export type NudgeForceSendResult =
+  /** Claimed and handed to the send path. */
+  | { outcome: 'sent' }
+  /** Already sent/canceled/skipped, or the poll won the claim race. */
+  | { outcome: 'not_pending' }
+  /** Refused PRE-claim: the row is untouched and still pending. */
+  | { outcome: 'refused'; reason: NudgeForceSendRefusal }
+  /** The narrow post-claim race (see forceSendNudge): claim KEPT, nothing sent. */
+  | { outcome: 'refused_post_claim'; reason: SendRefusedError['code'] };
+
+/**
+ * Send ONE pending nudge immediately, on a human's click. The twin of
+ * forceSendReminder (jobs/tourReminders.ts) - same contract:
+ *
+ * - BYPASSES quiet hours, manual mode and the per-conversation breaker (the send
+ *   goes out with `automated: false`).
+ * - RESPECTS the kill switch, opt-out, soft-deletion, JIT consent AND the staleness check (a
+ *   nudge whose placement has moved on refuses rather than sending stale copy).
+ * - EVERY gate runs BEFORE `claimSend`, because the claim IS the sentAt stamp: a
+ *   refusal after it would leave the row claimed-but-unsent. A refusal therefore
+ *   leaves the row exactly as it found it - still pending. In particular a stale
+ *   row is NOT claim-skipped here: retiring stale rows is the POLL's job, on its
+ *   own ticks, so a human refusal never consumes the row.
+ * - The gates also run BEFORE the on-demand conversation mint, so a refused
+ *   force-send never leaves a brand-new empty thread behind. A send that DOES
+ *   proceed mints exactly like the poll (accepted, poller parity).
+ *
+ * The one surviving race (an opt-out or breaker trip landing between the
+ * pre-check and the provider call) surfaces as a post-claim SendRefusedError:
+ * the claim is KEPT (poller parity) and reported as `refused_post_claim` so the
+ * route can show an honest error instead of a false "sent".
+ *
+ * PII (doc s9): log ids/kinds/refusal codes only - never a phone/name/body.
+ */
+export async function forceSendNudge(
+  nudgeId: string,
+  placementId: string,
+  nowIso: string,
+  smsSendingEnabled: boolean | undefined,
+  deps: RunDuePlacementNudgesDeps,
+): Promise<NudgeForceSendResult> {
+  const log = deps.logger ?? defaultLogger;
+
+  const rows = await deps.placementNudgesRepo.listByPlacement(placementId);
+  const row = rows.find((r) => r.nudgeId === nudgeId);
+  if (row === undefined) return { outcome: 'refused', reason: 'placement_missing' };
+  if (row.sentAt !== undefined || row.canceledAt !== undefined || row.skippedAt !== undefined) {
+    return { outcome: 'not_pending' };
+  }
+
+  const refuse = (reason: NudgeForceSendRefusal): NudgeForceSendResult => {
+    log.warn(
+      { nudgeId, placementId, kind: row.kind, reason },
+      'placement nudge force-send refused (pre-claim) - row left pending',
+    );
+    return { outcome: 'refused', reason };
+  };
+
+  const target = await resolveNudgeTarget(row, deps, log);
+  if ('unresolvable' in target) return refuse(target.unresolvable);
+
+  // PRE-CLAIM ABSOLUTE GATES, and BEFORE the conversation mint. Manual mode and
+  // the breaker are deliberately NOT checked - this is a human send.
+  if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
+  // Opt-out is absolute; consent is required because `automated: false` is
+  // subject to the JIT consent gate (services/sendMessage.ts) - checking it here
+  // is what keeps that gate from firing AFTER the claim. A recipient with no
+  // thread yet has no conversation-level flag to read (undefined), exactly as
+  // the evaluator expects.
+  const existing = findNudgeConversation(
+    await deps.conversationsRepo.findByParticipantPhone(target.phone),
+    target.rung,
+  );
+  if (isOptedOut(existing?.sms_opt_out, target.contact.sms_opt_out === true)) {
+    return refuse('contact_opted_out');
+  }
+  // A soft-deleted recipient is unreachable until restored: sendMessage refuses
+  // the 1:1 with ContactDeletedError regardless of `automated`. Deleted-ness is
+  // DETERMINISTIC and already in hand, so it is checked here rather than left to
+  // the post-claim race - otherwise the claim (which IS the sentAt stamp) would
+  // land first and burn the rung. Mirrors sendMessage's own ordering: after
+  // opt-out (TCPA wins), before consent.
+  if (isDeleted(target.contact)) return refuse('contact_deleted');
+  if (!hasSmsConsent(target.contact)) return refuse('no_consent');
+
+  const conv =
+    existing ??
+    (await mintNudgeConversation(
+      row,
+      target.contact,
+      target.phone,
+      target.contactId,
+      target.rung,
+      deps,
+      log,
+    ));
+
+  const claimed = await deps.placementNudgesRepo.claimSend(row.nudgeId, nowIso);
+  if (!claimed) {
+    log.info(
+      { nudgeId, placementId, kind: row.kind },
+      'placement nudge force-send claim lost (concurrent poll tick or cancel)',
+    );
+    return { outcome: 'not_pending' };
+  }
+
+  try {
+    await deps.sendMessageService({
+      conversationId: conv.conversationId,
+      body: resolveMessage(`nudge.${target.rung.kind}`),
+      author: 'teammate',
+      // Human force-send: bypasses manual mode + the breaker (and IS subject to
+      // the JIT consent gate pre-checked above).
+      automated: false,
+    });
+    log.info(
+      {
+        nudgeId,
+        placementId,
+        contactId: target.contactId,
+        kind: row.kind,
+        recipient: target.rung.recipient,
+        route: `${target.rung.recipient}_1to1`,
+      },
+      'placement nudge force-sent',
+    );
+    return { outcome: 'sent' };
+  } catch (err) {
+    if (err instanceof SendRefusedError) {
+      log.warn(
+        { nudgeId, placementId, kind: row.kind, refusal: err.code },
+        'placement nudge force-send refused POST-claim (race) - claim kept, not retried',
+      );
+      return { outcome: 'refused_post_claim', reason: err.code };
+    }
+    // Non-refusal error: the claim is already stamped, so this rung will NOT
+    // retry - same accepted tradeoff as the poll. Surface it as a 500.
+    log.error(
+      { err, nudgeId, placementId, kind: row.kind },
+      'placement nudge force-send failed (non-refusal) - claim already stamped, not retried',
     );
     throw err;
   }

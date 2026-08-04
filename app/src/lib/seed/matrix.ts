@@ -1303,6 +1303,14 @@ function buildSettings(): Record<string, unknown>[] {
       missedCallAutoText: 'Housing Choice: Sorry we missed your call! Please text us your full name, voucher size, and housing authority to get started. Reply STOP to opt out.',
       missedCallAutoTextEnabled: true,
       preRingPauseSeconds: 2,
+      // Seeded worlds stay time-of-day independent. seedAll writes a FULL-ITEM
+      // Put per row, so this 'org' row REPLACES the lean seed's - omitting the
+      // field would silently restore the product default (ON) for every
+      // full-profile world (npm run dev --seeded, e2e ?profile=full reseeds) and
+      // make tour-booking specs clamp differently at night. The PRODUCT default
+      // stays true (settingsRepo DEFAULT_ORG_SETTINGS); staff flip it on in
+      // Settings to demo the feature.
+      quietHoursEnabled: false,
     },
   ];
 }

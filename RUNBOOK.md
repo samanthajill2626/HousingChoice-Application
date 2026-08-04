@@ -365,6 +365,28 @@ Effect: every outstanding session cookie stops opening = **forced global logout*
 back in via Google). No data loss — sessions live only inside the cookies themselves. Rotate on any
 suspicion the secret leaked.
 
+### Relay preferred area codes (`RELAY_PREFERRED_AREA_CODES`)
+
+- **`RELAY_PREFERRED_AREA_CODES`** (default `404,470,678,770,943` - Atlanta metro) is the
+  comma-separated list of 3-digit NANP area codes tried IN ORDER for every relay pool-number
+  purchase. It is an app-behavior flag (an `.env.<env>` key like `RELAY_LIVE_PROVISIONING`:
+  push it with `secrets:push` then deploy; NOT Terraform-managed). A malformed entry refuses
+  boot; an explicitly EMPTY value means no preference (every buy is the plain any-US search).
+- **The property ZIP is tried first on TIER-3 CONNECT-WHEN-READY buys ONLY** - the path taken
+  when NO pool number is free at the moment of the request. Tiers 1 and 2 (reuse an active
+  number / consume a warm spare) assign an EXISTING number and never run a search, so they
+  never see a ZIP; buffer refills (fresh spares, no group yet) carry no ZIP either and start
+  at the area codes. Practical effect in prod, where `RELAY_SPARE_BUFFER_TARGET=2` keeps
+  spares on hand: MOST tour/placement groups are served an already-bought Atlanta-coded
+  refill spare, and the ZIP rung is the EXCEPTION - it fires only when the buffer happened to
+  be empty. When it does fire the number is local to that unit if Twilio has inventory there.
+- **Watch `relay_warm_hint_miss` and `hintTier` on `relay_number_warming`** to see which rung
+  of the ladder actually bought the number. A steady drift to `bare` means the preferred
+  metro codes are dry at Twilio - widen the list (add neighboring NPAs) or accept non-local
+  numbers. Note that `postal` is RARE BY DESIGN per the bullet above: seeing few or no
+  `postal` tiers is not evidence the ZIP hint is broken, only that the spare buffer is doing
+  its job. Both log lines carry the hint TYPE only, never a ZIP or a phone number.
+
 ### Relay number release (`RELAY_NUMBER_RELEASE_ENABLED`)
 
 `RELAY_NUMBER_RELEASE_ENABLED` is an app-behavior flag (an `.env.<env>` key like

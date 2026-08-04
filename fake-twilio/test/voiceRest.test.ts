@@ -83,6 +83,36 @@ describe('voice REST: GET .../AvailablePhoneNumbers/US/Local.json', () => {
     expect(list[0].phone_number).toMatch(/^\+1/);
     expect(list[0].capabilities).toMatchObject({ voice: true, sms: true });
   });
+
+  it('honors AreaCode: the searched code replaces the 555 prefix segment', async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .get(`${ACCT}/AvailablePhoneNumbers/US/Local.json`)
+      .query({ VoiceEnabled: 'true', SmsEnabled: 'true', AreaCode: '404', PageSize: 2 });
+    expect(res.status).toBe(200);
+    const numbers = res.body.available_phone_numbers.map(
+      (n: { phone_number: string }) => n.phone_number,
+    );
+    expect(numbers.length).toBeGreaterThan(0);
+    for (const n of numbers) {
+      expect(n.startsWith('+1404019')).toBe(true);
+    }
+  });
+
+  it('AvailablePhoneNumbers honors InPostalCode (ZIP first-3 prefix marker), winning over AreaCode', async () => {
+    const { app } = makeApp();
+    const res = await request(app)
+      .get(`${ACCT}/AvailablePhoneNumbers/US/Local.json`)
+      .query({ InPostalCode: '30309', AreaCode: '404', PageSize: 2 });
+    expect(res.status).toBe(200);
+    const numbers = res.body.available_phone_numbers.map(
+      (n: { phone_number: string }) => n.phone_number,
+    );
+    expect(numbers.length).toBeGreaterThan(0);
+    for (const n of numbers) {
+      expect(n.startsWith('+1303019')).toBe(true); // ZIP 30309 -> "303" segment
+    }
+  });
 });
 
 describe('voice REST: POST .../IncomingPhoneNumbers.json (commit a chosen number)', () => {

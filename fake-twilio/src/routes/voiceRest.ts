@@ -44,18 +44,21 @@ function badRequest(
 
 /**
  * Deterministic AvailablePhoneNumbers candidates: the mintable end of the
- * +1555019xxxx pool the NumberRegistry commits from. We surface a few suffixes
- * NOT yet committed (so a listed number is genuinely mintable, and committing it
- * via IncomingPhoneNumbers.json makes registry.isPool(it) true). AreaCode, when
- * given, replaces the 555 NANP-test prefix segment so tests can assert it threads
- * through (cosmetic — the pool stays distinct either way).
+ * +1<segment>019xxxx pool the NumberRegistry commits from. We surface a few
+ * suffixes NOT yet committed (so a listed number is genuinely mintable, and
+ * committing it via IncomingPhoneNumbers.json makes registry.isPool(it) true).
+ * `prefixSegment` is the searched geographic hint - AreaCode, or the first 3
+ * digits of InPostalCode (InPostalCode wins, mirroring the app driver) - which
+ * replaces the 555 NANP-test segment so tests can assert WHICH hint threaded
+ * through. Unhinted searches keep +1555019xxxx. Cosmetic either way: the 019
+ * exchange is what keeps mintable candidates distinct, not the segment.
  */
-function availableCandidates(registry: NumberRegistry, areaCode: string | undefined, want: number): string[] {
+function availableCandidates(registry: NumberRegistry, prefixSegment: string | undefined, want: number): string[] {
   const out: string[] = [];
   let n = 1;
   while (out.length < want && n < 10000) {
     const suffix = String(n).padStart(4, '0');
-    const phone = areaCode !== undefined ? `+1${areaCode}019${suffix}` : `+1555019${suffix}`;
+    const phone = prefixSegment !== undefined ? `+1${prefixSegment}019${suffix}` : `+1555019${suffix}`;
     if (!registry.isPool(phone)) out.push(phone);
     n += 1;
   }
@@ -100,9 +103,14 @@ export function createVoiceRestRouter(deps: VoiceRestDeps): Router {
   router.get('/2010-04-01/Accounts/:accountSid/AvailablePhoneNumbers/:country/Local.json', (req, res) => {
     const q = req.query as Record<string, string | undefined>;
     const areaCode = typeof q['AreaCode'] === 'string' && q['AreaCode'].length > 0 ? q['AreaCode'] : undefined;
+    const inPostalCode =
+      typeof q['InPostalCode'] === 'string' && q['InPostalCode'].length > 0 ? q['InPostalCode'] : undefined;
+    // InPostalCode wins over AreaCode (mirrors the app driver's precedence, so
+    // the minted prefix is a trustworthy witness of which search hint won).
+    const prefixSegment = inPostalCode !== undefined ? inPostalCode.slice(0, 3) : areaCode;
     const limit = Number(q['PageSize'] ?? q['Limit'] ?? 10);
     const want = Number.isFinite(limit) && limit > 0 ? Math.min(limit, 10) : 1;
-    const numbers = availableCandidates(registry, areaCode, Math.max(want, 1));
+    const numbers = availableCandidates(registry, prefixSegment, Math.max(want, 1));
     res.status(200).json({
       available_phone_numbers: numbers.map((phone_number) => ({
         friendly_name: phone_number,

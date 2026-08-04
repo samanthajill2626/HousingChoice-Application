@@ -21,6 +21,7 @@ import type { PlacementItem } from '../src/repos/placementsRepo.js';
 import type { PlacementStage } from '../src/lib/statusModel.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
+import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -142,6 +143,8 @@ describe('scheduled.updated — nudges', () => {
     const placement = makePlacement('awaiting_receipt', 'contact-tenant-9');
     await armNudgeForStage(placement, 'awaiting_receipt', NOW, {
       placementNudgesRepo: makeFakeNudgesRepo(),
+      // Not a quiet-hours case: these assert the emit, not the dueAt.
+      settingsRepo: quietOffSettingsRepo(),
       events,
     });
 
@@ -156,6 +159,8 @@ describe('scheduled.updated — nudges', () => {
     const placement = makePlacement('lost', 'contact-tenant-9');
     await armNudgeForStage(placement, 'lost', NOW, {
       placementNudgesRepo: makeFakeNudgesRepo(),
+      // Not a quiet-hours case: these assert the emit, not the dueAt.
+      settingsRepo: quietOffSettingsRepo(),
       events,
     });
 
@@ -167,6 +172,7 @@ describe('scheduled.updated — nudges', () => {
     await expect(
       armNudgeForStage(placement, 'awaiting_receipt', NOW, {
         placementNudgesRepo: makeFakeNudgesRepo(),
+        settingsRepo: quietOffSettingsRepo(),
       }),
     ).resolves.toBeUndefined();
   });

@@ -16,8 +16,18 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { resolveMessage } from '../src/messages/index.js';
-import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
+import type {
+  SendMessageInput,
+  SendMessageOutcome,
+  SendMessageService,
+} from '../src/services/sendMessage.js';
+import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
+import {
+  isoHoursFromNow,
+  quietWindowAroundNow,
+  quietWindowAwayFromNow,
+} from './helpers/settingsStub.js';
 
 const SECRET = ORIGIN_SECRET;
 
@@ -27,7 +37,24 @@ function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
     patch: (path: string) =>
       request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
   };
+}
+
+/** Records every send the route drives (the route asserts on view + audit). */
+function makeSendSpy(): { service: SendMessageService; sent: SendMessageInput[] } {
+  const sent: SendMessageInput[] = [];
+  const service: SendMessageService = async (input) => {
+    sent.push(input);
+    return {
+      conversationId: input.conversationId,
+      providerSid: 'SM-route-fake',
+      tsMsgId: 'ts-route-fake',
+      status: 'queued',
+    } as SendMessageOutcome;
+  };
+  return { service, sent };
 }
 
 /** Seed a reminder row directly on the world fake. */
@@ -57,6 +84,38 @@ function seedReminder(
     ...(input.skipReason !== undefined && { skipReason: input.skipReason }),
   };
   world.tourRemindersMap.set(item.reminderId, item);
+}
+
+/**
+ * Seed a tenant + their 1:1 thread + a self_guided tour (the unambiguous 1:1
+ * route, the only shape that gets a suppression estimate) and return its tourId.
+ * Nothing here suppresses on its own, so the quiet cases below assert purely on
+ * each rung's dueAt.
+ */
+async function seedQuietTour(world: FakeWorld, suffix: string, phone: string): Promise<string> {
+  const tenantId = `contact-quiet-${suffix}`;
+  world.contacts.push({
+    contactId: tenantId,
+    type: 'tenant',
+    phone,
+    created_at: '2026-07-13T00:00:00.000Z',
+  } as Parameters<typeof world.contacts.push>[0]);
+  world.conversations.set(`conv-quiet-${suffix}`, {
+    conversationId: `conv-quiet-${suffix}`,
+    participant_phone: phone,
+    status: 'open',
+    type: 'tenant_1to1',
+    ai_mode: 'auto',
+    last_activity_at: '2026-07-13T00:00:00.000Z',
+    created_at: '2026-07-13T00:00:00.000Z',
+  });
+  const created = await world.toursRepo.create({
+    tenantId,
+    unitId: `unit-quiet-${suffix}`,
+    scheduledAt: '2099-01-10T10:00:00.000Z',
+    tourType: 'self_guided',
+  });
+  return created.tourId;
 }
 
 describe('GET /api/tours/:tourId/reminders', () => {
@@ -225,6 +284,187 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
   });
 
+  // Quiet hours (spec 2026-08-03): the chip is a claim about the FUTURE ("Will
+  // wait"), so it is a property of the RUNG - its own dueAt against the
+  // daily-recurring window - not of the server wall clock. The window stub is
+  // still built from the current time (never a fixed 21:00-08:00, which would
+  // make these cases pass or fail depending on when the suite runs).
+  it('carries a quiet_hours suppression estimate for a rung due inside a window occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const tourId = await seedQuietTour(world, 'view-1', '+15550600011');
+    // Same wall time tomorrow: inside TOMORROW's occurrence of the window.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-1',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(24),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The SF1 false positive: at 03:00 the wall clock is quiet, but a rung due
+  // Friday afternoon will not wait for anything, so it must NOT be chipped -
+  // while a rung already due IS being held by the fire-time backstop right now.
+  it('inside the window, chips only what quiet hours will hold - not every upcoming rung', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+    const tourId = await seedQuietTour(world, 'view-5', '+15550600015');
+    // Three days out at a time of day outside EVERY occurrence of the window.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-far',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(3 * 24 + 6),
+    });
+    // Already due, with a dueAt outside every occurrence: the poll is deferring
+    // it RIGHT NOW (worker-downtime catch-up that crossed the window start).
+    seedReminder(world, {
+      reminderId: 'rem-quiet-overdue',
+      tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(-30),
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-quiet-far')?.suppression).toBeUndefined();
+    expect(byId.get('rem-quiet-overdue')?.suppression).toEqual({ reason: 'quiet_hours' });
+  });
+
+  // The other half of SF1: during business hours a rung genuinely due at 23:00
+  // tonight WILL be deferred, so it must chip even though the clock is outside
+  // the window - exactly when staff are looking at the panel.
+  it('outside the window, still chips a rung due inside tonight occurrence', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAwayFromNow());
+    const tourId = await seedQuietTour(world, 'view-6', '+15550600016');
+    seedReminder(world, {
+      reminderId: 'rem-quiet-tonight',
+      tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(4), // inside tonight's occurrence
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-before',
+      tourId,
+      kind: 'confirmation',
+      dueAt: isoHoursFromNow(1), // future, but before the window opens
+    });
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const byId = new Map(
+      (res.body.reminders as { reminderId: string; suppression?: { reason: string } }[]).map((r) => [
+        r.reminderId,
+        r,
+      ]),
+    );
+    expect(byId.get('rem-quiet-tonight')?.suppression).toEqual({ reason: 'quiet_hours' });
+    expect(byId.get('rem-quiet-before')?.suppression).toBeUndefined();
+  });
+
+  it('carries NO suppression when quiet hours are disabled (nothing else suppresses)', async () => {
+    const { app, world } = makeWebhookHarness();
+    world.settings.quietHoursEnabled = false;
+
+    const tenantPhone = '+15550600012';
+    const tenantId = 'contact-quiet-view-2';
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone: tenantPhone,
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set('conv-quiet-view-2', {
+      conversationId: 'conv-quiet-view-2',
+      participant_phone: tenantPhone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: 'unit-quiet-view-2',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-2',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-14T10:00:00.000Z',
+    });
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toBeUndefined();
+  });
+
+  it('a harder reason still outranks quiet hours (opted-out tenant inside the window)', async () => {
+    const { app, world } = makeWebhookHarness();
+    Object.assign(world.settings, quietWindowAroundNow());
+
+    const tenantPhone = '+15550600013';
+    const tenantId = 'contact-quiet-view-3';
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone: tenantPhone,
+      sms_opt_out: true,
+      created_at: '2026-07-13T00:00:00.000Z',
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set('conv-quiet-view-3', {
+      conversationId: 'conv-quiet-view-3',
+      participant_phone: tenantPhone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: 'unit-quiet-view-3',
+      scheduledAt: '2026-07-15T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    // A dueAt inside tomorrow's occurrence, so quiet hours WOULD chip this rung
+    // on its own - the opt-out has to outrank it, not merely fill a gap.
+    seedReminder(world, {
+      reminderId: 'rem-quiet-view-3',
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: isoHoursFromNow(24),
+    });
+
+    const res = await authed(app).get(`/api/tours/${created.tourId}/reminders`);
+    expect(res.status).toBe(200);
+    const upcoming = (res.body.reminders as { state: string; suppression?: { reason: string } }[]).find(
+      (r) => r.state === 'upcoming',
+    );
+    expect(upcoming?.suppression).toEqual({ reason: 'contact_opted_out' });
+  });
+
   it('returns 404 for an unknown tour id', async () => {
     const { app } = makeWebhookHarness();
     const res = await authed(app).get('/api/tours/no-such-tour/reminders');
@@ -335,5 +575,182 @@ describe('PATCH /api/tours/:tourId/reminders/:reminderId', () => {
       .send({ canceled: true });
     expect(cross.status).toBe(404);
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
+  });
+});
+
+// Send now (quiet-hours spec section 7): any authed staff role - no admin gate
+// (staff can already send the equivalent text from the composer).
+describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
+  /** A tenant with a phone, RECORDED CONSENT and a 1:1 thread + one pending rung. */
+  async function seedSendNowTour(
+    world: FakeWorld,
+    over: {
+      contactOptOut?: boolean;
+      consent?: boolean;
+      suffix?: string;
+      /** Soft-delete stamp (contactsRepo isDeleted reads a non-empty deleted_at). */
+      deletedAt?: string;
+    } = {},
+  ) {
+    const suffix = over.suffix ?? '1';
+    const tenantId = `contact-sendnow-${suffix}`;
+    const phone = `+1555070${suffix.padStart(4, '0')}`;
+    world.contacts.push({
+      contactId: tenantId,
+      type: 'tenant',
+      phone,
+      created_at: '2026-07-13T00:00:00.000Z',
+      ...(over.consent !== false && { consent_method: 'inbound_text' }),
+      ...(over.contactOptOut === true && { sms_opt_out: true }),
+      ...(over.deletedAt !== undefined && { deleted_at: over.deletedAt }),
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(`conv-sendnow-${suffix}`, {
+      conversationId: `conv-sendnow-${suffix}`,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: '2026-07-13T00:00:00.000Z',
+      created_at: '2026-07-13T00:00:00.000Z',
+    });
+    const created = await world.toursRepo.create({
+      tenantId,
+      unitId: `unit-sendnow-${suffix}`,
+      scheduledAt: '2026-07-20T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    seedReminder(world, {
+      reminderId: `rem-sendnow-${suffix}`,
+      tourId: created.tourId,
+      kind: 'day_before',
+      dueAt: '2026-07-19T14:00:00.000Z',
+    });
+    return { tourId: created.tourId, reminderId: `rem-sendnow-${suffix}`, tenantId };
+  }
+
+  it('200s with the re-read sent view, sends automated: false, and records an audit event', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    // Quiet hours ON around the wall clock: the human path must ignore them.
+    Object.assign(world.settings, quietWindowAroundNow());
+    const { tourId, reminderId } = await seedSendNowTour(world);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.reminderId).toBe(reminderId);
+    expect(res.body.reminder.state).toBe('sent');
+    expect(typeof res.body.reminder.sentAt).toBe('string');
+    expect(res.body.reminder.body).toBe(resolveMessage('tour.day_before'));
+
+    // The send went out as a HUMAN send.
+    expect(spy.sent).toHaveLength(1);
+    expect(spy.sent[0]!.conversationId).toBe('conv-sendnow-1');
+    expect(spy.sent[0]!.automated).toBe(false);
+
+    // Who clicked is recorded on the tour's trail.
+    const ev = world.auditEvents.find((e) => e.event_type === 'reminder_force_sent');
+    expect(ev?.entityKey).toBe(`tours#${tourId}`);
+    expect(ev?.actorId).toBe(TEST_SESSION_USER.userId);
+    expect(ev?.payload).toEqual({
+      reminderId,
+      kind: 'day_before',
+      actor: TEST_SESSION_USER.userId,
+    });
+  });
+
+  it('409s reminder_not_pending with the honest current view when the rung already fired', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '2' });
+    await world.tourRemindersRepo.claimSend(reminderId, '2026-07-19T14:00:05.000Z');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('reminder_not_pending');
+    expect(res.body.reminder.state).toBe('sent');
+    expect(spy.sent).toHaveLength(0);
+    expect(world.auditEvents.some((e) => e.event_type === 'reminder_force_sent')).toBe(false);
+  });
+
+  it('409s contact_opted_out and leaves the rung upcoming (a refusal never consumes the row)', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, {
+      suffix: '3',
+      contactOptOut: true,
+    });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_opted_out');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+    // Still pending for the poll at its own dueAt.
+    expect(
+      (await world.tourRemindersRepo.listDue('2026-07-19T14:01:00.000Z')).map((r) => r.reminderId),
+    ).toContain(reminderId);
+  });
+
+  it('409s no_consent for a contact with no recorded consent', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '4', consent: false });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('no_consent');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('409s contact_deleted for a soft-deleted contact and leaves the rung upcoming', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, {
+      suffix: '6',
+      deletedAt: '2026-07-12T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${reminderId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('contact_deleted');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(spy.sent).toHaveLength(0);
+  });
+
+  it('404s an unknown tour, an unknown rung, and a rung owned by ANOTHER tour', async () => {
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, reminderId } = await seedSendNowTour(world, { suffix: '5' });
+
+    const ghostTour = await authed(app).post(
+      `/api/tours/no-such-tour/reminders/${reminderId}/send-now`,
+    );
+    expect(ghostTour.status).toBe(404);
+    expect(ghostTour.body).toEqual({ error: 'tour_not_found' });
+
+    const ghostRung = await authed(app).post(
+      `/api/tours/${tourId}/reminders/rem-does-not-exist/send-now`,
+    );
+    expect(ghostRung.status).toBe(404);
+    expect(ghostRung.body).toEqual({ error: 'reminder_not_found' });
+
+    const other = await world.toursRepo.create({
+      tenantId: 'contact-sendnow-other',
+      unitId: 'unit-sendnow-other',
+      scheduledAt: '2026-07-21T14:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const cross = await authed(app).post(
+      `/api/tours/${other.tourId}/reminders/${reminderId}/send-now`,
+    );
+    expect(cross.status).toBe(404);
+    expect(cross.body).toEqual({ error: 'reminder_not_found' });
+    expect(spy.sent).toHaveLength(0);
   });
 });

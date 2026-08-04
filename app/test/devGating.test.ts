@@ -16,6 +16,7 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 
 const SECRET = 'test-origin-secret';
 
@@ -251,8 +252,12 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   // The deterministic e2e seam for the worker's 60s tour-reminder poll: one
   // POST = one runDueTourReminders(now) pass over the SAME world fakes the
   // /api/tours route armed.
-  const FIXED_NOW = '2026-07-13T10:00:00.000Z';
-  const SCHEDULED_AT = '2026-07-15T10:00:00.000Z';
+  // Daytime Eastern (10:00 / 14:00 EDT): the route arms through the real
+  // quiet-hours clamp with the org default window (21:00-08:00
+  // America/New_York), so an early-morning fixture would be stored pre-clamped
+  // at 08:00 local and these ticks would fire nothing.
+  const FIXED_NOW = '2026-07-13T14:00:00.000Z';
+  const SCHEDULED_AT = '2026-07-15T18:00:00.000Z';
   const TENANT_PHONE = '+15550300001';
   // Rung bodies sourced from the message catalog (single source of truth).
   const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
@@ -293,6 +298,7 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         messagesRepo: world.messagesRepo,
         sendMessageService,
         adapter: world.adapter,
+        settingsRepo: quietOffSettingsRepo(),
         logger,
       },
     });
@@ -346,7 +352,7 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     // A later tick fires the NEXT rung once; the claimed row never re-sends.
     const res2 = await request(app)
       .post('/__dev/tour-reminders/tick')
-      .send({ now: '2026-07-14T10:01:00.000Z' });
+      .send({ now: '2026-07-14T18:01:00.000Z' });
     expect(res2.status).toBe(200);
     expect(world.sent).toHaveLength(2);
     expect(world.sent[1]).toMatchObject({ to: TENANT_PHONE, body: DAY_BEFORE_BODY });
@@ -360,15 +366,16 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
     // collapse to '…00.000Z' so rows whose dueAt carries milliseconds fire.
     const res = await request(app)
       .post('/__dev/tour-reminders/tick')
-      .send({ now: '2026-07-14T10:01:00Z' });
+      .send({ now: '2026-07-14T18:01:00Z' });
     expect(res.status).toBe(200);
-    expect(res.body).toEqual({ ok: true, now: '2026-07-14T10:01:00.000Z' });
+    expect(res.body).toEqual({ ok: true, now: '2026-07-14T18:01:00.000Z' });
 
-    // Both due rows (confirmation @ FIXED_NOW, day_before @ T-24h with .000
-    // milliseconds) fired against the normalized now.
-    expect(world.sent.map((s) => s.body).sort()).toEqual(
-      [CONFIRMATION_BODY, DAY_BEFORE_BODY].sort(),
-    );
+    // The day_before row (dueAt @ T-24h, carrying .000 milliseconds) fired
+    // against the normalized now - proof the ms-less input collapsed. The
+    // confirmation rung is due in the SAME batch and is retired unsent by
+    // release supersession (quiet-hours spec section 5: only the rung closest
+    // to the event sends when a catch-up tick releases several at once).
+    expect(world.sent.map((s) => s.body)).toEqual([DAY_BEFORE_BODY]);
   });
 
   it('defaults now to the wall clock when the body carries none', async () => {
@@ -453,6 +460,7 @@ describe('dev tick — POST /__dev/placement-nudges/tick', () => {
         unitsRepo: world.unitsRepo,
         conversationsRepo: world.conversationsRepo,
         sendMessageService,
+        settingsRepo: quietOffSettingsRepo(),
         logger,
       },
     });

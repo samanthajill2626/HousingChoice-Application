@@ -15,6 +15,7 @@ import type { EventStreamHandlers, TourReminderView, TourRemindersPage } from '.
 
 const getTourReminders = vi.fn();
 const patchTourReminder = vi.fn();
+const postReminderSendNow = vi.fn();
 let streamHandlers: EventStreamHandlers | null = null;
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -22,6 +23,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getTourReminders: (...a: unknown[]) => getTourReminders(...a),
     patchTourReminder: (...a: unknown[]) => patchTourReminder(...a),
+    postReminderSendNow: (...a: unknown[]) => postReminderSendNow(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers = h;
     },
@@ -43,6 +45,7 @@ function rung(over: Partial<TourReminderView> = {}): TourReminderView {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  postReminderSendNow.mockReset().mockResolvedValue(rung({ state: 'sent' }));
   streamHandlers = null;
 });
 
@@ -336,5 +339,166 @@ describe('RemindersPanel — dueAt-anchored self-refetch', () => {
     render(<RemindersPanel tourId="tour-1" />);
     await waitFor(() => expect(screen.getByText('Confirmation')).toBeInTheDocument());
     expect(screen.queryByRole('button', { name: /Cancel|Restore/ })).toBeNull();
+  });
+});
+
+// ---- Quiet hours (2026-08-03): the deferred-send chip + operator Send now ----
+// Quiet hours DEFERS a rung, it never drops it, so its note must not read
+// "Will be skipped"; and staff can force any PENDING rung out immediately.
+
+// The rendered em dash, by code point, so these added source lines stay ASCII.
+const EM = String.fromCharCode(0x2014);
+
+describe('RemindersPanel - quiet-hours copy', () => {
+  it('a quiet_hours suppression reads as a WAIT, never as a skip', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-q', suppression: { reason: 'quiet_hours' } })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(`Will wait ${EM} quiet hours`)).toBeInTheDocument(),
+    );
+    // "Will be skipped" would be a lie - the message goes out at quiet-end.
+    expect(screen.queryByText(/Will be skipped/)).toBeNull();
+  });
+
+  it('every OTHER suppression reason keeps the "Will be skipped" sentence', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-o', suppression: { reason: 'manual_mode' } })],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText(`Will be skipped ${EM} manual mode`)).toBeInTheDocument(),
+    );
+  });
+
+  it('a rung retired by release supersession names that reason in its chip', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({
+          reminderId: 'r-sup',
+          kind: 'day_before',
+          state: 'skipped',
+          skippedAt: '2026-07-13T16:00:00Z',
+          skipReason: 'quiet_hours_superseded',
+        }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() =>
+      expect(screen.getByText('Skipped - superseded by a later reminder')).toBeInTheDocument(),
+    );
+  });
+});
+
+describe('RemindersPanel - Send now', () => {
+  it('offers Send now on an upcoming rung only (not sent/canceled/skipped)', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({ reminderId: 'r-u', kind: 'day_before', state: 'upcoming' }),
+        rung({ reminderId: 'r-s', kind: 'confirmation', state: 'sent', sentAt: '2026-06-18T13:02:00Z' }),
+        rung({ reminderId: 'r-c', kind: 'morning_of', state: 'canceled', canceledAt: '2026-06-18T13:02:00Z' }),
+        rung({ reminderId: 'r-k', kind: 'en_route', state: 'skipped', skippedAt: '2026-06-18T13:02:00Z' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    // Accessible name disambiguates the rung (A10) - a bare "Send now" repeated
+    // per rung would be a strict-mode violation for the e2e harness.
+    await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    expect(screen.getAllByRole('button', { name: /reminder now$/ })).toHaveLength(1);
+    // Visible text stays short.
+    expect(screen.getByText('Send now')).toBeInTheDocument();
+  });
+
+  it('Send now POSTs for that rung and refetches the honest ladder', async () => {
+    getTourReminders.mockReset();
+    getTourReminders
+      .mockResolvedValueOnce({
+        reminders: [rung({ reminderId: 'r-n', kind: 'day_before', state: 'upcoming' })],
+      } satisfies TourRemindersPage)
+      .mockResolvedValue({
+        reminders: [
+          rung({
+            reminderId: 'r-n',
+            kind: 'day_before',
+            state: 'sent',
+            sentAt: '2026-07-01T12:00:00Z',
+          }),
+        ],
+      } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+
+    const btn = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    btn.click();
+    await waitFor(() => expect(postReminderSendNow).toHaveBeenCalledWith('tour-1', 'r-n'));
+    await waitFor(() => expect(getTourReminders).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(screen.getByText(/Sent -/i)).toBeInTheDocument());
+    // A success clears any error slot.
+    expect(screen.queryByRole('alert')).toBeNull();
+  });
+
+  it('a 409 shows readable inline copy beside the rung, keeps the ladder, and re-enables', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-e', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    postReminderSendNow.mockReset();
+    postReminderSendNow.mockRejectedValue(
+      new ApiError(409, 'contact_opted_out', 'contact_opted_out', {
+        error: 'contact_opted_out',
+      }),
+    );
+    render(<RemindersPanel tourId="tour-1" />);
+
+    const btn = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    btn.click();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/opted out/i);
+    // The raw machine code never reaches a navigator.
+    expect(alert).not.toHaveTextContent('contact_opted_out');
+    // The list must NOT be replaced by the error (the fetch-error path does that).
+    expect(screen.getByText('Day before')).toBeInTheDocument();
+    const again = await screen.findByRole('button', { name: 'Send Day before reminder now' });
+    expect((again as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it('a contact_deleted 409 tells the navigator to restore the contact', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-d', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    postReminderSendNow.mockReset();
+    postReminderSendNow.mockRejectedValue(
+      new ApiError(409, 'contact_deleted', 'contact_deleted', { error: 'contact_deleted' }),
+    );
+    render(<RemindersPanel tourId="tour-1" />);
+
+    (await screen.findByRole('button', { name: 'Send Day before reminder now' })).click();
+
+    const alert = await screen.findByRole('alert');
+    expect(alert).toHaveTextContent(/restore them to send/i);
+    // The raw machine code never reaches a navigator.
+    expect(alert).not.toHaveTextContent('contact_deleted');
+  });
+
+  it('an unmapped refusal code still says something human', async () => {
+    getTourReminders.mockReset();
+    getTourReminders.mockResolvedValue({
+      reminders: [rung({ reminderId: 'r-x', kind: 'day_before', state: 'upcoming' })],
+    } satisfies TourRemindersPage);
+    postReminderSendNow.mockReset();
+    postReminderSendNow.mockRejectedValue(new ApiError(409, 'wat_is_this', 'wat_is_this'));
+    render(<RemindersPanel tourId="tour-1" />);
+
+    (await screen.findByRole('button', { name: 'Send Day before reminder now' })).click();
+    const alert = await screen.findByRole('alert');
+    expect(alert).not.toHaveTextContent('wat_is_this');
+    expect(alert).toHaveTextContent(/try again/i);
   });
 });

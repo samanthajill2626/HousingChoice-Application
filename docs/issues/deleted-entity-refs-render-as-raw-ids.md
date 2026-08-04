@@ -3,7 +3,8 @@ id: deleted-entity-refs-render-as-raw-ids
 title: Cross-reference lookup maps built from live-only lists render raw ids for soft-deleted contacts/units
 type: bug
 severity: med
-status: open
+status: resolved
+resolved: 2026-08-03
 area: dashboard
 created: 2026-08-03
 refs: dashboard/src/routes/placements/usePlacements.ts:78, dashboard/src/routes/placements/pageModel.ts:84
@@ -32,3 +33,17 @@ are not affected by soft-deletes - only truly-missing (404) refs degrade there.
 them into the lookup maps with live records winning on id collision. If a page ever
 needs to distinguish, style deleted-entity rows (e.g. muted/"(deleted)") - not
 required for correctness.
+
+**Resolution (2026-08-03).** All display-resolution surfaces fixed the same way
+(deleted lists merged under live, live wins collisions), each TDD'd + live-QAed:
+
+- Tours list: ToursPage @ 0ce0b018
+- Placements board: usePlacements @ 226c37f5
+- Property page ("Placements/Tours on this property" cards): ListingDetail (this commit)
+
+Audited the remaining `useContacts('all')` consumers - ConversationDetail (roster
+add search), EmailTriage (match candidates), ContactDetail (relationship
+candidates) - all are candidate PICKERS where excluding soft-deleted contacts is
+correct behavior, not this bug. Detail pages (TourDetail, PlacementDetail) join
+per-id and the single-entity GETs return soft-deleted records, so they were never
+affected.

@@ -45,6 +45,9 @@ function makeConfig(over: Partial<AppConfig> = {}): AppConfig {
     relayLiveProvisioning: true,
     relaySpareBufferTarget: 0,
     relayWarmingMaxWaitMs: 30 * 60_000,
+    // Buy-side geographic hints (area-code preference). EMPTY here so every
+    // pre-existing test keeps today's behavior: one unhinted search per buy.
+    relayPreferredAreaCodes: [],
     ...over,
   } as AppConfig;
 }
@@ -366,6 +369,10 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
 
       const warm = queue.envelopes.filter((e) => e.jobName === RELAY_WARM_JOB);
       expect(warm).toHaveLength(2);
+      // Buffer spares are bought for NOBODY: the payload must stay EMPTY so no
+      // group's property ZIP can ever ride along and geo-bias a shared spare
+      // (area-code preference: the hint belongs to tier-3 buys only).
+      for (const envelope of warm) expect(envelope.payload).toEqual({});
     });
 
     it('target 2, but 1 fresh spare + 1 warming already -> enqueues 0 (warming counts; debounce)', async () => {
@@ -538,7 +545,9 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       await queueAdapter.settle();
 
       expect(warmOneNumber).toHaveBeenCalledTimes(1);
-      expect(warmOneNumber).toHaveBeenCalledWith('c-1');
+      // The handler always passes BOTH params (area-code preference): a payload
+      // with no postalCode forwards an explicit undefined hint.
+      expect(warmOneNumber).toHaveBeenCalledWith('c-1', undefined);
     });
 
     it('dispatches with undefined when the payload has no conversationId', async () => {
@@ -551,7 +560,20 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
       await enqueueImmediate(RELAY_WARM_JOB, {});
       await queueAdapter.settle();
 
-      expect(warmOneNumber).toHaveBeenCalledWith(undefined);
+      expect(warmOneNumber).toHaveBeenCalledWith(undefined, undefined);
+    });
+
+    it('handler forwards postalCode to warmOneNumber', async () => {
+      const warmOneNumber = vi.fn(async () => {});
+      registerRelayWarmJobHandler({
+        poolNumbersService: { warmOneNumber } as unknown as PoolNumbersService,
+        logger,
+      });
+
+      await enqueueImmediate(RELAY_WARM_JOB, { conversationId: 'c-1', postalCode: '30309' });
+      await queueAdapter.settle();
+
+      expect(warmOneNumber).toHaveBeenCalledWith('c-1', '30309');
     });
   });
 
@@ -567,6 +589,15 @@ describe('poolNumbersService warm-a-spare (T4)', () => {
     it('throws on a non-object payload', () => {
       expect(() => parseRelayWarmPayload(null)).toThrow();
       expect(() => parseRelayWarmPayload('nope')).toThrow();
+    });
+    it('a non-empty string postalCode is kept; missing/empty/non-string is dropped', () => {
+      expect(parseRelayWarmPayload({ conversationId: 'c1', postalCode: '30309' })).toEqual({
+        conversationId: 'c1',
+        postalCode: '30309',
+      });
+      expect(parseRelayWarmPayload({ postalCode: '' })).toEqual({});
+      expect(parseRelayWarmPayload({ postalCode: 30309 })).toEqual({});
+      expect(parseRelayWarmPayload({})).toEqual({});
     });
   });
 });

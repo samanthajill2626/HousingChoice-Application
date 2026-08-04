@@ -3,7 +3,7 @@
 //
 // Producers: refillBufferIfNeeded (one per missing spare) and the connect-when-
 // ready path (T6, tagged with a conversationId). This handler dispatches straight
-// to poolNumbersService.warmOneNumber(conversationId).
+// to poolNumbersService.warmOneNumber(conversationId, postalCode).
 //
 // NOT a token-bucket job: warming is an SDK provision + messaging-service attach
 // (a purchase, not an outbound SMS), so it draws NO token from the shared A2P
@@ -11,7 +11,16 @@
 // source of truth for both worker.ts and the app's in-process path).
 //
 // PII (doc section 9): the payload carries only a conversationId (an internal id)
-// - never a phone number.
+// and an optional property ZIP search hint - never a phone number, and neither
+// value is ever logged (warmOneNumber logs the hint TYPE only).
+//
+// AT REST, though, the payload IS the SQS message body: the ZIP persists in the
+// jobs queue for the life of the message and, if the job exhausts maxReceiveCount,
+// for up to 14 days in the jobs DLQ (infra/modules/jobs/main.tf), where operators
+// read bodies in the console. ACCEPTED exposure - a property ZIP is coarse
+// business data about a UNIT, not a person, and the pairing with a conversationId
+// is no more locating than the unit record itself. Named here so the surface is
+// stated rather than implied absent by the logging sentence above.
 import type { Logger } from '../lib/logger.js';
 import {
   createPoolNumbersService,
@@ -28,12 +37,21 @@ export interface RelayWarmPayload {
    * Absent for a plain buffer refill (an untagged spare).
    */
   conversationId?: string;
+  /**
+   * Property ZIP hint for the buy (area-code preference): tier-3 buys for a
+   * tour/placement group prefer numbers local to the unit. Absent for buffer
+   * refills and standalone groups (Atlanta-default ladder). Riding the payload
+   * keeps the hint across job retries.
+   */
+  postalCode?: string;
 }
 
 /**
  * Hand-rolled payload guard (mirrors parseRelayFanOutPayload): a refill enqueues
  * {}, so a missing / empty / non-string conversationId is tolerated and simply
- * omitted; only a non-empty string surfaces as the earmark.
+ * omitted; only a non-empty string surfaces as the earmark. postalCode gets the
+ * same tolerance - an absent/blank/non-string hint simply means no hint (the
+ * ladder falls back to the preferred area codes), never a failed job.
  */
 export function parseRelayWarmPayload(payload: unknown): RelayWarmPayload {
   if (typeof payload !== 'object' || payload === null) {
@@ -44,7 +62,12 @@ export function parseRelayWarmPayload(payload: unknown): RelayWarmPayload {
     typeof p.conversationId === 'string' && p.conversationId.length > 0
       ? p.conversationId
       : undefined;
-  return { ...(conversationId !== undefined && { conversationId }) };
+  const postalCode =
+    typeof p.postalCode === 'string' && p.postalCode.length > 0 ? p.postalCode : undefined;
+  return {
+    ...(conversationId !== undefined && { conversationId }),
+    ...(postalCode !== undefined && { postalCode }),
+  };
 }
 
 export interface RelayWarmJobDeps {
@@ -64,6 +87,6 @@ export function registerRelayWarmJobHandler(deps: RelayWarmJobDeps = {}): void {
   defineJobHandler(RELAY_WARM_JOB, async (rawPayload) => {
     const payload = parseRelayWarmPayload(rawPayload);
     poolNumbers ??= createPoolNumbersService({ logger: deps.logger });
-    await poolNumbers.warmOneNumber(payload.conversationId);
+    await poolNumbers.warmOneNumber(payload.conversationId, payload.postalCode);
   });
 }

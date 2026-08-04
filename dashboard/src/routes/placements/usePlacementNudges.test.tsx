@@ -11,6 +11,7 @@ import type { EventStreamHandlers, PlacementNudgeView } from '../../api/index.js
 
 const getPlacementNudges = vi.fn();
 const patchPlacementNudge = vi.fn();
+const postNudgeSendNow = vi.fn();
 let streamHandlers: EventStreamHandlers | null = null;
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -18,6 +19,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
     patchPlacementNudge: (...a: unknown[]) => patchPlacementNudge(...a),
+    postNudgeSendNow: (...a: unknown[]) => postNudgeSendNow(...a),
     useEventStream: (h: EventStreamHandlers) => {
       streamHandlers = h;
     },
@@ -41,6 +43,7 @@ function nudge(over: Partial<PlacementNudgeView> = {}): PlacementNudgeView {
 beforeEach(() => {
   getPlacementNudges.mockReset().mockResolvedValue([]);
   patchPlacementNudge.mockReset().mockResolvedValue(nudge());
+  postNudgeSendNow.mockReset().mockResolvedValue(nudge({ state: 'sent' }));
   streamHandlers = null;
 });
 
@@ -111,4 +114,76 @@ it('surfaces a fetch error', async () => {
   getPlacementNudges.mockRejectedValue(new ApiError(500, 'boom', 'boom'));
   const { result } = renderHook(() => usePlacementNudges('p1'));
   await waitFor(() => expect(result.current.error).not.toBeNull());
+});
+
+// ---- Send now (quiet-hours spec section 7) ---------------------------------
+// A human force-send: POST, refetch either way, and - unlike cancel/restore -
+// a refusal must be VISIBLE, never a silent no-op.
+
+it('sendNow POSTs for the rung and refetches the honest ladder', async () => {
+  getPlacementNudges
+    .mockResolvedValueOnce([nudge({ nudgeId: 'n-n', state: 'upcoming' })])
+    .mockResolvedValue([nudge({ nudgeId: 'n-n', state: 'sent', sentAt: '2026-07-01T12:00:00Z' })]);
+  const { result } = renderHook(() => usePlacementNudges('p1'));
+  await waitFor(() => expect(result.current.nudges).toHaveLength(1));
+
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-n', state: 'upcoming' })));
+  await waitFor(() => expect(postNudgeSendNow).toHaveBeenCalledWith('p1', 'n-n'));
+  await waitFor(() => expect(result.current.nudges[0]?.state).toBe('sent'));
+  expect(result.current.actionError).toBeNull();
+});
+
+it('a 409 refusal becomes a readable actionError keyed to the rung (never silent)', async () => {
+  getPlacementNudges.mockResolvedValue([nudge({ nudgeId: 'n-e', state: 'upcoming' })]);
+  postNudgeSendNow.mockReset();
+  postNudgeSendNow.mockRejectedValue(
+    new ApiError(409, 'stage_moved', 'stage_moved', { error: 'stage_moved' }),
+  );
+  const { result } = renderHook(() => usePlacementNudges('p1'));
+  await waitFor(() => expect(result.current.nudges).toHaveLength(1));
+
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-e', state: 'upcoming' })));
+  await waitFor(() => expect(result.current.actionError?.nudgeId).toBe('n-e'));
+  // Human copy, never the raw machine code.
+  expect(result.current.actionError?.message).not.toContain('stage_moved');
+  expect(result.current.actionError?.message).toMatch(/stage/i);
+  // The single-flight slot is released so the operator can act again.
+  await waitFor(() => expect(result.current.busyId).toBeNull());
+});
+
+it('single-flights: sendNow is ignored while another rung action is in flight', async () => {
+  getPlacementNudges.mockResolvedValue([nudge({ nudgeId: 'n-s', state: 'upcoming' })]);
+  let release: () => void = () => {};
+  postNudgeSendNow.mockReset();
+  postNudgeSendNow.mockReturnValue(
+    new Promise<PlacementNudgeView>((resolve) => {
+      release = () => resolve(nudge({ nudgeId: 'n-s', state: 'sent' }));
+    }),
+  );
+  const { result } = renderHook(() => usePlacementNudges('p1'));
+  await waitFor(() => expect(result.current.nudges).toHaveLength(1));
+
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-s', state: 'upcoming' })));
+  await waitFor(() => expect(result.current.busyId).toBe('n-s'));
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-s', state: 'upcoming' })));
+  expect(postNudgeSendNow).toHaveBeenCalledTimes(1);
+  release();
+  await waitFor(() => expect(result.current.busyId).toBeNull());
+});
+
+it('a retry clears the previous refusal', async () => {
+  getPlacementNudges.mockResolvedValue([nudge({ nudgeId: 'n-r', state: 'upcoming' })]);
+  postNudgeSendNow.mockReset();
+  postNudgeSendNow.mockRejectedValueOnce(
+    new ApiError(409, 'sms_sending_disabled', 'sms_sending_disabled'),
+  );
+  const { result } = renderHook(() => usePlacementNudges('p1'));
+  await waitFor(() => expect(result.current.nudges).toHaveLength(1));
+
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-r', state: 'upcoming' })));
+  await waitFor(() => expect(result.current.actionError).not.toBeNull());
+
+  postNudgeSendNow.mockResolvedValue(nudge({ nudgeId: 'n-r', state: 'sent' }));
+  act(() => result.current.sendNow(nudge({ nudgeId: 'n-r', state: 'upcoming' })));
+  await waitFor(() => expect(result.current.actionError).toBeNull());
 });

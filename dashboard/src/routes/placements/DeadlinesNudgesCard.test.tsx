@@ -34,6 +34,7 @@ function nudge(over: Partial<PlacementNudgeView> = {}): PlacementNudgeView {
 
 const onEditFollowUp = vi.fn();
 const onToggleCanceled = vi.fn();
+const onSendNow = vi.fn();
 
 function renderCard(
   props: Partial<React.ComponentProps<typeof DeadlinesNudgesCard>> = {},
@@ -49,6 +50,8 @@ function renderCard(
       nudgesError={null}
       busyId={null}
       onToggleCanceled={onToggleCanceled}
+      onSendNow={onSendNow}
+      actionError={null}
       {...props}
     />,
   );
@@ -58,6 +61,7 @@ beforeEach(() => {
   clearPlacementFollowUp.mockReset().mockResolvedValue(undefined);
   onEditFollowUp.mockReset();
   onToggleCanceled.mockReset();
+  onSendNow.mockReset();
 });
 
 describe('DeadlinesNudgesCard - card + deadlines', () => {
@@ -145,6 +149,8 @@ describe('DeadlinesNudgesCard - nudges', () => {
         nudgesError={null}
         busyId={null}
         onToggleCanceled={onToggleCanceled}
+        onSendNow={onSendNow}
+        actionError={null}
       />,
     );
     screen.getByRole('button', { name: 'Cancel Receipt check nudge' }).click();
@@ -163,6 +169,8 @@ describe('DeadlinesNudgesCard - nudges', () => {
         nudgesError={null}
         busyId={null}
         onToggleCanceled={onToggleCanceled}
+        onSendNow={onSendNow}
+        actionError={null}
       />,
     );
     expect(screen.getByText('Canceled')).toBeInTheDocument();
@@ -224,5 +232,76 @@ describe('DeadlinesNudgesCard - nudges', () => {
   it('surfaces a fetch error via role="alert"', () => {
     renderCard({ nudgesError: 'boom' });
     expect(screen.getByRole('alert')).toBeInTheDocument();
+  });
+});
+
+// ---- Quiet hours (2026-08-03): the suppression line + operator Send now -----
+// The nudge view carries a suppression ESTIMATE for the first time (S3); quiet
+// hours DEFERS a rung rather than dropping it, so its wording differs.
+// Plain-hyphen, plain-ASCII copy per this card's house contract.
+
+describe('DeadlinesNudgesCard - suppression', () => {
+  it('reads a quiet_hours suppression as a WAIT, never as a skip', () => {
+    renderCard({
+      nudges: [nudge({ nudgeId: 'n-q', suppression: { reason: 'quiet_hours' } })],
+    });
+    expect(screen.getByText('Will wait - quiet hours')).toBeInTheDocument();
+    expect(screen.queryByText(/Will be skipped/)).toBeNull();
+  });
+
+  it('reads every other suppression reason as a skip', () => {
+    renderCard({
+      nudges: [nudge({ nudgeId: 'n-s', suppression: { reason: 'stale_stage' } })],
+    });
+    expect(screen.getByText('Will be skipped - stage moved on')).toBeInTheDocument();
+  });
+
+  it('renders no suppression line when the rung carries none', () => {
+    renderCard({ nudges: [nudge({ nudgeId: 'n-0' })] });
+    expect(screen.queryByText(/Will (wait|be skipped)/)).toBeNull();
+  });
+});
+
+describe('DeadlinesNudgesCard - Send now', () => {
+  it('offers Send now on an upcoming nudge only, routed through onSendNow', () => {
+    const upcoming = nudge({ nudgeId: 'n-u', kind: 'receipt_check', state: 'upcoming' });
+    renderCard({
+      nudges: [
+        upcoming,
+        nudge({ nudgeId: 'n-s', kind: 'completion_check', state: 'sent', sentAt: '2026-06-18T13:02:00Z' }),
+        nudge({ nudgeId: 'n-c', kind: 'approval_check', state: 'canceled', canceledAt: '2026-06-18T13:02:00Z' }),
+        nudge({ nudgeId: 'n-k', kind: 'rta_window_closing', state: 'skipped', skippedAt: '2026-06-18T13:02:00Z' }),
+      ],
+    });
+    // A10: the accessible name names the rung; the visible text stays short.
+    expect(screen.getAllByRole('button', { name: /nudge now$/ })).toHaveLength(1);
+    screen.getByRole('button', { name: 'Send Receipt check nudge now' }).click();
+    expect(onSendNow).toHaveBeenCalledWith(upcoming);
+    expect(screen.getByText('Send now')).toBeInTheDocument();
+  });
+
+  it('disables Send now while another rung action is in flight', () => {
+    renderCard({
+      busyId: 'n-1',
+      nudges: [nudge({ nudgeId: 'n-1', kind: 'receipt_check', state: 'upcoming' })],
+    });
+    const btn = screen.getByRole('button', { name: 'Send Receipt check nudge now' });
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('shows a send-now refusal beside the rung it belongs to, keeping the ladder', () => {
+    renderCard({
+      nudges: [
+        nudge({ nudgeId: 'n-1', kind: 'receipt_check', state: 'upcoming' }),
+        nudge({ nudgeId: 'n-2', kind: 'completion_check', state: 'upcoming' }),
+      ],
+      actionError: { nudgeId: 'n-2', message: 'The placement moved on from this stage.' },
+    });
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent(/moved on from this stage/i);
+    // Exactly one row carries it, and the ladder is still fully rendered.
+    expect(screen.getAllByRole('alert')).toHaveLength(1);
+    expect(screen.getByText('Receipt check')).toBeInTheDocument();
+    expect(screen.getByText('Completion check')).toBeInTheDocument();
   });
 });

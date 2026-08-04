@@ -81,6 +81,7 @@ export function InboxRow({
             {isRelay && row.status === 'closed' ? <span className={styles.tag}>Closed</span> : null}
             {row.placementContext ? <span className={styles.tag}>{row.placementContext.label}</span> : null}
             {row.needsTriage ? <span className={styles.triage}>Needs triage</span> : null}
+            {row.deleted ? <span className={styles.deletedTag}>Deleted</span> : null}
           </span>
           <span className={`${styles.preview} ${unread ? styles.bold : ''}`}>
             {row.direction === 'outbound' ? `You: ${row.preview}` : row.preview}

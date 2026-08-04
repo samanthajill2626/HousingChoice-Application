@@ -93,3 +93,23 @@ export function formatAddress(a: Address | string | undefined): string {
     .join(', ');
   return [street, cityState].filter((s) => s.length > 0).join(', ');
 }
+
+/**
+ * Leading 5-digit ZIP of a structured address, for geographic search hints
+ * (relay pool-number buys). ZIP+4 truncates to the first 5; a legacy plain-
+ * string address, missing/blank zip, a NON-STRING zip, or a zip not STARTING
+ * with 5 digits all return undefined (the caller simply omits the hint - never
+ * an error).
+ */
+export function zipFive(a: Address | string | undefined): string | undefined {
+  if (a === undefined || typeof a === 'string') return undefined;
+  // TOTAL FUNCTION (the doc above promises "never an error"). `zip?.trim()`
+  // guards only null/undefined, so a legacy/imported row whose zip is a number
+  // or an object - shapes validateAddress rejects on NEW writes but never
+  // policed retroactively - would reach .trim() and throw. placements.ts calls
+  // this UNWRAPPED before provisionRelayGroup, so that throw would 500 a relay
+  // creation over a cosmetic hint. Anything not a string is simply "no hint".
+  if (typeof a.zip !== 'string') return undefined;
+  const match = a.zip.trim().match(/^(\d{5})/);
+  return match?.[1];
+}

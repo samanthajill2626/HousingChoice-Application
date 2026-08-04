@@ -25,31 +25,51 @@ import { matrixItems } from '../src/lib/seed/matrix.js';
 import { castItems } from '../src/lib/seed/cast.js';
 import { seedLive, LIVE_IDS } from '../src/lib/seed/live.js';
 import { deriveStatuses } from '../src/lib/statusModel.js';
+import {
+  clampOutOfQuietHours,
+  instantAtLocalTime,
+  localDateOf,
+  quietHoursWindowOf,
+} from '../src/lib/quietHours.js';
+import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 
 // We re-implement computeDueAt inline to match jobs/tourReminders.ts exactly.
 // This is intentionally a COPY so we catch drift if either side changes.
 // If this test ever fails because the copy drifted, update this copy to match
 // the canonical one in tourReminders.ts.
+//
+// QUIET HOURS (spec 2026-08-03): the seeder arms through the REAL armer, so the
+// copy mirrors BOTH halves of the new rule - morning_of is 08:00 ORG-LOCAL (it
+// used to be 08:00 UTC), and every rung is clamped out of the org's quiet
+// window before it is stored. Only the ladder OFFSETS stay hand-written; the
+// window/timezone arithmetic is imported from the shipped lib (a hand-copied
+// Intl/DST implementation would test the copy, not the product). The seed runs
+// against an empty settings table, so the window is DEFAULT_ORG_SETTINGS.
 type ReminderKind = 'confirmation' | 'day_before' | 'morning_of' | 'en_route' | 'no_show_checkin';
+
+const QUIET_WINDOW = quietHoursWindowOf(DEFAULT_ORG_SETTINGS);
 
 function computeDueAt(kind: ReminderKind, scheduledAt: string, now: string): string {
   const scheduled = new Date(scheduledAt).getTime();
-  switch (kind) {
-    case 'confirmation':
-      return now;
-    case 'day_before':
-      return new Date(scheduled - 24 * 60 * 60 * 1000).toISOString();
-    case 'morning_of': {
-      const d = new Date(scheduledAt);
-      return new Date(
-        Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 8, 0, 0, 0),
-      ).toISOString();
+  const raw = ((): string => {
+    switch (kind) {
+      case 'confirmation':
+        return now;
+      case 'day_before':
+        return new Date(scheduled - 24 * 60 * 60 * 1000).toISOString();
+      case 'morning_of':
+        return instantAtLocalTime(
+          localDateOf(scheduledAt, QUIET_WINDOW.timezone),
+          '08:00',
+          QUIET_WINDOW.timezone,
+        );
+      case 'en_route':
+        return new Date(scheduled - 2 * 60 * 60 * 1000).toISOString();
+      case 'no_show_checkin':
+        return new Date(scheduled + 30 * 60 * 1000).toISOString();
     }
-    case 'en_route':
-      return new Date(scheduled - 2 * 60 * 60 * 1000).toISOString();
-    case 'no_show_checkin':
-      return new Date(scheduled + 30 * 60 * 1000).toISOString();
-  }
+  })();
+  return clampOutOfQuietHours(raw, QUIET_WINDOW);
 }
 
 // no_show_checkin is intentionally NOT auto-armed (manual send only), so it is
@@ -143,18 +163,17 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         ExpressionAttributeNames: { '#tid': 'tourId' },
         ExpressionAttributeValues: { ':tid': LIVE_IDS.tourToday },
       }));
-      // Confirmation always arms; others may be skipped if dueAt < now.
-      // At 09:00 UTC seeding a 14:00 UTC tour: confirmation=09:00 (future),
-      // day_before would be yesterday-14:00 (past → skipped),
-      // morning_of is today 08:00 (past → skipped),
-      // en_route is today 12:00 (future),
-      // no_show_checkin is today 14:30 (future).
-      // So we expect at least 1 (confirmation) and up to 3.
+      // Quiet hours (default 21:00-08:00 America/New_York) reshape this ladder.
+      // At 09:00 UTC (05:00 EDT - inside the window) seeding a 14:00 UTC
+      // (10:00 EDT) tour: confirmation clamps to 12:00 UTC (08:00 EDT),
+      // day_before is yesterday-14:00 (past - skipped), morning_of is 08:00
+      // EDT = 12:00 UTC, en_route is 12:00 UTC. The three survivors all land on
+      // the SAME 08:00-local instant, so supersession keeps only the last rung.
       expect(Items).toBeDefined();
       expect(Items!.length).toBeGreaterThanOrEqual(1);
     });
 
-    it('confirmation reminder dueAt equals FIXED_NOW_ISO', async () => {
+    it('the in-window seed time collapses the ladder onto one 08:00-local rung', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -162,10 +181,15 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         ExpressionAttributeNames: { '#tid': 'tourId' },
         ExpressionAttributeValues: { ':tid': LIVE_IDS.tourToday },
       }));
-      const confirmation = (Items ?? []).find((r) => r['kind'] === 'confirmation');
-      expect(confirmation, 'confirmation reminder should exist for today tour').toBeDefined();
-      // dueAt must equal FIXED_NOW_ISO (armTourReminders sets confirmation dueAt = now).
-      expect(confirmation!['dueAt']).toBe(FIXED_NOW_ISO);
+      const rows = Items ?? [];
+      // confirmation would have been sent at 05:00 EDT - it is clamped to 08:00
+      // EDT, collides with morning_of/en_route there, and the LAST rung (the
+      // one whose copy is still true) is the only row written.
+      expect(rows.map((r) => r['kind'])).toEqual(['en_route']);
+      expect(rows[0]!['dueAt']).toBe(
+        instantAtLocalTime(FIXED_NOW_ISO.slice(0, 10), '08:00', QUIET_WINDOW.timezone),
+      );
+      expect(rows.find((r) => r['kind'] === 'confirmation')).toBeUndefined();
     });
   });
 
@@ -177,7 +201,7 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     tomorrowDate.setUTCDate(tomorrowDate.getUTCDate() + 1);
     const scheduledAtTomorrow = `${tomorrowDate.toISOString().slice(0, 10)}T14:00:00.000Z`;
 
-    it('has all 4 reminder rungs armed (all are in the future at 09:00 seed time)', async () => {
+    it('has 3 reminder rungs armed (morning_of is superseded by en_route)', async () => {
       const { Items } = await doc.send(new QueryCommand({
         TableName: `${prefix}tourReminders`,
         IndexName: 'byTour',
@@ -185,15 +209,21 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
         ExpressionAttributeNames: { '#tid': 'tourId' },
         ExpressionAttributeValues: { ':tid': LIVE_IDS.tourTomorrow },
       }));
-      // At 09:00 UTC today seeding a 14:00 UTC tomorrow tour:
-      // confirmation = 09:00 today (future from now=09:00: passes as now equals now)
-      // day_before = 14:00 today (future)
-      // morning_of = 08:00 tomorrow (future)
-      // en_route = 12:00 tomorrow (future)
+      // At 09:00 UTC (05:00 EDT) today seeding a 14:00 UTC (10:00 EDT) tomorrow
+      // tour, with the default quiet window:
+      // confirmation = 09:00 today, inside the window -> clamped to 12:00 today
+      // day_before = 14:00 today (future, daytime - unclamped)
+      // morning_of = 08:00 EDT tomorrow = 12:00 UTC tomorrow
+      // en_route = 12:00 UTC tomorrow - the SAME instant as morning_of, so the
+      //   later rung supersedes morning_of and no morning_of row is written.
       // no_show_checkin is manual-send only now, so it is NOT auto-armed.
-      // The other 4 rungs should arm.
       expect(Items).toBeDefined();
-      expect(Items!.length).toBe(4);
+      expect(Items!.length).toBe(3);
+      expect((Items ?? []).map((r) => r['kind']).sort()).toEqual([
+        'confirmation',
+        'day_before',
+        'en_route',
+      ]);
     });
 
     it('each reminder dueAt matches computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO)', async () => {
@@ -208,8 +238,17 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
       for (const item of Items ?? []) {
         byKind.set(item['kind'] as string, item['dueAt'] as string);
       }
+      // morning_of clamps onto the SAME instant as en_route (both 08:00 EDT on
+      // tour day), so the arm-time supersession rule writes no morning_of row -
+      // asserted explicitly rather than skipped, so a regression that starts
+      // writing it again fails here.
+      const superseded: ReminderKind[] = ['morning_of'];
       for (const kind of REMINDER_KINDS) {
         const expectedDueAt = computeDueAt(kind, scheduledAtTomorrow, FIXED_NOW_ISO);
+        if (superseded.includes(kind)) {
+          expect(byKind.get(kind), `superseded kind '${kind}' must have no row`).toBeUndefined();
+          continue;
+        }
         // Only assert for kinds that should have been armed (dueAt >= FIXED_NOW_ISO).
         if (expectedDueAt >= FIXED_NOW_ISO) {
           expect(byKind.get(kind), `dueAt for kind '${kind}'`).toBe(expectedDueAt);

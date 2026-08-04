@@ -583,6 +583,23 @@ a.pill:focus-visible {
   font-weight: var(--fw-medium);
 }
 
+/* Deleted-contact resurfacing: the composer is replaced by the note above plus
+   this restore action (the only way back to replying). */
+.restoreBtn {
+  align-self: flex-start;
+  padding: var(--sp-1) var(--sp-3);
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--c-border);
+  background: var(--c-surface-2);
+  font-size: var(--fs-sm);
+  cursor: pointer;
+}
+
+.restoreBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
 /* Relay group (M1.7): a subtle within-bubble note on a relay SOURCE message when
  * one or more members opted out and weren't relayed to. Muted (not an error —
  * the message DID relay to everyone else); real text, never color-only. */

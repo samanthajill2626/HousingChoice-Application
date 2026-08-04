@@ -15,13 +15,19 @@ import {
   configureJobsLogger,
   configureOutboundQueue,
   configureScheduler,
+  defineJobHandler,
   dispatchJob,
 } from '../src/jobs/jobs.js';
 import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
+import type { Address } from '../src/lib/address.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
 import type { PlacementStage } from '../src/lib/statusModel.js';
-import { RelayProvisioningDisabledError, type PoolNumbersService } from '../src/services/poolNumbers.js';
+import {
+  RelayProvisioningDisabledError,
+  RELAY_WARM_JOB,
+  type PoolNumbersService,
+} from '../src/services/poolNumbers.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -109,12 +115,25 @@ function makeDisabledPoolNumbers(): PoolNumbersService & { provisionAttempts: nu
   };
 }
 
+/** The unit address most tests seed - a ZIP+4 so the 5-digit truncation is exercised. */
+const UNIT_ADDRESS: Address = {
+  line1: '123 Main St',
+  city: 'Atlanta',
+  state: 'GA',
+  zip: '30309-1234',
+};
+
 /** Seed a tenant contact + a unit (owned by a landlord contact) + a placement. */
 async function seedPlacement(
   world: FakeWorld,
-  opts: { tenantHasPhone?: boolean; landlordHasPhone?: boolean } = {},
+  opts: {
+    tenantHasPhone?: boolean;
+    landlordHasPhone?: boolean;
+    /** Override the unit address (e.g. a ZIP-less one for the no-hint case). */
+    unitAddress?: Address;
+  } = {},
 ): Promise<string> {
-  const { tenantHasPhone = true, landlordHasPhone = true } = opts;
+  const { tenantHasPhone = true, landlordHasPhone = true, unitAddress = UNIT_ADDRESS } = opts;
   await world.contactsRepo.create({
     contactId: 'c-tenant',
     type: 'tenant',
@@ -129,7 +148,12 @@ async function seedPlacement(
     lastName: 'Landlord',
     ...(landlordHasPhone && { phone: LANDLORD_PHONE }),
   });
-  await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'c-landlord', status: 'available' });
+  await world.unitsRepo.create({
+    unitId: 'unit-1',
+    landlordId: 'c-landlord',
+    status: 'available',
+    address: unitAddress,
+  });
   const c = await world.placementsRepo.create({
     tenantId: 'c-tenant',
     unitId: 'unit-1',
@@ -144,6 +168,9 @@ const post = (app: Parameters<typeof request>[0], path: string) =>
 
 describe('placement-scoped relay provisioning (M1.10c)', () => {
   let world: FakeWorld;
+  // Kept on a handle so a test can settle the deferred in-process dispatches
+  // before asserting on what a job handler captured.
+  let queueAdapter: InProcessOutboundQueueAdapter;
 
   beforeEach(() => {
     _resetForTests();
@@ -158,7 +185,8 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
       contactsRepo: world.contactsRepo,
       logger,
     });
-    configureOutboundQueue(new InProcessOutboundQueueAdapter({ dispatch: dispatchJob }));
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
   });
 
   afterEach(() => {
@@ -273,6 +301,52 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
     // The refusal is audited on the CASE (entity placements#<placementId>, reason 'placement').
     const refusal = world.auditEvents.find((a) => a.event_type === 'relay_provisioning_disabled');
     expect(refusal?.entityKey).toBe(`placements#${placementId}`);
+  });
+
+  // --- area-code preference: the property ZIP is a tier-3 BUY hint -----------
+  // A pool service with NO number available now -> tier-3 connect-when-ready,
+  // which is the only path that enqueues relay.warmNumber (and so the only path
+  // that can carry the hint).
+  function makeConnectingPoolNumbers(): PoolNumbersService {
+    return {
+      ...makeFakePoolNumbers(),
+      async provisionForGroup() {
+        return { kind: 'needs_connecting' };
+      },
+    };
+  }
+
+  it('tier-3 relay creation threads the unit ZIP (5 digits) into the warm-job payload', async () => {
+    const captured: Record<string, unknown>[] = [];
+    defineJobHandler(RELAY_WARM_JOB, (payload) => {
+      captured.push(payload as Record<string, unknown>);
+    });
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeConnectingPoolNumbers() });
+    const placementId = await seedPlacement(world);
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(201);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).toMatchObject({ postalCode: '30309' }); // ZIP+4 truncated to 5
+  });
+
+  it('a unit with NO usable zip still creates the group - payload just omits postalCode', async () => {
+    const captured: Record<string, unknown>[] = [];
+    defineJobHandler(RELAY_WARM_JOB, (payload) => {
+      captured.push(payload as Record<string, unknown>);
+    });
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeConnectingPoolNumbers() });
+    // Same seed as the previous test EXCEPT the unit address carries no zip.
+    const placementId = await seedPlacement(world, { unitAddress: { city: 'Atlanta' } });
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(201);
+    expect(captured).toHaveLength(1);
+    expect(captured[0]).not.toHaveProperty('postalCode');
   });
 
   // --- M1.10c failed-send escalation (doc §7.1) ---------------------------

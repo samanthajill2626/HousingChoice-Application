@@ -150,13 +150,18 @@ export function ListingDetail(): React.JSX.Element {
   const state = useListing(unitId);
   // Contacts back the "Placements on this property" + "Tours on this property"
   // rows: resolve each row's tenantId to a display name (falls back to the id
-  // when a contact hasn't loaded).
+  // when a contact hasn't loaded). Soft-deleted contacts are included too — a
+  // closed placement/tour routinely outlives its tenant (same fix as the tours
+  // list + placements board, 2026-08-03); live records are set LAST so a
+  // defensive id collision resolves to the live record.
   const { contacts: contactsList } = useContacts('all');
+  const { contacts: deletedContactsList } = useContacts('deleted');
   const contactsMap = useMemo(() => {
     const m = new Map<string, Contact>();
+    for (const c of deletedContactsList) m.set(c.contactId, c);
     for (const c of contactsList) m.set(c.contactId, c);
     return m;
-  }, [contactsList]);
+  }, [contactsList, deletedContactsList]);
   const [deleteBusy, setDeleteBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);

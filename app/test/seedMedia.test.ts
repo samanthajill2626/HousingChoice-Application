@@ -52,6 +52,7 @@ vi.mock('../src/lib/config.js', () => ({
     systemLogGroupName: '/hc/local/system',
     messagingDriver: 'console',
     relayLiveProvisioning: false,
+    relayPreferredAreaCodes: [],
     smsSendingEnabled: false,
   })),
   tableName: (base: string) => `hc-local-${base}`,

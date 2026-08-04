@@ -40,10 +40,26 @@ export function describeTourActivity(e: TourActivityEvent): TourActivityDescript
   return { label };
 }
 
-/** Tour audit kind → the closest shared TimelineMilestoneType. The type drives
- *  ONLY the pin color (the label above is what renders); kinds the shared union
- *  doesn't know map to a same-color neighbor rather than widening the server
- *  timeline contract mirror. Unknown kinds fall to 'stage_changed' (neutral). */
+/** Tour audit kind -> the closest shared TimelineMilestoneType. The type drives
+ *  ONLY the pin color; the label above is what renders. Unknown kinds fall to
+ *  'stage_changed' (neutral).
+ *
+ *  Two entries are deliberate ALIASES rather than identity mappings, and the old
+ *  reason ("kinds the shared union doesn't know") stopped being true when
+ *  contact-comms-pane added `tour_group_opened` / `tour_converted` to
+ *  TimelineMilestoneType (api/types.ts). The real situation now:
+ *  this file maps the TOUR's own audit trail (GET /api/tours/:id/activity),
+ *  which feeds the Activity card + the GROUP transcript on the tour page, and it
+ *  keeps its own coarse colour vocabulary - `added_to_group_text` and
+ *  `placement_opened` are the same colour and already carry the meaning. The
+ *  1:1 tabs' pins do NOT come through here at all: they are server-written
+ *  person events read straight off the contact timeline, so they use the new
+ *  types directly. The visible consequence of the split is the deep link, and
+ *  it is intentional per surface: a group-tab `tour_converted` pin links to
+ *  /placements/<id> (the thing you just created, via refType 'placement'
+ *  below), while the person-feed copy is written with refType 'tour'
+ *  (app/src/routes/placements.ts) and links back to /tours/<id> from a feed
+ *  that is not already on the tour page. */
 const MILESTONE_TYPE: Record<string, TimelineMilestoneType> = {
   tour_scheduled: 'tour_scheduled',
   tour_rescheduled: 'tour_scheduled',

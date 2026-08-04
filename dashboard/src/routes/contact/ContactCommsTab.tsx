@@ -58,9 +58,20 @@ export function ContactCommsTab({
       commsOnly={commsOnly}
       onCommsOnlyChange={onCommsOnlyChange}
       // No onRestore: restoring a deleted contact stays on the contact page, so
-      // the locked composer shows the note WITHOUT a dead button. No
-      // onContactUpdated either: these pages hold no contact state to sync, and
-      // the pane's local override already keeps its own send gates fresh.
+      // the locked composer shows the note WITHOUT a dead button.
+      //
+      // No onContactUpdated either - and the honest reason is NOT that the hubs
+      // hold no contact state. They do: useTour.ts:33-42 exposes tenant/landlord
+      // and refetches BOTH on every tour.updated SSE, and PlacementDetail.tsx
+      // holds the same pair. What they lack is a way to APPLY one contact back
+      // into that bundle without a whole refetch, and adding one would still not
+      // close the race: the pane clears its local override on any new `contact`
+      // identity, so a refetch that was already in flight when the operator
+      // recorded consent lands STALER and reverts the pane's send gates until the
+      // next refetch. Contact has no updated_at (or any monotonic stamp), so the
+      // pane cannot tell staler from fresher to defend itself. Tracked in
+      // docs/issues/pane-override-stale-refetch-race.md; the window is a
+      // display-only revert (every send is re-checked server-side).
     />
   );
 }

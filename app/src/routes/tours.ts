@@ -82,6 +82,7 @@ import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
 import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
@@ -203,8 +204,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
   const router = Router();
 
-  // Best-effort triple-write of a tour lifecycle event to THREE surfaces: the
-  // tenant's contact timeline (activity event), the property's Activity card
+  // Best-effort write of a tour lifecycle event to THREE surfaces: BOTH
+  // parties' contact timelines (the tenant's and the unit landlord's - one
+  // activity event each, via lib/personEvents), the property's Activity card
   // (a `units#<unitId>` audit row), and the tour's OWN history (a
   // `tours#<tourId>` audit row - tour-detail-page 1a, feeds
   // GET /api/tours/:tourId/activity). Each write is independently guarded -
@@ -216,17 +218,17 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     auditType: string,
     label: string,
   ): Promise<void> {
-    try {
-      await activityEvents.record({
-        contactId: tour.tenantId,
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      {
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
         type: activityType,
         label,
         refType: 'tour',
         refId: tour.tourId,
-      });
-    } catch (err) {
-      log.error({ err, tourId: tour.tourId }, `${activityType} milestone record failed (best-effort)`);
-    }
+      },
+    );
     try {
       await audit.append(`units#${tour.unitId}`, auditType, { tourId: tour.tourId });
     } catch (err) {

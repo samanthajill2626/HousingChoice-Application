@@ -1,6 +1,7 @@
 // ContactDetail — the shared shell for the contact detail page (tenant /
 // landlord / untriaged). A near-black header band (avatar - name - KIND pill -
-// facts - Call ▾ - ⋯) over a two-pane body: comms-LEFT (the Timeline) / file-RIGHT.
+// facts - Call ▾ - ⋯) over a two-pane body: comms-LEFT (ContactCommsPane) /
+// file-RIGHT.
 //
 // KIND, not a binary: a three-way `kind` (landlord/pm → landlord, unknown →
 // unknown, else → tenant) chooses the file pane (TenantFile / LandlordFile /
@@ -10,11 +11,13 @@
 // UnknownFile leads with a triage CTA (Mark as Tenant/Landlord → PATCH type).
 //
 // Type-AGNOSTIC cards rendered here for every kind: Relationships, Custom fields.
-// Comms behaviours: opt-out (Do-Not-Contact) flag + refusal messaging; OPTIMISTIC
-// send (Sending… → Sent → Delivered via the timeline's add/resolve/fail);
-// "Media from comms" derived from the live timeline. Narrow widths lead with comms
-// + a segmented Comms | Profile toggle. The page resolves the reply target
-// (primary / picker) and whether a conversation is sendable, else Send is disabled.
+// Comms: the LEFT pane is ContactCommsPane (extracted 2026-08-03 and shared with
+// the tour/placement 1:1 tabs) - it owns reply-target resolution, the optimistic
+// send, email compose, retry, consent capture and the deleted-composer lock. This
+// page keeps the hook that feeds it (useContactTimeline) because it ALSO derives
+// "Media from comms" from those items and refetches after its own mutations
+// (status, opt-out, phone/suggestion changes). Narrow widths lead with comms + a
+// segmented Comms | Profile toggle.
 // Behaviours documented in 2026-06-18-contact-comms-and-listings-refinements.
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
@@ -22,12 +25,7 @@ import { useContacts } from '../contacts/useContacts.js';
 import {
   ApiError,
   deleteContact,
-  ensureContactConversation,
-  ensureEmailConversation,
   restoreContact,
-  retryMessage,
-  sendEmail,
-  sendMessage,
   setContactOptOut,
   setContactVoiceOptOut,
   setTenantStatus,
@@ -36,11 +34,9 @@ import {
   LANDLORD_STATUS_LABELS,
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
-  type Contact,
   type ContactType,
   type LandlordStatus,
   type TenantStatus,
-  type TimelineMessage,
 } from '../../api/index.js';
 import {
   Button,
@@ -50,7 +46,7 @@ import {
   contactStatusTone,
 } from '../../ui/index.js';
 import { Modal } from './Modal.js';
-import { Timeline } from './Timeline.js';
+import { ContactCommsPane } from './ContactCommsPane.js';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import { UnknownFile } from './UnknownFile.js';
@@ -58,16 +54,12 @@ import { PartnerFile } from './PartnerFile.js';
 import { ContactActionsMenu } from './ContactActionsMenu.js';
 import { ContactEditForm } from './ContactEditForm.js';
 import { PhoneManager } from './PhoneManager.js';
-import { EmailManager } from './EmailManager.js';
-import { contactEmails } from './contactEmails.js';
-import type { EmailComposerSendInput } from './EmailComposer.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { UnitCreateForm } from '../listing/UnitCreateForm.js';
 import { CallMenu } from './CallMenu.js';
 import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
-import { ConsentCaptureModal } from './ConsentCaptureModal.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
 import { useSuggestions } from './useSuggestions.js';
@@ -77,9 +69,7 @@ import { useContactTimeline } from './useContactTimeline.js';
 import { useContactFile } from './useContactFile.js';
 import { useMarkContactRead } from './useMarkContactRead.js';
 import { contactDisplayName } from './format.js';
-import { contactPhones, defaultPhone, defaultPhoneLabel } from './contactPhones.js';
-import { buildReplyTargets } from './replyTargets.js';
-import { messageSid } from './media.js';
+import { contactPhones, defaultPhone } from './contactPhones.js';
 import { landlordUnits } from './buildContactFile.js';
 import { CONTACT_TYPE_LABEL, displayKind } from './contactProfile.js';
 import { RelationshipsCard } from './RelationshipsCard.js';
@@ -94,9 +84,6 @@ export function ContactDetail(): React.JSX.Element {
   const [pane, setPane] = useState<Pane>('comms');
   const [editing, setEditing] = useState(false);
   const [managingPhones, setManagingPhones] = useState(false);
-  // The "Manage email" dialog (email-channel v1, A6). Opened from the composer's
-  // channel toggle when the contact has no address, and from the file pane.
-  const [managingEmails, setManagingEmails] = useState(false);
   // The "Start placement" dialog, pre-filled+locked to this (tenant) contact.
   const [startingPlacement, setStartingPlacement] = useState(false);
   // The "Schedule a tour" dialog, pre-filled+locked to this (tenant) contact.
@@ -119,24 +106,6 @@ export function ContactDetail(): React.JSX.Element {
   // The confirm-before-delete dialog (deleting navigates away, so we gate it).
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  // Which number's thread the reply box sends into (null = use the default). Set
-  // by the reply-target picker for multi-number contacts.
-  const [selectedConvId, setSelectedConvId] = useState<string | null>(null);
-  // Just-in-time consent gate (§3.4): when a proactive send is refused with a 409
-  // `contact_no_consent`, we hold the pending send here + open the hard-block
-  // modal. On confirm we PATCH consent then RETRY this exact send.
-  const [pendingConsentSend, setPendingConsentSend] = useState<
-    {
-      conversationId: string;
-      body: string;
-      replyToPhone?: string;
-      attachmentKeys?: string[];
-      attachmentOriginalKeys?: string[];
-    } | null
-  >(null);
-  // Bumped by deferredSend when an out-of-band send (the post-consent retry) lands,
-  // so the Timeline composer clears the draft it restored on the 409 refusal.
-  const [clearDraftSignal, setClearDraftSignal] = useState(0);
 
   const { status: contactStatus, contact, setContact } = useContact(contactId);
   // The contact's pending AI suggestions (chips/badges + the accept/dismiss loop).
@@ -177,15 +146,6 @@ export function ContactDetail(): React.JSX.Element {
   // timeline refetches on SSE message.persisted. Memoized on items identity.
   const media = useMemo(() => commsMedia(timeline.items), [timeline.items]);
   const mediaLoading = timeline.status === 'loading';
-  // The conversation an email sends into: an existing email thread if any (else
-  // onSendEmail falls back to the default phone thread / creates the 1:1). A hook,
-  // so it MUST run before the loading/error guards below (stable hook order).
-  const existingEmailConvId = useMemo(() => {
-    for (const it of timeline.items) {
-      if (it.kind === 'message' && it.type === 'email') return it.conversationId;
-    }
-    return null;
-  }, [timeline.items]);
 
   if (contactStatus === 'loading') {
     return (
@@ -250,179 +210,11 @@ export function ContactDetail(): React.JSX.Element {
     );
   };
 
-  // Resolve which thread the reply sends into. Each of the contact's numbers is
-  // its own 1:1 conversation; the picker lets the navigator choose, defaulting to
-  // the primary number's thread. With a single conversation there's nothing to
-  // pick (the picker hides).
-  const { targets: replyTargets, defaultConversationId } = buildReplyTargets(timeline.items, phones);
-  const sendConvId = selectedConvId ?? defaultConversationId;
-  // Sendable when a thread already resolves OR the contact has a number to start
-  // one with — a BRAND-NEW contact has no conversation yet, so the first send
-  // creates it (ensureContactConversation in onSend) instead of graying out.
-  // Soft-deleted contact: the composer is locked (restore to reply). canSend
-  // gates the Send affordances; the server also refuses with 409
-  // contact_deleted (belt and braces).
+  // Soft-deleted contact: the header shows a badge + banner, the status pill goes
+  // display-only, and the comms pane locks its composer (restore to reply - the
+  // server also refuses with 409 contact_deleted). The pane re-derives this from
+  // the contact it holds; this copy serves the page chrome.
   const deleted = typeof contact.deleted_at === 'string' && contact.deleted_at.length > 0;
-  const canSend = (sendConvId !== null || target !== undefined) && !deleted;
-  // Email channel (A6): the contact's addresses + which conversation an email
-  // sends into. Prefer an existing email thread; else the default (phone) thread;
-  // else onSendEmail creates/gets the 1:1. The A5 route attaches the email claim
-  // to whichever conversation it POSTs to (or redirects to the already-claimed one).
-  const emails = contactEmails(contact);
-  const emailSuppressed = contact.email_opt_out === true || contact.email_unreachable === true;
-  // The number shown in the reply box = the selected target's number (else the
-  // default reply target).
-  const replyToPhone =
-    replyTargets.find((t) => t.conversationId === sendConvId)?.phone ?? target?.phone;
-  // Optimistic send: show the outbound bubble ("Sending…") IMMEDIATELY, then POST.
-  // On success, stamp the real tsMsgId + status so the SSE refetch reconciles by
-  // id and the bubble advances Sending… → Sent → Delivered. On failure, drop the
-  // optimistic bubble and rethrow so the Timeline restores the draft + shows why.
-  // The core optimistic POST into a specific conversation. Shared by the reply
-  // box's onSend AND the just-in-time consent retry (after consent is recorded).
-  const postSend = (
-    conversationId: string,
-    body: string,
-    toPhone?: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ): Promise<void> => {
-    const tempId = timeline.addOptimistic(conversationId, body, {
-      ...(toPhone !== undefined && { toPhone }),
-      ...(attachmentKeys !== undefined && { attachmentKeys }),
-    });
-    return sendMessage(conversationId, {
-      body,
-      ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
-      ...(attachmentOriginalKeys !== undefined &&
-        attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-    })
-      .then((result) => {
-        timeline.resolveOptimistic(tempId, result);
-      })
-      .catch((err: unknown) => {
-        timeline.failOptimistic(tempId);
-        throw err;
-      });
-  };
-  // A DEFERRED send — one that runs OUTSIDE the composer's own optimistic-send flow.
-  // Today that's the just-in-time consent retry (after the user records consent in the
-  // modal), but ANY out-of-band/retry send should route through here. The composer
-  // RESTORED its draft when the original send was refused (409), so on success we clear
-  // it — matching what a normal send does. A rejected send propagates (caller decides);
-  // the draft is left intact so the message isn't lost.
-  //   NB: the NORMAL path (onSend, via the composer's handleSend) clears the draft
-  //   SYNCHRONOUSLY before its POST and must NOT go through here — re-clearing after the
-  //   POST resolves would wipe a message typed while it was in flight.
-  const deferredSend = (
-    conversationId: string,
-    body: string,
-    toPhone?: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ): Promise<void> =>
-    postSend(conversationId, body, toPhone, attachmentKeys, attachmentOriginalKeys).then(() => {
-      setClearDraftSignal((n) => n + 1);
-    });
-  const onSend = async (
-    body: string,
-    attachmentKeys?: string[],
-    attachmentOriginalKeys?: string[],
-  ): Promise<void> => {
-    // No thread yet (a brand-new contact who has never messaged us): create-or-get
-    // the primary number's 1:1 conversation first, THEN send into it. Idempotent —
-    // a racing inbound resolves to the same thread. An ensure failure throws before
-    // any optimistic bubble, so the Timeline just restores the draft + shows why.
-    let resolvedId = sendConvId;
-    if (resolvedId === null) {
-      if (target === undefined) return; // no number to start a thread with
-      resolvedId = await ensureContactConversation(contact.contactId);
-    }
-    const convId = resolvedId;
-    const toPhone = replyToPhone;
-    return postSend(convId, body, toPhone, attachmentKeys, attachmentOriginalKeys).catch((err: unknown) => {
-      // A2P/CTIA just-in-time gate: a proactive send to a no-consent contact is
-      // refused with 409 `contact_no_consent`. Open the hard-block consent modal
-      // (holding the pending send) instead of surfacing a generic error, and
-      // rethrow so the Timeline restores the draft (the message stays in the box
-      // for the retry / Cancel).
-      if (err instanceof ApiError && err.status === 409 && err.code === 'contact_no_consent') {
-        setPendingConsentSend({
-          conversationId: convId,
-          body,
-          ...(toPhone !== undefined && { replyToPhone: toPhone }),
-          ...(attachmentKeys !== undefined && attachmentKeys.length > 0 && { attachmentKeys }),
-          ...(attachmentOriginalKeys !== undefined &&
-            attachmentOriginalKeys.length > 0 && { attachmentOriginalKeys }),
-        });
-      }
-      throw err;
-    });
-  };
-  // Compose + send an email (A6). Resolve a conversation to POST into (an existing
-  // email thread -> the default phone thread -> create/get the 1:1), show the
-  // optimistic "Sending..." EmailCard immediately, then POST. On success stamp the
-  // real id/status (the SSE refetch reconciles by tsMsgId - even if the send
-  // `redirected` into another conversation, the contact timeline gathers all the
-  // contact's threads). On any refusal, drop the optimistic card and rethrow so the
-  // EmailComposer surfaces the reason.
-  const onSendEmail = async (input: EmailComposerSendInput): Promise<void> => {
-    let convId = existingEmailConvId ?? sendConvId;
-    if (convId === null) {
-      // A phoneless (email-only) contact has no phone thread to fall back to, and
-      // the phone ensure route 400s (contact_has_no_phone) for them - use the
-      // email-conversation route instead. Also fall through to it if the phone
-      // ensure fails that way (defensive), so the composer never dead-ends.
-      if (phones.length === 0) {
-        convId = await ensureEmailConversation(contact.contactId);
-      } else {
-        try {
-          convId = await ensureContactConversation(contact.contactId);
-        } catch (err) {
-          if (err instanceof ApiError && err.code === 'contact_has_no_phone') {
-            convId = await ensureEmailConversation(contact.contactId);
-          } else {
-            throw err;
-          }
-        }
-      }
-    }
-    const cId = convId;
-    const tempId = timeline.addOptimistic(cId, input.body, {
-      type: 'email',
-      subject: input.subject,
-      email_to: [input.to],
-      ...(input.cc.length > 0 && { email_cc: input.cc }),
-    });
-    return sendEmail(cId, {
-      to: input.to,
-      ...(input.cc.length > 0 && { cc: input.cc }),
-      subject: input.subject,
-      body: input.body,
-      ...(input.attachments.length > 0 && { attachments: input.attachments }),
-    })
-      .then((result) => {
-        timeline.resolveOptimistic(tempId, result);
-      })
-      .catch((err: unknown) => {
-        timeline.failOptimistic(tempId);
-        throw err;
-      });
-  };
-
-  // Retry a failed outbound message. The server re-reads the original by its
-  // provider SID (so body AND media resend correctly) and stamps `retry_of`, so
-  // the SSE message.persisted refetch brings back BOTH the resent message and the
-  // lineage that hides the stale failed bubble. The provider SID is the suffix of
-  // tsMsgId (`<provider_ts>#<sid>`); without it there's nothing to retry.
-  // Returns the promise so the Timeline can surface a refusal (429
-  // rate_limited — the retry shares the manual-send budget — opt-out, …) in
-  // its composer error slot rather than swallowing it.
-  const onRetry = async (msg: TimelineMessage): Promise<void> => {
-    const sid = messageSid(msg);
-    if (sid.length === 0) return;
-    await retryMessage(msg.conversationId, sid);
-  };
 
   // Header ⋯ menu + UnknownFile triage. Each endpoint RETURNS the updated contact,
   // so we apply it in place (setContact) — the header, file pane, facts, and reply
@@ -538,7 +330,8 @@ export function ContactDetail(): React.JSX.Element {
   // out of the normal views — so on success we navigate back to the Contacts list
   // (it can be restored from the Deleted tab). Restore stays on the page and
   // applies the returned contact in place so the Deleted banner clears.
-  // (`deleted` itself is computed higher up, beside canSend.)
+  // (`deleted` itself is computed higher up; onRestore is also handed to the
+  // comms pane, whose locked-composer note renders the same action.)
   const onConfirmDelete = (): void => {
     if (deleteBusy) return;
     setDeleteBusy(true);
@@ -687,38 +480,20 @@ export function ContactDetail(): React.JSX.Element {
 
       <div className={styles.body}>
         <div className={`${styles.left} ${pane === 'comms' ? styles.paneActive : styles.paneHidden}`}>
-          {/* key= REMOUNTS the Timeline when the route param changes: this page
+          {/* key= REMOUNTS the pane when the route param changes: this page
               re-renders the SAME component instance on contact-to-contact
-              navigation (no remount), so the composer's LOCAL state - the text
-              draft and, since outbound MMS, the uploaded attachment chips -
-              would otherwise survive into the NEXT contact's composer and a
-              Send would deliver contact A's media to contact B. Same keyed
-              isolation the tour channel switcher uses (TourConversation). */}
-          <Timeline
+              navigation (no remount), so the pane's LOCAL state - the composer
+              draft, the uploaded attachment chips (outbound MMS), and the picked
+              reply target - would otherwise survive into the NEXT contact's pane
+              and a Send would deliver contact A's media into contact B's thread.
+              Same keyed isolation the tour channel switcher uses. */}
+          <ContactCommsPane
             key={contactId}
-            status={timeline.status}
-            items={timeline.items}
-            upcoming={timeline.upcoming}
-            source={timeline.source}
-            {...(replyToPhone !== undefined && { replyToPhone })}
-            replyToLabel={defaultPhoneLabel(phones)}
-            replyTargets={replyTargets}
-            {...(sendConvId !== null && { selectedConversationId: sendConvId })}
-            onSelectTarget={setSelectedConvId}
-            canSend={canSend}
-            onSend={onSend}
-            onRetry={onRetry}
-            optedOut={optedOut}
-            deleted={deleted}
-            onRestore={onRestore}
-            clearDraftSignal={clearDraftSignal}
+            contact={contact}
+            timeline={timeline}
             resetScrollKey={contactId}
-            emailChannel={{
-              emails,
-              onSendEmail,
-              onManageEmails: () => setManagingEmails(true),
-              ...(emailSuppressed && { suppressed: true }),
-            }}
+            onContactUpdated={setContact}
+            onRestore={onRestore}
           />
         </div>
         <div
@@ -840,18 +615,6 @@ export function ContactDetail(): React.JSX.Element {
         />
       ) : null}
 
-      {managingEmails ? (
-        <EmailManager
-          contact={contact}
-          emails={emails}
-          onClose={() => setManagingEmails(false)}
-          onChanged={(updated) => {
-            setContact(updated);
-            timeline.refetch();
-          }}
-        />
-      ) : null}
-
       {startingPlacement ? (
         <PlacementCreateForm
           tenantId={contact.contactId}
@@ -886,33 +649,6 @@ export function ContactDetail(): React.JSX.Element {
           onCreated={(u) => {
             setAddingProperty(false);
             void navigate('/listings/' + u.unitId);
-          }}
-        />
-      ) : null}
-
-      {pendingConsentSend !== null ? (
-        <ConsentCaptureModal
-          contactId={contact.contactId}
-          contactName={name}
-          onCancel={() => setPendingConsentSend(null)}
-          onRecorded={(updated: Contact) => {
-            // Apply the consent in place so the contact now reads as opted-in, then
-            // RETRY the exact send that was blocked. Clear the modal first.
-            const retry = pendingConsentSend;
-            setContact(updated);
-            setPendingConsentSend(null);
-            if (retry !== null) {
-              // Out-of-band of the composer: deferredSend clears the restored draft on
-              // success; a fresh refusal leaves it (message preserved). The no-op catch
-              // avoids an unhandled rejection.
-              void deferredSend(
-                retry.conversationId,
-                retry.body,
-                retry.replyToPhone,
-                retry.attachmentKeys,
-                retry.attachmentOriginalKeys,
-              ).catch(() => {});
-            }
           }}
         />
       ) : null}

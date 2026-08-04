@@ -910,10 +910,10 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // than open - "opened" would be premature, so mark the audit/log accordingly.
     const connecting = conversation.status === 'connecting';
 
-    // Tour-history milestone (tour-detail-page 1a): a tours#-ONLY audit row (the
-    // tenant timeline + property card deliberately do NOT carry it - recordTourEvent
-    // is not used here). Best-effort: a failed write must never fail the 201. IDs
-    // only. `connecting` distinguishes a deferred-open (connect-when-ready) group.
+    // Tour-history milestone (tour-detail-page 1a): a tours#<tourId> audit row
+    // carrying the opened thread id. Best-effort: a failed write must never fail
+    // the 201. IDs only. `connecting` distinguishes a deferred-open
+    // (connect-when-ready) group.
     try {
       await audit.append(`tours#${tourId}`, 'tour_group_opened', {
         tourId,
@@ -924,6 +924,26 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     } catch (err) {
       log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
     }
+
+    // ...and a person milestone on BOTH parties' contact timelines
+    // (contact-comms-pane): opening the group text is the moment the tenant and
+    // the landlord start talking, so it belongs in each person's feed. Kept
+    // OUTSIDE recordTourEvent because the property (units#) Activity card
+    // deliberately carries no row for it - the tour's own trail already does.
+    // The pin fires even on the `connecting` path (no pool number yet): the
+    // route has no status gate and the tour Activity card already shows it,
+    // so this is parity, not a new claim. Best-effort, like every write above.
+    await recordPersonMilestone(
+      { activityEvents, units, log },
+      {
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
+        type: 'tour_group_opened',
+        label: 'Group text opened',
+        refType: 'tour',
+        refId: tourId,
+      },
+    );
 
     // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
     events.emit('tour.updated', { tourId, status: updatedTour.status });

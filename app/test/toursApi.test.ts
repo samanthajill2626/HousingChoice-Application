@@ -1780,12 +1780,27 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(world.sent.every((s) => s.from === pool.provisioned[0])).toBe(true);
   });
 
-  it('relay success records a tours#-ONLY tour_group_opened milestone + emits tour.updated (1a)', async () => {
+  // Seeds the tour's unit WITH a landlord so the dual-party person write has
+  // somebody to resolve (contact-comms-pane Slice 1).
+  function seedLandlordedUnit(w: FakeWorld): void {
+    w.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'c-ll',
+      status: 'available',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  const groupOpenedPins = (w: FakeWorld, contactId: string) =>
+    w.activityEvents.filter((e) => e.type === 'tour_group_opened' && e.contactId === contactId);
+
+  it('relay success records tour_group_opened on BOTH person feeds + the tours# audit row + emits tour.updated (1a)', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
-    const activityCountBefore = world.activityEvents.length;
 
     const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
       members: [{ phone: '+15550200001', name: 'Alice' }],
@@ -1801,9 +1816,24 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(opened[0]!.payload).toMatchObject({ tourId, conversationId });
     expect(opened[0]!.actorId).toBe('usr_testva00000000000000000');
 
-    // tours#-ONLY: no units# row and no tenant activity event for group-opened.
+    // Opening the group is now ALSO a person milestone on both sides of the
+    // deal (contact-comms-pane): the tenant's and the landlord's timelines.
+    const tenantPins = groupOpenedPins(world, BASE_CREATE_BODY.tenantId);
+    const landlordPins = groupOpenedPins(world, 'c-ll');
+    expect(tenantPins).toHaveLength(1);
+    expect(landlordPins).toHaveLength(1);
+    for (const pin of [tenantPins[0], landlordPins[0]]) {
+      expect(pin).toMatchObject({
+        type: 'tour_group_opened',
+        label: 'Group text opened',
+        refType: 'tour',
+        refId: tourId,
+      });
+    }
+
+    // The property (units#) audit card deliberately still carries NO row for
+    // group-open - the tour's own trail and the two person feeds cover it.
     expect(world.auditEvents.some((e) => e.entityKey.startsWith('units#') && e.event_type === 'tour_group_opened')).toBe(false);
-    expect(world.activityEvents.length).toBe(activityCountBefore);
 
     // tour.updated advised dashboards (ID + status only).
     const updates = world.emitted.filter((e) => e.event === 'tour.updated');
@@ -1811,9 +1841,54 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(updates[updates.length - 1]!.payload).toEqual({ tourId, status: 'scheduled' });
   });
 
+  it('pins tour_group_opened on both feeds even when the group is still CONNECTING (no number yet)', async () => {
+    // Tier-3 connect-when-ready: provisioning defers, the conversation is
+    // `connecting`, and the route has NO status gate - the pin fires at open
+    // time, matching what the tour Activity card already shows for this case.
+    const pool: PoolNumbersService = {
+      ...makeFakePoolNumbers(),
+      async provisionForGroup() {
+        return { kind: 'needs_connecting' };
+      },
+    };
+    defineJobHandler(RELAY_WARM_JOB, () => {});
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    await queueAdapter.settle();
+    expect(res.status).toBe(201);
+    expect((res.body.conversation as Record<string, unknown>)['status']).toBe('connecting');
+
+    expect(groupOpenedPins(world, BASE_CREATE_BODY.tenantId)).toHaveLength(1);
+    expect(groupOpenedPins(world, 'c-ll')).toHaveLength(1);
+  });
+
+  it('skips the landlord pin when the unit has no landlord (tenant pin only)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    // No units row for unit-abc at all -> nothing to resolve.
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({
+      members: [{ phone: '+15550200001', name: 'Alice' }],
+    });
+    expect(res.status).toBe(201);
+
+    const pins = world.activityEvents.filter((e) => e.type === 'tour_group_opened');
+    expect(pins).toHaveLength(1);
+    expect(pins[0]?.contactId).toBe(BASE_CREATE_BODY.tenantId);
+  });
+
   it('a REFUSED relay provision (409 tour_not_active) records NO tour_group_opened milestone', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedLandlordedUnit(world);
     const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
     const tourId = created.body.tour.tourId as string;
     await authed(app).patch(`/api/tours/${tourId}`).send({ status: 'canceled' });
@@ -1825,6 +1900,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(
       world.auditEvents.some((e) => e.event_type === 'tour_group_opened'),
     ).toBe(false);
+    expect(world.activityEvents.some((e) => e.type === 'tour_group_opened')).toBe(false);
   });
 
   it('404 for a missing tour', async () => {
@@ -2152,8 +2228,9 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     const tourId = created.body.tour.tourId as string;
 
     // Break the units repo only AFTER the tour exists, and drive the
-    // EXPLICIT-members path: the ZIP hint is then the ONLY unit read this
-    // request makes, so the throw lands squarely on the best-effort lookup.
+    // EXPLICIT-members path (no auto-resolve read). Both remaining unit reads -
+    // the ZIP hint and the group-open person milestone's landlord resolve - are
+    // best-effort, so the throw must still leave a 201 with the hint omitted.
     world.unitsRepo.getById = async () => {
       throw new Error('dynamodb: ProvisionedThroughputExceededException');
     };

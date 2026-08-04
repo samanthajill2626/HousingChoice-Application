@@ -49,3 +49,17 @@ chrome consume most of a 640px viewport before the stream and composer get a say
 
 Worth confirming the same measurement on the placement hub and contact detail —
 they share the twoPaneShell + Timeline, so they are very likely affected too.
+
+**Re-measured 2026-08-04 (contact-comms-pane live QA, tour page at 360x640,
+Conversation view).** The 1:1 tabs now render the full ContactCommsPane, which
+adds the Text/Email channel toggle and (when present) an Upcoming section to
+the pane's budget. Measured: the Communications region gets ~193px of a 640px
+viewport (top at ~423px after header band + View toggle + tab rail); roughly
+one bubble of transcript is visible; the composer block consumes the rest.
+Still no page-level horizontal overflow (documentElement scrollWidth -
+clientWidth = 0); the email subject line ellipsizes; the tab rail scrolls
+horizontally by design. Everything remains reachable by scrolling - degraded,
+not broken. The header-band shrink (option 1) remains the highest-leverage fix
+and would now also benefit the placement hub, whose 1:1 tabs render the same
+pane. Screenshot: .playwright-mcp/qa-tour-360x640.png (main checkout,
+gitignored).

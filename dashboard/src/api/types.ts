@@ -736,6 +736,64 @@ export interface RosterMemberView {
   sharesPhoneWithName?: string;
 }
 
+/** What a deferred roster change WAS: opening the group, or adding one person.
+ *  MIRRORS app/src/repos/pendingRosterActionsRepo.ts `RosterActionKind`. */
+export type RosterActionKind = 'open_group' | 'add_member';
+
+/**
+ * Why the poller retired a deferred action WITHOUT doing it - the world moved
+ * between the confirm and quiet-end. MIRRORS the server's
+ * `RosterActionSkipReason` verbatim; the card renders honest copy for every
+ * member (spec 6.5), so widening this union without widening that copy is a
+ * type error, not a silent blank row.
+ */
+export type RosterActionSkipReason =
+  | 'group_closed'
+  /** Tour canceled / placement closed. */
+  | 'owner_canceled'
+  | 'already_member'
+  | 'contact_deleted'
+  /** Removed from the roster WHILE the add was pending. */
+  | 'member_no_longer_on_roster'
+  /** The roster lost its second reachable member. */
+  | 'roster_too_thin'
+  /** Only when migration to the converted placement failed. */
+  | 'converted';
+
+/**
+ * One change confirmed inside QUIET HOURS and waiting for the window to end
+ * (spec 5.3 / 6.5). A pending `add_member` is deliberately NOT in `members`:
+ * membership defers WITH the message (D7), so nobody joins a group text before
+ * the group has been told.
+ */
+export interface RosterPendingAction {
+  /** The deterministic id the pending endpoints take. */
+  actionId: string;
+  kind: RosterActionKind;
+  /** add_member only. */
+  contactId?: string;
+  /** add_member only - best-effort display name. */
+  name?: string;
+  /** ISO 8601 - quiet-end, when the poller applies it. */
+  dueAt: string;
+}
+
+/**
+ * One resolved action that still owes the operator a NOTICE: it was retired
+ * instead of applied, or a human canceled it. Visible until dismissed - APPLIED
+ * actions are absent here because the roster itself is their receipt.
+ */
+export interface RosterSkippedAction {
+  actionId: string;
+  kind: RosterActionKind;
+  contactId?: string;
+  name?: string;
+  /** `'canceled'` is the operator's own cancel - a fact, not a failure. */
+  reason: RosterActionSkipReason | 'canceled';
+  /** ISO 8601 - when it resolved. */
+  at: string;
+}
+
 /** GET /api/tours/:tourId/roster and GET /api/placements/:placementId/roster
  *  return this AS THE BODY (not wrapped). */
 export interface RosterView {
@@ -751,6 +809,12 @@ export interface RosterView {
   /** >= 2 DISTINCT reachable numbers AND no thread yet. */
   canOpenGroup: boolean;
   threadExists: boolean;
+  /** Quiet-hours deferrals still waiting, due-first. ALWAYS present (`[]` when
+   *  there are none) - the server serves both arrays on GET and on every
+   *  mutating roster endpoint, so ONE decoding rule covers all of them. */
+  pending: RosterPendingAction[];
+  /** Terminal notices NOT yet dismissed, newest-first. ALWAYS present. */
+  skipped: RosterSkippedAction[];
 }
 
 /** One line of a preview's per-member deliverability (spec 6.3): who the send
@@ -770,9 +834,10 @@ export interface RosterPreviewRecipient {
  * edited (spec 6.3). The client never rebuilds it and never re-derives
  * `quietEndsAt` (the DST-safe window math is the server's).
  *
- * `deferred` is HONEST BUT INFORMATIONAL until slice 6 wires the deferral -
- * a confirmed send still goes out immediately, which is exactly what the
- * dialog's interim copy says.
+ * `deferred` drives the dialog's THREE-button quiet-hours layout (spec 6.3):
+ * confirming defers the whole change to `quietEndsAt` (the server answers 202
+ * with a pending row), and only "Send now anyway" (`?force=send_now`) sends
+ * immediately.
  */
 export interface RosterPreview {
   /** The exact SMS body the group receives. */

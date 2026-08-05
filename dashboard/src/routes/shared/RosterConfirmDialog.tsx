@@ -12,10 +12,12 @@
 //     recipients" over a suppressed leg is precisely the lie this dialog
 //     exists to prevent - and the COUNT is the server's distinct-reachable-
 //     numbers count, never the number of rows.
-//   - The quiet-hours line is HONEST ABOUT THE INTERIM: quiet hours are
-//     evaluated and reported, but slice 6 owns the actual deferral, so a
-//     confirmed send still goes out now and the copy says exactly that. It
-//     never offers an "Open at 8:00 AM" button it cannot honour.
+//   - INSIDE QUIET HOURS the footer is the THREE-button layout (spec 6.3/6.4):
+//     [Cancel] [Send now anyway] [<verb> at 8:00 AM], with the DEFERRAL as the
+//     default. That is not a cosmetic choice: the plain confirm now defers
+//     server-side (202 + a pending row), so the default button describes what
+//     the default action really does, and "Send now anyway" is the ONLY path
+//     that passes `force` and texts people at 11pm.
 //
 // Fetching is the CALLER's job: preview-open 409s `relay_already_provisioned`
 // once a thread exists and preview-add 409s `no_thread` before one, and both
@@ -25,7 +27,7 @@ import { useState } from 'react';
 import type { RosterPreview, RosterPreviewRecipient } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
-import { refusalMessage } from './rosterWrites.js';
+import { quietClockLabel, refusalMessage } from './rosterWrites.js';
 import styles from './RosterConfirmDialog.module.css';
 
 /** Why a listed recipient will not receive this send. */
@@ -34,24 +36,23 @@ const NOT_RECEIVING: Readonly<Record<string, string>> = {
   opted_out: 'not receiving - opted out',
 };
 
-/** A clock label for the quiet-window end, in the viewer's zone (the ToursPage
- *  idiom). The INSTANT itself is always the server's - we only format it. */
-function clockLabel(iso: string): string {
-  const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return '';
-  return d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-}
-
 export interface RosterConfirmDialogProps {
   /** The question, e.g. "Open the group text?" / "Add Alicia Grant to the group text?" */
   title: string;
   /** The server-resolved preview. Never rebuilt client-side. */
   preview: RosterPreview;
-  /** The DEFAULT action's label, e.g. "Open group text" / "Add and notify". */
+  /** The DEFAULT action's label OUTSIDE quiet hours, e.g. "Open group text" /
+   *  "Add and notify". */
   confirmLabel: string;
-  /** Run the action. Resolves -> the dialog closes; rejects -> its message
-   *  renders inline and the dialog STAYS OPEN (nothing was sent). */
-  onConfirm: () => Promise<void>;
+  /** The verb phrase the DEFERRAL button reads with, e.g. "Open" -> "Open at
+   *  8:00 AM"; "Add and notify" -> "Add and notify at 8:00 AM" (spec 6.3/6.4).
+   *  Used only inside quiet hours. */
+  deferLabel: string;
+  /** Run the action. `force` is true ONLY for "Send now anyway" - the caller
+   *  passes it to the endpoint as `?force=send_now`. Resolves -> the dialog
+   *  closes; rejects -> its message renders inline and the dialog STAYS OPEN
+   *  (nothing was sent). */
+  onConfirm: (force: boolean) => Promise<void>;
   /** Cancel, dismiss, or a successful confirm - the caller clears its state. */
   onClose: () => void;
 }
@@ -60,17 +61,18 @@ export function RosterConfirmDialog({
   title,
   preview,
   confirmLabel,
+  deferLabel,
   onConfirm,
   onClose,
 }: RosterConfirmDialogProps): React.JSX.Element {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const run = (): void => {
+  const run = (force: boolean): void => {
     if (busy) return;
     setBusy(true);
     setError(null);
-    void onConfirm()
+    void onConfirm(force)
       .then(() => onClose())
       .catch((err: unknown) => {
         setError(refusalMessage(err));
@@ -83,20 +85,45 @@ export function RosterConfirmDialog({
       ? '1 recipient will receive this.'
       : `${preview.recipientCount} recipients will receive this.`;
 
+  // Inside quiet hours the DEFAULT is the deferral, and it names the instant it
+  // will happen. A server that reports `deferred` without an instant still gets
+  // a truthful (time-less) label rather than "at Invalid Date".
+  const clock = preview.quietEndsAt !== undefined ? quietClockLabel(preview.quietEndsAt) : '';
+  const defaultLabel = !preview.deferred
+    ? confirmLabel
+    : clock === ''
+      ? `${deferLabel} when quiet hours end`
+      : `${deferLabel} at ${clock}`;
+  const quietLine =
+    clock === ''
+      ? 'Quiet hours - this goes out when they end unless you send it now.'
+      : `Quiet hours until ${clock} - this goes out then unless you send it now.`;
+
   return (
     <Modal
       title={title}
       onClose={onClose}
       footer={
         <div className={styles.actions}>
-          {/* Authored Cancel-then-default: desktop puts the default rightmost,
-              and the narrow rule reverses the column so it lands on TOP
-              (spec 6.7) without either order being re-authored. */}
+          {/* Authored Cancel -> (Send now anyway) -> default: desktop puts the
+              default rightmost, and the narrow rule reverses the column so it
+              lands on TOP (spec 6.7) without either order being re-authored. */}
           <Button variant="secondary" size="sm" type="button" onClick={onClose} disabled={busy}>
             Cancel
           </Button>
-          <Button size="sm" type="button" onClick={run} disabled={busy}>
-            {confirmLabel}
+          {preview.deferred ? (
+            <Button
+              variant="secondary"
+              size="sm"
+              type="button"
+              onClick={() => run(true)}
+              disabled={busy}
+            >
+              Send now anyway
+            </Button>
+          ) : null}
+          <Button size="sm" type="button" onClick={() => run(false)} disabled={busy}>
+            {defaultLabel}
           </Button>
         </div>
       }
@@ -110,13 +137,7 @@ export function RosterConfirmDialog({
         ))}
       </ul>
       <p className={styles.count}>{countLine}</p>
-      {preview.deferred ? (
-        <p className={styles.quiet}>
-          {preview.quietEndsAt !== undefined
-            ? `Quiet hours until ${clockLabel(preview.quietEndsAt)} - this will still send now.`
-            : 'Quiet hours - this will still send now.'}
-        </p>
-      ) : null}
+      {preview.deferred ? <p className={styles.quiet}>{quietLine}</p> : null}
       {error !== null ? (
         <p role="alert" className={styles.error}>
           {error}

@@ -37,6 +37,12 @@
 // operator B's open lands) is DROPPED with a visible note and a refetch. It is
 // never auto-resubmitted through the live endpoint: that would escalate a
 // no-send plan edit into a `member_added` text nobody confirmed.
+// PENDING / SKIPPED (spec 6.5): a change confirmed inside quiet hours has NOT
+// happened yet. It rides the same payload as its own row - "Joins at 8:00 AM -
+// quiet hours" with Add now / Cancel - and a pending add is deliberately NOT a
+// member, because membership defers WITH the message (D7). An action that
+// resolved WITHOUT happening leaves a NOTICE that stays until it is dismissed;
+// the server then excludes it for good, so a dismissed notice never returns.
 import { useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
@@ -44,7 +50,9 @@ import {
   type Contact,
   type RosterMemberRole,
   type RosterMemberView,
+  type RosterPendingAction,
   type RosterPreview,
+  type RosterSkippedAction,
   type RosterView,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
@@ -53,7 +61,15 @@ import { ContactSearchField, type ContactSearchValue } from '../contact/ContactS
 import { useContacts } from '../contacts/useContacts.js';
 import { RosterConfirmDialog } from './RosterConfirmDialog.js';
 import type { RosterSuggestion } from './rosterPeople.js';
-import { rosterApi, refusalMessage, threadExistsNote, type RosterOwner } from './rosterWrites.js';
+import {
+  pendingActionNote,
+  rosterApi,
+  refusalMessage,
+  skippedActionNote,
+  skippedActionSubject,
+  threadExistsNote,
+  type RosterOwner,
+} from './rosterWrites.js';
 import styles from './PeopleCard.module.css';
 
 /** The subtle right-hand role word. Deliberately lower-case prose (except the
@@ -89,6 +105,8 @@ const RESET_DISABLED_REASON =
 const ADD_FORM_KEY = 'add-any-contact';
 const RESET_KEY = 'reset';
 const suggestionKey = (contactId: string): string => `suggest:${contactId}`;
+const pendingKey = (actionId: string): string => `pending:${actionId}`;
+const skippedKey = (actionId: string): string => `skipped:${actionId}`;
 
 /** What the card needs to BE the editor. Absent -> read-only, byte-identical to
  *  the Task 8 card. */
@@ -101,6 +119,13 @@ export interface PeopleCardEdit {
    *  hub's roster state, so the card, the 1:1 tabs and the notes all move
    *  together without a refetch round-trip. */
   onApply: (roster: RosterView) => void;
+  /**
+   * "Send now" on a DEFERRED OPEN (spec 6.5). The HUB owns the relay-open path -
+   * it is the only place that can mount the freshly provisioned thread - so the
+   * card delegates instead of opening a group text it could not then show.
+   * Absent -> the banner still explains the deferral and still offers Cancel.
+   */
+  onOpenNow?: () => void;
 }
 
 export interface PeopleCardProps {
@@ -220,6 +245,30 @@ export function PeopleCard({
   const resetRoster = (): void => {
     if (api === null) return;
     run(RESET_KEY, () => api.reset());
+  };
+
+  /** "Add now" / "Send now" on a pending row. An ADD goes through apply-now -
+   *  the SAME applier the poller runs, so a world that moved lands a visible
+   *  skip notice instead of a surprise send. An OPEN is the hub's to run. */
+  const applyPendingNow = (action: RosterPendingAction): void => {
+    if (api === null) return;
+    if (action.kind === 'open_group') {
+      edit?.onOpenNow?.();
+      return;
+    }
+    run(pendingKey(action.actionId), () => api.applyPendingNow(action.actionId));
+  };
+
+  const cancelPending = (action: RosterPendingAction): void => {
+    if (api === null) return;
+    run(pendingKey(action.actionId), () => api.cancelPending(action.actionId));
+  };
+
+  /** The operator has read the notice. The server drops it from `skipped` for
+   *  good, so a later refetch cannot bring it back. */
+  const dismissSkipped = (row: RosterSkippedAction): void => {
+    if (api === null) return;
+    run(skippedKey(row.actionId), () => api.dismissPending(row.actionId));
   };
 
   const errorFor = (key: string): string | null =>
@@ -346,6 +395,41 @@ export function PeopleCard({
       }
     >
       {body}
+      {/* Pending + skipped are card STATE, not an edit gesture: they render in
+          read mode too, and OUTSIDE the roster list because a pending add is
+          not a member yet. Their controls appear only when there is a write
+          seam to run them through. */}
+      {roster !== null && !unreadable && roster.pending.length > 0 ? (
+        <ul className={styles.pendingList} aria-label="Waiting for quiet hours to end">
+          {roster.pending.map((action) => (
+            <PendingRow
+              key={action.actionId}
+              action={action}
+              canAct={api !== null}
+              canApplyNow={action.kind === 'add_member' || edit?.onOpenNow !== undefined}
+              busy={busy !== null}
+              onApplyNow={() => applyPendingNow(action)}
+              onCancel={() => cancelPending(action)}
+              error={errorFor(pendingKey(action.actionId))}
+            />
+          ))}
+        </ul>
+      ) : null}
+      {roster !== null && !unreadable && roster.skipped.length > 0 ? (
+        <ul className={styles.pendingList} aria-label="Roster notices">
+          {roster.skipped.map((row) => (
+            <SkippedRow
+              key={row.actionId}
+              row={row}
+              scope={scope}
+              canAct={api !== null}
+              busy={busy !== null}
+              onDismiss={() => dismissSkipped(row)}
+              error={errorFor(skippedKey(row.actionId))}
+            />
+          ))}
+        </ul>
+      ) : null}
       {caseworker !== undefined && caseworker.trim().length > 0 ? (
         <p className={styles.hint}>{`Caseworker on file: ${caseworker} - not a contact record`}</p>
       ) : null}
@@ -360,9 +444,12 @@ export function PeopleCard({
           title={`Add ${confirm.name} to the group text?`}
           preview={confirm.preview}
           confirmLabel="Add and notify"
-          onConfirm={async () => {
+          deferLabel="Add and notify"
+          onConfirm={async (force) => {
             try {
-              edit.onApply(await api.addLive(confirm.contactId));
+              // Inside quiet hours the unforced call answers 202: nobody is
+              // added yet and the returned roster carries the pending row.
+              edit.onApply(await api.addLive(confirm.contactId, force));
             } catch (err) {
               onRetry();
               throw err;
@@ -442,6 +529,134 @@ function MemberRow({
       ) : null}
       {/* Said BEFORE the doomed click, not after it. */}
       {editing && disableRemove ? <p className={styles.note}>{LAST_MEMBER_REASON}</p> : null}
+      {error !== null ? (
+        <p role="alert" className={styles.rowError}>
+          {error}
+        </p>
+      ) : null}
+    </li>
+  );
+}
+
+/** WHO a pending row is about, mid-sentence - the subject of both its control
+ *  labels, so the two can never name different people. */
+function pendingSubject(action: RosterPendingAction): string {
+  if (action.kind === 'open_group') return 'the group text';
+  return action.name ?? 'that contact';
+}
+
+/**
+ * One deferred change, waiting for quiet-end (spec 6.5):
+ *
+ *   Alicia Grant
+ *     Joins at 8:00 AM - quiet hours
+ *     Add now - Cancel
+ *
+ * The two controls are the only two honest ways out: do it now, or call it off.
+ * A read-only card (no write seam) renders the sentence WITHOUT them rather
+ * than a button that could not fire.
+ */
+function PendingRow({
+  action,
+  canAct,
+  canApplyNow,
+  busy,
+  onApplyNow,
+  onCancel,
+  error,
+}: {
+  action: RosterPendingAction;
+  canAct: boolean;
+  /** An OPEN's "Send now" needs the hub (it mounts the new thread). */
+  canApplyNow: boolean;
+  busy: boolean;
+  onApplyNow: () => void;
+  onCancel: () => void;
+  error: string | null;
+}): React.JSX.Element {
+  const subject = pendingSubject(action);
+  const title = action.kind === 'open_group' ? 'Group text' : (action.name ?? 'That contact');
+  return (
+    <li className={styles.pendingRow}>
+      <div className={styles.nameLine}>
+        <span className={styles.name}>{title}</span>
+        {canAct ? (
+          <span className={styles.pendingActions}>
+            {canApplyNow ? (
+              <button
+                type="button"
+                className={styles.rowAction}
+                aria-label={
+                  action.kind === 'add_member' ? `Add ${subject} now` : `Send ${subject} now`
+                }
+                onClick={onApplyNow}
+                disabled={busy}
+              >
+                {action.kind === 'add_member' ? 'Add now' : 'Send now'}
+              </button>
+            ) : null}
+            <button
+              type="button"
+              className={styles.rowAction}
+              aria-label={
+                action.kind === 'add_member'
+                  ? `Cancel adding ${subject}`
+                  : `Cancel opening ${subject}`
+              }
+              onClick={onCancel}
+              disabled={busy}
+            >
+              Cancel
+            </button>
+          </span>
+        ) : null}
+      </div>
+      <p className={styles.note}>{pendingActionNote(action)}</p>
+      {error !== null ? (
+        <p role="alert" className={styles.rowError}>
+          {error}
+        </p>
+      ) : null}
+    </li>
+  );
+}
+
+/**
+ * One notice for a deferral that resolved WITHOUT happening (spec 6.5). It
+ * stays until the operator dismisses it - a change they confirmed and that
+ * silently did not happen is exactly the thing this feature must never do.
+ */
+function SkippedRow({
+  row,
+  scope,
+  canAct,
+  busy,
+  onDismiss,
+  error,
+}: {
+  row: RosterSkippedAction;
+  scope: 'tour' | 'placement';
+  canAct: boolean;
+  busy: boolean;
+  onDismiss: () => void;
+  error: string | null;
+}): React.JSX.Element {
+  return (
+    <li className={styles.pendingRow}>
+      <div className={styles.nameLine}>
+        <span className={styles.note}>{skippedActionNote(row, scope)}</span>
+        {canAct ? (
+          <button
+            type="button"
+            className={styles.rowAction}
+            aria-label={`Dismiss notice for ${skippedActionSubject(row)}`}
+            onClick={onDismiss}
+            disabled={busy}
+          >
+            Dismiss
+          </button>
+        ) : null}
+      </div>
       {error !== null ? (
         <p role="alert" className={styles.rowError}>
           {error}

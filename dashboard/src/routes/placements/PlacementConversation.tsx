@@ -187,7 +187,17 @@ export function PlacementConversation({
     setOpenGroupBusy(true);
     setGroupError(null);
     void provisionPlacementRelay(placement.placementId)
-      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
+      .then((result) => {
+        // Quiet hours DEFER the open (202): nothing was provisioned, so there is
+        // no thread to mount - say when it will happen instead of injecting an
+        // id that does not exist. (The page-owned flow, which is what the real
+        // app renders, carries the full pending banner + its two ways out.)
+        if (result.deferred) {
+          setGroupError('This group text opens when quiet hours end.');
+          return;
+        }
+        channels.setGroupConversationId(result.conversationId);
+      })
       .catch(() => setGroupError('Could not open the group text. Please try again.'))
       .finally(() => setOpenGroupBusy(false));
   }

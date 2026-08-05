@@ -17,7 +17,13 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { Contact, RosterMemberView, RosterPreview, RosterView } from '../../api/index.js';
+import type {
+  Contact,
+  RosterMemberView,
+  RosterPreview,
+  RosterSkippedAction,
+  RosterView,
+} from '../../api/index.js';
 
 // Edit mode WRITES. Mock the barrel so every routing rule (plan vs live) is
 // asserted on the exact client fn that fired - the raw relay member fns are
@@ -31,6 +37,9 @@ const previewTourRosterAdd = vi.fn();
 const addConversationMember = vi.fn();
 const removeConversationMember = vi.fn();
 const getContacts = vi.fn();
+const cancelTourRosterAction = vi.fn();
+const applyTourRosterActionNow = vi.fn();
+const dismissTourRosterAction = vi.fn();
 
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
@@ -45,10 +54,13 @@ vi.mock('../../api/index.js', async () => {
     addConversationMember: (...a: unknown[]) => addConversationMember(...a),
     removeConversationMember: (...a: unknown[]) => removeConversationMember(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
+    cancelTourRosterAction: (...a: unknown[]) => cancelTourRosterAction(...a),
+    applyTourRosterActionNow: (...a: unknown[]) => applyTourRosterActionNow(...a),
+    dismissTourRosterAction: (...a: unknown[]) => dismissTourRosterAction(...a),
   };
 });
 
-import { PeopleCard, type PeopleCardProps } from './PeopleCard.js';
+import { PeopleCard, type PeopleCardEdit, type PeopleCardProps } from './PeopleCard.js';
 import type { RosterSuggestion } from './rosterPeople.js';
 
 function member(over: Partial<RosterMemberView> & { memberKey: string }): RosterMemberView {
@@ -66,6 +78,8 @@ function view(over: Partial<RosterView> = {}): RosterView {
     tenantOnRoster: true,
     canOpenGroup: true,
     threadExists: false,
+    pending: [],
+    skipped: [],
     ...over,
   };
 }
@@ -562,10 +576,65 @@ describe('PeopleCard - edit mode against a LIVE group text', () => {
     expect(addTourRosterLiveMember).not.toHaveBeenCalled();
     expect(within(dialog).getByText('Adding Alicia Grant to this group text.')).toBeInTheDocument();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Add and notify' }));
-    await waitFor(() => expect(addTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'c-pm'));
+    // Outside quiet hours the confirm is the plain (unforced) add.
+    await waitFor(() =>
+      expect(addTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'c-pm', { force: false }),
+    );
     expect(addConversationMember).not.toHaveBeenCalled();
     expect(addTourRosterMember).not.toHaveBeenCalled();
     expect(onApply).toHaveBeenCalledWith(live());
+  });
+
+  it('an ADD inside QUIET HOURS defers by default - and the 202 payload lands as a pending row', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    previewTourRosterAdd.mockResolvedValue(preview({ deferred: true, quietEndsAt }));
+    // The 202 body: nobody joined, and the deferral rides pending[].
+    const deferredView = live({
+      pending: [
+        {
+          actionId: 'tour#tour-abc#add#c-pm',
+          kind: 'add_member',
+          contactId: 'c-pm',
+          name: 'Alicia Grant',
+          dueAt: quietEndsAt,
+        },
+      ],
+    });
+    addTourRosterLiveMember.mockResolvedValue(deferredView);
+    const { onApply } = await renderEditing({ roster: live({ members: [view().members[0]!] }) }, [
+      PM_SUGGESTION,
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Add Alicia Grant to the group text?',
+    });
+    await userEvent.click(
+      within(dialog).getByRole('button', { name: `Add and notify at ${clock}` }),
+    );
+    await waitFor(() =>
+      expect(addTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'c-pm', { force: false }),
+    );
+    expect(onApply).toHaveBeenCalledWith(deferredView);
+  });
+
+  it('"Send now anyway" forces the live add past quiet hours', async () => {
+    previewTourRosterAdd.mockResolvedValue(
+      preview({ deferred: true, quietEndsAt: '2026-08-05T12:00:00.000Z' }),
+    );
+    addTourRosterLiveMember.mockResolvedValue(live());
+    await renderEditing({ roster: live({ members: [view().members[0]!] }) }, [PM_SUGGESTION]);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Add Alicia Grant to the group text?',
+    });
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Send now anyway' }));
+    await waitFor(() =>
+      expect(addTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'c-pm', { force: true }),
+    );
   });
 
   it('a REMOVE goes straight through live-members BY MEMBER KEY - never a phone, never a confirm', async () => {
@@ -637,5 +706,246 @@ describe('PeopleCard - refusals', () => {
       ),
     ).toBeInTheDocument();
     expect(onRetry).toHaveBeenCalled();
+  });
+});
+
+// --- Pending + skipped roster actions (spec 6.5, Task 14) -------------------
+// A change confirmed during QUIET HOURS has not happened yet: membership defers
+// WITH the message (D7), so a pending add is deliberately NOT a member - it is
+// its own row, with the two ways out (do it now / call it off). An action that
+// resolved WITHOUT happening owes the operator a NOTICE, visible until it is
+// dismissed - after which the server excludes it for good.
+
+/** The quiet-end instant every pending row below is due at. */
+const DUE_AT = '2026-08-05T12:00:00.000Z';
+
+/** The clock label the card renders for DUE_AT, in the VIEWER's zone (the card
+ *  FORMATS the server's instant - it never re-derives the window). */
+const DUE_CLOCK = new Date(DUE_AT).toLocaleTimeString('en-US', {
+  hour: 'numeric',
+  minute: '2-digit',
+});
+
+const PENDING_ADD = {
+  actionId: 'tour#tour-abc#add#c-pm',
+  kind: 'add_member' as const,
+  contactId: 'c-pm',
+  name: 'Alicia Grant',
+  dueAt: DUE_AT,
+};
+
+const PENDING_OPEN = {
+  actionId: 'tour#tour-abc#open',
+  kind: 'open_group' as const,
+  dueAt: DUE_AT,
+};
+
+/** Render the card as the editor WITHOUT flipping into edit mode: pending and
+ *  skipped rows are roster STATE, not an edit gesture, so they show either way. */
+function renderWithActions(
+  over: Partial<PeopleCardProps> = {},
+  editOver: Partial<PeopleCardEdit> = {},
+): { onRetry: ReturnType<typeof vi.fn>; onApply: ReturnType<typeof vi.fn> } {
+  const onApply = vi.fn();
+  const { onRetry } = renderCard({
+    edit: { owner: { type: 'tour', id: 'tour-abc' }, suggestions: [], onApply, ...editOver },
+    ...over,
+  });
+  return { onRetry, onApply };
+}
+
+describe('PeopleCard - pending quiet-hours actions', () => {
+  it('renders a pending ADD as its own row - NOT as a member - with the join time', () => {
+    renderWithActions({ roster: view({ threadExists: true, pending: [PENDING_ADD] }) });
+    // Membership defers with the message: they are not on the roster yet.
+    expect(rosterRows()).toHaveLength(2);
+    const pending = within(
+      screen.getByRole('list', { name: 'Waiting for quiet hours to end' }),
+    ).getAllByRole('listitem');
+    expect(pending).toHaveLength(1);
+    expect(within(pending[0]!).getByText('Alicia Grant')).toBeInTheDocument();
+    expect(within(pending[0]!).getByText(`Joins at ${DUE_CLOCK} - quiet hours`)).toBeInTheDocument();
+  });
+
+  it('"Add now" applies the pending action through apply-now and commits the result', async () => {
+    const next = view({ threadExists: true });
+    applyTourRosterActionNow.mockResolvedValue(next);
+    const { onApply } = renderWithActions({
+      roster: view({ threadExists: true, pending: [PENDING_ADD] }),
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant now' }));
+    await waitFor(() =>
+      expect(applyTourRosterActionNow).toHaveBeenCalledWith('tour-abc', 'tour#tour-abc#add#c-pm'),
+    );
+    expect(onApply).toHaveBeenCalledWith(next);
+    // Forcing a PENDING row is its own endpoint - never a fresh live add.
+    expect(addTourRosterLiveMember).not.toHaveBeenCalled();
+  });
+
+  it('"Cancel" cancels the pending ADD and commits the result', async () => {
+    const next = view({ threadExists: true });
+    cancelTourRosterAction.mockResolvedValue(next);
+    const { onApply } = renderWithActions({
+      roster: view({ threadExists: true, pending: [PENDING_ADD] }),
+    });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel adding Alicia Grant' }));
+    await waitFor(() =>
+      expect(cancelTourRosterAction).toHaveBeenCalledWith('tour-abc', 'tour#tour-abc#add#c-pm'),
+    );
+    expect(onApply).toHaveBeenCalledWith(next);
+    expect(applyTourRosterActionNow).not.toHaveBeenCalled();
+  });
+
+  it('renders the deferred-OPEN banner with Send now + Cancel (spec 6.5)', async () => {
+    const onOpenNow = vi.fn();
+    renderWithActions({ roster: view({ pending: [PENDING_OPEN] }) }, { onOpenNow });
+    expect(screen.getByText(`Opens at ${DUE_CLOCK} - quiet hours`)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Send the group text now' }));
+    // The HUB owns the relay-open path (it mounts the new thread), so the card
+    // delegates rather than opening a thread it cannot show.
+    expect(onOpenNow).toHaveBeenCalledTimes(1);
+    expect(applyTourRosterActionNow).not.toHaveBeenCalled();
+  });
+
+  it('cancels a deferred OPEN through the pending endpoint', async () => {
+    const next = view();
+    cancelTourRosterAction.mockResolvedValue(next);
+    const { onApply } = renderWithActions({ roster: view({ pending: [PENDING_OPEN] }) });
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel opening the group text' }));
+    await waitFor(() =>
+      expect(cancelTourRosterAction).toHaveBeenCalledWith('tour-abc', 'tour#tour-abc#open'),
+    );
+    expect(onApply).toHaveBeenCalledWith(next);
+  });
+
+  it('shows a pending row on a READ-ONLY card, without controls it could not run', () => {
+    renderCard({ roster: view({ threadExists: true, pending: [PENDING_ADD] }) });
+    expect(screen.getByText(`Joins at ${DUE_CLOCK} - quiet hours`)).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Add Alicia Grant now' })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Cancel adding Alicia Grant' }),
+    ).not.toBeInTheDocument();
+  });
+});
+
+describe('PeopleCard - skipped notices (visible until dismissed)', () => {
+  function skip(over: Partial<RosterSkippedAction> = {}): RosterSkippedAction {
+    return {
+      actionId: 'tour#tour-abc#add#c-pm',
+      kind: 'add_member',
+      contactId: 'c-pm',
+      name: 'Alicia Grant',
+      reason: 'already_member',
+      at: DUE_AT,
+      ...over,
+    };
+  }
+
+  /** An open_group notice - no contact, no name (the group is the subject). */
+  function openSkip(reason: RosterSkippedAction['reason']): RosterSkippedAction {
+    return {
+      actionId: 'tour#tour-abc#open',
+      kind: 'open_group',
+      reason,
+      at: DUE_AT,
+    };
+  }
+
+  // EVERY reason the server can serve gets honest copy: an operator who comes
+  // back at 8:05 must be able to tell what happened without reading a log.
+  const CASES: Array<[RosterSkippedAction, string]> = [
+    [skip({ reason: 'canceled' }), 'Canceled - Alicia Grant was not added.'],
+    [openSkip('canceled'), 'Canceled - the group text was not opened.'],
+    [skip({ reason: 'group_closed' }), 'Alicia Grant was not added - the group text was closed.'],
+    [openSkip('group_closed'), 'The group text was not opened - it had already been closed.'],
+    [skip({ reason: 'owner_canceled' }), 'Alicia Grant was not added - this tour was canceled.'],
+    [
+      skip({ reason: 'already_member' }),
+      'Alicia Grant was not added - they were already on the group text.',
+    ],
+    [
+      skip({ reason: 'contact_deleted' }),
+      'Alicia Grant was not added - that contact is gone or has no mobile number.',
+    ],
+    [
+      skip({ reason: 'member_no_longer_on_roster' }),
+      'Alicia Grant was not added - they were removed from this tour first.',
+    ],
+    [openSkip('roster_too_thin'), 'The group text was not opened - two reachable members are needed.'],
+    [openSkip('converted'), 'The group text was not opened - this tour became a placement first.'],
+  ];
+
+  it.each(CASES)('says what happened (case %#)', (row, sentence) => {
+    renderWithActions({ roster: view({ skipped: [row] }) });
+    expect(screen.getByText(sentence)).toBeInTheDocument();
+  });
+
+  it('says a PLACEMENT closed rather than "was canceled" for owner_canceled', () => {
+    renderWithActions({
+      scope: 'placement',
+      roster: view({ skipped: [skip({ reason: 'owner_canceled' })] }),
+    });
+    expect(
+      screen.getByText('Alicia Grant was not added - this placement closed.'),
+    ).toBeInTheDocument();
+  });
+
+  it('names an unnamed contact structurally, never by phone', () => {
+    renderWithActions({
+      roster: view({ skipped: [skip({ name: undefined, reason: 'contact_deleted' })] }),
+    });
+    expect(
+      screen.getByText('That contact was not added - that contact is gone or has no mobile number.'),
+    ).toBeInTheDocument();
+  });
+
+  it('DISMISS removes the notice - and a refetch keeps it gone (the server excludes it)', async () => {
+    const dismissed = view({ skipped: [] });
+    dismissTourRosterAction.mockResolvedValue(dismissed);
+    const onApply = vi.fn();
+    const props: PeopleCardProps = {
+      scope: 'tour',
+      status: 'ready',
+      onRetry: vi.fn(),
+      roster: view({ skipped: [skip()] }),
+      edit: { owner: { type: 'tour', id: 'tour-abc' }, suggestions: [], onApply },
+    };
+    const { rerender } = render(
+      <MemoryRouter>
+        <PeopleCard {...props} />
+      </MemoryRouter>,
+    );
+    const sentence = 'Alicia Grant was not added - they were already on the group text.';
+    expect(screen.getByText(sentence)).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole('button', { name: 'Dismiss notice for Alicia Grant' }));
+    await waitFor(() =>
+      expect(dismissTourRosterAction).toHaveBeenCalledWith('tour-abc', 'tour#tour-abc#add#c-pm'),
+    );
+    // The write's own response IS the fresh roster - the notice is gone from it.
+    expect(onApply).toHaveBeenCalledWith(dismissed);
+
+    // ...and a later GET (which excludes dismissed rows) never brings it back.
+    rerender(
+      <MemoryRouter>
+        <PeopleCard {...props} roster={dismissed} />
+      </MemoryRouter>,
+    );
+    expect(screen.queryByText(sentence)).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Dismiss notice for Alicia Grant' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('labels the OPEN notice dismiss distinctly from a person notice', () => {
+    renderWithActions({
+      roster: view({ skipped: [skip(), openSkip('roster_too_thin')] }),
+    });
+    expect(
+      screen.getByRole('button', { name: 'Dismiss notice for Alicia Grant' }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Dismiss notice for the group text' }),
+    ).toBeInTheDocument();
   });
 });

@@ -70,6 +70,7 @@ import { PeopleCard } from '../shared/PeopleCard.js';
 import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
 import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
+import { pendingActionNote } from '../shared/rosterWrites.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { usePlacementNudges } from './usePlacementNudges.js';
@@ -314,11 +315,34 @@ export function PlacementDetail(): React.JSX.Element {
 
   // The confirmed half. Throws on failure so the dialog shows the reason and
   // stays open; on success the plan is consumed (spec D1), so re-read.
-  const runOpenGroup = useCallback(async (): Promise<void> => {
-    const { conversationId } = await provisionPlacementRelay(placementId);
-    channels.setGroupConversationId(conversationId);
-    roster.refetch();
-  }, [placementId, channels, roster]);
+  // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
+  // answers 202 with the ROSTER - nothing is opened, so there is no conversation
+  // id to mount. Committing the returned payload is the whole handling: its
+  // `pending` row is what the card and the [Open group text] control render as
+  // "Opens at 8:00 AM - quiet hours". `force` is "Send now anyway".
+  const runOpenGroup = useCallback(
+    async (force: boolean): Promise<void> => {
+      const result = await provisionPlacementRelay(placementId, { force });
+      if (result.deferred) {
+        roster.apply(result.roster);
+        return;
+      }
+      channels.setGroupConversationId(result.conversationId);
+      roster.refetch();
+    },
+    [placementId, channels, roster],
+  );
+
+  // "Send now" on a DEFERRED open: the operator already confirmed this send
+  // once, so it never re-previews - it forces the same provision through.
+  const forceOpenGroup = useCallback((): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void runOpenGroup(true)
+      .catch(() => setError('Could not open the group text. Please try again.'))
+      .finally(() => setBusy(false));
+  }, [busy, runOpenGroup]);
 
   // After a terminal move (lost / moved_in) the LINKED relay group is NOT
   // auto-closed (nothing auto-closes now). If it is still OPEN, offer to close it.
@@ -433,6 +457,11 @@ export function PlacementDetail(): React.JSX.Element {
   // to open a group text with (spec 6.2). The People card carries the reason.
   const openGroupBlocked =
     canOpenGroup && roster.roster !== null && !roster.roster.canOpenGroup;
+  // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
+  // again would silently supersede it with a new dueAt, so the control says
+  // when it opens instead - and the People card carries the two ways out.
+  const pendingOpen = roster.roster?.pending.find((p) => p.kind === 'open_group');
+  const pendingOpenNote = pendingOpen !== undefined ? pendingActionNote(pendingOpen) : undefined;
 
   // The date-vocabulary facts line (spec section 6): phase, in-stage-since, the
   // voucher deadline, and the source-tour provenance - each a verb phrase, joined
@@ -539,10 +568,12 @@ export function PlacementDetail(): React.JSX.Element {
             commsVisible={commsVisible}
             onOpenGroup={handleOpenGroup}
             openGroupBusy={busy}
-            {...(openGroupBlocked && {
-              openGroupDisabledReason:
-                'Not enough people to open a group text - two reachable members are needed',
-            })}
+            {...(pendingOpenNote !== undefined
+              ? { openGroupDisabledReason: pendingOpenNote }
+              : openGroupBlocked && {
+                  openGroupDisabledReason:
+                    'Not enough people to open a group text - two reachable members are needed',
+                })}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
@@ -594,6 +625,7 @@ export function PlacementDetail(): React.JSX.Element {
                 owner: { type: 'placement', id: placementId },
                 suggestions: rosterSuggestionRows,
                 onApply: roster.apply,
+                onOpenNow: forceOpenGroup,
               }}
             >
               <KV k="Property" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
@@ -694,6 +726,7 @@ export function PlacementDetail(): React.JSX.Element {
           title="Open the group text?"
           preview={openPreview}
           confirmLabel="Open group text"
+          deferLabel="Open"
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

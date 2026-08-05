@@ -137,6 +137,8 @@ function makeRoster(over: Partial<RosterView> = {}): RosterView {
     tenantOnRoster: true,
     canOpenGroup: true,
     threadExists: false,
+    pending: [],
+    skipped: [],
     ...over,
   };
 }
@@ -177,7 +179,7 @@ beforeEach(() => {
     participants: [],
   });
   markConversationRead.mockReset().mockResolvedValue(undefined);
-  provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
+  provisionPlacementRelay.mockReset().mockResolvedValue({ deferred: false, conversationId: 'g1' });
   previewPlacementRosterOpen.mockReset().mockResolvedValue({
     body: 'Hi - this is Housing Choice connecting you about this placement.',
     recipients: [
@@ -329,7 +331,36 @@ describe('PlacementDetail - header', () => {
     ).toBeInTheDocument();
     expect(provisionPlacementRelay).not.toHaveBeenCalled();
     await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
-    await waitFor(() => expect(provisionPlacementRelay).toHaveBeenCalledWith('c1'));
+    await waitFor(() =>
+      expect(provisionPlacementRelay).toHaveBeenCalledWith('c1', { force: false }),
+    );
+  });
+
+  // Task 14: the placement mirror of the 202 branch. A deferred open answers
+  // with a ROSTER, so `res.conversation.conversationId` is not there to read -
+  // and there is no thread to mount.
+  it('a DEFERRED open (202) shows when it opens and mounts no conversation', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    provisionPlacementRelay.mockResolvedValue({
+      deferred: true,
+      roster: makeRoster({
+        pending: [{ actionId: 'placement#c1#open', kind: 'open_group', dueAt: quietEndsAt }],
+      }),
+    });
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+
+    expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
+    expect(getConversation).not.toHaveBeenCalledWith('g1');
   });
 });
 

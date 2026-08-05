@@ -1,7 +1,7 @@
 // Typed endpoint functions - one per route. Every function returns a typed
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
-import { ApiError, request } from './client.js';
+import { ApiError, request, requestWithStatus } from './client.js';
 import type {
   AdminUserView,
   AudienceFilter,
@@ -350,21 +350,41 @@ export async function postNudgeSendNow(
   return res.nudge;
 }
 
+/**
+ * What opening a relay group did. TWO successful outcomes share the route and
+ * the STATUS is what tells them apart (contact-rosters D7):
+ *   - 201 -> provisioned NOW; the thread exists and can be mounted.
+ *   - 202 -> DEFERRED to quiet-end; NOTHING was opened. The body is the roster,
+ *     whose `pending` carries the row the card renders as "Opens at 8:00 AM".
+ * Modelled as a union so no caller can read a conversation id that is not there
+ * (and mount a thread that does not exist).
+ */
+export type PlacementRelayOpenResult =
+  | { deferred: false; conversationId: string }
+  | { deferred: true; roster: RosterView };
+
 /** POST /api/placements/:placementId/relay — provision the placement's masked
  *  relay group thread (tenant + the unit's landlord, by their SMS numbers) and
  *  link placement.group_thread. Idempotent: 409 relay_exists when an OPEN relay
  *  already fronts the placement; 503 relay_provisioning_disabled (kill-switch) /
  *  pool_number_unavailable; 400 tenant_unreachable / landlord_unreachable /
- *  unit_not_found; 404 placement_not_found. The server responds 201
- *  { conversation, placement }; we unwrap the new thread's id. */
+ *  unit_not_found; 404 placement_not_found. 201 { conversation, placement } ->
+ *  the new thread's id; 202 <RosterView> -> deferred (see the result type).
+ *  `force` is the dialog's "Send now anyway" (`?force=send_now`), which opens
+ *  immediately despite quiet hours. */
 export async function provisionPlacementRelay(
   placementId: string,
-): Promise<{ conversationId: string }> {
-  const res = await request<{ conversation: { conversationId: string }; placement: PlacementItem }>(
-    `/api/placements/${encodeURIComponent(placementId)}/relay`,
-    { method: 'POST' },
-  );
-  return { conversationId: res.conversation.conversationId };
+  opts: { force?: boolean } = {},
+): Promise<PlacementRelayOpenResult> {
+  const res = await requestWithStatus<
+    { conversation: { conversationId: string }; placement: PlacementItem } | RosterView
+  >(`/api/placements/${encodeURIComponent(placementId)}/relay`, {
+    method: 'POST',
+    ...(opts.force === true && { query: { force: 'send_now' } }),
+  });
+  if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
+  const opened = res.body as { conversation: { conversationId: string } };
+  return { deferred: false, conversationId: opened.conversation.conversationId };
 }
 
 /** POST /api/placements/:placementId/deadline { type:'follow_up', at } — arm the
@@ -1923,10 +1943,12 @@ export async function resetTourRoster(tourId: string): Promise<RosterView> {
 export async function addTourRosterLiveMember(
   tourId: string,
   contactId: string,
+  opts: { force?: boolean } = {},
 ): Promise<RosterView> {
   return request<RosterView>(`${rosterPath('tours', tourId)}/live-members`, {
     method: 'POST',
     body: { contactId },
+    ...(opts.force === true && { query: { force: 'send_now' } }),
   });
 }
 
@@ -2006,10 +2028,12 @@ export async function resetPlacementRoster(placementId: string): Promise<RosterV
 export async function addPlacementRosterLiveMember(
   placementId: string,
   contactId: string,
+  opts: { force?: boolean } = {},
 ): Promise<RosterView> {
   return request<RosterView>(`${rosterPath('placements', placementId)}/live-members`, {
     method: 'POST',
     body: { contactId },
+    ...(opts.force === true && { query: { force: 'send_now' } }),
   });
 }
 
@@ -2045,6 +2069,95 @@ export async function previewPlacementRosterAdd(
   return request<RosterPreview>(`${rosterPath('placements', placementId)}/preview-add`, {
     method: 'POST',
     body: { contactId },
+  });
+}
+
+// --- Pending roster actions: the three ways a deferral ends (Task 14) --------
+//
+// A change confirmed inside quiet hours becomes a PENDING action the poller
+// applies at quiet-end. Until then the operator has three moves, all of them
+// answering with the SAME unwrapped RosterView every other roster endpoint
+// serves (its `pending` / `skipped` arrays are the card's whole story):
+//
+//   cancel     pending -> canceled. It never happens; a notice says so.
+//   apply-now  do it RIGHT NOW - the same applier the poller runs, so a world
+//              that moved lands a VISIBLE skip instead of a surprise send.
+//   dismiss    a TERMINAL row's notice is done being read; the server excludes
+//              it from `skipped` for good (a dismissed notice never returns).
+//
+// `actionId` is the server's deterministic id (`tour#<id>#add#<contactId>`) and
+// carries `#`, so it MUST be percent-encoded into the path.
+// Refusals: 404 pending_action_not_found (incl. a row owned by another
+// tour/placement), 409 action_not_pending (cancel/apply-now on a terminal row),
+// 409 action_not_dismissable (dismiss on a PENDING row, or a second dismiss).
+
+/** `.../roster/pending/:actionId/<verb>` for either owner. */
+function pendingActionPath(
+  owner: 'tours' | 'placements',
+  id: string,
+  actionId: string,
+  verb: 'cancel' | 'apply-now' | 'dismiss',
+): string {
+  return `${rosterPath(owner, id)}/pending/${encodeURIComponent(actionId)}/${verb}`;
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/cancel */
+export async function cancelTourRosterAction(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'cancel'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/apply-now */
+export async function applyTourRosterActionNow(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'apply-now'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/dismiss */
+export async function dismissTourRosterAction(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'dismiss'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/cancel */
+export async function cancelPlacementRosterAction(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'cancel'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/apply-now */
+export async function applyPlacementRosterActionNow(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'apply-now'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/dismiss */
+export async function dismissPlacementRosterAction(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'dismiss'), {
+    method: 'POST',
   });
 }
 
@@ -2180,21 +2293,34 @@ export async function patchTour(
   return res.tour;
 }
 
+/** The tour twin of `PlacementRelayOpenResult`: 201 -> the updated tour (its
+ *  `groupThreadId` is the new thread); 202 -> DEFERRED, nothing opened. */
+export type TourRelayOpenResult =
+  | { deferred: false; tour: Tour }
+  | { deferred: true; roster: RosterView };
+
 /** POST /api/tours/:tourId/relay — provision a masked relay group thread for
  *  the tour. `members` is optional: when omitted the server auto-resolves
  *  [tenant contact, unit's landlord contact] (phones + names). Stamps
  *  groupThreadId back on the tour. Errors: 409 relay_already_provisioned when
  *  the tour already has a group; 400 relay_member_unresolvable (with `detail`)
- *  when a member can't resolve. Returns the updated tour + the new
- *  conversation (unwrapped). */
+ *  when a member can't resolve. 201 { tour, conversation } -> the updated tour;
+ *  202 <RosterView> -> deferred to quiet-end (nothing was opened). `force` is
+ *  "Send now anyway" (`?force=send_now`). */
 export async function createTourRelay(
   tourId: string,
-  members?: Array<{ phone: string; contactId?: string; name?: string }>,
-): Promise<{ tour: Tour; conversation: unknown }> {
-  return request<{ tour: Tour; conversation: unknown }>(
+  opts: { members?: Array<{ phone: string; contactId?: string; name?: string }>; force?: boolean } = {},
+): Promise<TourRelayOpenResult> {
+  const res = await requestWithStatus<{ tour: Tour; conversation: unknown } | RosterView>(
     `/api/tours/${encodeURIComponent(tourId)}/relay`,
-    // Omit the members key entirely when not given (server auto-resolves) —
-    // never send members: undefined.
-    { method: 'POST', body: members !== undefined ? { members } : {} },
+    {
+      method: 'POST',
+      // Omit the members key entirely when not given (server auto-resolves) -
+      // never send members: undefined.
+      body: opts.members !== undefined ? { members: opts.members } : {},
+      ...(opts.force === true && { query: { force: 'send_now' } }),
+    },
   );
+  if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
+  return { deferred: false, tour: (res.body as { tour: Tour }).tour };
 }

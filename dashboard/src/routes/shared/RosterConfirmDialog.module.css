@@ -58,8 +58,8 @@
   color: var(--c-text-muted);
 }
 
-/* Quiet hours are INFORMATIONAL until slice 6 wires the deferral - the copy
- * says the send still goes now, so this is a note, not a warning. */
+/* Quiet hours DEFER the change (the default button does it at the window's
+ * end), so this is a note explaining the default, not a warning. */
 .quiet {
   margin: var(--sp-1) 0 0;
   font-size: var(--fs-xs);

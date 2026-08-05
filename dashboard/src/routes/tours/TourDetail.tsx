@@ -42,6 +42,7 @@ import { PeopleCard } from '../shared/PeopleCard.js';
 import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
 import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
+import { pendingActionNote } from '../shared/rosterWrites.js';
 import { formatRent } from '../listing/listingFormat.js';
 import { dateTime, shortDate } from '../placements/placementsFormat.js';
 import { useTour } from './useTour.js';
@@ -256,6 +257,11 @@ function TourDetailLoaded({
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   const openGroupBlocked = canOpenGroup && rosterTooThin;
+  // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
+  // again would silently supersede it with a new dueAt, so the control says
+  // when it opens instead - and the People card carries the two ways out.
+  const pendingOpen = roster.roster?.pending.find((p) => p.kind === 'open_group');
+  const pendingOpenNote = pendingOpen !== undefined ? pendingActionNote(pendingOpen) : undefined;
   const isConverted = typeof tour.convertedPlacementId === 'string';
 
   // --- Mutations ------------------------------------------------------------
@@ -326,15 +332,41 @@ function TourDetailLoaded({
   // Provision the masked group thread (members auto-resolved server-side) - the
   // confirmed half of handleOpenGroup. Throws on failure so the dialog can show
   // the reason and stay open.
-  const runOpenGroup = async (): Promise<void> => {
-    const { tour: updated } = await createTourRelay(tourId);
-    setTour(updated);
-    if (typeof updated.groupThreadId === 'string') {
-      channels.setGroupConversationId(updated.groupThreadId);
+  //
+  // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
+  // answers 202 with the ROSTER - nothing is opened, so there is no tour to
+  // apply and no thread id to mount. Committing the returned payload is the
+  // whole handling: its `pending` row is what the card and the [Open group
+  // text] control render as "Opens at 8:00 AM - quiet hours".
+  // `force` is the dialog's "Send now anyway" (and the pending banner's
+  // "Send now"), which opens immediately despite the window.
+  const runOpenGroup = async (force: boolean): Promise<void> => {
+    const result = await createTourRelay(tourId, { force });
+    if (result.deferred) {
+      roster.apply(result.roster);
+      return;
+    }
+    setTour(result.tour);
+    if (typeof result.tour.groupThreadId === 'string') {
+      channels.setGroupConversationId(result.tour.groupThreadId);
     }
     // The plan was consumed at open (spec D1) - re-read so the card and the tabs
     // switch to the thread's participants.
     roster.refetch();
+  };
+
+  // "Send now" on a DEFERRED open: the operator already confirmed this send
+  // once, so it never re-previews - it forces the same provision through.
+  // Failures land in the header alert (there is no dialog to hold them).
+  const forceOpenGroup = (): void => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    void runOpenGroup(true)
+      .catch((err: unknown) => {
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
+      })
+      .finally(() => setBusy(false));
   };
 
   // Convert a convertible, not-yet-converted tour into a placement, then jump to
@@ -552,10 +584,12 @@ function TourDetailLoaded({
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
-            {...(openGroupBlocked && {
-              openGroupDisabledReason:
-                'Not enough people to open a group text - two reachable members are needed',
-            })}
+            {...(pendingOpenNote !== undefined
+              ? { openGroupDisabledReason: pendingOpenNote }
+              : openGroupBlocked && {
+                  openGroupDisabledReason:
+                    'Not enough people to open a group text - two reachable members are needed',
+                })}
             tourMilestones={tourMilestones}
             commsVisible={commsVisible}
             {...(noShowSeed !== null && { noShowDraft: noShowSeed })}
@@ -597,6 +631,7 @@ function TourDetailLoaded({
                 owner: { type: 'tour', id: tourId },
                 suggestions: rosterSuggestionRows,
                 onApply: roster.apply,
+                onOpenNow: forceOpenGroup,
               }}
             >
               <KV
@@ -678,6 +713,7 @@ function TourDetailLoaded({
           title="Open the group text?"
           preview={openPreview}
           confirmLabel="Open group text"
+          deferLabel="Open"
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
         />

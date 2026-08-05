@@ -38,6 +38,8 @@ const ROSTER: RosterView = {
   tenantOnRoster: true,
   canOpenGroup: false,
   threadExists: false,
+  pending: [],
+  skipped: [],
 };
 
 /** Fire an event at every registered subscriber (the provider's job). */

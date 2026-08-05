@@ -4,15 +4,20 @@ import { vi, it, expect, beforeEach } from 'vitest';
 
 vi.mock('./client.js', () => ({
   request: vi.fn(() => Promise.resolve({ contact: { contactId: 'c9', type: 'tenant' } })),
+  requestWithStatus: vi.fn(() => Promise.resolve({ status: 200, body: {} })),
 }));
 
-import { request } from './client.js';
+import { request, requestWithStatus } from './client.js';
 import {
+  applyTourRosterActionNow,
   buildTransitionBody,
+  cancelTourRosterAction,
   createContact,
   createPlacementFromTour,
   createTour,
   createTourRelay,
+  dismissPlacementRosterAction,
+  dismissTourRosterAction,
   getTours,
   getPlacement,
   getContactVocabulary,
@@ -28,9 +33,25 @@ import {
   updatePlacement,
   validateLostReason,
 } from './endpoints.js';
+import type { RosterView } from './types.js';
+
+/** A minimal roster payload - the 202 body of a DEFERRED open (s6b contract). */
+function rosterWithPendingOpen(): RosterView {
+  return {
+    source: 'plan',
+    members: [],
+    customized: false,
+    tenantOnRoster: true,
+    canOpenGroup: true,
+    threadExists: false,
+    pending: [{ actionId: 'tour#t1#open', kind: 'open_group', dueAt: '2026-08-05T12:00:00.000Z' }],
+    skipped: [],
+  };
+}
 
 beforeEach(() => {
   vi.mocked(request).mockReset();
+  vi.mocked(requestWithStatus).mockReset();
 });
 
 it('createContact posts and unwraps', async () => {
@@ -154,13 +175,96 @@ it('patchPlacementNudge PATCHes { canceled } and unwraps { nudge }', async () =>
 });
 
 it('provisionPlacementRelay POSTs and unwraps the new conversationId', async () => {
-  vi.mocked(request).mockResolvedValueOnce({
-    conversation: { conversationId: 'conv-9' },
-    placement: { placementId: 'k1', group_thread: 'conv-9' },
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({
+    status: 201,
+    body: {
+      conversation: { conversationId: 'conv-9' },
+      placement: { placementId: 'k1', group_thread: 'conv-9' },
+    },
   });
   const res = await provisionPlacementRelay('k1');
-  expect(request).toHaveBeenCalledWith('/api/placements/k1/relay', { method: 'POST' });
-  expect(res).toEqual({ conversationId: 'conv-9' });
+  expect(requestWithStatus).toHaveBeenCalledWith('/api/placements/k1/relay', { method: 'POST' });
+  expect(res).toEqual({ deferred: false, conversationId: 'conv-9' });
+});
+
+// --- contact-rosters Task 14: the 202-DEFERRED arm of both relay-open paths ---
+// A quiet-hours deferral answers 2xx with a ROSTER, not a conversation. Reading
+// `res.conversation.conversationId` there would be an undefined deref (and would
+// mount a thread that does not exist), so the status IS the contract.
+it('provisionPlacementRelay reports a 202 as DEFERRED with the roster payload', async () => {
+  const roster = rosterWithPendingOpen();
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({ status: 202, body: roster });
+  const res = await provisionPlacementRelay('k1');
+  expect(res).toEqual({ deferred: true, roster });
+});
+
+it('provisionPlacementRelay with force posts ?force=send_now', async () => {
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({
+    status: 201,
+    body: { conversation: { conversationId: 'conv-9' }, placement: { placementId: 'k1' } },
+  });
+  await provisionPlacementRelay('k1', { force: true });
+  expect(requestWithStatus).toHaveBeenCalledWith('/api/placements/k1/relay', {
+    method: 'POST',
+    query: { force: 'send_now' },
+  });
+});
+
+it('createTourRelay reports a 202 as DEFERRED with the roster payload', async () => {
+  const roster = rosterWithPendingOpen();
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({ status: 202, body: roster });
+  const res = await createTourRelay('t1');
+  expect(res).toEqual({ deferred: true, roster });
+});
+
+it('createTourRelay with force posts ?force=send_now', async () => {
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({
+    status: 201,
+    body: { tour: { tourId: 't1' }, conversation: {} },
+  });
+  await createTourRelay('t1', { force: true });
+  expect(requestWithStatus).toHaveBeenCalledWith('/api/tours/t1/relay', {
+    method: 'POST',
+    body: {},
+    query: { force: 'send_now' },
+  });
+});
+
+// --- contact-rosters Task 14: the three pending-action endpoints -------------
+it('cancelTourRosterAction POSTs the pending cancel path with the actionId ENCODED', async () => {
+  const roster = rosterWithPendingOpen();
+  vi.mocked(request).mockResolvedValueOnce(roster);
+  const res = await cancelTourRosterAction('t1', 'tour#t1#add#c-9');
+  expect(request).toHaveBeenCalledWith(
+    '/api/tours/t1/roster/pending/tour%23t1%23add%23c-9/cancel',
+    { method: 'POST' },
+  );
+  expect(res).toBe(roster);
+});
+
+it('applyTourRosterActionNow POSTs apply-now', async () => {
+  vi.mocked(request).mockResolvedValueOnce(rosterWithPendingOpen());
+  await applyTourRosterActionNow('t1', 'tour#t1#open');
+  expect(request).toHaveBeenCalledWith('/api/tours/t1/roster/pending/tour%23t1%23open/apply-now', {
+    method: 'POST',
+  });
+});
+
+it('dismissTourRosterAction POSTs dismiss', async () => {
+  vi.mocked(request).mockResolvedValueOnce(rosterWithPendingOpen());
+  await dismissTourRosterAction('t1', 'tour#t1#open');
+  expect(request).toHaveBeenCalledWith('/api/tours/t1/roster/pending/tour%23t1%23open/dismiss', {
+    method: 'POST',
+  });
+});
+
+it('dismissPlacementRosterAction POSTs the PLACEMENT mirror', async () => {
+  vi.mocked(request).mockResolvedValueOnce(rosterWithPendingOpen());
+  await dismissPlacementRosterAction('k1', 'placement#k1#open');
+  expect(request).toHaveBeenCalledWith(
+    '/api/placements/k1/roster/pending/placement%23k1%23open/dismiss',
+    { method: 'POST' },
+  );
 });
 
 it('setPlacementFollowUp POSTs { type:"follow_up", at }', async () => {
@@ -269,20 +373,29 @@ it('createTour posts WITH scheduledAt when present', async () => {
 
 it('createTourRelay WITHOUT members posts an empty body (server auto-resolves)', async () => {
   const tour = { tourId: 't1', tenantId: 'c1', unitId: 'u1', groupThreadId: 'conv-9' };
-  vi.mocked(request).mockResolvedValueOnce({ tour, conversation: { conversationId: 'conv-9' } });
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({
+    status: 201,
+    body: { tour, conversation: { conversationId: 'conv-9' } },
+  });
   const res = await createTourRelay('t1');
-  expect(request).toHaveBeenCalledWith('/api/tours/t1/relay', { method: 'POST', body: {} });
+  expect(requestWithStatus).toHaveBeenCalledWith('/api/tours/t1/relay', {
+    method: 'POST',
+    body: {},
+  });
   // The members key must be OMITTED entirely, never sent as undefined.
-  const sent = vi.mocked(request).mock.calls[0]![1] as { body: Record<string, unknown> };
+  const sent = vi.mocked(requestWithStatus).mock.calls[0]![1] as { body: Record<string, unknown> };
   expect('members' in sent.body).toBe(false);
-  expect(res.tour).toEqual(tour);
+  expect(res).toEqual({ deferred: false, tour });
 });
 
 it('createTourRelay WITH explicit members posts them unchanged', async () => {
-  vi.mocked(request).mockResolvedValueOnce({ tour: { tourId: 't1' }, conversation: {} });
+  vi.mocked(requestWithStatus).mockResolvedValueOnce({
+    status: 201,
+    body: { tour: { tourId: 't1' }, conversation: {} },
+  });
   const members = [{ phone: '+15550001111', name: 'Tina Tenant' }];
-  await createTourRelay('t1', members);
-  expect(request).toHaveBeenCalledWith('/api/tours/t1/relay', {
+  await createTourRelay('t1', { members });
+  expect(requestWithStatus).toHaveBeenCalledWith('/api/tours/t1/relay', {
     method: 'POST',
     body: { members },
   });

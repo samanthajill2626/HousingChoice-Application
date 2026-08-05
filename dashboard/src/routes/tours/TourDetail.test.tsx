@@ -108,6 +108,8 @@ function makeRoster(over: Partial<RosterView> = {}): RosterView {
     tenantOnRoster: true,
     canOpenGroup: true,
     threadExists: false,
+    pending: [],
+    skipped: [],
     ...over,
   };
 }
@@ -1263,7 +1265,7 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
 describe('TourDetail - conversation empty states', () => {
   it('group with no thread shows "No group text yet" + Open group text (confirm, then createTourRelay)', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
-    createTourRelay.mockResolvedValue({ tour: makeTour({ groupThreadId: 'g-new' }), conversation: {} });
+    createTourRelay.mockResolvedValue({ deferred: false, tour: makeTour({ groupThreadId: 'g-new' }) });
     renderDetail();
     await waitLoaded();
     // Switch to the Group tab (self-guided defaults to Tenant).
@@ -1273,7 +1275,9 @@ describe('TourDetail - conversation empty states', () => {
     const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
     expect(createTourRelay).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
-    await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc'));
+    await waitFor(() =>
+      expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: false }),
+    );
   });
 
   it('a 1:1 with no thread shows the "with <name>" empty state + creates on first send', async () => {
@@ -1390,8 +1394,8 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
   it('previews the SERVER-composed intro before provisioning, and provisions only on confirm', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
     createTourRelay.mockResolvedValue({
+      deferred: false,
       tour: makeTour({ groupThreadId: 'g-new' }),
-      conversation: {},
     });
     renderDetail();
     await waitLoaded();
@@ -1409,7 +1413,98 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     // NOTHING is provisioned until the operator confirms.
     expect(createTourRelay).not.toHaveBeenCalled();
     await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
-    await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc'));
+    await waitFor(() =>
+      expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: false }),
+    );
+  });
+
+  // --- Task 14: the 202-DEFERRED arm ---------------------------------------
+  // Confirming inside quiet hours creates a PENDING action and opens NOTHING.
+  // The response is a RosterView, not { tour, conversation } - reading
+  // `res.tour` / `res.conversation.conversationId` there is the undefined deref
+  // the s6b contract flagged, and mounting a thread id that does not exist is
+  // the failure it would cause.
+  it('a confirm DURING QUIET HOURS defers: no thread is mounted and the card says when it opens', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
+    previewTourRosterOpen.mockResolvedValue({
+      body: 'Hi Ann and Lon - this is Housing Choice connecting you about 123 Main St.',
+      recipients: [
+        { name: 'Ann Tenant', reachability: 'reachable' },
+        { name: 'Lon Landlord', reachability: 'reachable' },
+      ],
+      recipientCount: 2,
+      deferred: true,
+      quietEndsAt,
+    });
+    createTourRelay.mockResolvedValue({
+      deferred: true,
+      roster: makeRoster({
+        pending: [{ actionId: 'tour#tour-abc#open', kind: 'open_group', dueAt: quietEndsAt }],
+      }),
+    });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    await userEvent.click(within(dialog).getByRole('button', { name: `Open at ${clock}` }));
+
+    await waitFor(() =>
+      expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: false }),
+    );
+    // The pending state is on the card, straight from the 202 payload...
+    expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
+    // ...and NOTHING was opened: the group pane still has no thread.
+    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+    expect(getConversationMessages).not.toHaveBeenCalledWith('g-new', expect.anything());
+  });
+
+  it('"Send the group text now" on a pending open FORCES the provision through', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        pending: [{ actionId: 'tour#tour-abc#open', kind: 'open_group', dueAt: quietEndsAt }],
+      }),
+    );
+    createTourRelay.mockResolvedValue({
+      deferred: false,
+      tour: makeTour({ groupThreadId: 'g-new' }),
+    });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(await screen.findByRole('button', { name: 'Send the group text now' }));
+    await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: true }));
+    // No preview, no dialog - the operator already confirmed this send once.
+    expect(previewTourRosterOpen).not.toHaveBeenCalled();
+  });
+
+  it('DISABLES [Open group text] with the pending reason while an open is deferred', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        pending: [{ actionId: 'tour#tour-abc#open', kind: 'open_group', dueAt: quietEndsAt }],
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled(),
+    );
+    // The control carries the SAME sentence the card does - one fact, one phrasing.
+    expect(screen.getAllByText(`Opens at ${clock} - quiet hours`).length).toBeGreaterThan(1);
   });
 
   it('a 409 relay_already_provisioned REFETCHES the roster instead of opening a dialog', async () => {

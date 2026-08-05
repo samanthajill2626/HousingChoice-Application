@@ -154,7 +154,7 @@ beforeEach(() => {
   ensureContactConversation.mockImplementation((id: string) =>
     Promise.resolve(id === 'landlord-1' ? 'c-landlord' : 'c-tenant'),
   );
-  provisionPlacementRelay.mockResolvedValue({ conversationId: 'g-new' });
+  provisionPlacementRelay.mockResolvedValue({ deferred: false, conversationId: 'g-new' });
 });
 
 describe('PlacementConversation - tabs and 1:1 panes', () => {

@@ -16,6 +16,8 @@ function view(over: Partial<RosterView> = {}): RosterView {
     tenantOnRoster: true,
     canOpenGroup: true,
     threadExists: false,
+    pending: [],
+    skipped: [],
     ...over,
   };
 }

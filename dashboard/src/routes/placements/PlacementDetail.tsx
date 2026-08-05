@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
+  ApiError,
   PLACEMENT_STAGES,
   STAGE_LABELS,
   STAGE_PHASE,
@@ -28,6 +29,7 @@ import {
   getPlacement,
   getContact,
   getUnit,
+  previewPlacementRosterOpen,
   provisionPlacementRelay,
   setPlacementFollowUp,
   transitionPlacement,
@@ -39,6 +41,7 @@ import {
   type Contact,
   type LostReason,
   type PlacementStage,
+  type RosterPreview,
   type UnitItem,
 } from '../../api/index.js';
 import {
@@ -64,8 +67,9 @@ import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
 import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import { PeopleCard } from '../shared/PeopleCard.js';
+import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
-import { rosterDrivesTabs, rosterPersonInputs } from '../shared/rosterPeople.js';
+import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { usePlacementNudges } from './usePlacementNudges.js';
@@ -128,6 +132,9 @@ export function PlacementDetail(): React.JSX.Element {
   // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
   // The "Also close the group text?" ask, opened AFTER a terminal move saves.
+  // The pre-open confirm's server-composed preview (spec 6.3). Non-null == the
+  // dialog is up; nothing is provisioned until the operator confirms.
+  const [openPreview, setOpenPreview] = useState<RosterPreview | null>(null);
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
   );
@@ -235,6 +242,23 @@ export function PlacementDetail(): React.JSX.Element {
     ...(placement?.group_thread !== undefined && { threadId: placement.group_thread }),
   });
   const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // Who belongs on this placement but is not on the roster - the property's
+  // other contacts and, when they have been removed, the tenant (spec 6.2).
+  const unitContacts = unit?.contacts;
+  const placementTenantId = placement?.tenantId;
+  const rosterSuggestionRows = useMemo(
+    () =>
+      rosterSuggestions({
+        scope: 'placement',
+        roster: roster.roster,
+        unitContacts,
+        tenant:
+          placementTenantId === undefined
+            ? undefined
+            : { contactId: placementTenantId, name: tenantLabel },
+      }),
+    [roster.roster, unitContacts, placementTenantId, tenantLabel],
+  );
 
   // The comms channels (group + one 1:1 per person). Called UNCONDITIONALLY
   // (hooks rules) with a loading-safe placeholder while the bundle loads - it
@@ -268,15 +292,33 @@ export function PlacementDetail(): React.JSX.Element {
   // server-side), then inject the new conversationId so the group tab mounts at
   // once. Shared by the header kebab; the left-pane empty state has its OWN
   // button (both hit the same channels instance).
+  // Opening a group text SENDS the intro to real people, so it confirms first
+  // (spec 6.3): fetch the server-composed preview and provision only on confirm.
+  // A 409 relay_already_provisioned means someone else just opened it - refetch
+  // the roster and NEVER open a dialog we could only fail.
   const handleOpenGroup = useCallback(() => {
     if (busy) return;
     setBusy(true);
     setError(null);
-    void provisionPlacementRelay(placementId)
-      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
-      .catch(() => setError('Could not open the group text. Please try again.'))
+    void previewPlacementRosterOpen(placementId)
+      .then((p) => setOpenPreview(p))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+          roster.refetch();
+        } else {
+          setError('Could not open the group text. Please try again.');
+        }
+      })
       .finally(() => setBusy(false));
-  }, [busy, placementId, channels]);
+  }, [busy, placementId, roster]);
+
+  // The confirmed half. Throws on failure so the dialog shows the reason and
+  // stays open; on success the plan is consumed (spec D1), so re-read.
+  const runOpenGroup = useCallback(async (): Promise<void> => {
+    const { conversationId } = await provisionPlacementRelay(placementId);
+    channels.setGroupConversationId(conversationId);
+    roster.refetch();
+  }, [placementId, channels, roster]);
 
   // After a terminal move (lost / moved_in) the LINKED relay group is NOT
   // auto-closed (nothing auto-closes now). If it is still OPEN, offer to close it.
@@ -387,6 +429,10 @@ export function PlacementDetail(): React.JSX.Element {
   // Open group text is a kebab action ONLY until a group exists (then the group
   // tab shows the thread).
   const canOpenGroup = placement.group_thread === undefined;
+  // The ROSTER's own gate: fewer than two reachable members and there is nothing
+  // to open a group text with (spec 6.2). The People card carries the reason.
+  const openGroupBlocked =
+    canOpenGroup && roster.roster !== null && !roster.roster.canOpenGroup;
 
   // The date-vocabulary facts line (spec section 6): phase, in-stage-since, the
   // voucher deadline, and the source-tour provenance - each a verb phrase, joined
@@ -491,6 +537,12 @@ export function PlacementDetail(): React.JSX.Element {
             landlord={landlord}
             channels={channels}
             commsVisible={commsVisible}
+            onOpenGroup={handleOpenGroup}
+            openGroupBusy={busy}
+            {...(openGroupBlocked && {
+              openGroupDisabledReason:
+                'Not enough people to open a group text - two reachable members are needed',
+            })}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
@@ -538,6 +590,11 @@ export function PlacementDetail(): React.JSX.Element {
               roster={roster.roster}
               onRetry={roster.refetch}
               {...(caseworker !== undefined && { caseworker })}
+              edit={{
+                owner: { type: 'placement', id: placementId },
+                suggestions: rosterSuggestionRows,
+                onApply: roster.apply,
+              }}
             >
               <KV k="Property" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
               {placement.fromTourId !== undefined ? (
@@ -630,6 +687,15 @@ export function PlacementDetail(): React.JSX.Element {
           conversationId={closeAsk.conversationId}
           memberSummary={closeAsk.memberSummary}
           onDone={() => setCloseAsk(null)}
+        />
+      ) : null}
+      {openPreview !== null ? (
+        <RosterConfirmDialog
+          title="Open the group text?"
+          preview={openPreview}
+          confirmLabel="Open group text"
+          onConfirm={runOpenGroup}
+          onClose={() => setOpenPreview(null)}
         />
       ) : null}
     </div>

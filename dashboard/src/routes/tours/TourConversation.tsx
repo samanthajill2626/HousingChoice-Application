@@ -62,6 +62,12 @@ export interface TourConversationProps {
    *  the page header banner. */
   onOpenGroup: () => void;
   openGroupBusy: boolean;
+  /** Why [Open group text] is unavailable RIGHT NOW even though the tour could
+   *  otherwise take one - today: the roster has fewer than two reachable
+   *  members (contact-rosters spec 6.2). Present -> the control is disabled and
+   *  carries this sentence, instead of failing at click time with the route's
+   *  400 relay_member_unresolvable. */
+  openGroupDisabledReason?: string;
   /** THIS tour's lifecycle events as shared-Timeline milestone pins (oldest ->
    *  newest), interleaved into the GROUP transcript so it shows tour activity,
    *  not just comms. The 1:1 tabs get their pins from the PERSON feed instead
@@ -96,6 +102,7 @@ export function TourConversation({
   channels,
   onOpenGroup,
   openGroupBusy,
+  openGroupDisabledReason,
   tourMilestones,
   noShowDraft,
   commsVisible,
@@ -215,10 +222,13 @@ export function TourConversation({
                 size="sm"
                 type="button"
                 onClick={onOpenGroup}
-                disabled={openGroupBusy || groupDead}
+                disabled={openGroupBusy || groupDead || openGroupDisabledReason !== undefined}
               >
                 {openGroupBusy ? 'Opening...' : 'Open group text'}
               </Button>
+              {openGroupDisabledReason !== undefined && !groupDead ? (
+                <p className={styles.emptyNote}>{openGroupDisabledReason}</p>
+              ) : null}
               {groupDead ? (
                 <p className={styles.emptyNote}>
                   This tour is {tour.status} - a group text cannot be opened.

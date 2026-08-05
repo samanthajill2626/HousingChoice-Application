@@ -25,9 +25,11 @@ import {
   getConversation,
   getNoShowCheckinDraft,
   patchTour,
+  previewTourRosterOpen,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
   type Contact,
+  type RosterPreview,
   type Tour,
   type TourOutcome,
   type TourStatus,
@@ -37,8 +39,9 @@ import { Button, Spinner, StatusBadge, useTwoPaneNarrow } from '../../ui/index.j
 import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
 import { contactDisplayName, formatAddress } from '../contact/format.js';
 import { PeopleCard } from '../shared/PeopleCard.js';
+import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
-import { rosterDrivesTabs, rosterPersonInputs } from '../shared/rosterPeople.js';
+import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
 import { formatRent } from '../listing/listingFormat.js';
 import { dateTime, shortDate } from '../placements/placementsFormat.js';
 import { useTour } from './useTour.js';
@@ -165,6 +168,21 @@ function TourDetailLoaded({
     ...(tour.groupThreadId !== undefined && { threadId: tour.groupThreadId }),
   });
   const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // Who belongs on this tour but is not on the roster - the property's other
+  // contacts and, when they have been removed, the tenant (spec 6.2). This is
+  // what makes the swap two clicks and a restore one.
+  const unitContacts = unit?.contacts;
+  const tenantId = tour.tenantId;
+  const rosterSuggestionRows = useMemo(
+    () =>
+      rosterSuggestions({
+        scope: 'tour',
+        roster: roster.roster,
+        unitContacts,
+        tenant: { contactId: tenantId, name: tenantName },
+      }),
+    [roster.roster, unitContacts, tenantId, tenantName],
+  );
   // Until the roster is a fact we can key on, the tabs keep the ids this page
   // already renders (tenant + the property's landlord) so they never blink out
   // mid-conversation - never a phone-gated resolver (a tenant with no mobile
@@ -210,6 +228,9 @@ function TourDetailLoaded({
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
   );
+  // The pre-open confirm's server-composed preview (spec 6.3). Non-null == the
+  // dialog is up; nothing is provisioned until the operator confirms.
+  const [openPreview, setOpenPreview] = useState<RosterPreview | null>(null);
 
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
@@ -227,8 +248,14 @@ function TourDetailLoaded({
     typeof tour.scheduledAt === 'string' && new Date(tour.scheduledAt).getTime() <= Date.now();
   const canSendNoShowCheckin =
     startPassed && (tour.status === 'scheduled' || tour.status === 'no_show');
+  // The ROSTER's own gate: fewer than two reachable members and there is nothing
+  // to open a group text with. Say so on a DISABLED control (the People card
+  // already carries the reason) instead of failing at click time with the
+  // route's 400 relay_member_unresolvable - the route keeps its guard regardless.
+  const rosterTooThin = roster.roster !== null && !roster.roster.canOpenGroup;
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
+  const openGroupBlocked = canOpenGroup && rosterTooThin;
   const isConverted = typeof tour.convertedPlacementId === 'string';
 
   // --- Mutations ------------------------------------------------------------
@@ -272,37 +299,42 @@ function TourDetailLoaded({
       });
   };
 
-  // Provision the masked group thread (members auto-resolved server-side); shared
-  // by the header kebab AND the left-pane empty state.
+  // Opening a group text SENDS the intro to real people, so it confirms first
+  // (spec 6.3): fetch the server-composed preview, show it, and provision only
+  // on confirm. Shared by the header kebab AND the left-pane empty state.
+  //
+  // A 409 relay_already_provisioned means someone else just opened it - refetch
+  // the roster (its source flips to `participants`) and NEVER open a dialog we
+  // would only be able to fail.
   const handleOpenGroup = async (): Promise<void> => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      const { tour: updated } = await createTourRelay(tourId);
-      setTour(updated);
-      if (typeof updated.groupThreadId === 'string') {
-        channels.setGroupConversationId(updated.groupThreadId);
-      }
+      setOpenPreview(await previewTourRosterOpen(tourId));
     } catch (err) {
-      if (err instanceof ApiError) {
-        // relay_member_unresolvable carries a human `detail` (which member has no
-        // phone) - show that, not the raw code.
-        const detail =
-          err.body !== null && typeof err.body === 'object'
-            ? (err.body as { detail?: unknown }).detail
-            : undefined;
-        setActionError(
-          err.code === 'relay_member_unresolvable' && typeof detail === 'string'
-            ? detail
-            : err.message,
-        );
+      if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+        roster.refetch();
       } else {
-        setActionError('Failed to open group text');
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
       }
     } finally {
       setBusy(false);
     }
+  };
+
+  // Provision the masked group thread (members auto-resolved server-side) - the
+  // confirmed half of handleOpenGroup. Throws on failure so the dialog can show
+  // the reason and stay open.
+  const runOpenGroup = async (): Promise<void> => {
+    const { tour: updated } = await createTourRelay(tourId);
+    setTour(updated);
+    if (typeof updated.groupThreadId === 'string') {
+      channels.setGroupConversationId(updated.groupThreadId);
+    }
+    // The plan was consumed at open (spec D1) - re-read so the card and the tabs
+    // switch to the thread's participants.
+    roster.refetch();
   };
 
   // Convert a convertible, not-yet-converted tour into a placement, then jump to
@@ -520,6 +552,10 @@ function TourDetailLoaded({
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
+            {...(openGroupBlocked && {
+              openGroupDisabledReason:
+                'Not enough people to open a group text - two reachable members are needed',
+            })}
             tourMilestones={tourMilestones}
             commsVisible={commsVisible}
             {...(noShowSeed !== null && { noShowDraft: noShowSeed })}
@@ -557,6 +593,11 @@ function TourDetailLoaded({
               roster={roster.roster}
               onRetry={roster.refetch}
               {...(caseworker !== undefined && { caseworker })}
+              edit={{
+                owner: { type: 'tour', id: tourId },
+                suggestions: rosterSuggestionRows,
+                onApply: roster.apply,
+              }}
             >
               <KV
                 k="Property"
@@ -630,6 +671,15 @@ function TourDetailLoaded({
           conversationId={closeAsk.conversationId}
           memberSummary={closeAsk.memberSummary}
           onDone={() => setCloseAsk(null)}
+        />
+      ) : null}
+      {openPreview !== null ? (
+        <RosterConfirmDialog
+          title="Open the group text?"
+          preview={openPreview}
+          confirmLabel="Open group text"
+          onConfirm={runOpenGroup}
+          onClose={() => setOpenPreview(null)}
         />
       ) : null}
     </div>

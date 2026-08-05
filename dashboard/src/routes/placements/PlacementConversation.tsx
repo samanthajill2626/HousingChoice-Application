@@ -77,6 +77,17 @@ export interface PlacementConversationProps {
    *  Conversation pane state + the shell breakpoint); we are always MOUNTED, so
    *  we cannot tell. Gates the 1:1 mark-read fan-out only - see the effect. */
   commsVisible: boolean;
+  /** Open the group text THROUGH THE PAGE. Opening sends a real intro text, so
+   *  the hub routes it via the pre-open confirm (contact-rosters spec 6.3);
+   *  without this prop the pane keeps its own direct provision (the standalone
+   *  render path its own tests exercise). */
+  onOpenGroup?: () => void;
+  /** True while the page's open flow is in flight (only with onOpenGroup). */
+  openGroupBusy?: boolean;
+  /** Why [Open group text] is unavailable right now - today: fewer than two
+   *  reachable roster members (spec 6.2). Disables the control and says so
+   *  rather than failing at click time. */
+  openGroupDisabledReason?: string;
 }
 
 export function PlacementConversation({
@@ -85,6 +96,9 @@ export function PlacementConversation({
   landlord,
   channels,
   commsVisible,
+  onOpenGroup: onOpenGroupFromPage,
+  openGroupBusy: pageOpenGroupBusy,
+  openGroupDisabledReason,
 }: PlacementConversationProps): React.JSX.Element {
   // Initial tab decided ONCE from the placement at first render; never re-synced.
   // 'group', else a contactId - here the tenant's.
@@ -162,7 +176,13 @@ export function PlacementConversation({
   // fresh conversationId so the relay thread mounts immediately.
   const [openGroupBusy, setOpenGroupBusy] = useState(false);
   const [groupError, setGroupError] = useState<string | null>(null);
+  // The page's flow wins when it owns the open (its confirm dialog is the gate).
+  const busyOpening = pageOpenGroupBusy ?? openGroupBusy;
   function onOpenGroup(): void {
+    if (onOpenGroupFromPage !== undefined) {
+      onOpenGroupFromPage();
+      return;
+    }
     if (openGroupBusy) return;
     setOpenGroupBusy(true);
     setGroupError(null);
@@ -190,10 +210,13 @@ export function PlacementConversation({
                 size="sm"
                 type="button"
                 onClick={onOpenGroup}
-                disabled={openGroupBusy || groupDead}
+                disabled={busyOpening || groupDead || openGroupDisabledReason !== undefined}
               >
-                {openGroupBusy ? 'Opening...' : 'Open group text'}
+                {busyOpening ? 'Opening...' : 'Open group text'}
               </Button>
+              {openGroupDisabledReason !== undefined && !groupDead ? (
+                <p className={styles.emptyNote}>{openGroupDisabledReason}</p>
+              ) : null}
               {groupError !== null ? <p className={styles.emptyNote}>{groupError}</p> : null}
               {groupDead ? (
                 <p className={styles.emptyNote}>

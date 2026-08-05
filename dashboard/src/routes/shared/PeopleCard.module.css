@@ -90,6 +90,98 @@ a.name:focus-visible {
   margin-top: var(--sp-2);
 }
 
+/* --- Edit mode (spec 6.2 / 6.7) ------------------------------------------ */
+
+/* Editing rows carry the 44px touch target at EVERY width - the remove control
+ * lives on them now, and a 44px target is not a phone-only courtesy. */
+.rowEditing {
+  min-height: 44px;
+}
+
+/* Remove / + Add: a small inline text button, anchored to the name line so it
+ * does not move when the role wraps under the name below 860px. */
+.rowAction {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  padding: var(--sp-1);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.rowAction:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.rowAction:disabled {
+  color: var(--c-text-subtle);
+  cursor: default;
+}
+
+.rowAction:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.rowError {
+  margin: 2px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}
+
+/* An inline suggestion is deliberately NOT a roster row: it sits outside the
+ * list, muted, so nobody reads it as someone who is already on the roster. */
+.suggestion {
+  padding: var(--sp-1) 0;
+}
+
+.suggestionLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-height: 44px;
+}
+
+.suggestionText {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.addBtn {
+  display: block;
+  background: transparent;
+  border: none;
+  padding: var(--sp-2) 0;
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+  cursor: pointer;
+}
+
+.addBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+.addForm {
+  padding: var(--sp-2) 0;
+}
+
+.addActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
 /* People above, the page's non-people rows (Property, provenance) below. */
 .divider {
   border: none;

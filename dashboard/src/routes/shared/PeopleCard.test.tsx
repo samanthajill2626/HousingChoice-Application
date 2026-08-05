@@ -12,12 +12,44 @@
 // Task 11 - nothing here may assume them.
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { describe, expect, it, vi } from 'vitest';
-import type { RosterMemberView, RosterView } from '../../api/index.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ApiError } from '../../api/index.js';
+import type { Contact, RosterMemberView, RosterPreview, RosterView } from '../../api/index.js';
+
+// Edit mode WRITES. Mock the barrel so every routing rule (plan vs live) is
+// asserted on the exact client fn that fired - the raw relay member fns are
+// mocked too, purely so a test can prove the card NEVER reaches them (A4).
+const addTourRosterMember = vi.fn();
+const removeTourRosterMember = vi.fn();
+const resetTourRoster = vi.fn();
+const addTourRosterLiveMember = vi.fn();
+const removeTourRosterLiveMember = vi.fn();
+const previewTourRosterAdd = vi.fn();
+const addConversationMember = vi.fn();
+const removeConversationMember = vi.fn();
+const getContacts = vi.fn();
+
+vi.mock('../../api/index.js', async () => {
+  const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
+  return {
+    ...actual,
+    addTourRosterMember: (...a: unknown[]) => addTourRosterMember(...a),
+    removeTourRosterMember: (...a: unknown[]) => removeTourRosterMember(...a),
+    resetTourRoster: (...a: unknown[]) => resetTourRoster(...a),
+    addTourRosterLiveMember: (...a: unknown[]) => addTourRosterLiveMember(...a),
+    removeTourRosterLiveMember: (...a: unknown[]) => removeTourRosterLiveMember(...a),
+    previewTourRosterAdd: (...a: unknown[]) => previewTourRosterAdd(...a),
+    addConversationMember: (...a: unknown[]) => addConversationMember(...a),
+    removeConversationMember: (...a: unknown[]) => removeConversationMember(...a),
+    getContacts: (...a: unknown[]) => getContacts(...a),
+  };
+});
+
 import { PeopleCard, type PeopleCardProps } from './PeopleCard.js';
+import type { RosterSuggestion } from './rosterPeople.js';
 
 function member(over: Partial<RosterMemberView> & { memberKey: string }): RosterMemberView {
   return { role: 'other', reachability: 'reachable', ...over };
@@ -38,7 +70,9 @@ function view(over: Partial<RosterView> = {}): RosterView {
   };
 }
 
-function renderCard(over: Partial<PeopleCardProps> = {}): { onRetry: () => void } {
+function renderCard(over: Partial<PeopleCardProps> = {}): {
+  onRetry: ReturnType<typeof vi.fn>;
+} {
   const onRetry = vi.fn();
   const props: PeopleCardProps = {
     scope: 'tour',
@@ -54,6 +88,11 @@ function renderCard(over: Partial<PeopleCardProps> = {}): { onRetry: () => void 
   );
   return { onRetry };
 }
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  getContacts.mockResolvedValue({ contacts: [], nextCursor: null });
+});
 
 /** The rendered roster rows, in payload order. */
 function rosterRows(): HTMLElement[] {
@@ -348,5 +387,255 @@ describe('PeopleCard - hub-owned rows + narrow viewport', () => {
     );
     expect(cardCss).toContain('@media (max-width: 860px)');
     expect(cardCss).toMatch(/\.nameLine\s*\{[^}]*flex-wrap:\s*wrap/);
+  });
+});
+
+// --- Edit mode (spec 6.2 / 6.4, Task 11) -----------------------------------
+// The card IS the roster editor. Every action persists ON CLICK (spec D5), and
+// WHICH endpoint it persists through is the whole safety story (spec section 7):
+// no thread -> the silent PLAN endpoints; a thread -> the OWNER-SCOPED
+// live-members call-through, with an ADD gated behind the confirm dialog.
+
+const PM_SUGGESTION: RosterSuggestion = {
+  contactId: 'c-pm',
+  name: 'Alicia Grant',
+  lead: 'Also on this property',
+  roleLabel: 'PM',
+  primaryContact: true,
+};
+const TENANT_SUGGESTION: RosterSuggestion = {
+  contactId: 'c-t',
+  name: 'Tasha Nguyen',
+  lead: 'On this tour',
+  roleLabel: 'tenant',
+};
+
+function pmContact(): Contact {
+  return {
+    contactId: 'c-pm',
+    type: 'landlord',
+    firstName: 'Alicia',
+    lastName: 'Grant',
+    phone: '+14045550188',
+  };
+}
+
+function preview(over: Partial<RosterPreview> = {}): RosterPreview {
+  return {
+    body: 'Adding Alicia Grant to this group text.',
+    recipients: [
+      { name: 'Tasha Nguyen', reachability: 'reachable' },
+      { name: 'Alicia Grant', reachability: 'reachable' },
+    ],
+    recipientCount: 2,
+    deferred: false,
+    ...over,
+  };
+}
+
+/** Render the card as the EDITOR and flip it into edit mode. */
+async function renderEditing(
+  over: Partial<PeopleCardProps> = {},
+  suggestions: RosterSuggestion[] = [],
+): Promise<{ onRetry: ReturnType<typeof vi.fn>; onApply: ReturnType<typeof vi.fn> }> {
+  const onApply = vi.fn();
+  const { onRetry } = renderCard({
+    edit: { owner: { type: 'tour', id: 'tour-abc' }, suggestions, onApply },
+    ...over,
+  });
+  await userEvent.click(screen.getByRole('button', { name: 'Edit people' }));
+  return { onRetry, onApply };
+}
+
+describe('PeopleCard - edit mode', () => {
+  it('Edit stops the rows being links, and Done returns to view mode', async () => {
+    await renderEditing();
+    expect(within(rosterRows()[0]!).queryByRole('link')).not.toBeInTheDocument();
+    expect(within(rosterRows()[0]!).getByText('Tasha Nguyen')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Done editing people' }));
+    expect(within(rosterRows()[0]!).getByRole('link', { name: 'Tasha Nguyen' })).toBeInTheDocument();
+  });
+
+  it('removes a member through the PLAN endpoint, silently, when no thread exists', async () => {
+    const next = view({ members: [view().members[0]!] });
+    removeTourRosterMember.mockResolvedValue(next);
+    const { onApply } = await renderEditing();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this tour' }));
+    await waitFor(() => expect(removeTourRosterMember).toHaveBeenCalledWith('tour-abc', 'c-pm'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(onApply).toHaveBeenCalledWith(next);
+    expect(removeTourRosterLiveMember).not.toHaveBeenCalled();
+  });
+
+  it("DISABLES the last member's remove and says why", async () => {
+    await renderEditing({ roster: view({ members: [view().members[0]!] }) });
+    expect(screen.getByRole('button', { name: 'Remove Tasha Nguyen from this tour' })).toBeDisabled();
+    expect(
+      screen.getByText(
+        'A roster needs at least one member. Add someone else before removing this one.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('suggests the property roster members who are not on this roster', async () => {
+    addTourRosterMember.mockResolvedValue(view());
+    await renderEditing({ roster: view({ members: [view().members[0]!] }) }, [PM_SUGGESTION]);
+    expect(
+      screen.getByText('Also on this property: Alicia Grant - PM - primary contact'),
+    ).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
+    await waitFor(() =>
+      expect(addTourRosterMember).toHaveBeenCalledWith('tour-abc', { contactId: 'c-pm' }),
+    );
+  });
+
+  it('restores a removed tenant in ONE click from the missing-tenant suggestion', async () => {
+    addTourRosterMember.mockResolvedValue(view());
+    const { onApply } = await renderEditing(
+      { roster: view({ members: [view().members[1]!], tenantOnRoster: false }) },
+      [TENANT_SUGGESTION],
+    );
+    expect(screen.getByText('On this tour: Tasha Nguyen - tenant')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Add Tasha Nguyen to this tour' }));
+    await waitFor(() =>
+      expect(addTourRosterMember).toHaveBeenCalledWith('tour-abc', { contactId: 'c-t' }),
+    );
+    expect(onApply).toHaveBeenCalled();
+  });
+
+  it('adds ANY contact through the committed-pick search', async () => {
+    getContacts.mockImplementation((params: { type: string }) =>
+      Promise.resolve({
+        contacts: params.type === 'landlord' ? [pmContact()] : [],
+        nextCursor: null,
+      }),
+    );
+    addTourRosterMember.mockResolvedValue(view());
+    await renderEditing({ roster: view({ members: [view().members[0]!] }) });
+    await userEvent.click(screen.getByRole('button', { name: '+ Add any contact' }));
+    const search = await screen.findByRole('combobox', { name: 'Add any contact' });
+    await userEvent.type(search, 'Alicia');
+    await userEvent.click(await screen.findByRole('option', { name: 'Alicia Grant' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Add contact to this tour' }));
+    await waitFor(() =>
+      expect(addTourRosterMember).toHaveBeenCalledWith('tour-abc', { contactId: 'c-pm' }),
+    );
+  });
+
+  it('offers Reset only when the roster is customized and no thread exists', async () => {
+    resetTourRoster.mockResolvedValue(view());
+    const { onApply } = await renderEditing({
+      roster: view({ source: 'plan', customized: true, defaultPrimaryName: 'Marcus Webb' }),
+    });
+    // Confirmless: it is a plan edit, nothing has been sent.
+    await userEvent.click(screen.getByRole('button', { name: 'Reset to property default' }));
+    await waitFor(() => expect(resetTourRoster).toHaveBeenCalledWith('tour-abc'));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(onApply).toHaveBeenCalled();
+  });
+
+  it('keeps Reset DISABLED once a thread exists (the plan was consumed)', async () => {
+    await renderEditing({
+      roster: view({ source: 'participants', customized: true, threadExists: true }),
+    });
+    expect(screen.getByRole('button', { name: 'Reset to property default' })).toBeDisabled();
+    expect(resetTourRoster).not.toHaveBeenCalled();
+  });
+});
+
+describe('PeopleCard - edit mode against a LIVE group text', () => {
+  const live = (over: Partial<RosterView> = {}): RosterView =>
+    view({ source: 'participants', threadExists: true, canOpenGroup: false, ...over });
+
+  it('an ADD confirms first, then calls the OWNER-SCOPED live endpoint (never the raw relay route)', async () => {
+    previewTourRosterAdd.mockResolvedValue(preview());
+    addTourRosterLiveMember.mockResolvedValue(live());
+    const { onApply } = await renderEditing({ roster: live({ members: [view().members[0]!] }) }, [
+      PM_SUGGESTION,
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
+    const dialog = await screen.findByRole('dialog', {
+      name: 'Add Alicia Grant to the group text?',
+    });
+    expect(previewTourRosterAdd).toHaveBeenCalledWith('tour-abc', 'c-pm');
+    // Nothing is written until the operator confirms.
+    expect(addTourRosterLiveMember).not.toHaveBeenCalled();
+    expect(within(dialog).getByText('Adding Alicia Grant to this group text.')).toBeInTheDocument();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Add and notify' }));
+    await waitFor(() => expect(addTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'c-pm'));
+    expect(addConversationMember).not.toHaveBeenCalled();
+    expect(addTourRosterMember).not.toHaveBeenCalled();
+    expect(onApply).toHaveBeenCalledWith(live());
+  });
+
+  it('a REMOVE goes straight through live-members BY MEMBER KEY - never a phone, never a confirm', async () => {
+    removeTourRosterLiveMember.mockResolvedValue(live());
+    await renderEditing({
+      roster: live({
+        members: [
+          view().members[0]!,
+          {
+            memberKey: 'phone:+14045550199',
+            phoneLast4: '0199',
+            role: 'added',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    });
+    await userEvent.click(
+      screen.getByRole('button', { name: 'Remove Number ending 0199 from this tour' }),
+    );
+    await waitFor(() =>
+      expect(removeTourRosterLiveMember).toHaveBeenCalledWith('tour-abc', 'phone:+14045550199'),
+    );
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(removeConversationMember).not.toHaveBeenCalled();
+  });
+});
+
+describe('PeopleCard - refusals', () => {
+  it('NEVER resubmits a plan edit through the live endpoint on 409 thread_exists', async () => {
+    addTourRosterMember.mockRejectedValue(
+      new ApiError(409, 'thread_exists', 'thread_exists', {
+        error: 'thread_exists',
+        message: 'This tour already has a group text - use the live roster controls.',
+      }),
+    );
+    const { onRetry } = await renderEditing({ roster: view({ members: [view().members[0]!] }) }, [
+      PM_SUGGESTION,
+    ]);
+    await userEvent.click(screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }));
+    await waitFor(() => expect(addTourRosterMember).toHaveBeenCalledTimes(1));
+    // The whole point: the dropped intent must NOT escalate into a member_added
+    // text nobody confirmed.
+    expect(addTourRosterLiveMember).not.toHaveBeenCalled();
+    expect(addConversationMember).not.toHaveBeenCalled();
+    expect(previewTourRosterAdd).not.toHaveBeenCalled();
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    // The card refetches and says the change was dropped.
+    expect(onRetry).toHaveBeenCalled();
+    expect(
+      await screen.findByText(
+        'A group text was just opened for this tour - that change was not applied. Try it again to notify the group.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it("renders the server's own refusal copy on the row and refetches", async () => {
+    removeTourRosterMember.mockRejectedValue(
+      new ApiError(409, 'roster_conflict', 'roster_conflict', {
+        error: 'roster_conflict',
+        message: 'Someone else changed this roster at the same time. It has been refreshed.',
+      }),
+    );
+    const { onRetry } = await renderEditing();
+    await userEvent.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this tour' }));
+    expect(
+      await within(rosterRows()[1]!).findByText(
+        'Someone else changed this roster at the same time. It has been refreshed.',
+      ),
+    ).toBeInTheDocument();
+    expect(onRetry).toHaveBeenCalled();
   });
 });

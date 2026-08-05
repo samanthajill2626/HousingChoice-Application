@@ -148,6 +148,10 @@ test('hub: opens the group text from the empty state (button disappears, thread 
   // mounts the fresh thread; the button (and empty state) disappear.
   const openBtn = page.getByRole('button', { name: 'Open group text' });
   await openBtn.click();
+  // Opening sends the intro, so it confirms first (contact-rosters spec 6.3).
+  const confirm = page.getByRole('dialog', { name: 'Open the group text?' });
+  await expect(confirm).toBeVisible({ timeout: 15_000 });
+  await confirm.getByRole('button', { name: 'Open group text' }).click();
   await expect(openBtn).toHaveCount(0, { timeout: 15_000 });
   await expect(page.getByText('No group text yet')).toHaveCount(0);
   // The group transcript mounted: its composer (a "Reply message" box) is present.

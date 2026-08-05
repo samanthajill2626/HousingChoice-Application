@@ -34,6 +34,8 @@ const getConversations = vi.fn();
 const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
+// [Open group text] previews the server-composed intro first (spec 6.3).
+const previewPlacementRosterOpen = vi.fn();
 // The 1:1 tabs are contact-keyed panes now: every render mounts
 // useContactTimeline for the active party, and viewing an unread 1:1 tab marks
 // the CONTACT read (the inbox fan-out). Both are mocked in EVERY test - an
@@ -70,6 +72,7 @@ vi.mock('../../api/index.js', async () => {
     getConversation: (...a: unknown[]) => getConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
+    previewPlacementRosterOpen: (...a: unknown[]) => previewPlacementRosterOpen(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
     getPlacementRoster: (...a: unknown[]) => getPlacementRoster(...a),
@@ -175,6 +178,15 @@ beforeEach(() => {
   });
   markConversationRead.mockReset().mockResolvedValue(undefined);
   provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
+  previewPlacementRosterOpen.mockReset().mockResolvedValue({
+    body: 'Hi - this is Housing Choice connecting you about this placement.',
+    recipients: [
+      { name: 'Ann Tenant', reachability: 'reachable' },
+      { name: 'Lon Landlord', reachability: 'reachable' },
+    ],
+    recipientCount: 2,
+    deferred: false,
+  });
   getContactTimeline.mockReset().mockResolvedValue({ items: [], nextCursor: null });
   markInboxRead.mockReset().mockResolvedValue(undefined);
   getPlacementRoster.mockReset().mockResolvedValue(makeRoster());
@@ -300,6 +312,24 @@ describe('PlacementDetail - header', () => {
     expect(screen.queryByRole('menuitem', { name: 'Open group text' })).not.toBeInTheDocument();
     // The other actions still show.
     expect(screen.getByRole('menuitem', { name: 'Mark lost' })).toBeInTheDocument();
+  });
+
+  // contact-rosters Task 11: opening a group is a REAL send, so it confirms.
+  it('previews the intro before provisioning, and provisions only on confirm', async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    expect(previewPlacementRosterOpen).toHaveBeenCalledWith('c1');
+    expect(
+      within(dialog).getByText('Hi - this is Housing Choice connecting you about this placement.'),
+    ).toBeInTheDocument();
+    expect(provisionPlacementRelay).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await waitFor(() => expect(provisionPlacementRelay).toHaveBeenCalledWith('c1'));
   });
 });
 

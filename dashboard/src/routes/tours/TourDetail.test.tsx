@@ -35,6 +35,9 @@ const getContactTimeline = vi.fn();
 // The People card AND the 1:1 tab set both read the resolved roster now
 // (contact-rosters Task 8) - one payload, one source.
 const getTourRoster = vi.fn();
+// [Open group text] is a REAL send now: it previews the server-composed intro
+// first and provisions only after the confirm (contact-rosters spec 6.3).
+const previewTourRosterOpen = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
@@ -60,6 +63,7 @@ vi.mock('../../api/index.js', async () => {
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     getTourRoster: (...a: unknown[]) => getTourRoster(...a),
+    previewTourRosterOpen: (...a: unknown[]) => previewTourRosterOpen(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
@@ -208,6 +212,15 @@ beforeEach(() => {
   getConversationMembers.mockResolvedValue([]);
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   getTourRoster.mockResolvedValue(makeRoster());
+  previewTourRosterOpen.mockResolvedValue({
+    body: 'Hi Ann and Lon - this is Housing Choice connecting you about 123 Main St.',
+    recipients: [
+      { name: 'Ann Tenant', reachability: 'reachable' },
+      { name: 'Lon Landlord', reachability: 'reachable' },
+    ],
+    recipientCount: 2,
+    deferred: false,
+  });
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
   // The 1:1 panes create their thread on first send (ensureContactConversation);
@@ -1248,7 +1261,7 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
 });
 
 describe('TourDetail - conversation empty states', () => {
-  it('group with no thread shows "No group text yet" + Open group text (createTourRelay)', async () => {
+  it('group with no thread shows "No group text yet" + Open group text (confirm, then createTourRelay)', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
     createTourRelay.mockResolvedValue({ tour: makeTour({ groupThreadId: 'g-new' }), conversation: {} });
     renderDetail();
@@ -1257,7 +1270,10 @@ describe('TourDetail - conversation empty states', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
     expect(screen.getByText('No group text yet')).toBeInTheDocument();
     await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
-    expect(createTourRelay).toHaveBeenCalledWith('tour-abc');
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    expect(createTourRelay).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc'));
   });
 
   it('a 1:1 with no thread shows the "with <name>" empty state + creates on first send', async () => {
@@ -1366,5 +1382,91 @@ describe('TourDetail - mobile', () => {
     await waitLoaded();
 
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'tenant-1' }));
+  });
+});
+
+// --- contact-rosters Task 11: the pre-open confirm + the card as editor ------
+describe('TourDetail - pre-open confirm + roster editing', () => {
+  it('previews the SERVER-composed intro before provisioning, and provisions only on confirm', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
+    createTourRelay.mockResolvedValue({
+      tour: makeTour({ groupThreadId: 'g-new' }),
+      conversation: {},
+    });
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    expect(previewTourRosterOpen).toHaveBeenCalledWith('tour-abc');
+    expect(
+      within(dialog).getByText(
+        'Hi Ann and Lon - this is Housing Choice connecting you about 123 Main St.',
+      ),
+    ).toBeInTheDocument();
+    expect(within(dialog).getByText('2 recipients will receive this.')).toBeInTheDocument();
+    // NOTHING is provisioned until the operator confirms.
+    expect(createTourRelay).not.toHaveBeenCalled();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc'));
+  });
+
+  it('a 409 relay_already_provisioned REFETCHES the roster instead of opening a dialog', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
+    previewTourRosterOpen.mockRejectedValue(
+      new ApiError(409, 'relay_already_provisioned', 'relay_already_provisioned', {
+        error: 'relay_already_provisioned',
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await waitFor(() => expect(getTourRoster).toHaveBeenCalledTimes(1));
+    await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+
+    await waitFor(() => expect(getTourRoster).toHaveBeenCalledTimes(2));
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
+    expect(createTourRelay).not.toHaveBeenCalled();
+  });
+
+  it("disables [Open group text] with the roster's reason when too few members are reachable", async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
+    getTourRoster.mockResolvedValue(makeRoster({ canOpenGroup: false }));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled(),
+    );
+    expect(
+      screen.getAllByText(
+        'Not enough people to open a group text - two reachable members are needed',
+      ).length,
+    ).toBeGreaterThan(0);
+    expect(previewTourRosterOpen).not.toHaveBeenCalled();
+  });
+
+  it("the People card edits the roster and suggests the property's other contacts", async () => {
+    getUnit.mockResolvedValue(
+      makeUnit({
+        contacts: [
+          { contactId: 'c-pm', role: 'pm', primaryContact: true, name: 'Alicia Grant' },
+          { contactId: 'landlord-1', role: 'landlord', primaryContact: false, name: 'Lon Landlord' },
+        ],
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(await screen.findByRole('button', { name: 'Edit people' }));
+    // The PM is on the PROPERTY but not on this tour - one click puts them here.
+    expect(
+      screen.getByText('Also on this property: Alicia Grant - PM - primary contact'),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Add Alicia Grant to this tour' }),
+    ).toBeInTheDocument();
+    // The landlord IS on the roster already, so they are never suggested.
+    expect(screen.queryByText(/Also on this property: Lon Landlord/)).not.toBeInTheDocument();
   });
 });

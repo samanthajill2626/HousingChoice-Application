@@ -1617,11 +1617,17 @@ export class Scenario {
       // tab to reach its in-place empty state with the [Open group text] button
       // (the same action the header kebab offers).
       await this.page.getByRole('tab', { name: 'Group text' }).click();
+      // Opening SENDS the intro to real people, so it confirms first
+      // (contact-rosters spec 6.3): the click shows the server-composed preview
+      // and the dialog's own [Open group text] is what provisions.
+      await this.page.getByRole('button', { name: 'Open group text' }).click();
+      const confirm = this.page.getByRole('dialog', { name: 'Open the group text?' });
+      await expect(confirm).toBeVisible({ timeout: 15_000 });
       const [res] = await Promise.all([
         this.page.waitForResponse(
           (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
         ),
-        this.page.getByRole('button', { name: 'Open group text' }).click(),
+        confirm.getByRole('button', { name: 'Open group text' }).click(),
       ]);
       expect(res.status(), await res.text()).toBe(201);
       const { tour: updated, conversation } = (await res.json()) as {

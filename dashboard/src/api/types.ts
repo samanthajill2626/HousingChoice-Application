@@ -753,6 +753,40 @@ export interface RosterView {
   threadExists: boolean;
 }
 
+/** One line of a preview's per-member deliverability (spec 6.3): who the send
+ *  touches, receiving or not, and why not. */
+export interface RosterPreviewRecipient {
+  name?: string;
+  reachability: RosterReachability;
+}
+
+/**
+ * What a group send WOULD do, resolved server-side. Returned as the BODY by
+ * `GET .../roster/preview-open` and `POST .../roster/preview-add`.
+ *
+ * `body` is composed from the `relay.intro` / `relay.member_added` catalog
+ * entries BY THE SERVER and is rendered verbatim: the templates are
+ * founder-editable, so a browser-side copy would drift the first time one is
+ * edited (spec 6.3). The client never rebuilds it and never re-derives
+ * `quietEndsAt` (the DST-safe window math is the server's).
+ *
+ * `deferred` is HONEST BUT INFORMATIONAL until slice 6 wires the deferral -
+ * a confirmed send still goes out immediately, which is exactly what the
+ * dialog's interim copy says.
+ */
+export interface RosterPreview {
+  /** The exact SMS body the group receives. */
+  body: string;
+  /** Everyone the send touches, in roster order, receiving or not. */
+  recipients: RosterPreviewRecipient[];
+  /** DISTINCT reachable numbers - what "3 recipients" honestly means. */
+  recipientCount: number;
+  /** Quiet hours hold right now. */
+  deferred: boolean;
+  /** ISO instant the quiet window ends; present only when `deferred`. */
+  quietEndsAt?: string;
+}
+
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
 
 /**

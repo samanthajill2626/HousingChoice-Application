@@ -39,8 +39,15 @@ export interface RosterState {
   status: 'loading' | 'ready' | 'error';
   /** The payload, or null while loading / after a failure. */
   roster: RosterView | null;
-  /** Re-run the fetch (the card's Retry control). */
+  /** Re-run the fetch (the card's Retry control, and the settle after a refused
+   *  write). */
   refetch: () => void;
+  /** Commit a write's returned payload. Every roster mutation answers with the
+   *  SAME unwrapped RosterView this hook fetches, so applying it directly keeps
+   *  the card, the 1:1 tabs and the notes in step WITHOUT a refetch round-trip
+   *  (a plan edit emits no SSE event, so waiting for one would leave the tabs
+   *  stale). */
+  apply: (roster: RosterView) => void;
 }
 
 /** Debounce window (ms) for SSE-triggered refetches - coalesces a burst of
@@ -128,6 +135,13 @@ export function useRoster(owner: RosterOwnerRef): RosterState {
 
   const refetch = useCallback(() => void load(), [load]);
 
+  // A write's response IS the fresh roster; commit it under the CURRENT key so a
+  // pointer that moved mid-write can never be masked by a stale answer.
+  const apply = useCallback(
+    (next: RosterView) => setState({ status: 'ready', roster: next, forKey }),
+    [forKey],
+  );
+
   // Committed state describes a DIFFERENT owner/pointer -> the new fetch is in
   // flight; report loading rather than the previous answer.
   const stale = state.forKey !== forKey;
@@ -136,7 +150,8 @@ export function useRoster(owner: RosterOwnerRef): RosterState {
       status: stale ? ('loading' as const) : state.status,
       roster: stale ? null : state.roster,
       refetch,
+      apply,
     }),
-    [stale, state.status, state.roster, refetch],
+    [stale, state.status, state.roster, refetch, apply],
   );
 }

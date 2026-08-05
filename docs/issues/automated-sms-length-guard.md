@@ -17,11 +17,20 @@ four segments sends silently at 3-4x the intended cost.
 
 Static catalog defaults are safe by inspection - a human wrote them and they are
 short. The exposure is INTERPOLATED bodies, where a code-controlled template is
-joined to user-controlled data of unbounded length. Concrete example: unit
-addresses are capped at `line1` 200 + `line2` 100 chars (`lib/address.ts`
-FIELD_CAPS), so a LEGAL address is about 300 characters. Interpolated into a
-tour reminder that is roughly 3 segments per rung, across a 4-rung ladder. The
-same shape applies to `{members}` in the relay intro (a large roster), to
+joined to user-controlled data of effectively unbounded length.
+
+Concrete example, and note how weak the existing bound actually is. Unit address
+length has NO storage-level limit (DynamoDB is schemaless). The only cap is an
+application constant - `FIELD_CAPS` in `lib/address.ts:33` (`line1` 200,
+`line2` 100), checked by `validateAddress` at `address.ts:66`, reached from
+exactly ONE call site: the unit write surface `lib/unitFields.ts:175`. So a
+validated STRUCTURED address can reach ~300 characters, which is roughly 3
+segments per rung across a 4-rung tour ladder. But `validateAddress` requires an
+object, so it never applies to a legacy plain-STRING address, and the seeds write
+straight to DynamoDB bypassing `unitFields` altogether - which is why every
+seeded address is an uncapped plain string. Those have no bound whatsoever.
+
+The same shape applies to `{members}` in the relay intro (a large roster), to
 `{firstName}` in an operator-overridden welcome, and to any future token.
 
 The catalog's own `maxChars` field is the intended guard. It was written as

@@ -137,7 +137,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.receipt_check': {
     id: 'nudge.receipt_check',
     default:
-      'Just checking in — did the rental application come through? Let us know if you need it re-sent.',
+      'Just checking in - did the rental application come through? Let us know if you need it re-sent.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -153,7 +153,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'nudge.approval_check': {
     id: 'nudge.approval_check',
-    default: 'Checking in — any decision yet on the application we sent over?',
+    default: 'Checking in - any decision yet on the application we sent over?',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -162,7 +162,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.rta_window_closing': {
     id: 'nudge.rta_window_closing',
     default:
-      'Friendly reminder — the 48-hour RTA window is closing. Have you been able to submit it?',
+      'Friendly reminder - the 48-hour RTA window is closing. Have you been able to submit it?',
     class: 'operational',
     editable: true,
     channel: 'sms',

@@ -24,6 +24,12 @@ export interface TourActionsMenuProps {
   /** Open group text (no group yet + tour not dead). */
   canOpenGroup: boolean;
   onOpenGroup: () => void;
+  /** Why the group text cannot be opened RIGHT NOW even though the tour could
+   *  otherwise take one - today: fewer than two reachable roster members
+   *  (contact-rosters spec 6.2). The item stays VISIBLE and DISABLED carrying
+   *  this reason, instead of failing at click time with the route's
+   *  400 relay_member_unresolvable. Same gate the pane's own button obeys. */
+  openGroupDisabledReason?: string;
   /** True while a mutation is in flight (disables the items). */
   busy?: boolean;
 }
@@ -39,6 +45,7 @@ export function TourActionsMenu({
   onSendNoShowCheckin,
   canOpenGroup,
   onOpenGroup,
+  openGroupDisabledReason,
   busy = false,
 }: TourActionsMenuProps): React.JSX.Element | null {
   const [open, setOpen] = useState(false);
@@ -125,7 +132,8 @@ export function TourActionsMenu({
               type="button"
               role="menuitem"
               className={styles.item}
-              disabled={busy}
+              disabled={busy || openGroupDisabledReason !== undefined}
+              {...(openGroupDisabledReason !== undefined && { title: openGroupDisabledReason })}
               onClick={() => run(onOpenGroup)}
             >
               Open group text

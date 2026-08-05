@@ -463,6 +463,13 @@ export function PlacementDetail(): React.JSX.Element {
   // to open a group text with (spec 6.2). The People card carries the reason.
   const openGroupBlocked =
     canOpenGroup && roster.roster !== null && !roster.roster.canOpenGroup;
+  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // header kebab's menu item are the same click, so they carry the same reason
+  // and the same disabled state (spec 6.2 - the reason on a disabled control
+  // rather than a click-time 400 relay_member_unresolvable).
+  const openGroupBlockedReason = openGroupBlocked
+    ? 'Not enough people to open a group text - two reachable members are needed'
+    : undefined;
   // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
   // again would silently supersede it with a new dueAt, so the control says
   // when it opens instead - and the People card carries the two ways out.
@@ -528,6 +535,9 @@ export function PlacementDetail(): React.JSX.Element {
             onMove={requestMove}
             canOpenGroup={canOpenGroup}
             onOpenGroup={handleOpenGroup}
+            {...(openGroupBlockedReason !== undefined && {
+              openGroupDisabledReason: openGroupBlockedReason,
+            })}
             onMarkLost={() => requestMove('lost')}
             onSetFollowUp={() => setFollowUpOpen(true)}
             busy={busy}
@@ -577,9 +587,8 @@ export function PlacementDetail(): React.JSX.Element {
             openGroupBusy={busy}
             {...(pendingOpenNote !== undefined
               ? { openGroupDisabledReason: pendingOpenNote }
-              : openGroupBlocked && {
-                  openGroupDisabledReason:
-                    'Not enough people to open a group text - two reachable members are needed',
+              : openGroupBlockedReason !== undefined && {
+                  openGroupDisabledReason: openGroupBlockedReason,
                 })}
           />
         </div>
@@ -752,6 +761,7 @@ function PlacementActionsMenu({
   onMove,
   canOpenGroup,
   onOpenGroup,
+  openGroupDisabledReason,
   onMarkLost,
   onSetFollowUp,
   busy = false,
@@ -760,6 +770,11 @@ function PlacementActionsMenu({
   onMove: (toStage: PlacementStage) => void;
   canOpenGroup: boolean;
   onOpenGroup: () => void;
+  /** Why the group text cannot be opened right now even though the placement
+   *  could otherwise take one - today: fewer than two reachable roster members
+   *  (spec 6.2). The item stays VISIBLE and DISABLED carrying this reason,
+   *  instead of failing at click time with 400 relay_member_unresolvable. */
+  openGroupDisabledReason?: string;
   onMarkLost: () => void;
   onSetFollowUp: () => void;
   busy?: boolean;
@@ -830,7 +845,8 @@ function PlacementActionsMenu({
               type="button"
               role="menuitem"
               className={menuStyles.item}
-              disabled={busy}
+              disabled={busy || openGroupDisabledReason !== undefined}
+              {...(openGroupDisabledReason !== undefined && { title: openGroupDisabledReason })}
               onClick={() => run(onOpenGroup)}
             >
               Open group text

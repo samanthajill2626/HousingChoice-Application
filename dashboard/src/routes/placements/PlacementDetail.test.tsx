@@ -362,6 +362,45 @@ describe('PlacementDetail - header', () => {
     expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
     expect(getConversation).not.toHaveBeenCalledWith('g1');
   });
+
+  it("the KEBAB's [Open group text] is disabled by the same too-thin roster", async () => {
+    // Spec 6.2 asks for the reason on a DISABLED control instead of a click-time
+    // 400 relay_member_unresolvable - the kebab is a third way to that click, so
+    // it obeys the same gate as the pane button and the card note.
+    getPlacementRoster.mockResolvedValue(makeRoster({ canOpenGroup: false }));
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    const item = await screen.findByRole('menuitem', { name: 'Open group text' });
+    // Still VISIBLE (an absent control teaches nothing), disabled, with the why.
+    await waitFor(() => expect(item).toBeDisabled());
+    expect(item).toHaveAttribute(
+      'title',
+      'Not enough people to open a group text - two reachable members are needed',
+    );
+    await user.click(item);
+    expect(previewPlacementRosterOpen).not.toHaveBeenCalled();
+  });
+
+  it('the KEBAB stays LIVE while an open is merely deferred (Send now anyway)', async () => {
+    // The pending-open case is deliberately NOT blocked: re-confirming and
+    // choosing "Send now anyway" is the second way to force a deferred open.
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        pending: [
+          { actionId: 'placement#c1#open', kind: 'open_group', dueAt: '2026-08-05T12:00:00.000Z' },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Open group text' })).toBeEnabled();
+  });
 });
 
 describe('PlacementDetail', () => {

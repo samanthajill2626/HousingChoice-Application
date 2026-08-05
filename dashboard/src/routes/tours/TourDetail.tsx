@@ -263,6 +263,13 @@ function TourDetailLoaded({
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   const openGroupBlocked = canOpenGroup && rosterTooThin;
+  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // header kebab's menu item are the same click, so they carry the same reason
+  // and the same disabled state (spec 6.2 - the reason on a disabled control
+  // rather than a click-time 400 relay_member_unresolvable).
+  const openGroupBlockedReason = openGroupBlocked
+    ? 'Not enough people to open a group text - two reachable members are needed'
+    : undefined;
   // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
   // again would silently supersede it with a new dueAt, so the control says
   // when it opens instead - and the People card carries the two ways out.
@@ -547,6 +554,9 @@ function TourDetailLoaded({
             onSendNoShowCheckin={handleSendNoShowCheckin}
             canOpenGroup={canOpenGroup}
             onOpenGroup={() => void handleOpenGroup()}
+            {...(openGroupBlockedReason !== undefined && {
+              openGroupDisabledReason: openGroupBlockedReason,
+            })}
             busy={busy}
           />
         </div>
@@ -593,9 +603,8 @@ function TourDetailLoaded({
             openGroupBusy={busy}
             {...(pendingOpenNote !== undefined
               ? { openGroupDisabledReason: pendingOpenNote }
-              : openGroupBlocked && {
-                  openGroupDisabledReason:
-                    'Not enough people to open a group text - two reachable members are needed',
+              : openGroupBlockedReason !== undefined && {
+                  openGroupDisabledReason: openGroupBlockedReason,
                 })}
             tourMilestones={tourMilestones}
             commsVisible={commsVisible}

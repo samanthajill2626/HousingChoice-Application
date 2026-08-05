@@ -517,6 +517,156 @@ describe('placements API — derive-on-create (§7)', () => {
   });
 });
 
+// ============================================================================
+// GET /api/placements/:placementId/roster (contact-rosters T5)
+// ============================================================================
+//
+// The placement twin of the tour roster endpoint - SAME serializer
+// (lib/rosterResolution.describeRoster), so the exhaustive derivation cases
+// live in toursApi.test.ts. These pin the placement wiring: the owner shape
+// (group_thread is the pointer), the property default, and the PII rule.
+
+describe('GET /api/placements/:placementId/roster', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  const TENANT_PHONE = '+15550400011';
+  const PM_PHONE = '+15550400013';
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+    world.contacts.push({
+      contactId: 'c-tenant',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      firstName: 'Tasha',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'c-owner',
+      type: 'landlord',
+      phone: '+15550400012',
+      firstName: 'Ollie',
+      lastName: 'Owner',
+    });
+    world.contacts.push({
+      contactId: 'c-pm',
+      type: 'landlord',
+      phone: PM_PHONE,
+      firstName: 'Pat',
+      lastName: 'Manager',
+    });
+    world.units.set('unit-r', {
+      unitId: 'unit-r',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+  });
+
+  const getRoster = (placementId: string) =>
+    request(app)
+      .get(`/api/placements/${placementId}/roster`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+  it('DEFAULT source: the tenant + the property PRIMARY contact (the PM), roles derived', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'default',
+      customized: false,
+      tenantOnRoster: true,
+      canOpenGroup: true,
+      threadExists: false,
+      defaultPrimaryName: 'Pat Manager',
+    });
+    expect(
+      (res.body.members as { memberKey: string; role: string }[]).map((m) => [m.memberKey, m.role]),
+    ).toEqual([
+      ['c-tenant', 'tenant'],
+      ['c-pm', 'pm'],
+    ]);
+  });
+
+  it('PARTICIPANTS source once a group_thread exists - and never leaks a full phone', async () => {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-pr', {
+      conversationId: 'conv-pr',
+      participant_phone: '+15550409000',
+      pool_number: '+15550409000',
+      status: 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      created_at: now,
+    });
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+      group_thread: 'conv-pr',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'participants',
+      threadExists: true,
+      canOpenGroup: false,
+      tenantOnRoster: true,
+    });
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain(TENANT_PHONE);
+    expect(body).not.toContain(PM_PHONE);
+    expect(body).toContain('0011'); // last4 only
+  });
+
+  it('a plan override wins while no thread exists, and drops the tenant off the roster', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+    await world.placementsRepo.setRoster(
+      p.placementId,
+      [{ contactId: 'c-owner' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const res = await getRoster(p.placementId);
+    expect(res.body).toMatchObject({
+      source: 'plan',
+      customized: true,
+      tenantOnRoster: false,
+      canOpenGroup: true,
+    });
+    expect((res.body.members as { role: string }[]).map((m) => m.role)).toEqual(['owner', 'pm']);
+  });
+
+  it('404s for an unknown placement', async () => {
+    const res = await getRoster('placement-ghost');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('placement_not_found');
+  });
+});
+
 describe('toPlacementUpdatedEvent (M1.10b live-update payload)', () => {
   it('maps attention to a boolean (both states) and never carries PII', () => {
     const base = { placementId: 'c', tenantId: 't', unitId: 'u', stage: 'awaiting_approval' } as PlacementItem;

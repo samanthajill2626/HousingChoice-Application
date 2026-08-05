@@ -2713,6 +2713,379 @@ describe('GET /api/tours — ?status= filter', () => {
 });
 
 // ============================================================================
+// GET /api/tours/:tourId/roster - the People card payload (contact-rosters T5)
+// ============================================================================
+//
+// One shared serializer (lib/rosterResolution.describeRoster) answers for both
+// owners, so these cases are the contract for the placement twin too. The two
+// rules the payload exists to keep honest:
+//   1. NO FULL PHONE EVER LEAVES THE SERVER - rows carry memberKey + last4.
+//   2. FACT-mode reachability is derived from the phone STORED ON THE
+//      PARTICIPANT ROW (what the fan-out will text), never the contact's
+//      current phone (spec 5.2).
+
+describe('GET /api/tours/:tourId/roster', () => {
+  let world: FakeWorld;
+
+  beforeEach(() => {
+    world = createFakeWorld();
+  });
+
+  const TENANT_PHONE = '+15550300011';
+  const OWNER_PHONE = '+15550300012';
+  const PM_PHONE = '+15550300013';
+
+  /** A PM-managed property: owner of record + a PM flagged primaryContact. */
+  function seedPmProperty(): void {
+    world.contacts.push({
+      contactId: 'contact-tenant-1',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      firstName: 'Tina',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'c-owner',
+      type: 'landlord',
+      phone: OWNER_PHONE,
+      firstName: 'Ollie',
+      lastName: 'Owner',
+    });
+    world.contacts.push({
+      contactId: 'c-pm',
+      type: 'landlord',
+      phone: PM_PHONE,
+      firstName: 'Pat',
+      lastName: 'Manager',
+    });
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  }
+
+  async function createTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    return created.body.tour.tourId as string;
+  }
+
+  /** Seed a relay thread and point the tour at it (the FACT source). */
+  function seedThread(
+    tourId: string,
+    participants: { contactId: string; phone: string; name?: string }[],
+    opts: { status?: 'open' | 'closed'; optedOutKeys?: string[] } = {},
+  ): void {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-roster', {
+      conversationId: 'conv-roster',
+      participant_phone: '+15550309000',
+      pool_number: '+15550309000',
+      status: opts.status ?? 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants,
+      created_at: now,
+      ...(opts.optedOutKeys !== undefined && {
+        relay_opted_out_members: Object.fromEntries(
+          opts.optedOutKeys.map((key) => [key, { at: now }]),
+        ),
+      }),
+    });
+    world.toursMap.set(tourId, { ...world.toursMap.get(tourId)!, groupThreadId: 'conv-roster' });
+  }
+
+  it('DEFAULT source: tenant + the property PRIMARY contact, derived roles, not customized', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'default',
+      customized: false,
+      tenantOnRoster: true,
+      canOpenGroup: true,
+      threadExists: false,
+      defaultPrimaryName: 'Pat Manager',
+    });
+    expect(res.body.members).toEqual([
+      {
+        memberKey: 'contact-tenant-1',
+        contactId: 'contact-tenant-1',
+        name: 'Tina Tenant',
+        phoneLast4: '0011',
+        role: 'tenant',
+        reachability: 'reachable',
+      },
+      {
+        memberKey: 'c-pm',
+        contactId: 'c-pm',
+        name: 'Pat Manager',
+        phoneLast4: '0013',
+        // The unit roster row's own role - never stored on the roster itself.
+        role: 'pm',
+        reachability: 'reachable',
+      },
+    ]);
+  });
+
+  it('PLAN source: the override answers, customized:true, and names the property default', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    world.contacts.push({
+      contactId: 'c-caseworker',
+      type: 'team_member',
+      phone: '+15550300021',
+      firstName: 'Casey',
+      lastName: 'Worker',
+    });
+    const tourId = await createTour(app);
+    // The caseworker-to-PM arrangement: the tenant is deliberately OFF.
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'plan',
+      customized: true,
+      tenantOnRoster: false,
+      canOpenGroup: true,
+      threadExists: false,
+      defaultPrimaryName: 'Pat Manager',
+    });
+    expect(res.body.members.map((m: { memberKey: string; role: string }) => [m.memberKey, m.role])).toEqual([
+      ['c-caseworker', 'added'],
+      ['c-pm', 'pm'],
+    ]);
+  });
+
+  it('PARTICIPANTS source for an OPEN thread - and a CLOSED thread is still the fact', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const open = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(open.status).toBe(200);
+    expect(open.body).toMatchObject({
+      source: 'participants',
+      threadExists: true,
+      tenantOnRoster: true,
+      // A thread already exists, so there is nothing left to open.
+      canOpenGroup: false,
+      customized: false,
+    });
+    expect(open.body.members.map((m: { memberKey: string }) => m.memberKey)).toEqual([
+      'contact-tenant-1',
+      'c-pm',
+    ]);
+
+    // Reopen is a pure status flip, so a CLOSED thread's participants are still
+    // the roster (spec D1) - never a silent fall-back to the property default.
+    world.conversations.set('conv-roster', {
+      ...world.conversations.get('conv-roster')!,
+      status: 'closed',
+    });
+    const closed = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(closed.body.source).toBe('participants');
+    expect(closed.body.members).toHaveLength(2);
+  });
+
+  it("UNAVAILABLE: a pointer that will not load returns NO members - never the property default", async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.conversationsRepo.getById = async () => {
+      throw new Error('dynamodb: ProvisionedThroughputExceededException');
+    };
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'unavailable',
+      members: [],
+      canOpenGroup: false,
+      tenantOnRoster: false,
+      customized: false,
+      threadExists: true,
+    });
+    // The property default must NOT be served in its place.
+    expect(JSON.stringify(res.body)).not.toContain('Pat Manager');
+  });
+
+  it('FACT-mode reachability reads the STORED participant phone, not the corrected contact phone', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    // The PM joined on their old number; the group still texts THAT number.
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: '+15550300099', name: 'Pat Manager' },
+    ]);
+    // Someone corrects the contact record AFTER they joined.
+    const pm = world.contacts.find((c) => c.contactId === 'c-pm')!;
+    pm.phone = '+15550300777';
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const pmRow = res.body.members.find((m: { memberKey: string }) => m.memberKey === 'c-pm');
+    expect(pmRow.reachability).toBe('reachable');
+    // Last4 of the STORED row phone (0099), never the corrected one (0777).
+    expect(pmRow.phoneLast4).toBe('0099');
+  });
+
+  it('opted-out members are muted: contact-level in PLAN mode, the thread annotation in FACT mode', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const pm = world.contacts.find((c) => c.contactId === 'c-pm')!;
+    pm.sms_opt_out = true;
+    const tourId = await createTour(app);
+
+    const plan = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(
+      plan.body.members.find((m: { memberKey: string }) => m.memberKey === 'c-pm').reachability,
+    ).toBe('opted_out');
+    // One reachable member left -> the group cannot be opened.
+    expect(plan.body.canOpenGroup).toBe(false);
+
+    // FACT mode: the thread's own relay_opted_out_members annotation (keyed by
+    // relayMemberKey) mutes the row even for a bare-phone member.
+    pm.sms_opt_out = false;
+    seedThread(
+      tourId,
+      [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+        { contactId: '', phone: '+15550300044', name: 'Bare Barry' },
+      ],
+      { optedOutKeys: ['c-pm', `phone#+15550300044`] },
+    );
+    const fact = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const byKey = Object.fromEntries(
+      fact.body.members.map((m: { memberKey: string; reachability: string }) => [
+        m.memberKey,
+        m.reachability,
+      ]),
+    );
+    expect(byKey['c-pm']).toBe('opted_out');
+    expect(byKey['phone:+15550300044']).toBe('opted_out');
+    expect(byKey['contact-tenant-1']).toBe('reachable');
+  });
+
+  it('a phone-less member is no_phone, and one reachable member cannot open a group', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    world.contacts.push({ contactId: 'c-no-phone', type: 'landlord', firstName: 'Nora', lastName: 'Nophone' });
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'contact-tenant-1' }, { contactId: 'c-no-phone' }],
+      undefined,
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const rows = res.body.members as { memberKey: string; reachability: string; phoneLast4?: string }[];
+    expect(rows[1]).toEqual({
+      memberKey: 'c-no-phone',
+      contactId: 'c-no-phone',
+      name: 'Nora Nophone',
+      role: 'added',
+      reachability: 'no_phone',
+    });
+    expect(res.body.canOpenGroup).toBe(false);
+  });
+
+  it('a dangling contactId keeps its row as removed_contact', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'contact-tenant-1' }, { contactId: 'c-gone' }],
+      undefined,
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const rows = res.body.members as { memberKey: string; role: string; reachability: string }[];
+    expect(rows).toHaveLength(2);
+    expect(rows[1]).toMatchObject({
+      memberKey: 'c-gone',
+      contactId: 'c-gone',
+      role: 'removed_contact',
+      reachability: 'no_phone',
+    });
+    expect(res.body.canOpenGroup).toBe(false);
+  });
+
+  it('two members on ONE number: the second row says who it shares with', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    // The owner and the PM are the same handset.
+    const owner = world.contacts.find((c) => c.contactId === 'c-owner')!;
+    owner.phone = PM_PHONE;
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'c-pm' }, { contactId: 'c-owner' }],
+      undefined,
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const rows = res.body.members as { memberKey: string; sharesPhoneWithName?: string }[];
+    expect(rows[0]).not.toHaveProperty('sharesPhoneWithName');
+    expect(rows[1]?.sharesPhoneWithName).toBe('Pat Manager');
+    // Two rows, ONE number - not two reachable parties, so no group.
+    expect(res.body.canOpenGroup).toBe(false);
+  });
+
+  it('NEVER serializes a full phone - only memberKey + last4', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const body = JSON.stringify(res.body);
+    for (const phone of [TENANT_PHONE, PM_PHONE, OWNER_PHONE]) {
+      expect(body).not.toContain(phone);
+      expect(body).not.toContain(phone.slice(1)); // no un-prefixed leak either
+    }
+    expect(body).toContain('0011'); // the last4 IS carried
+  });
+
+  it('404s for an unknown tour', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).get('/api/tours/no-such-tour/roster');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('tour_not_found');
+  });
+});
+
+// ============================================================================
 // Auth gate
 // ============================================================================
 

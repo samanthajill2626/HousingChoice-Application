@@ -76,7 +76,7 @@ import {
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
-import { resolveRoster } from '../lib/rosterResolution.js';
+import { describeRoster, resolveRoster } from '../lib/rosterResolution.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -804,6 +804,40 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // Attach the COMPUTED soonest deadline (its own placementDeadlines items).
     const ds = await placementDeadlines.listByPlacement(placementId);
     res.json({ placement: withDeadline(item, soonestDeadline(ds)) });
+  });
+
+  // GET /api/placements/:placementId/roster - the People card payload
+  // (contact-rosters Task 5). The placement twin of the tour endpoint: the SAME
+  // shared serializer (lib/rosterResolution.describeRoster), so both hubs render
+  // one roster model. 404 unknown placement.
+  //
+  // PII (doc section 9): the RESPONSE carries names + phone last4 to the authed
+  // client; the LOG line carries ids and counts only, and the full phone never
+  // leaves the server.
+  router.get('/:placementId/roster', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const view = await describeRoster(
+      { conversations, units, contacts, log },
+      {
+        type: 'placement',
+        id: placementId,
+        tenantId: item.tenantId,
+        unitId: item.unitId,
+        ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
+        ...(item.roster !== undefined && { roster: item.roster }),
+      },
+    );
+    log.info(
+      { placementId, source: view.source, memberCount: view.members.length },
+      'placement roster served',
+    );
+    res.json(view);
   });
 
   // PATCH /api/placements/:placementId — partial update (SET-merge; null clears a field).

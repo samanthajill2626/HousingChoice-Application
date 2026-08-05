@@ -73,7 +73,7 @@ import {
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
 import { resolveMemberName } from './relayGroups.js';
-import { resolveRoster } from '../lib/rosterResolution.js';
+import { describeRoster, resolveRoster } from '../lib/rosterResolution.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -409,6 +409,39 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const projected = rows.map(toTourActivityEvent);
     log.info({ tourId, returned: projected.length }, 'tour activity served');
     res.json({ events: projected });
+  });
+
+  // GET /api/tours/:tourId/roster - the People card payload (contact-rosters
+  // Task 5). Serves the ONE shared serializer (lib/rosterResolution.
+  // describeRoster) so the tour and placement cards can never disagree about
+  // who is on a roster or how a row is labeled. 404 unknown tour.
+  //
+  // PII (doc section 9): the RESPONSE carries names + phone last4 to the authed
+  // client; the LOG line carries ids and counts only, and the full phone never
+  // leaves the server.
+  router.get('/:tourId/roster', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const view = await describeRoster(
+      { conversations, units, contacts, log },
+      {
+        type: 'tour',
+        id: tour.tourId,
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
+        ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
+        ...(tour.roster !== undefined && { roster: tour.roster }),
+      },
+    );
+    log.info(
+      { tourId, source: view.source, memberCount: view.members.length },
+      'tour roster served',
+    );
+    res.json(view);
   });
 
   // PATCH /api/tours/:tourId — partial update with transition guards.

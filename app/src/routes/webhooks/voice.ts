@@ -382,6 +382,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // path stays M1.10 (needs the unit↔placement linkage).
     // NOTE (contact-rosters spec 2026-08-04 section 12): when this path is
     // built it must consult the THREAD roster, not the unit scalar.
+    // TODO(voice-business-number-roster): resolve callees through the shared
+    // roster resolver (docs/issues/voice-business-number-roster.md).
     await handleFounderTriage(res, { CallSid, From });
   });
 

@@ -106,6 +106,14 @@ the new tables started empty. BE1/BE5/BE6 added NO schema — multi-phone is an 
 `contacts` (phone-pointer items live in the existing table), and media/similar/today are read-only
 aggregations over existing tables.
 
+**Contact-rosters schema — NOT YET APPLIED anywhere (owed at merge, 2026-08-05).**
+`pendingRosterActions` (**new table** — PK `actionId`, GSIs `byOwner` (hash `ownerKey`) and `byDueAt`
+(hash `_actionPartition`, range `dueAt`)) powers the quiet-hours deferral rows for the People card.
+It is in both `tables.auto.tfvars.json` files; **dev** needs `npm run plan -- dev` + `npm run apply -- dev`
+when the branch merges (schema BEFORE the code deploy, per the rule above); prod rides M1.11. Online op,
+table starts empty. Until the dev apply lands, every deferral path 500s on dev deploys (local/hermetic
+lanes are unaffected — they bootstrap their own tables).
+
 **Placement deadline-model schema — NOT YET APPLIED (as of 2026-07-03; feature branch `feat/placement-deadline-model` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
 
 | Change | Table | Kind | Powers |
@@ -855,6 +863,22 @@ so a double-started worker cannot double-text. Deterministic e2e/dev seams (herm
 `POST /__dev/tour-reminders/tick { now? }` and `POST /__dev/placement-nudges/tick { now? }`.
 If a ladder seems dead in a deployed env: check the worker service is running (one process runs
 both polls), then look for `… poll error` lines in the worker logs.
+
+- **Roster deferred actions** (`pendingRosterActions` table, `jobs/rosterActions.ts`): quiet-hours
+  deferral for the tour/placement People card (contact-rosters). A group-text OPEN or a live-thread
+  ADD confirmed during org quiet hours writes a pending row (deterministic PK
+  `tour#<id>#open` / `tour#<id>#add#<contactId>`, placement mirrors) due at quiet-end instead of
+  sending; the worker poll (same `WORKER_POLL_INTERVAL_MS` cadence as the ladders above) claims the
+  row (claim-before-act, one-way transitions), RE-VALIDATES the world, then applies (provision +
+  intro / add + announcement) or retires it with a visible skip reason
+  (`group_closed`, `owner_canceled`, `already_member`, `contact_deleted`,
+  `member_no_longer_on_roster`, `roster_too_thin`, `converted`). Skip notices stay on the card until
+  dismissed. Closed-thread adds and standalone relay groups NEVER defer. Dev seam
+  (hermetic-LOCAL-only): `POST /__dev/roster-actions/tick { now? }`.
+  **A stuck PENDING row** (dueAt long past, card still says "Opens/Joins at ...") means the worker
+  poll is not running or is erroring - check the worker service, then `roster action poll error`
+  lines; a row claimed but half-applied is visible as `applied` with no thread/member change and its
+  correlationId names the failing apply in the worker log.
 
 ### AI extraction (conversation fact extraction)
 

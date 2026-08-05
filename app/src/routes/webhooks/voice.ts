@@ -62,8 +62,6 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
 } from '../../repos/conversationsRepo.js';
-import { createPlacementsRepo, type PlacementsRepo } from '../../repos/placementsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../../repos/unitsRepo.js';
 import {
   createMessagesRepo,
   type CallStatus,
@@ -243,9 +241,6 @@ export interface TwilioVoiceWebhookDeps {
   contactsRepo?: ContactsRepo;
   /** Audit trail (contact auto-capture appends contact_auto_captured). */
   auditRepo?: AuditRepo;
-  /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_contact). */
-  placementsRepo?: PlacementsRepo;
-  unitsRepo?: UnitsRepo;
   /** Founder-editable templates (M1.9b: missed-call quick-replies); real repo by default. */
   settingsRepo?: SettingsRepo;
   /** Team lookup (M1.9b: resolve the founder = admin user(s)); real repo by default. */
@@ -271,8 +266,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
-  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
-  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const pushService =
@@ -457,7 +450,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // their own number is nonsensical, and with answerOnBridge it leaves the
     // caller leg unanswered → a VoIP client can loop on it. Refuse to bridge — a
     // brief greeting + hangup, no self-dial, no bogus call entry/push. (The
-    // masked relay path already has the equivalent dialPhone !== From guard.)
+    // masked relay path's equivalent protection is its CALLEE FILTER — callees
+    // are `participants` minus From — so a member can never be dialed back on
+    // the number they are calling from.)
     if (From === dialedCell) {
       log.info({ callSid: CallSid }, 'founder triage: caller is the dialed cell — not bridging to self');
       sendTwiml(
@@ -849,49 +844,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');
     }
 
-    // M1.10d: for a tenant->landlord masked call on a PLACEMENT-linked relay, the
-    // landlord LEG dials the unit's primary_contact (the per-property
-    // primary contact, §7.1) instead of the roster SMS number — resolved at CALL
-    // TIME (so a changed per-unit primary contact takes effect without
-    // re-rostering), with the roster number as the fallback. It substitutes ONLY
-    // when the CALLER is the placement's tenant (destination = the landlord side);
-    // texts are unaffected (relay fan-out always uses the roster SMS numbers).
-    // Best-effort: any lookup hiccup falls back to the roster number — the
-    // bridge must never crash on routing resolution.
-    let landlordVoiceOverride: { landlordContactId: string; dialPhone: string } | undefined;
-    try {
-      const placementId = typeof relay.placementId === 'string' && relay.placementId.length > 0 ? relay.placementId : undefined;
-      if (placementId !== undefined && caller.contactId) {
-        const linkedPlacement = await placements.getById(placementId);
-        if (linkedPlacement && caller.contactId === linkedPlacement.tenantId) {
-          const unit = await units.getById(linkedPlacement.unitId);
-          const voiceContactId =
-            typeof unit?.primary_contact === 'string' && unit.primary_contact.length > 0
-              ? unit.primary_contact
-              : undefined;
-          const landlordContactId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
-          if (voiceContactId !== undefined && landlordContactId !== undefined) {
-            const voiceContact = await contacts.getById(voiceContactId);
-            const dialPhone =
-              typeof voiceContact?.phone === 'string' && voiceContact.phone.length > 0
-                ? voiceContact.phone
-                : undefined;
-            // Guard a misconfig where the unit's primary contact resolves to the
-            // CALLER's own number — never bridge the tenant to themselves; fall
-            // back to the roster number.
-            if (dialPhone !== undefined && dialPhone !== From) {
-              landlordVoiceOverride = { landlordContactId, dialPhone };
-            }
-          }
-        }
-      }
-    } catch (err) {
-      log.error(
-        { err, callSid: CallSid },
-        'masked call: landlord primary-contact resolution failed — using the roster number',
-      );
-    }
-
     // Build the bridge TwiML. callerId MUST be the pool number — NEVER From.
     // record="do-not-record": masked calls are NEVER recorded/transcribed. The
     // <Dial action> reports the dial outcome to /voice/status; each <Number>
@@ -915,13 +867,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       `&conversationId=${encodeURIComponent(relay.conversationId)}` +
       `&parentCallSid=${encodeURIComponent(CallSid)}`;
     for (const callee of callees) {
-      // M1.10d: the landlord-side callee dials the unit's primary_contact
-      // when resolved (else the roster number). Identified by contactId so a
-      // multi-member group only substitutes the actual landlord leg.
-      const dialPhone =
-        landlordVoiceOverride !== undefined && callee.contactId === landlordVoiceOverride.landlordContactId
-          ? landlordVoiceOverride.dialPhone
-          : callee.phone;
+      // THE ROSTER IS THE ROUTING (contact-rosters D10): every callee is dialed
+      // on the number stored on their participant row. There is no per-property
+      // substitution - a leg moves only when the roster moves, which is exactly
+      // what the People card edits.
+      const dialPhone = callee.phone;
       dial.number(
         {
           url: whisperUrl,
@@ -942,7 +892,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         calleeCount: callees.length,
         masked: true,
         callerIdIsPool: true,
-        landlordVoiceOverride: landlordVoiceOverride !== undefined,
       },
       'masked inbound call bridged (callerId = pool number, do-not-record, whisper+gate)',
     );

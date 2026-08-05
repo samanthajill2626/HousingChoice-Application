@@ -2818,8 +2818,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // placement-deadline-model: the escalation emit recomputes the soonest
       // deadline so the pending chip is PRESERVED (not nulled) on attention raise.
       placementDeadlinesRepo: world.placementDeadlinesRepo,
-      // M1.10d masked-call landlord-leg routing reads the unit's primary_contact.
-      unitsRepo: world.unitsRepo,
+      // NOTE: no unitsRepo here. The masked bridge dials the THREAD ROSTER
+      // verbatim (contact-rosters D10), so the voice router reads no unit at
+      // all - and TwilioVoiceWebhookDeps no longer declares the field.
       broadcastsRepo: world.broadcastsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin
       // user(s)) via the SAME fake users repo the auth gate uses, reads the

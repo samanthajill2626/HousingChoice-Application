@@ -257,11 +257,6 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       return;
     }
 
-    // Composing inputs for the echoed view. This single-row response carries no
-    // timezone field of its own - the panel reuses the zone from its list state.
-    const window = await readQuietHoursWindow(settings, log);
-    const address = await addressOf(tour);
-
     const won = canceled
       ? await reminders.cancel(reminderId, new Date().toISOString())
       : await reminders.uncancel(reminderId);
@@ -269,6 +264,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // Re-read for the HONEST post-write state (also what a lost race reports:
     // e.g. the poll sent the rung between our list and the conditional write).
     const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+    // Composing inputs for the echoed view, read AFTER the conditional write so
+    // they add nothing to the list->write window the poll can race into. This
+    // single-row response carries no timezone field of its own - the panel
+    // reuses the zone from its list state.
+    const window = await readQuietHoursWindow(settings, log);
+    const address = await addressOf(tour);
     if (!won) {
       log.info(
         { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', state: stateOf(after) },

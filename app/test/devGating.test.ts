@@ -16,6 +16,8 @@ import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
+import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import { quietOffSettingsRepo } from './helpers/settingsStub.js';
 
 const SECRET = 'test-origin-secret';
@@ -259,9 +261,21 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
   const FIXED_NOW = '2026-07-13T14:00:00.000Z';
   const SCHEDULED_AT = '2026-07-15T18:00:00.000Z';
   const TENANT_PHONE = '+15550300001';
-  // Rung bodies sourced from the message catalog (single source of truth).
-  const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
-  const DAY_BEFORE_BODY = resolveMessage('tour.day_before');
+  // Rung bodies COMPOSED the way the send path composes them (single source of
+  // truth): this tour's instant, the zone the quiet-hours window resolves to
+  // (quietOffSettingsRepo inherits DEFAULT_ORG_SETTINGS.timezone) and no
+  // address - 'unit-tick-1' is never seeded, so both sides take the
+  // _no_address variant.
+  const CONFIRMATION_BODY = composeTourReminderBody({
+    kind: 'confirmation',
+    scheduledAt: SCHEDULED_AT,
+    timezone: DEFAULT_ORG_SETTINGS.timezone,
+  });
+  const DAY_BEFORE_BODY = composeTourReminderBody({
+    kind: 'day_before',
+    scheduledAt: SCHEDULED_AT,
+    timezone: DEFAULT_ORG_SETTINGS.timezone,
+  });
 
   /** Harness app + dev router sharing ONE world: /api/tours arms reminder rows
    *  against the world fakes and the tick drains them through the SAME repos —

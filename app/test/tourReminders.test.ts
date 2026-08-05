@@ -27,8 +27,9 @@ import { getTableSpec } from '../src/lib/tables.js';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
-import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
+import { createTourRemindersRepo, type ReminderKind } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
+import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import {
   createSendMessageService,
   SendRefusedError,
@@ -42,7 +43,7 @@ import {
   forceSendReminder,
   runDueTourReminders,
 } from '../src/jobs/tourReminders.js';
-import { resolveMessage } from '../src/messages/index.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import { createFakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
@@ -68,6 +69,20 @@ if (!reachable) {
     `[tourReminders.integration] SKIPPED — no DynamoDB Local at ${endpoint}. ` +
       'Run `npm run db:start` to exercise this suite.',
   );
+}
+
+/**
+ * The body the send paths compose for a rung of a tour booked at `scheduledAt`.
+ *
+ * Every tour.* default now carries {when}/{time}/{where}, so a bare
+ * resolveMessage of one THROWS - the expectation has to be composed from the
+ * same context the job composes from. Both settings stubs this suite uses
+ * (quietOffSettingsRepo and stubSettingsRepo) inherit
+ * DEFAULT_ORG_SETTINGS.timezone, and NO fixture here seeds a unit, so every
+ * body takes the _no_address variant.
+ */
+function rungBody(kind: ReminderKind, scheduledAt: string): string {
+  return composeTourReminderBody({ kind, scheduledAt, timezone: DEFAULT_ORG_SETTINGS.timezone });
 }
 
 describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
@@ -527,8 +542,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     // confirmation + day_before fired, one per tick.
     expect(world.sent).toHaveLength(2);
     const sentBodies = world.sent.map((s) => s.body);
-    expect(sentBodies).toContain(resolveMessage('tour.confirmation'));
-    expect(sentBodies).toContain(resolveMessage('tour.day_before'));
+    expect(sentBodies).toContain(rungBody('confirmation', scheduledAt));
+    expect(sentBodies).toContain(rungBody('day_before', scheduledAt));
 
     // All sent rows should have sentAt stamped.
     const rows = await tourReminders.listByTour(tour.tourId);
@@ -816,7 +831,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const afterWindow = '2026-01-15T13:05:00.000Z';
     await runDueTourReminders(afterWindow, deps);
     expect(rig.world.sent).toHaveLength(1);
-    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.morning_of'));
+    expect(rig.world.sent[0]!.body).toBe(rungBody('morning_of', '2026-01-15T20:00:00.000Z'));
     expect(
       (await tourReminders.listByTour(tour.tourId)).find((r) => r.reminderId === legacy.reminderId)
         ?.sentAt,
@@ -920,7 +935,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(later?.sentAt).toBe(afterWindow);
     // EXACTLY one text about this tour.
     expect(rig.world.sent).toHaveLength(1);
-    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.morning_of'));
+    expect(rig.world.sent[0]!.body).toBe(rungBody('morning_of', '2026-01-16T20:00:00.000Z'));
   });
 
   // ---------------------------------------------------------------------------
@@ -967,7 +982,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(earlier?.skipReason).toBe('quiet_hours_superseded');
     expect(later?.sentAt).toBe(catchUp);
     expect(rig.world.sent).toHaveLength(1);
-    expect(rig.world.sent[0]!.body).toBe(resolveMessage('tour.en_route'));
+    expect(rig.world.sent[0]!.body).toBe(rungBody('en_route', '2026-01-15T20:00:00.000Z'));
   });
 
   // ---------------------------------------------------------------------------
@@ -1015,8 +1030,13 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(b?.sentAt).toBe(afterWindow);
     expect(b?.skipReason).toBeUndefined();
     expect(rig.world.sent).toHaveLength(2);
+    // A's day_before is composed from A's tour time, B's morning_of from B's -
+    // the two rungs no longer share a body once the copy carries the instant.
     expect(rig.world.sent.map((s) => s.body).sort()).toEqual(
-      [resolveMessage('tour.day_before'), resolveMessage('tour.morning_of')].sort(),
+      [
+        rungBody('day_before', '2026-01-16T20:00:00.000Z'),
+        rungBody('morning_of', '2026-01-15T20:00:00.000Z'),
+      ].sort(),
     );
   });
 
@@ -1373,7 +1393,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   // at these polls, and fresh per-test worlds so send counts are isolated.
   // ===========================================================================
 
-  const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
+  // No shared CONFIRMATION_BODY constant: the copy now carries the tour's own
+  // time, so each case composes from ITS fixture's scheduledAt via rungBody().
 
   /** Adapter spy for the GROUP route: records direct sends; never a network. */
   function createAdapterSpy(opts: { failFor?: string[] } = {}): {
@@ -1559,7 +1580,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends.map((s) => s.to).sort()).toEqual([tenantPhone, landlordPhone].sort());
     for (const s of rig.groupSends) {
       expect(s.from).toBe(poolNumber);
-      expect(s.body).toBe(CONFIRMATION_BODY);
+      expect(s.body).toBe(rungBody('confirmation', scheduledAt));
     }
 
     // Founder decision 2026-07-14: the rung is VISIBLE in the group thread —
@@ -1572,7 +1593,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(announcement.direction).toBe('outbound');
     expect(announcement.author).toBe('system');
     expect(announcement.relay_sender_key).toBe('system');
-    expect(announcement.body).toBe(CONFIRMATION_BODY);
+    expect(announcement.body).toBe(rungBody('confirmation', scheduledAt));
     expect(Object.keys(announcement.delivery_recipients ?? {})).toHaveLength(2);
     // Nothing through the 1:1 send service.
     expect(rig.world.sent).toHaveLength(0);
@@ -1709,7 +1730,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rig.groupSends).toHaveLength(0);
     expect(rig.world.sent).toHaveLength(1);
     expect(rig.world.sent[0]!.to).toBe(tenantPhone);
-    expect(rig.world.sent[0]!.body).toContain(CONFIRMATION_BODY);
+    expect(rig.world.sent[0]!.body).toContain(rungBody('confirmation', scheduledAt));
   });
 
   // ---------------------------------------------------------------------------
@@ -2133,7 +2154,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(result).toEqual({ outcome: 'sent' });
     expect(spy.sent).toHaveLength(1);
     expect(spy.sent[0]!.conversationId).toBe('conv-force-1');
-    expect(spy.sent[0]!.body).toBe(resolveMessage('tour.confirmation'));
+    expect(spy.sent[0]!.body).toBe(rungBody('confirmation', '2026-02-11T20:00:00.000Z'));
     expect(spy.sent[0]!.author).toBe('teammate');
     // automated: false - a human send bypasses manual mode + the breaker.
     expect(spy.sent[0]!.automated).toBe(false);

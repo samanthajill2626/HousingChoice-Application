@@ -60,11 +60,17 @@ export function composeTourReminderBody(input: ComposeTourReminderInput): string
     );
   }
 
-  // Composed but unused until Task 9 flips the catalog templates. Computing them
-  // now means Task 9 is a catalog-and-selection change only.
-  void formatStreet(address);
-  void formatLocalDate(scheduledAt, timezone);
-  void formatLocalTime(scheduledAt, timezone);
+  const street = formatStreet(address);
+  const date = formatLocalDate(scheduledAt, timezone);
+  const time = formatLocalTime(scheduledAt, timezone);
 
-  return resolveMessage(`tour.${kind}`, undefined, overrides);
+  const id: MessageId = street.length > 0
+    ? (`tour.${kind}` as MessageId)
+    : (`tour.${kind}_no_address` as MessageId);
+
+  return resolveMessage(
+    id,
+    { when: `${date} at ${time}`, time, ...(street.length > 0 && { where: street }) },
+    overrides,
+  );
 }

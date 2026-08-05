@@ -1332,7 +1332,11 @@ describe('relay-group API (M1.7)', () => {
       expect(first['kind']).toBe('scheduled');
       expect(first['source']).toBe('tour_reminder');
       expect(first['reminderKind']).toBe('confirmation');
-      expect(first['body']).toContain('Your tour is confirmed');
+      // The flipped copy: composed by the SAME composer the send path uses, so
+      // the body opens with the confirmation lead-in and carries the local time
+      // (zone-agnostic shape - this bucket does not pin the org zone).
+      expect(first['body']).toContain('Tour confirmed');
+      expect(first['body']).toMatch(/at \d{1,2}:\d{2} (AM|PM)/);
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');
       expect(first['refId']).toBe(tour.tourId);

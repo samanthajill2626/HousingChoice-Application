@@ -15,7 +15,7 @@
 import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
-import { resolveMessage } from '../src/messages/index.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
 import {
   runDueTourReminders,
   type RunDueTourRemindersDeps,
@@ -205,9 +205,16 @@ describe('GET /api/tours/:tourId/reminders', () => {
     expect(reminders.map((r) => r.kind)).toEqual(['confirmation', 'day_before', 'morning_of']);
     expect(reminders.map((r) => r.state)).toEqual(['sent', 'upcoming', 'canceled']);
 
-    // Bodies are the canned rung text.
+    // Bodies are the composed rung text: this tour's instant in the org zone
+    // the route composes in, with no address ('unit-states-1' is not seeded).
     for (const r of reminders) {
-      expect(r.body).toBe(resolveMessage(`tour.${r.kind}`));
+      expect(r.body).toBe(
+        composeTourReminderBody({
+          kind: r.kind,
+          scheduledAt: '2026-07-15T10:00:00.000Z',
+          timezone: world.settings.timezone,
+        }),
+      );
       // No suppression estimate on a non-self_guided tour (Task 2 scope).
       expect(r.suppression).toBeUndefined();
     }
@@ -697,7 +704,16 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(res.body.reminder.reminderId).toBe(reminderId);
     expect(res.body.reminder.state).toBe('sent');
     expect(typeof res.body.reminder.sentAt).toBe('string');
-    expect(res.body.reminder.body).toBe(resolveMessage('tour.day_before'));
+    // The snapshot the force-send claimed, composed in the zone the settings
+    // stub above installs (quietWindowAroundNow evaluates in UTC), with no
+    // address ('unit-sendnow-1' is not seeded).
+    expect(res.body.reminder.body).toBe(
+      composeTourReminderBody({
+        kind: 'day_before',
+        scheduledAt: '2026-07-20T14:00:00.000Z',
+        timezone: world.settings.timezone,
+      }),
+    );
 
     // The send went out as a HUMAN send.
     expect(spy.sent).toHaveLength(1);

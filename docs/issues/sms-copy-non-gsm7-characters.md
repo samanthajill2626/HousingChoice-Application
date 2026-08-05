@@ -1,13 +1,45 @@
 ---
 id: sms-copy-non-gsm7-characters
-title: Outbound SMS copy must be GSM-7; three nudges use an em dash and bill double
+title: SMS copy encoding - guard SHIPPED for catalog defaults; REMAINING scope is the Settings-UI override advisory
 type: bug
 severity: low
 status: open
 area: app/messages
 created: 2026-08-05
-refs: app/src/messages/catalog.ts:139, app/src/messages/catalog.ts:156, app/src/messages/catalog.ts:164
+updated: 2026-08-05
+refs: app/src/lib/smsEncoding.ts, app/test/messageCatalogAscii.test.ts, app/src/messages/catalog.ts:182
 ---
+
+**Update (2026-08-05, feat/tour-reminder-details).** Suggested-fix items 1-3
+SHIPPED on that branch (commit f2d3688d):
+
+1. `app/src/lib/smsEncoding.ts` - pure `analyzeSms(body)` -> `{ encoding,
+   units, segments, nonGsm7Chars }`, GSM-7 basic + extension tables, 2-septet
+   extension pricing, UCS-2 code-unit counting.
+2. `app/test/messageCatalogAscii.test.ts` - every `channel: 'sms'` default is
+   guarded. DELIBERATE DEVIATION from this issue's original wording: the test
+   asserts ASCII, which is STRICTER than GSM-7 - it also rejects characters
+   GSM-7 prices at one septet (pound, e-acute, n-tilde). Rationale (spec
+   2026-08-05-tour-reminder-details-design.md section 7): ASCII is a rule a
+   human can apply by eye; a GSM-7 check would let the em dash's cousins back
+   in. A companion describe additionally asserts GSM-7 via analyzeSms. Do not
+   "fix" the ASCII test into a GSM-7 check.
+   The user-data boundary this issue demanded is pinned from BOTH sides in
+   `app/test/tourCopy.test.ts`: our composed copy is ASCII; a deliberately
+   non-ASCII unit address passes through UNCHANGED (no sanitizer may sneak in).
+3. The three nudge em dashes are ASCII hyphens now (single-segment GSM-7; copy
+   reads identically). Current entries: `app/src/messages/catalog.ts:182-214`.
+
+Item 4 (validate the catalog's declared `maxChars`) is NOT done here and is
+superseded by `docs/issues/automated-sms-length-guard.md` (filed on main),
+which puts the universal length/segment guard at the automated-send layer.
+
+**REMAINING SCOPE (why this stays open).** The Settings-UI advisory for
+operator OVERRIDES: when an operator edits `welcomeText` /
+`missedCallAutoText` (or any future generic override), the Settings UI should
+show the encoding and segment count via `analyzeSms` as an advisory - never a
+rejection. Overrides are user input; rejecting or rewriting them is the wrong
+trade (same rule as interpolated names/addresses below).
 
 **Problem.** A single character outside the GSM-7 alphabet flips an ENTIRE SMS to
 UCS-2 encoding, which collapses the per-message budget from 160 characters to 70

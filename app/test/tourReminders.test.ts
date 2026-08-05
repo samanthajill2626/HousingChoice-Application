@@ -1646,7 +1646,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 13 — groupThreadId → missing conversation: routing falls back to 1:1,
+  // Test 13 - groupThreadId -> missing conversation: routing falls back to 1:1,
   // but D11 holds the rung (the roster is UNREADABLE, not "tenant removed")
   // ---------------------------------------------------------------------------
   it('landlord_led tour whose groupThreadId points at a missing conversation falls back to 1:1 - and D11 holds the rung UNCLAIMED', async () => {
@@ -1693,7 +1693,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 14 — groupThreadId → a NON-relay_group conversation: routing falls
+  // Test 14 - groupThreadId -> a NON-relay_group conversation: routing falls
   // back to 1:1, and that thread's (absent) participants are the roster FACT
   // ---------------------------------------------------------------------------
   it('landlord_led tour whose groupThreadId points at a non-relay_group conversation falls back to 1:1 - and D11 skips it visibly', async () => {

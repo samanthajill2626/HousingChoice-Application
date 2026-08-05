@@ -450,8 +450,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // their own number is nonsensical, and with answerOnBridge it leaves the
     // caller leg unanswered → a VoIP client can loop on it. Refuse to bridge — a
     // brief greeting + hangup, no self-dial, no bogus call entry/push. (The
-    // masked relay path's equivalent protection is its CALLEE FILTER — callees
-    // are `participants` minus From — so a member can never be dialed back on
+    // masked relay path's equivalent protection is its CALLEE FILTER - callees
+    // are `participants` minus From - so a member can never be dialed back on
     // the number they are calling from.)
     if (From === dialedCell) {
       log.info({ callSid: CallSid }, 'founder triage: caller is the dialed cell — not bridging to self');

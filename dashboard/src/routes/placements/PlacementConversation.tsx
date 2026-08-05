@@ -72,6 +72,10 @@ export interface PlacementConversationProps {
    *  channels: the 1:1 pane needs a loaded Contact, not just an id. */
   tenant: Contact | null;
   landlord: Contact | null;
+  /** The records for ROSTER members who are neither of those two - the PM on a
+   *  PM-managed property, anyone added by hand (useRosterContacts). Without
+   *  them those tabs would have no Contact to open a pane with (spec D6). */
+  rosterContacts?: Contact[];
   channels: PlacementChannelsState;
   /** Is this pane actually ON SCREEN? The page owns the answer (its Details /
    *  Conversation pane state + the shell breakpoint); we are always MOUNTED, so
@@ -94,6 +98,7 @@ export function PlacementConversation({
   placement,
   tenant,
   landlord,
+  rosterContacts,
   channels,
   commsVisible,
   onOpenGroup: onOpenGroupFromPage,
@@ -136,15 +141,20 @@ export function PlacementConversation({
   const oneToOneName = activePerson?.label ?? '';
   // The pane needs a LOADED Contact - it derives the numbers, addresses and the
   // deleted / opted-out send gates from it, so an id alone is not enough. The
-  // page hands us the records it fetched; match the active person against them.
+  // page hands us the records it fetched (its tenant/landlord joins) PLUS the
+  // records it fetched for the rest of the roster; match the active person
+  // against all of them - a roster member is never only the tenant or the
+  // unit's landlord-of-record (spec D6: the PM on a PM-managed property).
   const oneToOneContact =
     activePerson === undefined
       ? null
-      : ([tenant, landlord].find((c) => c !== null && c.contactId === activePerson.contactId) ??
-        null);
-  // Only ONE way a tab can be missing its record now: the page's best-effort
-  // getContact failed. (A person with no id gets no tab at all, so the old
-  // "landlord not resolved yet" dead-end tab is gone with the fixed slots.)
+      : ([tenant, landlord, ...(rosterContacts ?? [])].find(
+          (c) => c !== null && c.contactId === activePerson.contactId,
+        ) ?? null);
+  // Only ONE way a tab can be missing its record now: the best-effort getContact
+  // behind it failed (the page's own join, or the roster-member fetch). A person
+  // with no id gets no tab at all, so the old "landlord not resolved yet"
+  // dead-end tab is gone with the fixed slots.
   const oneToOneMissingNote = `We could not load ${oneToOneName}'s contact record.`;
 
   // Viewing the GROUP tab marks its SINGLE conversation read + clears the tab dot.

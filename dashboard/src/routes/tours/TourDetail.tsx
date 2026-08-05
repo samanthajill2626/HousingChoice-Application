@@ -41,6 +41,7 @@ import { contactDisplayName, formatAddress } from '../contact/format.js';
 import { PeopleCard } from '../shared/PeopleCard.js';
 import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
+import { useRosterContacts } from '../shared/useRosterContacts.js';
 import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
 import { pendingActionNote } from '../shared/rosterWrites.js';
 import { formatRent } from '../listing/listingFormat.js';
@@ -169,6 +170,11 @@ function TourDetailLoaded({
     ...(tour.groupThreadId !== undefined && { threadId: tour.groupThreadId }),
   });
   const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // The 1:1 PANES need a loaded Contact, and this page joins only two of them
+  // (tenant + the unit's landlord-of-record). Fetch the records for whoever
+  // else is on the roster - the PM on a PM-managed property, anyone added by
+  // hand - so their tab opens a real pane instead of a dead end (spec D6).
+  const rosterContacts = useRosterContacts(rosterPeople, [tour.tenantId, landlordId]);
   // Who belongs on this tour but is not on the roster - the property's other
   // contacts and, when they have been removed, the tenant (spec 6.2). This is
   // what makes the swap two clicks and a restore one.
@@ -581,6 +587,7 @@ function TourDetailLoaded({
             tour={tour}
             tenant={tenant}
             landlord={landlord}
+            rosterContacts={rosterContacts}
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}

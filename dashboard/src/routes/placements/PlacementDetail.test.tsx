@@ -423,6 +423,52 @@ describe('PlacementDetail', () => {
     await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(4));
   });
 
+  it('a PM-MANAGED roster: the PM tab opens a real pane, not the failed-load note', async () => {
+    // The motivating case (spec D6 / 6.6): the roster is [tenant, PM] while the
+    // unit's landlordId is the OWNER, so the PM is NEITHER of the two records
+    // this page fetches for itself. Their tab must still resolve a Contact.
+    const user = userEvent.setup();
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          {
+            memberKey: 't1',
+            contactId: 't1',
+            name: 'Tasha Nguyen',
+            role: 'tenant',
+            reachability: 'reachable',
+          },
+          {
+            memberKey: 'pm-9',
+            contactId: 'pm-9',
+            name: 'Alicia Grant',
+            role: 'pm',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
+    getContact.mockImplementation((id: unknown) =>
+      Promise.resolve(
+        id === 'pm-9'
+          ? {
+              contactId: 'pm-9',
+              type: 'landlord' as const,
+              firstName: 'Alicia',
+              lastName: 'Grant',
+              phone: '+14045550333',
+            }
+          : contactById(id),
+      ),
+    );
+    renderAt();
+    await waitLoaded();
+    await user.click(await screen.findByRole('tab', { name: /Alicia Grant/ }));
+    expect(await screen.findByText('No messages with Alicia Grant yet')).toBeInTheDocument();
+    expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toBeInTheDocument();
+  });
+
   it('while the roster payload is in flight the tabs keep the page inputs (no blink)', async () => {
     getPlacementRoster.mockReturnValue(new Promise(() => {}));
     renderAt();

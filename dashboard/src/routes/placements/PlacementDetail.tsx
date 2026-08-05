@@ -69,6 +69,7 @@ import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
 import { PeopleCard } from '../shared/PeopleCard.js';
 import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
 import { useRoster } from '../shared/useRoster.js';
+import { useRosterContacts } from '../shared/useRosterContacts.js';
 import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
 import { pendingActionNote } from '../shared/rosterWrites.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
@@ -243,6 +244,11 @@ export function PlacementDetail(): React.JSX.Element {
     ...(placement?.group_thread !== undefined && { threadId: placement.group_thread }),
   });
   const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // The 1:1 PANES need a loaded Contact, and this page joins only two of them
+  // (tenant + the unit's landlord-of-record). Fetch the records for whoever
+  // else is on the roster - the PM on a PM-managed property, anyone added by
+  // hand - so their tab opens a real pane instead of a dead end (spec D6).
+  const rosterContacts = useRosterContacts(rosterPeople, [placement?.tenantId, landlordId]);
   // Who belongs on this placement but is not on the roster - the property's
   // other contacts and, when they have been removed, the tenant (spec 6.2).
   const unitContacts = unit?.contacts;
@@ -564,6 +570,7 @@ export function PlacementDetail(): React.JSX.Element {
             placement={placement}
             tenant={tenant}
             landlord={landlord}
+            rosterContacts={rosterContacts}
             channels={channels}
             commsVisible={commsVisible}
             onOpenGroup={handleOpenGroup}

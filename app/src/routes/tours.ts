@@ -465,17 +465,18 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       res.status(404).json({ error: 'tour_not_found' });
       return;
     }
-    const view = await describeRoster(
-      { conversations, units, contacts, log },
-      {
-        type: 'tour',
-        id: tour.tourId,
-        tenantId: tour.tenantId,
-        unitId: tour.unitId,
-        ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
-        ...(tour.roster !== undefined && { roster: tour.roster }),
-      },
-    );
+    // rosterDeps, NOT an inline subset: the deps carry the pendingRosterActions
+    // repo, and a GET that omits it silently serves pending[]/skipped[] empty
+    // (S6 regression - the card would only ever learn of deferrals from
+    // mutation responses).
+    const view = await describeRoster(rosterDeps, {
+      type: 'tour',
+      id: tour.tourId,
+      tenantId: tour.tenantId,
+      unitId: tour.unitId,
+      ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
+      ...(tour.roster !== undefined && { roster: tour.roster }),
+    });
     log.info(
       { tourId, source: view.source, memberCount: view.members.length },
       'tour roster served',

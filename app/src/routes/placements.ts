@@ -893,17 +893,18 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(404).json({ error: 'placement_not_found' });
       return;
     }
-    const view = await describeRoster(
-      { conversations, units, contacts, log },
-      {
-        type: 'placement',
-        id: placementId,
-        tenantId: item.tenantId,
-        unitId: item.unitId,
-        ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
-        ...(item.roster !== undefined && { roster: item.roster }),
-      },
-    );
+    // rosterDeps, NOT an inline subset: the deps carry the pendingRosterActions
+    // repo, and a GET that omits it silently serves pending[]/skipped[] empty
+    // (S6 regression - the card would only ever learn of deferrals from
+    // mutation responses).
+    const view = await describeRoster(rosterDeps, {
+      type: 'placement',
+      id: placementId,
+      tenantId: item.tenantId,
+      unitId: item.unitId,
+      ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
+      ...(item.roster !== undefined && { roster: item.roster }),
+    });
     log.info(
       { placementId, source: view.source, memberCount: view.members.length },
       'placement roster served',

@@ -34,6 +34,7 @@ import {
   type PoolNumbersService,
 } from '../src/services/poolNumbers.js';
 import { VoiceCapabilityError } from '../src/adapters/messaging.js';
+import { rosterActionIdFor } from '../src/repos/pendingRosterActionsRepo.js';
 import { RosterPlanConflictError } from '../src/lib/rosterResolution.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -2814,6 +2815,45 @@ describe('GET /api/tours/:tourId/roster', () => {
     });
     world.toursMap.set(tourId, { ...world.toursMap.get(tourId)!, groupThreadId: 'conv-roster' });
   }
+
+  it('serves pending[] and skipped[] on the PLAIN GET - deferral visibility must not depend on a mutation response (S6 regression)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'add_member',
+      contactId: 'c-pm',
+      dueAt: '2026-07-10T13:00:00.000Z',
+      createdAt: '2026-07-10T03:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'open_group',
+      dueAt: '2026-07-10T12:00:00.000Z',
+      createdAt: '2026-07-10T02:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.claimSkip(
+      rosterActionIdFor({ ownerType: 'tour', ownerId: tourId, action: 'open_group' }),
+      '2026-07-10T04:00:00.000Z',
+      'roster_too_thin',
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(res.status).toBe(200);
+    expect(res.body.pending).toMatchObject([
+      {
+        kind: 'add_member',
+        contactId: 'c-pm',
+        name: 'Pat Manager',
+        dueAt: '2026-07-10T13:00:00.000Z',
+      },
+    ]);
+    expect(res.body.skipped).toMatchObject([{ kind: 'open_group', reason: 'roster_too_thin' }]);
+  });
 
   it('DEFAULT source: tenant + the property PRIMARY contact, derived roles, not customized', async () => {
     const { app } = makeWebhookHarness({ world });

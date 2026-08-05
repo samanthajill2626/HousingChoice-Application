@@ -596,6 +596,35 @@ describe('GET /api/placements/:placementId/roster', () => {
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
 
+  it('serves pending[] and skipped[] on the PLAIN GET (S6 regression, placement mirror)', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'send_application',
+    });
+
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'placement',
+      ownerId: p.placementId,
+      action: 'add_member',
+      contactId: 'c-pm',
+      dueAt: '2026-07-10T13:00:00.000Z',
+      createdAt: '2026-07-10T03:00:00.000Z',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body.pending).toMatchObject([
+      {
+        kind: 'add_member',
+        contactId: 'c-pm',
+        name: 'Pat Manager',
+        dueAt: '2026-07-10T13:00:00.000Z',
+      },
+    ]);
+    expect(res.body.skipped).toEqual([]);
+  });
+
   it('DEFAULT source: the tenant + the property PRIMARY contact (the PM), roles derived', async () => {
     const p = await world.placementsRepo.create({
       tenantId: 'c-tenant',

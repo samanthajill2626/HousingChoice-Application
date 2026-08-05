@@ -120,9 +120,10 @@ Renames (exact, global):
   `TourPersonKey` / `PlacementPersonKey` are DELETED. Callers build `people`
   from the SAME ids the page renders today: `[{contactId: tour.tenantId,
   label: tenantName}, ...(landlordId ? [{contactId: landlordId, label:
-  isPm ? landlordName : landlordName}] : [])]`. DO NOT consume
-  `resolveTourMembers` or any phone-gated source (spec slice 2: a phone-less
-  tenant must keep their tab).
+  landlordName}] : [])]`. The label is the person's DISPLAY NAME, nothing
+  else - never a type-derived role word (the spec deletes those). DO NOT
+  consume `resolveTourMembers` or any phone-gated source (spec slice 2: a
+  phone-less tenant must keep their tab).
 
 - [ ] **Step 1: Failing test.** In `TourConversation.test.tsx` add:
   ```tsx
@@ -195,7 +196,7 @@ Renames (exact, global):
     groupThreadId?: string;      // tours: groupThreadId; placements: group_thread
     roster?: RosterEntry[];      // the plan override
   }
-  export type RosterSource = 'participants' | 'plan' | 'default';
+  export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
   export interface ResolvedMember {
     contactId?: string;          // absent for bare-phone participants
     phone?: string;              // participants: the STORED row phone (fact mode)
@@ -214,17 +215,26 @@ Renames (exact, global):
   export function rosterEquals(a: ResolvedMember[], b: ResolvedMember[]): boolean
   ```
   Rules (spec D1/D3/5.2): thread pointer present -> read the conversation's
-  `participants` (ANY status; missing/broken conversation -> log + fall
-  through to plan/default, never throw); else `roster` override verbatim
-  (resolve names/phones from contacts at use time); else default = tenant
-  first + the unit roster's `primaryContact` row, FALLBACK to `landlordId`
-  when no row is primary, de-duped when tenant === property contact.
-  `rosterEquals`: order-insensitive set compare - contactId when both have
-  one, else E.164 phone (spec 5.2 customized equality).
+  `participants` (ANY status). WHEN THE POINTER IS SET BUT THE CONVERSATION
+  READ FAILS OR RETURNS NOTHING: source `'unavailable'`, members `[]` - NEVER
+  fall through to plan/default. By then the plan was consumed, so the
+  fallback would be exactly the roster the operator edited away from: the
+  card would silently show the wrong people, and the D11 check could text a
+  removed tenant on a Dynamo blip. "Never 500 a page" is right; "never be
+  wrong about who gets texted" outranks it - callers handle 'unavailable'
+  explicitly (card: unavailable state; reminders: leave the rung unclaimed).
+  No pointer -> `roster` override verbatim (resolve names/phones from
+  contacts at use time); else default = tenant first + the unit roster's
+  `primaryContact` row, FALLBACK to `landlordId` when no row is primary,
+  de-duped when tenant === property contact. `rosterEquals`:
+  order-insensitive set compare - contactId when both have one, else E.164
+  phone (spec 5.2 customized equality).
 
 - [ ] **Step 1: Failing tests** (fake repos = plain objects with `getById`
   maps): thread-pointer-wins (participants returned verbatim incl. a
-  bare-phone row, source 'participants'); closed-thread still wins; plan
+  bare-phone row, source 'participants'); closed-thread still wins; POINTER
+  SET + conversation read throws -> source 'unavailable', empty members
+  (never plan/default); pointer set + conversation missing -> same; plan
   override in stored order; default happy path (PM marked primaryContact ->
   PM, not landlordId); ZERO-PRIMARY FALLBACK to landlordId; tenant ===
   primary -> one member; missing unit -> tenant only; `rosterEquals`
@@ -243,6 +253,10 @@ Renames (exact, global):
 - Modify: `app/src/routes/tours.ts` (POST /:tourId/relay), `app/src/routes/placements.ts`
   (relay provision + convert), `app/src/repos/activityEventsRepo.ts`
   (`placement_group_opened` in ActivityEventType)
+- Modify: the FULL seed module (NOT lean.ts): add the PM-managed property -
+  owner of record + a PM contact rostered with `primaryContact: true`
+  (spec 9). Lands HERE, not slice 6, so every later live-QA step (Tasks 8,
+  9, 11) exercises the default-is-the-PM case realistically.
 - Test: `app/test/toursApi.test.ts`, `app/test/placementsApi.test.ts` (extend)
 
 **Interfaces:**
@@ -295,8 +309,11 @@ Renames (exact, global):
 - Produces `GET /api/tours/:tourId/roster` and
   `GET /api/placements/:placementId/roster` ->
   ```ts
-  { source: 'participants' | 'plan' | 'default',
-    members: [{ contactId?: string, phone?: string /* masked to last4 for bare rows */,
+  { source: 'participants' | 'plan' | 'default' | 'unavailable',
+    members: [{ memberKey: string /* contactId, else `phone:<E164>` - the ONLY
+                                     key the client ever sends back */,
+                contactId?: string, phoneLast4?: string /* display only - the
+                                     FULL phone never leaves the server */,
                 name?: string, role: 'tenant' | UnitContact['role'] | 'added' | 'removed_contact',
                 reachability: 'reachable' | 'no_phone' | 'opted_out',
                 sharesPhoneWithName?: string }],
@@ -317,10 +334,13 @@ Renames (exact, global):
 - [ ] **Step 1: Failing tests:** default-source payload (PM primary ->
   customized:false, roles right); plan-source customized:true with
   defaultPrimaryName; participants-source for open AND closed threads;
-  fact-mode reachability uses the STORED participant phone (correct the
-  contact's phone after join -> still 'reachable' via old number, spec 5.2);
-  opted-out member -> 'opted_out'; tenant removed -> tenantOnRoster:false;
-  canOpenGroup false when 1 reachable; dangling contactId -> 'removed_contact'.
+  'unavailable' when the pointer is set but the conversation read fails
+  (members empty, canOpenGroup false); fact-mode reachability uses the
+  STORED participant phone (correct the contact's phone after join -> still
+  'reachable' via old number, spec 5.2); opted-out member -> 'opted_out';
+  tenant removed -> tenantOnRoster:false; canOpenGroup false when 1
+  reachable; dangling contactId -> 'removed_contact'; NO full phone anywhere
+  in the payload (bare rows carry memberKey + phoneLast4 only).
 - [ ] **Step 2: Implement** (one shared serializer in
   `app/src/lib/rosterResolution.ts` - `describeRoster(deps, owner)` - both
   routes call it). PII: response carries names/last4 to the authed client;
@@ -368,8 +388,12 @@ Renames (exact, global):
   THE FALLBACK DOOR (spec D11): landlord_led rung due, NO usable group,
   tenant absent -> suppressed (routing outcome, not rung kind); (c)
   landlord_led rung due, usable group exists, tenant absent -> SENDS to the
-  group (unaffected); (d) re-add tenant, next due rung sends (no re-arm).
-  Placement-nudge twins for tenant-1:1-routed rungs. Pinned clocks.
+  group (unaffected); (d) re-add tenant, next due rung sends (no re-arm);
+  (e) resolver returns 'unavailable' (thread pointer set, conversation read
+  failing) -> the rung is LEFT UNCLAIMED for the next poll - neither sent
+  nor skipped (a transient blip must never text a possibly-removed tenant,
+  Task 3 rule). Placement-nudge twins for tenant-1:1-routed rungs. Pinned
+  clocks.
 - [ ] **Step 2: Implement.** In the claim path, exactly where the delivery
   target has been resolved to the tenant 1:1 (both the self_guided branch and
   the group-fallback branch), insert the roster check via `resolveRoster` on
@@ -397,7 +421,9 @@ Card (read mode only in this task - no edit affordance yet): list rows (name
 links to contact, role subtle right, NO phones, role wraps under name below
 860px); muted reachability rows (`not on the group text - no mobile number` /
 `- opted out`); `shares a number with <name> - one message`; removed-contact
-rows; customized note + DISABLED reset placeholder when `threadExists`
+rows; an UNAVAILABLE state when `source === 'unavailable'` (`Couldn't load
+this roster - retry`; NEVER render the property default in its place - Task 3
+rule); customized note + DISABLED reset placeholder when `threadExists`
 (`members are on a live group text - add or remove them individually`);
 tenant-not-on-roster note (`Tenant is not on this roster - tour reminders are
 paused`); caseworker hint whenever the tenant contact's `caseworker` string
@@ -414,9 +440,11 @@ The type-derived `isPm ? 'Property manager' : 'Landlord'` KV is DELETED.
   removed_contact rows) - card and tabs now share ONE source (spec goal 4).
   Refetch the roster payload on `tour.updated` / `conversation.updated` SSE
   (both pages already subscribe - piggyback their reload paths).
-- [ ] **Step 3: Gates + live QA** (dev stack via e2e:session lane): PM-managed
-  property from Task 12's seed not yet present - QA with a hand-built unit
-  roster via API. Verify tour page, placement page, 360px.
+- [ ] **Step 3: Gates + live QA** (hermetic e2e:session lane ONLY - never
+  the live :5174/:8080 stack): use Task 4's FULL-profile PM property if the
+  lane's reseed supports the full profile; otherwise hand-build the same
+  shape via API (PM contact -> roster -> primary). Verify tour page,
+  placement page, 360px.
 - [ ] **Step 4: Full e2e (slice end)**; fix fallout (TourDetail tests that
   asserted the old People KV shape).
 - [ ] **Step 5: Commit** `feat(roster): People card renders the live roster on both hubs; tabs follow it`.
@@ -463,58 +491,95 @@ refetches the unit and the toggled row VISIBLY settles.
 
 ## SLICE 5 - CARD EDIT MODE + CONFIRMS + CALL-THROUGH
 
-### Task 10: plan endpoints (per-member) + previews (server)
+### Task 10: plan endpoints, LIVE call-through endpoints, previews (server)
 
 **Files:**
 - Modify: `app/src/routes/tours.ts`, `app/src/routes/placements.ts`
-- Modify: `app/src/jobs/relayFanOut.ts` (export `composeMemberAddedBody` +
-  `composeConnectionSentence` - already exported? verify; export if not)
-- Test: extend the two API suites
+- Create: `app/src/services/relayMembers.ts` - EXTRACT the add-member and
+  remove-member bodies from `app/src/routes/relayGroups.ts` (:280-421 add,
+  :423-510 remove) into `addMemberToRelay(deps, conversationId, member,
+  {announce: boolean})` and `removeMemberFromRelay(deps, conversationId,
+  memberKey)` so the relay route AND the new owner endpoints share ONE
+  implementation (roster write, opt-out clear, milestone, announcement
+  enqueue, conversation.updated emit). The relay route keeps its exact
+  behavior; pure extraction.
+- Modify: `app/src/jobs/relayFanOut.ts` (verify `composeMemberAddedBody` +
+  `composeConnectionSentence` exports - both exist at :171/:216)
+- Test: extend the two API suites + a relayGroups regression run
 
 **Interfaces (tours shown; placements mirror under /api/placements/:id/...):**
 ```
+// PLAN (no thread) - 409 thread_exists when the pointer is set:
 POST   /api/tours/:tourId/roster/members          { contactId } | { phone }   -> { roster }  // Task 5 payload
 DELETE /api/tours/:tourId/roster/members/:memberKey                            -> { roster }
-        // memberKey = contactId, or `phone:<E164>` for bare rows
 POST   /api/tours/:tourId/roster/reset                                         -> { roster }
+
+// LIVE call-through (thread exists, any status) - 409 no_thread otherwise.
+// THIS is where the deferred-add evaluation will live (Task 13): the
+// dashboard NEVER calls the raw relay routes for owner-scoped edits, so the
+// deferral machinery has exactly one add path to guard. Standalone relay
+// groups keep the raw routes and DO NOT defer (out of spec scope - note it
+// in the route comment).
+POST   /api/tours/:tourId/roster/live-members     { contactId }                -> { roster }
+        // open thread: addMemberToRelay + announcement (Task 13 adds the
+        //   quiet-hours evaluation + ?force=send_now here)
+        // CLOSED thread: silent-and-immediate add, announce:false, NEVER
+        //   deferred (spec section 7 carve-out)
+DELETE /api/tours/:tourId/roster/live-members/:memberKey                       -> { roster }
+        // SERVER locates the participant row by contactId (or bare-phone
+        //   key) and removes by THE PHONE STORED ON THAT ROW - the client
+        //   never plumbs a phone (payload only carries phoneLast4).
+        //   Immediate, never defers, never announces.
+
+// PREVIEWS - server-resolved, owner-only input:
 GET    /api/tours/:tourId/roster/preview-open                                  -> preview
+        // 409 relay_already_provisioned when the pointer is set - never
+        //   preview an open that can only 409.
 POST   /api/tours/:tourId/roster/preview-add      { contactId }                -> preview
         // preview = { body, recipients: [{ name?, reachability }], recipientCount,
         //             deferred: boolean, quietEndsAt?: string }
 ```
-Rules: plan endpoints 409 `{ error: 'thread_exists' }` when the thread
-pointer is set (never auto-escalate - spec section 7); entry validation
-EXACTLY one of contactId/phone (400); remove refuses the LAST member (409
-`last_member`); materialize-then-apply per spec: `setRoster` with
+Rules: memberKey = contactId, else `phone:<E164>` (URL-encoded) - matching
+Task 5's payload field. Plan-endpoint rules: entry validation EXACTLY one of
+contactId/phone (400); remove refuses the LAST member (409 `last_member`);
+materialize-then-apply per spec: `setRoster` with
 `attribute_not_exists(roster)` holding the resolved default, on conflict
 re-read and apply onto the existing override with `rosterVersion` guard,
-bounded retries then 409 `roster_conflict`. RESET = `clearRoster` (409 when
-thread exists). Previews take NO client roster: resolve server-side via
-`describeRoster`; `body` composed via the SAME code the fan-out uses
-(`resolveMessage('relay.intro', {members: composeConnectionSentence(...)})`
-/ `composeMemberAddedBody`); `deferred`/`quietEndsAt` from
-`isQuietTime`/`clampOutOfQuietHours` + `resolveQuietHoursTimezone` over org
-settings (until Slice 6 wires deferral, `deferred` is still returned so the
-dialog can render - the buttons just both send immediately, and the dialog
-copy for that interim is `Quiet hours - this will still send now` behind a
-flag the Slice 6 task flips; keep the interim honest).
+bounded retries then 409 `roster_conflict`; RESET = `clearRoster`. Previews
+take NO client roster: resolve server-side via `describeRoster`; `body`
+composed via the SAME code the fan-out uses (`resolveMessage('relay.intro',
+{members: composeConnectionSentence(...)})` / `composeMemberAddedBody`);
+`deferred`/`quietEndsAt` from `isQuietTime`/`clampOutOfQuietHours` +
+`resolveQuietHoursTimezone` over org settings (until Slice 6 wires deferral,
+`deferred` is still returned so the dialog can render - live-members sends
+immediately, and the dialog copy for that interim is `Quiet hours - this
+will still send now` behind a flag the Slice 6 task flips; keep the interim
+honest).
 
 - [ ] **Step 1: Failing tests:** materialize race (two concurrent first
   edits via injected repos - second conditional write fails, retries onto
   the winner's override, both members present); add/remove/reset round-trip;
-  validation 400s; `thread_exists` 409; last-member 409; preview-open body
-  matches a `resolveMessage('relay.intro', ...)` call for the same roster;
-  preview during pinned quiet hours -> `deferred:true, quietEndsAt` =
-  clamped instant; preview-add for an opted-out member marks them
-  `opted_out` and excludes them from `recipientCount`.
-- [ ] **Step 2: Implement; green; commit** `feat(roster): per-member plan endpoints + server-composed open/add previews`.
+  validation 400s; `thread_exists` 409 on plan endpoints / `no_thread` 409
+  on live endpoints; last-member 409; LIVE add on an open thread announces
+  (outbox) and on a CLOSED thread adds silently; LIVE remove for a member
+  whose contact phone was CORRECTED after joining removes the participant
+  row anyway (stored-phone rule) and for a bare-phone member via its
+  memberKey; relayGroups' own member routes still pass unchanged (extraction
+  regression); preview-open 409 when provisioned; preview-open body matches
+  a `resolveMessage('relay.intro', ...)` call for the same roster; preview
+  during pinned quiet hours -> `deferred:true, quietEndsAt` = clamped
+  instant; preview-add for an opted-out member marks them `opted_out` and
+  excludes them from `recipientCount`.
+- [ ] **Step 2: Implement; green; commit** `feat(roster): plan + live-members endpoints, relayMembers extraction, server previews`.
 
 ### Task 11: card edit mode + confirm dialogs + call-through (dashboard)
 
 **Files:**
 - Modify: `dashboard/src/routes/shared/PeopleCard.tsx` (+ css),
-  `dashboard/src/api/endpoints.ts` (plan endpoints, previews; relay
-  `getRelayGroupRoster`/`addRelayMember`/`removeRelayMember` already exist)
+  `dashboard/src/api/endpoints.ts` (plan endpoints, LIVE-members endpoints,
+  previews, pending cancel/apply-now/dismiss; the raw relay client fns
+  `addRelayMember`/`removeRelayMember` stay for standalone groups and are
+  NOT used by the card)
 - Create: `dashboard/src/routes/shared/RosterConfirmDialog.tsx`
 - Modify: `dashboard/src/routes/tours/TourDetail.tsx` /
   `PlacementDetail.tsx` ([Open group text] goes through the confirm)
@@ -530,9 +595,11 @@ Behavior:
 - Routing: `threadExists` false -> plan endpoints, silent. True -> ADD opens
   RosterConfirmDialog fed by preview-add (body verbatim in an sms-bubble,
   per-recipient list with reachability reasons, count, quiet-hours state);
-  confirm calls `addRelayMember`; REMOVE calls `removeRelayMember` with the
-  phone FROM THE PARTICIPANT ROW (the roster payload carries it - never
-  re-resolve). No confirm on remove.
+  confirm calls the OWNER-SCOPED `POST .../roster/live-members` (never the
+  raw relay route - that is where Task 13's deferral lives); REMOVE calls
+  `DELETE .../roster/live-members/:memberKey` with the payload's memberKey -
+  the client NEVER handles a phone (the server does the participant-row
+  lookup, Task 10). No confirm on remove.
 - The plan-endpoint 409 `thread_exists` race: refetch the roster payload,
   surface the now-live state, do NOT resubmit (spec section 7); the queued
   intent is dropped with a visible toast-level note on the card.
@@ -549,12 +616,16 @@ Behavior:
 - [ ] **Step 2: Build; gates; live QA** the two-click swap (suggestion add +
   row remove) and the open confirm end to end on the session lane; verify
   `GET /__dev/outbox` shows the intro exactly as previewed.
-- [ ] **Step 3: e2e** `e2e/tests/tour-roster.spec.ts`: THE SWAP FLOW (spec
-  9): PM property -> tour defaults to PM -> remove owner suggestion case ->
-  open group via confirm -> conversation members = card rows; the removed-
-  tenant flow: remove tenant -> reminders panel shows paused note ->
-  milestone still pins (assert via contact timeline) -> one-click restore
-  via suggestion. 360px pass over card, dialogs, rail. Full e2e green.
+- [ ] **Step 3: e2e** `e2e/tests/tour-roster.spec.ts`. The e2e lane runs the
+  BYTE-STABLE lean world - Task 4's PM property exists only in the FULL
+  profile, so THIS SPEC BUILDS ITS OWN FIXTURES IN-TEST (UI or API: create
+  the PM contact, roster it on the seeded property, mark primary), exactly
+  as Task 9's spec does. THE SWAP FLOW (spec 9): PM property -> tour
+  defaults to PM -> remove owner suggestion case -> open group via confirm
+  -> conversation members = card rows; the removed-tenant flow: remove
+  tenant -> reminders panel shows paused note -> milestone still pins
+  (assert via contact timeline) -> one-click restore via suggestion. 360px
+  pass over card, dialogs, rail. Full e2e green.
 - [ ] **Step 4: Commit** `feat(roster): People card edit mode, previews, call-through`.
 
 ---
@@ -580,21 +651,27 @@ Behavior:
   ```
 - Create: `app/src/repos/pendingRosterActionsRepo.ts` (clone
   tourRemindersRepo's create/listDue/claimApply/claimSkip/cancel discipline;
-  item per spec 5.3 + `actionId` = DETERMINISTIC
+  item per spec 5.3 PLUS `dismissedAt?: string`; `actionId` = DETERMINISTIC
   `${ownerType}#${ownerId}#open` / `...#add#${contactId}` so the PK itself
-  enforces the dedupe; "supersede" = conditional update of dueAt+status back
-  to pending on a non-pending row, else plain create)
+  enforces the dedupe. SUPERSEDE SEMANTICS - one behavior, stated once
+  (adjudicated post-review): `upsertPending(input)` REPLACES whatever row
+  holds that key - a pending row gets the new dueAt (spec 5.3's "duplicate
+  confirm supersedes the earlier pending action"), and a TERMINAL row
+  (skipped/canceled/applied) is overwritten back to pending, deliberately
+  retiring its old notice: a live pending row about a contact beats a stale
+  skip notice about the same contact. Claim transitions still refuse
+  terminal rows; only upsertPending may resurrect a key.)
 - Create: `app/test/pendingRosterActionsRepo.integration.test.ts` (DynamoDB
   Local, mirror the reminders integration suite)
-- Modify: FULL seed module (NOT lean.ts): add the PM-managed property - owner
-  of record + a PM contact rostered with `primaryContact: true` (spec 9).
 
 - [ ] **Step 1: Failing integration tests:** create/listDue ordering; claim
-  states are terminal; deterministic-id dedupe (second create of same add
-  supersedes, never duplicates); migrate(ownerKey -> new ownerKey) for
-  conversion.
+  states are terminal; deterministic-id dedupe (second upsert of the same
+  add supersedes - new dueAt, never a duplicate row); upsert onto a SKIPPED
+  row resurrects it to pending (old notice retired); dismiss stamps
+  dismissedAt (listable but excluded from the card's skipped[]); migrate
+  (ownerKey -> new ownerKey) for conversion.
 - [ ] **Step 2: Implement; green.**
-- [ ] **Step 3: Commit** `feat(roster): pendingRosterActions repo + table + FULL-seed PM property`. Flag in the task report: NEW TABLE + GSIs => dev Terraform apply owed at merge (spec section 11 - do NOT run it).
+- [ ] **Step 3: Commit** `feat(roster): pendingRosterActions repo + table`. Flag in the task report: NEW TABLE + GSIs => dev Terraform apply owed at merge (spec section 11 - do NOT run it).
 
 ### Task 13: quiet-hours evaluation + worker poller + skip paths
 
@@ -602,11 +679,21 @@ Behavior:
 - Create: `app/src/jobs/rosterActions.ts` (`runDuePendingRosterActions(nowIso, deps)`)
 - Modify: `app/src/worker.ts` (setInterval registration - clone the
   placement-nudge block at :261-295), `app/src/routes/tours.ts` +
-  `placements.ts` (open/add paths write a pending action instead of sending
-  when `isQuietTime`; `?force=send_now` query from the dialog's override
-  applies immediately with `automated:false` semantics), `app/src/routes/`
-  cancel/force endpoints:
+  `placements.ts` - the TWO paths that gain the quiet-hours evaluation,
+  named precisely so the add path has a home (post-review finding 1):
+  (a) the OPEN path (POST /:tourId/relay and the placement provision route);
+  (b) the LIVE ADD path = the owner call-through endpoint
+      `POST .../roster/live-members` FROM TASK 10 - and ONLY when the thread
+      is OPEN. A CLOSED thread's add stays silent-and-immediate, never
+      deferred (spec section 7 carve-out - deferring it would announce to a
+      closed group at 8 AM). The raw relay route
+      (`POST /api/conversations/:id/members`) is NOT touched - standalone
+      relay groups do not defer (out of scope; route comment says so).
+  Both accept `?force=send_now` from the dialog's override, applying
+  immediately with `automated:false` semantics. Pending-row endpoints:
   `POST /api/tours/:tourId/roster/pending/:actionId/cancel` / `.../apply-now`
+  / `.../dismiss` (dismiss stamps dismissedAt on a terminal row - the
+  "visible until dismissed" mechanism, spec 6.5)
 - Modify: convert path migrates pending actions (Task 4's hook goes live)
 - Test: `app/test/rosterActionsPoll.test.ts` (pinned clock), route tests
 
@@ -615,7 +702,8 @@ with reason: `group_closed`, `owner_canceled`, `already_member`,
 `contact_deleted`, `member_no_longer_on_roster`, `roster_too_thin`,
 `converted` (only when migration failed). open_group applies by running the
 SAME provision flow (resolves the plan AT APPLY TIME, consumes it); add
-applies addRelayMember + announcement. Reminder coupling (D7, pre-approved
+applies `addMemberToRelay` (the Task 10 relayMembers service) with the
+announcement. Reminder coupling (D7, pre-approved
 cheap position): in the reminder claim path, a group-eligible rung whose
 tour has a PENDING open_group and `now < tour start` is left UNCLAIMED
 (re-listed next poll); at/after tour start it proceeds via today's fallback
@@ -624,11 +712,14 @@ lines of ladder change, SKIP IT and document the nondeterminism instead -
 the spec pre-approves.
 
 - [ ] **Step 1: Failing tests:** open at 23:00 org-time -> pending action
-  (dueAt = clamped quiet-end), NO provision, NO outbox send; poller at
-  quiet-end provisions + intro sent + plan consumed; every skip reason has a
-  test scenario; cancel + apply-now; convert migrates the pending row
-  (ownerKey rewritten); reminder-wait (or its documented absence). Pinned
-  clocks throughout.
+  (dueAt = clamped quiet-end), NO provision, NO outbox send; LIVE ADD at
+  23:00 on an OPEN thread -> pending action, membership unchanged, no
+  announcement; LIVE ADD at 23:00 on a CLOSED thread -> immediate silent
+  add, NO pending action (the carve-out); poller at quiet-end provisions +
+  intro sent + plan consumed (and applies the deferred add + announcement);
+  every skip reason has a test scenario; cancel + apply-now + dismiss;
+  convert migrates the pending row (ownerKey rewritten); reminder-wait (or
+  its documented absence). Pinned clocks throughout.
 - [ ] **Step 2: Implement; green.**
 - [ ] **Step 3: Commit** `feat(roster): quiet-hours deferral for open/add - pending actions, poller, visible skips`.
 
@@ -638,11 +729,14 @@ the spec pre-approves.
 - Modify: `PeopleCard.tsx` (pending rows: `Joins at <time> - quiet hours /
   Add now - Cancel`; deferred-open banner on the button:
   `Opens at <time> - quiet hours. Send now - Cancel`; skipped rows visible
-  until dismissed), Task 5/10 roster payload gains `pending[]` + `skipped[]`,
+  until DISMISSED via a per-row dismiss control -> `POST .../pending/
+  :actionId/dismiss`; dismissed rows disappear), Task 5/10 roster payload
+  gains `pending[]` + `skipped[]` (skipped EXCLUDES dismissed rows),
   `RosterConfirmDialog` flips to the real three-button quiet layout
   ([Cancel] [Send now anyway] [Open at <time>] default - stacked on mobile)
 - Create: `e2e/tests/roster-quiet-hours.spec.ts`
-- Test: component tests for every pending/skip rendering
+- Test: component tests for every pending/skip rendering INCLUDING dismiss
+  (skip row -> dismiss click -> row gone -> refetch keeps it gone)
 
 - [ ] **Step 1: Component tests first; build.**
 - [ ] **Step 2: e2e:** freeze the lane's org settings into quiet hours (the
@@ -674,6 +768,25 @@ the spec pre-approves.
   task above; D9's ordering constraint is the slice order itself.
 - Type names consistent: `RosterEntry`/`ResolvedRoster`/`describeRoster`
   (Tasks 3/5/10), `PersonChannelInput` (Tasks 2/8), payload shape (Tasks
-  5/8/11/14).
+  5/8/11/14), memberKey (Tasks 5/10/11).
 - The two review-mandated negative tests are present: tabs NOT keyed on
   resolveTourMembers (Task 2), 409 never auto-resubmits (Task 11 Step 1).
+
+## Plan-review adjudications (2026-08-04, post-adversarial-review of the plan)
+
+- Deferred ADDS live on the owner call-through endpoints
+  (`POST .../roster/live-members`, Task 10), the ONLY add path the dashboard
+  uses; the raw relay route is untouched and standalone groups do not defer.
+- The client NEVER handles phones: roster payload carries memberKey +
+  phoneLast4; live remove is server-side by memberKey (stored-phone rule).
+- Resolver failure with a thread pointer set = source 'unavailable', never a
+  plan/default fallback: card renders unavailable, reminder rungs stay
+  unclaimed. Wrong-roster sends on a Dynamo blip are the outranking risk.
+- Supersede = upsert-to-pending replacing ANY prior row for the
+  deterministic key (terminal rows' notices deliberately retire); dismiss is
+  `dismissedAt` + endpoint, and skipped[] excludes dismissed rows.
+- Closed-thread adds are never deferred (spec section 7 carve-out);
+  preview-open 409s on an already-provisioned owner.
+- FULL-seed PM property moved to Task 4 so slices 3-5 live-QA realistically;
+  e2e specs build their own PM fixtures in-test (lean world stays
+  byte-stable).

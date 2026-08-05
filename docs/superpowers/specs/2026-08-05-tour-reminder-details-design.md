@@ -704,7 +704,10 @@ dependency, no infra.
 File these before handback:
 1. **Convert seeded unit addresses to structured `Address`** (D5). Note the
    byte-stable `lean` profile risk.
-2. FILED: `automated-sms-length-guard` (D9) - a universal length guard at the
+2. FILED ON `main` at `ee82772a` (corrected by `354c6f33`), NOT on this branch -
+   it was filed after this worktree was cut from `ed75d9e8`, so it appears here
+   only after the branch syncs `main`. Verify it exists post-merge rather than
+   assuming: `automated-sms-length-guard` (D9) - a universal length guard at the
    automated-send layer, covering every automated message rather than one
    feature. Needs the send service to know the message id, which it does not
    today, and should finally validate the `maxChars` the catalog has always

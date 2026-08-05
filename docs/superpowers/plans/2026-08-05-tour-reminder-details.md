@@ -83,6 +83,60 @@ Read it before Task 1. Decisions are cited below as D1..D9, W1..W7.
 
 ---
 
+## Task 0: Prerequisites (DO THIS FIRST - nothing below runs without it)
+
+This worktree was created by `git worktree add`, which copies tracked files ONLY.
+It has NO `node_modules` - not at the root, not in `app/`. Dependencies are hoisted
+to the workspace root, so `npx vitest` in Task 1 would not find vitest; `npx` would
+then try to DOWNLOAD it rather than failing cleanly, which wastes minutes and can
+produce a version skew against the repo's pinned vitest.
+
+- [ ] **Step 1: Install dependencies from the worktree root**
+
+```bash
+cd w:/tmp/tour-reminder-details
+npm install
+```
+
+Expected: a `node_modules` tree at the worktree root. This is a workspaces repo -
+install from the ROOT, never from `app/` or `dashboard/`.
+
+- [ ] **Step 2: Verify the toolchain actually resolves**
+
+```bash
+cd w:/tmp/tour-reminder-details/app && npx vitest --version
+```
+Expected: a version number printed with no download. If npx offers to install
+anything, STOP - the install in Step 1 did not take.
+
+- [ ] **Step 3: Warm the containers**
+
+```bash
+cd w:/tmp/tour-reminder-details
+npm run db:start
+npm run s3:start
+```
+
+DynamoDB Local backs the `tourReminders.test.ts` integration suite from Task 5
+onward. That suite SELF-SKIPS when nothing answers, and a skipped suite is not a
+pass - if you see the skip warning, the container is not up.
+
+- [ ] **Step 4: Confirm the baseline is green BEFORE you change anything**
+
+Run these BARE from the worktree root:
+
+```bash
+npm run typecheck
+npm test
+```
+Expected: PASS. If either is red on an untouched worktree, STOP and report - you
+cannot attribute a later failure to your own change without this baseline.
+
+Do NOT commit anything in this task (`node_modules` is gitignored; verify with a
+bare `git status` that the tree is clean).
+
+---
+
 ## Task 1: SMS encoding analysis + the catalog ASCII guard
 
 Folded in from `docs/issues/sms-copy-non-gsm7-characters.md` (spec section 7).
@@ -298,11 +352,12 @@ Change nothing else about the strings.
 Run: `cd app && npx vitest run test/smsEncoding.test.ts test/messageCatalogAscii.test.ts`
 Expected: PASS.
 
-- [ ] **Step 9: Full app suite (the nudge copy is asserted elsewhere)**
+- [ ] **Step 9: Full app suite**
 
 Run: `cd app && npx vitest run`
-Expected: PASS. If a nudge body assertion fails, update that expectation to the
-hyphen form - the copy is intentionally changed.
+Expected: PASS with NO other changes needed - no nudge default is duplicated
+outside `catalog.ts`, so the three edits break nothing. If something does fail,
+read it carefully rather than assuming it is copy drift.
 
 - [ ] **Step 10: ASCII check, then commit**
 
@@ -639,8 +694,45 @@ plus the Co-Authored-By trailer.
 The composer lands FIRST returning today's exact copy, so Tasks 5-8 can wire
 every site with zero test-expectation churn. Task 9 flips the copy.
 
+**Step 0 first - split the repo dependency out of `resolve.ts`.** `resolve.ts`
+VALUE-imports `createSettingsRepo`, which pulls `lib/dynamo.js` and
+`@aws-sdk/client-dynamodb`. Task 12 imports the composer into the Playwright
+harness, and `e2e/package.json` declares exactly ONE dependency
+(`@playwright/test`) - so every e2e worker would load the AWS SDK. It resolves
+today by hoisting and nothing executes at import time, so this is weight and
+latent breakage rather than a hard failure - but the fix is small and it restores
+the purity this layer's own header claims.
+
+- [ ] **Step 0: Make `resolve.ts` pure**
+
+Move ONLY `resolveWithSettings` into a new `app/src/messages/resolveWithSettings.ts`.
+Leave `resolveMessage`, `interpolate` and `settingsToOverrides` in `resolve.ts`,
+and change its settings import to TYPE-ONLY:
+
+```ts
+import type { OrgSettings } from '../repos/settingsRepo.js';
+```
+
+`settingsToOverrides` only needs the TYPE, so it stays pure. Then re-export both
+from `app/src/messages/index.ts` so every existing importer is untouched:
+
+```ts
+export { resolveMessage, settingsToOverrides } from './resolve.js';
+export { resolveWithSettings } from './resolveWithSettings.js';
+```
+
+Verify nothing else changed: `grep -rn "from './resolve.js'\|from '../messages/resolve.js'" app/src app/test`
+should show only `index.ts` and the new module. Every consumer imports from
+`messages/index.js` today (verified: `missedCallAutoText.ts`, `public.ts`,
+`relayGroups.ts`, `webhooks/twilio.ts`), so this is additive.
+
+Run `cd app && npx vitest run test/messages/resolve.test.ts` - PASS, unchanged.
+Commit this as its own small commit before continuing.
+
 **Files:**
-- Create: `app/src/messages/tourCopy.ts`, `app/test/tourCopy.test.ts`
+- Create: `app/src/messages/resolveWithSettings.ts`, `app/src/messages/tourCopy.ts`,
+  `app/test/tourCopy.test.ts`
+- Modify: `app/src/messages/resolve.ts`, `app/src/messages/index.ts`
 
 **Interfaces:**
 - Consumes: `formatStreet` (Task 3), `formatLocalDate`/`formatLocalTime` (Task 2),
@@ -1001,7 +1093,8 @@ Add to `app/test/tourReminders.test.ts`:
       tourId: tour.tourId, kind: 'confirmation', dueAt: '2026-09-19T15:00:00.000Z',
     });
     // Corrupt the tour's time AFTER arming - the only way to reach this state.
-    await tours.update(tour.tourId, { scheduledAt: 'not-an-instant' });
+    // The method is patch(), NOT update() - toursRepo has no update.
+    await tours.patch(tour.tourId, { scheduledAt: 'not-an-instant' });
 
     const pollAt = '2026-09-19T15:00:01.000Z';
     await runDueTourReminders(pollAt, runDeps);
@@ -1018,9 +1111,9 @@ Add to `app/test/tourReminders.test.ts`:
   });
 ```
 
-If `tours.update` cannot write an invalid `scheduledAt`, write the row directly
-with the doc client instead - the point is to reach the state, not to prove the
-write surface allows it.
+If `tours.patch` validates and rejects an invalid `scheduledAt`, write the row
+directly with the doc client instead - the point is to reach the state, not to
+prove the write surface allows it.
 
 - [ ] **Step 2: Run it and confirm it fails**
 
@@ -1096,15 +1189,40 @@ Then pass `body` into the claim: `deps.tourRemindersRepo.claimSend(row.reminderI
 
 - [ ] **Step 5: Reorder `forceSendReminder` (1:1)**
 
-Compose BEFORE `claimSend` at `:871`. A compose failure here is a pre-claim
-refusal, NOT a claim-skip - a human action must never retire a rung (spec section
-7 of the quiet-hours design). Return `{ outcome: 'refused', reason: 'tour_missing' }`
-is wrong; add nothing to `ForceSendRefusal` unless a reason is genuinely needed -
-prefer letting the existing 500 path handle it after logging, and state which you
-chose in the commit message.
+FIRST, note a signature gap: `forceSendReminder(reminderId, tourId, nowIso,
+smsSendingEnabled, deps)` has NO quiet-hours window - only `runDueTourReminders`
+calls `readQuietHoursWindow`. So `composeBodyForRow` cannot be called here as-is.
+`forceSendReminder` must read its OWN window:
 
-Pass the composed body into `claimSend` and into the 1:1 `sendMessageService` call
-in place of the `resolveMessage` at `:903`.
+```ts
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+```
+
+Do this and nothing else. Do NOT reach for `settings.timezone` directly - D8/W5
+forbid it, and `readQuietHoursWindow` is what routes through
+`resolveQuietHoursTimezone`. (The window is used ONLY for its timezone here;
+force-send deliberately bypasses quiet hours as a human action.)
+
+Then compose BEFORE `claimSend` at `:871`, and pass the composed body into
+`claimSend` and into the 1:1 `sendMessageService` call in place of the
+`resolveMessage` at `:903`.
+
+DECISION (do not improvise): a compose failure here is a PRE-CLAIM REFUSAL, never
+a claim-skip - a human action must not retire a rung. Add `'invalid_schedule'` to
+the `ForceSendRefusal` union and return
+`{ outcome: 'refused', reason: 'invalid_schedule' }`.
+
+A 500 would be wrong: the send-now route's whole design is a 409 carrying the
+honest row view so the panel self-corrects. The dashboard degrades gracefully
+before its copy line exists - `SEND_NOW_ERROR_COPY`
+(`dashboard/src/api/types.ts:826`) is a `Readonly<Record<string, string>>` with a
+documented generic fallback for unknown codes, so staff never see a raw token.
+Add the copy line in Task 10 (you are already editing that file):
+`invalid_schedule: 'That tour has no usable date and time, so nothing was sent.'`
+
+NOTE for Task 10: unlike the two `skipReason` declarations, `SEND_NOW_ERROR_COPY`
+is keyed by plain `string`, so typecheck will NOT force you to add this entry.
+It is on you to remember.
 
 - [ ] **Step 6: Hoist composition out of `announceGroupReminder`**
 
@@ -1175,25 +1293,42 @@ the one router that most needs the unit read. You must add it by hand.
 
 - [ ] **Step 1: Write the failing parity test**
 
-Add to `app/test/tourRemindersApi.test.ts`:
+READ THE SUITE'S SEAMS FIRST. `app/test/tourRemindersApi.test.ts` builds its app
+through `makeWebhookHarness` -> `buildApp` with in-memory fakes: no DynamoDB, no
+network, and NO dev router (the `__dev` routes are opt-in and this suite never
+mounts them). So there is no `POST /__dev/tour-reminders/tick` and no
+`GET /__dev/outbox` to call.
+
+Use what the suite actually has:
+- `authed(app)` (`:34-44`) wraps every request with `x-origin-verify` and
+  `TEST_SESSION_COOKIE`. A bare `request(app)` is REJECTED.
+- `makeSendSpy()` (`:46-58`) is the send-observation seam - it records
+  `SendMessageInput[]` on `.sent`.
+- Drive the send by calling `runDueTourReminders(now, deps)` DIRECTLY with the
+  suite's deps, rather than through an HTTP tick that does not exist here.
 
 ```ts
   it('the GET preview body EQUALS what the send path composes', async () => {
     // W1: the panel renders this string as "what will be sent". If the preview and
-    // the send path ever build it differently the dashboard is lying.
-    const { body: listBody } = await request(app).get(`/api/tours/${tourId}/reminders`);
-    const preview = listBody.reminders.find((r: { kind: string }) => r.kind === 'confirmation');
+    // the send path ever build it differently, the dashboard is lying.
+    const spy = makeSendSpy();
+    const { app, deps, tourId } = /* the suite's existing setup, wired with spy.service */;
 
-    await request(app).post('/__dev/tour-reminders/tick').send({});
-    const outbox = await request(app).get('/__dev/outbox');
-    const sent = outbox.body.messages.at(-1);
+    const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const preview = listed.body.reminders.find(
+      (r: { kind: string; state: string }) => r.kind === 'confirmation' && r.state === 'upcoming',
+    );
+    expect(preview).toBeDefined();
 
-    expect(preview.body).toBe(sent.body);
+    await runDueTourReminders(preview.dueAt, deps);
+
+    expect(spy.sent.at(-1)?.body).toBe(preview.body);
   });
 ```
 
-Adapt the request helpers to whatever this suite already uses - do not introduce a
-new HTTP harness.
+Fill the setup line from the suite's existing pattern - do NOT introduce a new
+harness, and do NOT add the dev router to this suite just to make an HTTP tick
+work.
 
 - [ ] **Step 2: Run it and confirm it fails or is inconclusive**
 
@@ -1282,21 +1417,37 @@ which is the whole reason the snapshot exists.
 
 - [ ] **Step 1: Write the failing test**
 
+Same seam constraints as Task 7 Step 1 - `authed()`, no `__dev` routes, drive the
+send directly. Reschedule by mutating the WORLD FAKE's tour rather than calling
+`PATCH /api/tours/:tourId`, which would additionally require the tour to be in a
+reschedulable status - status rules are not what this test is about.
+
 ```ts
   it('a SENT rung keeps its original body after the tour is rescheduled', async () => {
     // D4: sent rows survive a reschedule (only PENDING rungs are canceled). Without
     // the snapshot, a read path would recompose them with the NEW time and claim we
     // texted something we never texted - and disagree with the thread.
-    await request(app).post('/__dev/tour-reminders/tick').send({});
-    const before = await request(app).get(`/api/tours/${tourId}/reminders`);
-    const sentBefore = before.body.reminders.find((r: { state: string }) => r.state === 'sent');
-    expect(sentBefore).toBeDefined();
+    const spy = makeSendSpy();
+    const { app, deps, world, tourId } = /* the suite's existing setup, wired with spy.service */;
 
-    await request(app).patch(`/api/tours/${tourId}`).send({ scheduledAt: '2026-12-01T20:00:00.000Z' });
+    const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const target = listed.body.reminders.find(
+      (r: { kind: string; state: string }) => r.kind === 'confirmation' && r.state === 'upcoming',
+    );
+    await runDueTourReminders(target.dueAt, deps);
 
-    const after = await request(app).get(`/api/tours/${tourId}/reminders`);
-    const sentAfter = after.body.reminders.find(
-      (r: { reminderId: string }) => r.reminderId === sentBefore.reminderId,
+    const afterSend = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const sentBefore = afterSend.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === target.reminderId,
+    );
+    expect(sentBefore.state).toBe('sent');
+
+    // Reschedule on the fake directly - no status gate, no HTTP.
+    await world.toursRepo.patch(tourId, { scheduledAt: '2026-12-01T20:00:00.000Z' });
+
+    const afterReschedule = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const sentAfter = afterReschedule.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === target.reminderId,
     );
     expect(sentAfter.body).toBe(sentBefore.body);
   });
@@ -1599,12 +1750,25 @@ In `dashboard/src/api/types.ts`:
 - add `'invalid_schedule'` to the `skipReason` union at `:764`;
 - add `invalid_schedule: 'schedule unusable'` to `REMINDER_SKIP_REASON_LABELS` at
   `:806-815` (both are exhaustive, so typecheck fails loudly if either is missed);
-- add `timezone: string` to the reminders-list response type and to the contact
-  timeline response type - the IANA zone the bodies were composed in.
+- add `timezone: string` to the reminders-LIST response type and to the contact
+  timeline response type - the IANA zone the bodies were composed in;
+- add the send-now copy line Task 6 Step 5 deferred here:
+  `invalid_schedule: 'That tour has no usable date and time, so nothing was sent.'`
+  NOTE: unlike the two declarations above, `SEND_NOW_ERROR_COPY` is keyed by plain
+  `string`, so typecheck will NOT force this. Nothing but this instruction will
+  catch it.
 
 In `app/src/routes/tourReminders.ts` and `app/src/routes/contactTimeline.ts`,
 include `timezone: window.timezone` in the JSON. Both already have the window in
 hand after Task 7.
+
+SCOPE OF `timezone` ON THE WIRE: it lands on the reminders-LIST response and the
+timeline response only - NOT on the PATCH / send-now `{ reminder }` payloads,
+which return a single row. That is deliberate and fine because the panel holds the
+list's zone in component state and re-uses it when re-rendering a patched row.
+Make sure the component reads the zone from that state, NOT from the patch
+response, or it will format a chip from `undefined` and silently fall back to the
+browser zone - reintroducing exactly the mismatch this task exists to fix.
 
 - [ ] **Step 6: Use it in both components**
 
@@ -1646,10 +1810,15 @@ seventh site is exactly what this test would have caught.
 // would have 500'd GET /api/contacts/:id/timeline for any tenant with an upcoming
 // tour rung.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join } from 'node:path';
+import path, { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
-const SRC = new URL('../src', import.meta.url).pathname;
+// path.dirname(fileURLToPath(...)), NOT new URL(...).pathname - on win32 the
+// latter yields "/W:/tmp/..." with a leading slash and readdirSync throws ENOENT.
+// This is the idiom every tree-walking test in this repo already uses
+// (lane.test.ts:27, otel.test.ts:18, scaffold.test.ts:9).
+const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'src');
 /** The ONE module allowed to resolve a tokenized tour.* id. */
 const COMPOSER = join('messages', 'tourCopy.ts');
 /** Token-free by design (spec D2), so direct resolution stays legal. */
@@ -1801,8 +1970,20 @@ city/state/zip, so reminder copy reads `Tour at 350 Boulevard SE, Atlanta, GA
 them touches the byte-stable `lean` profile the e2e goldens depend on, which is why
 it was deferred. `type: improvement`, `severity: low`, `area: app`.
 
-`docs/issues/automated-sms-length-guard.md` is ALREADY FILED on `main` - do not
-re-file it.
+`docs/issues/automated-sms-length-guard.md` is ALREADY FILED on `main`
+(commits `ee82772a` + `354c6f33`) but is NOT in this worktree - the branch was cut
+from `ed75d9e8`, before it. It arrives with the `git merge main` in Step 4.
+
+So: do NOT re-file it now (you would create a conflicting duplicate). AFTER Step
+4's merge, VERIFY it is present:
+
+```bash
+ls docs/issues/automated-sms-length-guard.md
+```
+
+If the merge did not bring it in, THEN file it - D9 accepts unbounded
+multi-segment texts specifically because that guard is tracked somewhere, and
+losing the issue silently deletes the only record of the deferral.
 
 - [ ] **Step 3: Run the derived index and ASCII-check the new issue**
 
@@ -1867,3 +2048,20 @@ Tasks 1 and 9. `dateTime(iso, timeZone?)` matches between Tasks 10's steps.
 who "helpfully" flips the copy early will produce a large red window and lose the
 ability to tell a wiring bug from a copy-expectation change. Task 4's comment and
 the plan header both say so.
+
+**Environment and harness assumptions, verified rather than assumed** (a second
+review caught each of these as a plan-stopper):
+- The worktree has NO `node_modules` - Task 0 installs before anything runs.
+- `tourRemindersApi.test.ts` mounts NO dev router and rejects unauthenticated
+  requests. Tasks 7 and 8 use its real seams (`authed()`, `makeSendSpy()`, a
+  direct `runDueTourReminders` call), never `__dev` HTTP or bare `request(app)`.
+- `toursRepo` exposes `patch`, not `update` (Task 6).
+- `forceSendReminder` has no quiet-hours window and must read its own (Task 6
+  Step 5) - the natural improvisation, reading `settings.timezone` directly, is
+  exactly what D8/W5 forbid.
+- `new URL(..).pathname` is broken on win32; Task 11 uses the repo's
+  `fileURLToPath` idiom.
+- `automated-sms-length-guard` exists on `main` but NOT in this worktree until the
+  Task 13 merge - verify post-merge, do not re-file.
+- `SEND_NOW_ERROR_COPY` is keyed by plain `string`, so unlike the two `skipReason`
+  declarations it gives NO typecheck protection for the new refusal code.

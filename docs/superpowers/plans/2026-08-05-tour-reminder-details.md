@@ -721,13 +721,32 @@ export { resolveMessage, settingsToOverrides } from './resolve.js';
 export { resolveWithSettings } from './resolveWithSettings.js';
 ```
 
-Verify nothing else changed: `grep -rn "from './resolve.js'\|from '../messages/resolve.js'" app/src app/test`
-should show only `index.ts` and the new module. Every consumer imports from
-`messages/index.js` today (verified: `missedCallAutoText.ts`, `public.ts`,
-`relayGroups.ts`, `webhooks/twilio.ts`), so this is additive.
+ONE CONSUMER IMPORTS `resolve.js` DIRECTLY AND MUST BE FIXED IN THIS STEP.
+`app/test/messages/resolve.test.ts:6-10` imports all three names straight from
+`'../../src/messages/resolve.js'`, bypassing `index.js`. Change it to pull
+`resolveWithSettings` from the new module:
 
-Run `cd app && npx vitest run test/messages/resolve.test.ts` - PASS, unchanged.
-Commit this as its own small commit before continuing.
+```ts
+import { resolveMessage, settingsToOverrides } from '../../src/messages/resolve.js';
+import { resolveWithSettings } from '../../src/messages/resolveWithSettings.js';
+```
+
+(Task 9 Step 6 also edits this file, for a different reason - the token-free
+example. Do the IMPORT repair here; leave that one for Task 9.)
+
+Now verify:
+
+```bash
+grep -rn "from './resolve.js'\|messages/resolve.js" app/src app/test
+```
+Expected: THREE hits - `messages/index.ts`, the new `resolveWithSettings.ts`, and
+the repaired `resolve.test.ts`. Anything else is a consumer you missed. ("Every
+consumer goes through `messages/index.js`" is true of `app/src` - verified:
+`missedCallAutoText.ts`, `public.ts`, `relayGroups.ts`, `webhooks/twilio.ts` - but
+NOT of `app/test`.)
+
+Run `cd app && npx vitest run test/messages/resolve.test.ts` - PASS, behavior
+unchanged. Commit this as its own small commit before continuing.
 
 **Files:**
 - Create: `app/src/messages/resolveWithSettings.ts`, `app/src/messages/tourCopy.ts`,
@@ -1307,12 +1326,47 @@ Use what the suite actually has:
 - Drive the send by calling `runDueTourReminders(now, deps)` DIRECTLY with the
   suite's deps, rather than through an HTTP tick that does not exist here.
 
+The harness returns `{ app, world }` - there is NO `deps` object, and
+`runDueTourReminders` needs a full `RunDueTourRemindersDeps`. Assemble it from
+`FakeWorld`, which already carries every repo you need (`unitsRepo` at
+`twilioWebhookHarness.ts:196`, `settingsRepo` at `:214`, `messagesRepo` at `:191`,
+`adapter` at `:232`, plus `toursRepo` / `tourRemindersRepo` / `contactsRepo` /
+`conversationsRepo`):
+
+```ts
+import { runDueTourReminders, type RunDueTourRemindersDeps } from '../src/jobs/tourReminders.js';
+import { quietOffSettingsRepo } from './helpers/settingsStub.js';
+
+/** The poll's deps, assembled from the harness world. */
+function pollDepsFrom(
+  world: ReturnType<typeof makeWebhookHarness>['world'],
+  sendMessageService: SendMessageService,
+): RunDueTourRemindersDeps {
+  return {
+    tourRemindersRepo: world.tourRemindersRepo,
+    toursRepo: world.toursRepo,
+    contactsRepo: world.contactsRepo,
+    conversationsRepo: world.conversationsRepo,
+    messagesRepo: world.messagesRepo,
+    unitsRepo: world.unitsRepo,
+    adapter: world.adapter,
+    sendMessageService,
+    // Quiet hours OFF so the fire-time backstop is a no-op and the rung actually
+    // sends at its fixture dueAt. With the default window a dueAt inside
+    // 21:00-08:00 would DEFER and the assertion would see no send at all.
+    settingsRepo: quietOffSettingsRepo(),
+  };
+}
+```
+
 ```ts
   it('the GET preview body EQUALS what the send path composes', async () => {
     // W1: the panel renders this string as "what will be sent". If the preview and
     // the send path ever build it differently, the dashboard is lying.
+    const { app, world } = makeWebhookHarness();
     const spy = makeSendSpy();
-    const { app, deps, tourId } = /* the suite's existing setup, wired with spy.service */;
+    const deps = pollDepsFrom(world, spy.service);
+    const tourId = /* seed a tour + arm its ladder using the suite's existing helper */;
 
     const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
     const preview = listed.body.reminders.find(
@@ -1427,8 +1481,10 @@ reschedulable status - status rules are not what this test is about.
     // D4: sent rows survive a reschedule (only PENDING rungs are canceled). Without
     // the snapshot, a read path would recompose them with the NEW time and claim we
     // texted something we never texted - and disagree with the thread.
+    const { app, world } = makeWebhookHarness();
     const spy = makeSendSpy();
-    const { app, deps, world, tourId } = /* the suite's existing setup, wired with spy.service */;
+    const deps = pollDepsFrom(world, spy.service); // the helper added in Task 7
+    const tourId = /* seed a tour + arm its ladder using the suite's existing helper */;
 
     const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
     const target = listed.body.reminders.find(
@@ -2035,8 +2091,13 @@ D8 -> Task 10. D9 (no cap) -> nothing to build, correctly. Section 6's seven sit
 6 and Task 12. W1 -> Tasks 7, 11. W2 -> Task 7 step 4. W4 -> Tasks 12, 13. W6 ->
 Task 6's reorder table. W7 -> Task 7's `body: ''`. Section 10 follow-ups -> Task 13.
 
-**Placeholders.** None. Every code step carries real code; every run step names a
-command and an expected result.
+**Placeholders.** Two remain, both deliberate and both narrow: Tasks 7 and 8 each
+say `/* seed a tour + arm its ladder using the suite's existing helper */`. That
+is the ONE line that must match a fixture helper already in
+`tourRemindersApi.test.ts`, and inventing a replacement here would more likely
+conflict with the suite than help. Everything the reviews actually flagged - the
+deps assembly, the auth wrapper, the send seam - is now written out in full.
+No other step defers work; every run step names a command and an expected result.
 
 **Type consistency.** `composeTourReminderBody` / `ComposeTourReminderInput` /
 `UncomposableReminderError` are named identically in Tasks 4, 6, 7, 9 and 12.

@@ -1,10 +1,10 @@
 // usePlacementChannels tests - resolves the GROUP channel to a conversationId +
-// unread, the two 1:1 channels to a SUMMED unread over the contact's non-relay
-// threads, the two mark-read paths (group = single conversation, person = inbox
-// fan-out), group id injection, and a live conversation.updated refetch.
-// Structural mirror of tours/useTourChannels.test.tsx (the group source is
-// placement.group_thread and the 1:1 targets are placement.tenantId + the unit's
-// landlordId).
+// unread, each PERSON channel (keyed by contactId) to a SUMMED unread over that
+// contact's non-relay threads, the two mark-read paths (group = single
+// conversation, person = inbox fan-out), group id injection, and a live
+// conversation.updated refetch. Structural mirror of
+// tours/useTourChannels.test.tsx (the group source is placement.group_thread and
+// the people are placement.tenantId + the unit's landlordId).
 import { useEffect } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -31,7 +31,7 @@ vi.mock('../../api/index.js', async () => {
 
 import {
   usePlacementChannels,
-  type PlacementChannelKey,
+  type PersonChannelInput,
   type PlacementChannelsState,
 } from './usePlacementChannels.js';
 
@@ -69,6 +69,20 @@ function emailConv(conversationId: string, contactId: string, unread: number): C
   } as ConversationSummary;
 }
 
+/** WHAT THE PAGE PASSES: the tenant + the unit's landlord when there is one,
+ *  keyed by contactId and labelled with the display name. */
+function peopleFor(placement: PlacementItem, landlordId?: string): PersonChannelInput[] {
+  return [
+    { contactId: placement.tenantId, label: 'Ann Tenant' },
+    ...(landlordId !== undefined ? [{ contactId: landlordId, label: 'Lon Landlord' }] : []),
+  ];
+}
+
+/** The channel's unread for a person, 0 when they are not on the channels. */
+function unreadOf(s: PlacementChannelsState, contactId: string): number {
+  return s.people.find((p) => p.contactId === contactId)?.unread ?? 0;
+}
+
 function Probe({
   placement,
   landlordId,
@@ -76,23 +90,21 @@ function Probe({
   placement: PlacementItem;
   landlordId?: string;
 }): React.JSX.Element {
-  const s = usePlacementChannels(placement, landlordId);
+  const s = usePlacementChannels(placement, peopleFor(placement, landlordId));
+  const tenantUnread = unreadOf(s, placement.tenantId);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
       <span data-testid="group">{`${s.group.conversationId ?? '-'}/${s.group.unread}`}</span>
-      <span data-testid="tenant">{`unread:${s.tenant.unread}`}</span>
-      <span data-testid="landlord">{`unread:${s.landlord.unread}`}</span>
-      <button
-        type="button"
-        onClick={() => s.markPersonRead('tenant', placement.tenantId, s.tenant.unread)}
-      >
+      <span data-testid="tenant">{`unread:${tenantUnread}`}</span>
+      <span data-testid="landlord">{`unread:${unreadOf(s, landlordId ?? '')}`}</span>
+      <button type="button" onClick={() => s.markPersonRead(placement.tenantId, tenantUnread)}>
         markTenant
       </button>
-      <button type="button" onClick={() => s.markPersonRead('tenant', undefined, s.tenant.unread)}>
+      <button type="button" onClick={() => s.markPersonRead(undefined, tenantUnread)}>
         markTenantUnresolved
       </button>
-      <button type="button" onClick={() => s.markPersonRead('tenant', '', s.tenant.unread)}>
+      <button type="button" onClick={() => s.markPersonRead('', tenantUnread)}>
         markTenantEmptyId
       </button>
       <button type="button" onClick={() => s.markGroupRead(s.group.conversationId, s.group.unread)}>
@@ -115,44 +127,36 @@ function MarkReadHarness({
 }: {
   placement: PlacementItem;
   landlordId?: string;
-  activeKey: PlacementChannelKey;
+  activeKey: string;
 }): React.JSX.Element {
-  const channels = usePlacementChannels(placement, landlordId);
+  const channels = usePlacementChannels(placement, peopleFor(placement, landlordId));
   return (
     <div>
       <span data-testid="status">{channels.status}</span>
       <span data-testid="group">{`${channels.group.conversationId ?? '-'}/${channels.group.unread}`}</span>
-      <span data-testid="tenant">{`unread:${channels.tenant.unread}`}</span>
-      <span data-testid="landlord">{`unread:${channels.landlord.unread}`}</span>
-      <MarkReadChild
-        channels={channels}
-        activeKey={activeKey}
-        tenantId={placement.tenantId}
-        {...(landlordId !== undefined && { landlordId })}
-      />
+      <span data-testid="tenant">{`unread:${unreadOf(channels, placement.tenantId)}`}</span>
+      <span data-testid="landlord">{`unread:${unreadOf(channels, landlordId ?? '')}`}</span>
+      <MarkReadChild channels={channels} activeKey={activeKey} />
     </div>
   );
 }
 function MarkReadChild({
   channels,
   activeKey,
-  tenantId,
-  landlordId,
 }: {
   channels: PlacementChannelsState;
-  activeKey: PlacementChannelKey;
-  tenantId: string;
-  landlordId?: string;
+  activeKey: string;
 }): React.JSX.Element {
-  const active = channels[activeKey];
-  const contactId = activeKey === 'landlord' ? landlordId : tenantId;
+  const active = channels.people.find((p) => p.contactId === activeKey);
+  const contactId = active?.contactId;
+  const unread = active === undefined ? channels.group.unread : active.unread;
   useEffect(() => {
     if (activeKey === 'group') {
       channels.markGroupRead(channels.group.conversationId, channels.group.unread);
       return;
     }
-    channels.markPersonRead(activeKey, contactId, active.unread);
-  }, [activeKey, contactId, active.unread, channels]);
+    channels.markPersonRead(contactId, unread);
+  }, [activeKey, contactId, unread, channels]);
   return <span />;
 }
 
@@ -349,7 +353,7 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
       conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
       nextCursor: null,
     });
-    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     // Fires WITHOUT any interaction - the regression the ref-based version missed.
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'ten-1' }));
     expect(markInboxRead).toHaveBeenCalledTimes(1);
@@ -362,7 +366,7 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
       conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
       nextCursor: null,
     });
-    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
 
     getConversations.mockResolvedValue({
@@ -390,7 +394,7 @@ describe('usePlacementChannels - initial active tab auto-mark-read', () => {
       ],
       nextCursor: null,
     });
-    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness placement={makePlacement()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // Active (tenant) tab loaded at unread 0 -> no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();

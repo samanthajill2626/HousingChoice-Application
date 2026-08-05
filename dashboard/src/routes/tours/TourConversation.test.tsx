@@ -1,5 +1,7 @@
-// TourConversation tests - the three-channel switcher now that both 1:1 tabs are
-// the SHARED person-centric comms pane (ContactCommsTab -> ContactCommsPane).
+// TourConversation tests - the channel switcher: the group text plus ONE 1:1 tab
+// per person the page resolves (keyed by contactId, labelled with that person's
+// display name), each 1:1 being the SHARED person-centric comms pane
+// (ContactCommsTab -> ContactCommsPane).
 // Verifies the properties the rewire had to preserve or newly guarantee:
 //   1) TENANT ONLY seed: a noShowDraft nonce bump selects the Tenant tab and
 //      prefills the tenant composer (never the landlord/PM pane) - including a
@@ -13,6 +15,10 @@
 //   5) The 1:1 mark-read fan-out only fires from a pane the operator could
 //      actually see: commsVisible + a LOADED contact + a foreground browser tab.
 //      The group tab's single-conversation read is exempt.
+//   6) The rail is driven by `channels.people`: one tab per person, no tab for a
+//      person the page cannot resolve, selection falls back to Group when the
+//      active person leaves the list, and an unread that scrolls off the right
+//      edge is carried by a dot at that edge (spec 6.6).
 //
 // TourConversation is rendered DIRECTLY with a hand-built `channels` stub (the
 // real useTourChannels has its own suite + TourDetail.test). Unlike before the
@@ -21,7 +27,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Contact, ContactTimelinePage, Tour } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
@@ -45,7 +51,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { TourConversation, type TourConversationProps } from './TourConversation.js';
-import type { TourChannelsState } from './useTourChannels.js';
+import type { PersonChannel, TourChannelsState } from './useTourChannels.js';
 
 const SEED = 'Hi! We noticed you may have missed your tour. Want to reschedule?';
 
@@ -102,15 +108,28 @@ function pinnedFeed(label: string): ContactTimelinePage {
   };
 }
 
-// Both 1:1 channels report unread only (they resolve a PERSON, not one
+/** What TourDetail resolves today: the tenant + the property's landlord, keyed by
+ *  contactId and labelled with the DISPLAY NAME (never a role word). */
+function people(): PersonChannel[] {
+  return [
+    { contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 },
+    { contactId: 'landlord-1', label: 'Lon Landlord', unread: 0 },
+  ];
+}
+
+/** The same two people with ONE person's unread raised. */
+function peopleWith(contactId: string, unread: number): PersonChannel[] {
+  return people().map((p) => (p.contactId === contactId ? { ...p, unread } : p));
+}
+
+// Person channels report unread only (they resolve a PERSON, not one
 // conversation); the group is left unresolved so the initial Group pane is the
 // empty state.
 function makeChannels(over: Partial<TourChannelsState> = {}): TourChannelsState {
   return {
     status: 'ready',
     group: { conversationId: null, unread: 0 },
-    tenant: { unread: 0 },
-    landlord: { unread: 0 },
+    people: people(),
     setGroupConversationId: vi.fn(),
     markGroupRead: vi.fn(),
     markPersonRead: vi.fn(),
@@ -123,7 +142,6 @@ function baseProps(over: Partial<TourConversationProps> = {}): TourConversationP
     tour: makeTour(),
     tenant: tenantContact(),
     landlord: landlordContact(),
-    landlordId: 'landlord-1',
     channels: makeChannels(),
     onOpenGroup: vi.fn(),
     openGroupBusy: false,
@@ -178,9 +196,9 @@ describe('TourConversation - no-show check-in seed', () => {
       </MemoryRouter>,
     );
 
-    // The Tenant tab becomes selected and its composer shows the seeded copy.
+    // The tenant's tab becomes selected and its composer shows the seeded copy.
     expect(
-      await screen.findByRole('tab', { name: /Tenant/, selected: true }),
+      await screen.findByRole('tab', { name: /Ann Tenant/, selected: true }),
     ).toBeInTheDocument();
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue(SEED);
   });
@@ -189,9 +207,12 @@ describe('TourConversation - no-show check-in seed', () => {
     const props = baseProps({ tour: makeTour({ groupThreadId: undefined }) });
     const { rerender } = renderConvo(props);
 
-    // Self-guided tour -> the Tenant tab is the initial tab, its pane already
+    // Self-guided tour -> the tenant's tab is the initial tab, its pane already
     // mounted and its composer empty.
-    expect(screen.getByRole('tab', { name: /Tenant/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
     expect(await screen.findByRole('textbox', { name: 'Reply message' })).toHaveValue('');
 
     // "Send no-show check-in" with no tab change to ride: the seed key alone must
@@ -218,15 +239,15 @@ describe('TourConversation - no-show check-in seed', () => {
     // Seeded once on the tenant pane.
     expect(await screen.findByRole('textbox', { name: 'Reply message' })).toHaveValue(SEED);
 
-    // Invariant 1: switching to the Landlord pane shows an EMPTY composer - the
+    // Invariant 1: switching to the landlord's pane shows an EMPTY composer - the
     // seed never reaches the landlord/PM 1:1.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
 
-    // Invariant 2: a later MANUAL return to the Tenant tab remounts a fresh pane
-    // with no seed (the one-shot seed was consumed, not persisted). This is also
-    // the wrong-party-send guard: a draft never survives a tab switch.
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    // Invariant 2: a later MANUAL return to the tenant's tab remounts a fresh
+    // pane with no seed (the one-shot seed was consumed, not persisted). This is
+    // also the wrong-party-send guard: a draft never survives a tab switch.
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
   });
 });
@@ -266,35 +287,34 @@ describe('TourConversation - 1:1 panes', () => {
     renderConvo(
       baseProps({
         tour: makeTour({ groupThreadId: undefined }),
-        channels: makeChannels({ landlord: { unread: 4 } }),
+        channels: makeChannels({ people: peopleWith('landlord-1', 4) }),
       }),
     );
 
-    expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument();
-    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).not.toHaveAccessibleName(/unread/i);
+    expect(screen.getByRole('tab', { name: /Lon Landlord.*unread/i })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).not.toHaveAccessibleName(/unread/i);
   });
 
-  it('an unresolved landlord shows the empty state, never a pane', async () => {
+  it('a landlord the page cannot resolve gets NO tab at all (people drives the rail)', () => {
+    // The unit has no landlordId, so the page puts nobody but the tenant on the
+    // channels - and a person with no id can no longer own an empty dead-end tab.
     renderConvo(
       baseProps({
         tour: makeTour({ groupThreadId: undefined }),
-        landlordId: undefined,
         landlord: null,
+        channels: makeChannels({ people: [{ contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 }] }),
       }),
     );
 
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
-    expect(
-      screen.getByText('The landlord for this property is not resolved yet.'),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /Landlord/i })).toBeNull();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
   });
 
   it('a contact whose record failed to load shows the empty state, never a pane', async () => {
     renderConvo(baseProps({ tour: makeTour({ groupThreadId: undefined }), tenant: null }));
 
     expect(
-      await screen.findByText("We could not load the tenant's contact record."),
+      await screen.findByText("We could not load Ann Tenant's contact record."),
     ).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
     // The pane is what fetches a timeline - it never mounted, so nothing did.
@@ -309,14 +329,190 @@ describe('TourConversation - 1:1 panes', () => {
     await userEvent.click(screen.getByRole('button', { name: /Comms only/i }));
     await waitFor(() => expect(screen.queryByText('Tour scheduled')).not.toBeInTheDocument());
 
-    // Switch to the Landlord pane: it REMOUNTS (fresh draft), but the filter is
+    // Switch to the landlord's pane: it REMOUNTS (fresh draft), but the filter is
     // held above the remount so it is still on.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(screen.getByRole('button', { name: /Comms only/i })).toHaveAttribute(
       'aria-pressed',
       'true',
     );
     await waitFor(() => expect(screen.queryByText('Tour scheduled')).not.toBeInTheDocument());
+  });
+});
+
+// The rail is a pure projection of `channels.people` - no fixed tenant/landlord
+// slots, no role words, no type-derived PM label. The page owns WHO is on the
+// tour; this component only renders them.
+describe('TourConversation - id-keyed person tabs', () => {
+  it('renders one 1:1 tab per person input, keyed by contactId', async () => {
+    renderConvo(
+      baseProps({
+        tour: makeTour({ groupThreadId: undefined }),
+        channels: makeChannels({
+          people: [
+            { contactId: 'tenant-1', label: 'Tasha Nguyen', unread: 0 },
+            { contactId: 'landlord-1', label: 'Marcus Webb', unread: 0 },
+          ],
+        }),
+      }),
+    );
+
+    expect(await screen.findByRole('tab', { name: /Tasha Nguyen/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Marcus Webb/ })).toBeInTheDocument();
+    // The labels are DISPLAY NAMES: no role word survives on either tab.
+    expect(screen.queryByRole('tab', { name: /Tenant|Landlord|PM/ })).toBeNull();
+  });
+
+  it('falls back to the Group tab when the active person leaves the people list', async () => {
+    const props = baseProps();
+    const { rerender } = renderConvo(props);
+
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
+    expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+
+    // The landlord is removed from the roster while their tab is selected.
+    const trimmed = {
+      ...props,
+      channels: makeChannels({
+        people: [{ contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 }],
+      }),
+    };
+    rerender(
+      <MemoryRouter>
+        <TourConversation {...trimmed} />
+      </MemoryRouter>,
+    );
+
+    expect(screen.queryByRole('tab', { name: /Lon Landlord/ })).toBeNull();
+    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    );
+    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+  });
+});
+
+// One row that SCROLLS (never wraps), with the overflow marked by an edge fade -
+// and if a tab hidden past that edge has unread, the edge carries its dot so a
+// reply can never hide off-screen (spec 6.6).
+describe('TourConversation - scrolling tab rail', () => {
+  // Five tabs 60px apart in a 200px rail whose content is 300px wide: tabs 0-2
+  // are comfortably on screen, tabs 3-4 sit past the 24px fade at x=176.
+  const RAIL_WIDTH = 200;
+  const RAIL_CONTENT = 300;
+  const TAB_PITCH = 60;
+  const TAB_WIDTH = 50;
+  const CARRIED = 'Unread messages past the edge of the channel list';
+
+  function rectOf(left: number, right: number): DOMRect {
+    return {
+      x: left,
+      y: 0,
+      left,
+      right,
+      top: 0,
+      bottom: 0,
+      width: right - left,
+      height: 0,
+      toJSON: () => ({}),
+    } as DOMRect;
+  }
+
+  /** The rail's stubbed scrollWidth - mutable so a test can "resize" it. */
+  let railContent = RAIL_WIDTH;
+
+  /** jsdom does no layout, so drive the rail's overflow geometry ourselves: a
+   *  RAIL_WIDTH-wide rail whose tabs sit TAB_PITCH apart, so the later tabs are
+   *  off the right edge. `contentWidth` decides whether the rail overflows at
+   *  all. Returns the undo. */
+  function stubRailGeometry(contentWidth: number): () => void {
+    railContent = contentWidth;
+    const rects = vi
+      .spyOn(HTMLElement.prototype, 'getBoundingClientRect')
+      .mockImplementation(function boundingRect(this: HTMLElement): DOMRect {
+        const role = this.getAttribute('role');
+        if (role === 'tablist') return rectOf(0, RAIL_WIDTH);
+        if (role === 'tab') {
+          const i = Array.prototype.indexOf.call(this.parentElement?.children ?? [], this);
+          return rectOf(i * TAB_PITCH, i * TAB_PITCH + TAB_WIDTH);
+        }
+        return rectOf(0, 0);
+      });
+    Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('role') === 'tablist' ? RAIL_WIDTH : 0;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollWidth', {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.getAttribute('role') === 'tablist' ? railContent : 0;
+      },
+    });
+    return () => {
+      rects.mockRestore();
+      Reflect.deleteProperty(HTMLElement.prototype, 'clientWidth');
+      Reflect.deleteProperty(HTMLElement.prototype, 'scrollWidth');
+    };
+  }
+
+  /** Five tabs (group + four people); `unreadFor` raises one person's unread. */
+  function fiveTabs(unreadFor: string, unread: number): TourConversationProps {
+    const roster: PersonChannel[] = [
+      { contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 },
+      { contactId: 'landlord-1', label: 'Lon Landlord', unread: 0 },
+      { contactId: 'pm-1', label: 'Pat Manager', unread: 0 },
+      { contactId: 'sup-1', label: 'Sam Support', unread: 0 },
+    ];
+    return baseProps({
+      channels: makeChannels({
+        people: roster.map((p) => (p.contactId === unreadFor ? { ...p, unread } : p)),
+      }),
+    });
+  }
+
+  let undo: () => void = () => {};
+  afterEach(() => undo());
+
+  it('carries the unread dot of a tab hidden past the right edge', () => {
+    // The 5th tab (Sam, at x=240) is past the 200px-wide rail entirely.
+    undo = stubRailGeometry(RAIL_CONTENT);
+    renderConvo(fiveTabs('sup-1', 3));
+
+    expect(screen.getByText(CARRIED)).toBeInTheDocument();
+  });
+
+  it('carries nothing when every unread tab is on screen', () => {
+    // The tenant's tab (x=60..110) is visible, so its own dot is enough.
+    undo = stubRailGeometry(RAIL_CONTENT);
+    renderConvo(fiveTabs('tenant-1', 3));
+
+    expect(screen.queryByText(CARRIED)).toBeNull();
+  });
+
+  it('carries nothing when the rail does not overflow', () => {
+    // Same tab offsets, but the content fits: there is no edge to hide behind.
+    undo = stubRailGeometry(RAIL_WIDTH);
+    renderConvo(fiveTabs('sup-1', 3));
+
+    expect(screen.queryByText(CARRIED)).toBeNull();
+  });
+
+  it('re-measures on resize (the window narrows until the rail overflows)', async () => {
+    undo = stubRailGeometry(RAIL_WIDTH);
+    renderConvo(fiveTabs('sup-1', 3));
+    expect(screen.queryByText(CARRIED)).toBeNull();
+
+    // The pane narrows (an operator drags the window, or the shell flips to its
+    // one-column layout) and the same tabs no longer fit.
+    railContent = RAIL_CONTENT;
+    window.dispatchEvent(new Event('resize'));
+
+    expect(await screen.findByText(CARRIED)).toBeInTheDocument();
   });
 });
 
@@ -331,7 +527,7 @@ describe('TourConversation - deleted-contact composer lock', () => {
   it('a soft-deleted tenant locks the tenant 1:1: note shown, no Reply textbox, no dead Restore', async () => {
     renderConvo(baseProps({ tenant: { ...tenantContact(), deleted_at: DELETED_AT } }));
 
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Restore contact' })).toBeNull();
@@ -341,11 +537,11 @@ describe('TourConversation - deleted-contact composer lock', () => {
     renderConvo(baseProps({ landlord: { ...landlordContact(), deleted_at: DELETED_AT } }));
 
     // The (live) tenant pane still composes normally...
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toBeInTheDocument();
 
     // ...while the deleted landlord's pane is locked.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
   });
@@ -361,7 +557,7 @@ describe('TourConversation - deleted-contact composer lock', () => {
 // ContactCommsTab (only IT can see the pane's timeline status); these drive it
 // through the page, which is the surface the behavior is claimed on.
 describe('TourConversation - 1:1 mark-read gates', () => {
-  const unreadTenant = () => makeChannels({ tenant: { unread: 7 } });
+  const unreadTenant = () => makeChannels({ people: peopleWith('tenant-1', 7) });
 
   it('DESKTOP: the initial 1:1 tab with unread fans out on mount, no click', async () => {
     const channels = unreadTenant();
@@ -369,9 +565,7 @@ describe('TourConversation - 1:1 mark-read gates', () => {
       baseProps({ tour: makeTour({ groupThreadId: undefined }), channels, commsVisible: true }),
     );
 
-    await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
-    );
+    await waitFor(() => expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7));
   });
 
   it('MOBILE: a details-first mount does NOT fan out; revealing the pane fires it once', async () => {
@@ -394,36 +588,29 @@ describe('TourConversation - 1:1 mark-read gates', () => {
         <TourConversation {...props} commsVisible={true} />
       </MemoryRouter>,
     );
-    await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
-    );
+    await waitFor(() => expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7));
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });
 
   it('a contact whose record FAILED to load never fans out (dead-end tab, unread kept)', async () => {
-    // The adversarial probe, inverted: landlord id resolved, landlord record
-    // null, landlord unread 4, one click on the Landlord tab.
-    const channels = makeChannels({ landlord: { unread: 4 } });
+    // The adversarial probe, inverted: the landlord is on the channels with
+    // unread 4, their contact record is null, one click on their tab.
+    const channels = makeChannels({ people: peopleWith('landlord-1', 4) });
     renderConvo(
       baseProps({
         tour: makeTour({ groupThreadId: undefined }),
         landlord: null,
-        landlordId: 'landlord-1',
         channels,
       }),
     );
 
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
-    // Scoped to the LANDLORD: the initial (loaded, unread-0) Tenant tab legitimately
+    // Scoped to the LANDLORD: the initial (loaded, unread-0) tenant tab legitimately
     // calls through and the hook no-ops it, which is not what this pins.
-    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord', 'landlord-1', 4);
-    expect(channels.markPersonRead).not.toHaveBeenCalledWith(
-      'landlord',
-      expect.anything(),
-      expect.anything(),
-    );
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord-1', 4);
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord-1', expect.anything());
   });
 
   it('the GROUP tab is unaffected by the visibility gate (single-conversation read)', async () => {
@@ -467,7 +654,7 @@ describe('TourConversation - 1:1 mark-read gates', () => {
     act(() => document.dispatchEvent(new Event('visibilitychange')));
 
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
   });
 
@@ -526,7 +713,7 @@ describe('TourConversation - 1:1 mark-read gates', () => {
     });
 
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });

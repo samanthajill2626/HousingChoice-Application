@@ -208,14 +208,35 @@ export function PlacementDetail(): React.JSX.Element {
   const landlord = fresh.landlord;
   const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
 
-  // The three comms channels (group / tenant 1:1 / landlord 1:1). Called
-  // UNCONDITIONALLY (hooks rules) with a loading-safe placeholder while the
-  // bundle loads - it keys on the real placementId, so once the placement +
-  // unit resolve the hook refetches against the real tenant/landlord/group. Only
-  // consumed in the render below, which runs after the loaded guard.
+  // Staff see people by NAME (GLOSSARY); degrade to the raw id only when the
+  // contact record truly cannot be loaded. Declared HERE, above the channels
+  // hook, because the 1:1 tabs are labelled with these display names.
+  const tenantLabel = tenant
+    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
+    : placement?.tenantId ?? '';
+  const landlordLabel = landlord
+    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
+    : landlordId ?? null;
+
+  // The comms channels (group + one 1:1 per person). Called UNCONDITIONALLY
+  // (hooks rules) with a loading-safe placeholder while the bundle loads - it
+  // keys on the real placementId, so once the placement + unit resolve the hook
+  // refetches against the real people/group. Only consumed in the render below,
+  // which runs after the loaded guard.
+  //
+  // WHO the 1:1 channels are with: the tenant, plus the property's landlord when
+  // there is one - the SAME ids this page renders, never a phone-gated resolver
+  // (a tenant with no mobile number keeps their tab). Slice 3 swaps this input
+  // for the resolved roster. The placeholder's tenantId is '' - a legal, unread-0
+  // person the hook's mark-read guard rejects by design.
   const channels = usePlacementChannels(
     placement ?? { placementId, tenantId: '', unitId: '', stage: 'send_application' },
-    landlordId,
+    [
+      { contactId: placement?.tenantId ?? '', label: tenantLabel },
+      ...(landlordId !== undefined
+        ? [{ contactId: landlordId, label: landlordLabel ?? landlordId }]
+        : []),
+    ],
   );
 
   // The ONE nudge-ladder fetch for this placement (spec's "do not fetch twice"),
@@ -332,12 +353,6 @@ export function PlacementDetail(): React.JSX.Element {
 
   const stageLabel = STAGE_LABELS[placement.stage] ?? placement.stage;
   const phase = STAGE_PHASE[placement.stage];
-  // Staff see the person by NAME (GLOSSARY); degrade to the raw id only when the
-  // contact truly can't be loaded.
-  const tenantLabel = tenant ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone) : placement.tenantId;
-  const landlordLabel = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : landlordId ?? null;
   const listing = unit ? formatAddress(unit.address) || placement.unitId : placement.unitId;
   const lostReason = formatLostReason(placement.lost_reason);
   const finalRent = formatMoney(unit?.final_rent);
@@ -452,7 +467,6 @@ export function PlacementDetail(): React.JSX.Element {
         >
           <PlacementConversation
             placement={placement}
-            unit={unit}
             tenant={tenant}
             landlord={landlord}
             channels={channels}

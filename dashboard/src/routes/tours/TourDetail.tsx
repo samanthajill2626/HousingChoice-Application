@@ -147,7 +147,23 @@ function TourDetailLoaded({
 }: LoadedProps): React.JSX.Element {
   const navigate = useNavigate();
   const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
-  const channels = useTourChannels(tour, landlordId);
+  // Staff see people by NAME (GLOSSARY); degrade to the raw id only when the
+  // contact record truly cannot be loaded. Declared HERE, above the channels
+  // hook, because the 1:1 tabs are labelled with these display names.
+  const tenantName = tenant
+    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
+    : tour.tenantId;
+  const landlordName = landlord
+    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
+    : landlordId ?? null;
+  // WHO this tour's 1:1 channels are with: the tenant, plus the property's
+  // landlord when there is one - the SAME ids this page renders, never a
+  // phone-gated resolver (a tenant with no mobile number keeps their tab).
+  // Slice 3 swaps this input for the resolved roster.
+  const channels = useTourChannels(tour, [
+    { contactId: tour.tenantId, label: tenantName },
+    ...(landlordId !== undefined ? [{ contactId: landlordId, label: landlordName ?? landlordId }] : []),
+  ]);
   // ONE activity fetch feeds both the Activity card and the conversation
   // transcripts (as interleaved milestone pins). Rows arrive newest-first;
   // the transcripts want oldest-first, hence the reverse. Only the loaded
@@ -181,12 +197,6 @@ function TourDetailLoaded({
 
   const isPm = tour.tourType === 'pm_team';
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
-  const tenantName = tenant
-    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
-    : tour.tenantId;
-  const landlordName = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : landlordId ?? null;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
   const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not booked';
   const factsLine = `${whenText} - ${typeLabel} - ${tenantName} -> ${address}`;
@@ -492,7 +502,6 @@ function TourDetailLoaded({
             tour={tour}
             tenant={tenant}
             landlord={landlord}
-            landlordId={landlordId}
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}

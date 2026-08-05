@@ -70,16 +70,48 @@
   min-height: 0;
 }
 
+/* The rail's positioning shell. The carried unread dot CANNOT live inside the
+ * rail itself: an absolutely positioned child of a scroll container scrolls with
+ * the content, and this dot must stay pinned to the visible right edge. */
+.tabRailWrap {
+  position: relative;
+  min-width: 0;
+}
+
 .tabRail {
   display: flex;
+  /* ONE row, always: a rail with several people on it SCROLLS instead of
+   * wrapping to a second line (contact-rosters spec 6.6 / 6.7). */
+  flex-wrap: nowrap;
   gap: var(--sp-1);
   padding: var(--sp-2) var(--sp-3);
   background: var(--c-surface);
   border-bottom: 1px solid var(--c-border);
-  /* The pills are nowrap; a long channel label ("Landlord - <name>") at a
+  /* The pills are nowrap; a long channel label (a full display name) at a
    * phone width must scroll THIS rail, never the page (shared by the tour +
    * placement conversation panes; placement-hub spec s7). */
   overflow-x: auto;
+}
+
+/* Applied by ChannelTabRail ONLY while the rail really overflows, so a rail that
+ * fits keeps a crisp last pill. The 24px width is MIRRORED as RAIL_FADE_PX in
+ * TourConversation.tsx (it decides which tabs count as past the edge) - change
+ * both. */
+.tabRailFaded {
+  -webkit-mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+  mask-image: linear-gradient(to right, black calc(100% - 24px), transparent);
+}
+
+/* The carried dot: the unread of a tab hidden past the fade, shown AT the fade so
+ * a reply never hides off-screen. Not a hit target - the rail scrolls to it. */
+.carriedDot {
+  position: absolute;
+  top: 50%;
+  right: var(--sp-1);
+  transform: translateY(-50%);
+  display: inline-flex;
+  align-items: center;
+  pointer-events: none;
 }
 
 .tab,

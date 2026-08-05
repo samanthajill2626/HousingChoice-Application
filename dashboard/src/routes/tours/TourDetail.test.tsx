@@ -1,7 +1,7 @@
 // TourDetail component tests - the rebuilt two-pane tour page. Verifies:
 //   - the status-aware PRIMARY CTA ladder (Book / Mark toured / Record outcome /
 //     Start placement / View placement / none) + the kebab guards
-//   - the three-channel switcher: initial tab, never-auto-switch, unread dots,
+//   - the channel switcher: initial tab, never-auto-switch, unread dots,
 //     SINGLE-conversation mark-read (never the inbox fan-out), composer targeting,
 //     lazy-load, and the group + 1:1 empty states (open-group / create-on-demand)
 //   - the right-column cards (routing chip + fallback warning, People, Guidance,
@@ -738,7 +738,7 @@ describe('TourDetail - right column cards', () => {
   });
 });
 
-describe('TourDetail - three-channel switcher', () => {
+describe('TourDetail - channel switcher', () => {
   it('a self-guided tour (no group) defaults to the Tenant tab and never auto-switches', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'self_guided', groupThreadId: undefined }));
     getConversations.mockResolvedValue({
@@ -747,11 +747,11 @@ describe('TourDetail - three-channel switcher', () => {
     });
     renderDetail();
     await waitLoaded();
-    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
     expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'false');
     // Let all the channel fetches settle; the active tab must NOT have moved.
     await waitFor(() => expect(getConversations).toHaveBeenCalled());
-    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('a tour WITH a group defaults to the Group tab', async () => {
@@ -774,7 +774,7 @@ describe('TourDetail - three-channel switcher', () => {
     renderDetail();
     await waitLoaded();
     // The Landlord tab (unread 2) exposes an accessible "unread" hint.
-    await waitFor(() => expect(screen.getByRole('tab', { name: /Landlord - Lon.*unread/i })).toBeInTheDocument());
+    await waitFor(() => expect(screen.getByRole('tab', { name: /Lon Landlord.*unread/i })).toBeInTheDocument());
     // Lazy-load, now measured on the PERSON feed (a 1:1 tab is a contact-keyed
     // pane, so its stream comes from getContactTimeline): the ACTIVE tab's
     // contact IS fetched, the inactive tab's contact is NOT.
@@ -802,10 +802,10 @@ describe('TourDetail - three-channel switcher', () => {
     });
     renderDetail();
     await waitLoaded();
-    await screen.findByRole('tab', { name: /Landlord - Lon.*unread/i });
+    await screen.findByRole('tab', { name: /Lon Landlord.*unread/i });
     // The tenant tab (active, unread 0) triggered no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     // Contact-page parity: the 1:1 tab reads the PERSON, clearing every thread
     // they own (which is exactly what the tab's summed dot counted).
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'landlord-1' }));
@@ -832,9 +832,9 @@ describe('TourDetail - three-channel switcher', () => {
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
     await waitFor(() => expect(sendMessage).toHaveBeenLastCalledWith('c-tenant', { body: 'hi tenant' }));
     // Switch to landlord: its pane mounts, then send targets the landlord conversation.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     await waitFor(() =>
-      expect(screen.getByRole('tab', { name: /Landlord - Lon/ })).toHaveAttribute('aria-selected', 'true'),
+      expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toHaveAttribute('aria-selected', 'true'),
     );
     await userEvent.type(screen.getByRole('textbox', { name: 'Reply message' }), 'hi landlord');
     await userEvent.click(screen.getByRole('button', { name: 'Send' }));
@@ -864,9 +864,9 @@ describe('TourDetail - three-channel switcher', () => {
     );
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('PRIVATE note for the tenant');
     // Switch to the Landlord tab WITHOUT sending.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     await waitFor(() =>
-      expect(screen.getByRole('tab', { name: /Landlord - Lon/ })).toHaveAttribute('aria-selected', 'true'),
+      expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toHaveAttribute('aria-selected', 'true'),
     );
     // The remount gives a FRESH composer: the tenant draft is gone (not carried over).
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toHaveValue('');
@@ -931,7 +931,7 @@ describe('TourDetail - three-channel switcher', () => {
     // pane renders it - including the "(primary)" qualifier the pane passes as
     // replyToLabel=defaultPhoneLabel(phones), which the old bespoke 1:1
     // transcript did not have.
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant - Ann/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     await waitFor(() =>
       expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
         'Reply sends to (404) 555-0111 (primary)',
@@ -1171,7 +1171,7 @@ describe('TourDetail - mobile', () => {
 
     // The Tenant tab is active and its dot is showing - and NOTHING was marked
     // read. Wait for the pane itself to mount so this is not a race won by luck.
-    await screen.findByRole('tab', { name: /Tenant - Ann.*unread/i });
+    await screen.findByRole('tab', { name: /Ann Tenant.*unread/i });
     await screen.findByRole('textbox', { name: 'Reply message' });
     expect(markInboxRead).not.toHaveBeenCalled();
 

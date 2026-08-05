@@ -1,10 +1,13 @@
-// PlacementConversation - the placement page's LEFT pane: a three-channel switcher
-// (Group text / Tenant 1:1 / Landlord 1:1). Structural mirror of
-// tours/TourConversation.tsx. All three tabs always render; the initial tab is
-// Group when the placement already has a group thread, else Tenant, and it NEVER
-// auto-switches after load (only a user click moves it).
+// PlacementConversation - the placement page's LEFT pane: a channel switcher over
+// the group text plus ONE 1:1 tab per person the page put on this placement
+// (`channels.people`, keyed by contactId and labelled with that person's DISPLAY
+// NAME - no role words). Structural mirror of tours/TourConversation.tsx. The
+// initial tab is Group when the placement already has a group thread, else the
+// tenant's, and it NEVER auto-switches after load (only a user click moves it) -
+// except that a selection pointing at a person who is no longer on the placement
+// falls back to Group (spec 6.6).
 //
-// The two 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
+// The 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
 // ContactCommsPane, the same component the contact page renders), not a
 // single-conversation relay transcript: they show the PERSON's whole feed - every
 // number's thread, email, calls and the lifecycle pins the server writes - and
@@ -21,23 +24,21 @@
 // + a foreground browser tab) - see that file's effect for why.
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
-// never fetch all three up front). Empty states render in place: the group offers
+// never fetch every tab up front). Empty states render in place: the group offers
 // [Open group text] (which provisions the masked relay via
 // provisionPlacementRelay and mounts the fresh thread at once); a 1:1 whose
-// contact is unresolved says so (the pane requires a LOADED Contact), and a
-// contact with no thread yet gets a live composer that creates the conversation
+// contact record failed to load says so (the pane requires a LOADED Contact), and
+// a contact with no thread yet gets a live composer that creates the conversation
 // on the first send.
 //
 // Differences from the tour template, and ONLY these: the channel SOURCES are
-// placement.* (group = placement.group_thread; tenant = placement.tenantId;
-// landlord = unit.landlordId, derived HERE rather than passed as a prop); there
-// is no pm_team label branch (labels are exactly Group text / Tenant - {first} /
-// Landlord - {first}); the group empty-state button provisions the relay
-// INTERNALLY (provisionPlacementRelay -> setGroupConversationId) rather than
-// delegating to a parent onOpenGroup; there is no no-show check-in seed; and no
-// milestones are interleaved on ANY tab (the group transcript renders its thread
-// items raw). A placement has no `status` field, so the group "dead" guard keys
-// on TERMINAL_STAGES (moved_in / lost) instead of tour.status.
+// placement.* (group = placement.group_thread; the people come from the page);
+// the group empty-state button provisions the relay INTERNALLY
+// (provisionPlacementRelay -> setGroupConversationId) rather than delegating to a
+// parent onOpenGroup; there is no no-show check-in seed; and no milestones are
+// interleaved on ANY tab (the group transcript renders its thread items raw). A
+// placement has no `status` field, so the group "dead" guard keys on
+// TERMINAL_STAGES (moved_in / lost) instead of tour.status.
 import { useEffect, useState } from 'react';
 import {
   getConversation,
@@ -49,26 +50,26 @@ import {
   type Contact,
   type ConversationParticipant,
   type PlacementItem,
-  type UnitItem,
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Timeline } from '../contact/Timeline.js';
 import { ContactCommsTab } from '../contact/ContactCommsTab.js';
-import { contactDisplayName } from '../contact/format.js';
 import { useRelayThread } from '../conversation/useRelayThread.js';
-import {
-  type PlacementChannelKey,
-  type PlacementChannelsState,
-  type PlacementPersonKey,
-} from './usePlacementChannels.js';
-// Reuse the tour page's comms CSS verbatim (scoped CSS module, tokens only) - the
-// pill rail / pane / empty-state styling is identical for both hubs.
+import { type PlacementChannelsState } from './usePlacementChannels.js';
+// Reuse the tour page's comms CSS *and* its rail component verbatim (the CSS
+// module is scoped + tokens only) - the pill rail / pane / empty-state styling
+// and the overflow behavior are identical for both hubs.
+import { ChannelTabRail, type ChannelTab } from '../tours/TourConversation.js';
 import styles from '../tours/TourDetail.module.css';
+
+/** The GROUP tab's key. Every other tab keys on a contactId, which can never
+ *  collide with it (contact ids are minted with an id prefix). */
+const GROUP_KEY = 'group';
 
 export interface PlacementConversationProps {
   placement: PlacementItem;
-  /** The placement's unit - its landlordId is the landlord 1:1 target. */
-  unit: UnitItem | null;
+  /** The contact RECORDS the page fetched, for whichever people are on the
+   *  channels: the 1:1 pane needs a loaded Contact, not just an id. */
   tenant: Contact | null;
   landlord: Contact | null;
   channels: PlacementChannelsState;
@@ -78,73 +79,59 @@ export interface PlacementConversationProps {
   commsVisible: boolean;
 }
 
-/** A member's first name, or null when unknown. */
-function firstNameOf(c: Contact | null): string | null {
-  const f = c?.firstName?.trim();
-  return f && f.length > 0 ? f : null;
-}
-
 export function PlacementConversation({
   placement,
-  unit,
   tenant,
   landlord,
   channels,
   commsVisible,
 }: PlacementConversationProps): React.JSX.Element {
-  const landlordId = unit?.landlordId;
-
   // Initial tab decided ONCE from the placement at first render; never re-synced.
-  const [activeKey, setActiveKey] = useState<PlacementChannelKey>(
-    placement.group_thread ? 'group' : 'tenant',
+  // 'group', else a contactId - here the tenant's.
+  const [activeKey, setActiveKey] = useState<string>(
+    placement.group_thread ? GROUP_KEY : placement.tenantId,
   );
 
-  // ONE "Comms only" filter per page visit, shared by BOTH 1:1 tabs and held
+  // ONE "Comms only" filter per page visit, shared by EVERY 1:1 tab and held
   // ABOVE their keyed remount. Timeline's own copy is per-mount state, so without
   // this the filter would reset on every tab switch - and a pin-heavy person feed
   // is exactly where an operator reaches for it (spec A-M2).
   const [commsOnly, setCommsOnly] = useState(false);
 
-  const tenantFirst = firstNameOf(tenant);
-  const landlordFirst = firstNameOf(landlord);
-  const tabs: { key: PlacementChannelKey; label: string; unread: number }[] = [
-    { key: 'group', label: 'Group text', unread: channels.group.unread },
-    {
-      key: 'tenant',
-      label: tenantFirst ? `Tenant - ${tenantFirst}` : 'Tenant',
-      unread: channels.tenant.unread,
-    },
-    {
-      key: 'landlord',
-      label: landlordFirst ? `Landlord - ${landlordFirst}` : 'Landlord',
-      unread: channels.landlord.unread,
-    },
+  // The rail: the group text, then one tab per person - label verbatim from the
+  // channel (the page resolved the display name; no role word is derived here).
+  const people = channels.people;
+  const tabs: ChannelTab[] = [
+    { key: GROUP_KEY, label: 'Group text', unread: channels.group.unread },
+    ...people.map((p) => ({ key: p.contactId, label: p.label, unread: p.unread })),
   ];
 
-  const tenantName = tenant
-    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
-    : 'the tenant';
-  const landlordName = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : 'the landlord';
+  // Selection-on-remove (spec 6.6): an activeKey that is not one of THIS
+  // placement's people - they were dropped from the roster while their tab was
+  // selected - lands on the GROUP tab, which always exists. Derived, never
+  // re-synced state: activeKey itself is untouched, so nothing has to be undone
+  // if they return.
+  const activePerson = people.find((p) => p.contactId === activeKey);
+  const isGroupTab = activePerson === undefined;
+  const effectiveKey = isGroupTab ? GROUP_KEY : activeKey;
 
   // A placement has no `status`; a group text cannot be opened once the deal is
   // terminal (moved_in / lost).
   const groupDead = TERMINAL_STAGES.has(placement.stage);
-  const oneToOneKey: PlacementPersonKey = activeKey === 'landlord' ? 'landlord' : 'tenant';
-  const oneToOneContactId = activeKey === 'landlord' ? landlordId : placement.tenantId;
-  const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
+  const oneToOneContactId = activePerson?.contactId;
+  const oneToOneName = activePerson?.label ?? '';
   // The pane needs a LOADED Contact - it derives the numbers, addresses and the
-  // deleted / opted-out send gates from it, so an id alone is not enough.
-  const oneToOneContact = activeKey === 'landlord' ? landlord : tenant;
-  // Two ways it can be missing, and they are different facts: the unit is
-  // unloaded or has no landlordId at all (nothing to load), or the page's
-  // best-effort getContact failed. Say which - a bare "no messages yet" would be
-  // a lie.
-  const oneToOneMissingNote =
-    oneToOneContactId === undefined
-      ? 'The landlord for this property is not resolved yet.'
-      : `We could not load ${oneToOneName}'s contact record.`;
+  // deleted / opted-out send gates from it, so an id alone is not enough. The
+  // page hands us the records it fetched; match the active person against them.
+  const oneToOneContact =
+    activePerson === undefined
+      ? null
+      : ([tenant, landlord].find((c) => c !== null && c.contactId === activePerson.contactId) ??
+        null);
+  // Only ONE way a tab can be missing its record now: the page's best-effort
+  // getContact failed. (A person with no id gets no tab at all, so the old
+  // "landlord not resolved yet" dead-end tab is gone with the fixed slots.)
+  const oneToOneMissingNote = `We could not load ${oneToOneName}'s contact record.`;
 
   // Viewing the GROUP tab marks its SINGLE conversation read + clears the tab dot.
   // Runs on the initial tab and every switch; re-runs when the channel resolves an
@@ -164,11 +151,11 @@ export function PlacementConversation({
   // markGroupRead is a single-conversation read that predates the pane, and gating
   // it is out of scope.
   const groupConversationId = channels.group.conversationId;
-  const activeUnread = channels[activeKey].unread;
+  const activeUnread = activePerson === undefined ? channels.group.unread : activePerson.unread;
   useEffect(() => {
-    if (activeKey !== 'group') return;
+    if (!isGroupTab) return;
     channels.markGroupRead(groupConversationId, activeUnread);
-  }, [activeKey, groupConversationId, activeUnread, channels]);
+  }, [isGroupTab, groupConversationId, activeUnread, channels]);
 
   // Group provisioning lives HERE (not delegated to a parent onOpenGroup like the
   // tour page): [Open group text] calls provisionPlacementRelay, then injects the
@@ -187,29 +174,10 @@ export function PlacementConversation({
 
   return (
     <div className={styles.convo}>
-      <div className={styles.tabRail} role="tablist" aria-label="Conversation channel">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={activeKey === t.key}
-            className={activeKey === t.key ? styles.tabOn : styles.tab}
-            onClick={() => setActiveKey(t.key)}
-          >
-            {t.label}
-            {t.unread > 0 ? (
-              <>
-                <span className={styles.dot} aria-hidden="true" />
-                <span className={styles.srOnly}> unread</span>
-              </>
-            ) : null}
-          </button>
-        ))}
-      </div>
+      <ChannelTabRail tabs={tabs} activeKey={effectiveKey} onSelect={setActiveKey} />
 
       <div className={styles.channelPane}>
-        {activeKey === 'group' ? (
+        {isGroupTab ? (
           groupConversationId !== null ? (
             <GroupChannel conversationId={groupConversationId} />
           ) : (
@@ -239,10 +207,11 @@ export function PlacementConversation({
             <p className={styles.emptyNote}>{oneToOneMissingNote}</p>
           </div>
         ) : (
-          // key so switching the Tenant<->Landlord 1:1 REMOUNTS a fresh pane. Both
-          // tabs render <ContactCommsTab> at the same JSX position; without a key
-          // React reuses the fiber and the composer's in-progress draft survives
-          // the switch, so a Send would post it to the newly-selected party.
+          // key so switching from one person's 1:1 to another's REMOUNTS a fresh
+          // pane. Every tab renders <ContactCommsTab> at the same JSX position;
+          // without a key React reuses the fiber and the composer's in-progress
+          // draft survives the switch, so a Send would post it to the
+          // newly-selected party.
           // (No seed nonce rides this key - the placement page has no no-show
           // check-in.)
           <ContactCommsTab
@@ -253,7 +222,7 @@ export function PlacementConversation({
             onCommsOnlyChange={setCommsOnly}
             commsVisible={commsVisible}
             unread={activeUnread}
-            onMarkRead={(u) => channels.markPersonRead(oneToOneKey, oneToOneContactId, u)}
+            onMarkRead={(u) => channels.markPersonRead(oneToOneContactId, u)}
           />
         )}
       </div>

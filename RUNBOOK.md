@@ -114,6 +114,14 @@ when the branch merges (schema BEFORE the code deploy, per the rule above); prod
 table starts empty. Until the dev apply lands, every deferral path 500s on dev deploys (local/hermetic
 lanes are unaffected — they bootstrap their own tables).
 
+**Contact-rosters data note (same merge):** the branch renames the unit scalar
+`primary_voice_contact` -> `primary_contact` with NO read-fallback and retires
+`landlordVoiceOverride` on conversations. Existing dev rows written under the old
+key keep it until reseeded: a unit whose primary was a PM reads as landlord-primary,
+and pre-rename threads with a voice override dial the thread roster instead. The
+routine post-merge **dev reseed** clears both (prod has no data pre-cutover). Do the
+reseed BEFORE the post-merge masked-call smoke, or the smoke tests stale rows.
+
 **Placement deadline-model schema — NOT YET APPLIED (as of 2026-07-03; feature branch `feat/placement-deadline-model` unmerged). Apply to DEV after merge; PROD rides the M1.11 cutover.**
 
 | Change | Table | Kind | Powers |

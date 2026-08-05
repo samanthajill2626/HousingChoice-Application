@@ -51,3 +51,9 @@ success. That makes the pointer write part of the claim rather than a
 best-effort tail, and the 409 for the race loser lands before any number is
 bought. Do NOT redesign the resolution/consumption flow around it - only the
 claim.
+
+**Update (2026-08-05, contact-rosters adversarial review).** The quiet-hours
+deferral poller adds a SECOND automated writer to this unclaimed path: a
+deferred open applied at quiet-end and an operator force-open can now race
+each other as well as two operators. Same gap, higher probability - worth
+weighing when this is prioritized.

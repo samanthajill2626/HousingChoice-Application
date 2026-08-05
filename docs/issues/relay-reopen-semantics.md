@@ -27,3 +27,11 @@ intro/reintroduction body for members added while closed (the
 never-introduced set is computable: participants with no relay.intro or
 relay.member_added milestone on this thread). Decide whether reopen
 announces to everyone or only to never-introduced members.
+
+**Update (2026-08-05, fix-wave adjudication).** One more asymmetry belongs to
+this decision: a placement whose `group_thread` points at a CLOSED relay can
+be re-opened by a FORCED open (201) while the deferred form of the identical
+click is retired by the poller as a `group_closed` skip - route and poller
+disagree about whether "open" may mean "reopen". The fix wave pinned the
+actual behavior in a test rather than inventing parity; resolve it here when
+reopen semantics are decided.

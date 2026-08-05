@@ -1548,6 +1548,12 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       return;
     }
     log.info({ placementId, actionId: row.actionId }, 'pending roster action canceled by operator');
+    // Poke the hubs: this operator gets the fresh payload in the response, but
+    // every OTHER open placement page is still showing "Opens at 8:00 AM" for a
+    // row that is now a canceled notice (PL5). Cancel touches nothing else, so
+    // this is the only signal there is.
+    const canceledPlacement = await placements.getById(placementId);
+    if (canceledPlacement) await emitPlacementUpdated(canceledPlacement);
     await respondWithRoster(res, placementId);
   });
 

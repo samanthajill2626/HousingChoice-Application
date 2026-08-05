@@ -843,6 +843,12 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
     log.info({ tourId, actionId: row.actionId }, 'pending roster action canceled by operator');
+    // Poke the hubs: this operator gets the fresh payload in the response, but
+    // every OTHER open tour page is still showing "Opens at 8:00 AM" for a row
+    // that is now a canceled notice (PL5). Cancel touches nothing else, so this
+    // is the only signal there is.
+    const canceledTour = await tours.get(tourId);
+    if (canceledTour) events.emit('tour.updated', { tourId, status: canceledTour.status });
     await respondWithRoster(res, tourId);
   });
 

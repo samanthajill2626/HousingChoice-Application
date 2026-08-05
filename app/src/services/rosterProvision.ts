@@ -637,8 +637,11 @@ export async function openPlacementGroup(
   return { ok: true, placement: updatedPlacement, conversation };
 }
 
-/** Emit placement.updated with the recomputed soonest deadline (one query). */
-async function emitPlacementUpdated(
+/** Emit placement.updated with the recomputed soonest deadline (one query).
+ *  Exported because the roster-action poller pokes the same event when it
+ *  RESOLVES a deferral (a skip changes the card's notices without touching the
+ *  placement itself, so nothing else would emit). */
+export async function emitPlacementUpdated(
   deps: OpenPlacementGroupDeps,
   placement: PlacementItem,
 ): Promise<void> {

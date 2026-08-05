@@ -604,6 +604,50 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     expect(row.skippedReason).toBe('converted');
   });
 
+  // --- the card must not keep showing a claim that is already false (PL5) ---
+
+  it('a SKIP pokes the owner event, so an open hub stops showing "Joins at 8:00 AM"', async () => {
+    // The card reads pending[]/skipped[] from the roster payload, and useRoster
+    // refetches on tour.updated / placement.updated. An apply emits those from
+    // inside the provision/add services; a claimSkip emitted NOTHING, so the
+    // banner sat there claiming a deferral that had already been retired.
+    const tourId = await createTour();
+    await world.toursRepo.setRoster(tourId, [{ contactId: 'c-tenant' }], undefined);
+    const actionId = await deferOpen('tour', tourId);
+    world.emitted.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    expect((await rowOf(actionId)).status).toBe('skipped');
+    expect(
+      world.emitted
+        .filter((e) => e.event === 'tour.updated')
+        .map((e) => (e.payload as { tourId: string }).tourId),
+    ).toContain(tourId);
+  });
+
+  it('a PLACEMENT skip pokes placement.updated the same way', async () => {
+    const placement = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+    await world.placementsRepo.setRoster(placement.placementId, [{ contactId: 'c-tenant' }], undefined);
+    const actionId = await deferOpen('placement', placement.placementId);
+    world.emitted.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    expect((await rowOf(actionId)).status).toBe('skipped');
+    expect(
+      world.emitted
+        .filter((e) => e.event === 'placement.updated')
+        .map((e) => (e.payload as { placementId: string }).placementId),
+    ).toContain(placement.placementId);
+  });
+
   // --- refusals the ACT would raise, pre-empted BEFORE the claim (MF1) ------
 
   it('skips provisioning_unavailable when live number provisioning is OFF', async () => {

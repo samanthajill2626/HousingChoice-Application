@@ -47,6 +47,7 @@ import type {
 import { addMemberToRelay, type RelayMemberDeps } from '../services/relayMembers.js';
 import type { PoolNumbersService } from '../services/poolNumbers.js';
 import {
+  emitPlacementUpdated,
   openPlacementGroup,
   openTourGroup,
   placementOpenGuard,
@@ -127,6 +128,15 @@ interface RosterActionOwner {
   /** The resolver's view - absent only when the owner itself is gone. */
   rosterOwner?: RosterOwner;
   openGroup: () => Promise<{ ok: boolean; refusal?: { status: number; body: Record<string, unknown> } }>;
+  /**
+   * Poke the hubs that this owner's roster PICTURE changed. The card reads
+   * pending[]/skipped[] from the roster payload and useRoster refetches on
+   * tour.updated / placement.updated - but a claim-SKIP touches neither the
+   * owner nor any conversation, so without this the card keeps showing "Joins
+   * at 8:00 AM" for a row that is already retired until someone reloads.
+   * Best-effort: an emit failure must never fail an apply.
+   */
+  emitUpdated: () => Promise<void>;
 }
 
 /** A tour that vanished, was canceled/closed, or converted away. */
@@ -145,22 +155,27 @@ async function loadTourOwner(
     const result = await openTourGroup(provisionDeps, tour);
     return result.ok ? { ok: true } : { ok: false, refusal: result.refusal };
   };
-  if (!tour) return { dead: 'owner_canceled', openGroup };
+  const emitUpdated = async (): Promise<void> => {
+    if (!tour) return;
+    deps.events.emit('tour.updated', { tourId: tour.tourId, status: tour.status });
+  };
+  if (!tour) return { dead: 'owner_canceled', openGroup, emitUpdated };
   // CONVERTED FIRST: a converted tour is also `closed`, and 'converted' is the
   // honest notice - conversion should have MIGRATED this row (spec D4), so
   // seeing it here means that best-effort migrate failed and the row is an
   // orphan on a tour whose roster now belongs to the placement.
   if (typeof tour.convertedPlacementId === 'string' && tour.convertedPlacementId.length > 0) {
-    return { dead: 'converted', openGroup };
+    return { dead: 'converted', openGroup, emitUpdated };
   }
   if (tour.status === 'canceled' || tour.status === 'closed') {
-    return { dead: 'owner_canceled', openGroup };
+    return { dead: 'owner_canceled', openGroup, emitUpdated };
   }
   return {
     ...(typeof tour.groupThreadId === 'string' &&
       tour.groupThreadId.length > 0 && { threadId: tour.groupThreadId }),
     rosterOwner: tourRosterOwner(tour),
     openGroup,
+    emitUpdated,
   };
 }
 
@@ -182,14 +197,19 @@ async function loadPlacementOwner(
     const result = await openPlacementGroup(provisionDeps, placement);
     return result.ok ? { ok: true } : { ok: false, refusal: result.refusal };
   };
-  if (!placement) return { dead: 'owner_canceled', openGroup };
+  const emitUpdated = async (): Promise<void> => {
+    if (!placement) return;
+    await emitPlacementUpdated({ ...deps, log }, placement);
+  };
+  if (!placement) return { dead: 'owner_canceled', openGroup, emitUpdated };
   const terminal = placementOpenGuard(placement);
-  if (terminal !== undefined) return { dead: 'owner_canceled', openGroup };
+  if (terminal !== undefined) return { dead: 'owner_canceled', openGroup, emitUpdated };
   return {
     ...(typeof placement.group_thread === 'string' &&
       placement.group_thread.length > 0 && { threadId: placement.group_thread }),
     rosterOwner: placementRosterOwner(placement),
     openGroup,
+    emitUpdated,
   };
 }
 
@@ -391,6 +411,23 @@ async function readConversation(
 // Apply
 // ---------------------------------------------------------------------------
 
+/** Tell the hubs this owner's roster payload changed. Best-effort by design:
+ *  a live-update poke must never turn a completed apply into a failure. */
+async function pokeOwner(
+  owner: RosterActionOwner,
+  row: PendingRosterActionItem,
+  log: Logger,
+): Promise<void> {
+  try {
+    await owner.emitUpdated();
+  } catch (err) {
+    log.warn(
+      { err, actionId: row.actionId },
+      'roster action: live-update poke failed - the card refreshes on its next read',
+    );
+  }
+}
+
 async function applyAction(
   row: PendingRosterActionItem,
   nowIso: string,
@@ -415,6 +452,10 @@ async function applyAction(
       { actionId: row.actionId, action: row.action, reason: verdict.skip },
       'roster action retired without applying (visible skip)',
     );
+    // The card is showing "Joins at 8:00 AM" for a row that just became a skip
+    // NOTICE, and a skip touches neither the owner nor a conversation - so this
+    // is the only thing that can tell an open hub to re-read (PL5).
+    await pokeOwner(owner, row, log);
     return { result: 'skipped', reason: verdict.skip };
   }
 
@@ -428,7 +469,12 @@ async function applyAction(
   // the claim itself stays one-way, exactly as designed. The poll's per-row
   // catch also logs, but apply-now (routes) has no such net.
   try {
-    return await performClaimedAction(row, verdict, owner, deps, log);
+    const outcome = await performClaimedAction(row, verdict, owner, deps, log);
+    // Same reason as the skip above: the pending banner has to go away even when
+    // the apply itself emitted nothing (a noop, or a refusal). A duplicate poke
+    // is harmless - the hub's refetch is debounced.
+    await pokeOwner(owner, row, log);
+    return outcome;
   } catch (err) {
     log.error(
       { err, actionId: row.actionId, ownerType: row.ownerType, action: row.action },

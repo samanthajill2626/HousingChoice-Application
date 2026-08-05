@@ -329,10 +329,20 @@ export function ChannelTabRail({
     measure();
     rail.addEventListener('scroll', schedule, { passive: true });
     window.addEventListener('resize', schedule);
+    // The rail's own BOX can change with no window event at all: at phone
+    // widths the hubs mount on the Details pane with this rail display:none
+    // (0x0 - "fits"), and the [Conversation] pane toggle just flips
+    // visibility. Observe the element itself so the fade/carried dot are
+    // right on pane ENTRY, not first-scroll. (jsdom has no ResizeObserver -
+    // the listeners above still cover those tests.)
+    const observer =
+      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    observer?.observe(rail);
     return () => {
       if (frame !== 0) cancelAnimationFrame(frame);
       rail.removeEventListener('scroll', schedule);
       window.removeEventListener('resize', schedule);
+      observer?.disconnect();
     };
   }, [measure, tabsKey]);
 

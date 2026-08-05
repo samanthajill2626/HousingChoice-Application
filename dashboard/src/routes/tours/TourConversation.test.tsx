@@ -514,6 +514,42 @@ describe('TourConversation - scrolling tab rail', () => {
 
     expect(await screen.findByText(CARRIED)).toBeInTheDocument();
   });
+
+  it('re-measures when the rail element itself changes box (pane switch reveals a hidden rail - no window event fires)', async () => {
+    // At phone widths the hubs mount on the Details pane with the rail
+    // display:none (0x0). Tapping [Conversation] only flips visibility: no
+    // window resize, no scroll. The component must observe ITS OWN element
+    // box (ResizeObserver) or the fade/carried dot are wrong on pane entry.
+    // jsdom has no ResizeObserver - install a recording fake and drive it.
+    const callbacks: ResizeObserverCallback[] = [];
+    class FakeResizeObserver {
+      private readonly cb: ResizeObserverCallback;
+      constructor(cb: ResizeObserverCallback) {
+        this.cb = cb;
+        callbacks.push(cb);
+      }
+      observe(): void {}
+      unobserve(): void {}
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', FakeResizeObserver);
+    try {
+      undo = stubRailGeometry(RAIL_WIDTH); // mounts "hidden": content fits, no fade
+      renderConvo(fiveTabs('sup-1', 3));
+      expect(screen.queryByText(CARRIED)).toBeNull();
+      expect(callbacks.length).toBeGreaterThan(0); // the rail IS observed
+
+      // The pane toggle reveals the rail at its real (overflowing) size.
+      railContent = RAIL_CONTENT;
+      act(() => {
+        for (const cb of callbacks) cb([], {} as unknown as ResizeObserver);
+      });
+
+      expect(await screen.findByText(CARRIED)).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
 });
 
 // The composer lock is UNIFORM across every 1:1 Timeline surface (2026-08-03

@@ -215,7 +215,8 @@ concern, not a tour concern.** Address length has NO storage-level bound.
 DynamoDB is schemaless (only the 400 KB item ceiling applies), and the only cap
 is an application constant: `FIELD_CAPS` in `lib/address.ts:33` (`line1` 200,
 `line2` 100), checked by `validateAddress` at `address.ts:66` and reached from
-exactly ONE call site, the unit write surface `lib/unitFields.ts:175`.
+just TWO call sites, both in `lib/unitFields.ts`: the write surface at `:175` and
+`toUnitFlyer`'s projection re-validation at `:243`.
 
 Two gaps follow, and both matter here:
 - `validateAddress` only accepts a STRUCTURED object, so it never applies to a
@@ -371,12 +372,30 @@ specific, verified failure mode:
   "sending shortly" bug that `claimSkip` was built to end (see the `claimSkipRow`
   docstring). Required: catch `UncomposableReminderError` and CLAIM-SKIP the rung
   with a new `ReminderSkipReason` of `invalid_schedule`, so it retires once and
-  visibly. Add the matching label beside the existing skip-reason labels in
-  `RemindersPanel.tsx`.
+  visibly.
+
+  That new reason must be added in THREE exhaustive places, none of them
+  `RemindersPanel.tsx` (which only consumes the labels):
+  1. `app/src/repos/tourRemindersRepo.ts` - the `ReminderSkipReason` union (source
+     of truth).
+  2. `dashboard/src/api/types.ts:764` - the mirrored `skipReason` union.
+  3. `dashboard/src/api/types.ts:806-815` - `REMINDER_SKIP_REASON_LABELS`, an
+     exhaustive `Record` over that union.
+  Items 2 and 3 are exhaustive, so typecheck fails loudly if either is missed -
+  but only after the builder has looked in the wrong file.
 - READ paths (sites 4, 5, 6): no such guard exists. A throw is a 500 on the tour
   page AND the contact timeline. A read path must NEVER 500 over copy rendering.
-  Required: catch and degrade - render the `_no_address`/no-time shape, or omit
-  the body for that rung - and log at warn.
+  Required: catch, set `body: ''` for that rung, and log at warn.
+
+  `body: ''` is the specified output, NOT "some degraded shape". There is no
+  no-time variant to fall back to - all eight entries in section 4 contain
+  `{when}` or `{time}`, `_no_address` included - and omitting the field is a wire
+  breaking change: `body` is REQUIRED on the backend `TourReminderView`, on the
+  dashboard mirror at `dashboard/src/api/types.ts:771`, and on
+  `TimelineScheduled`. The empty string needs no type change on either side, and
+  both components already render the body as secondary text, so it degrades to a
+  blank line rather than a crash. The rung is transient anyway: its next poll
+  tick claim-skips it with `invalid_schedule`.
 
 Probability is low (rows cannot be armed without `scheduledAt`, PATCH cannot
 clear it, and the value is canonicalized at the boundary). Low probability plus
@@ -437,11 +456,28 @@ row inside it. This is the shape most likely to be got wrong.
   seeded fixture data: an unwired dev tick would make every e2e body silently
   lose its address and fail the suite in a confusing way.
 - `claimSend` signature change: `tourRemindersRepo.ts:96` becomes
-  `claimSend(reminderId, claimedAt, sentBody)`, adding `#sentBody` to the SAME
-  conditional `UpdateExpression` (genuinely atomic, no second write). Fake blast
-  radius is ONE implementation: `app/test/helpers/twilioWebhookHarness.ts:2085`.
-  The other `claimSend` hits call the real repo, and `:2179` is
-  `placementNudgesRepo`'s separate `claimSend` - do NOT touch it.
+  `claimSend(reminderId, claimedAt, sentBody?)`, adding `#sentBody` to the SAME
+  conditional `UpdateExpression` (genuinely atomic, no second write).
+
+  `sentBody` is OPTIONAL DELIBERATELY. SEVEN existing call sites pass two
+  arguments - `relayApi.test.ts:1343`, `tourReminders.test.ts:655/:1003/:1099/
+  :2064`, `tourRemindersApi.test.ts:556/:692` - and a required third parameter
+  breaks every one. Optional erases that blast radius entirely, and it is honest:
+  a claim with no body is exactly the legacy-row case D4 already handles on read.
+  The production send paths always pass it; a test claiming a row directly does
+  not care.
+
+  The fake at `app/test/helpers/twilioWebhookHarness.ts:2085` still TYPECHECKS
+  untouched (TypeScript permits an implementation with fewer parameters), but it
+  silently drops `sentBody` - so it needs a behavioral update for the D4 history
+  test to mean anything. `:2179` is `placementNudgesRepo`'s separate `claimSend`
+  - do NOT touch it.
+
+  DOC-COMMENT PRECISION: `sentBody` is "the body composed for the send that
+  claimed this row" - NOT "what we sent". `claimSend` IS the `sentAt` stamp, and
+  a `SendRefusedError` leaves the claim in place with nothing delivered
+  (`tourReminders.ts:619-632`). That is pre-existing behavior for `sentAt`, not
+  something D4 introduces, but the new field must not imply proof of delivery.
 - TYPECHECK BLIND SPOT: `contactTimeline.ts:613` builds
   `{ conversationsRepo } as unknown as RunDueTourRemindersDeps`. That cast will
   silently swallow a new required field, so typecheck will NOT flag the one
@@ -563,8 +599,8 @@ Containment (pins section 5 - each has a specific verified failure mode):
 - a rung whose `scheduledAt` is unusable is CLAIM-SKIPPED with `invalid_schedule`
   on the send path, and is NOT re-listed by a subsequent `listDue` - the
   regression test for the every-60s-forever retry loop.
-- each read path (sites 4, 5, 6) returns 200 with a degraded body rather than
-  500 when composition throws.
+- each read path (sites 4, 5, 6) returns 200 with `body: ''` rather than 500 when
+  composition throws.
 
 Catalog:
 - Every `channel: 'sms'` DEFAULT is ASCII. The durable guard of section 7; its

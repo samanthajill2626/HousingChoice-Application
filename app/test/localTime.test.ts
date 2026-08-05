@@ -1,7 +1,26 @@
 import { describe, expect, it } from 'vitest';
-import { formatLocalDate, formatLocalTime } from '../src/lib/localTime.js';
+import { formatLocalDate, formatLocalTime, toAscii } from '../src/lib/localTime.js';
 
 const NY = 'America/New_York';
+
+describe('toAscii (the normalizer itself, pinned directly)', () => {
+  // While the host ICU emits plain ASCII spaces, the output tests below pass
+  // whether or not the normalizer works - a no-op toAscii is invisible to them.
+  // This pins the mechanism so a future Node/ICU bump lands on a PROVEN
+  // normalizer instead of silently shipping U+202F into SMS bodies.
+  // String.fromCharCode keeps this file free of non-ASCII AND of \u escapes.
+  it('replaces U+202F NARROW NO-BREAK SPACE with a plain space', () => {
+    expect(toAscii('3:00' + String.fromCharCode(0x202f) + 'PM')).toBe('3:00 PM');
+  });
+
+  it('replaces U+00A0 NO-BREAK SPACE with a plain space', () => {
+    expect(toAscii('3:00' + String.fromCharCode(0x00a0) + 'PM')).toBe('3:00 PM');
+  });
+
+  it('leaves plain ASCII untouched', () => {
+    expect(toAscii('Thu, Jul 23 at 3:00 PM')).toBe('Thu, Jul 23 at 3:00 PM');
+  });
+});
 
 describe('formatLocalDate', () => {
   it('renders weekday, month and day in the given zone', () => {

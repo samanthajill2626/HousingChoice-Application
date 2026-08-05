@@ -43,8 +43,11 @@ function timeFormatterFor(timezone: string): Intl.DateTimeFormat {
   return f;
 }
 
-/** U+00A0 NO-BREAK SPACE and U+202F NARROW NO-BREAK SPACE -> plain space. */
-function toAscii(s: string): string {
+/** U+00A0 NO-BREAK SPACE and U+202F NARROW NO-BREAK SPACE -> plain space.
+ *  Exported ONLY for the direct pin in localTime.test.ts: while the host ICU
+ *  emits plain spaces, the output tests cannot tell a working normalizer from
+ *  a no-op, so the mechanism is tested by itself. Not part of the copy API. */
+export function toAscii(s: string): string {
   return s.replace(/[\u00A0\u202F]/g, ' ');
 }
 

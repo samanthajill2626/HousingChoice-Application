@@ -655,6 +655,38 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await expect(tourReminders.claimSend(confirmation!.reminderId, pollAt)).resolves.toBe(false);
   });
 
+  // ---------------------------------------------------------------------------
+  // sentBody - the body composed for the send that CLAIMED the row, snapshotted
+  // so a later reschedule or address edit cannot rewrite what was already sent.
+  // The third parameter is OPTIONAL: a two-arg claim is the legacy shape (and
+  // the shape every pre-existing caller in this repo still uses), and it must
+  // leave the attribute absent rather than writing an empty string.
+  // ---------------------------------------------------------------------------
+  it('claimSend stores the composed body on the row (and stays optional)', async () => {
+    const tour = await tours.create({
+      tenantId: 'contact-sentbody-1',
+      unitId: 'unit-sentbody-1',
+      scheduledAt: '2026-09-10T18:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const withBody = await tourReminders.create({
+      tourId: tour.tourId, kind: 'confirmation', dueAt: '2026-09-01T15:00:00.000Z',
+    });
+    const withoutBody = await tourReminders.create({
+      tourId: tour.tourId, kind: 'day_before', dueAt: '2026-09-09T18:00:00.000Z',
+    });
+
+    expect(await tourReminders.claimSend(withBody.reminderId, '2026-09-01T15:00:01.000Z', 'Body text'))
+      .toBe(true);
+    // Two-arg call: the legacy shape every existing caller uses.
+    expect(await tourReminders.claimSend(withoutBody.reminderId, '2026-09-09T18:00:01.000Z'))
+      .toBe(true);
+
+    const rows = await tourReminders.listByTour(tour.tourId);
+    expect(rows.find((r) => r.reminderId === withBody.reminderId)?.sentBody).toBe('Body text');
+    expect(rows.find((r) => r.reminderId === withoutBody.reminderId)?.sentBody).toBeUndefined();
+  });
+
   // ===========================================================================
   // FIRE-TIME BACKSTOP (quiet-hours spec 2026-08-03, section 6)
   //

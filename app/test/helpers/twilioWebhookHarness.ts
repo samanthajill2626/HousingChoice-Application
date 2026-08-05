@@ -2082,12 +2082,15 @@ export function createFakeWorld(): FakeWorld {
         )
         .map((r) => ({ ...r }));
     },
-    async claimSend(reminderId, claimedAt) {
+    async claimSend(reminderId, claimedAt, sentBody) {
       const r = tourRemindersMap.get(reminderId);
       if (!r || r.sentAt !== undefined || r.canceledAt !== undefined || r.skippedAt !== undefined) {
         return false;
       }
       r.sentAt = claimedAt;
+      // Mirror the real repo: only WRITE the attribute when one was supplied, so
+      // a two-arg claim leaves it absent (the legacy-row shape) rather than ''.
+      if (typeof sentBody === 'string') r.sentBody = sentBody;
       tourRemindersMap.set(reminderId, r);
       return true;
     },

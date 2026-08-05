@@ -16,7 +16,7 @@
 // Staff see "property" for the unit (GLOSSARY). The old StageDataCard +
 // PaperworkCard recorders live INSIDE the Now card now (its stage-scoped
 // Record section) — they no longer render standalone here.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
   PLACEMENT_STAGES,
@@ -63,6 +63,9 @@ import { gateFor, type TransitionGate } from './transitionGate.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
 import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
+import { PeopleCard } from '../shared/PeopleCard.js';
+import { useRoster } from '../shared/useRoster.js';
+import { rosterDrivesTabs, rosterPersonInputs } from '../shared/rosterPeople.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { usePlacementNudges } from './usePlacementNudges.js';
@@ -217,6 +220,21 @@ export function PlacementDetail(): React.JSX.Element {
   const landlordLabel = landlord
     ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
     : landlordId ?? null;
+  // The tenant's free-text caseworker: a NAME on the record, not a contact - the
+  // People card hints it whenever it is set (spec 6.2).
+  const caseworker = typeof tenant?.caseworker === 'string' ? tenant.caseworker : undefined;
+
+  // THE roster: one fetch feeding the People card AND the 1:1 tabs, so the card
+  // and the tabs can never disagree about who is on this placement (spec goal
+  // 4). The group-thread pointer rides along: once it exists, the thread's
+  // participants ARE the roster (spec D1), so the pointer moving is a different
+  // question and must refetch.
+  const roster = useRoster({
+    type: 'placement',
+    id: placementId,
+    ...(placement?.group_thread !== undefined && { threadId: placement.group_thread }),
+  });
+  const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
 
   // The comms channels (group + one 1:1 per person). Called UNCONDITIONALLY
   // (hooks rules) with a loading-safe placeholder while the bundle loads - it
@@ -224,19 +242,21 @@ export function PlacementDetail(): React.JSX.Element {
   // refetches against the real people/group. Only consumed in the render below,
   // which runs after the loaded guard.
   //
-  // WHO the 1:1 channels are with: the tenant, plus the property's landlord when
-  // there is one - the SAME ids this page renders, never a phone-gated resolver
-  // (a tenant with no mobile number keeps their tab). Slice 3 swaps this input
-  // for the resolved roster. The placeholder's tenantId is '' - a legal, unread-0
-  // person the hook's mark-read guard rejects by design.
+  // Until the roster is a fact we can key on, the tabs keep the ids this page
+  // already renders (tenant + the property's landlord) so they never blink out
+  // mid-conversation - never a phone-gated resolver (a tenant with no mobile
+  // number keeps their tab). The placeholder's tenantId is '' - a legal,
+  // unread-0 person the hook's mark-read guard rejects by design.
   const channels = usePlacementChannels(
     placement ?? { placementId, tenantId: '', unitId: '', stage: 'send_application' },
-    [
-      { contactId: placement?.tenantId ?? '', label: tenantLabel },
-      ...(landlordId !== undefined
-        ? [{ contactId: landlordId, label: landlordLabel ?? landlordId }]
-        : []),
-    ],
+    rosterDrivesTabs(roster.status, roster.roster)
+      ? rosterPeople
+      : [
+          { contactId: placement?.tenantId ?? '', label: tenantLabel },
+          ...(landlordId !== undefined
+            ? [{ contactId: landlordId, label: landlordLabel ?? landlordId }]
+            : []),
+        ],
   );
 
   // The ONE nudge-ladder fetch for this placement (spec's "do not fetch twice"),
@@ -511,19 +531,14 @@ export function PlacementDetail(): React.JSX.Element {
               actionError={nudges.actionError}
             />
 
-            {/* 3. People and provenance */}
-            <Card title="People">
-              <KV k="Tenant" v={<Link to={`/contacts/${placement.tenantId}`}>{tenantLabel}</Link>} />
-              <KV
-                k="Landlord"
-                v={
-                  landlordId !== undefined ? (
-                    <Link to={`/contacts/${landlordId}`}>{landlordLabel ?? landlordId}</Link>
-                  ) : (
-                    <EmptyRow>No landlord on file.</EmptyRow>
-                  )
-                }
-              />
+            {/* 3. People (the ROSTER) + the provenance rows the page owns */}
+            <PeopleCard
+              scope="placement"
+              status={roster.status}
+              roster={roster.roster}
+              onRetry={roster.refetch}
+              {...(caseworker !== undefined && { caseworker })}
+            >
               <KV k="Property" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
               {placement.fromTourId !== undefined ? (
                 <Row
@@ -533,7 +548,7 @@ export function PlacementDetail(): React.JSX.Element {
                   } \u2192`}
                 />
               ) : null}
-            </Card>
+            </PeopleCard>
 
             {/* 4. Placement facts (read-only fields, date vocabulary) */}
             <Card title="Placement facts">

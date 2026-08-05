@@ -47,6 +47,7 @@ import type {
   PlacementNudgeView,
   RelatedUnit,
   RelayGroupRow,
+  RosterView,
   SendMessageResult,
   SimilarUnit,
   SuggestionItem,
@@ -1780,6 +1781,28 @@ export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tou
     ...(signal !== undefined && { signal }),
   });
   return res.tour;
+}
+
+/** GET /api/tours/:tourId/roster - WHO is on this tour's roster right now, with
+ *  the source it was resolved from (spec D1: thread participants when a thread
+ *  exists, else the plan override, else the property default). Returned AS THE
+ *  BODY (no unwrap). Carries names + a phone's last 4 only - the full phone
+ *  never leaves the server. 404 tour_not_found. */
+export async function getTourRoster(tourId: string, signal?: AbortSignal): Promise<RosterView> {
+  return request<RosterView>(`/api/tours/${encodeURIComponent(tourId)}/roster`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/placements/:placementId/roster - the placement twin of
+ *  getTourRoster (same payload, same rules). 404 placement_not_found. */
+export async function getPlacementRoster(
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<RosterView> {
+  return request<RosterView>(`/api/placements/${encodeURIComponent(placementId)}/roster`, {
+    ...(signal !== undefined && { signal }),
+  });
 }
 
 /** GET /api/tours/:tourId/reminders — the armed reminder ladder for a tour

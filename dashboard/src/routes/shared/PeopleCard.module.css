@@ -1,0 +1,115 @@
+/* PeopleCard - the roster card shared by the tour and placement hubs.
+ * Tokens only (no raw colours). The 860px breakpoint below is the SAME one as
+ * ui/twoPaneShell (TWO_PANE_BREAKPOINT_PX) - the point at which the file pane
+ * is a phone-width column and the "name ... role" pair stops fitting on one
+ * line (spec 6.7). */
+
+.roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-surface-2);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+/* Name + role on ONE line: the name takes the slack, the role sits right.
+ * A future per-row remove control anchors HERE (spec 6.7) so it does not move
+ * when the role wraps. */
+.nameLine {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-height: 24px;
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+a.name {
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+a.name:hover {
+  text-decoration: underline;
+}
+
+a.name:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.role {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* Muted explanations: reachability, shares-a-number, the D11 paused note, the
+ * customized note, and the disabled-open reason. */
+.note {
+  margin: 2px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+/* The caseworker hint - italic, because it names someone who is NOT a contact
+ * record and must not read as a roster row. */
+.hint {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  font-style: italic;
+  color: var(--c-text-subtle);
+}
+
+.unavailable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.resetRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+/* People above, the page's non-people rows (Property, provenance) below. */
+.divider {
+  border: none;
+  border-top: 1px solid var(--c-border);
+  margin: var(--sp-2) 0;
+}
+
+@media (max-width: 860px) {
+  /* The role wraps UNDER the name whenever the pair does not fit (spec 6.7). */
+  .nameLine {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+
+  .name {
+    flex: 1 1 100%;
+  }
+
+  /* The touch target is the full row (44px min), not the glyph. */
+  .row {
+    min-height: 44px;
+  }
+}

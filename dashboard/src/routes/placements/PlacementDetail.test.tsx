@@ -17,7 +17,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem, PlacementStage } from '../../api/index.js';
+import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, RosterView, UnitItem, PlacementStage } from '../../api/index.js';
 import { STAGE_LABELS } from '../../api/index.js';
 
 const getPlacement = vi.fn();
@@ -42,6 +42,9 @@ const provisionPlacementRelay = vi.fn();
 // vi.fn() returns undefined -> TypeError).
 const getContactTimeline = vi.fn();
 const markInboxRead = vi.fn();
+// The People card AND the 1:1 tab set both read the resolved roster now
+// (contact-rosters Task 8) - one payload, one source.
+const getPlacementRoster = vi.fn();
 // Deadlines-and-nudges card deps: quiet the nudge fetch so the card renders its
 // empty ladder (this suite exercises the header + right-pane structure; the card
 // has its own tests in DeadlinesNudgesCard.test.tsx).
@@ -69,6 +72,7 @@ vi.mock('../../api/index.js', async () => {
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    getPlacementRoster: (...a: unknown[]) => getPlacementRoster(...a),
     getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
     setPlacementFollowUp: (...a: unknown[]) => setPlacementFollowUp(...a),
     clearPlacementFollowUp: (...a: unknown[]) => clearPlacementFollowUp(...a),
@@ -104,6 +108,35 @@ const TENANT = {
   voucher_expiration_date: '2026-08-02',
 };
 const LANDLORD = { contactId: 'l1', type: 'landlord' as const, firstName: 'Larry', lastName: 'Owens' };
+
+/** The default resolved roster: the same two people the page used to hard-code
+ *  (tenant + the unit's landlord), now served by GET /api/placements/:id/roster. */
+function makeRoster(over: Partial<RosterView> = {}): RosterView {
+  return {
+    source: 'default',
+    members: [
+      {
+        memberKey: 't1',
+        contactId: 't1',
+        name: 'Tasha Nguyen',
+        role: 'tenant',
+        reachability: 'reachable',
+      },
+      {
+        memberKey: 'l1',
+        contactId: 'l1',
+        name: 'Larry Owens',
+        role: 'landlord',
+        reachability: 'reachable',
+      },
+    ],
+    customized: false,
+    tenantOnRoster: true,
+    canOpenGroup: true,
+    threadExists: false,
+    ...over,
+  };
+}
 
 /** Resolve tenant vs landlord by id so their links never collide (both would
  *  otherwise show the same mocked name and break a unique getByRole). */
@@ -144,6 +177,7 @@ beforeEach(() => {
   provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
   getContactTimeline.mockReset().mockResolvedValue({ items: [], nextCursor: null });
   markInboxRead.mockReset().mockResolvedValue(undefined);
+  getPlacementRoster.mockReset().mockResolvedValue(makeRoster());
   getPlacementNudges.mockReset().mockResolvedValue([]);
   setPlacementFollowUp.mockReset().mockResolvedValue(undefined);
   clearPlacementFollowUp.mockReset().mockResolvedValue(undefined);
@@ -276,8 +310,17 @@ describe('PlacementDetail', () => {
     await waitLoaded();
     // Stage pill (header band - the Now card repeats the stage label).
     expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument();
-    // M4: the Tenant link shows the contact NAME, not the raw id.
-    expect(screen.getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute('href', '/contacts/t1');
+    // M4: the People card's roster row shows the contact NAME, not the raw id.
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute(
+      'href',
+      '/contacts/t1',
+    );
+    expect(within(roster).getByRole('link', { name: 'Larry Owens' })).toHaveAttribute(
+      'href',
+      '/contacts/l1',
+    );
+    // The Property row is the PAGE's, below the divider (spec 6.2).
     expect(screen.getByRole('link', { name: '12 Oak St' })).toHaveAttribute('href', '/listings/u1');
     // Scope to the "Placement facts" card - the awaiting_inspection stage also
     // renders the in-place inspection recorder, which has its own Pass control.
@@ -285,11 +328,47 @@ describe('PlacementDetail', () => {
     expect(within(factsCard()).getByText('$1,550/mo')).toBeInTheDocument();
   });
 
-  it('M4: degrades the Tenant link to the raw id when the contact cannot be loaded', async () => {
+  it('M4: degrades the roster row to the raw id when the name cannot be resolved', async () => {
     getContact.mockRejectedValue(new Error('not found'));
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [{ memberKey: 't1', contactId: 't1', role: 'tenant', reachability: 'reachable' }],
+      }),
+    );
     renderAt();
     await waitLoaded();
-    expect(screen.getByRole('link', { name: 't1' })).toHaveAttribute('href', '/contacts/t1');
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByRole('link', { name: 't1' })).toHaveAttribute('href', '/contacts/t1');
+  });
+
+  it('the 1:1 tabs FOLLOW the roster payload (a new member grows a tab)', async () => {
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          ...makeRoster().members,
+          {
+            memberKey: 'pm-9',
+            contactId: 'pm-9',
+            name: 'Alicia Grant',
+            role: 'pm',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
+    renderAt();
+    await waitLoaded();
+    expect(await screen.findByRole('tab', { name: /Alicia Grant/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(4));
+  });
+
+  it('while the roster payload is in flight the tabs keep the page inputs (no blink)', async () => {
+    getPlacementRoster.mockReturnValue(new Promise(() => {}));
+    renderAt();
+    await waitLoaded();
+    expect(screen.getByRole('tab', { name: /Tasha Nguyen/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Larry Owens/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
   });
 
   it('links the source tour in People + provenance when fromTourId is present', async () => {

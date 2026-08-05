@@ -35,12 +35,10 @@ import {
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge, useTwoPaneNarrow } from '../../ui/index.js';
 import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
-import {
-  contactDisplayName,
-  contactStatusLabel,
-  formatAddress,
-  formatPhone,
-} from '../contact/format.js';
+import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { PeopleCard } from '../shared/PeopleCard.js';
+import { useRoster } from '../shared/useRoster.js';
+import { rosterDrivesTabs, rosterPersonInputs } from '../shared/rosterPeople.js';
 import { formatRent } from '../listing/listingFormat.js';
 import { dateTime, shortDate } from '../placements/placementsFormat.js';
 import { useTour } from './useTour.js';
@@ -156,14 +154,32 @@ function TourDetailLoaded({
   const landlordName = landlord
     ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
     : landlordId ?? null;
-  // WHO this tour's 1:1 channels are with: the tenant, plus the property's
-  // landlord when there is one - the SAME ids this page renders, never a
-  // phone-gated resolver (a tenant with no mobile number keeps their tab).
-  // Slice 3 swaps this input for the resolved roster.
-  const channels = useTourChannels(tour, [
-    { contactId: tour.tenantId, label: tenantName },
-    ...(landlordId !== undefined ? [{ contactId: landlordId, label: landlordName ?? landlordId }] : []),
-  ]);
+  // THE roster: one fetch feeding the People card AND the 1:1 tabs, so the card
+  // and the tabs can never disagree about who is on this tour (spec goal 4).
+  // The group-thread pointer rides along: once it exists, the thread's
+  // participants ARE the roster (spec D1), so the pointer moving is a different
+  // question and must refetch.
+  const roster = useRoster({
+    type: 'tour',
+    id: tourId,
+    ...(tour.groupThreadId !== undefined && { threadId: tour.groupThreadId }),
+  });
+  const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // Until the roster is a fact we can key on, the tabs keep the ids this page
+  // already renders (tenant + the property's landlord) so they never blink out
+  // mid-conversation - never a phone-gated resolver (a tenant with no mobile
+  // number keeps their tab).
+  const channels = useTourChannels(
+    tour,
+    rosterDrivesTabs(roster.status, roster.roster)
+      ? rosterPeople
+      : [
+          { contactId: tour.tenantId, label: tenantName },
+          ...(landlordId !== undefined
+            ? [{ contactId: landlordId, label: landlordName ?? landlordId }]
+            : []),
+        ],
+  );
   // ONE activity fetch feeds both the Activity card and the conversation
   // transcripts (as interleaved milestone pins). Rows arrive newest-first;
   // the transcripts want oldest-first, hence the reverse. Only the loaded
@@ -195,7 +211,6 @@ function TourDetailLoaded({
     null,
   );
 
-  const isPm = tour.tourType === 'pm_team';
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
   const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not booked';
@@ -405,9 +420,9 @@ function TourDetailLoaded({
   }
 
   // --- People card data -----------------------------------------------------
-  const tenantChips: string[] = [];
-  if (tenant?.status) tenantChips.push(contactStatusLabel(tenant.type, tenant.status));
-  if (typeof tenant?.voucherSize === 'number') tenantChips.push(`Voucher ${tenant.voucherSize}BR`);
+  // The tenant's free-text caseworker: a NAME on the record, not a contact - the
+  // card hints it whenever it is set (spec 6.2).
+  const caseworker = typeof tenant?.caseworker === 'string' ? tenant.caseworker : undefined;
   const propertyChips: string[] = [];
   if (unit) {
     if (typeof unit.beds === 'number') propertyChips.push(`${unit.beds} BR`);
@@ -535,32 +550,14 @@ function TourDetailLoaded({
               />
             </Card>
 
-            {/* --- People --- */}
-            <Card title="People">
-              <KV
-                k="Tenant"
-                v={
-                  <span className={styles.person}>
-                    <Link to={`/contacts/${tour.tenantId}`}>{tenantName}</Link>
-                    {tenantChips.length > 0 ? <Chips items={tenantChips} /> : null}
-                  </span>
-                }
-              />
-              <KV
-                k={isPm ? 'Property manager' : 'Landlord'}
-                v={
-                  landlordId !== undefined ? (
-                    <span className={styles.person}>
-                      <Link to={`/contacts/${landlordId}`}>{landlordName ?? landlordId}</Link>
-                      {landlord?.phone ? (
-                        <span className={styles.subtle}>{formatPhone(landlord.phone)}</span>
-                      ) : null}
-                    </span>
-                  ) : (
-                    <EmptyRow>No landlord on file.</EmptyRow>
-                  )
-                }
-              />
+            {/* --- People (the ROSTER) + the property row the page owns --- */}
+            <PeopleCard
+              scope="tour"
+              status={roster.status}
+              roster={roster.roster}
+              onRetry={roster.refetch}
+              {...(caseworker !== undefined && { caseworker })}
+            >
               <KV
                 k="Property"
                 v={
@@ -570,7 +567,7 @@ function TourDetailLoaded({
                   </span>
                 }
               />
-            </Card>
+            </PeopleCard>
 
             {/* --- Reminders (RemindersPanel renders its own Card) --- */}
             <RemindersPanel tourId={tour.tourId} />

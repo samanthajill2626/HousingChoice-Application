@@ -15,7 +15,7 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, describe, expect, it, vi, beforeEach } from 'vitest';
 import { ApiError } from '../../api/index.js';
-import type { Contact, Tour, UnitItem } from '../../api/index.js';
+import type { Contact, RosterView, Tour, UnitItem } from '../../api/index.js';
 
 const getTour = vi.fn();
 const getUnit = vi.fn();
@@ -32,6 +32,9 @@ const getConversationMembers = vi.fn();
 // conversation ones) - left unmocked it would reject and the pane would render
 // its error state into unrelated assertions.
 const getContactTimeline = vi.fn();
+// The People card AND the 1:1 tab set both read the resolved roster now
+// (contact-rosters Task 8) - one payload, one source.
+const getTourRoster = vi.fn();
 const patchTour = vi.fn();
 const createTourRelay = vi.fn();
 const createPlacementFromTour = vi.fn();
@@ -56,6 +59,7 @@ vi.mock('../../api/index.js', async () => {
     getConversation: (...a: unknown[]) => getConversation(...a),
     getConversationMembers: (...a: unknown[]) => getConversationMembers(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
+    getTourRoster: (...a: unknown[]) => getTourRoster(...a),
     patchTour: (...a: unknown[]) => patchTour(...a),
     createTourRelay: (...a: unknown[]) => createTourRelay(...a),
     createPlacementFromTour: (...a: unknown[]) => createPlacementFromTour(...a),
@@ -74,6 +78,35 @@ vi.mock('react-router-dom', async () => {
 });
 
 import { TourDetail } from './TourDetail.js';
+
+/** The default resolved roster: the same two people the page used to hard-code
+ *  (tenant + the unit's landlord), now served by GET /api/tours/:id/roster. */
+function makeRoster(over: Partial<RosterView> = {}): RosterView {
+  return {
+    source: 'default',
+    members: [
+      {
+        memberKey: 'tenant-1',
+        contactId: 'tenant-1',
+        name: 'Ann Tenant',
+        role: 'tenant',
+        reachability: 'reachable',
+      },
+      {
+        memberKey: 'landlord-1',
+        contactId: 'landlord-1',
+        name: 'Lon Landlord',
+        role: 'landlord',
+        reachability: 'reachable',
+      },
+    ],
+    customized: false,
+    tenantOnRoster: true,
+    canOpenGroup: true,
+    threadExists: false,
+    ...over,
+  };
+}
 
 function makeTour(over: Partial<Tour> = {}): Tour {
   return {
@@ -174,6 +207,7 @@ beforeEach(() => {
   });
   getConversationMembers.mockResolvedValue([]);
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
+  getTourRoster.mockResolvedValue(makeRoster());
   markConversationRead.mockResolvedValue(undefined);
   markInboxRead.mockResolvedValue(undefined);
   // The 1:1 panes create their thread on first send (ensureContactConversation);
@@ -688,24 +722,73 @@ describe('TourDetail - right column cards', () => {
     expect(screen.getByText('reminders -> group')).toBeInTheDocument();
   });
 
-  it('People card links the tenant, landlord, and property', async () => {
+  it('People card lists the ROSTER members and keeps the property row', async () => {
     getTour.mockResolvedValue(makeTour());
     renderDetail();
     await waitLoaded();
-    expect(screen.getByRole('link', { name: 'Ann Tenant' })).toHaveAttribute('href', '/contacts/tenant-1');
-    expect(screen.getByRole('link', { name: 'Lon Landlord' })).toHaveAttribute('href', '/contacts/landlord-1');
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByRole('link', { name: 'Ann Tenant' })).toHaveAttribute(
+      'href',
+      '/contacts/tenant-1',
+    );
+    expect(within(roster).getByRole('link', { name: 'Lon Landlord' })).toHaveAttribute(
+      'href',
+      '/contacts/landlord-1',
+    );
+    // The Property row is the PAGE's, below the divider (spec 6.2).
     expect(screen.getByRole('link', { name: '123 Main St, Atlanta, GA' })).toHaveAttribute(
       'href',
       '/listings/unit-1',
     );
   });
 
-  it('pm_team labels the landlord slot "Property manager"', async () => {
+  it('NEVER derives a "Property manager" / "Landlord" key from the tour type', async () => {
     getTour.mockResolvedValue(makeTour({ tourType: 'pm_team' }));
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          {
+            memberKey: 'tenant-1',
+            contactId: 'tenant-1',
+            name: 'Ann Tenant',
+            role: 'tenant',
+            reachability: 'reachable',
+          },
+          {
+            memberKey: 'landlord-1',
+            contactId: 'landlord-1',
+            name: 'Lon Landlord',
+            // The ROSTER says owner; the tour type says pm_team. The card must
+            // follow the roster - the old key claimed a PM and rendered an owner.
+            role: 'owner',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
     renderDetail();
     await waitLoaded();
-    expect(screen.getByText('Property manager')).toBeInTheDocument();
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByText('owner')).toBeInTheDocument();
+    expect(screen.queryByText('Property manager')).not.toBeInTheDocument();
     expect(screen.getByText('PM-team tour')).toBeInTheDocument();
+  });
+
+  it('the People card surfaces the roster notes (tenant off the roster)', async () => {
+    getTourRoster.mockResolvedValue(makeRoster({ tenantOnRoster: false }));
+    renderDetail();
+    await waitLoaded();
+    expect(
+      await screen.findByText('Tenant is not on this roster - tour reminders are paused'),
+    ).toBeInTheDocument();
+  });
+
+  it('an unavailable roster offers a retry and shows NO people', async () => {
+    getTourRoster.mockResolvedValue(makeRoster({ source: 'unavailable', members: [], threadExists: true }));
+    renderDetail();
+    await waitLoaded();
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.queryByRole('list', { name: 'Roster' })).not.toBeInTheDocument();
   });
 
   it('Outcome card shows the pending panel before the gate', async () => {
@@ -735,6 +818,89 @@ describe('TourDetail - right column cards', () => {
     expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
     // The heading is the bare title — count asides were removed 2026-08-03.
     expect(screen.getByRole('heading', { name: 'Activity' })).toBeInTheDocument();
+  });
+});
+
+describe('TourDetail - the 1:1 tabs FOLLOW the roster payload', () => {
+  it('a member added to the roster grows a tab', async () => {
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          ...makeRoster().members,
+          {
+            memberKey: 'pm-9',
+            contactId: 'pm-9',
+            name: 'Alicia Grant',
+            role: 'pm',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    expect(await screen.findByRole('tab', { name: /Alicia Grant/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(4));
+  });
+
+  it('a BARE-PHONE roster member gets no tab (spec 6.6)', async () => {
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        source: 'participants',
+        threadExists: true,
+        members: [
+          ...makeRoster().members,
+          { memberKey: 'phone:+14045550199', phoneLast4: '0199', role: 'added', reachability: 'reachable' },
+        ],
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await screen.findByRole('list', { name: 'Roster' });
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.queryByRole('tab', { name: /0199/ })).not.toBeInTheDocument();
+  });
+
+  it('a REMOVED-CONTACT roster member gets no tab either', async () => {
+    getTourRoster.mockResolvedValue(
+      makeRoster({
+        source: 'participants',
+        threadExists: true,
+        members: [
+          ...makeRoster().members,
+          {
+            memberKey: 'c-gone',
+            contactId: 'c-gone',
+            name: 'Del Ted',
+            role: 'removed_contact',
+            reachability: 'no_phone',
+          },
+        ],
+      }),
+    );
+    renderDetail();
+    await waitLoaded();
+    await screen.findByRole('list', { name: 'Roster' });
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+    expect(screen.queryByRole('tab', { name: /Del Ted/ })).not.toBeInTheDocument();
+  });
+
+  it('while the roster payload is still in flight the tabs keep the page inputs (no blink)', async () => {
+    getTourRoster.mockReturnValue(new Promise(() => {}));
+    renderDetail();
+    await waitLoaded();
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
+  });
+
+  it('an UNAVAILABLE roster also keeps the page inputs rather than dropping the tabs', async () => {
+    getTourRoster.mockResolvedValue(makeRoster({ source: 'unavailable', members: [], threadExists: true }));
+    renderDetail();
+    await waitLoaded();
+    expect(await screen.findByRole('button', { name: 'Retry' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toBeInTheDocument();
   });
 });
 

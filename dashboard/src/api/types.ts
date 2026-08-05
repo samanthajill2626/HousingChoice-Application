@@ -692,6 +692,67 @@ export interface TourActivityEvent {
   conversationId?: string;
 }
 
+// --- Tour / placement contact roster (contact-rosters, spec 2026-08-04) ------
+
+/**
+ * WHERE the roster the client is looking at came from (spec D1, the PLAN vs FACT
+ * split). `participants` = a relay thread exists (ANY status) and its member
+ * rows ARE the roster; `plan` = a stored override waiting to be consumed at
+ * open; `default` = the property's primary contact + the tenant; `unavailable` =
+ * a thread pointer is set but the conversation could NOT be read. An
+ * `unavailable` roster is NEVER silently re-resolved into the default - the card
+ * says so and offers a retry, because being wrong about who is on a live group
+ * text outranks "never show an error".
+ */
+export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
+
+/** A member's role on this roster: the tenant, their row's role on the unit
+ *  roster, an ad-hoc `added` member, or a contact record that is GONE
+ *  (`removed_contact` - dangling id or soft-deleted; it wins over every other
+ *  label so a dead record can never render as an active tenant/PM). */
+export type RosterMemberRole =
+  | 'tenant'
+  | 'landlord'
+  | 'pm'
+  | 'owner'
+  | 'other'
+  | 'added'
+  | 'removed_contact';
+
+/** Whether the GROUP TEXT can reach this member (the send path's own view). */
+export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
+
+export interface RosterMemberView {
+  /** contactId, else `phone:<E164>` - the ONLY key the client ever sends back. */
+  memberKey: string;
+  contactId?: string;
+  /** Display only. The FULL phone never leaves the server (spec 6.2 forbids
+   *  phone numbers on the card; the last 4 is how a bare-phone row is named). */
+  phoneLast4?: string;
+  name?: string;
+  role: RosterMemberRole;
+  reachability: RosterReachability;
+  /** The EARLIER member on this same number, when there is one with a name. */
+  sharesPhoneWithName?: string;
+}
+
+/** GET /api/tours/:tourId/roster and GET /api/placements/:placementId/roster
+ *  return this AS THE BODY (not wrapped). */
+export interface RosterView {
+  source: RosterSource;
+  members: RosterMemberView[];
+  /** The roster differs from the property's current default (spec 5.2 equality). */
+  customized: boolean;
+  /** The default roster's first non-tenant member - the "the property's default
+   *  is <name>" note. Absent on an `unavailable` roster (never computed there). */
+  defaultPrimaryName?: string;
+  /** false -> tenant 1:1 reminders / nudges are suppressed (D11). */
+  tenantOnRoster: boolean;
+  /** >= 2 DISTINCT reachable numbers AND no thread yet. */
+  canOpenGroup: boolean;
+  threadExists: boolean;
+}
+
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
 
 /**

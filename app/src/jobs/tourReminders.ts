@@ -66,6 +66,10 @@ import {
   type QuietHoursWindow,
 } from '../lib/quietHours.js';
 import { DEFAULT_ORG_SETTINGS, type SettingsRepo } from '../repos/settingsRepo.js';
+import {
+  rosterActionIdFor,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
 
@@ -297,6 +301,13 @@ export async function cancelTourReminders(
 
 export interface RunDueTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
+  /**
+   * Pending roster actions (contact-rosters D7), OPTIONAL: when supplied, a
+   * group-eligible rung whose tour has a PENDING open_group WAITS for the open
+   * instead of falling back to the tenant 1:1. Omitted (older call sites, unit
+   * tests) = today's immediate fallback, unchanged.
+   */
+  pendingRosterActionsRepo?: Pick<PendingRosterActionsRepo, 'getById'>;
   toursRepo: ToursRepo;
   contactsRepo: ContactsRepo;
   conversationsRepo: ConversationsRepo;
@@ -626,6 +637,28 @@ async function processReminderRow(
 
   const { tour, conversation: conv } = target;
   const body = resolveMessage(`tour.${row.kind}`);
+
+  // D7 REMINDER COUPLING (contact-rosters): this rung is GROUP-ELIGIBLE but fell
+  // back to the tenant 1:1, and the tour has a PENDING open_group - the group
+  // text is confirmed, just held until quiet-end. Sending 1:1 now would deliver
+  // the reminder to the tenant alone, minutes before the group it belongs in
+  // exists. Leave the rung UNCLAIMED (the ladder's existing "wait" idiom: it
+  // re-lists next tick, and the open applies within one tick of quiet-end).
+  // BOUNDED BY TOUR START: at/after the scheduled time the rung proceeds through
+  // today's fallback, so a morning_of reminder can never be held past the tour.
+  if (tour.tourType !== 'self_guided' && deps.pendingRosterActionsRepo !== undefined) {
+    const pendingOpen = await deps.pendingRosterActionsRepo.getById(
+      rosterActionIdFor({ ownerType: 'tour', ownerId: tour.tourId, action: 'open_group' }),
+    );
+    const beforeStart = typeof tour.scheduledAt === 'string' && now < tour.scheduledAt;
+    if (pendingOpen?.status === 'pending' && beforeStart) {
+      log.info(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder: group open is pending until quiet-end - leaving the rung unclaimed',
+      );
+      return;
+    }
+  }
 
   // D11 (contact-rosters): delivery has resolved to the TENANT 1:1 - the ONE
   // place both doors meet. A self_guided rung lands here, and so does a

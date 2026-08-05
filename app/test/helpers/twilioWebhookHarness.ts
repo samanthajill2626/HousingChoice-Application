@@ -103,6 +103,15 @@ import {
   type PlacementNudgeItem,
   type PlacementNudgesRepo,
 } from '../../src/repos/placementNudgesRepo.js';
+import {
+  rosterActionIdFor,
+  rosterActionOwnerKey,
+  type PendingRosterActionItem,
+  type PendingRosterActionsRepo,
+  type RosterActionOwnerRef,
+  type RosterActionSkipReason,
+  type UpsertPendingInput,
+} from '../../src/repos/pendingRosterActionsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import { type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
 import {
@@ -241,6 +250,9 @@ export interface FakeWorld {
   /** In-memory placement nudges (Post-Tour & Application, Task 3/5), keyed by nudgeId. */
   placementNudgesMap: Map<string, PlacementNudgeItem>;
   placementNudgesRepo: PlacementNudgesRepo;
+  /** In-memory pending roster actions (contact-rosters Task 12/13), keyed by actionId. */
+  pendingRosterActionsMap: Map<string, PendingRosterActionItem>;
+  pendingRosterActionsRepo: PendingRosterActionsRepo;
   /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
   suggestions: Map<string, SuggestionItem>;
   /** scheduleExtraction calls through the world extraction repo, in order (the
@@ -2178,6 +2190,120 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  // In-memory pending roster actions (contact-rosters Task 12/13): the durable
+  // quiet-hours deferral rows. Mirrors pendingRosterActionsRepo EXACTLY - the
+  // deterministic PK is the dedupe (upsertPending is an unconditional replace),
+  // every claim transition is conditional on the row still being 'pending', and
+  // dismiss refuses a pending row. Tests drive the poller/endpoints with NO
+  // DynamoDB.
+  const pendingRosterActionsMap = new Map<string, PendingRosterActionItem>();
+  const pendingRosterActionsRepo: PendingRosterActionsRepo = {
+    async upsertPending(input: UpsertPendingInput) {
+      const key =
+        input.action === 'add_member'
+          ? ({
+              ownerType: input.ownerType,
+              ownerId: input.ownerId,
+              action: 'add_member' as const,
+              contactId: input.contactId ?? '',
+            })
+          : ({ ownerType: input.ownerType, ownerId: input.ownerId, action: 'open_group' as const });
+      if (key.action === 'add_member' && key.contactId === '') {
+        throw new Error('pendingRosterActions: add_member requires a contactId');
+      }
+      const item: PendingRosterActionItem = {
+        actionId: rosterActionIdFor(key),
+        ownerKey: rosterActionOwnerKey(key),
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        action: input.action,
+        ...(input.action === 'add_member' && { contactId: input.contactId }),
+        dueAt: input.dueAt,
+        _actionPartition: 'roster_actions',
+        reason: input.reason ?? 'quiet_hours',
+        status: 'pending',
+        createdAt: input.createdAt ?? new Date().toISOString(),
+      };
+      pendingRosterActionsMap.set(item.actionId, { ...item });
+      return { ...item };
+    },
+    async getById(actionId: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      return row === undefined ? undefined : { ...row };
+    },
+    async listByOwner(owner: RosterActionOwnerRef) {
+      const ownerKey = rosterActionOwnerKey(owner);
+      return [...pendingRosterActionsMap.values()]
+        .filter((r) => r.ownerKey === ownerKey)
+        .map((r) => ({ ...r }));
+    },
+    async listDue(nowIso: string) {
+      return [...pendingRosterActionsMap.values()]
+        .filter((r) => r.status === 'pending' && r.dueAt <= nowIso)
+        .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0))
+        .map((r) => ({ ...r }));
+    },
+    async claimApply(actionId: string, appliedAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'applied';
+      row.resolvedAt = appliedAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async claimSkip(actionId: string, skippedAt: string, reason: RosterActionSkipReason) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'skipped';
+      row.resolvedAt = skippedAt;
+      row.skippedReason = reason;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async cancel(actionId: string, canceledAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'canceled';
+      row.resolvedAt = canceledAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async dismiss(actionId: string, dismissedAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status === 'pending' || row.dismissedAt !== undefined) return false;
+      row.dismissedAt = dismissedAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async migrate(from: RosterActionOwnerRef, to: RosterActionOwnerRef) {
+      const fromKey = rosterActionOwnerKey(from);
+      const moved: PendingRosterActionItem[] = [];
+      for (const row of [...pendingRosterActionsMap.values()]) {
+        if (row.ownerKey !== fromKey || row.status !== 'pending') continue;
+        const key =
+          row.action === 'add_member'
+            ? ({
+                ownerType: to.ownerType,
+                ownerId: to.ownerId,
+                action: 'add_member' as const,
+                contactId: row.contactId ?? '',
+              })
+            : ({ ownerType: to.ownerType, ownerId: to.ownerId, action: 'open_group' as const });
+        const next: PendingRosterActionItem = {
+          ...row,
+          actionId: rosterActionIdFor(key),
+          ownerKey: rosterActionOwnerKey(key),
+          ownerType: to.ownerType,
+          ownerId: to.ownerId,
+        };
+        pendingRosterActionsMap.set(next.actionId, next);
+        pendingRosterActionsMap.delete(row.actionId);
+        moved.push({ ...next });
+      }
+      return moved;
+    },
+  };
+
   // In-memory placement nudges (Post-Tour & Application, Task 3/5): mirror the
   // durable-row repo's contract (a rename-clone of tourReminders) so the
   // choke-point armStageNudge hook runs with NO DynamoDB/network in unit tests.
@@ -2598,6 +2724,8 @@ export function createFakeWorld(): FakeWorld {
     tourRemindersRepo,
     placementNudgesMap,
     placementNudgesRepo,
+    pendingRosterActionsMap,
+    pendingRosterActionsRepo,
     suggestions,
     extractionSchedules,
     extractionRepo,
@@ -2642,6 +2770,11 @@ export interface HarnessOptions {
    * assert exact dueAt values). Omit to use the wall clock.
    */
   toursNow?: () => string;
+  /**
+   * Injected clock for the PLACEMENT router's quiet-hours evaluation
+   * (contact-rosters Task 13). Omit to use the wall clock.
+   */
+  placementsNow?: () => string;
   /**
    * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
    * endpoints against the world fakes pass one in; mounted exactly like the
@@ -2746,10 +2879,14 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // Post-Tour & Application (Task 5): the choke-point armStageNudge hook runs
       // against this no-network fake instead of the real DynamoDB repo.
       placementNudgesRepo: world.placementNudgesRepo,
+      // contact-rosters Task 13: the quiet-hours deferral rows the open/live-add
+      // routes write and the pending-row endpoints act on (no DynamoDB).
+      pendingRosterActionsRepo: world.pendingRosterActionsRepo,
       // conversation-fact-extraction (T8): the review API (suggestions router) +
       // the contact-PATCH provenance-clear share this in-memory suggestion store.
       extractionRepo: world.extractionRepo,
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
+      ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.

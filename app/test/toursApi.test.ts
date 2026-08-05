@@ -1688,7 +1688,7 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
   // before asserting on what a job handler captured.
   let queueAdapter: InProcessOutboundQueueAdapter;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _resetForTests();
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
@@ -1703,6 +1703,11 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(queueAdapter);
+    // WALL-CLOCK ROUTER: this suite is about PROVISIONING, not quiet hours, and
+    // the default org window (21:00 -> 08:00) would defer an auto-resolved open
+    // to a pending row when the suite runs at night (contact-rosters Task 13).
+    // Pin the window OFF so these assertions are time-independent.
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
   });
 
   afterEach(() => {
@@ -3152,7 +3157,7 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
   const CASEWORKER_PHONE = '+15550300021';
   const OPTOUT_PHONE = '+15550300022';
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _resetForTests();
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
@@ -3167,6 +3172,10 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(queueAdapter);
+    // WALL-CLOCK ROUTER: pin quiet hours OFF for the editing tests so a suite
+    // run at night never defers a LIVE add (Task 13); the quiet-hours block at
+    // the bottom turns the window back ON with a PINNED clock.
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
 
     world.contacts.push(
       {
@@ -3727,6 +3736,227 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
 
     expect(res.status).toBe(409);
     expect(res.body.error).toBe('no_thread');
+  });
+
+  // --- Quiet-hours deferral (contact-rosters Task 13) ----------------------
+  //
+  // PINNED CLOCK: 2026-08-05T03:00Z is 23:00 on Aug 4 in America/New_York, and
+  // the DEFAULT org window (21:00 -> 08:00 ET) ends at 08:00 EDT = 12:00Z.
+  const QUIET_NOW = '2026-08-05T03:00:00.000Z';
+  const QUIET_END = '2026-08-05T12:00:00.000Z';
+  const quietHarness = async (): Promise<ReturnType<typeof makeWebhookHarness>> => {
+    // The window is turned back ON here (the suite's beforeEach pins it off) and
+    // the router's clock is PINNED, so every assertion below is deterministic.
+    await world.settingsRepo.putOrgSettings({
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: 'America/New_York',
+    });
+    return makeWebhookHarness({
+      world,
+      poolNumbersService: makeFakePoolNumbers(),
+      toursNow: () => QUIET_NOW,
+    });
+  };
+
+  it('OPEN during quiet hours DEFERS: 202, a pending open_group row, no thread, no send', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    world.sent.length = 0;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(202);
+    // The deferred response is the SAME roster payload every other endpoint
+    // serves - now carrying the pending row the card renders.
+    expect(res.body.pending).toEqual([
+      { actionId: `tour#${tourId}#open`, kind: 'open_group', dueAt: QUIET_END },
+    ]);
+    expect(res.body.skipped).toEqual([]);
+    expect(world.toursMap.get(tourId)!.groupThreadId).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+
+    const row = await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`);
+    expect(row!.status).toBe('pending');
+    expect(row!.dueAt).toBe(QUIET_END);
+    expect(row!.reason).toBe('quiet_hours');
+    expect(row!.createdAt).toBe(QUIET_NOW);
+  });
+
+  it('OPEN with ?force=send_now during quiet hours provisions immediately', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    world.sent.length = 0;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay?force=send_now`).send({});
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(201);
+    expect(res.body.conversation.conversationId).toBeDefined();
+    expect(world.toursMap.get(tourId)!.groupThreadId).toBe(res.body.conversation.conversationId);
+    expect(world.sent.length).toBeGreaterThan(0);
+    expect(await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`)).toBeUndefined();
+  });
+
+  it('LIVE ADD during quiet hours on an OPEN thread DEFERS: 202, pending row, membership unchanged, no announcement', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.sent.length = 0;
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(202);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm']);
+    expect(res.body.pending).toEqual([
+      {
+        actionId: `tour#${tourId}#add#c-caseworker`,
+        kind: 'add_member',
+        contactId: 'c-caseworker',
+        name: 'Casey Worker',
+        dueAt: QUIET_END,
+      },
+    ]);
+    expect(world.sent).toHaveLength(0);
+    expect(
+      world.conversations.get('conv-live')!.participants!.map((p) => p.contactId),
+    ).not.toContain('c-caseworker');
+  });
+
+  it('LIVE ADD during quiet hours on a CLOSED thread stays silent-and-IMMEDIATE (spec 7 carve-out)', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    seedThread(
+      tourId,
+      [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      { status: 'closed' },
+    );
+    world.sent.length = 0;
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(res.body.pending).toEqual([]);
+    expect(world.sent).toHaveLength(0);
+    expect(
+      await world.pendingRosterActionsRepo.getById(`tour#${tourId}#add#c-caseworker`),
+    ).toBeUndefined();
+  });
+
+  it('LIVE ADD with ?force=send_now during quiet hours adds AND announces now', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.sent.length = 0;
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members?force=send_now`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(world.sent.map((s) => s.to).sort()).toEqual(
+      [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
+    );
+  });
+
+  it('CANCEL retires a pending row into a visible skipped[] notice; DISMISS clears it', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    const deferred = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(deferred.status).toBe(202);
+    const actionId = `tour#${tourId}#open`;
+
+    const canceled = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/cancel`,
+    );
+    expect(canceled.status).toBe(200);
+    expect(canceled.body.pending).toEqual([]);
+    expect(canceled.body.skipped).toEqual([
+      { actionId, kind: 'open_group', reason: 'canceled', at: QUIET_NOW },
+    ]);
+
+    // A second cancel is a 409 - the row is terminal.
+    const again = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/cancel`,
+    );
+    expect(again.status).toBe(409);
+    expect(again.body.error).toBe('action_not_pending');
+
+    const dismissed = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/dismiss`,
+    );
+    expect(dismissed.status).toBe(200);
+    expect(dismissed.body.skipped, 'a dismissed notice leaves skipped[]').toEqual([]);
+
+    // GET serves the SAME shape (one decoder rule).
+    const got = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(got.body.pending).toEqual([]);
+    expect(got.body.skipped).toEqual([]);
+  });
+
+  it('DISMISS refuses a PENDING row (it would hide work that is still going to happen)', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    const actionId = `tour#${tourId}#open`;
+
+    const res = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/dismiss`,
+    );
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('action_not_dismissable');
+  });
+
+  it('APPLY-NOW runs the poller apply immediately: the deferred open provisions and sends', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    const actionId = `tour#${tourId}#open`;
+    world.sent.length = 0;
+
+    const res = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+    );
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(res.body.pending).toEqual([]);
+    expect(res.body.threadExists).toBe(true);
+    expect(world.toursMap.get(tourId)!.groupThreadId).toBeDefined();
+    expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT_PHONE, PM_PHONE].sort());
+    expect((await world.pendingRosterActionsRepo.getById(actionId))!.status).toBe('applied');
+  });
+
+  it('404s an action that belongs to another owner', async () => {
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+
+    const res = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent('tour#other#open')}/cancel`,
+    );
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('pending_action_not_found');
   });
 
   it('404s tour_not_found on every roster-editing path for an unknown tour', async () => {

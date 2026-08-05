@@ -2584,6 +2584,91 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect((await rungOf(tour.tourId, 'confirmation'))?.sentAt).toBe(NOW_D11);
   });
 
+  // -------------------------------------------------------------------------
+  // D7 (contact-rosters Task 13): a group-eligible rung WAITS for a deferred open
+  // -------------------------------------------------------------------------
+
+  /** A pendingRosterActions stub carrying exactly one row, keyed by actionId. */
+  function pendingOpenFor(tourId: string, status: 'pending' | 'applied' = 'pending') {
+    const actionId = `tour#${tourId}#open`;
+    return {
+      async getById(id: string) {
+        return id === actionId
+          ? ({
+              actionId,
+              ownerKey: `tour#${tourId}`,
+              ownerType: 'tour' as const,
+              ownerId: tourId,
+              action: 'open_group' as const,
+              dueAt: '2026-08-05T12:00:00.000Z',
+              _actionPartition: 'roster_actions' as const,
+              reason: 'quiet_hours' as const,
+              status,
+              createdAt: '2026-08-05T03:00:00.000Z',
+            })
+          : undefined;
+      },
+    };
+  }
+
+  it('a group-eligible rung whose tour has a PENDING open WAITS: unclaimed, not 1:1-sent', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-a', '+15550800011', 'conv-d7-a', NOW_D11);
+    // landlord_led with NO group thread yet - today that falls back to the
+    // tenant 1:1, which is exactly what the deferred open makes premature.
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-a',
+      unitId: 'unit-d7-a',
+      tourType: 'landlord_led',
+    });
+
+    await runDueTourReminders(NOW_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
+    });
+
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    const confirmation = await rungOf(tour.tourId, 'confirmation');
+    expect(confirmation?.sentAt, 'unclaimed - it re-lists next tick').toBeUndefined();
+    expect(confirmation?.skippedAt).toBeUndefined();
+  });
+
+  it('AT/AFTER tour start the wait ENDS: the rung proceeds through the usual fallback', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-b', '+15550800012', 'conv-d7-b', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-b',
+      unitId: 'unit-d7-b',
+      tourType: 'landlord_led',
+    });
+
+    // now == the tour's own start instant: the staleness bound has expired.
+    await runDueTourReminders(SCHEDULED_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
+    });
+
+    expect(rig.world.sent.length, 'the tenant 1:1 fallback fires').toBeGreaterThan(0);
+  });
+
+  it('a RESOLVED open imposes no wait at all', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-c', '+15550800013', 'conv-d7-c', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-c',
+      unitId: 'unit-d7-c',
+      tourType: 'landlord_led',
+    });
+
+    await runDueTourReminders(NOW_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId, 'applied'),
+    });
+
+    expect(rig.world.sent.length).toBeGreaterThan(0);
+  });
+
   it('force-send REFUSES a rung targeting an off-roster tenant and leaves the row pending', async () => {
     const rig = createGroupTestRig();
     const spy = makeForceSendSpy();

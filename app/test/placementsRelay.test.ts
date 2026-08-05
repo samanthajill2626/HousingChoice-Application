@@ -172,7 +172,7 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
   // before asserting on what a job handler captured.
   let queueAdapter: InProcessOutboundQueueAdapter;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     _resetForTests();
     const logger = createLogger({ destination: createLogCapture().stream });
     configureJobsLogger(logger);
@@ -187,6 +187,11 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
     });
     queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
     configureOutboundQueue(queueAdapter);
+    // WALL-CLOCK ROUTER: this suite is about PROVISIONING, not quiet hours, and
+    // the default org window (21:00 -> 08:00) would defer every open here to a
+    // pending row when the suite happens to run at night (contact-rosters
+    // Task 13). Pin the window OFF so these assertions are time-independent.
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
   });
 
   afterEach(() => {

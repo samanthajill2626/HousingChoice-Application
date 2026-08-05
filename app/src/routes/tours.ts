@@ -69,7 +69,7 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createActivityEventsRepo,
@@ -98,21 +98,28 @@ import {
 } from '../services/rosterEdits.js';
 import {
   describeRoster,
-  resolveRoster,
   type RosterOwner,
   type RosterResolutionDeps,
 } from '../lib/rosterResolution.js';
+import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
 import {
-  createPoolNumbersService,
-  RelayProvisioningDisabledError,
-  type PoolNumbersService,
-} from '../services/poolNumbers.js';
-import { provisionRelayGroup } from '../services/relayProvisioning.js';
+  openTourGroup,
+  tourOpenGuard,
+  type OpenTourGroupDeps,
+} from '../services/rosterProvision.js';
+import {
+  applyTourRosterAction,
+  type TourRosterActionDeps,
+} from '../jobs/rosterActions.js';
+import {
+  createPendingRosterActionsRepo,
+  rosterActionIdFor,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
+import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
 import { armRelayCloseNagIfOpen } from '../services/relayCloseNag.js';
-import { VoiceCapabilityError } from '../adapters/messaging.js';
 import { normalizeToE164 } from '../lib/phone.js';
-import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
-import { zipFive } from '../lib/address.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 
 /**
@@ -205,6 +212,8 @@ export interface ToursRouterDeps {
   unitsRepo?: UnitsRepo;
   /** Person-centric milestone log — emits tour_took_place on the toured transition. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** Quiet-hours deferrals (contact-rosters Task 13): the pending open/add rows. */
+  pendingRosterActionsRepo?: PendingRosterActionsRepo;
   events?: EventBus;
   /**
    * Injected clock for arm/re-arm dueAt computation — defaults to wall clock.
@@ -228,6 +237,8 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const poolNumbers =
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
+  const rosterActions =
+    deps.pendingRosterActionsRepo ?? createPendingRosterActionsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const getNow = deps.now ?? (() => new Date().toISOString());
 
@@ -495,8 +506,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   //
   // PII (doc section 9): bodies carry names + last4; logs carry ids/counts.
 
-  /** The resolver + serializer deps (lib/rosterResolution), built once. */
-  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, log };
+  /** The resolver + serializer deps (lib/rosterResolution), built once. The
+   *  `actions` seam is what puts pending[]/skipped[] on every roster payload. */
+  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, actions: rosterActions, log };
 
   /** Everything services/relayMembers touches for the LIVE call-through. */
   const memberDeps: RelayMemberDeps = {
@@ -508,6 +520,41 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     events,
     log,
   };
+
+  /** Everything the shared open (services/rosterProvision) touches. */
+  const provisionDeps: OpenTourGroupDeps = {
+    tours,
+    conversations,
+    contacts,
+    units,
+    audit,
+    activityEvents,
+    poolNumbers,
+    events,
+    log,
+  };
+
+  /** The deferral engine's deps - the SAME apply the poller runs (apply-now). */
+  const actionDeps: TourRosterActionDeps = { ...provisionDeps, actions: rosterActions, logger: log };
+
+  /** The dialog's explicit override: apply now despite quiet hours. */
+  const isForceSendNow = (req: { query: Record<string, unknown> }): boolean =>
+    String(req.query['force'] ?? '') === 'send_now';
+
+  /**
+   * Retire a pending action that a HUMAN just performed by hand (an immediate
+   * open / add). `claimApply` is the honest transition - the action happened,
+   * just now and by a person - and it refuses terminal rows, so a missing or
+   * already-resolved row is a benign false. Best-effort: never fail the request
+   * the operator actually made.
+   */
+  async function retirePendingAction(actionId: string): Promise<void> {
+    try {
+      await rosterActions.claimApply(actionId, getNow());
+    } catch (err) {
+      log.error({ err, actionId }, 'tour roster: retiring the superseded pending action failed');
+    }
+  }
 
   /** The resolver's owner view of a tour (thread pointer + plan override). */
   function rosterOwnerOf(tour: TourItem): RosterOwner {
@@ -552,8 +599,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     });
   };
 
-  /** Re-read + serialize - the 200 body of every mutating roster endpoint. */
-  async function respondWithRoster(res: Response, tourId: string): Promise<void> {
+  /** Re-read + serialize - the 200 body of every mutating roster endpoint (202
+   *  when the write was DEFERRED to quiet-end: same shape, different verdict). */
+  async function respondWithRoster(res: Response, tourId: string, status = 200): Promise<void> {
     const tour = await tours.get(tourId);
     if (!tour) {
       res.status(404).json({ error: 'tour_not_found' });
@@ -561,7 +609,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     }
     const view = await describeRoster(rosterDeps, rosterOwnerOf(tour));
     log.info({ tourId, source: view.source, memberCount: view.members.length }, 'tour roster edited');
-    res.json(view);
+    res.status(status).json(view);
   }
 
   /** The clock + org window a preview evaluates quiet hours against. */
@@ -669,8 +717,30 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     }
     // Spec section 7 carve-out: a CLOSED thread's add is silent AND immediate.
     // There is nobody to announce to on a closed thread, so it is never
-    // deferred either (slice 6 leaves this branch alone).
+    // deferred either - deferring it would announce to a closed group at 8 AM.
     const announce = conversation.status !== 'closed';
+
+    // QUIET-HOURS DEFERRAL (D7): only an ANNOUNCING add defers, and membership
+    // defers WITH the message - nobody joins a group text before the group is
+    // told. `?force=send_now` is the dialog's "Send now anyway".
+    if (announce && !isForceSendNow(req)) {
+      const quiet = await quietHoursState();
+      if (isQuietTime(quiet.nowIso, quiet.window)) {
+        const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
+        await rosterActions.upsertPending({
+          ownerType: 'tour',
+          ownerId: tourId,
+          action: 'add_member',
+          contactId: candidate.contactId,
+          dueAt,
+          createdAt: quiet.nowIso,
+        });
+        log.info({ tourId, dueAt }, 'tour roster add deferred to quiet-end (pending roster action)');
+        await respondWithRoster(res, tourId, 202);
+        return;
+      }
+    }
+
     const result = await addMemberToRelay(
       memberDeps,
       threadId,
@@ -681,6 +751,15 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       sendRefusal(res, result.refusal);
       return;
     }
+    // The human did it by hand - retire any pending add for the same person.
+    await retirePendingAction(
+      rosterActionIdFor({
+        ownerType: 'tour',
+        ownerId: tourId,
+        action: 'add_member',
+        contactId: candidate.contactId,
+      }),
+    );
     await respondWithRoster(res, tourId);
   });
 
@@ -712,6 +791,85 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     );
     if (!result.ok) {
       sendRefusal(res, result.refusal);
+      return;
+    }
+    await respondWithRoster(res, tourId);
+  });
+
+  // --- Pending roster actions (quiet-hours deferrals, Task 13) -------------
+  //
+  //   POST /:tourId/roster/pending/:actionId/cancel     pending -> canceled
+  //   POST /:tourId/roster/pending/:actionId/apply-now  apply it RIGHT NOW
+  //   POST /:tourId/roster/pending/:actionId/dismiss    terminal -> notice gone
+  //
+  // All three answer with the SAME roster payload every other endpoint serves.
+  // The actionId is DETERMINISTIC and embeds its owner, so the ownership check
+  // is a string compare - a row belonging to another tour is a 404, never an
+  // action on someone else's roster.
+
+  /** Load + own-check one action row, or refuse (404). */
+  async function loadOwnedAction(
+    res: Response,
+    tourId: string,
+    actionId: string,
+  ): Promise<Awaited<ReturnType<PendingRosterActionsRepo['getById']>> | undefined> {
+    const row = await rosterActions.getById(actionId);
+    if (!row || row.ownerType !== 'tour' || row.ownerId !== tourId) {
+      res.status(404).json({ error: 'pending_action_not_found' });
+      return undefined;
+    }
+    return row;
+  }
+
+  router.post('/:tourId/roster/pending/:actionId/cancel', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    if (!(await tours.get(tourId))) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, tourId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    if (!(await rosterActions.cancel(row.actionId, getNow()))) {
+      // Already applied/skipped/canceled - the card is looking at a stale row.
+      res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
+    log.info({ tourId, actionId: row.actionId }, 'pending roster action canceled by operator');
+    await respondWithRoster(res, tourId);
+  });
+
+  router.post('/:tourId/roster/pending/:actionId/apply-now', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    if (!(await tours.get(tourId))) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, tourId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    // The SAME apply the poller runs - claim-and-skip discipline included, so a
+    // world that moved underneath the action lands a visible skip row rather
+    // than a surprise send.
+    const outcome = await applyTourRosterAction(row, getNow(), actionDeps);
+    if (outcome.result === 'lost') {
+      res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
+    log.info({ tourId, actionId: row.actionId, outcome: outcome.result }, 'pending roster action applied by operator');
+    await respondWithRoster(res, tourId);
+  });
+
+  router.post('/:tourId/roster/pending/:actionId/dismiss', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    if (!(await tours.get(tourId))) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, tourId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    // Dismiss is for a TERMINAL row's notice (spec 6.5). Dismissing a live
+    // pending action would hide work that is still going to happen.
+    if (!(await rosterActions.dismiss(row.actionId, getNow()))) {
+      res.status(409).json({ error: 'action_not_dismissable' });
       return;
     }
     await respondWithRoster(res, tourId);
@@ -1050,104 +1208,29 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     res.json({ tour });
   });
 
-  /**
-   * Resolve the tour's relay roster through the ONE shared resolver
-   * (lib/rosterResolution.ts): the roster PLAN when the operator materialized
-   * one, else the property default (tenant + the unit's primaryContact, with
-   * the landlord-of-record fallback). Returns a stable, dashboard-consumable
-   * detail string when the roster cannot make a relay (the route maps it to
-   * 400 relay_member_unresolvable).
-   *
-   * A member with no phone is EXCLUDED from the SMS members rather than failing
-   * the whole open - a relay needs two reachable people, and who those are is
-   * the roster's business, not this function's. Fewer than two left => the
-   * ladder below names exactly which rung failed (the same six strings the
-   * dashboard has always surfaced).
-   */
-  async function resolveTourMembers(
-    tour: TourItem,
-  ): Promise<{ members: ConversationParticipant[] } | { unresolvable: string }> {
-    const resolved = await resolveRoster(
-      { conversations, units, contacts, log },
-      {
-        type: 'tour',
-        id: tour.tourId,
-        tenantId: tour.tenantId,
-        unitId: tour.unitId,
-        ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
-        ...(tour.roster !== undefined && { roster: tour.roster }),
-      },
-    );
-    // Unreachable from this route (the one-thread-per-tour guard above already
-    // refused a tour carrying a pointer), but the resolver's contract is
-    // explicit: an unreadable thread is NEVER silently re-resolved.
-    if (resolved.source === 'unavailable') {
-      return { unresolvable: 'the group thread could not be read' };
-    }
-
-    const members: ConversationParticipant[] = [];
-    const seenPhones = new Set<string>();
-    for (const member of resolved.members) {
-      const phone = member.phone;
-      if (typeof phone !== 'string' || phone.length === 0) continue; // unreachable member
-      if (seenPhones.has(phone)) continue; // one slot per number (shared phones)
-      seenPhones.add(phone);
-      members.push({
-        phone,
-        contactId: member.contactId ?? '',
-        ...(member.name !== undefined && { name: member.name }),
-      });
-    }
-    if (members.length >= 2) return { members };
-
-    // Too thin to relay. Name the rung that failed - these strings are the
-    // dashboard's error copy and are asserted verbatim by the API tests.
-    if (resolved.source === 'plan') {
-      return { unresolvable: 'this tour roster has fewer than two reachable members' };
-    }
-    const tenant = await contacts.getById(tour.tenantId);
-    if (!tenant) return { unresolvable: 'tenant contact not found' };
-    const tenantPhone =
-      typeof tenant.phone === 'string' && tenant.phone.length > 0
-        ? normalizeToE164(tenant.phone)
-        : undefined;
-    if (tenantPhone === undefined) return { unresolvable: 'tenant contact has no phone' };
-
-    const unit = await units.getById(tour.unitId);
-    if (!unit) return { unresolvable: 'unit not found (cannot resolve landlord)' };
-    // The property's contact is the primaryContact row, falling back to the
-    // landlord of record (D3) - the same ladder the resolver walked.
-    const propertyContactId =
-      unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ??
-      (typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined);
-    if (propertyContactId === undefined) {
-      return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
-    }
-    const landlord = await contacts.getById(propertyContactId);
-    if (!landlord) return { unresolvable: 'landlord contact not found' };
-    const landlordPhone =
-      typeof landlord.phone === 'string' && landlord.phone.length > 0
-        ? normalizeToE164(landlord.phone)
-        : undefined;
-    if (landlordPhone === undefined) return { unresolvable: 'landlord contact has no phone' };
-    // Both rungs resolve and share ONE number (tenant === property contact):
-    // a relay needs two distinct parties.
-    return { unresolvable: 'this tour roster has fewer than two reachable members' };
-  }
-
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a
-  // tour (Task 5). Stores the relay conversationId back on the tour as
-  // groupThreadId. ONE thread per tour — an already-provisioned tour is refused
-  // (409) so a second click never buys a new pool number and orphans the first.
+  // tour (Task 5). The FLOW ITSELF lives in services/rosterProvision.ts
+  // (openTourGroup) because the quiet-hours poller applies a DEFERRED open
+  // through the very same sequence - resolve the plan at apply time, claim,
+  // provision, stamp the pointer, consume the plan, pin the milestone.
   //
   // Body: { members?: [{ phone, contactId?, name? }, …] }
-  //   - members absent or empty → AUTO-RESOLVE the roster as [tenant contact,
-  //     unit's landlord contact] (phones + names from contacts); an
-  //     unresolvable member → 400 { error: 'relay_member_unresolvable', detail }
-  //     naming exactly which member/rung failed.
-  //   - explicit members are honored as before; a member carrying contactId
-  //     but no name gets the contact's display name (best-effort).
-  // Returns: 201 { tour, conversation }
+  //   - members absent or empty -> AUTO-RESOLVE through the shared roster
+  //     resolver; an unresolvable roster -> 400 { error:
+  //     'relay_member_unresolvable', detail } naming exactly which rung failed.
+  //   - explicit members are honored as before; a member carrying contactId but
+  //     no name gets the contact's display name (best-effort).
+  //
+  // QUIET HOURS (spec D7, contact-rosters Task 13): inside the org window an
+  // AUTO-RESOLVED open is DEFERRED instead of provisioned - a pendingRosterActions
+  // row due at quiet-end, and 202 carrying the roster payload (whose pending[]
+  // is what the card's "Opens at 8:00 AM" banner renders). `?force=send_now` is
+  // the dialog's explicit override and provisions immediately. An EXPLICIT
+  // members list is never deferred: the pending row records the owner only (the
+  // apply re-resolves the plan, D7), so deferring a caller-supplied roster would
+  // silently open the group with different people.
+  //
+  // Returns: 201 { tour, conversation } | 202 <RosterView> (deferred)
   //
   // PII (doc §9): log ids only (never member phones in log lines).
   router.post('/:tourId/relay', async (req, res) => {
@@ -1162,18 +1245,12 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    // Dead tours don't get group threads: a stale page's button click must not
-    // buy a pool number + text [AUTO] intros for a canceled/closed tour (the
-    // UI hides the control, but the route is the guard).
-    if (tour.status === 'canceled' || tour.status === 'closed') {
-      res.status(409).json({ error: 'tour_not_active', detail: `cannot open a group thread on a ${tour.status} tour` });
-      return;
-    }
-
-    // One-thread-per-tour guard FIRST: a second provision would silently buy a
-    // new pool number and overwrite groupThreadId, orphaning the live thread.
-    if (typeof tour.groupThreadId === 'string' && tour.groupThreadId.length > 0) {
-      res.status(409).json({ error: 'relay_already_provisioned' });
+    // The dead-tour + one-thread-per-tour guards run BEFORE body parsing (the
+    // historical order of this route's refusals). openTourGroup re-applies them
+    // - one definition, checked twice.
+    const guard = tourOpenGuard(tour);
+    if (guard !== undefined) {
+      res.status(guard.status).json(guard.body);
       return;
     }
 
@@ -1183,19 +1260,11 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       return;
     }
 
-    let members: ConversationParticipant[];
-    if (rawMembers === undefined || rawMembers.length === 0) {
-      // AUTO-RESOLVE (founder flow): [tenant, unit's landlord] from contacts.
-      const resolved = await resolveTourMembers(tour);
-      if ('unresolvable' in resolved) {
-        res.status(400).json({ error: 'relay_member_unresolvable', detail: resolved.unresolvable });
-        return;
-      }
-      members = resolved.members;
-    } else {
-      // Parse + normalize explicit members (reuse the same mini-validator as
-      // relayGroups.ts); fill a missing name from contactId (best-effort).
-      members = [];
+    let explicitMembers: ConversationParticipant[] | undefined;
+    if (Array.isArray(rawMembers) && rawMembers.length > 0) {
+      // Parse + normalize explicit members; fill a missing name from contactId
+      // (best-effort).
+      explicitMembers = [];
       const seenPhones = new Set<string>();
       for (const raw of rawMembers as unknown[]) {
         if (typeof raw !== 'object' || raw === null) {
@@ -1218,157 +1287,43 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
           typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : '';
         const name =
           typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
-        members.push(
+        explicitMembers.push(
           await resolveMemberName(contacts, { phone, contactId, ...(name !== undefined && { name }) }),
         );
       }
     }
 
-    // Property-ZIP hint for a potential tier-3 buy (area-code preference).
-    // Best-effort: a missing unit/address just means no hint - never a 4xx
-    // (the roster resolution above already produced its own errors if the
-    // unit truly matters). The auto-resolve path fetched the unit internally
-    // but does not expose it, and the explicit-members path never loads it.
-    // The read is WRAPPED because of that last point: on the explicit-members
-    // path this route never touched the units table before, so an unguarded
-    // repo/network throw would turn a DynamoDB hiccup into a 500 on a request
-    // that used to succeed - a cosmetic hint must never fail group creation.
-    let postalCode: string | undefined;
-    try {
-      const unitForZip = await units.getById(tour.unitId);
-      postalCode = zipFive(unitForZip?.address);
-    } catch (err) {
-      log.warn(
-        { err, tourId },
-        'tour relay: unit ZIP hint lookup failed - creating the group without the hint',
-      );
-    }
-
-    // Atomically claim the group-thread slot BEFORE buying anything: the
-    // read-guard above is check-then-act, so two overlapping POSTs could both
-    // pass it, buy two pool numbers, and orphan the first thread. The claim's
-    // ConditionExpression (attribute_not_exists(groupThreadId)) makes the race
-    // loser 409 here, before any provisioning side effects. The sentinel is
-    // replaced by the real conversation id on success and released on failure;
-    // a crash inside this window leaves the sentinel behind (rare — clears by
-    // removing groupThreadId), which we prefer over the double-buy.
-    const claimSentinel = `provisioning:${tourId}`;
-    try {
-      await tours.claimGroupThread(tourId, claimSentinel);
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        res.status(409).json({ error: 'relay_already_provisioned' });
+    // QUIET-HOURS DEFERRAL (D7) - membership and message defer together.
+    if (explicitMembers === undefined && !isForceSendNow(req)) {
+      const quiet = await quietHoursState();
+      if (isQuietTime(quiet.nowIso, quiet.window)) {
+        const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
+        await rosterActions.upsertPending({
+          ownerType: 'tour',
+          ownerId: tourId,
+          action: 'open_group',
+          dueAt,
+          createdAt: quiet.nowIso,
+        });
+        log.info({ tourId, dueAt }, 'tour relay open deferred to quiet-end (pending roster action)');
+        await respondWithRoster(res, tourId, 202);
         return;
       }
-      throw err;
     }
 
-    // Provision the relay group owned by this tour.
-    let conversation;
-    try {
-      conversation = await provisionRelayGroup(
-        {
-          conversationsRepo: conversations,
-          poolNumbersService: poolNumbers,
-          auditRepo: audit,
-          events,
-          logger: log,
-        },
-        {
-          members,
-          owner: { type: 'tour', id: tourId },
-          ...(actor !== undefined && { actor }),
-          ...(postalCode !== undefined && { postalCode }),
-        },
-      );
-    } catch (err) {
-      // Provisioning failed — release the claim so a retry can provision.
-      await tours.releaseGroupThreadClaim(tourId, claimSentinel);
-      if (err instanceof RelayProvisioningDisabledError) {
-        log.warn({ err: { name: err.name }, tourId }, 'tour relay create: number provisioning disabled');
-        res.status(503).json({ error: 'relay_provisioning_disabled', message: (err as Error).message });
-        return;
-      }
-      if (err instanceof VoiceCapabilityError) {
-        log.error({ err: { name: err.name }, tourId }, 'tour relay create: no voice-capable pool number available');
-        res.status(503).json({ error: 'relay_provisioning_failed', message: (err as Error).message });
-        return;
-      }
-      throw err;
+    const result = await openTourGroup(provisionDeps, tour, {
+      ...(actor !== undefined && { actor }),
+      ...(explicitMembers !== undefined && { members: explicitMembers }),
+    });
+    if (!result.ok) {
+      res.status(result.refusal.status).json(result.refusal.body);
+      return;
     }
-
-    // Stamp the real groupThreadId over the claim sentinel.
-    let updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
-
-    // THE PLAN IS CONSUMED (spec D1) - and only now, AFTER the thread pointer
-    // is written. From here the conversation's participants are the roster, so
-    // a second persisted roster must not survive to disagree with them. Order
-    // matters both ways: clearing BEFORE the pointer write would lose the plan
-    // on a failed stamp, and a crash BETWEEN the two leaves a stale plan that is
-    // INERT by precedence (the resolver reads participants first whenever the
-    // pointer is set) - never "defensively" merge it back in.
-    if (updatedTour.roster !== undefined) {
-      try {
-        await tours.clearRoster(tourId);
-        updatedTour = { ...updatedTour };
-        delete updatedTour.roster;
-        delete updatedTour.rosterVersion;
-      } catch (err) {
-        log.error({ err, tourId }, 'tour relay: clearing the consumed roster plan failed (inert leftover)');
-      }
-    }
-
-    // Connect-when-ready (T6): the group may be CONNECTING (no number yet) rather
-    // than open - "opened" would be premature, so mark the audit/log accordingly.
-    const connecting = conversation.status === 'connecting';
-
-    // Tour-history milestone (tour-detail-page 1a): a tours#<tourId> audit row
-    // carrying the opened thread id. Best-effort: a failed write must never fail
-    // the 201. IDs only. `connecting` distinguishes a deferred-open
-    // (connect-when-ready) group.
-    try {
-      await audit.append(`tours#${tourId}`, 'tour_group_opened', {
-        tourId,
-        conversationId: conversation.conversationId,
-        connecting,
-        ...(actor !== undefined && { actor }),
-      });
-    } catch (err) {
-      log.error({ err, tourId }, 'tour_group audit failed (best-effort)');
-    }
-
-    // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP.
-    // This one is roster-driven, NOT dual-party (lib/personEvents explains the
-    // split): "Group text opened" asserts membership of this conversation, so
-    // it follows `members` - the roster we just provisioned - the same way
-    // added_to_group_text follows the member it names. Auto-resolved rosters
-    // ARE [tenant, unit landlord], so the founder flow pins exactly those two;
-    // an explicit roster (a caseworker standing in for the tenant, a PM for the
-    // owner) pins who is actually there, and no absent tour party. Kept OUTSIDE
-    // recordTourEvent because the property (units#) Activity card deliberately
-    // carries no row for it - the tour's own trail already does. The pin fires
-    // even on the `connecting` path (no pool number yet): the route has no
-    // status gate and the tour Activity card already shows it, so this is
-    // parity, not a new claim. Best-effort, like every write above.
-    await recordRosterMilestone(
-      { activityEvents, log },
-      {
-        members,
-        type: 'tour_group_opened',
-        label: 'Group text opened',
-        refType: 'tour',
-        refId: tourId,
-      },
-    );
-
-    // Live tour-page refresh (tour-detail-page 1a): ID + status only (no PII).
-    events.emit('tour.updated', { tourId, status: updatedTour.status });
-
-    log.info(
-      { tourId, conversationId: conversation.conversationId, memberCount: members.length, connecting },
-      connecting ? 'tour relay group provisioned (connecting - awaiting number)' : 'tour relay group provisioned',
-    );
-    res.status(201).json({ tour: updatedTour, conversation });
+    // An immediate open RETIRES any pending open for this owner: the operator
+    // just did the thing the deferred row was going to do, so it must not fire
+    // again at 8 AM (and must not leave a stale "opens at 8:00 AM" banner).
+    await retirePendingAction(rosterActionIdFor({ ownerType: 'tour', ownerId: tourId, action: 'open_group' }));
+    res.status(201).json({ tour: result.tour, conversation: result.conversation });
   });
 
   return router;

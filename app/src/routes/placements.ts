@@ -24,14 +24,11 @@
 // LOG LINES are placementId/stage/counts only — never the placement_tag (a name).
 import { randomUUID } from 'node:crypto';
 import { Router, type Response } from 'express';
-import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
 import { appEvents, toPlacementUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { VoiceCapabilityError } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import {
   type PlacementsPage,
@@ -53,15 +50,11 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { cancelTourReminders } from '../jobs/tourReminders.js';
-import {
-  createPoolNumbersService,
-  RelayProvisioningDisabledError,
-  type PoolNumbersService,
-} from '../services/poolNumbers.js';
+import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
 import {
   createStatusTransitionService,
   type StatusTransitionService,
@@ -75,14 +68,27 @@ import {
   type PlacementItem,
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
-import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
+import { recordPersonMilestone } from '../lib/personEvents.js';
 import {
   describeRoster,
-  resolveRoster,
   type RosterOwner,
   type RosterResolutionDeps,
 } from '../lib/rosterResolution.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
+import {
+  openPlacementGroup,
+  type OpenPlacementGroupDeps,
+} from '../services/rosterProvision.js';
+import {
+  applyPlacementRosterAction,
+  type PlacementRosterActionDeps,
+} from '../jobs/rosterActions.js';
+import {
+  createPendingRosterActionsRepo,
+  rosterActionIdFor,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import {
   addMemberToRelay,
@@ -125,6 +131,14 @@ export interface PlacementsRouterDeps {
   settingsRepo?: SettingsRepo;
   /** BE2/C2: emit placement_opened/placement_closed/stage_changed/tour_* milestones. */
   activityEventsRepo?: ActivityEventsRepo;
+  /** Quiet-hours deferrals (contact-rosters Task 13): the pending open/add rows. */
+  pendingRosterActionsRepo?: PendingRosterActionsRepo;
+  /**
+   * Injected clock for the quiet-hours evaluation on the open / live-add paths
+   * (contact-rosters Task 13) - defaults to the wall clock. Tests inject it to
+   * assert exact dueAt values; production omits it.
+   */
+  now?: () => string;
   /**
    * Status-transition service — its derive helpers stamp tenant/property coarse
    * status on create (best-effort; §7). Defaulted to the real service below.
@@ -398,6 +412,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const settingsRepo = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const rosterActions =
+    deps.pendingRosterActionsRepo ?? createPendingRosterActionsRepo({ logger: deps.logger });
+  const getNow = deps.now ?? (() => new Date().toISOString());
   // §7 derive-on-create: the transition service's derive helpers stamp the
   // tenant + property coarse statuses on create (override-gated, source 'derived').
   // Self-construct from the SAME repos this router already builds when not injected.
@@ -763,6 +780,31 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       }
     }
 
+    // PENDING ROSTER ACTIONS MIGRATE with the roster (spec D4 / Task 13): a
+    // quiet-hours deferral the operator confirmed on the TOUR still has to
+    // happen, and after this the placement is the surface that shows it. Only
+    // PENDING rows move - terminal notices belong to the tour's own history.
+    // Best-effort, like every write in this tail: a failure must not fail a
+    // conversion that is already persisted, and the orphan it leaves is exactly
+    // what the poller's `converted` skip retires visibly.
+    try {
+      const migrated = await rosterActions.migrate(
+        { ownerType: 'tour', ownerId: tour.tourId },
+        { ownerType: 'placement', ownerId: created.placementId },
+      );
+      if (migrated.length > 0) {
+        log.info(
+          { tourId: tour.tourId, placementId: created.placementId, count: migrated.length },
+          'convert: pending roster actions migrated to the placement',
+        );
+      }
+    } catch (err) {
+      log.error(
+        { err, tourId: tour.tourId, placementId: created.placementId },
+        'convert: migrating pending roster actions failed (best-effort) - the poller will retire the orphans as converted',
+      );
+    }
+
     await audit.append(`placements#${created.placementId}`, 'placement_created', {
       actor: req.user?.userId,
       tenantId: created.tenantId,
@@ -876,7 +918,14 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   // repo and the 404 token differ. See routes/tours.ts for the full contract.
   // -------------------------------------------------------------------------
 
-  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, log };
+  const rosterDeps: RosterResolutionDeps = {
+    conversations,
+    units,
+    contacts,
+    // The seam that puts pending[]/skipped[] on every roster payload (Task 13).
+    actions: rosterActions,
+    log,
+  };
 
   const memberDeps: RelayMemberDeps = {
     conversations,
@@ -926,7 +975,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     });
   };
 
-  async function respondWithRoster(res: Response, placementId: string): Promise<void> {
+  /** Re-read + serialize - the 200 body of every mutating roster endpoint (202
+   *  when the write was DEFERRED to quiet-end: same shape, different verdict). */
+  async function respondWithRoster(res: Response, placementId: string, status = 200): Promise<void> {
     const item = await placements.getById(placementId);
     if (!item) {
       res.status(404).json({ error: 'placement_not_found' });
@@ -937,14 +988,52 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       { placementId, source: view.source, memberCount: view.members.length },
       'placement roster edited',
     );
-    res.json(view);
+    res.status(status).json(view);
   }
 
   async function quietHoursState(): Promise<QuietHoursState> {
     return {
-      nowIso: new Date().toISOString(),
+      nowIso: getNow(),
       window: await readQuietHoursWindow(settingsRepo, log),
     };
+  }
+
+  /** Everything the shared open (services/rosterProvision) touches. */
+  const provisionDeps: OpenPlacementGroupDeps = {
+    placements,
+    placementDeadlines,
+    conversations,
+    contacts,
+    units,
+    audit,
+    activityEvents,
+    poolNumbers,
+    events,
+    log,
+  };
+
+  /** The deferral engine's deps - the SAME apply the poller runs (apply-now). */
+  const actionDeps: PlacementRosterActionDeps = {
+    ...provisionDeps,
+    actions: rosterActions,
+    logger: log,
+  };
+
+  /** The dialog's explicit override: apply now despite quiet hours. */
+  const isForceSendNow = (req: { query: Record<string, unknown> }): boolean =>
+    String(req.query['force'] ?? '') === 'send_now';
+
+  /**
+   * Retire a pending action a HUMAN just performed by hand. `claimApply` is the
+   * honest transition (it happened, just now and by a person) and it refuses
+   * terminal rows, so a missing/resolved row is a benign false. Best-effort.
+   */
+  async function retirePendingAction(actionId: string): Promise<void> {
+    try {
+      await rosterActions.claimApply(actionId, getNow());
+    } catch (err) {
+      log.error({ err, actionId }, 'placement roster: retiring the superseded pending action failed');
+    }
   }
 
   // --- PLAN writes (no thread) ---------------------------------------------
@@ -1056,8 +1145,30 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       sendRefusal(res, ROSTER_UNAVAILABLE);
       return;
     }
-    // Spec section 7: a CLOSED thread's add is silent AND immediate.
+    // Spec section 7: a CLOSED thread's add is silent AND immediate - and
+    // therefore never deferred (nobody is there to be announced to at 8 AM).
     const announce = conversation.status !== 'closed';
+
+    // QUIET-HOURS DEFERRAL (D7): membership defers WITH the message.
+    // `?force=send_now` is the dialog's "Send now anyway".
+    if (announce && !isForceSendNow(req)) {
+      const quiet = await quietHoursState();
+      if (isQuietTime(quiet.nowIso, quiet.window)) {
+        const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
+        await rosterActions.upsertPending({
+          ownerType: 'placement',
+          ownerId: placementId,
+          action: 'add_member',
+          contactId: resolvedCandidate.candidate.contactId,
+          dueAt,
+          createdAt: quiet.nowIso,
+        });
+        log.info({ placementId, dueAt }, 'placement roster add deferred to quiet-end (pending roster action)');
+        await respondWithRoster(res, placementId, 202);
+        return;
+      }
+    }
+
     const result = await addMemberToRelay(
       memberDeps,
       threadId,
@@ -1071,6 +1182,15 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       sendRefusal(res, result.refusal);
       return;
     }
+    // The human did it by hand - retire any pending add for the same person.
+    await retirePendingAction(
+      rosterActionIdFor({
+        ownerType: 'placement',
+        ownerId: placementId,
+        action: 'add_member',
+        contactId: resolvedCandidate.candidate.contactId,
+      }),
+    );
     await respondWithRoster(res, placementId);
   });
 
@@ -1300,70 +1420,21 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     res.json({ placement: withDeadline(item, soonest) });
   });
 
-  /**
-   * Name the rung that left a placement roster too thin to relay. The three
-   * legacy codes (tenant_unreachable / unit_not_found / landlord_unreachable)
-   * are the dashboard's error copy and are preserved verbatim for the PROPERTY
-   * DEFAULT - the only source that had them before rosters existed. A roster
-   * the operator chose (a plan, or a previous thread's members) cannot be
-   * described by that ladder, so it refuses with the tours-style code instead.
-   */
-  async function describeThinRoster(
-    item: PlacementItem,
-    source: 'participants' | 'plan' | 'default',
-  ): Promise<{ status: number; body: Record<string, unknown> }> {
-    if (source !== 'default') {
-      return {
-        status: 400,
-        body: {
-          error: 'relay_member_unresolvable',
-          detail: 'this placement roster has fewer than two reachable members',
-        },
-      };
-    }
-    const tenant = await contacts.getById(item.tenantId);
-    if (!tenant || typeof tenant.phone !== 'string' || tenant.phone.length === 0) {
-      return {
-        status: 400,
-        body: { error: 'tenant_unreachable', message: 'the placement tenant has no phone on file' },
-      };
-    }
-    const unit = await units.getById(item.unitId);
-    if (!unit) return { status: 400, body: { error: 'unit_not_found' } };
-    // The property's contact is the primaryContact row, falling back to the
-    // landlord of record (D3) - the same ladder the resolver walked.
-    const propertyContactId =
-      unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ?? unit.landlordId;
-    const landlord =
-      typeof propertyContactId === 'string' && propertyContactId.length > 0
-        ? await contacts.getById(propertyContactId)
-        : undefined;
-    if (!landlord || typeof landlord.phone !== 'string' || landlord.phone.length === 0) {
-      return {
-        status: 400,
-        body: { error: 'landlord_unreachable', message: 'the unit landlord has no phone on file' },
-      };
-    }
-    // Both rungs resolve and share ONE number (the tenant IS the property
-    // contact): a relay needs two distinct parties.
-    return {
-      status: 400,
-      body: {
-        error: 'relay_member_unresolvable',
-        detail: 'this placement roster has fewer than two reachable members',
-      },
-    };
-  }
-
-  // POST /api/placements/:placementId/relay — set up the placement's masked relay
-  // thread. The explicit operator "Set up relay thread" action (Phase 1 is
-  // hand-touched parity — no auto-trigger). The roster is derived FROM the
-  // placement: the tenant + the unit's landlord, by their SMS numbers (the
-  // masked-CALL landlord leg resolves unit.primary_contact at call time,
-  // M1.10d). Reuses the shared provisioning primitive and links
-  // placement.group_thread ↔ conversation.placementId. Idempotent: refuses (409)
-  // if the placement already has an OPEN relay so a double-click never buys a
-  // second pool number.
+  // POST /api/placements/:placementId/relay - set up the placement's masked
+  // relay thread. The explicit operator "Set up relay thread" action (Phase 1 is
+  // hand-touched parity - no auto-trigger). The FLOW ITSELF lives in
+  // services/rosterProvision.ts (openPlacementGroup) because the quiet-hours
+  // poller applies a DEFERRED open through the very same sequence - resolve the
+  // roster at apply time, provision, link, consume the plan, pin the milestone.
+  // Idempotent: 409 relay_exists when an OPEN/CONNECTING relay already fronts
+  // the placement, so a double-click never buys a second pool number.
+  //
+  // QUIET HOURS (spec D7, Task 13): inside the org window the open is DEFERRED -
+  // a pendingRosterActions row due at quiet-end, and 202 carrying the roster
+  // payload (whose pending[] drives the card's "Opens at 8:00 AM" banner).
+  // `?force=send_now` is the dialog's override and provisions immediately.
+  //
+  // Returns: 201 { conversation, placement } | 202 <RosterView> (deferred)
   router.post('/:placementId/relay', async (req: AuthedRequest, res) => {
     const placementId = String(req.params['placementId'] ?? '');
     mergeContext({ placementId });
@@ -1374,165 +1445,118 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(404).json({ error: 'placement_not_found' });
       return;
     }
-    // Idempotency (D10): an OPEN *or CONNECTING* relay already fronts this
-    // placement -> never double-provision. A connecting group is mid-buy (its warm
-    // number has not registered yet); treating it as "already provisioned" stops a
-    // re-click from buying a SECOND number for the same placement.
-    if (typeof item.group_thread === 'string' && item.group_thread.length > 0) {
-      const existing = await conversations.getById(item.group_thread);
-      if (
-        existing &&
-        existing.type === 'relay_group' &&
-        (existing.status === 'open' || existing.status === 'connecting')
-      ) {
-        res.status(409).json({ error: 'relay_exists', conversation: existing });
+
+    // QUIET-HOURS DEFERRAL (D7) - membership and message defer together.
+    if (!isForceSendNow(req)) {
+      const quiet = await quietHoursState();
+      if (isQuietTime(quiet.nowIso, quiet.window)) {
+        const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
+        await rosterActions.upsertPending({
+          ownerType: 'placement',
+          ownerId: placementId,
+          action: 'open_group',
+          dueAt,
+          createdAt: quiet.nowIso,
+        });
+        log.info({ placementId, dueAt }, 'placement relay open deferred to quiet-end (pending roster action)');
+        await respondWithRoster(res, placementId, 202);
         return;
       }
     }
 
-    // Resolve the roster through the ONE shared resolver (lib/rosterResolution):
-    // the roster PLAN when the operator materialized one, else the property
-    // default (tenant + the unit's primaryContact, with the landlord-of-record
-    // fallback). Members need an SMS number to be in the relay (texts fan out to
-    // these), so a phone-less member is EXCLUDED and a roster that cannot muster
-    // two reachable people is a 400 - never provision a half-roster relay.
-    const resolved = await resolveRoster(
-      { conversations, units, contacts, log },
-      {
-        type: 'placement',
-        id: placementId,
-        tenantId: item.tenantId,
-        unitId: item.unitId,
-        ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
-        ...(item.roster !== undefined && { roster: item.roster }),
-      },
-    );
-    if (resolved.source === 'unavailable') {
-      // A pointer that will not load is NEVER silently re-resolved from the
-      // property (spec D1) - refuse and let the operator retry.
-      res.status(400).json({
-        error: 'relay_member_unresolvable',
-        detail: 'the group thread could not be read',
-      });
-      return;
-    }
-
-    const members: ConversationParticipant[] = [];
-    const seenPhones = new Set<string>();
-    for (const member of resolved.members) {
-      const phone = member.phone;
-      if (typeof phone !== 'string' || phone.length === 0) continue; // unreachable member
-      if (seenPhones.has(phone)) continue; // one slot per number (shared phones)
-      seenPhones.add(phone);
-      members.push({
-        phone,
-        contactId: member.contactId ?? '',
-        ...(member.name !== undefined && { name: member.name }),
-      });
-    }
-    if (members.length < 2) {
-      const refusal = await describeThinRoster(item, resolved.source);
-      res.status(refusal.status).json(refusal.body);
-      return;
-    }
-
-    const tag =
-      typeof item.placement_tag === 'string' && item.placement_tag.length > 0
-        ? item.placement_tag
-        : undefined;
-    // Property-ZIP hint for a potential tier-3 buy (area-code preference).
-    // Best-effort - a missing/unparseable zip (or a repo hiccup) just means no
-    // hint (Atlanta-default ladder), never a failed group creation.
-    let postalCode: string | undefined;
-    try {
-      postalCode = zipFive((await units.getById(item.unitId))?.address);
-    } catch (err) {
-      log.warn({ err, placementId }, 'placement relay: unit ZIP hint lookup failed - creating without the hint');
-    }
-
-    let conversation;
-    try {
-      conversation = await provisionRelayGroup(
-        { conversationsRepo: conversations, poolNumbersService: poolNumbers, auditRepo: audit, events, logger: log },
-        { members, placementId, ...(tag !== undefined && { tag }), ...(actor !== undefined && { actor }), ...(postalCode !== undefined && { postalCode }) },
-      );
-    } catch (err) {
-      // Kill-switch (M1.7): live provisioning is off pre-A2P — no number bought.
-      if (err instanceof RelayProvisioningDisabledError) {
-        log.warn({ err: { name: err.name }, placementId, actor }, 'placement relay: number provisioning disabled');
-        await audit.append(`placements#${placementId}`, 'relay_provisioning_disabled', { actor, reason: 'placement' });
-        res.status(503).json({ error: 'relay_provisioning_disabled', message: err.message });
-        return;
-      }
-      if (err instanceof VoiceCapabilityError) {
-        log.error({ err: { name: err.name }, placementId }, 'placement relay: no voice-capable pool number available');
-        res.status(503).json({ error: 'pool_number_unavailable' });
-        return;
-      }
-      throw err;
-    }
-
-    // Link the placement → its relay thread. The conversation already carries
-    // placementId (the back-reference, set at createRelayGroup); a link-write
-    // failure is logged, not fatal (the conversation.placementId back-ref still
-    // resolves it).
-    let updatedPlacement = item;
-    let linked = false;
-    try {
-      updatedPlacement = await placements.update(placementId, { group_thread: conversation.conversationId });
-      linked = true;
-    } catch (err) {
-      log.error(
-        { err, placementId, conversationId: conversation.conversationId },
-        'placement relay: linking group_thread failed — relay created',
-      );
-    }
-
-    // THE PLAN IS CONSUMED (spec D1) - and only after the thread pointer write
-    // SUCCEEDS. From here the conversation's participants are the roster, so no
-    // second persisted roster may survive to disagree with them. On a failed
-    // link the plan deliberately STAYS: the placement has no pointer, so the
-    // resolver is still in plan mode and dropping it would strand the operator's
-    // roster. A crash BETWEEN the two writes leaves a stale plan that is INERT
-    // by precedence (participants win whenever the pointer is set) - never
-    // "defensively" merge it back in.
-    if (linked && updatedPlacement.roster !== undefined) {
-      try {
-        await placements.clearRoster(placementId);
-        updatedPlacement = { ...updatedPlacement };
-        delete updatedPlacement.roster;
-        delete updatedPlacement.rosterVersion;
-      } catch (err) {
-        log.error({ err, placementId }, 'placement relay: clearing the consumed roster plan failed (inert leftover)');
-      }
-    }
-    await audit.append(`placements#${placementId}`, 'placement_relay_provisioned', {
-      actor,
-      conversationId: conversation.conversationId,
+    const result = await openPlacementGroup(provisionDeps, item, {
+      ...(actor !== undefined && { actor }),
     });
-    // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP
-    // (spec D8 - the parity tours has had since the group-open pin landed).
-    // Roster-driven, NOT dual-party: "Group text opened" asserts membership of
-    // this conversation, so it follows `members` - the roster we just
-    // provisioned. A member who was unreachable at open is not in that fan-out
-    // and gets NO pin: pins are facts about texts, and one claiming someone
-    // joined a conversation they cannot receive is false. Best-effort.
-    await recordRosterMilestone(
-      { activityEvents, log },
-      {
-        members,
-        type: 'placement_group_opened',
-        label: 'Group text opened',
-        refType: 'placement',
-        refId: placementId,
-      },
+    if (!result.ok) {
+      res.status(result.refusal.status).json(result.refusal.body);
+      return;
+    }
+    // An immediate open RETIRES any pending open for this owner (the operator
+    // just did it) so it cannot fire again at 8 AM.
+    await retirePendingAction(
+      rosterActionIdFor({ ownerType: 'placement', ownerId: placementId, action: 'open_group' }),
     );
-    await emitPlacementUpdated(updatedPlacement);
+    res.status(201).json({ conversation: result.conversation, placement: result.placement });
+  });
+
+  // --- Pending roster actions (quiet-hours deferrals, Task 13) -------------
+  //
+  //   POST /:placementId/roster/pending/:actionId/cancel     pending -> canceled
+  //   POST /:placementId/roster/pending/:actionId/apply-now  apply it RIGHT NOW
+  //   POST /:placementId/roster/pending/:actionId/dismiss    terminal -> gone
+  //
+  // The tour mirrors, verbatim (see routes/tours.ts): same tokens, same
+  // ownership rule (the deterministic actionId embeds its owner), and all three
+  // answer with the SAME roster payload every other endpoint serves.
+
+  /** Load + own-check one action row, or refuse (404). */
+  async function loadOwnedAction(
+    res: Response,
+    placementId: string,
+    actionId: string,
+  ): Promise<Awaited<ReturnType<PendingRosterActionsRepo['getById']>> | undefined> {
+    const row = await rosterActions.getById(actionId);
+    if (!row || row.ownerType !== 'placement' || row.ownerId !== placementId) {
+      res.status(404).json({ error: 'pending_action_not_found' });
+      return undefined;
+    }
+    return row;
+  }
+
+  router.post('/:placementId/roster/pending/:actionId/cancel', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    if (!(await placements.getById(placementId))) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, placementId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    if (!(await rosterActions.cancel(row.actionId, getNow()))) {
+      res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
+    log.info({ placementId, actionId: row.actionId }, 'pending roster action canceled by operator');
+    await respondWithRoster(res, placementId);
+  });
+
+  router.post('/:placementId/roster/pending/:actionId/apply-now', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    if (!(await placements.getById(placementId))) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, placementId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    // The SAME apply the poller runs, claim-and-skip discipline included.
+    const outcome = await applyPlacementRosterAction(row, getNow(), actionDeps);
+    if (outcome.result === 'lost') {
+      res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
     log.info(
-      { placementId, conversationId: conversation.conversationId, actor },
-      'placement relay thread provisioned via api',
+      { placementId, actionId: row.actionId, outcome: outcome.result },
+      'pending roster action applied by operator',
     );
-    res.status(201).json({ conversation, placement: updatedPlacement });
+    await respondWithRoster(res, placementId);
+  });
+
+  router.post('/:placementId/roster/pending/:actionId/dismiss', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    if (!(await placements.getById(placementId))) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const row = await loadOwnedAction(res, placementId, String(req.params['actionId'] ?? ''));
+    if (row === undefined) return;
+    // Dismiss is for a TERMINAL row's notice only (spec 6.5).
+    if (!(await rosterActions.dismiss(row.actionId, getNow()))) {
+      res.status(409).json({ error: 'action_not_dismissable' });
+      return;
+    }
+    await respondWithRoster(res, placementId);
   });
 
   return router;

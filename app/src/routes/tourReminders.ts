@@ -148,6 +148,9 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     conversationsRepo: conversations,
     // D11 (contact-rosters): the send-now path runs the poll's roster check.
     unitsRepo: units,
+    // D7: NOT wired on the send-now path - a human pressing "Send now" has
+    // decided, and a pending group open must not silently refuse them. The
+    // WAIT is a poll-only behavior (the poll re-lists; a human does not).
     sendMessageService:
       deps.sendMessageService ?? createSendMessageService({ config, logger: deps.logger }),
     settingsRepo: settings,

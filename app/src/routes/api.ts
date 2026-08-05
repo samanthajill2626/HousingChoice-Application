@@ -121,6 +121,10 @@ import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
 import { createTourRemindersRouter } from './tourReminders.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import {
+  createPendingRosterActionsRepo,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
@@ -230,6 +234,10 @@ export interface ApiRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   /** Injected clock for tour-reminder arm/re-arm dueAt computation (tests only). */
   toursNow?: () => string;
+  /** Injected clock for the placement router's quiet-hours evaluation (tests only). */
+  placementsNow?: () => string;
+  /** Quiet-hours roster deferrals (contact-rosters Task 13) - injected in tests. */
+  pendingRosterActionsRepo?: PendingRosterActionsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -439,6 +447,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  // contact-rosters Task 13: ONE pending-roster-actions repo for both hubs, so a
+  // tour's deferrals and the placement's read/write the same rows.
+  const rosterActions =
+    deps.pendingRosterActionsRepo ?? createPendingRosterActionsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
@@ -712,6 +724,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       // tour_took_place milestone on the toured transition (Post-Tour & Application).
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 13: the quiet-hours deferral rows (pending open/add).
+      pendingRosterActionsRepo: rosterActions,
       events,
     }),
   );
@@ -819,6 +833,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // contact-rosters Task 10: the roster previews read the org quiet-hours
       // window through the SAME settings repo the armers use.
       settingsRepo: settings,
+      // contact-rosters Task 13: the quiet-hours deferral rows + the clock the
+      // open/live-add paths evaluate the window against.
+      pendingRosterActionsRepo: rosterActions,
+      ...(deps.placementsNow !== undefined && { now: deps.placementsNow }),
       events,
     }),
   );

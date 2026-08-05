@@ -506,6 +506,98 @@ describe('POST /api/placements/from-tour — conversion', () => {
     );
   });
 
+  it('migrates the tour PENDING roster actions onto the placement (contact-rosters D4/Task 13)', async () => {
+    const world = createFakeWorld();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    const tourId = 'tour-convert-actions';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    // One PENDING open deferred to quiet-end, plus a TERMINAL notice that must
+    // stay with the tour's own history.
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'open_group',
+      dueAt: '2026-07-15T12:00:00.000Z',
+      createdAt: '2026-07-15T03:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'add_member',
+      contactId: 'c-old',
+      dueAt: '2026-07-14T12:00:00.000Z',
+      createdAt: '2026-07-14T03:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.claimSkip(
+      `tour#${tourId}#add#c-old`,
+      '2026-07-14T12:00:01.000Z',
+      'already_member',
+    );
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+    const placementId = (res.body.placement as Record<string, unknown>)['placementId'] as string;
+
+    // The PENDING row moved (its deterministic id was rewritten with the owner).
+    expect(await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`)).toBeUndefined();
+    const moved = await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`);
+    expect(moved!.status).toBe('pending');
+    expect(moved!.ownerKey).toBe(`placement#${placementId}`);
+    expect(moved!.dueAt).toBe('2026-07-15T12:00:00.000Z');
+
+    // The TERMINAL notice stayed with the tour.
+    const stayed = await world.pendingRosterActionsRepo.getById(`tour#${tourId}#add#c-old`);
+    expect(stayed!.status).toBe('skipped');
+  });
+
+  it('a failing action migration NEVER fails the conversion (the poller retires the orphan)', async () => {
+    const world = createFakeWorld();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    const tourId = 'tour-convert-migrate-fail';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'open_group',
+      dueAt: '2026-07-15T12:00:00.000Z',
+      createdAt: '2026-07-15T03:00:00.000Z',
+    });
+    world.pendingRosterActionsRepo.migrate = async () => {
+      throw new Error('injected migrate failure');
+    };
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+
+    expect(res.status).toBe(201);
+    // The orphan is still on the (now converted) tour - the poller's 'converted'
+    // skip is what retires it visibly.
+    expect((await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`))!.status).toBe(
+      'pending',
+    );
+  });
+
   it('bad body: unknown field → 400; missing tourId → 400; ghost tourId → 404 tour_not_found', async () => {
     const { app } = makeWebhookHarness();
 

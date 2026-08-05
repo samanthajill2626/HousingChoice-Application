@@ -39,6 +39,12 @@ import { normalizeToE164 } from './phone.js';
 import { isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import { relayMemberKey } from '../repos/messagesRepo.js';
+import type {
+  PendingRosterActionItem,
+  PendingRosterActionsRepo,
+  RosterActionKind,
+  RosterActionSkipReason,
+} from '../repos/pendingRosterActionsRepo.js';
 import { unitContacts, type UnitContact, type UnitsRepo } from '../repos/unitsRepo.js';
 
 /** One PLAN entry: exactly one of contactId / phone (validated at write time). */
@@ -93,6 +99,14 @@ export interface RosterResolutionDeps {
   conversations: Pick<ConversationsRepo, 'getById'>;
   units: Pick<UnitsRepo, 'getById'>;
   contacts: Pick<ContactsRepo, 'getById'>;
+  /**
+   * Quiet-hours deferrals (spec 5.3 / 6.5), OPTIONAL: supply it and every
+   * roster payload carries this owner's `pending[]` + `skipped[]`; omit it and
+   * both arrays are EMPTY (never absent - one decoder rule holds for every
+   * caller). resolveRoster itself never reads it: a deferred action is not
+   * membership, it is a promise about membership.
+   */
+  actions?: Pick<PendingRosterActionsRepo, 'listByOwner'>;
   log: Logger;
 }
 
@@ -284,6 +298,48 @@ export interface RosterMemberView {
   sharesPhoneWithName?: string;
 }
 
+/**
+ * One roster change the operator confirmed during QUIET HOURS, waiting for
+ * quiet-end (spec 5.3 / 6.5). The card renders it as a banner on the control it
+ * belongs to: an `open_group` row is "Opens at 8:00 AM - quiet hours" on the
+ * Open button; an `add_member` row is "Joins at 8:00 AM - quiet hours" on that
+ * person's row (they are NOT a member yet - membership defers with the message,
+ * so a pending add is deliberately absent from `members`).
+ */
+export interface RosterPendingActionView {
+  /** The DETERMINISTIC action id - the token the pending endpoints take. */
+  actionId: string;
+  kind: RosterActionKind;
+  /** add_member only: who joins when it applies. */
+  contactId?: string;
+  /** add_member only: their display name, best-effort (absent if unreadable). */
+  name?: string;
+  /** ISO 8601 - quiet-end, when the poller applies it. */
+  dueAt: string;
+}
+
+/**
+ * One RESOLVED action that still owes the operator a notice (spec 6.5): the
+ * world moved under a deferred change, so it was retired instead of applied -
+ * or a human canceled it. VISIBLE UNTIL DISMISSED; a dismissed row never
+ * appears here again. APPLIED actions carry no notice: the roster itself is the
+ * receipt.
+ */
+export interface RosterSkippedActionView {
+  actionId: string;
+  kind: RosterActionKind;
+  contactId?: string;
+  name?: string;
+  /**
+   * Why it did not happen. The repo's skip reasons, plus `'canceled'` for the
+   * operator's own cancel (which is NOT a skip reason - the repo records it as
+   * a status, and the card's copy for it is "Canceled", not a failure).
+   */
+  reason: RosterActionSkipReason | 'canceled';
+  /** ISO 8601 - when it resolved. */
+  at: string;
+}
+
 /** GET /api/{tours,placements}/:id/roster - the People card's whole payload. */
 export interface RosterView {
   source: RosterSource;
@@ -297,6 +353,10 @@ export interface RosterView {
   /** >= 2 reachable members on DISTINCT numbers, and no thread yet. */
   canOpenGroup: boolean;
   threadExists: boolean;
+  /** Quiet-hours deferrals still waiting. ALWAYS present (empty when none). */
+  pending: RosterPendingActionView[];
+  /** Terminal notices not yet dismissed. ALWAYS present (empty when none). */
+  skipped: RosterSkippedActionView[];
 }
 
 /** Last four digits of an E.164 (or any) phone - never the full number. */
@@ -357,6 +417,10 @@ export async function describeRoster(
 ): Promise<RosterView> {
   const resolved = await resolveRoster(deps, owner);
   const threadExists = nonEmpty(owner.groupThreadId) !== undefined;
+  // Deferred actions are INDEPENDENT of who is currently on the roster, so they
+  // are read (and served) even when the thread itself is unreadable - a pending
+  // "opens at 8 AM" must not vanish because of a Dynamo blip.
+  const { pending, skipped } = await describeRosterActions(deps, owner);
 
   if (resolved.source === 'unavailable') {
     // The cardinal rule: no members, and NOT the property default in their
@@ -368,6 +432,8 @@ export async function describeRoster(
       tenantOnRoster: false,
       canOpenGroup: false,
       threadExists,
+      pending,
+      skipped,
     };
   }
 
@@ -489,7 +555,79 @@ export async function describeRoster(
     // members on one handset are one party and cannot make a group.
     canOpenGroup: !threadExists && reachablePhones.size >= 2,
     threadExists,
+    pending,
+    skipped,
   };
+}
+
+/**
+ * The quiet-hours half of the payload: this owner's PENDING rows and the
+ * terminal rows that still owe a notice.
+ *
+ * - `pending` = status 'pending', due-first.
+ * - `skipped` = status 'skipped' or 'canceled', NOT dismissed (spec 6.5's
+ *   visible-until-dismissed), newest-first - a fresh notice reads at the top.
+ * - `applied` rows are in NEITHER list: the roster itself is the receipt.
+ *
+ * Names are a best-effort contact read for add rows (the card says "Alicia
+ * Grant joins at 8:00 AM", never a contact id). Never throws: an unreadable
+ * actions table degrades to "no deferrals", exactly like every other read here.
+ */
+async function describeRosterActions(
+  deps: RosterResolutionDeps,
+  owner: RosterOwner,
+): Promise<{ pending: RosterPendingActionView[]; skipped: RosterSkippedActionView[] }> {
+  if (deps.actions === undefined) return { pending: [], skipped: [] };
+  let rows: PendingRosterActionItem[];
+  try {
+    rows = await deps.actions.listByOwner({ ownerType: owner.type, ownerId: owner.id });
+  } catch (err) {
+    deps.log.warn(
+      { err, ownerType: owner.type, ownerId: owner.id },
+      'roster payload: pending actions unreadable - serving none',
+    );
+    return { pending: [], skipped: [] };
+  }
+
+  /** Display name for an add row's contact (absent for open rows / read fails). */
+  const nameOf = async (contactId: string | undefined): Promise<string | undefined> => {
+    if (contactId === undefined || contactId.length === 0) return undefined;
+    try {
+      const contact = await deps.contacts.getById(contactId);
+      return contact === undefined ? undefined : displayName(contact);
+    } catch {
+      return undefined;
+    }
+  };
+
+  const pending: RosterPendingActionView[] = [];
+  const skipped: RosterSkippedActionView[] = [];
+  for (const row of rows) {
+    const contactId = nonEmpty(row.contactId);
+    const name = await nameOf(contactId);
+    if (row.status === 'pending') {
+      pending.push({
+        actionId: row.actionId,
+        kind: row.action,
+        ...(contactId !== undefined && { contactId }),
+        ...(name !== undefined && { name }),
+        dueAt: row.dueAt,
+      });
+      continue;
+    }
+    if (row.status === 'applied' || row.dismissedAt !== undefined) continue;
+    skipped.push({
+      actionId: row.actionId,
+      kind: row.action,
+      ...(contactId !== undefined && { contactId }),
+      ...(name !== undefined && { name }),
+      reason: row.status === 'canceled' ? 'canceled' : (row.skippedReason ?? 'owner_canceled'),
+      at: row.resolvedAt ?? row.createdAt,
+    });
+  }
+  pending.sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0));
+  skipped.sort((a, b) => (a.at < b.at ? 1 : a.at > b.at ? -1 : 0));
+  return { pending, skipped };
 }
 
 /**

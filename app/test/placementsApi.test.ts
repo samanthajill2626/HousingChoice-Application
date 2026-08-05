@@ -964,6 +964,143 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect(add.body.recipientCount).toBe(3);
   });
 
+  // --- Quiet-hours deferral (contact-rosters Task 13) ----------------------
+  //
+  // The placement mirrors of the tour paths, on the SAME pinned clock:
+  // 2026-08-05T03:00Z = 23:00 ET on Aug 4; the default window ends 12:00Z.
+  describe('quiet-hours deferral', () => {
+    const QUIET_NOW = '2026-08-05T03:00:00.000Z';
+    const QUIET_END = '2026-08-05T12:00:00.000Z';
+    let quietApp: Express;
+
+    beforeEach(async () => {
+      const h = makeWebhookHarness({
+        world,
+        poolNumbersService: makeFakePoolNumbers(),
+        placementsNow: () => QUIET_NOW,
+      });
+      quietApp = h.app;
+      await world.settingsRepo.putOrgSettings({
+        quietHoursEnabled: true,
+        quietHoursStart: '21:00',
+        quietHoursEnd: '08:00',
+        timezone: 'America/New_York',
+      });
+    });
+
+    const quietReq = {
+      post: (path: string) =>
+        request(quietApp).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+      get: (path: string) =>
+        request(quietApp).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    };
+
+    it('OPEN during quiet hours DEFERS: 202, a pending row, no thread, no send', async () => {
+      const placementId = await createPlacement();
+      world.sent.length = 0;
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+      await queueAdapter.settle();
+
+      expect(res.status).toBe(202);
+      expect(res.body.pending).toEqual([
+        { actionId: `placement#${placementId}#open`, kind: 'open_group', dueAt: QUIET_END },
+      ]);
+      expect((await world.placementsRepo.getById(placementId))!.group_thread).toBeUndefined();
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('OPEN with ?force=send_now provisions immediately', async () => {
+      const placementId = await createPlacement();
+      world.sent.length = 0;
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay?force=send_now`);
+      await queueAdapter.settle();
+
+      expect(res.status).toBe(201);
+      expect(res.body.conversation.conversationId).toBeDefined();
+      expect(world.sent.length).toBeGreaterThan(0);
+    });
+
+    it('LIVE ADD on an OPEN thread defers; on a CLOSED thread it stays immediate', async () => {
+      const placementId = await createPlacement();
+      await seedThread(placementId, [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ]);
+      world.sent.length = 0;
+
+      const deferred = await quietReq
+        .post(`/api/placements/${placementId}/roster/live-members`)
+        .send({ contactId: 'c-caseworker' });
+      await queueAdapter.settle();
+
+      expect(deferred.status).toBe(202);
+      expect(deferred.body.pending).toEqual([
+        {
+          actionId: `placement#${placementId}#add#c-caseworker`,
+          kind: 'add_member',
+          contactId: 'c-caseworker',
+          name: 'Casey Worker',
+          dueAt: QUIET_END,
+        },
+      ]);
+      expect(world.sent).toHaveLength(0);
+
+      // Same request against a CLOSED thread: silent AND immediate (spec 7).
+      const closedId = await createPlacement();
+      await seedThread(
+        closedId,
+        [
+          { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+          { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+        ],
+        'closed',
+      );
+      const immediate = await quietReq
+        .post(`/api/placements/${closedId}/roster/live-members`)
+        .send({ contactId: 'c-caseworker' });
+      await queueAdapter.settle();
+
+      expect(immediate.status).toBe(200);
+      expect(immediate.body.members.map((m: { memberKey: string }) => m.memberKey)).toContain(
+        'c-caseworker',
+      );
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('cancel / apply-now / dismiss round-trip on the placement mirror', async () => {
+      const placementId = await createPlacement();
+      const deferred = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${placementId}#open`;
+      const path = (verb: string): string =>
+        `/api/placements/${placementId}/roster/pending/${encodeURIComponent(actionId)}/${verb}`;
+
+      const canceled = await quietReq.post(path('cancel'));
+      expect(canceled.status).toBe(200);
+      expect(canceled.body.skipped).toEqual([
+        { actionId, kind: 'open_group', reason: 'canceled', at: QUIET_NOW },
+      ]);
+
+      const dismissed = await quietReq.post(path('dismiss'));
+      expect(dismissed.status).toBe(200);
+      expect(dismissed.body.skipped).toEqual([]);
+
+      // Re-defer, then apply it NOW.
+      const again = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(again.status).toBe(202);
+      world.sent.length = 0;
+      const applied = await quietReq.post(path('apply-now'));
+      await queueAdapter.settle();
+
+      expect(applied.status).toBe(200);
+      expect(applied.body.pending).toEqual([]);
+      expect(applied.body.threadExists).toBe(true);
+      expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT_PHONE, PM_PHONE].sort());
+    });
+  });
+
   it('404s placement_not_found on every roster-editing path', async () => {
     const responses = [
       await authedReq.post('/api/placements/nope/roster/members').send({ contactId: 'c-pm' }),

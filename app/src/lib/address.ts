@@ -79,6 +79,21 @@ export function isValidAddress(value: unknown): value is Address {
 }
 
 /**
+ * The STREET portion only - line1 plus line2, no city/state/zip. This is what
+ * user-facing SMS copy uses: a tenant needs the street to navigate, not the
+ * postal tail (spec D5).
+ *
+ * Tolerant of a legacy plain-string address, which is returned trimmed and
+ * VERBATIM - such a value usually contains city/state/zip and we do not attempt
+ * to parse it out. Every seeded unit is this shape today.
+ */
+export function formatStreet(a: Address | string | undefined): string {
+  if (a === undefined) return '';
+  if (typeof a === 'string') return a.trim();
+  return [a.line1, a.line2].filter((s) => s && s.length > 0).join(' ');
+}
+
+/**
  * One-line display string for server-side logging / display needs. Joins the
  * present fields in postal order; "city, state zip" reads naturally. Tolerant of
  * a legacy plain-string address (returns it as-is) and of missing fields.
@@ -87,7 +102,7 @@ export function isValidAddress(value: unknown): value is Address {
 export function formatAddress(a: Address | string | undefined): string {
   if (a === undefined) return '';
   if (typeof a === 'string') return a.trim();
-  const street = [a.line1, a.line2].filter((s) => s && s.length > 0).join(' ');
+  const street = formatStreet(a);
   const cityState = [a.city, [a.state, a.zip].filter((s) => s && s.length > 0).join(' ')]
     .filter((s) => s && s.length > 0)
     .join(', ');

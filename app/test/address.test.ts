@@ -5,7 +5,7 @@
 // address. These cases pin that total-function promise, including the LEGACY
 // shapes the write validator did not police (a zip that is not a string).
 import { describe, expect, it } from 'vitest';
-import { zipFive, type Address } from '../src/lib/address.js';
+import { zipFive, formatAddress, formatStreet, type Address } from '../src/lib/address.js';
 
 describe('zipFive', () => {
   it('returns the 5-digit zip of a structured address', () => {
@@ -45,5 +45,44 @@ describe('zipFive', () => {
     expect(zipFive({ zip: { value: '30309' } } as unknown as Address)).toBeUndefined();
     expect(zipFive({ zip: ['30309'] } as unknown as Address)).toBeUndefined();
     expect(zipFive({ zip: null } as unknown as Address)).toBeUndefined();
+  });
+});
+
+describe('formatStreet', () => {
+  it('returns line1 alone', () => {
+    expect(formatStreet({ line1: '412 Oak St' })).toBe('412 Oak St');
+  });
+
+  it('joins line1 and line2 with a space', () => {
+    expect(formatStreet({ line1: '412 Oak St', line2: 'Apt 2' })).toBe('412 Oak St Apt 2');
+  });
+
+  it('EXCLUDES city, state and zip from a structured address', () => {
+    expect(formatStreet({ line1: '412 Oak St', city: 'Atlanta', state: 'GA', zip: '30312' }))
+      .toBe('412 Oak St');
+  });
+
+  it('returns a legacy plain-string address verbatim, trimmed', () => {
+    // Every seeded unit is this shape - postal noise included, by design (D5).
+    expect(formatStreet('  350 Boulevard SE, Atlanta, GA 30312 '))
+      .toBe('350 Boulevard SE, Atlanta, GA 30312');
+  });
+
+  it('returns empty string for undefined, an empty object, or a blank string', () => {
+    expect(formatStreet(undefined)).toBe('');
+    expect(formatStreet({})).toBe('');
+    expect(formatStreet('   ')).toBe('');
+  });
+});
+
+describe('formatAddress still behaves after the refactor', () => {
+  it('joins street with city, state and zip', () => {
+    expect(formatAddress({ line1: '412 Oak St', line2: 'Apt 2', city: 'Atlanta', state: 'GA', zip: '30312' }))
+      .toBe('412 Oak St Apt 2, Atlanta, GA 30312');
+  });
+
+  it('passes a legacy string through', () => {
+    expect(formatAddress('350 Boulevard SE, Atlanta, GA 30312'))
+      .toBe('350 Boulevard SE, Atlanta, GA 30312');
   });
 });

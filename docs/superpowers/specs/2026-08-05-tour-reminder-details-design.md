@@ -47,7 +47,8 @@ OUT (explicitly deferred, each with a follow-up issue to file - section 10):
 - The Settings-UI advisory showing an operator the encoding and segment count of
   an override. The folded-in issue stays open, narrowed to this.
 - Converting the seeded plain-string addresses to structured `Address` (D5).
-- Universal runaway-length enforcement across every automated send path (D9).
+- Any message-length guard, tour-local or universal (D9). Filed separately as
+  `automated-sms-length-guard`.
 - `{firstName}` personalization.
 - A per-contact `timezone` FIELD. This spec routes through the existing resolver
   seam (D8) but builds no field, storage, or UI.
@@ -159,21 +160,25 @@ the `timezone` actually used to compose, and the panel formats its chips in that
 zone. Hardcoding "org timezone" in the panel was rejected: returning the
 composing zone keeps chip and body agreeing even after per-contact zones land.
 
-**D9. NEW - a pathological address degrades to the no-address variant.**
-`line1` caps at 200 chars and `line2` at 100 (`lib/address.ts` FIELD_CAPS), so a
-LEGAL address is ~300 chars: about 3 segments on every rung, and past the
-`maxChars: 320` the catalog declares but never validates. v1's "adding time and
-address costs NOTHING in segments" was verified only inside a window the schema
-does not enforce.
+**D9. NEW - an unbounded address is ACCEPTED here; length is a universal
+concern, not a tour concern.** `line1` caps at 200 chars and `line2` at 100
+(`lib/address.ts` FIELD_CAPS), so a LEGAL address is ~300 chars: about 3 segments
+on every rung, and past the `maxChars: 320` the catalog declares but never
+validates. v1's "adding time and address costs NOTHING in segments" was verified
+only inside a window the schema does not enforce, and that claim is corrected in
+section 4.
 
-Truncating the address was rejected - a mangled street ("1234 Northwest
-Somethingvi") is worse than a long text. Instead: if the formatted street exceeds
-`MAX_REMINDER_ADDRESS_CHARS` (120), the composer uses the `_no_address` variant
-and logs at warn with the tour id and the length. That bounds every rung's output
-using copy we already have, with no new shape and no mangling.
+No tour-specific cap is added. Cameron's ruling: a length guard belongs at the
+automated-send layer where it protects EVERY message, not bolted onto one
+feature's composer. A tour-local cap would also be redundant the moment the
+universal one lands, and removing it later is work we can skip by not adding it.
 
-120 is deliberately generous: the seeded addresses are 51-52 chars, so the cap
-never touches real data. It exists to catch a runaway, not to police formatting.
+Truncating the address was rejected on its own merits too - a mangled street
+("1234 Northwest Somethingvi") is worse than a long text.
+
+The universal guard is filed as `automated-sms-length-guard` (section 10). Until
+it lands, a pathological address produces a multi-segment text: a real but
+bounded, per-unit, self-inflicted cost.
 
 ## 4. Copy
 
@@ -226,8 +231,9 @@ Tour starts at 3:00 PM. Text us when you're on the way!
 SEGMENT MATH, stated honestly:
 - With the seeded 52-char address every rung is GSM-7 single-segment (longest 138
   units of 160). VERIFIED this session.
-- With a 120-char address at the D9 cap, the longest rung is about 206 units = 2
-  segments. Bounded, accepted.
+- Address length is UNBOUNDED by this spec (D9). At the schema's legal maximum
+  (~300 chars) every rung is about 3 segments. Accepted here; the universal
+  length guard in section 10 is what will flag it.
 - If a unit address contains ANY non-ASCII character the whole body becomes UCS-2
   with a 70-char budget. At the seeded address length that is FOUR of four rungs
   at 2+ segments (`morning_of` reaches 95 UCS-2 units). v1 said three of four,
@@ -269,7 +275,7 @@ composeTourReminderBody(input: {
 }): string
 ```
 
-Picks the address-bearing or `_no_address` entry (D7, D9), builds the tokens, and
+Picks the address-bearing or `_no_address` entry (D7), builds the tokens, and
 delegates to `resolveMessage`. This is the ONLY module allowed to construct a
 `tour.*` message id other than `tour.no_show_checkin` - enforced by a test
 (section 8).
@@ -348,8 +354,8 @@ GET, and every PATCH and send-now response, read settings ZERO times today. All
 of them now need the timezone. Read it once per request.
 
 **Failure posture** (the `resolveWithSettings` precedent): a missing unit, a
-unit-read failure, a missing `unitId`, an empty address, or an over-cap address
-(D9) ALL degrade to the `_no_address` variant. Composition never blocks a send. A
+unit-read failure, a missing `unitId`, or an empty address ALL degrade to the
+`_no_address` variant. Composition never blocks a send. A
 read failure logs at warn with IDs only. The single exception is a missing
 `scheduledAt`, which throws by design (section 5).
 
@@ -427,7 +433,7 @@ Unit:
 - `smsEncoding` - GSM-7 vs UCS-2 classification, the 160/153 and 70/67
   boundaries, and the 2-septet extension characters.
 - `tourCopy` - every rung with and without an address, legacy string address,
-  the D9 over-cap fallback, a missing `scheduledAt` throwing the named error, and
+  a missing `scheduledAt` throwing the named error, and
   `analyzeSms(...).segments === 1` for every body composed with the seeded address.
 
 Catalog:
@@ -514,9 +520,10 @@ dependency, no infra.
 File these before handback:
 1. **Convert seeded unit addresses to structured `Address`** (D5). Note the
    byte-stable `lean` profile risk.
-2. **Universal automated-SMS runaway guard** (D9). This spec bounds only tour
-   copy. Doing it properly across every automated send path needs the send
-   service to know the message id, which it does not today. Should also finally
-   validate the `maxChars` the catalog has always declared and never enforced.
+2. FILED: `automated-sms-length-guard` (D9) - a universal length guard at the
+   automated-send layer, covering every automated message rather than one
+   feature. Needs the send service to know the message id, which it does not
+   today, and should finally validate the `maxChars` the catalog has always
+   declared and never enforced. This spec adds NO tour-local cap in its place.
 3. Narrow `sms-copy-non-gsm7-characters` to the deferred Settings-UI advisory
    (section 7).

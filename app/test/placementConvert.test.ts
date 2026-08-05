@@ -138,6 +138,78 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect((res.body.tour as Record<string, unknown>)['status']).toBe('closed');
   });
 
+  // --- roster inheritance (contact-rosters D4) -------------------------------
+
+  it('a THREAD-BEARING tour needs no roster copy: the participants ride the rebind', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550309998',
+      members: [
+        { phone: '+15550300001', contactId: tenantId },
+        { phone: '+15550300002', contactId: 'll-convert-1' },
+      ],
+      owner: { type: 'tour', id: 'tour-convert-fact' },
+    });
+
+    const tourId = 'tour-convert-fact';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      groupThreadId: conversation.conversationId,
+      // A stale plan left by a crash between the pointer write and the delete is
+      // INERT (spec D1) - the thread wins, and conversion must not resurrect it.
+      roster: [{ contactId: 'c-ghost' }],
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+
+    const placement = res.body.placement as Record<string, unknown>;
+    expect(placement['group_thread']).toBe(conversation.conversationId);
+    expect(placement['roster']).toBeUndefined();
+    // The rebound thread still carries both members - that IS the inheritance.
+    const rebound = world.conversations.get(conversation.conversationId)!;
+    expect((rebound.participants ?? []).map((p) => p.contactId)).toEqual([tenantId, 'll-convert-1']);
+  });
+
+  it('a PLAN-ONLY tour (no thread) hands its roster to the placement, verbatim', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const tourId = 'tour-convert-plan';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'self_guided',
+      status: 'toured',
+      convertible: true,
+      roster: [{ contactId: 'c-caseworker' }, { phone: '+15550300007' }],
+      rosterVersion: 3,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+
+    const placement = res.body.placement as Record<string, unknown>;
+    expect(placement['group_thread']).toBeUndefined();
+    expect(placement['roster']).toEqual([{ contactId: 'c-caseworker' }, { phone: '+15550300007' }]);
+    // The placement starts its own optimistic-concurrency line, not the tour's.
+    expect(placement['rosterVersion']).toBe(1);
+  });
+
   it('records the tours# tour_converted milestone + emits tour.updated (tour-detail-page 1a)', async () => {
     const { app, world } = makeWebhookHarness();
     const { tenantId, unitId } = seedTenantAndUnit(world);

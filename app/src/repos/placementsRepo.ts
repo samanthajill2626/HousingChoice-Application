@@ -48,6 +48,7 @@ import {
   type PlacementStage,
   type TransitionSource,
 } from '../lib/statusModel.js';
+import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 export { TERMINAL_STAGES };
@@ -111,6 +112,17 @@ export interface PlacementItem {
   tour_date?: string;
   /** The placement's relay group conversationId (set when the relay is set up). */
   group_thread?: string;
+  /**
+   * contact-rosters (spec D1): the roster PLAN - who this placement's group text
+   * will open with. ABSENT is the normal state and means "resolve from the
+   * property" (tenant + the unit's primaryContact). Inherited from a plan-only
+   * tour at conversion (D4), materialized on the first human edit, and CONSUMED
+   * (deleted) when the group is provisioned: once `group_thread` exists the
+   * conversation's participants are the roster and this attribute is inert.
+   */
+  roster?: RosterEntry[];
+  /** Optimistic-concurrency guard for `roster` (see setRoster). */
+  rosterVersion?: number;
   /** Operator label, mirrored onto the relay pool number (poolNumbers tag). */
   placement_tag?: string;
   /** The four-rung application ladder — free-form object (doc §5). */
@@ -213,6 +225,25 @@ export interface PlacementsRepo {
    * fallback.
    */
   list(opts?: ListPlacementsOpts): Promise<PlacementsPage>;
+  /**
+   * Write the roster PLAN under a conditional guard (contact-rosters section 7),
+   * mirroring toursRepo.setRoster exactly. `expectedVersion === undefined`
+   * MATERIALIZES it (`attribute_not_exists(roster)`); otherwise the stored
+   * `rosterVersion` must equal `expectedVersion`. Either failure throws
+   * RosterPlanConflictError so the caller re-reads and continues onto the
+   * EXISTING override. Returns the post-write item (ALL_NEW).
+   */
+  setRoster(
+    placementId: string,
+    roster: RosterEntry[],
+    expectedVersion: number | undefined,
+  ): Promise<PlacementItem>;
+  /**
+   * REMOVE the plan (roster + rosterVersion) - "the plan is consumed" at
+   * provision, and "reset to property default" on the edit path. Unconditional
+   * and idempotent.
+   */
+  clearRoster(placementId: string): Promise<void>;
 }
 
 export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
@@ -354,6 +385,55 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
         items: (Items ?? []) as PlacementItem[],
         ...(LastEvaluatedKey !== undefined && { lastEvaluatedKey: LastEvaluatedKey }),
       };
+    },
+
+    async setRoster(placementId, roster, expectedVersion) {
+      const nextVersion = (expectedVersion ?? 0) + 1;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { placementId },
+            UpdateExpression: 'SET #r = :r, #rv = :nv, #updatedAt = :now',
+            // MATERIALIZE (no expectedVersion) vs OPTIMISTIC UPDATE - identical
+            // discipline to toursRepo.setRoster.
+            ConditionExpression:
+              expectedVersion === undefined
+                ? 'attribute_exists(placementId) AND attribute_not_exists(#r)'
+                : 'attribute_exists(placementId) AND #rv = :ev',
+            ExpressionAttributeNames: { '#r': 'roster', '#rv': 'rosterVersion', '#updatedAt': 'updated_at' },
+            ExpressionAttributeValues: {
+              ':r': roster,
+              ':nv': nextVersion,
+              ':now': new Date().toISOString(),
+              ...(expectedVersion !== undefined && { ':ev': expectedVersion }),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info(
+          { placementId, memberCount: roster.length, rosterVersion: nextVersion },
+          'placement roster plan written',
+        );
+        return Attributes as PlacementItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) throw new RosterPlanConflictError();
+        throw err;
+      }
+    },
+
+    async clearRoster(placementId) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { placementId },
+          UpdateExpression: 'REMOVE #r, #rv SET #updatedAt = :now',
+          ConditionExpression: 'attribute_exists(placementId)',
+          ExpressionAttributeNames: { '#r': 'roster', '#rv': 'rosterVersion', '#updatedAt': 'updated_at' },
+          ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        }),
+      );
+      log.info({ placementId }, 'placement roster plan cleared');
     },
   };
 }

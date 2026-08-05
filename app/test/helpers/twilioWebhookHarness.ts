@@ -64,6 +64,7 @@ import {
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../../src/lib/unitMedia.js';
+import { RosterPlanConflictError } from '../../src/lib/rosterResolution.js';
 import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   deadlineIdFor,
@@ -1626,6 +1627,26 @@ export function createFakeWorld(): FakeWorld {
       const items = [...placements.values()].slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
     },
+    async setRoster(placementId, roster, expectedVersion) {
+      // Mirror the conditional write: MATERIALIZE only when no plan exists,
+      // otherwise the stored version must equal the caller's.
+      const c = placements.get(placementId);
+      const conflict =
+        !c ||
+        (expectedVersion === undefined ? c.roster !== undefined : c.rosterVersion !== expectedVersion);
+      if (conflict) throw new RosterPlanConflictError();
+      c.roster = roster;
+      c.rosterVersion = (expectedVersion ?? 0) + 1;
+      c.updated_at = new Date().toISOString();
+      return { ...c };
+    },
+    async clearRoster(placementId) {
+      const c = placements.get(placementId);
+      if (!c) return;
+      delete c.roster;
+      delete c.rosterVersion;
+      c.updated_at = new Date().toISOString();
+    },
   };
 
   // In-memory placement deadlines (placement-deadline-model): mirror the repo's
@@ -2045,6 +2066,28 @@ export function createFakeWorld(): FakeWorld {
       const t = toursMap.get(tourId);
       if (!t || t.convertedPlacementId !== value) return;
       delete t.convertedPlacementId;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
+    async setRoster(tourId, roster, expectedVersion) {
+      // Mirror the conditional write: MATERIALIZE only when no plan exists,
+      // otherwise the stored version must equal the caller's.
+      const t = toursMap.get(tourId);
+      const conflict =
+        !t ||
+        (expectedVersion === undefined ? t.roster !== undefined : t.rosterVersion !== expectedVersion);
+      if (conflict) throw new RosterPlanConflictError();
+      t.roster = roster;
+      t.rosterVersion = (expectedVersion ?? 0) + 1;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return { ...t };
+    },
+    async clearRoster(tourId) {
+      const t = toursMap.get(tourId);
+      if (!t) return;
+      delete t.roster;
+      delete t.rosterVersion;
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },

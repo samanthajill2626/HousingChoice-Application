@@ -53,7 +53,7 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { cancelTourReminders } from '../jobs/tourReminders.js';
@@ -75,7 +75,8 @@ import {
   type PlacementItem,
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
-import { recordPersonMilestone } from '../lib/personEvents.js';
+import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
+import { resolveRoster } from '../lib/rosterResolution.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -685,6 +686,14 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
         stage_source: 'manual',
         fromTourId: tour.tourId,
         ...(typeof tour.groupThreadId === 'string' && { group_thread: tour.groupThreadId }),
+        // ROSTER INHERITANCE (spec D4). A THREAD-BEARING tour needs no copy:
+        // the participants ride the rebindOwner below and the placement reads
+        // them like any other thread-bearing owner (a stale plan on such a tour
+        // is inert and must NOT be resurrected here). A plan-only tour hands its
+        // override over, so the placement opens with the people the operator
+        // chose on the tour. The placement starts its own concurrency line.
+        ...(typeof tour.groupThreadId !== 'string' &&
+          Array.isArray(tour.roster) && { roster: tour.roster, rosterVersion: 1 }),
       });
     } catch (err) {
       await tours.releaseConversionClaim(tour.tourId, sentinel);
@@ -941,6 +950,61 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     res.json({ placement: withDeadline(item, soonest) });
   });
 
+  /**
+   * Name the rung that left a placement roster too thin to relay. The three
+   * legacy codes (tenant_unreachable / unit_not_found / landlord_unreachable)
+   * are the dashboard's error copy and are preserved verbatim for the PROPERTY
+   * DEFAULT - the only source that had them before rosters existed. A roster
+   * the operator chose (a plan, or a previous thread's members) cannot be
+   * described by that ladder, so it refuses with the tours-style code instead.
+   */
+  async function describeThinRoster(
+    item: PlacementItem,
+    source: 'participants' | 'plan' | 'default',
+  ): Promise<{ status: number; body: Record<string, unknown> }> {
+    if (source !== 'default') {
+      return {
+        status: 400,
+        body: {
+          error: 'relay_member_unresolvable',
+          detail: 'this placement roster has fewer than two reachable members',
+        },
+      };
+    }
+    const tenant = await contacts.getById(item.tenantId);
+    if (!tenant || typeof tenant.phone !== 'string' || tenant.phone.length === 0) {
+      return {
+        status: 400,
+        body: { error: 'tenant_unreachable', message: 'the placement tenant has no phone on file' },
+      };
+    }
+    const unit = await units.getById(item.unitId);
+    if (!unit) return { status: 400, body: { error: 'unit_not_found' } };
+    // The property's contact is the primaryContact row, falling back to the
+    // landlord of record (D3) - the same ladder the resolver walked.
+    const propertyContactId =
+      unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ?? unit.landlordId;
+    const landlord =
+      typeof propertyContactId === 'string' && propertyContactId.length > 0
+        ? await contacts.getById(propertyContactId)
+        : undefined;
+    if (!landlord || typeof landlord.phone !== 'string' || landlord.phone.length === 0) {
+      return {
+        status: 400,
+        body: { error: 'landlord_unreachable', message: 'the unit landlord has no phone on file' },
+      };
+    }
+    // Both rungs resolve and share ONE number (the tenant IS the property
+    // contact): a relay needs two distinct parties.
+    return {
+      status: 400,
+      body: {
+        error: 'relay_member_unresolvable',
+        detail: 'this placement roster has fewer than two reachable members',
+      },
+    };
+  }
+
   // POST /api/placements/:placementId/relay — set up the placement's masked relay
   // thread. The explicit operator "Set up relay thread" action (Phase 1 is
   // hand-touched parity — no auto-trigger). The roster is derived FROM the
@@ -976,47 +1040,65 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       }
     }
 
-    // Resolve the roster from the placement: tenant + the unit's landlord side.
-    // Both need an SMS number to be in the relay (texts fan out to these). A
-    // missing party/phone is a 400 — never provision a half-roster relay.
-    const tenant = await contacts.getById(item.tenantId);
-    if (!tenant || typeof tenant.phone !== 'string' || tenant.phone.length === 0) {
-      res.status(400).json({ error: 'tenant_unreachable', message: 'the placement tenant has no phone on file' });
-      return;
-    }
-    const unit = await units.getById(item.unitId);
-    if (!unit) {
-      res.status(400).json({ error: 'unit_not_found' });
-      return;
-    }
-    const landlord = await contacts.getById(unit.landlordId);
-    if (!landlord || typeof landlord.phone !== 'string' || landlord.phone.length === 0) {
-      res.status(400).json({ error: 'landlord_unreachable', message: 'the unit landlord has no phone on file' });
+    // Resolve the roster through the ONE shared resolver (lib/rosterResolution):
+    // the roster PLAN when the operator materialized one, else the property
+    // default (tenant + the unit's primaryContact, with the landlord-of-record
+    // fallback). Members need an SMS number to be in the relay (texts fan out to
+    // these), so a phone-less member is EXCLUDED and a roster that cannot muster
+    // two reachable people is a 400 - never provision a half-roster relay.
+    const resolved = await resolveRoster(
+      { conversations, units, contacts, log },
+      {
+        type: 'placement',
+        id: placementId,
+        tenantId: item.tenantId,
+        unitId: item.unitId,
+        ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
+        ...(item.roster !== undefined && { roster: item.roster }),
+      },
+    );
+    if (resolved.source === 'unavailable') {
+      // A pointer that will not load is NEVER silently re-resolved from the
+      // property (spec D1) - refuse and let the operator retry.
+      res.status(400).json({
+        error: 'relay_member_unresolvable',
+        detail: 'the group thread could not be read',
+      });
       return;
     }
 
-    const tenantName = nameFromContact(tenant);
-    const landlordName = nameFromContact(landlord);
-    const members: ConversationParticipant[] = [
-      { phone: tenant.phone, contactId: item.tenantId, ...(tenantName !== undefined && { name: tenantName }) },
-    ];
-    // De-dupe if the landlord-side number is somehow the same phone as the tenant.
-    if (landlord.phone !== tenant.phone) {
+    const members: ConversationParticipant[] = [];
+    const seenPhones = new Set<string>();
+    for (const member of resolved.members) {
+      const phone = member.phone;
+      if (typeof phone !== 'string' || phone.length === 0) continue; // unreachable member
+      if (seenPhones.has(phone)) continue; // one slot per number (shared phones)
+      seenPhones.add(phone);
       members.push({
-        phone: landlord.phone,
-        contactId: unit.landlordId,
-        ...(landlordName !== undefined && { name: landlordName }),
+        phone,
+        contactId: member.contactId ?? '',
+        ...(member.name !== undefined && { name: member.name }),
       });
+    }
+    if (members.length < 2) {
+      const refusal = await describeThinRoster(item, resolved.source);
+      res.status(refusal.status).json(refusal.body);
+      return;
     }
 
     const tag =
       typeof item.placement_tag === 'string' && item.placement_tag.length > 0
         ? item.placement_tag
         : undefined;
-    // Property-ZIP hint for a potential tier-3 buy (area-code preference): the
-    // unit is already loaded above, so this costs nothing. Best-effort - a
-    // missing/unparseable zip just means no hint (Atlanta-default ladder).
-    const postalCode = zipFive(unit.address);
+    // Property-ZIP hint for a potential tier-3 buy (area-code preference).
+    // Best-effort - a missing/unparseable zip (or a repo hiccup) just means no
+    // hint (Atlanta-default ladder), never a failed group creation.
+    let postalCode: string | undefined;
+    try {
+      postalCode = zipFive((await units.getById(item.unitId))?.address);
+    } catch (err) {
+      log.warn({ err, placementId }, 'placement relay: unit ZIP hint lookup failed - creating without the hint');
+    }
 
     let conversation;
     try {
@@ -1045,18 +1127,56 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     // failure is logged, not fatal (the conversation.placementId back-ref still
     // resolves it).
     let updatedPlacement = item;
+    let linked = false;
     try {
       updatedPlacement = await placements.update(placementId, { group_thread: conversation.conversationId });
+      linked = true;
     } catch (err) {
       log.error(
         { err, placementId, conversationId: conversation.conversationId },
         'placement relay: linking group_thread failed — relay created',
       );
     }
+
+    // THE PLAN IS CONSUMED (spec D1) - and only after the thread pointer write
+    // SUCCEEDS. From here the conversation's participants are the roster, so no
+    // second persisted roster may survive to disagree with them. On a failed
+    // link the plan deliberately STAYS: the placement has no pointer, so the
+    // resolver is still in plan mode and dropping it would strand the operator's
+    // roster. A crash BETWEEN the two writes leaves a stale plan that is INERT
+    // by precedence (participants win whenever the pointer is set) - never
+    // "defensively" merge it back in.
+    if (linked && updatedPlacement.roster !== undefined) {
+      try {
+        await placements.clearRoster(placementId);
+        updatedPlacement = { ...updatedPlacement };
+        delete updatedPlacement.roster;
+        delete updatedPlacement.rosterVersion;
+      } catch (err) {
+        log.error({ err, placementId }, 'placement relay: clearing the consumed roster plan failed (inert leftover)');
+      }
+    }
     await audit.append(`placements#${placementId}`, 'placement_relay_provisioned', {
       actor,
       conversationId: conversation.conversationId,
     });
+    // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP
+    // (spec D8 - the parity tours has had since the group-open pin landed).
+    // Roster-driven, NOT dual-party: "Group text opened" asserts membership of
+    // this conversation, so it follows `members` - the roster we just
+    // provisioned. A member who was unreachable at open is not in that fan-out
+    // and gets NO pin: pins are facts about texts, and one claiming someone
+    // joined a conversation they cannot receive is false. Best-effort.
+    await recordRosterMilestone(
+      { activityEvents, log },
+      {
+        members,
+        type: 'placement_group_opened',
+        label: 'Group text opened',
+        refType: 'placement',
+        refId: placementId,
+      },
+    );
     await emitPlacementUpdated(updatedPlacement);
     log.info(
       { placementId, conversationId: conversation.conversationId, actor },

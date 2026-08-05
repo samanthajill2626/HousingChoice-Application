@@ -30,6 +30,7 @@ import {
   type PoolNumbersService,
 } from '../src/services/poolNumbers.js';
 import { VoiceCapabilityError } from '../src/adapters/messaging.js';
+import { RosterPlanConflictError } from '../src/lib/rosterResolution.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import { createFakeWorld, makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -2315,6 +2316,163 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(res.status).toBe(201);
     expect(captured).toHaveLength(1);
     expect(captured[0]).not.toHaveProperty('postalCode'); // hint simply omitted
+  });
+
+  // --- PLAN vs FACT (contact-rosters D1) ------------------------------------
+  // The `roster` override is the PLAN: provision resolves from it and CONSUMES
+  // it (deletes the attribute) once the thread pointer is written. A failed
+  // provision leaves the plan intact.
+
+  /** Seed a caseworker + a PM contact, both reachable. */
+  function seedPlanContacts(): void {
+    world.contacts.push({
+      contactId: 'c-caseworker',
+      type: 'team_member',
+      phone: '+15550200021',
+      firstName: 'Casey',
+      lastName: 'Worker',
+    });
+    world.contacts.push({
+      contactId: 'c-pm',
+      type: 'landlord',
+      phone: '+15550200022',
+      firstName: 'Pat',
+      lastName: 'Manager',
+    });
+  }
+
+  it('opens the group FROM THE PLAN and consumes it (the roster attribute is gone afterwards)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    seedPlanContacts();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    // The operator edited the roster before opening: caseworker + PM, and NOT
+    // the tour's own tenant.
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    const participants = (res.body.conversation as {
+      participants: { phone: string; contactId: string; name?: string }[];
+    }).participants;
+    expect(participants).toEqual([
+      { phone: '+15550200021', contactId: 'c-caseworker', name: 'Casey Worker' },
+      { phone: '+15550200022', contactId: 'c-pm', name: 'Pat Manager' },
+    ]);
+
+    // The plan is CONSUMED: the thread's participants are the roster from here
+    // on, and no second persisted roster is left to disagree with them.
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.roster).toBeUndefined();
+    expect(stored.rosterVersion).toBeUndefined();
+    expect(stored.groupThreadId).toBe((res.body.conversation as Record<string, unknown>)['conversationId']);
+
+    // The pin follows the roster that was opened, not the tour's parties.
+    expect(groupOpenedPins(world, 'c-caseworker')).toHaveLength(1);
+    expect(groupOpenedPins(world, 'c-pm')).toHaveLength(1);
+    expect(groupOpenedPins(world, BASE_CREATE_BODY.tenantId)).toHaveLength(0);
+  });
+
+  it('a FAILED provision KEEPS the plan (consumption happens only on success)', async () => {
+    const pool = makeDisabledPoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    seedPlanContacts();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await world.toursRepo.setRoster(tourId, [{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }], undefined);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(503);
+
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.roster).toEqual([{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }]);
+    expect(stored.groupThreadId).toBeUndefined(); // claim released
+  });
+
+  it('a phone-less plan member is excluded, and a plan too thin to relay 400s WITHOUT consuming it', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    world.contacts.push({ contactId: 'c-no-phone', type: 'landlord', firstName: 'Nora', lastName: 'Nophone' });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await world.toursRepo.setRoster(tourId, [{ contactId: 'contact-tenant-1' }, { contactId: 'c-no-phone' }], undefined);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('relay_member_unresolvable');
+    expect(pool.provisioned).toHaveLength(0);
+    // Nothing was consumed - the operator can fix the roster and retry.
+    expect(world.toursMap.get(tourId)!.roster).toHaveLength(2);
+  });
+
+  it('the DEFAULT roster follows the property PRIMARY CONTACT (the PM), not the landlord of record', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    seedPlanContacts();
+    // A PM-managed property: the owner is the landlord of record, the PM is the
+    // primary contact. No plan, no thread - the property answers.
+    world.units.set('unit-abc', {
+      ...world.units.get('unit-abc')!,
+      contacts: [
+        { contactId: 'll-relay-1', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    expect(res.status).toBe(201);
+
+    const participants = (res.body.conversation as {
+      participants: { contactId: string }[];
+    }).participants;
+    expect(participants.map((p) => p.contactId)).toEqual(['contact-tenant-1', 'c-pm']);
+    // The owner of record is NOT on the text - the PM is the property's contact.
+    expect(groupOpenedPins(world, 'll-relay-1')).toHaveLength(0);
+  });
+
+  it('setRoster is a CONDITIONAL write: first-write-wins, then optimistic concurrency', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+
+    // MATERIALIZE: attribute_not_exists(roster).
+    const first = await world.toursRepo.setRoster(tourId, [{ contactId: 'c-a' }], undefined);
+    expect(first.rosterVersion).toBe(1);
+
+    // A second materialize loses - the caller re-reads and continues onto the
+    // EXISTING override rather than overwriting it.
+    await expect(
+      world.toursRepo.setRoster(tourId, [{ contactId: 'c-b' }], undefined),
+    ).rejects.toBeInstanceOf(RosterPlanConflictError);
+
+    // A stale version loses; the current version wins and bumps.
+    await expect(
+      world.toursRepo.setRoster(tourId, [{ contactId: 'c-b' }], 0),
+    ).rejects.toBeInstanceOf(RosterPlanConflictError);
+    const second = await world.toursRepo.setRoster(tourId, [{ contactId: 'c-b' }], 1);
+    expect(second.rosterVersion).toBe(2);
+    expect(second.roster).toEqual([{ contactId: 'c-b' }]);
+
+    await world.toursRepo.clearRoster(tourId);
+    expect(world.toursMap.get(tourId)!.roster).toBeUndefined();
+    expect(world.toursMap.get(tourId)!.rosterVersion).toBeUndefined();
   });
 });
 

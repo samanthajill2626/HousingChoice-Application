@@ -84,6 +84,10 @@ const PHONES = {
   // mid-intake unit landlord reuses the parked landlord unit for the pool, and
   // has its own phone in the +1555010011X sub-block (no persona, not drivable)
   midIntakeLandlord: '+15550100110',
+  // PM-managed property (contact-rosters): owner of record + the property
+  // manager who is the unit's primaryContact. Same sub-block, neither drivable.
+  pmManagedOwner:    '+15550100111',
+  pmManager:         '+15550100112',
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -1225,6 +1229,79 @@ const midIntakeUnitLandlord = {
 };
 
 // ---------------------------------------------------------------------------
+// CAST PERSONA 10: PM-Managed Property (contact-rosters, spec section 9)
+// The motivating case for tour/placement rosters: the OWNER OF RECORD holds the
+// property (landlordId, and so unremovable from its roster), but a property
+// manager does all the talking and is the unit's PRIMARY CONTACT. Every roster
+// that resolves from this property therefore defaults to [tenant, the PM] -
+// never the owner - so the default-is-the-PM case is exercisable end to end
+// without hand-building a roster first.
+// No thread, no tour: this persona exists to be OPENED from, by hand or by e2e.
+// Both contacts are non-drivable (no fake-twilio persona) - nothing texts in.
+// ---------------------------------------------------------------------------
+const SLUG_PM_MANAGED = 'pm-managed-property';
+const C_PM_OWNER = contactId(`${SLUG_PM_MANAGED}-owner`);
+const C_PM_MANAGER = contactId(`${SLUG_PM_MANAGED}-manager`);
+const UNIT_PM_MANAGED = unitId(SLUG_PM_MANAGED);
+
+const pmManagedProperty = {
+  owner: {
+    contactId: C_PM_OWNER,
+    type: 'landlord',
+    status: 'active',
+    phone: PHONES.pmManagedOwner,
+    firstName: 'Delia',
+    lastName: 'Okonkwo',
+    company: 'Okonkwo Family Holdings',
+    lead_status: 'registered',
+    contract_status: 'signed',
+    registered_landlord: true,
+    authorities_served: ['atlanta_housing'],
+    created_at: CC,
+  },
+  manager: {
+    contactId: C_PM_MANAGER,
+    type: 'landlord',
+    status: 'active',
+    phone: PHONES.pmManager,
+    firstName: 'Rafael',
+    lastName: 'Duarte',
+    company: 'Peachtree Property Management',
+    lead_status: 'registered',
+    contract_status: 'signed',
+    registered_landlord: true,
+    authorities_served: ['atlanta_housing'],
+    created_at: CC,
+  },
+  unit: {
+    unitId: UNIT_PM_MANAGED,
+    // The OWNER is the landlord of record: who owns it, and who may not be
+    // removed from the roster (reassign landlordId first).
+    landlordId: C_PM_OWNER,
+    status: 'available',
+    status_source: 'manual',
+    jurisdiction: 'atlanta_housing',
+    address: '1145 Ralph David Abernathy Blvd SW, Atlanta, GA 30310',
+    beds: 3,
+    baths: 2,
+    rent_min: 1850,
+    rent_max: 1850,
+    deposit: 1850,
+    voucher_size_accepted: [2, 3],
+    pets: 'Cats OK',
+    tour_process: 'Text the property manager to arrange a showing.',
+    // The PM is the property's PRIMARY CONTACT - the person put on the group
+    // text and reached by a masked call. The scalar mirrors the flagged row.
+    contacts: [
+      { contactId: C_PM_OWNER, role: 'owner', primaryContact: false, name: 'Delia Okonkwo', company: 'Okonkwo Family Holdings' },
+      { contactId: C_PM_MANAGER, role: 'pm', primaryContact: true, name: 'Rafael Duarte', company: 'Peachtree Property Management' },
+    ],
+    primary_contact: C_PM_MANAGER,
+    created_at: CD,
+  },
+};
+
+// ---------------------------------------------------------------------------
 // Public export: merge all cast items into the table-base keyed record
 // ---------------------------------------------------------------------------
 
@@ -1242,6 +1319,8 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     neverSignedLandlord.contact,
     parkedLandlord.contact,
     midIntakeUnitLandlord.contact,
+    pmManagedProperty.owner,
+    pmManagedProperty.manager,
   ];
 
   const units: Record<string, unknown>[] = [
@@ -1249,6 +1328,7 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     searchingTenant.listingSendUnit1,
     touredYesTenant.unit,
     midIntakeUnitLandlord.unit,
+    pmManagedProperty.unit,
   ];
 
   // SeedConversationRow (not Record<string, unknown>) so a roster written as
@@ -1332,4 +1412,6 @@ export const CAST_CONTACTS_FOR_DRIFT = [
   { contactId: C_NEVER_SIGNED,primaryPhone: PHONES.neverSigned,      drivable: true },
   { contactId: C_PARKED_LL,   primaryPhone: PHONES.parkedLandlord,   drivable: true },
   { contactId: C_MID_INTAKE_LL,primaryPhone: PHONES.midIntakeLandlord,drivable: false }, // no fake-twilio persona (internal landlord number)
+  { contactId: C_PM_OWNER,    primaryPhone: PHONES.pmManagedOwner,   drivable: false }, // no persona: the owner never texts (the PM does)
+  { contactId: C_PM_MANAGER,  primaryPhone: PHONES.pmManager,        drivable: false }, // no persona: opened FROM, not driven
 ] as const;

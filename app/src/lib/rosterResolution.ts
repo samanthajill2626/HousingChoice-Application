@@ -46,6 +46,19 @@ export interface RosterEntry {
   phone?: string;
 }
 
+/**
+ * A conditional plan write lost its race: either a concurrent MATERIALIZE won
+ * (`attribute_not_exists(roster)` failed) or the caller's `expectedVersion` is
+ * stale. Both repos throw this on ConditionalCheckFailedException so callers
+ * re-read and continue onto the EXISTING override rather than overwriting it.
+ */
+export class RosterPlanConflictError extends Error {
+  constructor(message = 'roster plan changed under this write; re-read and retry') {
+    super(message);
+    this.name = 'RosterPlanConflictError';
+  }
+}
+
 /** The tour or placement whose roster is being resolved. */
 export interface RosterOwner {
   type: 'tour' | 'placement';

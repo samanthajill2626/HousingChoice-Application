@@ -349,6 +349,156 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
     expect(captured[0]).not.toHaveProperty('postalCode');
   });
 
+  // --- PLAN vs FACT + the D8 group-open pin (contact-rosters) ---------------
+
+  const groupOpenedPins = (contactId: string) =>
+    world.activityEvents.filter((e) => e.type === 'placement_group_opened' && e.contactId === contactId);
+
+  it('pins placement_group_opened on every PROVISIONED member with a contactId (D8)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(201);
+
+    for (const contactId of ['c-tenant', 'c-landlord']) {
+      const pins = groupOpenedPins(contactId);
+      expect(pins).toHaveLength(1);
+      expect(pins[0]).toMatchObject({
+        type: 'placement_group_opened',
+        label: 'Group text opened',
+        refType: 'placement',
+        refId: placementId,
+      });
+    }
+  });
+
+  it('an UNREACHABLE member gets NO pin - a pin claiming they joined would be false (D8)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    await world.contactsRepo.create({ contactId: 'c-silent', type: 'landlord', firstName: 'Sam' });
+    // An explicit plan whose third member has no phone: excluded from the
+    // fan-out, so excluded from the pin.
+    await world.placementsRepo.setRoster(
+      placementId,
+      [{ contactId: 'c-tenant' }, { contactId: 'c-landlord' }, { contactId: 'c-silent' }],
+      undefined,
+    );
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(201);
+    expect(res.body.conversation.participants).toHaveLength(2);
+    expect(groupOpenedPins('c-tenant')).toHaveLength(1);
+    expect(groupOpenedPins('c-silent')).toHaveLength(0);
+  });
+
+  it('provisions FROM THE PLAN and consumes it once the group_thread pointer is written', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    await world.contactsRepo.create({
+      contactId: 'c-pm',
+      type: 'landlord',
+      firstName: 'Pat',
+      lastName: 'Manager',
+      phone: '+15550100009',
+    });
+    await world.placementsRepo.setRoster(
+      placementId,
+      [{ contactId: 'c-tenant' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(201);
+    expect(
+      (res.body.conversation.participants as { contactId: string }[]).map((p) => p.contactId),
+    ).toEqual(['c-tenant', 'c-pm']);
+
+    const stored = (await world.placementsRepo.getById(placementId))!;
+    expect(stored.roster).toBeUndefined();
+    expect(stored.rosterVersion).toBeUndefined();
+  });
+
+  it('a FAILED provision keeps the plan (nothing is consumed)', async () => {
+    const pool = makeDisabledPoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-tenant' }, { contactId: 'c-landlord' }], undefined);
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(503);
+    expect((await world.placementsRepo.getById(placementId))?.roster).toHaveLength(2);
+  });
+
+  it('a FAILED pointer write leaves the plan in place (best-effort link, spec D1)', async () => {
+    // The placement relay has no atomic claim and its pointer write is
+    // best-effort (docs/issues/placement-relay-no-atomic-claim.md). Consumption
+    // is gated on that write SUCCEEDING, so a link failure leaves a live plan
+    // rather than a placement with neither a pointer nor a roster.
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-tenant' }, { contactId: 'c-landlord' }], undefined);
+    const realUpdate = world.placementsRepo.update.bind(world.placementsRepo);
+    world.placementsRepo.update = async (id, patch) => {
+      if (Object.keys(patch).includes('group_thread')) throw new Error('dynamodb: link write failed');
+      return realUpdate(id, patch);
+    };
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(201); // the relay exists; the link is best-effort
+    expect((await world.placementsRepo.getById(placementId))?.roster).toHaveLength(2);
+  });
+
+  it('the DEFAULT roster follows the property PRIMARY CONTACT (the PM), not the landlord of record', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    const placementId = await seedPlacement(world);
+    await world.contactsRepo.create({
+      contactId: 'c-pm',
+      type: 'landlord',
+      firstName: 'Pat',
+      lastName: 'Manager',
+      phone: '+15550100009',
+    });
+    await world.unitsRepo.update('unit-1', {
+      contacts: [
+        { contactId: 'c-landlord', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+
+    const res = await post(app, `/api/placements/${placementId}/relay`);
+    expect(res.status).toBe(201);
+    expect(
+      (res.body.conversation.participants as { contactId: string }[]).map((p) => p.contactId),
+    ).toEqual(['c-tenant', 'c-pm']);
+  });
+
+  it('NORMALIZES member phones to E.164 (the storage convention - placements used to store raw)', async () => {
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    await world.contactsRepo.create({ contactId: 'c-tenant', type: 'tenant', phone: '(555) 010-0001' });
+    await world.contactsRepo.create({ contactId: 'c-landlord', type: 'landlord', phone: '555-010-0002' });
+    await world.unitsRepo.create({ unitId: 'unit-1', landlordId: 'c-landlord', status: 'available' });
+    const created = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-1',
+      stage: 'awaiting_approval',
+    });
+
+    const res = await post(app, `/api/placements/${created.placementId}/relay`);
+    expect(res.status).toBe(201);
+    expect((res.body.conversation.participants as { phone: string }[]).map((p) => p.phone)).toEqual([
+      TENANT_PHONE,
+      LANDLORD_PHONE,
+    ]);
+  });
+
   // --- M1.10c failed-send escalation (doc §7.1) ---------------------------
   // Seed a placement + its relay (placementId-linked) + a relay source message with a
   // 'sent' delivery slot for member c-bob + the relaysid pointer, so a status

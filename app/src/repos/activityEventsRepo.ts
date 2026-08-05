@@ -38,6 +38,7 @@ export type ActivityEventType =
   | 'tour_no_show'
   | 'tour_outcome'
   | 'tour_group_opened'
+  | 'placement_group_opened'
   | 'tour_converted'
   | 'stage_changed'
   | 'contact_status_changed'

@@ -65,14 +65,15 @@ import {
   type ConversationsRepo,
 } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
   createActivityEventsRepo,
   type ActivityEventsRepo,
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
-import { nameFromContact, resolveMemberName } from './relayGroups.js';
+import { resolveMemberName } from './relayGroups.js';
+import { resolveRoster } from '../lib/rosterResolution.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -691,14 +692,60 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   });
 
   /**
-   * Auto-resolve the tour's relay roster: [tenant contact, unit's landlord
-   * contact] — phones + display names from contacts. Returns a stable,
-   * dashboard-consumable detail string when any member is unresolvable (the
-   * route maps it to 400 relay_member_unresolvable).
+   * Resolve the tour's relay roster through the ONE shared resolver
+   * (lib/rosterResolution.ts): the roster PLAN when the operator materialized
+   * one, else the property default (tenant + the unit's primaryContact, with
+   * the landlord-of-record fallback). Returns a stable, dashboard-consumable
+   * detail string when the roster cannot make a relay (the route maps it to
+   * 400 relay_member_unresolvable).
+   *
+   * A member with no phone is EXCLUDED from the SMS members rather than failing
+   * the whole open - a relay needs two reachable people, and who those are is
+   * the roster's business, not this function's. Fewer than two left => the
+   * ladder below names exactly which rung failed (the same six strings the
+   * dashboard has always surfaced).
    */
   async function resolveTourMembers(
     tour: TourItem,
   ): Promise<{ members: ConversationParticipant[] } | { unresolvable: string }> {
+    const resolved = await resolveRoster(
+      { conversations, units, contacts, log },
+      {
+        type: 'tour',
+        id: tour.tourId,
+        tenantId: tour.tenantId,
+        unitId: tour.unitId,
+        ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
+        ...(tour.roster !== undefined && { roster: tour.roster }),
+      },
+    );
+    // Unreachable from this route (the one-thread-per-tour guard above already
+    // refused a tour carrying a pointer), but the resolver's contract is
+    // explicit: an unreadable thread is NEVER silently re-resolved.
+    if (resolved.source === 'unavailable') {
+      return { unresolvable: 'the group thread could not be read' };
+    }
+
+    const members: ConversationParticipant[] = [];
+    const seenPhones = new Set<string>();
+    for (const member of resolved.members) {
+      const phone = member.phone;
+      if (typeof phone !== 'string' || phone.length === 0) continue; // unreachable member
+      if (seenPhones.has(phone)) continue; // one slot per number (shared phones)
+      seenPhones.add(phone);
+      members.push({
+        phone,
+        contactId: member.contactId ?? '',
+        ...(member.name !== undefined && { name: member.name }),
+      });
+    }
+    if (members.length >= 2) return { members };
+
+    // Too thin to relay. Name the rung that failed - these strings are the
+    // dashboard's error copy and are asserted verbatim by the API tests.
+    if (resolved.source === 'plan') {
+      return { unresolvable: 'this tour roster has fewer than two reachable members' };
+    }
     const tenant = await contacts.getById(tour.tenantId);
     if (!tenant) return { unresolvable: 'tenant contact not found' };
     const tenantPhone =
@@ -709,36 +756,24 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
 
     const unit = await units.getById(tour.unitId);
     if (!unit) return { unresolvable: 'unit not found (cannot resolve landlord)' };
-    const landlordId =
-      typeof unit.landlordId === 'string' && unit.landlordId.length > 0
-        ? unit.landlordId
-        : undefined;
-    if (landlordId === undefined) {
+    // The property's contact is the primaryContact row, falling back to the
+    // landlord of record (D3) - the same ladder the resolver walked.
+    const propertyContactId =
+      unitContacts(unit).find((c) => c.primaryContact === true)?.contactId ??
+      (typeof unit.landlordId === 'string' && unit.landlordId.length > 0 ? unit.landlordId : undefined);
+    if (propertyContactId === undefined) {
       return { unresolvable: 'unit has no landlord (cannot resolve landlord)' };
     }
-    const landlord = await contacts.getById(landlordId);
+    const landlord = await contacts.getById(propertyContactId);
     if (!landlord) return { unresolvable: 'landlord contact not found' };
     const landlordPhone =
       typeof landlord.phone === 'string' && landlord.phone.length > 0
         ? normalizeToE164(landlord.phone)
         : undefined;
     if (landlordPhone === undefined) return { unresolvable: 'landlord contact has no phone' };
-
-    const tenantName = nameFromContact(tenant);
-    const members: ConversationParticipant[] = [
-      { phone: tenantPhone, contactId: tour.tenantId, ...(tenantName !== undefined && { name: tenantName }) },
-    ];
-    // De-dupe on phone (mirrors the explicit path) — a tenant who is somehow
-    // also the landlord gets one roster slot.
-    if (landlordPhone !== tenantPhone) {
-      const landlordName = nameFromContact(landlord);
-      members.push({
-        phone: landlordPhone,
-        contactId: landlordId,
-        ...(landlordName !== undefined && { name: landlordName }),
-      });
-    }
-    return { members };
+    // Both rungs resolve and share ONE number (tenant === property contact):
+    // a relay needs two distinct parties.
+    return { unresolvable: 'this tour roster has fewer than two reachable members' };
   }
 
   // POST /api/tours/:tourId/relay — provision a masked relay group thread for a
@@ -904,7 +939,25 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     }
 
     // Stamp the real groupThreadId over the claim sentinel.
-    const updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
+    let updatedTour = await tours.patch(tourId, { groupThreadId: conversation.conversationId });
+
+    // THE PLAN IS CONSUMED (spec D1) - and only now, AFTER the thread pointer
+    // is written. From here the conversation's participants are the roster, so
+    // a second persisted roster must not survive to disagree with them. Order
+    // matters both ways: clearing BEFORE the pointer write would lose the plan
+    // on a failed stamp, and a crash BETWEEN the two leaves a stale plan that is
+    // INERT by precedence (the resolver reads participants first whenever the
+    // pointer is set) - never "defensively" merge it back in.
+    if (updatedTour.roster !== undefined) {
+      try {
+        await tours.clearRoster(tourId);
+        updatedTour = { ...updatedTour };
+        delete updatedTour.roster;
+        delete updatedTour.rosterVersion;
+      } catch (err) {
+        log.error({ err, tourId }, 'tour relay: clearing the consumed roster plan failed (inert leftover)');
+      }
+    }
 
     // Connect-when-ready (T6): the group may be CONNECTING (no number yet) rather
     // than open - "opened" would be premature, so mark the audit/log accordingly.

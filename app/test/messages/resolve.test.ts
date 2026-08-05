@@ -3,11 +3,8 @@
 // failure falls back to the catalog default (no throw); settingsToOverrides maps
 // the legacy editable fields.
 import { describe, expect, it } from 'vitest';
-import {
-  resolveMessage,
-  resolveWithSettings,
-  settingsToOverrides,
-} from '../../src/messages/resolve.js';
+import { resolveMessage, settingsToOverrides } from '../../src/messages/resolve.js';
+import { resolveWithSettings } from '../../src/messages/resolveWithSettings.js';
 import { MESSAGE_CATALOG } from '../../src/messages/catalog.js';
 import { DEFAULT_ORG_SETTINGS, type OrgSettings, type SettingsRepo } from '../../src/repos/settingsRepo.js';
 import { WELCOME_SMS } from '../../src/lib/smsCompliance.js';

@@ -1,13 +1,10 @@
-// Message resolver — picks an override-or-default from the catalog and
-// interpolates {token} placeholders. `resolveMessage` is PURE; the async
-// `resolveWithSettings` convenience reads OrgSettings defensively (a settings-
-// read failure must NEVER break a send → falls back to the catalog default).
+// Message resolver - picks an override-or-default from the catalog and
+// interpolates {token} placeholders. This module is PURE: no repos, no I/O and
+// no value import of anything that reaches the AWS SDK, so it is safe to import
+// from any layer (including the Playwright harness, via messages/tourCopy.ts).
+// The async settings-aware convenience lives next door in resolveWithSettings.ts.
 import { MESSAGE_CATALOG, type MessageId } from './catalog.js';
-import {
-  createSettingsRepo,
-  type OrgSettings,
-  type SettingsRepo,
-} from '../repos/settingsRepo.js';
+import type { OrgSettings } from '../repos/settingsRepo.js';
 
 /**
  * Substitute `{token}` for each ALLOWED token that actually appears in the
@@ -79,31 +76,4 @@ export function settingsToOverrides(s: OrgSettings): Partial<Record<MessageId, s
     ...(s.welcomeText ? { 'welcome.sms': s.welcomeText } : {}),
     ...(s.missedCallAutoText ? { 'missed_call.autotext': s.missedCallAutoText } : {}),
   };
-}
-
-/**
- * Async convenience: read OrgSettings, adapt to overrides, resolve. Reads
- * defensively — any settings-read failure falls back to `{}` overrides (→ the
- * catalog default), exactly today's behavior for welcomeText / quick-replies. A
- * settings-read failure must never break a send.
- *
- * `deps.settingsRepo` lets a caller that already owns an (injected/fake) repo
- * reuse it — call-sites without one self-provision the real repo.
- */
-export async function resolveWithSettings(
-  id: MessageId,
-  vars?: Record<string, string>,
-  deps?: { settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'> },
-): Promise<string> {
-  let overrides: Partial<Record<MessageId, string>> = {};
-  try {
-    const repo = deps?.settingsRepo ?? createSettingsRepo();
-    const s = await repo.getOrgSettings();
-    overrides = settingsToOverrides(s);
-  } catch {
-    // best-effort: a settings-read failure must NOT break a send — fall back to
-    // the catalog default (no override).
-    overrides = {};
-  }
-  return resolveMessage(id, vars, overrides);
 }

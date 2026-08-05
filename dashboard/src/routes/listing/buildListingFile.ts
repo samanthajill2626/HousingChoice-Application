@@ -22,6 +22,9 @@ export interface RosterRow {
   contactId: string;
   /** Display name, when known (from the C3 row or the resolved contact). */
   name?: string;
+  /** The MACHINE role - what the roster edit-mode role selector reads and what
+   *  POST /api/units/:id/contacts takes back. `roleLabel` is its display twin. */
+  role: UnitContact['role'];
   /** Human role label, e.g. "Landlord" / "Property manager". */
   roleLabel: string;
   company?: string;
@@ -50,6 +53,7 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
       .map((c) => ({
         contactId: c.contactId,
         ...(c.name !== undefined && { name: c.name }),
+        role: c.role,
         roleLabel: ROLE_LABEL[c.role],
         ...(c.company !== undefined && { company: c.company }),
         primaryContact: c.primaryContact,
@@ -73,6 +77,7 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
     {
       contactId: landlordId,
       ...(name !== undefined && { name }),
+      role: 'landlord',
       roleLabel: 'Landlord',
       ...(company !== undefined && { company }),
       primaryContact: true,

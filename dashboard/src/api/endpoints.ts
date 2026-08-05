@@ -67,6 +67,7 @@ import type {
   TourRemindersPage,
   TourReminderView,
   UnitActivityEvent,
+  UnitContact,
   UnitItem,
   UnitsPage,
   MmsMediaAttachment,
@@ -865,6 +866,42 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
   const res = await request<{ unit: UnitItem }>(
     `/api/units/${encodeURIComponent(unitId)}/restore`,
     { method: 'POST' },
+  );
+  return res.unit;
+}
+
+/** POST /api/units/:unitId/contacts (C3) - add OR update a contact on the
+ *  property's roster. The route is an UPSERT keyed by contactId, so the SAME call
+ *  re-roles a row (send its current `primaryContact`) and promotes a row to the
+ *  property's PRIMARY CONTACT (send its current `role` with `primaryContact:
+ *  true`) - the server demotes whoever held it, keeping the single-primary
+ *  invariant and the `primary_contact` scalar in agreement. The landlord of
+ *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
+ *  sent. Returns the updated unit with its enriched `contacts` roster. Errors:
+ *  404 unit_not_found / contact_not_found; 400 on a bad role or a non-boolean
+ *  primaryContact. */
+export async function addUnitContact(
+  unitId: string,
+  input: { contactId: string; role: UnitContact['role']; primaryContact?: boolean },
+): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/contacts`,
+    { method: 'POST', body: input },
+  );
+  return res.unit;
+}
+
+/** DELETE /api/units/:unitId/contacts/:contactId (C3) - drop a contact from the
+ *  property's roster. Returns the updated unit (with `contacts`). Removing the
+ *  CURRENT primary contact promotes the landlord of record in its place (or
+ *  clears the primary entirely when the property has no landlordId) - so the
+ *  caller must confirm that promotion BEFORE calling (spec 6.1). Errors: 409
+ *  cannot_remove_landlord_of_record (the target IS `unit.landlordId` - reassign
+ *  the property's landlord first); 404 unit_or_contact_not_found. */
+export async function removeUnitContact(unitId: string, contactId: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' },
   );
   return res.unit;
 }

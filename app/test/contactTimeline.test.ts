@@ -1075,4 +1075,65 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.status).toBe(200);
     expect(res.body.upcoming).toEqual([]);
   });
+
+  it('an uncomposable tour empties ONLY its own rung - the rest of the bucket survives', async () => {
+    // READ-PATH CONTAINMENT (spec F1), and the failure mode here is NOT a 500:
+    // an uncontained throw lands in the gather's own catch, which returns `[]`
+    // and silently deletes the OTHER tours AND both nudge walks from the page.
+    // So the assertion is that the bucket SURVIVES, not merely that we got 200.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600009';
+    world.contacts.push({ contactId: 'ct-9', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-9', phone, 'tenant_1to1');
+
+    const goodTour = await world.toursRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-good',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: goodTour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+    const badTour = await world.toursRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-bad',
+      scheduledAt: '2099-01-12T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: badTour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-11T10:00:00.000Z',
+    });
+    // Corrupt AFTER arming - the only way to reach this state.
+    await world.toursRepo.patch(badTour.tourId, { scheduledAt: 'not-an-instant' });
+
+    // A tenant-recipient nudge from walk 2: it shares the bucket, so it proves
+    // the OTHER walks are untouched by the tour walk's bad row.
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-good',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      dueAt: '2099-02-01T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-9/timeline');
+
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(3);
+    const bad = up.find((i) => i.refId === badTour.tourId)!;
+    expect(bad.body).toBe('');
+    expect(bad.reminderKind).toBe('day_before');
+    const good = up.find((i) => i.refId === goodTour.tourId)!;
+    expect(good.body).toBe(CONFIRMATION_BODY);
+    expect(up.some((i) => i.source === 'placement_nudge')).toBe(true);
+  });
 });

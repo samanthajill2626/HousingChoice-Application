@@ -16,6 +16,10 @@ import request from 'supertest';
 import { describe, expect, it } from 'vitest';
 import type { ReminderKind, TourReminderItem } from '../src/repos/tourRemindersRepo.js';
 import { resolveMessage } from '../src/messages/index.js';
+import {
+  runDueTourReminders,
+  type RunDueTourRemindersDeps,
+} from '../src/jobs/tourReminders.js';
 import type {
   SendMessageInput,
   SendMessageOutcome,
@@ -25,6 +29,7 @@ import { TEST_SESSION_COOKIE, TEST_SESSION_USER } from './helpers/authSession.js
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import {
   isoHoursFromNow,
+  quietOffSettingsRepo,
   quietWindowAroundNow,
   quietWindowAwayFromNow,
 } from './helpers/settingsStub.js';
@@ -55,6 +60,31 @@ function makeSendSpy(): { service: SendMessageService; sent: SendMessageInput[] 
     } as SendMessageOutcome;
   };
   return { service, sent };
+}
+
+/**
+ * The POLL's deps, assembled from the harness world. This suite has no `__dev`
+ * routes (they are opt-in and never mounted here), so a parity test drives the
+ * send by calling runDueTourReminders directly rather than through an HTTP tick.
+ */
+function pollDepsFrom(
+  world: FakeWorld,
+  sendMessageService: SendMessageService,
+): RunDueTourRemindersDeps {
+  return {
+    tourRemindersRepo: world.tourRemindersRepo,
+    toursRepo: world.toursRepo,
+    contactsRepo: world.contactsRepo,
+    conversationsRepo: world.conversationsRepo,
+    messagesRepo: world.messagesRepo,
+    unitsRepo: world.unitsRepo,
+    adapter: world.adapter,
+    sendMessageService,
+    // Quiet hours OFF so the fire-time backstop is a no-op and the rung actually
+    // sends at its fixture dueAt. With the default window a dueAt inside
+    // 21:00-08:00 would DEFER and the assertion would see no send at all.
+    settingsRepo: quietOffSettingsRepo(),
+  };
 }
 
 /** Seed a reminder row directly on the world fake. */
@@ -778,5 +808,173 @@ describe('POST /api/tours/:tourId/reminders/:reminderId/send-now', () => {
     expect(cross.status).toBe(404);
     expect(cross.body).toEqual({ error: 'reminder_not_found' });
     expect(spy.sent).toHaveLength(0);
+  });
+});
+
+// ===========================================================================
+// Composed bodies: preview/send parity (T7) and sent-rung history (T8).
+//
+// The panel renders the GET's `body` as "this is what will be sent", so the
+// preview and the send path must build the string the SAME way - through the
+// one composer. These tests are behavior-neutral today (every body is still
+// the token-free catalog string); they earn their keep when the copy flips.
+// ===========================================================================
+describe('composed reminder bodies', () => {
+  /**
+   * seedQuietTour + the unit it points at (WITH a structured address) + one
+   * pending rung. The address is load-bearing: without it both sides would
+   * compose the no-address variant and the parity assertion would pass
+   * vacuously once the copy carries a street.
+   */
+  async function seedComposedTour(
+    world: FakeWorld,
+    suffix: string,
+    phone: string,
+  ): Promise<{ tourId: string; reminderId: string }> {
+    const tourId = await seedQuietTour(world, suffix, phone);
+    world.units.set(`unit-quiet-${suffix}`, {
+      unitId: `unit-quiet-${suffix}`,
+      landlordId: `contact-landlord-${suffix}`,
+      status: 'available',
+      address: { line1: '412 Sender Way NW', city: 'Atlanta', state: 'GA', zip: '30318' },
+      created_at: '2026-07-13T00:00:00.000Z',
+      updated_at: '2026-07-13T00:00:00.000Z',
+    });
+    const reminderId = `rem-composed-${suffix}`;
+    seedReminder(world, {
+      reminderId,
+      tourId,
+      kind: 'confirmation',
+      dueAt: '2026-01-10T10:00:00.000Z',
+    });
+    return { tourId, reminderId };
+  }
+
+  it('the GET preview body EQUALS what the send path composes', async () => {
+    // W1: the panel renders this string as "what will be sent". If the preview
+    // and the send path ever build it differently, the dashboard is lying.
+    const { app, world } = makeWebhookHarness();
+    const spy = makeSendSpy();
+    const deps = pollDepsFrom(world, spy.service);
+    const { tourId, reminderId } = await seedComposedTour(world, 'parity', '+15550710001');
+
+    const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    expect(listed.status).toBe(200);
+    const preview = listed.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === reminderId,
+    );
+    expect(preview).toBeDefined();
+    expect(preview.state).toBe('upcoming');
+
+    await runDueTourReminders(preview.dueAt, deps);
+
+    expect(spy.sent).toHaveLength(1);
+    // EQUALITY is the invariant. The seeded address is what gives it teeth:
+    // once the copy carries the street and the local time, a preview that
+    // resolved the catalog directly would no longer match this send.
+    expect(spy.sent.at(-1)?.body).toBe(preview.body);
+  });
+});
+
+// ===========================================================================
+// READ-PATH CONTAINMENT (spec F1). Composition is PARTIAL: a tour whose
+// scheduledAt is unusable (a bad write, a legacy row) cannot produce a body.
+// On a READ path that must degrade to `body: ''` - never a 500 that takes the
+// whole ladder with it, and never a missing `body` field (it is required on the
+// wire view, the dashboard mirror and TimelineScheduled).
+// ===========================================================================
+describe('uncomposable rungs on the tour-reminder read paths', () => {
+  /** A self_guided tour whose scheduledAt was corrupted AFTER the ladder existed. */
+  async function seedUncomposableTour(
+    world: FakeWorld,
+    suffix: string,
+    phone: string,
+  ): Promise<{ tourId: string; pendingId: string; sentId: string }> {
+    const tourId = await seedQuietTour(world, suffix, phone);
+    // Recorded consent, so the send-now case below reaches the COMPOSE instead
+    // of stopping at the JIT consent gate (which runs above it, by design).
+    Object.assign(
+      world.contacts.find((c) => c.contactId === `contact-quiet-${suffix}`)!,
+      { consent_method: 'inbound_text' },
+    );
+    const pendingId = `rem-bad-pending-${suffix}`;
+    const sentId = `rem-bad-sent-${suffix}`;
+    seedReminder(world, {
+      reminderId: pendingId,
+      tourId,
+      kind: 'confirmation',
+      dueAt: '2026-01-10T10:00:00.000Z',
+    });
+    seedReminder(world, {
+      reminderId: sentId,
+      tourId,
+      kind: 'day_before',
+      dueAt: '2026-01-09T10:00:00.000Z',
+      sentAt: '2026-01-09T10:00:05.000Z',
+    });
+    // The claim-time snapshot the send path stamped (claimSend's third argument).
+    world.tourRemindersMap.get(sentId)!.sentBody = 'What we actually texted';
+    await world.toursRepo.patch(tourId, { scheduledAt: 'not-an-instant' });
+    return { tourId, pendingId, sentId };
+  }
+
+  it('the GET list degrades to an empty body per rung - 200, ladder intact, snapshots preserved', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, pendingId, sentId } = await seedUncomposableTour(world, 'read1', '+15550710011');
+
+    const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
+
+    expect(res.status).toBe(200);
+    const rungs = res.body.reminders as Array<{
+      reminderId: string;
+      kind: string;
+      dueAt: string;
+      state: string;
+      body: string;
+    }>;
+    // The whole ladder still renders - only the text is empty.
+    expect(rungs).toHaveLength(2);
+    const pending = rungs.find((r) => r.reminderId === pendingId)!;
+    expect(pending.body).toBe('');
+    expect(pending.state).toBe('upcoming');
+    expect(pending.kind).toBe('confirmation');
+    expect(pending.dueAt).toBe('2026-01-10T10:00:00.000Z');
+    // A SENT rung never recomposes, so an unusable tour time cannot erase what
+    // was really sent.
+    const sent = rungs.find((r) => r.reminderId === sentId)!;
+    expect(sent.body).toBe('What we actually texted');
+    expect(sent.state).toBe('sent');
+  });
+
+  it('PATCH echoes the same empty body instead of failing the cancel', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tourId, pendingId } = await seedUncomposableTour(world, 'read2', '+15550710012');
+
+    const res = await authed(app)
+      .patch(`/api/tours/${tourId}/reminders/${pendingId}`)
+      .send({ canceled: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.reminder.state).toBe('canceled');
+    expect(res.body.reminder.body).toBe('');
+  });
+
+  it('send-now refuses PRE-CLAIM with invalid_schedule and leaves the rung pending', async () => {
+    // The send-path half of the same failure: a human click must not burn the
+    // rung (claimSend IS the sentAt stamp), so the refusal happens above it.
+    const spy = makeSendSpy();
+    const { app, world } = makeWebhookHarness({ sendMessageService: spy.service });
+    const { tourId, pendingId } = await seedUncomposableTour(world, 'read3', '+15550710013');
+
+    const res = await authed(app).post(`/api/tours/${tourId}/reminders/${pendingId}/send-now`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('invalid_schedule');
+    expect(res.body.reminder.state).toBe('upcoming');
+    expect(res.body.reminder.body).toBe('');
+    expect(spy.sent).toHaveLength(0);
+    // Untouched: no sentAt, no skip stamp - still the poll's to deliver.
+    expect(world.tourRemindersMap.get(pendingId)?.sentAt).toBeUndefined();
+    expect(world.tourRemindersMap.get(pendingId)?.skippedAt).toBeUndefined();
   });
 });

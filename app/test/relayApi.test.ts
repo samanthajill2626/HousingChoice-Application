@@ -1409,5 +1409,35 @@ describe('relay-group API (M1.7)', () => {
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(404);
     });
+
+    it('an uncomposable tour time empties the BODIES, not the bucket (read-path containment)', async () => {
+      // The rung text is composed from the tour time + the unit address, and a
+      // tour can lose a usable scheduledAt. On a READ path that degrades to
+      // body: '' (spec F1) - the thread's Upcoming list must still render every
+      // rung with its kind and due time, never 500.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // Corrupt AFTER arming - the only way to reach this state.
+      await world.toursRepo.patch(tour.tourId, { scheduledAt: 'not-an-instant' });
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+
+      const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
+      expect(scheduled).toHaveLength(4);
+      expect(scheduled.every((s) => s['body'] === '')).toBe(true);
+      // Everything else about each rung survives.
+      expect(scheduled.map((s) => s['reminderKind'])).toEqual([
+        'confirmation',
+        'day_before',
+        'morning_of',
+        'en_route',
+      ]);
+      expect(scheduled.every((s) => s['refId'] === tour.tourId)).toBe(true);
+      expect(scheduled.every((s) => s['conversationId'] === conversationId)).toBe(true);
+    });
   });
 });

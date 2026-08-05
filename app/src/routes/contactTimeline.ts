@@ -38,7 +38,12 @@ import {
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import { createUnitsRepo, type UnitItem, type UnitsRepo } from '../repos/unitsRepo.js';
+import type { Address } from '../lib/address.js';
+import {
+  composeTourReminderBody,
+  UncomposableReminderError,
+} from '../messages/tourCopy.js';
 import {
   createContactsRepo,
   type ContactItem,
@@ -510,6 +515,47 @@ interface ScheduledGatherRepos {
 }
 
 /**
+ * One tour-reminder rung's preview body, composed exactly the way the send path
+ * composes it (the shared composer is the only source of this string).
+ *
+ * READ-PATH CONTAINMENT (spec F1): a tour with no usable scheduledAt makes the
+ * body uncomposable. An uncontained throw here does NOT 500 - it lands in the
+ * gather's own catch and EMPTIES the whole `upcoming` bucket, silently taking
+ * every other tour AND both nudge walks with it. So one bad rung degrades to
+ * `body: ''` and the bucket survives.
+ *
+ * A SENT rung renders its claim-time snapshot; today this walk filters sent
+ * rungs out entirely, so the branch is a guard for future callers, not dead
+ * weight - the shape is identical on every preview surface.
+ */
+function tourReminderBodyOrEmpty(
+  row: TourReminderItem,
+  tour: TourItem,
+  timezone: string,
+  address: Address | string | undefined,
+  log: Logger,
+): string {
+  if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
+  try {
+    return composeTourReminderBody({
+      kind: row.kind,
+      scheduledAt: tour.scheduledAt ?? '',
+      timezone,
+      ...(address !== undefined && { address }),
+    });
+  } catch (err) {
+    if (err instanceof UncomposableReminderError) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
+        'tour reminder body uncomposable on a read path - returning an empty body',
+      );
+      return '';
+    }
+    throw err;
+  }
+}
+
+/**
  * Gather this contact's not-yet-sent scheduled sends into the first-page
  * `upcoming[]` bucket. Three independent walks (M2 — all `Promise.all`-parallel,
  * internally and with each other), each index-backed (no scans):
@@ -530,9 +576,13 @@ async function gatherUpcoming(params: {
    *  request from the org window + the wall clock (this gather stays
    *  clock-free); see routes/tourReminders.ts for the formula's rationale. */
   quietFor: (dueAt: string) => boolean;
+  /** The ORG's composing zone (window.timezone), read once by the caller. Tour
+   *  reminder copy renders the tour time in it - never a raw settings.timezone
+   *  (spec D8). */
+  timezone: string;
   log: Logger;
 }): Promise<TimelineScheduled[]> {
-  const { contact, config, conversationsRepo, repos, quietFor, log } = params;
+  const { contact, config, conversationsRepo, repos, quietFor, timezone, log } = params;
   const contactId = contact.contactId;
 
   // Resolve the contact's 1:1 threads the SAME way the pollers do — from the
@@ -593,6 +643,22 @@ async function gatherUpcoming(params: {
     return items;
   };
 
+  // One unit read PER UNIT (not per tour): a contact with several tours at the
+  // same property must not pay for the same address twice on a page load. The
+  // promise is memoized, so parallel walkers share the single in-flight read.
+  const unitReads = new Map<string, Promise<UnitItem | undefined>>();
+  const unitOnce = (unitId: string): Promise<UnitItem | undefined> => {
+    let pending = unitReads.get(unitId);
+    if (pending === undefined) {
+      pending = repos.unitsRepo.getById(unitId).catch((err: unknown) => {
+        log.warn({ err, unitId }, 'contact timeline: unit read failed - composing without an address');
+        return undefined;
+      });
+      unitReads.set(unitId, pending);
+    }
+    return pending;
+  };
+
   // Walk 1 — tenant tours → 1:1-routed tour reminders.
   const tourWalk = (async (): Promise<TimelineScheduled[]> => {
     const tours = await repos.toursRepo.listByTenant(contactId);
@@ -609,12 +675,18 @@ async function gatherUpcoming(params: {
         let routes1to1 = tour.tourType === 'self_guided';
         if (!routes1to1) {
           // resolveUsableGroup only reads `deps.conversationsRepo` — a narrow
-          // structural view is all it needs (cast documented).
-          const groupDeps = { conversationsRepo } as unknown as RunDueTourRemindersDeps;
+          // structural view is all it needs (cast documented). unitsRepo is
+          // listed BY HAND because the cast swallows every required field: the
+          // compiler cannot tell us when RunDueTourRemindersDeps grows one.
+          const groupDeps = {
+            conversationsRepo,
+            unitsRepo: repos.unitsRepo,
+          } as unknown as RunDueTourRemindersDeps;
           const group = await resolveUsableGroup(tour, upcomingRows[0]!, groupDeps, log);
           routes1to1 = group === undefined;
         }
         if (!routes1to1) return [];
+        const address = (await unitOnce(tour.unitId))?.address;
         return upcomingRows.map((row: TourReminderItem): TimelineScheduled => {
           const suppression = suppressionFor(tenantConv, false, row.dueAt);
           return {
@@ -623,7 +695,7 @@ async function gatherUpcoming(params: {
             at: row.dueAt,
             source: 'tour_reminder',
             reminderKind: row.kind,
-            body: resolveMessage(`tour.${row.kind}`),
+            body: tourReminderBodyOrEmpty(row, tour, timezone, address, log),
             ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
             ...(suppression !== undefined && { suppression }),
             refType: 'tour',
@@ -865,6 +937,12 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    Run only on the first page (`cursor` absent) AND when the caller wants
     //    the `scheduled` kind. Failures never break the timeline — the bucket is
     //    supplementary, so a gather error logs + falls back to `[]`.
+    // The org window is read ABOVE the conditional (and above its try/catch):
+    // it carries the COMPOSING ZONE, which the response owes even when the
+    // gather is skipped or fails. readQuietHoursWindow never throws - a settings
+    // failure falls back to the defaults.
+    const window = await readQuietHoursWindow(settings, log);
+
     let upcoming: TimelineScheduled[] = [];
     if (boundaryKey === undefined && kinds.has('scheduled') && scheduledRepos !== undefined) {
       try {
@@ -873,7 +951,6 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
         // is already due while the window is running. Full rationale at the same
         // call site in routes/tourReminders.ts; the tour-reminder and
         // placement-nudge panels use the same formula.
-        const window = await readQuietHoursWindow(settings, log);
         const nowIso = new Date().toISOString();
         const wallClockQuiet = isQuietTime(nowIso, window);
         upcoming = await gatherUpcoming({
@@ -883,6 +960,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
           repos: scheduledRepos,
           quietFor: (dueAt: string) =>
             (dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso),
+          timezone: window.timezone,
           log,
         });
       } catch (err) {

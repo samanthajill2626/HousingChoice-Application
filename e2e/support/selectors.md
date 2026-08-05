@@ -36,6 +36,7 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Tour Reminders panel | Send now | `getByRole('button', { name: 'Send <Kind label> reminder now' })` - e.g. `Send Day before reminder now` (kind labels: Confirmation, Day before, Morning of, En route, No-show check-in). A bare `{ name: 'Send now' }` matches one button PER pending rung and substring-collides with the contact page's "+ Send": a strict-mode violation |
 | Placement nudges card | Send now | `getByRole('button', { name: 'Send <Kind label> nudge now' })` - e.g. `Send Receipt check nudge now` (kind labels: Receipt check, Completion check, Approval check, RTA window closing). Same strict-mode caveat as the reminder button |
 | Tour Reminders panel | quiet-hours deferral note | the rung `listitem` contains `Will wait <U+2014 EM DASH> quiet hours` - quiet hours DEFERS a send, so the lead is "Will wait"; every other suppression reason still reads "Will be skipped". Build the separator with `String.fromCharCode(0x2014)` so the spec source stays ASCII (see quiet-hours.spec.ts) |
+| Tour / placement hub | person 1:1 channel tab | `getByRole('tab', { name: new RegExp('^' + firstName + '\\b') })` - person tabs are labeled by the contact's DISPLAY NAME, never a role word ("Tenant"/"Landlord"/"PM" died with contact-rosters slice 2); anchor on the run-unique firstName. The unread dot appends srOnly ` unread` to the accessible name; `Group text` stays a fixed label |
 
 ## Dev-only assertions (not UI)
 - Outbox: `getOutbox(request, { to, since })` → `GET /__dev/outbox`.

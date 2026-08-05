@@ -2240,9 +2240,12 @@ export class Scenario {
    *  (a known prior inbound renders in that transcript). */
   expectTenantTabShows1to1(bodyRe: RegExp): Promise<void> {
     const tour = this.requireActiveTour();
-    return step('Team opens the Tenant channel tab (1:1 transcript)', async () => {
+    const tenant = this.requireActiveTenant();
+    return step('Team opens the tenant 1:1 channel tab (transcript)', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('tab', { name: /^Tenant/ }).click();
+      // Person tabs are labeled by DISPLAY NAME (contact-rosters slice 2) -
+      // anchor on the run-unique first name.
+      await this.page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`) }).click();
       const comms = this.page.getByRole('region', { name: 'Communications and activity' });
       await expect(comms.getByText(bodyRe).first()).toBeVisible({ timeout: 10_000 });
     });
@@ -2281,13 +2284,14 @@ export class Scenario {
    *  Guidance card leads with the bolded ID-gate rule. */
   expectSelfGuidedTourPage(): Promise<void> {
     const tour = this.requireActiveTour();
-    return step('App: self-guided tour defaults to the Tenant tab + shows the ID-gate guidance', async () => {
+    const tenant = this.requireActiveTenant();
+    return step('App: self-guided tour defaults to the tenant tab + shows the ID-gate guidance', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      // No group thread -> the initial channel tab is Tenant (selected).
-      await expect(this.page.getByRole('tab', { name: /^Tenant/ })).toHaveAttribute(
-        'aria-selected',
-        'true',
-      );
+      // No group thread -> the initial channel tab is the tenant's (selected).
+      // Person tabs are labeled by DISPLAY NAME (contact-rosters slice 2).
+      await expect(
+        this.page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`) }),
+      ).toHaveAttribute('aria-selected', 'true');
       // The self-guided Guidance card leads with the ID-gate rule (ASCII hyphen).
       await expect(this.page.getByText('Photo ID before lockbox code - always.')).toBeVisible();
     });

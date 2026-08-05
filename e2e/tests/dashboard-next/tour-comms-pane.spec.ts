@@ -169,6 +169,18 @@ function commsRegion(page: Page): Locator {
   return page.getByRole('region', { name: 'Communications and activity' });
 }
 
+/** A person 1:1 tab. Labeled by the contact's DISPLAY NAME (contact-rosters
+ *  slice 2 deleted the "Tenant"/"Landlord"/"PM" role-word labels) - anchor on
+ *  the run-unique firstName. */
+function personTab(p: Party): RegExp {
+  return new RegExp(`^${p.firstName}\\b`);
+}
+
+/** The person tab WITH its srOnly " unread" suffix (the dot's a11y text). */
+function personTabUnread(p: Party): RegExp {
+  return new RegExp(`^${p.firstName}\\b.*unread$`);
+}
+
 test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () => {
   test('self-guided tour: the Tenant tab shows this tour Upcoming reminders, and the schedule pin lands on BOTH parties tabs', async ({
     page,
@@ -194,7 +206,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
 
     await page.goto(`${NEXT}/tours/${tourId}`);
     // Self-guided + no group thread -> Tenant is the INITIAL tab.
-    await expect(page.getByRole('tab', { name: /^Tenant/, selected: true })).toBeVisible({
+    await expect(page.getByRole('tab', { name: personTab(tenant), selected: true })).toBeVisible({
       timeout: 15_000,
     });
 
@@ -219,7 +231,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     await expect(tenantPin).toBeVisible({ timeout: 15_000 });
     await expect(tenantPin).toHaveAttribute('href', `/tours/${tourId}`);
 
-    await page.getByRole('tab', { name: /^Landlord/ }).click();
+    await page.getByRole('tab', { name: personTab(landlord) }).click();
     const landlordPin = commsRegion(page).getByRole('link', { name: /Tour scheduled/ }).first();
     await expect(landlordPin).toBeVisible({ timeout: 15_000 });
     await expect(landlordPin).toHaveAttribute('href', `/tours/${tourId}`);
@@ -297,7 +309,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     await expect(page.getByRole('tab', { name: 'Group text', selected: true })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByRole('tab', { name: /^Tenant\b.*unread$/ })).toBeVisible({
+    await expect(page.getByRole('tab', { name: personTabUnread(tenant) })).toBeVisible({
       timeout: 20_000,
     });
 
@@ -309,7 +321,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
         new RegExp(`/api/inbox/${tenant.contactId}/read$`).test(r.url()),
       { timeout: 30_000 },
     );
-    await page.getByRole('tab', { name: /^Tenant/ }).click();
+    await page.getByRole('tab', { name: personTab(tenant) }).click();
     await markedRead;
 
     // Both numbers' threads are in the ONE person feed on this tab.
@@ -325,7 +337,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     // The Tenant dot cleared. toHaveCount(0) RETRIES, which is what absorbs the
     // SSE-debounced refetch briefly re-reading the pre-fan-out server value
     // (the hook re-fires mark-read and converges).
-    await expect(page.getByRole('tab', { name: /^Tenant\b.*unread$/ })).toHaveCount(0, {
+    await expect(page.getByRole('tab', { name: personTabUnread(tenant) })).toHaveCount(0, {
       timeout: 20_000,
     });
 
@@ -343,7 +355,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     });
 
     // (item 5b, landlord half) The same dual-party group-open pin on his tab.
-    await page.getByRole('tab', { name: /^Landlord/ }).click();
+    await page.getByRole('tab', { name: personTab(landlord) }).click();
     const landlordGroupPin = commsRegion(page)
       .getByRole('link', { name: /Group text opened/ })
       .first();
@@ -386,7 +398,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     });
 
     await page.goto(`${NEXT}/tours/${tourId}`);
-    await expect(page.getByRole('tab', { name: /^Tenant/, selected: true })).toBeVisible({
+    await expect(page.getByRole('tab', { name: personTab(tenant), selected: true })).toBeVisible({
       timeout: 15_000,
     });
 
@@ -460,7 +472,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     // deliberately not reused here).
     await expect(async () => {
       await page.goto(`${NEXT}/tours/${tourId}`);
-      await expect(page.getByRole('tab', { name: /^Tenant/, selected: true })).toBeVisible({
+      await expect(page.getByRole('tab', { name: personTab(tenant), selected: true })).toBeVisible({
         timeout: 5_000,
       });
       const comms = commsRegion(page);
@@ -472,7 +484,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
 
     await expect(async () => {
       await page.goto(`${NEXT}/placements/${placementId}`);
-      await expect(page.getByRole('tab', { name: /^Tenant/, selected: true })).toBeVisible({
+      await expect(page.getByRole('tab', { name: personTab(tenant), selected: true })).toBeVisible({
         timeout: 5_000,
       });
       const comms = commsRegion(page);

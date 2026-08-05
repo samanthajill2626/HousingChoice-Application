@@ -693,7 +693,19 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       sendRefusal(res, ROSTER_THREAD_EXISTS);
       return;
     }
-    await tours.clearRoster(tourId);
+    // clearRoster is conditional on the tour still existing, so a tour deleted
+    // between the read above and this write throws instead of returning. Every
+    // sibling path answers 404 for a gone tour - a 500 would be the odd one out.
+    // Only a genuinely-missing tour is converted; anything else still propagates.
+    try {
+      await tours.clearRoster(tourId);
+    } catch (err) {
+      if (!(await tours.get(tourId))) {
+        res.status(404).json({ error: 'tour_not_found' });
+        return;
+      }
+      throw err;
+    }
     await respondWithRoster(res, tourId);
   });
 

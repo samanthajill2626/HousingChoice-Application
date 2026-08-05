@@ -884,6 +884,22 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect((await world.placementsRepo.getById(placementId))!.roster).toBeUndefined();
   });
 
+  it('RESET answers 404 (not 500) when the placement is deleted mid-write', async () => {
+    // clearRoster is conditional on the placement existing, so a delete between
+    // the route's read and its write throws into the Express error handler.
+    // Every sibling path answers 404 for a gone placement.
+    const placementId = await createPlacement();
+    world.placementsRepo.clearRoster = async (id: string) => {
+      world.placements.delete(id);
+      throw new Error('ConditionalCheckFailedException');
+    };
+
+    const res = await authedReq.post(`/api/placements/${placementId}/roster/reset`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('placement_not_found');
+  });
+
   it('PLAN remove refuses the last member; PLAN add 400s an invalid entry', async () => {
     const placementId = await createPlacement();
     await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-pm' }], undefined);

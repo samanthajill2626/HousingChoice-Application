@@ -3434,6 +3434,23 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(stored.rosterVersion).toBeUndefined();
   });
 
+  it('RESET answers 404 (not 500) when the tour is deleted mid-write', async () => {
+    // clearRoster is conditional on the tour existing, so a delete between the
+    // route's read and its write throws into the Express error handler. Every
+    // sibling path answers 404 for a gone tour.
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    world.toursRepo.clearRoster = async (id: string) => {
+      world.toursMap.delete(id);
+      throw new Error('ConditionalCheckFailedException');
+    };
+
+    const res = await authed(app).post(`/api/tours/${tourId}/roster/reset`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('tour_not_found');
+  });
+
   it('every PLAN endpoint 409s thread_exists once a group thread is provisioned', async () => {
     const { app } = makeWebhookHarness({ world });
     const tourId = await createTour(app);
@@ -3546,6 +3563,49 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(res.status).toBe(200);
     expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
     expect(world.sent).toHaveLength(0);
+  });
+
+  it('a REOPENED thread REFLECTS the edits made while it was closed (spec 9)', async () => {
+    // The other half of the closed-thread carve-out: the silent add really did
+    // land on `participants`, so flipping the thread back open surfaces that
+    // member as a full, reachable roster member - and nothing was announced at
+    // add time, which is exactly why reopen semantics are a filed decision
+    // (docs/issues/relay-reopen-semantics.md).
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeFakePoolNumbers() });
+    const tourId = await createTour(app);
+    seedThread(
+      tourId,
+      [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      { status: 'closed' },
+    );
+    world.sent.length = 0;
+
+    const added = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+    expect(added.status).toBe(200);
+    expect(world.sent, 'a closed group is never announced into').toHaveLength(0);
+
+    // Reopen through the REAL route (a pure status flip - nothing re-provisioned).
+    const reopened = await authed(app)
+      .patch('/api/conversations/conv-live/close')
+      .send({ closed: false });
+    await queueAdapter.settle();
+    expect(reopened.status).toBe(200);
+    expect(world.conversations.get('conv-live')!.status).toBe('open');
+
+    const view = await authed(app).get(`/api/tours/${tourId}/roster`);
+    expect(view.status).toBe(200);
+    expect(view.body.source).toBe('participants');
+    expect(keysOf(view.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(
+      view.body.members.find((m: { memberKey: string }) => m.memberKey === 'c-caseworker'),
+    ).toMatchObject({ reachability: 'reachable' });
+    expect(world.sent, 'reopen announces nothing either').toHaveLength(0);
   });
 
   it('LIVE endpoints 409 no_thread when the tour has no group thread', async () => {

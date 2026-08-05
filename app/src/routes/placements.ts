@@ -44,11 +44,7 @@ import {
   type PlacementDeadlinesRepo,
   type SoonestDeadline,
 } from '../repos/placementDeadlinesRepo.js';
-import {
-  createConversationsRepo,
-  type ConversationParticipant,
-  type ConversationsRepo,
-} from '../repos/conversationsRepo.js';
+import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import { createContactsRepo, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
@@ -1120,7 +1116,20 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       sendRefusal(res, ROSTER_THREAD_EXISTS);
       return;
     }
-    await placements.clearRoster(placementId);
+    // clearRoster is conditional on the placement still existing, so one deleted
+    // between the read above and this write throws instead of returning. Every
+    // sibling path answers 404 for a gone placement - a 500 would be the odd one
+    // out. Only a genuinely-missing placement is converted; anything else still
+    // propagates.
+    try {
+      await placements.clearRoster(placementId);
+    } catch (err) {
+      if (!(await placements.getById(placementId))) {
+        res.status(404).json({ error: 'placement_not_found' });
+        return;
+      }
+      throw err;
+    }
     await respondWithRoster(res, placementId);
   });
 

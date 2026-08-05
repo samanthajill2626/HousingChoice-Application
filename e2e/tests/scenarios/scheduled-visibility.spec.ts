@@ -25,7 +25,9 @@ import {
   tourScheduleFullLadder,
   justAfter,
   hoursFromNow,
-  TOUR_REMINDER_BODIES,
+  tourReminderBody,
+  tourReminderContext,
+  REMINDER_BODY_MARKERS,
   REMINDER_KIND_LABELS,
   type Contact,
   type Unit,
@@ -93,7 +95,7 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
   request,
 }) => {
   const flow = new Scenario(page, request);
-  await bookedSelfGuidedTour(flow, 'Ladder');
+  const { unit, times } = await bookedSelfGuidedTour(flow, 'Ladder');
 
   // The whole ladder is armed and upcoming right after booking; confirmation
   // (dueAt = arm-time now) is the earliest → the highlighted NEXT rung.
@@ -112,6 +114,17 @@ test('Part A — the tour Reminders panel renders the armed ladder + NEXT rung o
     reminders.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.no_show_checkin }),
   ).toHaveCount(0);
 
+  // The rung PREVIEW is the real thing, not a template: the day_before row shows
+  // the body the tenant will actually receive, carrying THIS tour's address and
+  // its org-local date and time (spec section 8). Composed by the app's own
+  // composer, so a copy change moves both sides together. NOTE: no zone-
+  // DISTINGUISHING claim is made here - this box runs on America/New_York too,
+  // so the browser and the org zone agree and only the TEXT is provable; the
+  // composing-zone half is pinned by the app's unit tests.
+  await expect(
+    reminders.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.day_before }),
+  ).toContainText(tourReminderBody('day_before', tourReminderContext(unit, times)));
+
   // Fire the confirmation rung → the panel now reads it SENT, and day_before is
   // still upcoming (a future rung the tick left untouched).
   await flow.tickTourReminders();
@@ -125,13 +138,17 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   request,
 }) => {
   const flow = new Scenario(page, request);
-  const { tenant, tenantId, times } = await bookedSelfGuidedTour(flow, 'Upcomer');
+  const { tenant, tenantId, unit, times } = await bookedSelfGuidedTour(flow, 'Upcomer');
+  // The exact text this tour's day_before rung composes to - address + org-local
+  // time - so both the Upcoming preview and the sent bubble are matched against
+  // the real body rather than a template.
+  const dayBefore = tourReminderBody('day_before', tourReminderContext(unit, times));
 
   // BEFORE any tick: the day_before rung is a pinned Upcoming item on the tenant's
   // timeline — its body, a "Tour reminder" tag, and a "sends in Nh · <abs>" line.
   // (The immediate confirmation rung rides the same section as "sending shortly".)
   await flow.expectUpcomingItem(tenantId, {
-    bodyContains: TOUR_REMINDER_BODIES.day_before,
+    bodyContains: dayBefore,
     source: 'tour_reminder',
   });
 
@@ -139,7 +156,7 @@ test('(a)+(b) tour reminder: future item on the tenant timeline → tick → lea
   // thread), and it TRANSITIONS out of Upcoming into a real sent bubble.
   await flow.tickTourReminders(justAfter(times.dayBefore));
   await flow.expectReminderTo1to1('day_before', tenant);
-  await flow.expectScheduledSent(tenantId, TOUR_REMINDER_BODIES.day_before);
+  await flow.expectScheduledSent(tenantId, dayBefore);
 });
 
 test('(c) reschedule: tick a rung → panel states → reschedule cancels + re-arms a fresh ladder', async ({
@@ -165,10 +182,14 @@ test('(c) reschedule: tick a rung → panel states → reschedule cancels + re-a
   await flow.expectReminderRung('day_before', 'canceled'); // the retired old rung
   await flow.expectReminderRung('confirmation', 'next'); // the fresh armed ladder
 
-  // The re-armed confirmation fires on a tick — a SECOND confirmation copy 1:1
-  // proves the ladder truly re-armed (not merely re-labeled).
+  // The re-armed confirmation fires on a tick. Since the flip, a rung's body
+  // carries its tour's TIME, so the fresh confirmation is textually DISTINCT from
+  // the one sent above - its arrival at all is the re-arm proof (a stronger one
+  // than the old "at least 2 identical copies": a mere re-label could not produce
+  // a body composed off the new time). expectReminderTo1to1 composes from the
+  // active tour, which teamReschedulesTour has already repointed.
   await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant, 2);
+  await flow.expectReminderTo1to1('confirmation', tenant);
 });
 
 test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-be-skipped → tick sends nothing', async ({
@@ -178,7 +199,9 @@ test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-
   const flow = new Scenario(page, request);
   // Self-seed WITHOUT consent, then opt the tenant out via a real inbound STOP
   // (sets the contact's sms_opt_out) BEFORE booking arms the ladder.
-  const { tenant, tenantId, times } = await bookedSelfGuidedTour(flow, 'Stopper', { consent: false });
+  const { tenant, tenantId, unit, times } = await bookedSelfGuidedTour(flow, 'Stopper', {
+    consent: false,
+  });
   await postInboundSms(request, {
     from: tenant.phone,
     body: 'STOP',
@@ -187,12 +210,17 @@ test('(d) suppression: an opted-out tenant → the Upcoming item is marked will-
 
   // The day_before rung still ARMS + surfaces in Upcoming, but honestly flagged:
   // "Will be skipped — contact opted out".
-  await flow.expectUpcomingSuppressed(tenantId, TOUR_REMINDER_BODIES.day_before);
+  await flow.expectUpcomingSuppressed(
+    tenantId,
+    tourReminderBody('day_before', tourReminderContext(unit, times)),
+  );
 
   // Tick past its dueAt → the poller refuses the send (honest suppression): the
-  // day_before body never reaches the opted-out tenant.
+  // day_before body never reaches the opted-out tenant. ABSENCE, so this rides the
+  // kind-distinctive MARKER, not a composed body - a mis-composed exact string
+  // would make "nothing arrived" true for the wrong reason.
   await flow.tickTourReminders(justAfter(times.dayBefore));
-  await flow.expectNoOutboxMessageContaining(tenant, TOUR_REMINDER_BODIES.day_before);
+  await flow.expectNoOutboxMessageContaining(tenant, REMINDER_BODY_MARKERS.day_before);
 });
 
 test('(e) tenant nudge: a placement at Awaiting receipt shows an Upcoming nudge → tick → sent 1:1', async ({

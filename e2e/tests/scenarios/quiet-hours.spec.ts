@@ -46,7 +46,7 @@ import {
   freshTenant,
   tourSchedule,
   justAfter,
-  TOUR_REMINDER_BODIES,
+  REMINDER_BODY_MARKERS,
   REMINDER_KIND_LABELS,
   type Contact,
   type TourTimes,
@@ -276,8 +276,12 @@ test('(2) Defer + release: a due rung WAITS inside the window, then sends once i
   // Tick 1s past the day_before rung: due, and org-locally INSIDE the window.
   await flow.tickTourReminders(justAfter(times.dayBefore));
 
-  // Deferred, not dropped: nothing reached the tenant...
-  await flow.expectNoOutboxMessageContaining(tenant, TOUR_REMINDER_BODIES.day_before);
+  // Deferred, not dropped: nothing reached the tenant. ABSENCE, so this rides the
+  // kind-distinctive MARKER rather than a composed body - an exact string that
+  // were ever mis-composed would make "nothing arrived" pass vacuously. (The
+  // matching PRESENCE assertions below go through expectReminderTo1to1, which
+  // composes the whole body from the active tour.)
+  await flow.expectNoOutboxMessageContaining(tenant, REMINDER_BODY_MARKERS.day_before);
   // ...the rung is STILL pending (the backstop never claimed it)...
   await flow.openTourReminders();
   await flow.expectReminderRung('day_before', 'upcoming');

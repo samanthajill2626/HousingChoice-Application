@@ -251,7 +251,11 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         refType: 'tour' as const,
         refId: tour.tourId,
       }));
-    res.json({ scheduled });
+    // `timezone` is the zone these bodies were composed in (spec D8) - the
+    // group thread renders each card's fire time in it, exactly like the
+    // contact timeline. The two EMPTY-bucket early returns above omit it: they
+    // have no window in hand and no row to render a time for.
+    res.json({ scheduled, timezone: window.timezone });
   });
 
   // POST /api/relay-groups — create a relay group + provision a pool number +

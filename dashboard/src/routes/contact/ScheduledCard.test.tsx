@@ -27,6 +27,28 @@ describe('ScheduledCard', () => {
     expect(screen.getByText('Reminder: your tour is tomorrow at 2pm.')).toBeInTheDocument();
   });
 
+  it('renders the absolute fire time in the zone the body was composed in', () => {
+    // Spec D8: the body now quotes an ORG-local time, so the absolute half of
+    // the fire line must use the SAME zone or the card contradicts itself.
+    // Asia/Tokyo is nobody's plausible browser zone here, so this cannot pass by
+    // accident: 2026-06-18T15:00Z is 12:00 AM on Jun 19 in Tokyo.
+    render(<ScheduledCard item={BASE} now={NOW} timezone="Asia/Tokyo" />);
+    expect(screen.getByText('sends in 3h - Jun 19, 12:00 AM')).toBeInTheDocument();
+  });
+
+  it('falls back to the browser zone when no zone is supplied', () => {
+    // A response that predates the field (or a failed bucket fetch) must render
+    // exactly as it does today, never crash and never show an empty time.
+    const legacy = new Date(BASE.at).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    render(<ScheduledCard item={BASE} now={NOW} />);
+    expect(screen.getByText(`sends in 3h - ${legacy}`)).toBeInTheDocument();
+  });
+
   it('renders "sending shortly" when the fire time is already at/past due', () => {
     const pastDue: TimelineScheduled = { ...BASE, at: '2026-06-18T11:59:00Z' }; // 1m ago
     render(<ScheduledCard item={pastDue} now={NOW} />);

@@ -204,8 +204,15 @@ export function wasDue(iso: string, now: number = Date.now()): string {
 
 /** A date-and-time label for a history row, e.g. "Jun 18, 1:02 PM". Accepts a clean
  *  ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf) so the
- *  raw key never renders; falls back to the normalised string when unparseable. */
-export function dateTime(iso: string): string {
+ *  raw key never renders; falls back to the normalised string when unparseable.
+ *
+ *  `timeZone` is an OPTIONAL IANA zone (spec D8): pass it only where the label
+ *  sits next to text that was COMPOSED in a specific zone -- a tour reminder body
+ *  now carries an org-local time, so a navigator in another zone would otherwise
+ *  read a chip and a body that disagree. OMITTING it is byte-identical to the
+ *  browser-zone behavior every other caller (placement deadlines, activity rows)
+ *  still wants, and that default is pinned by a test. */
+export function dateTime(iso: string, timeZone?: string): string {
   const norm = isoOf(iso);
   const d = new Date(norm);
   if (Number.isNaN(d.getTime())) return norm;
@@ -214,6 +221,7 @@ export function dateTime(iso: string): string {
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    ...(timeZone !== undefined && { timeZone }),
   });
 }
 

@@ -196,3 +196,41 @@ describe('date-vocabulary formatters', () => {
     });
   });
 });
+
+// ---------------------------------------------------------------------------
+// dateTime's optional timeZone (spec D8). Reminder BODIES now carry org-local
+// times, so the timestamps rendered NEXT to them must use the SAME zone or the
+// chip and the body disagree for any navigator outside the org's zone. The
+// parameter is ADDITIVE: omitting it must stay byte-identical to the browser-
+// zone behavior every other consumer (DeadlinesNudgesCard, TourDetail,
+// PlacementDetail) still relies on - that omitted-parameter case is the proof
+// those three surfaces are untouched by this change.
+// ---------------------------------------------------------------------------
+describe('dateTime timeZone parameter', () => {
+  const iso = '2026-07-23T19:00:00.000Z';
+
+  it('renders in an explicitly supplied zone', () => {
+    expect(dateTime(iso, 'America/New_York')).toBe('Jul 23, 3:00 PM');
+    expect(dateTime(iso, 'America/Los_Angeles')).toBe('Jul 23, 12:00 PM');
+  });
+
+  it('OMITTING the parameter is byte-identical to the previous behavior', () => {
+    const legacy = new Date(iso).toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    expect(dateTime(iso)).toBe(legacy);
+  });
+
+  it('still falls back to the normalized string when unparseable', () => {
+    expect(dateTime('not-a-date', 'America/New_York')).toBe('not-a-date');
+  });
+
+  it('normalizes an audit sort key before zoning it', () => {
+    // The sort-key suffix must be stripped on the zoned path too, not just the
+    // legacy one (dateTime is the ONE entry point for both).
+    expect(dateTime(`${iso}#33937ff7`, 'America/New_York')).toBe(dateTime(iso, 'America/New_York'));
+  });
+});

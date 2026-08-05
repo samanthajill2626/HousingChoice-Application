@@ -973,7 +973,16 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    for the wire. nextCursor was derived above from the descending slice's
     //    LAST element (the OLDEST returned item) BEFORE this reverse, so the
     //    cursor still pages backward in time (older) with no dups/skips.
-    res.json({ items: page.map((c) => c.item).reverse(), nextCursor, upcoming });
+    // `timezone` is the zone the `upcoming` BODIES were composed in (spec D8),
+    // so the client can render each card's fire time in the same zone the body
+    // quotes instead of the navigator's browser zone. Always present - the
+    // window is read above the gather's conditional and its catch.
+    res.json({
+      items: page.map((c) => c.item).reverse(),
+      nextCursor,
+      upcoming,
+      timezone: window.timezone,
+    });
   });
 
   return router;

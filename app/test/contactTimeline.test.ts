@@ -787,6 +787,10 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up.every((i) => i.suppression === undefined)).toBe(true);
     expect(up[0]!.refType).toBe('tour');
     expect(up[0]!.refId).toBe(tour.tourId);
+    // The response carries the zone those bodies were composed in (spec D8), so
+    // each card's fire-time label renders in the zone its body quotes rather
+    // than in whatever zone the navigator's browser happens to sit in.
+    expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
   });
 
   it('non-self_guided tour with an UNUSABLE (closed) group still surfaces its rungs as 1:1 items (M3)', async () => {

@@ -3,6 +3,8 @@
 //
 //   GET   /api/tours/:tourId/reminders
 //        → { reminders: TourReminderView[]; next?: TourReminderView }
+//          ... plus `timezone`: the ORG zone the bodies were composed in
+//          (spec D8), which the panel formats its own time labels with
 //   PATCH /api/tours/:tourId/reminders/:reminderId  { canceled: boolean }
 //        → { reminder: TourReminderView } | 409 (already sent/skipped, or the
 //          transition raced the poll — the honest current state is returned)
@@ -449,7 +451,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       'tour reminders read',
     );
 
-    res.json({ reminders: reminderViews, ...(next !== undefined && { next }) });
+    // `timezone` is the zone the rung BODIES were composed in (spec D8): the
+    // panel renders every timestamp beside them in THIS zone, so a navigator
+    // outside the org's zone never reads a chip that contradicts the text. Only
+    // this LIST response carries it - the single-row PATCH / send-now payloads
+    // reuse the zone the panel is already holding.
+    res.json({
+      reminders: reminderViews,
+      timezone: window.timezone,
+      ...(next !== undefined && { next }),
+    });
   });
 
   // GET /:tourId/no-show-checkin-draft -> the templated body for the MANUAL

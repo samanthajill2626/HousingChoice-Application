@@ -1340,6 +1340,10 @@ describe('relay-group API (M1.7)', () => {
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');
       expect(first['refId']).toBe(tour.tourId);
+      // The bucket carries the zone those bodies were composed in (spec D8), so
+      // the group thread renders each card's fire time in the same zone the
+      // body quotes - exactly like the contact timeline.
+      expect(res.body.timezone).toBe(world.settings.timezone);
 
       // Fire one rung (claim = sent) — it must drop out of the bucket.
       const rows = await world.tourRemindersRepo.listByTour(tour.tourId);

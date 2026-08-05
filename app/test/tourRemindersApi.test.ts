@@ -187,7 +187,7 @@ describe('GET /api/tours/:tourId/reminders', () => {
     const res = await authed(app).get(`/api/tours/${tourId}/reminders`);
     expect(res.status).toBe(200);
 
-    const { reminders, next } = res.body as {
+    const { reminders, next, timezone } = res.body as {
       reminders: {
         reminderId: string;
         kind: ReminderKind;
@@ -199,7 +199,13 @@ describe('GET /api/tours/:tourId/reminders', () => {
         suppression?: { reason: string };
       }[];
       next?: { reminderId: string; kind: ReminderKind; state: string };
+      timezone?: string;
     };
+
+    // The LIST response carries the zone the bodies were composed in (spec D8):
+    // the panel formats its own time labels with it, so a navigator outside the
+    // org's zone never reads a chip that contradicts the body beside it.
+    expect(timezone).toBe(world.settings.timezone);
 
     // Sorted ascending by dueAt: confirmation, day_before, morning_of.
     expect(reminders.map((r) => r.kind)).toEqual(['confirmation', 'day_before', 'morning_of']);

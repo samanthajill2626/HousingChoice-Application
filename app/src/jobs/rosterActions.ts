@@ -207,18 +207,35 @@ type ActionVerdict =
   /** Unreadable world: claim nothing at all. */
   | { wait: true };
 
+/** One page of the removal scan, and how many pages it may read. The window a
+ *  deferral spans is up to ~11 hours, and a contact active across several
+ *  tours/placements can log a lot in that time - so the scan is bounded by the
+ *  ROW'S OWN AGE (it stops at the first event older than createdAt), not by a
+ *  fixed event count. The page cap is only a runaway guard. */
+const REMOVAL_SCAN_PAGE_SIZE = 25;
+const REMOVAL_SCAN_MAX_PAGES = 10;
+
 /**
  * Was this member REMOVED from the thread while the add was pending (spec 5.3
  * `member_no_longer_on_roster`)? The evidence is their own timeline: the live
  * remove path pins `removed_from_group_text` against the conversation, so a pin
  * for THIS thread dated after the row was born means an operator took them off
  * after confirming the add - re-adding them at 8 AM would resurrect someone
- * deliberately removed.
+ * deliberately removed, and TEXT the group about it.
  *
  * A removal from BEFORE the row was born is the opposite case (a deliberate
  * re-add of a previously-removed member) and must apply normally, which is why
  * this compares against `createdAt` instead of just checking membership history.
- * Best-effort: an unreadable timeline answers "no evidence" and the add applies.
+ *
+ * So the scan pages back (newest-first) until it reaches events OLDER than
+ * `createdAt` - the point past which nothing can be evidence - rather than
+ * reading a fixed first page a busy contact would overflow. If the cap is hit
+ * before that boundary, the answer is "we do not know", and the conservative
+ * failure is to REFUSE: not texting someone is recoverable (the notice says so),
+ * announcing a deliberately-removed person is not.
+ *
+ * Best-effort on a read FAILURE only: an unreadable timeline answers "no
+ * evidence" and the add applies, as before.
  */
 async function removedWhilePending(
   row: PendingRosterActionItem,
@@ -228,13 +245,29 @@ async function removedWhilePending(
   log: Logger,
 ): Promise<boolean> {
   try {
-    const { items } = await deps.activityEvents.listByContact(contactId, { limit: 25 });
-    return items.some(
-      (e) =>
-        e.type === 'removed_from_group_text' &&
-        e.refId === conversationId &&
-        e.at > row.createdAt,
+    let before: string | undefined;
+    for (let page = 0; page < REMOVAL_SCAN_MAX_PAGES; page += 1) {
+      const { items } = await deps.activityEvents.listByContact(contactId, {
+        limit: REMOVAL_SCAN_PAGE_SIZE,
+        ...(before !== undefined && { before }),
+      });
+      for (const e of items) {
+        // Newest-first: the first event at or before the row's birth ends the
+        // window - nothing older can be a removal "while pending".
+        if (e.at <= row.createdAt) return false;
+        if (e.type === 'removed_from_group_text' && e.refId === conversationId) return true;
+      }
+      // A short page means the feed is exhausted: the boundary IS reached.
+      if (items.length < REMOVAL_SCAN_PAGE_SIZE) return false;
+      const oldest = items[items.length - 1];
+      if (oldest === undefined) return false;
+      before = oldest.tsEventId;
+    }
+    log.warn(
+      { actionId: row.actionId, pages: REMOVAL_SCAN_MAX_PAGES },
+      'roster action: removal-history scan hit the page cap without reaching the row - refusing the add',
     );
+    return true;
   } catch (err) {
     log.warn(
       { err, actionId: row.actionId },

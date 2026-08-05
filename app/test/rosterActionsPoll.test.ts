@@ -477,6 +477,76 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
+  it('honors a removal pin buried behind 30+ NEWER events (PL4 - pages to the boundary)', async () => {
+    // A busy contact (several tours/placements) can push the removal milestone
+    // well past one page of activity inside an 11-hour quiet window. A fixed
+    // first-page read would miss it and re-add - AND announce - someone an
+    // operator deliberately removed.
+    const tourId = await createTour();
+    seedThread('conv-live', [
+      { contactId: 'c-tenant', phone: TENANT_PHONE },
+      { contactId: 'c-pm', phone: PM_PHONE },
+    ]);
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-live' });
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+    await world.activityEventsRepo.record({
+      contactId: 'c-case',
+      type: 'removed_from_group_text',
+      label: 'Removed from group text',
+      refType: 'conversation',
+      refId: 'conv-live',
+      at: '2026-07-15T04:00:00.000Z', // AFTER the deferral was confirmed
+    });
+    // 34 milestones NEWER than the removal, all unrelated to this thread.
+    for (let i = 0; i < 34; i += 1) {
+      await world.activityEventsRepo.record({
+        contactId: 'c-case',
+        type: 'listing_sent',
+        label: 'Listing sent',
+        at: `2026-07-15T05:${String(i).padStart(2, '0')}:00.000Z`,
+      });
+    }
+    world.sent.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('member_no_longer_on_roster');
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('refuses to text when the scan CANNOT reach the boundary (conservative failure)', async () => {
+    // Beyond the page cap there is no evidence either way - so we do NOT send.
+    const tourId = await createTour();
+    seedThread('conv-live', [
+      { contactId: 'c-tenant', phone: TENANT_PHONE },
+      { contactId: 'c-pm', phone: PM_PHONE },
+    ]);
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-live' });
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+    // Every page full of events NEWER than the row, with no removal pin: the
+    // scan runs out of pages before it can prove the member was NOT removed.
+    for (let i = 0; i < 260; i += 1) {
+      await world.activityEventsRepo.record({
+        contactId: 'c-case',
+        type: 'listing_sent',
+        label: 'Listing sent',
+        at: new Date(Date.parse('2026-07-15T04:00:00.000Z') + i * 1000).toISOString(),
+      });
+    }
+    world.sent.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('member_no_longer_on_roster');
+    expect(world.sent).toHaveLength(0);
+  });
+
   it('applies an add whose member was removed BEFORE the deferral (a deliberate re-add)', async () => {
     const tourId = await createTour();
     seedThread('conv-live', [

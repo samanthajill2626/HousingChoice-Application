@@ -41,7 +41,8 @@ IN:
 - A snapshot of the sent body on the row, so history stays honest (D4).
 - `analyzeSms()` plus a catalog-wide ASCII test for code-controlled copy, and the
   three em-dash edits that test forces.
-- The Reminders panel's time chip normalized to the composing timezone (D8).
+- BOTH affected dashboard surfaces re-zoned to the composing timezone (D8): the
+  tour page's Reminders panel AND the contact timeline's ScheduledCard.
 
 OUT (explicitly deferred, each with a follow-up issue to file - section 10):
 - The Settings-UI advisory showing an operator the encoding and segment count of
@@ -94,13 +95,30 @@ The rule:
 - rung HAS `sentAt` -> render the stored `sentBody`.
 
 `sentBody` is written in the SAME atomic update as `sentAt`, by passing the
-composed body into `claimSend`. Composing before the claim is required anyway on
-the 1:1 path, so this reorders nothing material. Rendering from the thread instead
-was rejected: no rung-to-message link exists today.
+composed body into `claimSend`. Rendering from the thread instead was rejected:
+no rung-to-message link exists today.
+
+THE REORDER IS REAL AND IS THE RISKIEST EDIT IN THIS DIFF. Only ONE of the four
+send call sites composes before it claims today:
+
+| site | claims at | composes at | needs reorder |
+|---|---|---|---|
+| poll, 1:1 (`processReminderRow`) | `:587` | `:579` | NO - already before |
+| force-send, 1:1 (`forceSendReminder`) | `:871` | `:903` | YES |
+| poll, group (`sendGroupReminder`) | `:715` | `:767` (inside `announceGroupReminder`) | YES |
+| force-send, group | `:882` | `:767` (same) | YES |
+
+Three of four must move composition ABOVE the claim. `claimSend` IS the `sentAt`
+stamp, so a compose failure after it burns the rung permanently - see W6, which
+this table is the evidence for. For the two group paths the body must be composed
+by the CALLER and passed into `announceGroupReminder`, which today composes it
+itself.
 
 Legacy rows (armed before this change) have no `sentBody`; they fall back to
 composing live. Documented, not migrated - the old copy carried no time or
-address, so there is nothing to be wrong about.
+address, so there is nothing to be wrong about. NOTE this means a read path can
+never skip the unit/timezone reads on the grounds that a rung is already sent:
+any request may contain a legacy row. `sentBody` saves correctness, not I/O.
 
 **D5. REVISED - address means street-only WHEN STRUCTURED, stored string
 otherwise.** v1 claimed "street only (line1 + line2), no city/state/zip". That is
@@ -137,6 +155,22 @@ string stop being the sent string - exactly the drift the parity test exists to
 prevent - and fails silently when an optional token precedes a comma); a trailing
 space instead of a leading one (moves the wart, does not remove it).
 
+ACKNOWLEDGED TENSION WITH D1. D1 rejects per-route variants precisely because
+they "double the entries and double what an operator keeps in sync", and D7 then
+doubles the entries 4 -> 8 anyway. That is a knowing trade, not an oversight: the
+unlearnable-whitespace cost D7 avoids is paid on EVERY future read of the
+catalog, while the sync cost is paid only by an operator editing tour copy - and
+no such operator exists yet (see the override note below). Concrete consequence
+to accept: someone overriding `tour.day_before` sees NO change for address-less
+tours, because those render `tour.day_before_no_address`.
+
+OVERRIDES ARE UNREACHABLE TODAY. `settingsToOverrides` (`messages/resolve.ts:77`)
+maps only `welcome.sms` and `missed_call.autotext`, so no `tour.*` override can
+exist and the composer's `overrides` parameter is DEAD CODE for now. It is
+carried because `resolveMessage` takes it and the generic Templates UI is a filed
+follow-up. Stated so a reviewer does not go hunting for an override path that
+isn't built.
+
 **D8. NEW - timezone resolves through the existing seam, and the API returns the
 zone it used.** Do NOT read `settings.timezone` directly. Every timezone
 resolution goes through `resolveQuietHoursTimezone(settings, contact?)`
@@ -150,15 +184,31 @@ through. This spec builds no field; it only makes sure tour copy uses the seam,
 so the day a contact-level zone lands, reminder copy becomes recipient-local for
 free.
 
-Consequence for the dashboard: `RemindersPanel.tsx` renders its chips through
-`dateTime` / `sendRelative` (`placements/placementsFormat.ts`), which call
-`toLocaleString` with NO `timeZone` - i.e. the BROWSER's zone. Once the body
-carries a time, staff outside America/New_York see a row whose chip and body
-disagree. Before this change no disagreement was possible, so this change
-introduces the defect and must fix it. The reminders response therefore carries
-the `timezone` actually used to compose, and the panel formats its chips in that
-zone. Hardcoding "org timezone" in the panel was rejected: returning the
-composing zone keeps chip and body agreeing even after per-contact zones land.
+Consequence for the dashboard: `dateTime` (`placements/placementsFormat.ts`)
+calls `toLocaleString` with NO `timeZone` - i.e. the BROWSER's zone. Once a body
+carries an org-local time, staff outside America/New_York see a row whose chip
+and body disagree. Before this change no disagreement was possible, so this
+change introduces the defect and must fix it.
+
+TWO surfaces are affected, not one:
+- `RemindersPanel.tsx:79,103` (the tour page), fed by sites 4 and 5.
+- `contact/ScheduledCard.tsx:37` (the contact timeline), which renders
+  `[sendRelative(at), dateTime(at)]` directly beside the body that site 6
+  composes. This one is easy to miss and the argument above applies to it
+  verbatim.
+
+BOTH responses therefore carry the `timezone` actually used to compose, and both
+components format in that zone. Hardcoding "org timezone" in the components was
+rejected: returning the composing zone keeps chip and body agreeing even after
+per-contact zones land.
+
+CONSTRAIN THE FORMATTER CHANGE. `dateTime` is shared by FIVE consumers -
+`ScheduledCard`, `RemindersPanel`, `DeadlinesNudgesCard`, `PlacementNowCard` and
+`TourDetail`. Re-zoning it in place would silently move every placement and
+activity timestamp in the dashboard. REQUIRED: add an OPTIONAL `timeZone`
+parameter defaulting to today's behavior (or add a sibling function), so the
+three non-reminder consumers are provably unchanged. `sendRelative` is purely
+relative and therefore zone-independent - do NOT touch it.
 
 **D9. NEW - an unbounded address is ACCEPTED here; length is a universal
 concern, not a tour concern.** Address length has NO storage-level bound.
@@ -219,6 +269,16 @@ Address-bearing entries declare `vars: ['when', 'time', 'where']`; `_no_address`
 entries declare `vars: ['when', 'time']`. `interpolate` only substitutes tokens
 present in a template, so declaring both time tokens on every entry is safe, and
 every declared-and-present token is always supplied (D7's strict-throw guarantee).
+
+KNOWN GAP IN THAT ASYMMETRY, to be documented in a catalog comment rather than
+"fixed": `interpolate` iterates only over `allowed`, so a token NOT declared is
+never inspected at all. An operator override of `tour.morning_of_no_address`
+containing `{where}` would therefore emit the literal text `{where}` to a tenant,
+with no throw (strict applies to defaults, and `where` is never examined).
+Declaring `where` on the `_no_address` entries would suppress that, but only by
+reintroducing the always-pass-a-string hole D7 exists to close. The right fix is
+a comment on each half stating which vars it accepts. This is unreachable today
+regardless - no `tour.*` override can exist (see D7's override note).
 
 Rendered with the SEEDED address (`350 Boulevard SE, Atlanta, GA 30312`, a legacy
 plain string - this is what dev, demos and e2e actually show, per D5):
@@ -297,9 +357,31 @@ delegates to `resolveMessage`. This is the ONLY module allowed to construct a
 optional. This is a deliberate narrowing: a reminder row cannot exist for a
 time-less tour (`armTourReminders` returns early without one, and PATCH cannot
 clear it), so every caller has one in hand. The composer validates it and throws
-a NAMED error rather than letting `formatLocalDate` surface a bare `RangeError`.
-`{when}` and `{time}` have no graceful empty shape - they sit mid-sentence - so
-there is nothing to degrade to.
+a NAMED `UncomposableReminderError` rather than letting `formatLocalDate` surface
+a bare `RangeError`. `{when}` and `{time}` have no graceful empty shape - they
+sit mid-sentence - so the composer itself has nothing to degrade to.
+
+**NO CALL SITE MAY PROPAGATE THAT THROW.** The composer is partial; every caller
+must make itself total. This is not defensive padding - each unhandled path has a
+specific, verified failure mode:
+
+- SEND paths: a throw escapes `processReminderRow` into the per-row try/catch at
+  `tourReminders.ts:379-390`, which logs and continues WITHOUT claiming. The row
+  stays in `listDue` and is retried every 60s FOREVER - precisely the perpetual
+  "sending shortly" bug that `claimSkip` was built to end (see the `claimSkipRow`
+  docstring). Required: catch `UncomposableReminderError` and CLAIM-SKIP the rung
+  with a new `ReminderSkipReason` of `invalid_schedule`, so it retires once and
+  visibly. Add the matching label beside the existing skip-reason labels in
+  `RemindersPanel.tsx`.
+- READ paths (sites 4, 5, 6): no such guard exists. A throw is a 500 on the tour
+  page AND the contact timeline. A read path must NEVER 500 over copy rendering.
+  Required: catch and degrade - render the `_no_address`/no-time shape, or omit
+  the body for that rung - and log at warn.
+
+Probability is low (rows cannot be armed without `scheduledAt`, PATCH cannot
+clear it, and the value is canonicalized at the boundary). Low probability plus
+unbounded retry is a class this repo has already been bitten by, which is why the
+containment is specified rather than left to judgment.
 
 **EXTENDED `app/src/lib/address.ts`** - add `formatStreet(a)` beside
 `formatAddress`: joins `line1` and `line2` with a space, returns a legacy
@@ -347,6 +429,19 @@ row inside it. This is the shape most likely to be got wrong.
   `unitsRepo.getById(tour.unitId)`.
 - `contactTimeline.ts` ALREADY has `unitsRepo` and `settingsRepo` in its deps
   (`:102`, `:95`) - wiring there is cheap.
+- `routes/dev.ts:241` builds `tourReminderDeps` for
+  `POST /__dev/tour-reminders/tick` - THE path every e2e reminder assertion runs
+  through. Its return type IS annotated `(): RunDueTourRemindersDeps`, so
+  typecheck catches a missing `unitsRepo` here (unlike the cast below). Named
+  explicitly because section 8's e2e strategy composes expected bodies from
+  seeded fixture data: an unwired dev tick would make every e2e body silently
+  lose its address and fail the suite in a confusing way.
+- `claimSend` signature change: `tourRemindersRepo.ts:96` becomes
+  `claimSend(reminderId, claimedAt, sentBody)`, adding `#sentBody` to the SAME
+  conditional `UpdateExpression` (genuinely atomic, no second write). Fake blast
+  radius is ONE implementation: `app/test/helpers/twilioWebhookHarness.ts:2085`.
+  The other `claimSend` hits call the real repo, and `:2179` is
+  `placementNudgesRepo`'s separate `claimSend` - do NOT touch it.
 - TYPECHECK BLIND SPOT: `contactTimeline.ts:613` builds
   `{ conversationsRepo } as unknown as RunDueTourRemindersDeps`. That cast will
   silently swallow a new required field, so typecheck will NOT flag the one
@@ -368,9 +463,21 @@ of them now need the timezone. Read it once per request.
 
 **Failure posture** (the `resolveWithSettings` precedent): a missing unit, a
 unit-read failure, a missing `unitId`, or an empty address ALL degrade to the
-`_no_address` variant. Composition never blocks a send. A
-read failure logs at warn with IDs only. The single exception is a missing
-`scheduledAt`, which throws by design (section 5).
+`_no_address` variant, which requires no error handling at any call site. A read
+failure logs at warn with IDs only.
+
+The ONE partial case is a missing/invalid `scheduledAt`, which throws
+`UncomposableReminderError` by design. Section 5 specifies exactly how each call
+site contains it - send paths claim-skip with `invalid_schedule`, read paths
+degrade and never 500. Composition is NOT total; the call sites are what make the
+system total.
+
+**Preserve the announcement `kind` tag.** `announceGroupReminder:768` passes
+``kind: `tour.${row.kind}` `` to `sendRelayAnnouncement`. Keep it derived from
+`row.kind`, NOT from the eight-way catalog id the composer selects - otherwise
+every log line forks by address presence. Verified low severity (`kind` is
+log-only in `relayAnnouncements.ts`, never persisted), but it is a one-word
+mistake that is easy to make while touching this exact function.
 
 ## 7. Folded in: ASCII enforcement on code-controlled copy
 
@@ -446,8 +553,18 @@ Unit:
 - `smsEncoding` - GSM-7 vs UCS-2 classification, the 160/153 and 70/67
   boundaries, and the 2-septet extension characters.
 - `tourCopy` - every rung with and without an address, legacy string address,
-  a missing `scheduledAt` throwing the named error, and
+  a missing `scheduledAt` throwing `UncomposableReminderError`, and
   `analyzeSms(...).segments === 1` for every body composed with the seeded address.
+- `dateTime` - the new optional `timeZone` parameter renders in the given zone,
+  AND omitting it is byte-identical to today's output. The second half is what
+  proves `DeadlinesNudgesCard` / `PlacementNowCard` / `TourDetail` are unchanged.
+
+Containment (pins section 5 - each has a specific verified failure mode):
+- a rung whose `scheduledAt` is unusable is CLAIM-SKIPPED with `invalid_schedule`
+  on the send path, and is NOT re-listed by a subsequent `listDue` - the
+  regression test for the every-60s-forever retry loop.
+- each read path (sites 4, 5, 6) returns 200 with a degraded body rather than
+  500 when composition throws.
 
 Catalog:
 - Every `channel: 'sms'` DEFAULT is ASCII. The durable guard of section 7; its
@@ -487,13 +604,22 @@ Known regressions to fix (verified, beyond the two files v1 named):
 
 e2e - a DESIGN decision, not a mechanical fix:
 `e2e/scenarios/steps.ts:131-136` derives `TOUR_REMINDER_BODIES` directly from
-`MESSAGE_CATALOG[...].default` and asserts EXACT equality (`m.body === body` at
-`:1811`, `:1848`). After this change those constants would literally contain
-`{when}`. The harness must instead import the real `composeTourReminderBody` and
-build expected bodies from the seeded fixture data (the cross-workspace import
-path already exists - `steps.ts` imports `MESSAGE_CATALOG` today). This keeps
-exact equality AND one source of truth. Where a step lacks the tour context, fall
-back to a kind-distinctive substring. Consumers to update: `tours.spec.ts`,
+`MESSAGE_CATALOG[...].default`. After this change those constants would literally
+contain `{when}`.
+
+THREE step helpers consume it, at `:1801`, `:1827` and `:1839`, and they do NOT
+all assert the same way:
+- `:1801` and `:1839` compare against the fake-provider OUTBOX (`m.body === body`
+  at `:1811` and `:1848`) - `expectReminderInGroup` and `expectReminderTo1to1`.
+- `:1827` (`expectReminderVisibleInGroupThread`) asserts `getByText(body)`
+  against the DASHBOARD group thread. It is a DOM text match, not an outbox
+  match, so it fails differently and is the easiest of the three to miss.
+
+The harness must import the real `composeTourReminderBody` and build expected
+bodies from the seeded fixture data (the cross-workspace import path already
+exists - `steps.ts` imports `MESSAGE_CATALOG` today). This keeps exact equality
+AND one source of truth. Where a step lacks the tour context, fall back to a
+kind-distinctive substring. Consumers to update: `tours.spec.ts`,
 `scheduled-visibility.spec.ts`, `quiet-hours.spec.ts`, and
 `dashboard-next/tour-comms-pane.spec.ts` (see W4).
 
@@ -522,8 +648,17 @@ the chip in the composing timezone (D8). Honor the known flake
   free, so do not add a second settings path.
 - **W6 - `sentBody` and the claim.** `claimSend` IS the `sentAt` stamp. The body
   must be composed BEFORE the claim and written in the same update; a compose
-  failure after the claim would burn the rung. Section 6's failure posture makes
-  composition total, which is what makes this safe.
+  failure after the claim would burn the rung. THREE of the four send sites
+  currently compose AFTER claiming and must be reordered - see D4's table, which
+  is the evidence for this watch item. What makes the reorder safe is NOT that
+  composition is total (it is not - section 5), but that every caller CONTAINS
+  the one partial case: send paths claim-skip with `invalid_schedule` instead of
+  letting the throw reach the per-row catch at `tourReminders.ts:379-390`, which
+  would otherwise retry the row every 60s forever.
+- **W7 - read paths must never 500 over copy.** Sites 4, 5 and 6 have no
+  equivalent of the poll's per-row guard. An uncontained compose throw is a 500
+  on the tour page and the contact timeline. Section 5 requires the catch-and-
+  degrade; a reviewer should verify it exists at all three.
 
 ## 10. Out of scope, and follow-up issues to file
 

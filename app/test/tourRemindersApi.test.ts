@@ -874,6 +874,42 @@ describe('composed reminder bodies', () => {
     // resolved the catalog directly would no longer match this send.
     expect(spy.sent.at(-1)?.body).toBe(preview.body);
   });
+
+  it('a SENT rung keeps its original body after the tour is rescheduled', async () => {
+    // D4: sent rows survive a reschedule (only PENDING rungs are canceled).
+    // Without the claim-time snapshot a read path would recompose them with the
+    // NEW time and claim we texted something we never texted - and disagree
+    // with the thread, which still shows the original text.
+    const { app, world } = makeWebhookHarness();
+    const spy = makeSendSpy();
+    const deps = pollDepsFrom(world, spy.service);
+    const { tourId, reminderId } = await seedComposedTour(world, 'history', '+15550710002');
+
+    const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const target = listed.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === reminderId,
+    );
+    expect(target).toBeDefined();
+    await runDueTourReminders(target.dueAt, deps);
+
+    const afterSend = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const sentBefore = afterSend.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === reminderId,
+    );
+    expect(sentBefore.state).toBe('sent');
+    // What the send path actually put on the wire is what the panel shows.
+    expect(sentBefore.body).toBe(spy.sent.at(-1)?.body);
+
+    // Reschedule on the fake directly - no status gate, no HTTP: the status
+    // rules are not what this test is about.
+    await world.toursRepo.patch(tourId, { scheduledAt: '2026-12-01T20:00:00.000Z' });
+
+    const afterReschedule = await authed(app).get(`/api/tours/${tourId}/reminders`);
+    const sentAfter = afterReschedule.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === reminderId,
+    );
+    expect(sentAfter.body).toBe(sentBefore.body);
+  });
 });
 
 // ===========================================================================

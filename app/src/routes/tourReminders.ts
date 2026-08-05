@@ -48,6 +48,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import {
   evaluateScheduledSendSuppression,
@@ -87,6 +88,9 @@ export interface TourRemindersRouterDeps {
   adapter?: MessagingAdapter;
   /** GROUP route: persists the rung as a system announcement in the thread. */
   messagesRepo?: MessagesRepo;
+  /** The unit's address for the composed reminder copy (both the send-now path
+   *  and the previews below). */
+  unitsRepo?: UnitsRepo;
   /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */
   auditRepo?: AuditRepo;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
@@ -130,6 +134,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
@@ -147,6 +152,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     settingsRepo: settings,
     adapter: deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger }),
     messagesRepo: deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger }),
+    unitsRepo: units,
     events,
     ...(deps.logger !== undefined && { logger: deps.logger }),
   };

@@ -110,6 +110,9 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     contactsRepo: world.contactsRepo,
     conversationsRepo: world.conversationsRepo,
     messagesRepo: world.messagesRepo,
+    // Address source for the composed body (empty here - these tours' units are
+    // never seeded, which is exactly the no-address variant).
+    unitsRepo: world.unitsRepo,
     sendMessageService,
     adapter: createAdapterSpy().adapter,
     // Quiet hours OFF: the fire-time backstop is a no-op, so these poller cases
@@ -687,6 +690,71 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(rows.find((r) => r.reminderId === withoutBody.reminderId)?.sentBody).toBeUndefined();
   });
 
+  // ---------------------------------------------------------------------------
+  // COMPOSE-ABOVE-THE-CLAIM containment. The body is composed from the tour's
+  // scheduledAt, and a tour can lose a usable one (a bad write, a legacy row);
+  // the composer THROWS on that. claimSend IS the sentAt stamp, so the compose
+  // must happen ABOVE it - and its failure must be a claim-SKIP, not an escape
+  // into the per-row catch, which would leave the row unclaimed and re-listed
+  // by every 60s tick forever (the perpetual "sending shortly" bug).
+  //
+  // Its own January-05 timeline: every other fixture in this file is due on
+  // 2026-01-14 or later, so this poll's batch is exactly this one row.
+  // ---------------------------------------------------------------------------
+  it('a rung whose scheduledAt is unusable is claim-skipped, NOT retried forever', async () => {
+    world.sent.length = 0;
+    const contactId = 'contact-badsched-1';
+    const phone = '+15550200077';
+    const convId = 'conv-badsched-1';
+    const seededAt = '2026-01-05T00:00:00.000Z';
+    // A RESOLVABLE 1:1 target: the failure under test is the COMPOSE, not the
+    // target resolution (which claim-skips with its own reasons well before it).
+    world.contacts.push({
+      contactId,
+      type: 'tenant',
+      phone,
+      created_at: seededAt,
+    } as Parameters<typeof world.contacts.push>[0]);
+    world.conversations.set(convId, {
+      conversationId: convId,
+      participant_phone: phone,
+      status: 'open',
+      type: 'tenant_1to1',
+      ai_mode: 'auto',
+      last_activity_at: seededAt,
+      created_at: seededAt,
+    });
+
+    const tour = await tours.create({
+      tenantId: contactId,
+      unitId: 'unit-badsched-1',
+      scheduledAt: '2026-01-06T18:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    const row = await tourReminders.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2026-01-05T15:00:00.000Z',
+    });
+    // Corrupt the tour's time AFTER arming - the only way to reach this state.
+    // The method is patch(), NOT update() - toursRepo has no update.
+    await tours.patch(tour.tourId, { scheduledAt: 'not-an-instant' });
+
+    const pollAt = '2026-01-05T15:00:01.000Z';
+    await runDueTourReminders(pollAt, runDeps);
+
+    const after = (await tourReminders.listByTour(tour.tourId))
+      .find((r) => r.reminderId === row.reminderId);
+    expect(after?.skippedAt).toBe(pollAt);
+    expect(after?.skipReason).toBe('invalid_schedule');
+    expect(after?.sentAt).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+
+    // The point of the claim-skip: it leaves listDue permanently.
+    expect((await tourReminders.listDue('2026-01-05T15:10:00.000Z'))
+      .some((r) => r.reminderId === row.reminderId)).toBe(false);
+  });
+
   // ===========================================================================
   // FIRE-TIME BACKSTOP (quiet-hours spec 2026-08-03, section 6)
   //
@@ -1195,6 +1263,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       contactsRepo: racingWorld.contactsRepo,
       conversationsRepo: racingWorld.conversationsRepo,
       messagesRepo: racingWorld.messagesRepo,
+      unitsRepo: racingWorld.unitsRepo,
       sendMessageService: racingSend,
       adapter: createAdapterSpy().adapter,
       settingsRepo: quietOff,
@@ -1278,6 +1347,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       contactsRepo: cancelWorld.contactsRepo,
       conversationsRepo: cancelWorld.conversationsRepo,
       messagesRepo: cancelWorld.messagesRepo,
+      unitsRepo: cancelWorld.unitsRepo,
       sendMessageService: cancelSend,
       adapter: createAdapterSpy().adapter,
       settingsRepo: quietOff,
@@ -1387,6 +1457,7 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       // Group rungs persist a system announcement row in the relay thread
       // (sendRelayAnnouncement) — the world's message store backs it.
       messagesRepo: world.messagesRepo,
+      unitsRepo: world.unitsRepo,
       sendMessageService: send,
       adapter: spy.adapter,
       settingsRepo: quietOff,

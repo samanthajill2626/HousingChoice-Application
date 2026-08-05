@@ -248,6 +248,10 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       contactsRepo: createContactsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
       messagesRepo: createMessagesRepo({ logger: log }),
+      // The unit's address rides in the reminder copy - THIS is the path every
+      // e2e reminder assertion runs through, so an unwired tick would silently
+      // strip the address from every hermetic body.
+      unitsRepo: createUnitsRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
       adapter: createMessagingAdapter({ config, logger: log }),
       // Quiet hours (spec 2026-08-03): the tick runs the SAME pre-claim

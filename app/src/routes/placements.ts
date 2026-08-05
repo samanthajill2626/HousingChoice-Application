@@ -78,6 +78,7 @@ import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
 import {
   openPlacementGroup,
+  placementOpenGuard,
   type OpenPlacementGroupDeps,
 } from '../services/rosterProvision.js';
 import {
@@ -1449,6 +1450,32 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       res.status(404).json({ error: 'placement_not_found' });
       return;
     }
+
+    // THE GUARDS RUN FIRST - BEFORE the quiet-hours evaluation, exactly as the
+    // tours twin does (routes/tours.ts: tourOpenGuard, then the deferral).
+    // Deferring first would answer 202 "Opens at 8:00 AM" to a click that is not
+    // allowed AT ALL: a terminal placement would get a pending row instead of
+    // 409 placement_not_active, and a placement whose relay is ALREADY OPEN
+    // would get a banner about a group that exists (and, because upsertPending
+    // is an unconditional Put, would resurrect a previously-resolved row).
+    // Both are pure reads, so running them first costs nothing.
+    const terminal = placementOpenGuard(item);
+    if (terminal !== undefined) {
+      res.status(terminal.status).json(terminal.body);
+      return;
+    }
+    if (typeof item.group_thread === 'string' && item.group_thread.length > 0) {
+      const existing = await conversations.getById(item.group_thread);
+      if (
+        existing &&
+        existing.type === 'relay_group' &&
+        (existing.status === 'open' || existing.status === 'connecting')
+      ) {
+        res.status(409).json({ error: 'relay_exists', conversation: existing });
+        return;
+      }
+    }
+    // openPlacementGroup re-applies both below - one definition, checked twice.
 
     // QUIET-HOURS DEFERRAL (D7) - membership and message defer together.
     if (!isForceSendNow(req)) {

@@ -1051,6 +1051,100 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       expect(world.sent.length).toBeGreaterThan(0);
     });
 
+    // --- MF3: the guards run BEFORE the deferral (tours parity) -------------
+
+    it('an ALREADY-OPEN relay answers 409 relay_exists, never a pending row', async () => {
+      const placementId = await createPlacement();
+      await seedThread(placementId, [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ]);
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('relay_exists');
+      // No banner about a group that already exists - and nothing that an
+      // unconditional upsertPending could later resurrect.
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('a TERMINAL placement answers 409 placement_not_active, never a pending row', async () => {
+      const placementId = await createPlacement();
+      await world.placementsRepo.update(placementId, { stage: 'lost' });
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('placement_not_active');
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('a CLOSED-thread pointer passes the guards in BOTH forms, and the deferred one answers visibly', async () => {
+      // Neither form is refused by the guards (a closed relay does not block a
+      // re-open) - that is the parity the reorder buys. The OUTCOMES still
+      // differ downstream: the immediate click re-opens, while the poller
+      // deliberately does not re-open a closed thread and retires the row with
+      // the VISIBLE group_closed notice instead. Reopen semantics are an open
+      // decision (docs/issues/relay-reopen-semantics.md); what matters here is
+      // that the deferred click is answered rather than silently dropped.
+      const deferredId = await createPlacement();
+      world.conversations.set('conv-closed-a', {
+        conversationId: 'conv-closed-a',
+        participant_phone: '+15550409001',
+        pool_number: '+15550409001',
+        status: 'closed',
+        last_activity_at: QUIET_NOW,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: [
+          { contactId: 'c-tenant', phone: TENANT_PHONE },
+          { contactId: 'c-pm', phone: PM_PHONE },
+        ],
+        created_at: QUIET_NOW,
+      });
+      await world.placementsRepo.update(deferredId, { group_thread: 'conv-closed-a' });
+
+      const deferred = await quietReq.post(`/api/placements/${deferredId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${deferredId}#open`;
+      const applied = await quietReq.post(
+        `/api/placements/${deferredId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+      );
+      await queueAdapter.settle();
+      expect(applied.status).toBe(200);
+      expect(applied.body.pending).toEqual([]);
+      expect(applied.body.skipped).toEqual([
+        { actionId, kind: 'open_group', reason: 'group_closed', at: QUIET_NOW },
+      ]);
+
+      // The FORCED form of the same click on the same shape: guards pass too.
+      const forcedId = await createPlacement();
+      world.conversations.set('conv-closed-b', {
+        conversationId: 'conv-closed-b',
+        participant_phone: '+15550409002',
+        pool_number: '+15550409002',
+        status: 'closed',
+        last_activity_at: QUIET_NOW,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: [
+          { contactId: 'c-tenant', phone: TENANT_PHONE },
+          { contactId: 'c-pm', phone: PM_PHONE },
+        ],
+        created_at: QUIET_NOW,
+      });
+      await world.placementsRepo.update(forcedId, { group_thread: 'conv-closed-b' });
+
+      const forced = await quietReq.post(`/api/placements/${forcedId}/relay?force=send_now`);
+      await queueAdapter.settle();
+      expect(forced.status).toBe(201);
+    });
+
     it('LIVE ADD on an OPEN thread defers; on a CLOSED thread it stays immediate', async () => {
       const placementId = await createPlacement();
       await seedThread(placementId, [

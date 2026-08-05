@@ -469,18 +469,19 @@ async function applyAction(
   // the claim itself stays one-way, exactly as designed. The poll's per-row
   // catch also logs, but apply-now (routes) has no such net.
   try {
-    const outcome = await performClaimedAction(row, verdict, owner, deps, log);
-    // Same reason as the skip above: the pending banner has to go away even when
-    // the apply itself emitted nothing (a noop, or a refusal). A duplicate poke
-    // is harmless - the hub's refetch is debounced.
-    await pokeOwner(owner, row, log);
-    return outcome;
+    return await performClaimedAction(row, verdict, owner, deps, log);
   } catch (err) {
     log.error(
       { err, actionId: row.actionId, ownerType: row.ownerType, action: row.action },
       'roster action: UNEXPECTED failure AFTER the claim - the action did not happen and will not retry',
     );
     throw err;
+  } finally {
+    // Same reason as the skip above: the pending banner has to go away even when
+    // the apply itself emitted nothing (a noop, a refusal - or an unexpected
+    // throw: the row is TERMINAL either way, so the card must re-read). A
+    // duplicate poke is harmless - the hub's refetch is debounced.
+    await pokeOwner(owner, row, log);
   }
 }
 

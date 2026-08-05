@@ -727,6 +727,36 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     expect((await rowOf(actionId)).status, 'still pending - the next tick retries').toBe('pending');
   });
 
+  it('a post-claim throw still pokes the owner event - the stale pending banner must clear', async () => {
+    const tourId = await createTour();
+    seedThread('conv-throw', [
+      { contactId: 'c-tenant', phone: TENANT_PHONE },
+      { contactId: 'c-pm', phone: PM_PHONE },
+    ]);
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-throw' });
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+    // The apply blows up AFTER the one-way claim (the roster write itself).
+    const realAddMember = world.conversationsRepo.addMember.bind(world.conversationsRepo);
+    world.conversationsRepo.addMember = async () => {
+      throw new Error('boom post-claim');
+    };
+    world.emitted.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+    world.conversationsRepo.addMember = realAddMember;
+
+    // The claim is one-way: the row is terminal even though nothing happened
+    // (logged at error level with the actionId - see applyAction).
+    expect((await rowOf(actionId)).status).toBe('applied');
+    // The finally still pokes: without it the card shows "Joins at ..." for a
+    // row that is already terminal until a manual reload.
+    expect(
+      world.emitted.filter((e) => e.event === 'tour.updated').length,
+      'owner poke fired despite the throw',
+    ).toBeGreaterThan(0);
+  });
+
   it('isolates a failing row: the rest of the batch still runs', async () => {
     const tourId = await createTour();
     await deferOpen('tour', tourId);

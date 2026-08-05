@@ -767,7 +767,8 @@ export interface TourReminderView {
     | 'contact_no_phone'
     | 'tour_missing'
     | 'quiet_hours_superseded'
-    | 'past_event';
+    | 'past_event'
+    | 'tenant_not_on_roster';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -813,6 +814,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   tour_missing: 'tour missing',
   quiet_hours_superseded: 'superseded by a later reminder',
   past_event: 'would land after the tour starts',
+  tenant_not_on_roster: "tenant not on this tour's roster",
 };
 
 /**
@@ -841,6 +843,12 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   contact_missing: 'That contact is gone, so nothing was sent.',
   contact_no_phone: 'That contact has no phone number, so nothing was sent.',
   unknown_kind: 'This app does not know how to send that nudge.',
+  // contact-rosters D11: the rung targets the tenant 1:1 but the tenant was
+  // removed from the roster. (`roster_unavailable` - the roster could not be
+  // READ - deliberately has no entry: the generic retry sentence is exactly
+  // right for a transient failure.)
+  tenant_not_on_roster:
+    'That person is not on this roster, so nothing was sent - add them back to send.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',
@@ -957,7 +965,8 @@ export type NudgeSkipReason =
   | 'unit_missing'
   | 'no_landlord'
   | 'contact_missing'
-  | 'contact_no_phone';
+  | 'contact_no_phone'
+  | 'tenant_not_on_roster';
 
 export interface PlacementNudgeView {
   nudgeId: string;

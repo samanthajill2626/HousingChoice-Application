@@ -49,6 +49,7 @@ import {
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   evaluateScheduledSendSuppression,
   type ScheduledSuppression,
@@ -73,6 +74,8 @@ export interface TourRemindersRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
+  /** Roster resolution for the send-now path's D11 check (contact-rosters). */
+  unitsRepo?: UnitsRepo;
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
@@ -129,6 +132,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
@@ -142,6 +146,8 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     toursRepo: tours,
     contactsRepo: contacts,
     conversationsRepo: conversations,
+    // D11 (contact-rosters): the send-now path runs the poll's roster check.
+    unitsRepo: units,
     sendMessageService:
       deps.sendMessageService ?? createSendMessageService({ config, logger: deps.logger }),
     settingsRepo: settings,

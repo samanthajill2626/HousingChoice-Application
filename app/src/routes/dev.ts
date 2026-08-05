@@ -247,6 +247,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       toursRepo: createToursRepo({ logger: log }),
       contactsRepo: createContactsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
+      // Roster resolution (contact-rosters D11): the tenant-1:1 suppression
+      // check reads the property's primary contact for the DEFAULT roster.
+      unitsRepo: createUnitsRepo({ logger: log }),
       messagesRepo: createMessagesRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
       adapter: createMessagingAdapter({ config, logger: log }),

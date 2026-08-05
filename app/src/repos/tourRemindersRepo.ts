@@ -47,7 +47,13 @@ export type ReminderSkipReason =
   /** ARM time: the rung's (clamped) dueAt lands at/after the tour start, so
    *  sending it would be pointless - born skipped as a visible trace (a
    *  near-tour night booking must not silently arm nothing). */
-  | 'past_event';
+  | 'past_event'
+  /** CLAIM time: the delivery resolved to the tenant 1:1 but the tenant is NOT
+   *  on this tour's roster (contact-rosters D11) - the caseworker-to-PM
+   *  arrangement. Removal means removal: the rung is retired with a visible
+   *  skipped row instead of texting someone the operator took off. Binds to the
+   *  ROUTING OUTCOME, so a group rung falling back to the 1:1 is covered too. */
+  | 'tenant_not_on_roster';
 
 export interface TourReminderItem {
   /** PK */

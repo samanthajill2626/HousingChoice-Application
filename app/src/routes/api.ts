@@ -728,6 +728,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // D11 (contact-rosters): send-now resolves the tour's roster, whose
+      // DEFAULT rung is the property's primary contact.
+      unitsRepo: units,
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.
       settingsRepo: settings,

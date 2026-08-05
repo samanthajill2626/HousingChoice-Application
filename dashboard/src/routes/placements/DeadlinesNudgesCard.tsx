@@ -53,6 +53,7 @@ const NUDGE_SKIP_REASON_LABELS: Readonly<Record<NudgeSkipReason, string>> = {
   no_landlord: 'no landlord on the property',
   contact_missing: 'recipient no longer exists',
   contact_no_phone: 'recipient has no phone number',
+  tenant_not_on_roster: "tenant not on this placement's roster",
 };
 
 /** Why an ARMED rung will not fire at dueAt (the server's estimate, new with

@@ -219,6 +219,7 @@ runWithContext(bootContext, () => {
   const { createToursRepo } = await import('./repos/toursRepo.js');
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createUnitsRepo } = await import('./repos/unitsRepo.js');
   const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
   const { createMessagingAdapter } = await import('./adapters/messaging.js');
@@ -230,6 +231,9 @@ runWithContext(bootContext, () => {
     toursRepo: createToursRepo({ logger }),
     contactsRepo: createContactsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
+    // Roster resolution (contact-rosters D11): the tenant-1:1 suppression check
+    // reads the property's primary contact for the DEFAULT roster.
+    unitsRepo: createUnitsRepo({ logger }),
     // GROUP-route rungs persist a system announcement row in the relay thread
     // (sendRelayAnnouncement) — messagesRepo backs that persistence.
     messagesRepo: createMessagesRepo({ logger }),

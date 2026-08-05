@@ -36,6 +36,7 @@ describe('tables.ts — the table contract', () => {
       'tourReminders',
       'placementNudges',
       'placementDeadlines',
+      'pendingRosterActions',
       'tours',
       'ai_extraction',
       'unmatched_email',
@@ -205,6 +206,24 @@ describe('tables.ts — the table contract', () => {
     expect(byDueAt?.hashKey.name).toBe('_deadlinePartition');
     expect(byDueAt?.rangeKey?.name).toBe('at');
     expect(t.stream).toBeUndefined();
+  });
+
+  it('pendingRosterActions (contact-rosters 5.3): PK actionId; GSIs byOwner, byDueAt (fixed partition + dueAt range); no stream/TTL', () => {
+    const t = spec('pendingRosterActions');
+    expect(t.hashKey.name).toBe('actionId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byOwner', 'byDueAt']);
+    const byOwner = t.gsis.find((g) => g.indexName === 'byOwner');
+    expect(byOwner?.hashKey.name).toBe('ownerKey');
+    expect(byOwner?.rangeKey).toBeUndefined();
+    const byDueAt = t.gsis.find((g) => g.indexName === 'byDueAt');
+    expect(byDueAt?.hashKey.name).toBe('_actionPartition');
+    expect(byDueAt?.rangeKey?.name).toBe('dueAt');
+    // NOT sparse - every row stamps _actionPartition, so a row can never fall
+    // out of the poller's index (the pool_numbers failure mode).
+    expect(byDueAt?.sparse).toBeUndefined();
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
   });
 
   it('invoices: PK invoiceId; GSIs byLandlord, byStatus', () => {

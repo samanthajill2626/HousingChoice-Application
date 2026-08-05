@@ -23,7 +23,7 @@
 // PII (doc §9): responses carry full placement docs to the authenticated client;
 // LOG LINES are placementId/stage/counts only — never the placement_tag (a name).
 import { randomUUID } from 'node:crypto';
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { zipFive } from '../lib/address.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { mergeContext } from '../lib/context.js';
@@ -76,7 +76,33 @@ import {
 } from '../repos/placementsRepo.js';
 import { isInspectionOutcome, isPlacementStage, STAGE_LABELS, type PlacementStage } from '../lib/statusModel.js';
 import { recordPersonMilestone, recordRosterMilestone } from '../lib/personEvents.js';
-import { describeRoster, resolveRoster } from '../lib/rosterResolution.js';
+import {
+  describeRoster,
+  resolveRoster,
+  type RosterOwner,
+  type RosterResolutionDeps,
+} from '../lib/rosterResolution.js';
+import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
+import {
+  addMemberToRelay,
+  removeMemberFromRelay,
+  type RelayMemberDeps,
+} from '../services/relayMembers.js';
+import {
+  applyRosterPlanEdit,
+  buildAddPreview,
+  buildOpenPreview,
+  parseRosterEntryInput,
+  resolveRosterCandidate,
+  ROSTER_NO_THREAD,
+  ROSTER_THREAD_EXISTS,
+  ROSTER_UNAVAILABLE,
+  type QuietHoursState,
+  type RosterEditRefusal,
+  type RosterPlanState,
+  type RosterPlanStore,
+} from '../services/rosterEdits.js';
 
 export interface PlacementsRouterDeps {
   config?: AppConfig;
@@ -95,6 +121,8 @@ export interface PlacementsRouterDeps {
   toursRepo?: ToursRepo;
   /** Post-Tour conversion: cancel the tour's pending reminder rows on convert. */
   tourRemindersRepo?: TourRemindersRepo;
+  /** Org quiet-hours window for the roster previews (contact-rosters Task 10). */
+  settingsRepo?: SettingsRepo;
   /** BE2/C2: emit placement_opened/placement_closed/stage_changed/tour_* milestones. */
   activityEventsRepo?: ActivityEventsRepo;
   /**
@@ -369,6 +397,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     deps.poolNumbersService ?? createPoolNumbersService({ config, logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const settingsRepo = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   // §7 derive-on-create: the transition service's derive helpers stamp the
   // tenant + property coarse statuses on create (override-gated, source 'derived').
   // Self-construct from the SAME repos this router already builds when not injected.
@@ -838,6 +867,290 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       'placement roster served',
     );
     res.json(view);
+  });
+
+  // -------------------------------------------------------------------------
+  // Roster EDITING (contact-rosters Task 10) - the placement twin of the tour
+  // endpoints. Same engine (services/rosterEdits + services/relayMembers),
+  // same tokens, same payload; only the pointer field (`group_thread`), the
+  // repo and the 404 token differ. See routes/tours.ts for the full contract.
+  // -------------------------------------------------------------------------
+
+  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, log };
+
+  const memberDeps: RelayMemberDeps = {
+    conversations,
+    contacts,
+    audit,
+    activityEvents,
+    poolNumbers,
+    events,
+    log,
+  };
+
+  function rosterOwnerOf(item: PlacementItem): RosterOwner {
+    return {
+      type: 'placement',
+      id: item.placementId,
+      tenantId: item.tenantId,
+      unitId: item.unitId,
+      ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
+      ...(item.roster !== undefined && { roster: item.roster }),
+    };
+  }
+
+  const planStateOf = (item: PlacementItem): RosterPlanState => ({
+    ...(item.roster !== undefined && { roster: item.roster }),
+    ...(item.rosterVersion !== undefined && { rosterVersion: item.rosterVersion }),
+  });
+
+  const planStoreFor = (placementId: string): RosterPlanStore => ({
+    reload: async () => {
+      const fresh = await placements.getById(placementId);
+      return fresh === undefined ? undefined : planStateOf(fresh);
+    },
+    setRoster: async (roster, expectedVersion) =>
+      planStateOf(await placements.setRoster(placementId, roster, expectedVersion)),
+    clearRoster: () => placements.clearRoster(placementId),
+  });
+
+  const threadIdOf = (item: PlacementItem): string | undefined =>
+    typeof item.group_thread === 'string' && item.group_thread.length > 0
+      ? item.group_thread
+      : undefined;
+
+  const sendRefusal = (res: Response, refusal: RosterEditRefusal): void => {
+    res.status(refusal.status).json({
+      error: refusal.error,
+      ...(refusal.message !== undefined && { message: refusal.message }),
+    });
+  };
+
+  async function respondWithRoster(res: Response, placementId: string): Promise<void> {
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const view = await describeRoster(rosterDeps, rosterOwnerOf(item));
+    log.info(
+      { placementId, source: view.source, memberCount: view.members.length },
+      'placement roster edited',
+    );
+    res.json(view);
+  }
+
+  async function quietHoursState(): Promise<QuietHoursState> {
+    return {
+      nowIso: new Date().toISOString(),
+      window: await readQuietHoursWindow(settingsRepo, log),
+    };
+  }
+
+  // --- PLAN writes (no thread) ---------------------------------------------
+
+  router.post('/:placementId/roster/members', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (threadIdOf(item) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    const entry = parseRosterEntryInput(req.body);
+    if ('error' in entry) {
+      res.status(400).json({ error: 'invalid_member', message: entry.error });
+      return;
+    }
+    const outcome = await applyRosterPlanEdit(rosterDeps, planStoreFor(placementId), {
+      owner: {
+        type: 'placement',
+        id: item.placementId,
+        tenantId: item.tenantId,
+        unitId: item.unitId,
+      },
+      state: planStateOf(item),
+      edit: { kind: 'add', entry },
+      notFoundError: 'placement_not_found',
+    });
+    if (!outcome.ok) {
+      sendRefusal(res, outcome.refusal);
+      return;
+    }
+    await respondWithRoster(res, placementId);
+  });
+
+  router.delete('/:placementId/roster/members/:memberKey', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (threadIdOf(item) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    const outcome = await applyRosterPlanEdit(rosterDeps, planStoreFor(placementId), {
+      owner: {
+        type: 'placement',
+        id: item.placementId,
+        tenantId: item.tenantId,
+        unitId: item.unitId,
+      },
+      state: planStateOf(item),
+      edit: { kind: 'remove', memberKey: String(req.params['memberKey'] ?? '') },
+      notFoundError: 'placement_not_found',
+    });
+    if (!outcome.ok) {
+      sendRefusal(res, outcome.refusal);
+      return;
+    }
+    await respondWithRoster(res, placementId);
+  });
+
+  router.post('/:placementId/roster/reset', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (threadIdOf(item) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    await placements.clearRoster(placementId);
+    await respondWithRoster(res, placementId);
+  });
+
+  // --- LIVE call-through (a thread exists, any status) ---------------------
+
+  router.post('/:placementId/roster/live-members', async (req: AuthedRequest, res) => {
+    const actor = req.user?.userId;
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const threadId = threadIdOf(item);
+    if (threadId === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const resolvedCandidate = await resolveRosterCandidate(contacts, req.body);
+    if (!resolvedCandidate.ok) {
+      sendRefusal(res, resolvedCandidate.refusal);
+      return;
+    }
+    const conversation = await conversations.getById(threadId);
+    if (!conversation) {
+      sendRefusal(res, ROSTER_UNAVAILABLE);
+      return;
+    }
+    // Spec section 7: a CLOSED thread's add is silent AND immediate.
+    const announce = conversation.status !== 'closed';
+    const result = await addMemberToRelay(
+      memberDeps,
+      threadId,
+      {
+        contactId: resolvedCandidate.candidate.contactId,
+        phone: resolvedCandidate.candidate.phone,
+      },
+      { announce, ...(actor !== undefined && { actor }) },
+    );
+    if (!result.ok) {
+      sendRefusal(res, result.refusal);
+      return;
+    }
+    await respondWithRoster(res, placementId);
+  });
+
+  router.delete('/:placementId/roster/live-members/:memberKey', async (req: AuthedRequest, res) => {
+    const actor = req.user?.userId;
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    const threadId = threadIdOf(item);
+    if (threadId === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const result = await removeMemberFromRelay(
+      memberDeps,
+      threadId,
+      String(req.params['memberKey'] ?? ''),
+      { ...(actor !== undefined && { actor }) },
+    );
+    if (!result.ok) {
+      sendRefusal(res, result.refusal);
+      return;
+    }
+    await respondWithRoster(res, placementId);
+  });
+
+  // --- Previews ------------------------------------------------------------
+
+  router.get('/:placementId/roster/preview-open', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (threadIdOf(item) !== undefined) {
+      sendRefusal(res, { status: 409, error: 'relay_already_provisioned' });
+      return;
+    }
+    const preview = await buildOpenPreview(rosterDeps, rosterOwnerOf(item), await quietHoursState());
+    if (!preview.ok) {
+      sendRefusal(res, preview.refusal);
+      return;
+    }
+    res.json(preview.preview);
+  });
+
+  router.post('/:placementId/roster/preview-add', async (req, res) => {
+    const placementId = String(req.params['placementId'] ?? '');
+    mergeContext({ placementId });
+    const item = await placements.getById(placementId);
+    if (!item) {
+      res.status(404).json({ error: 'placement_not_found' });
+      return;
+    }
+    if (threadIdOf(item) === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const resolvedCandidate = await resolveRosterCandidate(contacts, req.body);
+    if (!resolvedCandidate.ok) {
+      sendRefusal(res, resolvedCandidate.refusal);
+      return;
+    }
+    const preview = await buildAddPreview(
+      rosterDeps,
+      rosterOwnerOf(item),
+      resolvedCandidate.candidate,
+      await quietHoursState(),
+    );
+    if (!preview.ok) {
+      sendRefusal(res, preview.refusal);
+      return;
+    }
+    res.json(preview.preview);
   });
 
   // PATCH /api/placements/:placementId — partial update (SET-merge; null clears a field).

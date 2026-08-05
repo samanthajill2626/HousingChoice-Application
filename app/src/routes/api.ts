@@ -816,6 +816,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 10: the roster previews read the org quiet-hours
+      // window through the SAME settings repo the armers use.
+      settingsRepo: settings,
       events,
     }),
   );

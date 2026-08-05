@@ -21,7 +21,11 @@ import {
   defineJobHandler,
   dispatchJob,
 } from '../src/jobs/jobs.js';
-import { registerRelayFanOutJobHandler } from '../src/jobs/relayFanOut.js';
+import {
+  composeIntroBody,
+  composeMemberAddedBody,
+  registerRelayFanOutJobHandler,
+} from '../src/jobs/relayFanOut.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
 import {
@@ -47,6 +51,8 @@ function authed(app: ReturnType<typeof makeWebhookHarness>['app']) {
       request(app).get(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
     patch: (path: string) =>
       request(app).patch(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
+    delete: (path: string) =>
+      request(app).delete(path).set('x-origin-verify', SECRET).set('cookie', TEST_SESSION_COOKIE),
   };
 }
 
@@ -3122,5 +3128,606 @@ describe('Tours routes stay behind requireAuth', () => {
       .get('/api/tours?tenantId=x')
       .set('x-origin-verify', SECRET);
     expect(noSession.status).toBe(401);
+  });
+});
+
+// ============================================================================
+// Roster editing endpoints (contact-rosters Task 10)
+// ============================================================================
+//
+// PLAN writes (no thread): POST/DELETE /:tourId/roster/members, POST .../reset.
+// LIVE call-through (a thread exists): POST/DELETE .../roster/live-members.
+// PREVIEWS: GET .../roster/preview-open, POST .../roster/preview-add.
+//
+// Every mutating endpoint answers with the SAME payload GET /roster serves
+// (lib/rosterResolution.describeRoster), so the card re-renders from one shape.
+
+describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
+  let world: FakeWorld;
+  let queueAdapter: InProcessOutboundQueueAdapter;
+
+  const TENANT_PHONE = '+15550300011';
+  const OWNER_PHONE = '+15550300012';
+  const PM_PHONE = '+15550300013';
+  const CASEWORKER_PHONE = '+15550300021';
+  const OPTOUT_PHONE = '+15550300022';
+
+  beforeEach(() => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    world = createFakeWorld();
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
+
+    world.contacts.push(
+      {
+        contactId: 'contact-tenant-1',
+        type: 'tenant',
+        phone: TENANT_PHONE,
+        firstName: 'Tina',
+        lastName: 'Tenant',
+      },
+      { contactId: 'c-owner', type: 'landlord', phone: OWNER_PHONE, firstName: 'Ollie', lastName: 'Owner' },
+      { contactId: 'c-pm', type: 'landlord', phone: PM_PHONE, firstName: 'Pat', lastName: 'Manager' },
+      {
+        contactId: 'c-caseworker',
+        type: 'team_member',
+        phone: CASEWORKER_PHONE,
+        firstName: 'Casey',
+        lastName: 'Worker',
+      },
+      {
+        contactId: 'c-optout',
+        type: 'team_member',
+        phone: OPTOUT_PHONE,
+        firstName: 'Otto',
+        lastName: 'Out',
+        sms_opt_out: true,
+      },
+      { contactId: 'c-nophone', type: 'team_member', firstName: 'Nora', lastName: 'Nophone' },
+    );
+    world.units.set('unit-abc', {
+      unitId: 'unit-abc',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+      created_at: '2026-07-01T00:00:00.000Z',
+      updated_at: '2026-07-01T00:00:00.000Z',
+    });
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  async function createTour(app: ReturnType<typeof makeWebhookHarness>['app']): Promise<string> {
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    expect(created.status).toBe(201);
+    return created.body.tour.tourId as string;
+  }
+
+  /** Point the tour at a relay thread carrying `participants` (the FACT source). */
+  function seedThread(
+    tourId: string,
+    participants: { contactId?: string; phone: string; name?: string }[],
+    opts: { status?: 'open' | 'closed' | 'connecting'; optedOutKeys?: string[] } = {},
+  ): void {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-live', {
+      conversationId: 'conv-live',
+      participant_phone: '+15550309000',
+      pool_number: '+15550309000',
+      status: opts.status ?? 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
+      participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      created_at: now,
+      ...(opts.optedOutKeys !== undefined && {
+        relay_opted_out_members: Object.fromEntries(opts.optedOutKeys.map((k) => [k, { at: now }])),
+      }),
+    });
+    world.toursMap.set(tourId, { ...world.toursMap.get(tourId)!, groupThreadId: 'conv-live' });
+  }
+
+  const keysOf = (body: { members: { memberKey: string }[] }): string[] =>
+    body.members.map((m) => m.memberKey);
+
+  // --- PLAN writes ---------------------------------------------------------
+
+  it('ADD materializes the property default, then applies the new member onto it', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('plan');
+    expect(res.body.customized).toBe(true);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    // Stored as the PLAN: the materialized default plus the edit, version 2
+    // (one write to materialize, one to apply).
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.roster).toEqual([
+      { contactId: 'contact-tenant-1' },
+      { contactId: 'c-pm' },
+      { contactId: 'c-caseworker' },
+    ]);
+    expect(stored.rosterVersion).toBe(2);
+  });
+
+  it('ADD accepts a bare phone, stores it E.164, and keys it phone:<E164>', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ phone: '(555) 010-9999' });
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'phone:+15550109999']);
+    expect(world.toursMap.get(tourId)!.roster).toContainEqual({ phone: '+15550109999' });
+  });
+
+  it('ADD is idempotent: re-adding a member already on the plan changes nothing', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/roster/members`).send({ contactId: 'c-caseworker' });
+    const versionAfterFirst = world.toursMap.get(tourId)!.rosterVersion;
+
+    const again = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(again.status).toBe(200);
+    expect(keysOf(again.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(world.toursMap.get(tourId)!.rosterVersion).toBe(versionAfterFirst);
+  });
+
+  it('ADD 400s unless EXACTLY ONE of contactId / phone is supplied', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    const bodies: object[] = [
+      {},
+      { contactId: 'c-pm', phone: '+15550109999' },
+      { contactId: '' },
+      { phone: 'not-a-phone' },
+      { contactId: 42 },
+    ];
+    for (const body of bodies) {
+      const res = await authed(app).post(`/api/tours/${tourId}/roster/members`).send(body);
+      expect(res.status, JSON.stringify(body)).toBe(400);
+      expect(res.body.error).toBe('invalid_member');
+    }
+    // Nothing was materialized by a refused edit.
+    expect(world.toursMap.get(tourId)!.roster).toBeUndefined();
+  });
+
+  it('REMOVE materializes the default and drops the named member', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const res = await authed(app).delete(`/api/tours/${tourId}/roster/members/c-pm`);
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1']);
+    expect(world.toursMap.get(tourId)!.roster).toEqual([{ contactId: 'contact-tenant-1' }]);
+  });
+
+  it('REMOVE takes a phone:<E164> memberKey (URL-encoded) for a bare-phone member', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }, { phone: '+15550109999' }],
+      undefined,
+    );
+
+    const res = await authed(app).delete(
+      `/api/tours/${tourId}/roster/members/${encodeURIComponent('phone:+15550109999')}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm']);
+  });
+
+  it('REMOVE refuses the LAST member with 409 last_member', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(tourId, [{ contactId: 'c-pm' }], undefined);
+
+    const res = await authed(app).delete(`/api/tours/${tourId}/roster/members/c-pm`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('last_member');
+    expect(world.toursMap.get(tourId)!.roster).toEqual([{ contactId: 'c-pm' }]);
+  });
+
+  it('REMOVE 404s member_not_found for a key that is not on the roster', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const res = await authed(app).delete(`/api/tours/${tourId}/roster/members/c-caseworker`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('member_not_found');
+  });
+
+  it('RESET clears the override and the roster falls back to the property default', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/roster/members`).send({ contactId: 'c-caseworker' });
+
+    const res = await authed(app).post(`/api/tours/${tourId}/roster/reset`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('default');
+    expect(res.body.customized).toBe(false);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm']);
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.roster).toBeUndefined();
+    expect(stored.rosterVersion).toBeUndefined();
+  });
+
+  it('every PLAN endpoint 409s thread_exists once a group thread is provisioned', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const add = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+    const remove = await authed(app).delete(`/api/tours/${tourId}/roster/members/c-pm`);
+    const reset = await authed(app).post(`/api/tours/${tourId}/roster/reset`);
+
+    for (const res of [add, remove, reset]) {
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('thread_exists');
+    }
+  });
+
+  it('the provisioning:<tourId> claim sentinel counts as a thread (A17) - plan edits 409', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    world.toursMap.set(tourId, {
+      ...world.toursMap.get(tourId)!,
+      groupThreadId: `provisioning:${tourId}`,
+    });
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('thread_exists');
+  });
+
+  it('MATERIALIZE RACE: the loser re-reads the winner override and BOTH edits survive', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    // A competing operator materializes their own first edit in the window
+    // between our resolve and our conditional write.
+    const realSetRoster = world.toursRepo.setRoster.bind(world.toursRepo);
+    let raced = false;
+    world.toursRepo.setRoster = async (id, roster, expectedVersion) => {
+      if (!raced && expectedVersion === undefined) {
+        raced = true;
+        await realSetRoster(
+          id,
+          [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }, { contactId: 'c-optout' }],
+          undefined,
+        );
+      }
+      return realSetRoster(id, roster, expectedVersion);
+    };
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(res.status).toBe(200);
+    expect(raced).toBe(true);
+    // The winner's member is NOT overwritten; ours is applied on top.
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-optout', 'c-caseworker']);
+  });
+
+  // --- LIVE call-through ---------------------------------------------------
+
+  it('LIVE add on an OPEN thread joins the roster AND announces to the whole group', async () => {
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeFakePoolNumbers() });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.sent.length = 0;
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(res.body.source).toBe('participants');
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(world.sent.map((s) => s.to).sort()).toEqual(
+      [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
+    );
+    expect(world.sent[0]!.body).toContain('Casey Worker joined this group text.');
+  });
+
+  it('LIVE add on a CLOSED thread is silent and immediate - never announced, never deferred', async () => {
+    const { app } = makeWebhookHarness({ world, poolNumbersService: makeFakePoolNumbers() });
+    const tourId = await createTour(app);
+    seedThread(
+      tourId,
+      [
+        { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      { status: 'closed' },
+    );
+    world.sent.length = 0;
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm', 'c-caseworker']);
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('LIVE endpoints 409 no_thread when the tour has no group thread', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const add = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    const remove = await authed(app).delete(`/api/tours/${tourId}/roster/live-members/c-pm`);
+
+    for (const res of [add, remove]) {
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('no_thread');
+    }
+  });
+
+  it('LIVE add refuses an unknown contact (404) and a phone-less contact (400)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const missing = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-nobody' });
+    expect(missing.status).toBe(404);
+    expect(missing.body.error).toBe('contact_not_found');
+
+    const unreachable = await authed(app)
+      .post(`/api/tours/${tourId}/roster/live-members`)
+      .send({ contactId: 'c-nophone' });
+    expect(unreachable.status).toBe(400);
+    expect(unreachable.body.error).toBe('contact_unreachable');
+  });
+
+  it('LIVE remove drops the participant row by THE PHONE STORED ON IT, even after the contact phone was corrected', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    // The PM's number was corrected AFTER they joined: the contact record and
+    // the participant row now disagree. The remove must follow the ROW.
+    const pm = world.contacts.find((c) => c.contactId === 'c-pm')!;
+    pm.phone = '+15550300099';
+    world.sent.length = 0;
+
+    const res = await authed(app).delete(`/api/tours/${tourId}/roster/live-members/c-pm`);
+    await queueAdapter.settle();
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1']);
+    expect(world.conversations.get('conv-live')!.participants).toHaveLength(1);
+    // Removal never announces.
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('LIVE remove takes a phone:<E164> memberKey for a bare-phone participant', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      { phone: '+15550109999', name: 'Walk-in' },
+    ]);
+
+    const res = await authed(app).delete(
+      `/api/tours/${tourId}/roster/live-members/${encodeURIComponent('phone:+15550109999')}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm']);
+  });
+
+  // --- Previews ------------------------------------------------------------
+
+  it('preview-open 409s relay_already_provisioned once the pointer is set', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('relay_already_provisioned');
+  });
+
+  it('preview-open returns the SERVER-composed intro body the fan-out will send', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    // Parity: the SAME composer relayFanOut's relay.intro handler uses.
+    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager']));
+    expect(res.body.recipients).toEqual([
+      { name: 'Tina Tenant', reachability: 'reachable' },
+      { name: 'Pat Manager', reachability: 'reachable' },
+    ]);
+    expect(res.body.recipientCount).toBe(2);
+    expect(res.body.deferred).toBe(false);
+    expect(res.body.quietEndsAt).toBeUndefined();
+  });
+
+  it('preview-open marks an opted-out member and excludes them from recipientCount', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }, { contactId: 'c-optout' }],
+      undefined,
+    );
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.recipients).toEqual([
+      { name: 'Tina Tenant', reachability: 'reachable' },
+      { name: 'Pat Manager', reachability: 'reachable' },
+      { name: 'Otto Out', reachability: 'opted_out' },
+    ]);
+    expect(res.body.recipientCount).toBe(2);
+    // The opted-out member is still NAMED in the body - they are a participant
+    // whose leg is suppressed at send, exactly as the fan-out composes it.
+    expect(res.body.body).toBe(composeIntroBody(['Tina Tenant', 'Pat Manager', 'Otto Out']));
+  });
+
+  it('preview during PINNED quiet hours reports deferred:true with the clamped quiet-end instant', async () => {
+    const { app } = makeWebhookHarness({
+      world,
+      toursNow: () => '2026-08-05T04:30:00.000Z', // 23:30 local in America/Chicago
+    });
+    await world.settingsRepo.putOrgSettings({
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: 'America/Chicago',
+    });
+    const tourId = await createTour(app);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster/preview-open`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.deferred).toBe(true);
+    expect(res.body.quietEndsAt).toBe('2026-08-05T13:00:00.000Z'); // 08:00 CDT
+  });
+
+  it('preview-add composes the member_added body for the CURRENT participants plus the candidate', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.body).toBe(
+      composeMemberAddedBody('Casey Worker', ['Tina Tenant', 'Pat Manager', 'Casey Worker']),
+    );
+    expect(res.body.recipients).toEqual([
+      { name: 'Tina Tenant', reachability: 'reachable' },
+      { name: 'Pat Manager', reachability: 'reachable' },
+      { name: 'Casey Worker', reachability: 'reachable' },
+    ]);
+    expect(res.body.recipientCount).toBe(3);
+    expect(res.body.deferred).toBe(false);
+  });
+
+  it('preview-add marks an opted-out CANDIDATE and excludes them from recipientCount', async () => {
+    const { app } = makeWebhookHarness({ world });
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+    const tourId = await createTour(app);
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-optout' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.recipients).toEqual([
+      { name: 'Tina Tenant', reachability: 'reachable' },
+      { name: 'Pat Manager', reachability: 'reachable' },
+      { name: 'Otto Out', reachability: 'opted_out' },
+    ]);
+    expect(res.body.recipientCount).toBe(2);
+  });
+
+  it('preview-add 409s no_thread before a group exists (a plan add sends nothing to preview)', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+
+    const res = await authed(app)
+      .post(`/api/tours/${tourId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('no_thread');
+  });
+
+  it('404s tour_not_found on every roster-editing path for an unknown tour', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const responses = [
+      await authed(app).post('/api/tours/nope/roster/members').send({ contactId: 'c-pm' }),
+      await authed(app).delete('/api/tours/nope/roster/members/c-pm'),
+      await authed(app).post('/api/tours/nope/roster/reset'),
+      await authed(app).post('/api/tours/nope/roster/live-members').send({ contactId: 'c-pm' }),
+      await authed(app).delete('/api/tours/nope/roster/live-members/c-pm'),
+      await authed(app).get('/api/tours/nope/roster/preview-open'),
+      await authed(app).post('/api/tours/nope/roster/preview-add').send({ contactId: 'c-pm' }),
+    ];
+    for (const res of responses) {
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('tour_not_found');
+    }
   });
 });

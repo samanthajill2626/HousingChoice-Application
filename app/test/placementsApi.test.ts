@@ -4,7 +4,7 @@
 // (placement-deadline-model). Runs on the shared in-memory world (the harness
 // placementsRepo + placementDeadlinesRepo fakes), authed via the real sealed
 // session cookie next to the origin secret.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -14,6 +14,26 @@ import { toPlacementUpdatedEvent } from '../src/lib/events.js';
 import type { PlacementItem } from '../src/repos/placementsRepo.js';
 import { createPlacementsRouter } from '../src/routes/placements.js';
 import type { StatusTransitionService } from '../src/services/statusTransition.js';
+import type { PoolNumbersService } from '../src/services/poolNumbers.js';
+import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureJobsLogger,
+  configureOutboundQueue,
+  configureScheduler,
+  dispatchJob,
+} from '../src/jobs/jobs.js';
+import {
+  composeIntroBody,
+  composeMemberAddedBody,
+  registerRelayFanOutJobHandler,
+} from '../src/jobs/relayFanOut.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 describe('placements API (M1.10b)', () => {
   let app: Express;
@@ -664,6 +684,284 @@ describe('GET /api/placements/:placementId/roster', () => {
     const res = await getRoster('placement-ghost');
     expect(res.status).toBe(404);
     expect(res.body.error).toBe('placement_not_found');
+  });
+});
+
+// ============================================================================
+// Placement roster editing endpoints (contact-rosters Task 10)
+// ============================================================================
+//
+// The placement twin of the tour endpoints - SAME engine (services/rosterEdits
+// + services/relayMembers), so the exhaustive cases live in toursApi.test.ts.
+// These pin the placement WIRING: group_thread is the pointer, and the
+// placement repo's setRoster/clearRoster back the plan writes.
+
+/** A no-network pool-numbers service: the LIVE add burns the new member onto
+ *  the group's number before the roster write (W1), which must not reach AWS. */
+function makeFakePoolNumbers(): PoolNumbersService {
+  const rec = (poolNumber: string): PoolNumberItem => ({
+    poolNumber,
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z',
+    voice_capable: true,
+    sms_capable: true,
+    provisioned_at: '2026-07-01T00:00:00.000Z',
+  });
+  return {
+    async provisionForGroup() {
+      const poolNumber = '+15550409000';
+      return { kind: 'assigned', poolNumber, record: rec(poolNumber), provisioned: true };
+    },
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async burnGroupRoster() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
+    async getRecord(poolNumber) {
+      return rec(poolNumber);
+    },
+    async clearConnectingEarmarks() {},
+  };
+}
+
+describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
+  let app: Express;
+  let world: FakeWorld;
+  let queueAdapter: InProcessOutboundQueueAdapter;
+
+  const TENANT_PHONE = '+15550400011';
+  const PM_PHONE = '+15550400013';
+  const CASEWORKER_PHONE = '+15550400021';
+
+  beforeEach(async () => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    const h = makeWebhookHarness({ poolNumbersService: makeFakePoolNumbers() });
+    app = h.app;
+    world = h.world;
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
+    // Wall-clock router: pin quiet hours OFF so the preview's deferred flag is
+    // deterministic whatever time the suite runs at.
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+
+    world.contacts.push(
+      { contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE, firstName: 'Tasha', lastName: 'Tenant' },
+      { contactId: 'c-owner', type: 'landlord', phone: '+15550400012', firstName: 'Ollie', lastName: 'Owner' },
+      { contactId: 'c-pm', type: 'landlord', phone: PM_PHONE, firstName: 'Pat', lastName: 'Manager' },
+      {
+        contactId: 'c-caseworker',
+        type: 'team_member',
+        phone: CASEWORKER_PHONE,
+        firstName: 'Casey',
+        lastName: 'Worker',
+      },
+    );
+    world.units.set('unit-r', {
+      unitId: 'unit-r',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  const authedReq = {
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    get: (path: string) =>
+      request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    delete: (path: string) =>
+      request(app).delete(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+  };
+
+  async function createPlacement(): Promise<string> {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+    return p.placementId;
+  }
+
+  async function seedThread(
+    placementId: string,
+    participants: { contactId?: string; phone: string; name?: string }[],
+    status: 'open' | 'closed' = 'open',
+  ): Promise<void> {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-plive', {
+      conversationId: 'conv-plive',
+      participant_phone: '+15550409000',
+      pool_number: '+15550409000',
+      status,
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
+      participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      created_at: now,
+    });
+    await world.placementsRepo.update(placementId, { group_thread: 'conv-plive' });
+  }
+
+  const keysOf = (body: { members: { memberKey: string }[] }): string[] =>
+    body.members.map((m) => m.memberKey);
+
+  it('PLAN add / remove / reset round-trip on the placement repo', async () => {
+    const placementId = await createPlacement();
+
+    const added = await authedReq
+      .post(`/api/placements/${placementId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(added.status).toBe(200);
+    expect(added.body.source).toBe('plan');
+    expect(keysOf(added.body)).toEqual(['c-tenant', 'c-pm', 'c-caseworker']);
+
+    const removed = await authedReq.delete(`/api/placements/${placementId}/roster/members/c-pm`);
+    expect(removed.status).toBe(200);
+    expect(keysOf(removed.body)).toEqual(['c-tenant', 'c-caseworker']);
+
+    const reset = await authedReq.post(`/api/placements/${placementId}/roster/reset`);
+    expect(reset.status).toBe(200);
+    expect(reset.body.source).toBe('default');
+    expect(keysOf(reset.body)).toEqual(['c-tenant', 'c-pm']);
+    expect((await world.placementsRepo.getById(placementId))!.roster).toBeUndefined();
+  });
+
+  it('PLAN remove refuses the last member; PLAN add 400s an invalid entry', async () => {
+    const placementId = await createPlacement();
+    await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-pm' }], undefined);
+
+    const last = await authedReq.delete(`/api/placements/${placementId}/roster/members/c-pm`);
+    expect(last.status).toBe(409);
+    expect(last.body.error).toBe('last_member');
+
+    const bad = await authedReq.post(`/api/placements/${placementId}/roster/members`).send({});
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('invalid_member');
+  });
+
+  it('PLAN endpoints 409 thread_exists once group_thread is set; LIVE endpoints 409 no_thread before it', async () => {
+    const placementId = await createPlacement();
+
+    const noThreadAdd = await authedReq
+      .post(`/api/placements/${placementId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(noThreadAdd.status).toBe(409);
+    expect(noThreadAdd.body.error).toBe('no_thread');
+
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const planAdd = await authedReq
+      .post(`/api/placements/${placementId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(planAdd.status).toBe(409);
+    expect(planAdd.body.error).toBe('thread_exists');
+  });
+
+  it('LIVE add announces on an open thread; LIVE remove follows the STORED participant phone', async () => {
+    const placementId = await createPlacement();
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.sent.length = 0;
+
+    const added = await authedReq
+      .post(`/api/placements/${placementId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+    expect(added.status).toBe(200);
+    expect(added.body.source).toBe('participants');
+    expect(keysOf(added.body)).toEqual(['c-tenant', 'c-pm', 'c-caseworker']);
+    expect(world.sent.map((s) => s.to).sort()).toEqual(
+      [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
+    );
+
+    // The PM's number is corrected after joining: the remove must follow the ROW.
+    world.contacts.find((c) => c.contactId === 'c-pm')!.phone = '+15550400099';
+    world.sent.length = 0;
+    const removed = await authedReq.delete(
+      `/api/placements/${placementId}/roster/live-members/c-pm`,
+    );
+    await queueAdapter.settle();
+    expect(removed.status).toBe(200);
+    expect(keysOf(removed.body)).toEqual(['c-tenant', 'c-caseworker']);
+    expect(world.sent).toHaveLength(0); // removal never announces
+  });
+
+  it('previews: server-composed bodies, 409 relay_already_provisioned once provisioned', async () => {
+    const placementId = await createPlacement();
+
+    const open = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+    expect(open.status).toBe(200);
+    expect(open.body.body).toBe(composeIntroBody(['Tasha Tenant', 'Pat Manager']));
+    expect(open.body.recipientCount).toBe(2);
+    expect(open.body.deferred).toBe(false);
+
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const provisioned = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+    expect(provisioned.status).toBe(409);
+    expect(provisioned.body.error).toBe('relay_already_provisioned');
+
+    const add = await authedReq
+      .post(`/api/placements/${placementId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+    expect(add.status).toBe(200);
+    expect(add.body.body).toBe(
+      composeMemberAddedBody('Casey Worker', ['Tasha Tenant', 'Pat Manager', 'Casey Worker']),
+    );
+    expect(add.body.recipientCount).toBe(3);
+  });
+
+  it('404s placement_not_found on every roster-editing path', async () => {
+    const responses = [
+      await authedReq.post('/api/placements/nope/roster/members').send({ contactId: 'c-pm' }),
+      await authedReq.delete('/api/placements/nope/roster/members/c-pm'),
+      await authedReq.post('/api/placements/nope/roster/reset'),
+      await authedReq.post('/api/placements/nope/roster/live-members').send({ contactId: 'c-pm' }),
+      await authedReq.delete('/api/placements/nope/roster/live-members/c-pm'),
+      await authedReq.get('/api/placements/nope/roster/preview-open'),
+      await authedReq.post('/api/placements/nope/roster/preview-add').send({ contactId: 'c-pm' }),
+    ];
+    for (const res of responses) {
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('placement_not_found');
+    }
   });
 });
 

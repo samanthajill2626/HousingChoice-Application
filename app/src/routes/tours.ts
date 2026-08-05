@@ -39,7 +39,7 @@
 // Validation is a strict field allowlist (unknown fields → 400). Mirror of
 // units.ts idioms: error shapes, 404 codes, createXRouter(deps) factory.
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
-import { Router } from 'express';
+import { Router, type Response } from 'express';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   canReschedule,
@@ -54,7 +54,11 @@ import {
   type TourType,
 } from '../lib/toursModel.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
-import { armTourReminders, cancelTourReminders } from '../jobs/tourReminders.js';
+import {
+  armTourReminders,
+  cancelTourReminders,
+  readQuietHoursWindow,
+} from '../jobs/tourReminders.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import type { AuthedRequest } from '../middleware/auth.js';
@@ -72,8 +76,32 @@ import {
   type ActivityEventsRepo,
   type ActivityEventType,
 } from '../repos/activityEventsRepo.js';
-import { resolveMemberName } from './relayGroups.js';
-import { describeRoster, resolveRoster } from '../lib/rosterResolution.js';
+import {
+  addMemberToRelay,
+  removeMemberFromRelay,
+  resolveMemberName,
+  type RelayMemberDeps,
+} from '../services/relayMembers.js';
+import {
+  applyRosterPlanEdit,
+  buildAddPreview,
+  buildOpenPreview,
+  parseRosterEntryInput,
+  resolveRosterCandidate,
+  ROSTER_NO_THREAD,
+  ROSTER_THREAD_EXISTS,
+  ROSTER_UNAVAILABLE,
+  type QuietHoursState,
+  type RosterEditRefusal,
+  type RosterPlanState,
+  type RosterPlanStore,
+} from '../services/rosterEdits.js';
+import {
+  describeRoster,
+  resolveRoster,
+  type RosterOwner,
+  type RosterResolutionDeps,
+} from '../lib/rosterResolution.js';
 import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
@@ -442,6 +470,301 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
       'tour roster served',
     );
     res.json(view);
+  });
+
+  // -------------------------------------------------------------------------
+  // Roster EDITING (contact-rosters Task 10)
+  // -------------------------------------------------------------------------
+  //
+  //   POST   /:tourId/roster/members            { contactId } | { phone }
+  //   DELETE /:tourId/roster/members/:memberKey
+  //   POST   /:tourId/roster/reset
+  //   POST   /:tourId/roster/live-members       { contactId }
+  //   DELETE /:tourId/roster/live-members/:memberKey
+  //   GET    /:tourId/roster/preview-open
+  //   POST   /:tourId/roster/preview-add        { contactId }
+  //
+  // The split is D1's: the PLAN endpoints edit the override and REFUSE (409
+  // thread_exists) once a thread exists; the LIVE endpoints call through to
+  // the thread's own roster and refuse (409 no_thread) before one does. The
+  // dashboard NEVER auto-resubmits a plan edit through the live path - a
+  // silent plan edit must not become a text nobody confirmed (spec section 7).
+  //
+  // Every mutating endpoint answers with the SAME payload GET /roster serves,
+  // so one shape re-renders the card.
+  //
+  // PII (doc section 9): bodies carry names + last4; logs carry ids/counts.
+
+  /** The resolver + serializer deps (lib/rosterResolution), built once. */
+  const rosterDeps: RosterResolutionDeps = { conversations, units, contacts, log };
+
+  /** Everything services/relayMembers touches for the LIVE call-through. */
+  const memberDeps: RelayMemberDeps = {
+    conversations,
+    contacts,
+    audit,
+    activityEvents,
+    poolNumbers,
+    events,
+    log,
+  };
+
+  /** The resolver's owner view of a tour (thread pointer + plan override). */
+  function rosterOwnerOf(tour: TourItem): RosterOwner {
+    return {
+      type: 'tour',
+      id: tour.tourId,
+      tenantId: tour.tenantId,
+      unitId: tour.unitId,
+      ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
+      ...(tour.roster !== undefined && { roster: tour.roster }),
+    };
+  }
+
+  /** The plan-write state the conditional writes guard on. */
+  const planStateOf = (tour: TourItem): RosterPlanState => ({
+    ...(tour.roster !== undefined && { roster: tour.roster }),
+    ...(tour.rosterVersion !== undefined && { rosterVersion: tour.rosterVersion }),
+  });
+
+  const planStoreFor = (tourId: string): RosterPlanStore => ({
+    reload: async () => {
+      const fresh = await tours.get(tourId);
+      return fresh === undefined ? undefined : planStateOf(fresh);
+    },
+    setRoster: async (roster, expectedVersion) =>
+      planStateOf(await tours.setRoster(tourId, roster, expectedVersion)),
+    clearRoster: () => tours.clearRoster(tourId),
+  });
+
+  /** The thread pointer, or undefined. A `provisioning:<tourId>` claim sentinel
+   *  COUNTS as a thread: a plan edit during that window would be consumed or
+   *  lost by the provision it is racing. */
+  const threadIdOf = (tour: TourItem): string | undefined =>
+    typeof tour.groupThreadId === 'string' && tour.groupThreadId.length > 0
+      ? tour.groupThreadId
+      : undefined;
+
+  const sendRefusal = (res: Response, refusal: RosterEditRefusal): void => {
+    res.status(refusal.status).json({
+      error: refusal.error,
+      ...(refusal.message !== undefined && { message: refusal.message }),
+    });
+  };
+
+  /** Re-read + serialize - the 200 body of every mutating roster endpoint. */
+  async function respondWithRoster(res: Response, tourId: string): Promise<void> {
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const view = await describeRoster(rosterDeps, rosterOwnerOf(tour));
+    log.info({ tourId, source: view.source, memberCount: view.members.length }, 'tour roster edited');
+    res.json(view);
+  }
+
+  /** The clock + org window a preview evaluates quiet hours against. */
+  async function quietHoursState(): Promise<QuietHoursState> {
+    return { nowIso: getNow(), window: await readQuietHoursWindow(settingsRepo, log) };
+  }
+
+  // --- PLAN writes (no thread) ---------------------------------------------
+
+  router.post('/:tourId/roster/members', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    if (threadIdOf(tour) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    const entry = parseRosterEntryInput(req.body);
+    if ('error' in entry) {
+      res.status(400).json({ error: 'invalid_member', message: entry.error });
+      return;
+    }
+    const outcome = await applyRosterPlanEdit(rosterDeps, planStoreFor(tourId), {
+      owner: { type: 'tour', id: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId },
+      state: planStateOf(tour),
+      edit: { kind: 'add', entry },
+      notFoundError: 'tour_not_found',
+    });
+    if (!outcome.ok) {
+      sendRefusal(res, outcome.refusal);
+      return;
+    }
+    await respondWithRoster(res, tourId);
+  });
+
+  router.delete('/:tourId/roster/members/:memberKey', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    if (threadIdOf(tour) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    const outcome = await applyRosterPlanEdit(rosterDeps, planStoreFor(tourId), {
+      owner: { type: 'tour', id: tour.tourId, tenantId: tour.tenantId, unitId: tour.unitId },
+      state: planStateOf(tour),
+      edit: { kind: 'remove', memberKey: String(req.params['memberKey'] ?? '') },
+      notFoundError: 'tour_not_found',
+    });
+    if (!outcome.ok) {
+      sendRefusal(res, outcome.refusal);
+      return;
+    }
+    await respondWithRoster(res, tourId);
+  });
+
+  // RESET = delete the override. The roster then re-resolves from the property
+  // on every read, so a later change of primary contact is picked up.
+  router.post('/:tourId/roster/reset', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    if (threadIdOf(tour) !== undefined) {
+      sendRefusal(res, ROSTER_THREAD_EXISTS);
+      return;
+    }
+    await tours.clearRoster(tourId);
+    await respondWithRoster(res, tourId);
+  });
+
+  // --- LIVE call-through (a thread exists, any status) ---------------------
+
+  router.post('/:tourId/roster/live-members', async (req, res) => {
+    const actor = (req as AuthedRequest).user?.userId;
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const threadId = threadIdOf(tour);
+    if (threadId === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const resolvedCandidate = await resolveRosterCandidate(contacts, req.body);
+    if (!resolvedCandidate.ok) {
+      sendRefusal(res, resolvedCandidate.refusal);
+      return;
+    }
+    const { candidate } = resolvedCandidate;
+    const conversation = await conversations.getById(threadId);
+    if (!conversation) {
+      sendRefusal(res, ROSTER_UNAVAILABLE);
+      return;
+    }
+    // Spec section 7 carve-out: a CLOSED thread's add is silent AND immediate.
+    // There is nobody to announce to on a closed thread, so it is never
+    // deferred either (slice 6 leaves this branch alone).
+    const announce = conversation.status !== 'closed';
+    const result = await addMemberToRelay(
+      memberDeps,
+      threadId,
+      { contactId: candidate.contactId, phone: candidate.phone },
+      { announce, ...(actor !== undefined && { actor }) },
+    );
+    if (!result.ok) {
+      sendRefusal(res, result.refusal);
+      return;
+    }
+    await respondWithRoster(res, tourId);
+  });
+
+  // The SERVER locates the participant row (by contactId or `phone:<E164>`)
+  // and removes it by THE PHONE STORED ON THAT ROW - the client only ever
+  // holds a memberKey and phoneLast4. Immediate; never deferred, never
+  // announced.
+  router.delete('/:tourId/roster/live-members/:memberKey', async (req, res) => {
+    const actor = (req as AuthedRequest).user?.userId;
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    const threadId = threadIdOf(tour);
+    if (threadId === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const result = await removeMemberFromRelay(
+      memberDeps,
+      threadId,
+      String(req.params['memberKey'] ?? ''),
+      { ...(actor !== undefined && { actor }) },
+    );
+    if (!result.ok) {
+      sendRefusal(res, result.refusal);
+      return;
+    }
+    await respondWithRoster(res, tourId);
+  });
+
+  // --- Previews (server-composed; the client never rebuilds a body) --------
+
+  router.get('/:tourId/roster/preview-open', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    if (threadIdOf(tour) !== undefined) {
+      // Never preview an open that can only 409.
+      sendRefusal(res, { status: 409, error: 'relay_already_provisioned' });
+      return;
+    }
+    const preview = await buildOpenPreview(rosterDeps, rosterOwnerOf(tour), await quietHoursState());
+    if (!preview.ok) {
+      sendRefusal(res, preview.refusal);
+      return;
+    }
+    res.json(preview.preview);
+  });
+
+  router.post('/:tourId/roster/preview-add', async (req, res) => {
+    const tourId = String(req.params['tourId'] ?? '');
+    const tour = await tours.get(tourId);
+    if (!tour) {
+      res.status(404).json({ error: 'tour_not_found' });
+      return;
+    }
+    // A pre-open add sends nothing, so there is no body to preview: refuse
+    // rather than render a message that will never go out.
+    if (threadIdOf(tour) === undefined) {
+      sendRefusal(res, ROSTER_NO_THREAD);
+      return;
+    }
+    const resolvedCandidate = await resolveRosterCandidate(contacts, req.body);
+    if (!resolvedCandidate.ok) {
+      sendRefusal(res, resolvedCandidate.refusal);
+      return;
+    }
+    const preview = await buildAddPreview(
+      rosterDeps,
+      rosterOwnerOf(tour),
+      resolvedCandidate.candidate,
+      await quietHoursState(),
+    );
+    if (!preview.ok) {
+      sendRefusal(res, preview.refusal);
+      return;
+    }
+    res.json(preview.preview);
   });
 
   // PATCH /api/tours/:tourId — partial update with transition guards.

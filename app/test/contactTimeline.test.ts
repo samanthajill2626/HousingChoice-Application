@@ -793,6 +793,50 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
   });
 
+  it('reads the org window ONLY when the gather runs: no settings read and NO timezone on a kinds=message request', async () => {
+    // The other half of the rule above. /timeline is one of the hottest read
+    // paths in the dashboard (contact page + both 1:1 comms tabs, refetched on
+    // every debounced SSE burst); a request that can carry no scheduled item -
+    // a kinds filter without `scheduled`, a cursor page, or a deployment with no
+    // scheduled repos - must pay no settings GetItem and must not advertise a
+    // zone for a bucket that is empty by construction.
+    let reads = 0;
+    const counting: SettingsReadRepo = {
+      async getOrgSettings() {
+        reads += 1;
+        return quietOffSettingsRepo().getOrgSettings();
+      },
+    };
+    const { world, app } = makeGatherHarness(counting);
+    const phone = '+15550600011';
+    world.contacts.push({ contactId: 'ct-tz', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-tz', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-tz',
+      unitId: 'u-tz',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+
+    const filtered = await request(app).get('/api/contacts/ct-tz/timeline?kinds=message');
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.upcoming).toEqual([]);
+    expect(filtered.body.timezone).toBeUndefined();
+    expect(reads).toBe(0);
+
+    // ...and the gathering shape still reads it exactly once and reports it.
+    const gathered = await request(app).get('/api/contacts/ct-tz/timeline');
+    expect(gathered.status).toBe(200);
+    expect(gathered.body.upcoming).toHaveLength(1);
+    expect(gathered.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
+    expect(reads).toBe(1);
+  });
+
   it('non-self_guided tour with an UNUSABLE (closed) group still surfaces its rungs as 1:1 items (M3)', async () => {
     const { world, app } = makeGatherHarness();
     const phone = '+15550600002';

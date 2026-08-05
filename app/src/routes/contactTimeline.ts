@@ -937,14 +937,21 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    Run only on the first page (`cursor` absent) AND when the caller wants
     //    the `scheduled` kind. Failures never break the timeline — the bucket is
     //    supplementary, so a gather error logs + falls back to `[]`.
-    // The org window is read ABOVE the conditional (and above its try/catch):
-    // it carries the COMPOSING ZONE, which the response owes even when the
-    // gather is skipped or fails. readQuietHoursWindow never throws - a settings
-    // failure falls back to the defaults.
-    const window = await readQuietHoursWindow(settings, log);
-
     let upcoming: TimelineScheduled[] = [];
+    // The COMPOSING ZONE of the gathered bodies, emitted only when we gathered.
+    let timezone: string | undefined;
     if (boundaryKey === undefined && kinds.has('scheduled') && scheduledRepos !== undefined) {
+      // The org window is read under the SAME condition as the gather - this is
+      // one of the hottest read paths in the dashboard (the contact page and both
+      // 1:1 comms tabs refetch it on every debounced SSE burst), and a cursor
+      // page, a kinds filter without `scheduled`, or a deployment without the
+      // scheduled repos gathers nothing, so it must not pay a settings GetItem
+      // for a zone describing an always-empty bucket.
+      // It stays ABOVE the try/catch: a gather FAILURE falls back to an empty
+      // bucket but must not lose the zone. readQuietHoursWindow never throws - a
+      // settings failure falls back to the defaults.
+      const window = await readQuietHoursWindow(settings, log);
+      timezone = window.timezone;
       try {
         // Quiet hours (spec 2026-08-03): evaluated PER ROW - the rung's own
         // dueAt falls inside an occurrence of the daily-recurring window, or it
@@ -975,13 +982,15 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     //    cursor still pages backward in time (older) with no dups/skips.
     // `timezone` is the zone the `upcoming` BODIES were composed in (spec D8),
     // so the client can render each card's fire time in the same zone the body
-    // quotes instead of the navigator's browser zone. Always present - the
-    // window is read above the gather's conditional and its catch.
+    // quotes instead of the navigator's browser zone. Present exactly when the
+    // gather ran (including when it FAILED into an empty bucket) - a response
+    // that can carry no scheduled item at all describes no zone. The dashboard
+    // type is `timezone?` and every consumer falls back to the browser zone.
     res.json({
       items: page.map((c) => c.item).reverse(),
       nextCursor,
       upcoming,
-      timezone: window.timezone,
+      ...(timezone !== undefined && { timezone }),
     });
   });
 

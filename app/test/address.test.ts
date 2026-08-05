@@ -73,6 +73,25 @@ describe('formatStreet', () => {
     expect(formatStreet({})).toBe('');
     expect(formatStreet('   ')).toBe('');
   });
+
+  it('returns empty string (never throws) for a NULL address', () => {
+    // The declared type says undefined, but `address: null` is reachable at
+    // runtime: the seeds write unit items with a RAW PutCommand (bypassing
+    // unitsRepo, which strips nulls), the M1.6 import is unbuilt, and stored rows
+    // can be hand-edited. On the reminder paths the containment blocks catch only
+    // UncomposableReminderError, so a TypeError from here escapes as a re-listed-
+    // forever poll row / a 500 / an emptied timeline bucket.
+    expect(() => formatStreet(null as unknown as Address)).not.toThrow();
+    expect(formatStreet(null as unknown as Address)).toBe('');
+  });
+
+  it('ignores a NON-STRING line1/line2 instead of stringifying it into the copy', () => {
+    // A legacy/imported row the write validator never policed. Without the
+    // string-typed filter this renders "[object Object]" into a tenant SMS.
+    expect(formatStreet({ line1: { length: 5 } } as unknown as Address)).toBe('');
+    expect(formatStreet({ line1: 412 } as unknown as Address)).toBe('');
+    expect(formatStreet({ line1: '412 Oak St', line2: 7 } as unknown as Address)).toBe('412 Oak St');
+  });
 });
 
 describe('formatAddress still behaves after the refactor', () => {

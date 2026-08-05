@@ -895,6 +895,11 @@ describe('composed reminder bodies', () => {
     // once the copy carries the street and the local time, a preview that
     // resolved the catalog directly would no longer match this send.
     expect(spy.sent.at(-1)?.body).toBe(preview.body);
+    // ANTI-VACUITY: equality alone would still hold if BOTH sides silently lost
+    // the address (e.g. unitsRepo dropped from the route deps AND the poll deps)
+    // and composed the _no_address variant. Naming the street pins that both
+    // sides really took the address-bearing path.
+    expect(preview.body).toContain('412 Sender Way NW');
   });
 
   it('a SENT rung keeps its original body after the tour is rescheduled', async () => {
@@ -906,6 +911,18 @@ describe('composed reminder bodies', () => {
     const spy = makeSendSpy();
     const deps = pollDepsFrom(world, spy.service);
     const { tourId, reminderId } = await seedComposedTour(world, 'history', '+15550710002');
+
+    // The OTHER half of the rule: a rung that was never claimed has no sentBody,
+    // so it must keep composing LIVE and follow the tour to its new time. Its
+    // dueAt sits far past the confirmation's, so the send run below never
+    // claims it (and it is not in that release batch, so nothing supersedes it).
+    const pendingId = 'rem-composed-history-pending';
+    seedReminder(world, {
+      reminderId: pendingId,
+      tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-09T10:00:00.000Z',
+    });
 
     const listed = await authed(app).get(`/api/tours/${tourId}/reminders`);
     const target = listed.body.reminders.find(
@@ -931,6 +948,25 @@ describe('composed reminder bodies', () => {
       (r: { reminderId: string }) => r.reminderId === reminderId,
     );
     expect(sentAfter.body).toBe(sentBefore.body);
+
+    // ...WHILE the pending sibling renders the NEW details. This is the half
+    // that catches a future "just render sentBody whenever it exists" (or
+    // "freeze every body at arm time") simplification: history is frozen ONLY
+    // for what we actually texted.
+    const pendingAfter = afterReschedule.body.reminders.find(
+      (r: { reminderId: string }) => r.reminderId === pendingId,
+    );
+    expect(pendingAfter.state).toBe('upcoming');
+    expect(pendingAfter.body).toBe(
+      composeTourReminderBody({
+        kind: 'day_before',
+        scheduledAt: '2026-12-01T20:00:00.000Z',
+        timezone: world.settings.timezone,
+        // formatStreet projects line1(+line2) only - the street the fixture seeds.
+        address: { line1: '412 Sender Way NW' },
+      }),
+    );
+    expect(pendingAfter.body).not.toBe(sentAfter.body);
   });
 });
 

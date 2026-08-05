@@ -4,6 +4,7 @@ import {
   UncomposableReminderError,
 } from '../src/messages/tourCopy.js';
 import { analyzeSms } from '../src/lib/smsEncoding.js';
+import type { Address } from '../src/lib/address.js';
 
 const NY = 'America/New_York';
 const AT = '2026-07-23T19:00:00.000Z'; // Jul 23 15:00 EDT
@@ -54,6 +55,19 @@ describe('composeTourReminderBody: the no-address variants', () => {
   it('an all-empty structured address takes the no-address path', () => {
     expect(composeTourReminderBody({ ...base, kind: 'morning_of', address: {} }))
       .toBe('Good morning! Tour is today at 3:00 PM.');
+  });
+
+  it('a NULL address composes the _no_address variant instead of throwing', () => {
+    // `address: null` is reachable at runtime even though the type says
+    // optional: the seeds write unit items with a RAW PutCommand around
+    // unitsRepo (which strips nulls). A TypeError here is NOT an
+    // UncomposableReminderError, so no caller's containment block would catch it.
+    expect(() => composeTourReminderBody({
+      ...base, kind: 'morning_of', address: null as unknown as Address,
+    })).not.toThrow();
+    expect(composeTourReminderBody({
+      ...base, kind: 'morning_of', address: null as unknown as Address,
+    })).toBe('Good morning! Tour is today at 3:00 PM.');
   });
 
   it('a structured address contributes street only', () => {

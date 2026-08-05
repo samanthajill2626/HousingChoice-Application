@@ -111,7 +111,7 @@ const READY: ListingState = {
       name: 'James Porter',
       roleLabel: 'Landlord',
       company: 'Porter Properties',
-      primaryVoice: true,
+      primaryContact: true,
       fallback: true,
     },
   ],

@@ -44,7 +44,7 @@ import { createUserRateLimit } from '../middleware/rateLimit.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { createAuditRepo, type AuditEvent, type AuditRepo } from '../repos/auditRepo.js';
 import {
-  CannotRemovePrimaryLandlordError,
+  CannotRemoveLandlordOfRecordError,
   createUnitsRepo,
   isDeleted,
   unitContacts,
@@ -976,12 +976,13 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     });
   });
 
-  // POST /api/units/:unitId/contacts { contactId, role, primaryVoice? } (BE3/C3).
+  // POST /api/units/:unitId/contacts { contactId, role, primaryContact? } (BE3/C3).
   // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
   // resolves the contact's denormalized name/company (so the roster row is
-  // self-describing); the repo maintains the single-primaryVoice invariant and
-  // keeps primary_voice_contact (voice routing) consistent. 404 unknown unit /
-  // unknown contact; 400 bad role / primaryVoice; audit unit_contact_added.
+  // self-describing); the repo maintains the single-primaryContact invariant and
+  // keeps the primary_contact scalar (the property's default contact - group
+  // texts and masked calls) consistent. 404 unknown unit /
+  // unknown contact; 400 bad role / primaryContact; audit unit_contact_added.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
     const body = req.body;
@@ -1000,12 +1001,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: `role must be one of: ${UNIT_CONTACT_ROLES.join(', ')}` });
       return;
     }
-    const primaryVoiceRaw = b['primaryVoice'];
-    if (primaryVoiceRaw !== undefined && typeof primaryVoiceRaw !== 'boolean') {
-      res.status(400).json({ error: 'primaryVoice must be a boolean' });
+    const primaryContactRaw = b['primaryContact'];
+    if (primaryContactRaw !== undefined && typeof primaryContactRaw !== 'boolean') {
+      res.status(400).json({ error: 'primaryContact must be a boolean' });
       return;
     }
-    const primaryVoice = primaryVoiceRaw === true;
+    const primaryContact = primaryContactRaw === true;
 
     // The unit must exist (404). We check up-front so an unknown unit is a clean
     // 404 distinct from the unknown-contact 404 below.
@@ -1029,7 +1030,7 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const updated = await units.addContact(unitId, {
       contactId,
       role,
-      primaryVoice,
+      primaryContact,
       ...(name !== undefined && { name }),
       ...(company !== undefined && { company }),
     });
@@ -1037,15 +1038,15 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       actor: req.user?.userId,
       contactId,
       role,
-      primaryVoice,
+      primaryContact,
     });
-    log.info({ unitId, contactId, role, primaryVoice, actor: req.user?.userId }, 'unit contact added via api');
+    log.info({ unitId, contactId, role, primaryContact, actor: req.user?.userId }, 'unit contact added via api');
     res.json({ unit: { ...updated, contacts: await enrichRoster(updated) } });
   });
 
   // DELETE /api/units/:unitId/contacts/:contactId (BE3/C3) → { unit }. 404
-  // unknown unit / contact-not-on-roster; 409 removing the primary landlord
-  // (cannot_remove_primary_landlord — reassign landlordId first); audit
+  // unknown unit / contact-not-on-roster; 409 removing the landlord of record
+  // (cannot_remove_landlord_of_record — reassign landlordId first); audit
   // unit_contact_removed.
   router.delete('/:unitId/contacts/:contactId', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');
@@ -1054,8 +1055,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     try {
       updated = await units.removeContact(unitId, contactId);
     } catch (err) {
-      if (err instanceof CannotRemovePrimaryLandlordError) {
-        res.status(409).json({ error: 'cannot_remove_primary_landlord' });
+      if (err instanceof CannotRemoveLandlordOfRecordError) {
+        res.status(409).json({ error: 'cannot_remove_landlord_of_record' });
         return;
       }
       if (err instanceof ConditionalCheckFailedException) {

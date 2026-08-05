@@ -243,7 +243,7 @@ export interface TwilioVoiceWebhookDeps {
   contactsRepo?: ContactsRepo;
   /** Audit trail (contact auto-capture appends contact_auto_captured). */
   auditRepo?: AuditRepo;
-  /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_voice_contact). */
+  /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_contact). */
   placementsRepo?: PlacementsRepo;
   unitsRepo?: UnitsRepo;
   /** Founder-editable templates (M1.9b: missed-call quick-replies); real repo by default. */
@@ -385,8 +385,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // the BUSINESS number as caller ID (never the real caller's) via the same
     // whisper + press-1 accept gate as the masked bridge. Missed → missed-call
     // push + zero-tap auto-text (the /voice/status handler below). The
-    // main-business-number → landlord-by-unit (primary_voice_contact) masked
+    // main-business-number → landlord-by-unit (primary_contact) masked
     // path stays M1.10 (needs the unit↔placement linkage).
+    // NOTE (contact-rosters spec 2026-08-04 section 12): when this path is
+    // built it must consult the THREAD roster, not the unit scalar.
     await handleFounderTriage(res, { CallSid, From });
   });
 
@@ -848,9 +850,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     }
 
     // M1.10d: for a tenant->landlord masked call on a PLACEMENT-linked relay, the
-    // landlord LEG dials the unit's primary_voice_contact (the per-property
-    // voice contact, §7.1) instead of the roster SMS number — resolved at CALL
-    // TIME (so a changed per-unit voice contact takes effect without
+    // landlord LEG dials the unit's primary_contact (the per-property
+    // primary contact, §7.1) instead of the roster SMS number — resolved at CALL
+    // TIME (so a changed per-unit primary contact takes effect without
     // re-rostering), with the roster number as the fallback. It substitutes ONLY
     // when the CALLER is the placement's tenant (destination = the landlord side);
     // texts are unaffected (relay fan-out always uses the roster SMS numbers).
@@ -864,8 +866,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         if (linkedPlacement && caller.contactId === linkedPlacement.tenantId) {
           const unit = await units.getById(linkedPlacement.unitId);
           const voiceContactId =
-            typeof unit?.primary_voice_contact === 'string' && unit.primary_voice_contact.length > 0
-              ? unit.primary_voice_contact
+            typeof unit?.primary_contact === 'string' && unit.primary_contact.length > 0
+              ? unit.primary_contact
               : undefined;
           const landlordContactId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
           if (voiceContactId !== undefined && landlordContactId !== undefined) {
@@ -874,7 +876,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
               typeof voiceContact?.phone === 'string' && voiceContact.phone.length > 0
                 ? voiceContact.phone
                 : undefined;
-            // Guard a misconfig where the unit's voice contact resolves to the
+            // Guard a misconfig where the unit's primary contact resolves to the
             // CALLER's own number — never bridge the tenant to themselves; fall
             // back to the roster number.
             if (dialPhone !== undefined && dialPhone !== From) {
@@ -886,7 +888,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     } catch (err) {
       log.error(
         { err, callSid: CallSid },
-        'masked call: landlord voice-contact resolution failed — using the roster number',
+        'masked call: landlord primary-contact resolution failed — using the roster number',
       );
     }
 
@@ -913,7 +915,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       `&conversationId=${encodeURIComponent(relay.conversationId)}` +
       `&parentCallSid=${encodeURIComponent(CallSid)}`;
     for (const callee of callees) {
-      // M1.10d: the landlord-side callee dials the unit's primary_voice_contact
+      // M1.10d: the landlord-side callee dials the unit's primary_contact
       // when resolved (else the roster number). Identified by contactId so a
       // multi-member group only substitutes the actual landlord leg.
       const dialPhone =

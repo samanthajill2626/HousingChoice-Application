@@ -945,7 +945,7 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   // thread. The explicit operator "Set up relay thread" action (Phase 1 is
   // hand-touched parity — no auto-trigger). The roster is derived FROM the
   // placement: the tenant + the unit's landlord, by their SMS numbers (the
-  // masked-CALL landlord leg resolves unit.primary_voice_contact at call time,
+  // masked-CALL landlord leg resolves unit.primary_contact at call time,
   // M1.10d). Reuses the shared provisioning primitive and links
   // placement.group_thread ↔ conversation.placementId. Idempotent: refuses (409)
   // if the placement already has an OPEN relay so a double-click never buys a

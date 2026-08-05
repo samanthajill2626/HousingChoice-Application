@@ -1479,7 +1479,7 @@ export interface UnitItem {
   tour_type?: TourType;
   /** Free-text "how to apply" copy (the property page's process card). */
   application_process?: string;
-  primary_voice_contact?: string;
+  primary_contact?: string;
   /** Soft-delete marker (ISO 8601). Present → the property is "deleted": hidden
    *  from the property lists + landlord card but fully retained (restore clears it). */
   deleted_at?: string;
@@ -1871,16 +1871,16 @@ export interface RelayGroupRow {
 // Copied verbatim from the build plan §C3. The property page's Contacts roster
 // (landlord/PM, each opening their contact page) + Related-properties panel.
 // UnitItem gains an optional `contacts[]` (BE3); legacy `landlordId` stays = the
-// primary landlord, which the page uses as a single-row FALLBACK until BE3 lands.
+// landlord of record, which the page uses as a single-row FALLBACK until BE3 lands.
 
 export interface UnitContact {
   contactId: string;
   role: 'landlord' | 'pm' | 'owner' | 'other';
-  primaryVoice: boolean; // the ☎ primary
+  primaryContact: boolean; // the ☎ primary
   name?: string;
   company?: string; // denormalized for the roster row
 }
-// UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the primary landlord)
+// UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the landlord of record)
 export interface RelatedUnit {
   unitId: string;
   address?: Address | string; // reuse legacy

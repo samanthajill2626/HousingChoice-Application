@@ -97,7 +97,7 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   // the flyer projections below.
   tour_type: 'tour_type',
   application_process: 'string',
-  primary_voice_contact: 'string',
+  primary_contact: 'string',
   // BE3/C3: the PARENT property/building group id (byProperty GSI hash). WRITABLE
   // so the related-units `same_property` branch is reachable through the API
   // (create/PATCH), not only via seeded fakes — without this it'd be permanently
@@ -199,7 +199,7 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * allowlist (build up), never a denylist (strip down): a future internal field
  * added to UnitItem can NEVER leak, because it simply won't be copied here.
  * NEVER include tour_process, tour_type, application_process, landlordId,
- * primary_voice_contact, notes, internal status/status_source, payment_standard,
+ * primary_contact, notes, internal status/status_source, payment_standard,
  * lif, priority, propertyId, jurisdiction, final_rent, voucher_size_accepted.
  */
 export interface UnitFlyer {

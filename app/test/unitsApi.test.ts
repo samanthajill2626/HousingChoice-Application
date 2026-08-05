@@ -142,7 +142,7 @@ describe('POST /api/units — create', () => {
     expect(res.status).toBe(400);
   });
 
-  it('accepts the per-unit internal fields incl. primary_voice_contact (CO1)', async () => {
+  it('accepts the per-unit internal fields incl. primary_contact (CO1)', async () => {
     const { app } = makeWebhookHarness();
     const res = await request(app)
       .post('/api/units')
@@ -152,11 +152,11 @@ describe('POST /api/units — create', () => {
         landlordId: 'contact-ll-1',
         tour_process: 'lockbox 1234',
         application_process: 'online portal',
-        primary_voice_contact: 'contact-ll-agent-7',
+        primary_contact: 'contact-ll-agent-7',
         pets: true,
       });
     expect(res.status).toBe(201);
-    expect(res.body.unit.primary_voice_contact).toBe('contact-ll-agent-7');
+    expect(res.body.unit.primary_contact).toBe('contact-ll-agent-7');
     expect(res.body.unit.pets).toBe(true);
   });
 });

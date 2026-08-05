@@ -56,7 +56,7 @@ import {
   type ParkedEmailEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
-  CannotRemovePrimaryLandlordError,
+  CannotRemoveLandlordOfRecordError,
   isDeleted as isUnitDeleted,
   unitContacts,
   type UnitContact,
@@ -1440,38 +1440,38 @@ export function createFakeWorld(): FakeWorld {
     },
     async addContact(unitId, contact) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, exactly-one-primaryVoice, and keep primary_voice_contact
+      // contactId, exactly-one-primaryContact, and keep primary_contact
       // consistent with the roster's ☎ primary.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
-      const primaryVoice = contact.primaryVoice === true;
+      const primaryContact = contact.primaryContact === true;
       // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
-      const isPrimaryLandlord =
+      const isLandlordOfRecord =
         typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
-      const role: UnitContact['role'] = isPrimaryLandlord ? 'landlord' : contact.role;
+      const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
       if (existing) {
         existing.role = role;
-        existing.primaryVoice = primaryVoice;
+        existing.primaryContact = primaryContact;
         if (contact.name !== undefined) existing.name = contact.name;
         if (contact.company !== undefined) existing.company = contact.company;
       } else {
         const entry: UnitContact = {
           contactId: contact.contactId,
           role,
-          primaryVoice,
+          primaryContact,
           ...(contact.name !== undefined ? { name: contact.name } : {}),
           ...(contact.company !== undefined ? { company: contact.company } : {}),
         };
         roster.push(entry);
       }
-      if (primaryVoice) {
-        for (const c of roster) c.primaryVoice = c.contactId === contact.contactId;
+      if (primaryContact) {
+        for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
       }
       unit.contacts = roster;
-      const primary = roster.find((c) => c.primaryVoice);
-      if (primary !== undefined) unit.primary_voice_contact = primary.contactId;
+      const primary = roster.find((c) => c.primaryContact);
+      if (primary !== undefined) unit.primary_contact = primary.contactId;
       unit.updated_at = new Date().toISOString();
       return unit;
     },
@@ -1479,25 +1479,25 @@ export function createFakeWorld(): FakeWorld {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`removeContact: no unit ${unitId}`);
       if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
-        throw new CannotRemovePrimaryLandlordError();
+        throw new CannotRemoveLandlordOfRecordError();
       }
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const target = roster.find((c) => c.contactId === contactId);
       if (!target) throw conditionalCheckFailed(`removeContact: unit ${unitId} has no contact ${contactId}`);
-      const removedWasPrimaryVoice = target.primaryVoice;
+      const removedWasPrimaryContact = target.primaryContact;
       const next = roster.filter((c) => c.contactId !== contactId);
       unit.contacts = next;
-      // FIX B: keep the roster primaryVoice flag and the primary_voice_contact
+      // FIX B: keep the roster primaryContact flag and the primary_contact
       // scalar in agreement after removing the ☎ primary (lockstep with the real
       // repo).
-      if (removedWasPrimaryVoice) {
+      if (removedWasPrimaryContact) {
         const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
         if (landlordId.length > 0) {
-          for (const c of next) c.primaryVoice = c.contactId === landlordId;
-          unit.primary_voice_contact = landlordId;
+          for (const c of next) c.primaryContact = c.contactId === landlordId;
+          unit.primary_contact = landlordId;
         } else {
-          for (const c of next) c.primaryVoice = false;
-          delete unit.primary_voice_contact; // null → REMOVE; never dangling
+          for (const c of next) c.primaryContact = false;
+          delete unit.primary_contact; // null → REMOVE; never dangling
         }
       }
       unit.updated_at = new Date().toISOString();
@@ -2775,7 +2775,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // placement-deadline-model: the escalation emit recomputes the soonest
       // deadline so the pending chip is PRESERVED (not nulled) on attention raise.
       placementDeadlinesRepo: world.placementDeadlinesRepo,
-      // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
+      // M1.10d masked-call landlord-leg routing reads the unit's primary_contact.
       unitsRepo: world.unitsRepo,
       broadcastsRepo: world.broadcastsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin

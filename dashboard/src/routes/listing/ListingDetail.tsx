@@ -222,7 +222,7 @@ export function ListingDetail(): React.JSX.Element {
 
   const { unit, roster, placementsOnUnit, related, recipients, similar, activity, tours } = state;
   const address = shortAddress(unit.address, unit.unitId);
-  const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
+  const landlordName = roster.find((r) => r.primaryContact)?.company ?? roster[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   const programs = unit.accepted_programs ?? [];
   // The gallery renders resolved display media (presign-per-read). The server
@@ -674,7 +674,7 @@ export function ListingDetail(): React.JSX.Element {
                       {/* The NAME is the visible link (brand-styled; the whole row
                           stays the hit target) — no separate "Open" affordance. */}
                       <span className={styles.contactName}>{r.name ?? r.contactId}</span>
-                      {r.primaryVoice ? <span className={styles.primaryStar}> (primary)</span> : null}
+                      {r.primaryContact ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}
                         {r.company ? ` - ${r.company}` : ''}

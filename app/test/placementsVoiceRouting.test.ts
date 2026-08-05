@@ -1,5 +1,5 @@
 // Masked-call landlord-leg routing (M1.10d) — a tenant->landlord masked call on
-// a CASE-linked relay dials the unit's primary_voice_contact (resolved at call
+// a CASE-linked relay dials the unit's primary_contact (resolved at call
 // time), with the roster SMS number as the fallback. The landlord->tenant
 // direction and non-placement relays never substitute; texts are unaffected. The
 // callerId=pool / do-not-record / no-leak guardrails stay intact throughout.
@@ -17,19 +17,19 @@ void ORIGIN_SECRET; // signedTwilioPost sets the origin header itself
 const POOL = '+15550109000';
 const TENANT = '+15550100001'; // caller (the placement tenant)
 const LANDLORD_SMS = '+15550100002'; // the landlord's roster SMS number
-const VOICE_CONTACT = '+15550100099'; // the unit's primary_voice_contact (e.g. a PM)
+const VOICE_CONTACT = '+15550100099'; // the unit's primary_contact (e.g. a PM)
 
 function seedPlacementRelay(
   world: FakeWorld,
   opts: {
-    primaryVoiceContact?: string;
+    primaryContact?: string;
     linkPlacement?: boolean;
     voiceContactHasPhone?: boolean;
     voiceContactPhone?: string;
   } = {},
 ): void {
   const {
-    primaryVoiceContact,
+    primaryContact,
     linkPlacement = true,
     voiceContactHasPhone = true,
     voiceContactPhone = VOICE_CONTACT,
@@ -41,7 +41,7 @@ function seedPlacementRelay(
     unitId: 'unit-vr',
     landlordId: 'c-landlord',
     status: 'available',
-    ...(primaryVoiceContact !== undefined && { primary_voice_contact: primaryVoiceContact }),
+    ...(primaryContact !== undefined && { primary_contact: primaryContact }),
   });
   if (linkPlacement) {
     world.placements.set('placement-vr', {
@@ -82,9 +82,9 @@ function inboundVoice(from: string): Record<string, string> {
 }
 
 describe('masked-call landlord-leg routing (M1.10d)', () => {
-  it('tenant->landlord on a placement-linked relay dials unit.primary_voice_contact, not the roster SMS number', async () => {
+  it('tenant->landlord on a placement-linked relay dials unit.primary_contact, not the roster SMS number', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm' });
+    seedPlacementRelay(world, { primaryContact: 'c-pm' });
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
@@ -93,15 +93,15 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
     // Guardrails unchanged: callerId is the pool number, masked, do-not-record.
     expect(xml).toContain(`callerId="${POOL}"`);
     expect(xml).toContain('record="do-not-record"');
-    // The landlord leg dials the primary_voice_contact (the PM), NOT the roster #.
+    // The landlord leg dials the primary_contact (the PM), NOT the roster #.
     expect(xml).toContain(VOICE_CONTACT);
     expect(xml).not.toContain(LANDLORD_SMS);
     expect(xml).not.toContain(TENANT); // never the caller's own number
   });
 
-  it('falls back to the roster SMS number when the unit has no primary_voice_contact', async () => {
+  it('falls back to the roster SMS number when the unit has no primary_contact', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, {}); // no primary_voice_contact set
+    seedPlacementRelay(world, {}); // no primary_contact set
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
@@ -112,7 +112,7 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
 
   it('landlord->tenant never substitutes (the tenant leg dials the roster number)', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm' });
+    seedPlacementRelay(world, { primaryContact: 'c-pm' });
     const { app } = makeWebhookHarness({ world });
 
     // The LANDLORD calls the pool → destination is the tenant → no override.
@@ -124,7 +124,7 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
 
   it('a relay with NO placement link never substitutes (roster number)', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm', linkPlacement: false });
+    seedPlacementRelay(world, { primaryContact: 'c-pm', linkPlacement: false });
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
@@ -133,19 +133,19 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
     expect(xml).not.toContain(VOICE_CONTACT);
   });
 
-  it('falls back to the roster number when primary_voice_contact has no phone on file', async () => {
+  it('falls back to the roster number when primary_contact has no phone on file', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm', voiceContactHasPhone: false });
+    seedPlacementRelay(world, { primaryContact: 'c-pm', voiceContactHasPhone: false });
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
     expect(res.text).toContain(LANDLORD_SMS); // roster fallback, no empty <Number>
   });
 
-  it('never bridges the tenant to themselves if primary_voice_contact resolves to the caller', async () => {
+  it('never bridges the tenant to themselves if primary_contact resolves to the caller', async () => {
     const world = createFakeWorld();
-    // Misconfig: the unit's voice contact's phone IS the tenant's own number.
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm', voiceContactPhone: TENANT });
+    // Misconfig: the unit's primary contact's phone IS the tenant's own number.
+    seedPlacementRelay(world, { primaryContact: 'c-pm', voiceContactPhone: TENANT });
     const { app } = makeWebhookHarness({ world });
 
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
@@ -158,7 +158,7 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
 
   it('is best-effort: a placement/unit lookup failure falls back to the roster number (never 5xxs)', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, { primaryVoiceContact: 'c-pm' });
+    seedPlacementRelay(world, { primaryContact: 'c-pm' });
     const { app } = makeWebhookHarness({ world });
     // A DynamoDB blip during routing resolution must degrade to the roster dial,
     // never crash the bridge.
@@ -175,23 +175,23 @@ describe('masked-call landlord-leg routing (M1.10d)', () => {
   });
 });
 
-// BE3/C3 cross-cutting: the roster's ☎ primaryVoice drives the SAME voice field
-// (primary_voice_contact) the masked-call bridge reads. Setting a roster contact
-// as primaryVoice must therefore route the landlord leg to that contact; a
-// roster-less unit (no primaryVoice ever set) must still route to landlordId.
-describe('BE3 roster primaryVoice ↔ masked-call routing consistency', () => {
-  it('setting a roster contact as primaryVoice routes the landlord leg to that contact', async () => {
+// BE3/C3 cross-cutting: the roster's ☎ primaryContact drives the SAME scalar
+// (primary_contact) the masked-call bridge reads. Setting a roster contact
+// as primaryContact must therefore route the landlord leg to that contact; a
+// roster-less unit (no primaryContact ever set) must still route to landlordId.
+describe('BE3 roster primaryContact ↔ masked-call routing consistency', () => {
+  it('setting a roster contact as primaryContact routes the landlord leg to that contact', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, {}); // no primary_voice_contact seeded
+    seedPlacementRelay(world, {}); // no primary_contact seeded
     // The operator adds the PM to the roster as the ☎ primary — this is what
     // the route does on POST /api/units/:id/contacts.
     await world.unitsRepo.addContact('unit-vr', {
       contactId: 'c-pm',
       role: 'pm',
-      primaryVoice: true,
+      primaryContact: true,
     });
-    // The voice-routing field is now the PM (the roster ☎ primary).
-    expect(world.units.get('unit-vr')?.primary_voice_contact).toBe('c-pm');
+    // The primary_contact scalar is now the PM (the roster ☎ primary).
+    expect(world.units.get('unit-vr')?.primary_contact).toBe('c-pm');
 
     const { app } = makeWebhookHarness({ world });
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
@@ -204,7 +204,7 @@ describe('BE3 roster primaryVoice ↔ masked-call routing consistency', () => {
 
   it('a roster-less unit still routes the landlord leg to the legacy landlordId', async () => {
     const world = createFakeWorld();
-    seedPlacementRelay(world, {}); // no roster, no primary_voice_contact
+    seedPlacementRelay(world, {}); // no roster, no primary_contact
     const { app } = makeWebhookHarness({ world });
     const res = await signedTwilioPost(app, '/webhooks/twilio/voice', inboundVoice(TENANT));
     const xml = res.text;

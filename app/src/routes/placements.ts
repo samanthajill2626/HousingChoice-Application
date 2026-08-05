@@ -1017,6 +1017,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   const actionDeps: PlacementRosterActionDeps = {
     ...provisionDeps,
     actions: rosterActions,
+    // The kill-switch the deferred open is pre-checked against (MF1): with it
+    // off, provisioning refuses from inside the open - too late to be visible.
+    relayLiveProvisioning: config.relayLiveProvisioning,
     logger: log,
   };
 

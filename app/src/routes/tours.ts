@@ -536,7 +536,14 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   };
 
   /** The deferral engine's deps - the SAME apply the poller runs (apply-now). */
-  const actionDeps: TourRosterActionDeps = { ...provisionDeps, actions: rosterActions, logger: log };
+  const actionDeps: TourRosterActionDeps = {
+    ...provisionDeps,
+    actions: rosterActions,
+    // The kill-switch the deferred open is pre-checked against (MF1): with it
+    // off, provisioning refuses from inside the open - too late to be visible.
+    relayLiveProvisioning: config.relayLiveProvisioning,
+    logger: log,
+  };
 
   /** The dialog's explicit override: apply now despite quiet hours. */
   const isForceSendNow = (req: { query: Record<string, unknown> }): boolean =>

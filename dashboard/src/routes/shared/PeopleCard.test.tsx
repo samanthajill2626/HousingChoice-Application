@@ -872,6 +872,10 @@ describe('PeopleCard - skipped notices (visible until dismissed)', () => {
       'Alicia Grant was not added - they were removed from this tour first.',
     ],
     [openSkip('roster_too_thin'), 'The group text was not opened - two reachable members are needed.'],
+    [
+      openSkip('provisioning_unavailable'),
+      'The group text was not opened - live number provisioning is off.',
+    ],
     [openSkip('converted'), 'The group text was not opened - this tour became a placement first.'],
   ];
 

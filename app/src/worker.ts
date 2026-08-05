@@ -344,6 +344,10 @@ runWithContext(bootContext, () => {
     // to app SSE clients when EVENT_BRIDGE_URL is set; an unbridged emit is a
     // no-op. The card refetches when a deferral finally lands.
     events: appEvents,
+    // With the kill-switch OFF a deferred open cannot be provisioned at all, and
+    // the refusal is raised from inside the open (post-claim, invisible) - so the
+    // poller pre-checks it and retires the row with a VISIBLE notice instead.
+    relayLiveProvisioning: config.relayLiveProvisioning,
     logger,
   };
 

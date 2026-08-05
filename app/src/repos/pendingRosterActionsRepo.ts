@@ -72,6 +72,12 @@ export type RosterActionSkipReason =
   | 'member_no_longer_on_roster'
   /** The roster lost its second reachable member, so no group can be opened. */
   | 'roster_too_thin'
+  /** Live relay-number provisioning is OFF in this environment
+   *  (RELAY_LIVE_PROVISIONING, the pre-A2P posture), so no group text can be
+   *  opened. Checked BEFORE the claim: the refusal is otherwise raised inside
+   *  provisioning, i.e. after the row is already terminal, where the operator
+   *  would see neither a group nor a notice. */
+  | 'provisioning_unavailable'
   /** Only when migration to the converted placement failed. */
   | 'converted';
 

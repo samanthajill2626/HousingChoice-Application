@@ -40,6 +40,7 @@ import {
   runDuePendingRosterActions,
   type RunDuePendingRosterActionsDeps,
 } from '../src/jobs/rosterActions.js';
+import { describeRoster } from '../src/lib/rosterResolution.js';
 import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
@@ -143,6 +144,8 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
       activityEvents: world.activityEventsRepo,
       poolNumbers: makeFakePoolNumbers(),
       events: world.events,
+      // The kill-switch as the deployed env reports it (config.relayLiveProvisioning).
+      relayLiveProvisioning: true,
       logger,
     };
   });
@@ -529,6 +532,71 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     const row = await rowOf(actionId);
     expect(row.status).toBe('skipped');
     expect(row.skippedReason).toBe('converted');
+  });
+
+  // --- refusals the ACT would raise, pre-empted BEFORE the claim (MF1) ------
+
+  it('skips provisioning_unavailable when live number provisioning is OFF', async () => {
+    // The pre-A2P posture (RELAY_LIVE_PROVISIONING=false). The refusal is raised
+    // INSIDE provisioning - i.e. after claimApply - where nobody would ever see
+    // it: the row would go 'applied' with no group and no notice at all.
+    const tourId = await createTour();
+    const actionId = await deferOpen('tour', tourId);
+
+    await runDuePendingRosterActions(POLL_AT, { ...deps, relayLiveProvisioning: false });
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('provisioning_unavailable');
+    expect((await world.toursRepo.get(tourId))!.groupThreadId).toBeUndefined();
+    expect(world.sent).toHaveLength(0);
+  });
+
+  it('the provisioning_unavailable notice is VISIBLE in the roster payload', async () => {
+    const tourId = await createTour();
+    await deferOpen('tour', tourId);
+
+    await runDuePendingRosterActions(POLL_AT, { ...deps, relayLiveProvisioning: false });
+    await queueAdapter.settle();
+
+    const view = await describeRoster(
+      {
+        conversations: world.conversationsRepo,
+        units: world.unitsRepo,
+        contacts: world.contactsRepo,
+        actions: world.pendingRosterActionsRepo,
+        log: logger,
+      },
+      { type: 'tour', id: tourId, tenantId: 'c-tenant', unitId: 'unit-r' },
+    );
+    expect(view.pending).toHaveLength(0);
+    expect(view.skipped).toHaveLength(1);
+    expect(view.skipped[0]?.reason).toBe('provisioning_unavailable');
+    expect(view.skipped[0]?.kind).toBe('open_group');
+  });
+
+  it('WAITS on a CONNECTING group instead of losing the add (nothing claimed)', async () => {
+    // A connecting group has no pool number yet, so relayMembers refuses the add
+    // (409 group_connecting) - but that is TRANSIENT, so the row must survive to
+    // the next tick rather than be claimed 'applied' with nobody added.
+    const tourId = await createTour();
+    seedThread('conv-connecting', [
+      { contactId: 'c-tenant', phone: TENANT_PHONE },
+      { contactId: 'c-pm', phone: PM_PHONE },
+    ]);
+    world.conversations.get('conv-connecting')!.status = 'connecting';
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-connecting' });
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    expect((await rowOf(actionId)).status, 'still pending - the next tick retries').toBe('pending');
+    expect(
+      world.conversations.get('conv-connecting')!.participants!.map((p) => p.contactId),
+    ).not.toContain('c-case');
+    expect(world.sent).toHaveLength(0);
   });
 
   // --- never-claim paths ----------------------------------------------------

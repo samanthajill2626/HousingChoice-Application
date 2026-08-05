@@ -161,6 +161,8 @@ function skipTail(
       return `they were removed from this ${scope} first.`;
     case 'roster_too_thin':
       return 'two reachable members are needed.';
+    case 'provisioning_unavailable':
+      return 'live number provisioning is off.';
     case 'converted':
       return 'this tour became a placement first.';
     default: {

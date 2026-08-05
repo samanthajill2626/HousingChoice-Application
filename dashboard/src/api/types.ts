@@ -757,6 +757,9 @@ export type RosterActionSkipReason =
   | 'member_no_longer_on_roster'
   /** The roster lost its second reachable member. */
   | 'roster_too_thin'
+  /** Live relay-number provisioning is off in this environment, so no group
+   *  text can be opened (the pre-A2P posture). */
+  | 'provisioning_unavailable'
   /** Only when migration to the converted placement failed. */
   | 'converted';
 

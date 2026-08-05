@@ -342,6 +342,7 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       activityEvents: createActivityEventsRepo({ logger: log }),
       poolNumbers: createPoolNumbersService({ config, logger: log }),
       events: appEvents,
+      relayLiveProvisioning: config.relayLiveProvisioning,
       logger: log,
     };
     return rosterTickDeps;

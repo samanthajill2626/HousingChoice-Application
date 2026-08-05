@@ -72,6 +72,13 @@ export interface RosterActionDepsBase {
   activityEvents: ActivityEventsRepo;
   poolNumbers: PoolNumbersService;
   events: EventBus;
+  /**
+   * config.relayLiveProvisioning - the RELAY_LIVE_PROVISIONING kill-switch as
+   * this process sees it. REQUIRED (not defaulted): with it off, provisioning
+   * refuses from INSIDE the open, i.e. after the claim, so the poller has to
+   * know before it claims - see the `provisioning_unavailable` verdict.
+   */
+  relayLiveProvisioning: boolean;
   logger?: Logger;
 }
 
@@ -276,6 +283,13 @@ async function validateAction(
     // between confirm and quiet-end, and 'roster_too_thin' is a VISIBLE notice -
     // it must never become a post-claim refusal nobody sees.
     if (provisionMembersOf(roster).length < 2) return { skip: 'roster_too_thin' };
+    // PRE-CLAIM kill-switch check, for the same reason. With
+    // RELAY_LIVE_PROVISIONING off (the pre-A2P posture) the open refuses from
+    // inside provisioning - AFTER claimApply - and an 'applied' row is in
+    // neither pending[] nor skipped[], so the operator's deferred open would
+    // simply evaporate at quiet-end with nothing to show for it. The immediate
+    // path answers 503 with a message; this is the deferred path's equivalent.
+    if (!deps.relayLiveProvisioning) return { skip: 'provisioning_unavailable' };
     return { act: 'open' };
   }
 
@@ -297,6 +311,12 @@ async function validateAction(
   if (conversation === 'unreadable' || conversation === undefined) return { wait: true };
   // Spec section 7: a closed group is never announced into.
   if (conversation.status === 'closed') return { skip: 'group_closed' };
+  // A CONNECTING group has no pool number yet, so services/relayMembers refuses
+  // every member mutation on it (409 group_connecting) - and that refusal is
+  // raised AFTER the claim, where it would silently lose the add. Connecting is
+  // TRANSIENT (the number is on its way), so this is the 'unavailable' idiom:
+  // claim nothing, retry next tick. Never a skip - the add is still wanted.
+  if (conversation.status === 'connecting') return { wait: true };
 
   let contact;
   try {
@@ -369,6 +389,31 @@ async function applyAction(
   const claimed = await deps.actions.claimApply(row.actionId, nowIso);
   if (!claimed) return { result: 'lost' };
 
+  // Past the claim the row is TERMINAL and nothing retries it, so an UNEXPECTED
+  // throw from here is a change that is gone: the pending banner disappears and
+  // nothing happened. Say so at error level (the logger stamps correlationId) -
+  // the claim itself stays one-way, exactly as designed. The poll's per-row
+  // catch also logs, but apply-now (routes) has no such net.
+  try {
+    return await performClaimedAction(row, verdict, owner, deps, log);
+  } catch (err) {
+    log.error(
+      { err, actionId: row.actionId, ownerType: row.ownerType, action: row.action },
+      'roster action: UNEXPECTED failure AFTER the claim - the action did not happen and will not retry',
+    );
+    throw err;
+  }
+}
+
+/** The claimed half of an apply. Split out so EVERY throw past the one-way claim
+ *  is logged in one place (see applyAction's try/catch). */
+async function performClaimedAction(
+  row: PendingRosterActionItem,
+  verdict: { act: 'open' } | { act: 'noop' } | { act: 'add'; conversationId: string; contactId: string; phone: string },
+  owner: RosterActionOwner,
+  deps: RosterActionDepsBase,
+  log: Logger,
+): Promise<RosterActionOutcome> {
   if (verdict.act === 'noop') {
     log.info(
       { actionId: row.actionId },
@@ -380,10 +425,12 @@ async function applyAction(
   if (verdict.act === 'open') {
     const opened = await owner.openGroup();
     if (!opened.ok) {
-      // Post-claim refusal (provisioning disabled, a roster that thinned
-      // between validate and act, a lost provisioning race). The claim stands -
-      // this NEVER retries - so log loudly: the operator sees no group and no
-      // pending banner, and opens it again by hand.
+      // Post-claim refusal. The two PREDICTABLE ones are pre-empted above
+      // (roster_too_thin, provisioning_unavailable), so what is left is a race
+      // (someone else opened/closed it between validate and act) or a
+      // provisioning failure. The claim stands - this NEVER retries - so log
+      // loudly: the operator sees no group and no pending banner, and opens it
+      // again by hand.
       log.error(
         { actionId: row.actionId, refusal: opened.refusal?.body },
         'roster action: deferred open REFUSED after the claim - nothing was provisioned',

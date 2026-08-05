@@ -95,6 +95,15 @@ A THREAD EXISTS (the roster is a FACT):
   plan, and the `roster` attribute is deleted in the same flow, after the
   provision succeeds. A failed provision leaves the plan intact. There is no
   path from thread-exists back to no-thread, so the two states never blur.
+- THE PREDICATE, precisely: "a thread exists" means `groupThreadId` (tours) /
+  `group_thread` (placements) is present on the owner - the same field the
+  one-thread-per-owner guard already reads. Provision is multi-step (create
+  conversation -> set the thread pointer -> delete `roster`), so a crash
+  between the last two steps can leave a thread-bearing owner with a STALE
+  plan attribute. That leftover is INERT by precedence - the resolver reads
+  participants first whenever the pointer is set - so it is not a bug and
+  must never be "defensively" merged back in; the next plan-side write may
+  lazily delete it.
 - Every membership change on a thread-bearing owner goes through the
   add/remove call-through (D5), which edits the participants directly. There
   is NO tour-side copy to keep in sync - the dual write does not exist.
@@ -375,9 +384,16 @@ New rule: WHEN `tour.tenantId` IS NOT ON THE CURRENT ROSTER (fact if a thread
 exists, else plan/default), EVERY TENANT-1:1-ROUTED RUNG IS SUPPRESSED with a
 visible skipped row, reason `tenant_not_on_roster` - following the
 arm/claim-time retirement pattern the quiet-hours work established (skips are
-visible, never silent). Group-routed rungs are unaffected (they go to the
-group, which is exactly the people the operator chose). Placement nudges get
-the same rule for their tenant-1:1-routed rungs.
+visible, never silent). Group-routed rungs are unaffected when they actually
+reach the group. Placement nudges get the same rule for their
+tenant-1:1-routed rungs.
+
+THE CHECK BINDS TO THE ROUTING OUTCOME AT CLAIM TIME, NOT THE RUNG KIND: a
+group-routed rung whose delivery FALLS BACK to the tenant 1:1 (no usable
+group, `tourReminders.ts` `resolveUsableGroup`) is suppressed by the same
+rule. A `landlord_led` tour with no thread and the tenant removed from the
+plan must not text the removed tenant through the fallback door. Wherever
+delivery would target the tenant 1:1, the check runs.
 
 Re-adding the tenant lifts the suppression for rungs not yet claimed - the
 check runs at claim time, so no re-arm step is needed.
@@ -431,6 +447,15 @@ derived at read time and never stored.
 on. Phones and display names for contact-backed members are resolved AT USE
 TIME, so a corrected phone number is picked up everywhere with no migration
 and no stale denormalized copy.
+
+PLAN-MODE STATEMENT ONLY. In FACT mode the fan-out sends to the phone STORED
+ON THE PARTICIPANT ROW, so deliverability derivation (the muted rows, the
+recipient count) must read the participant's stored phone plus the contact's
+opt-out state - never the contact's current phone. Otherwise the card claims
+a reachability the fan-out will not deliver when a contact's number was
+corrected after they joined. (The group continuing to text the stale number
+is a known, pre-existing limitation - tracked in section 12, made visible
+here, not fixed.)
 
 Order is preserved; the tenant is first when present.
 
@@ -676,7 +701,12 @@ sequence, because this is the one place a whole-array write will sneak in:
    retrying a bounded number of times, then `409 roster_conflict`.
 
 These endpoints REFUSE (409) when a thread exists - thread-bearing owners are
-edited through the call-through below, and the dashboard routes accordingly.
+edited through the call-through below. ON THAT 409 THE DASHBOARD NEVER
+AUTO-RESUBMITS the edit through call-through: the race (operator A edits the
+plan while operator B's open lands) would silently escalate a no-send plan
+edit into a `member_added` text nobody confirmed - goal 3's exact corner
+case. Instead: refetch, surface the now-live state, and let the add proceed
+only through the confirm dialog (6.4).
 
 CALL-THROUGH (a thread exists, any status)
 
@@ -695,9 +725,13 @@ PROVISION (open)
 PREVIEW
 
 - New endpoints returning the SERVER-composed `relay.intro` and
-  `relay.member_added` bodies for a given owner and prospective roster, plus
-  per-member deliverability (`reachable` / `no_phone` / `opted_out`), the true
-  recipient count, and the quiet-end instant when the send would defer.
+  `relay.member_added` bodies, plus per-member deliverability (`reachable` /
+  `no_phone` / `opted_out`), the true recipient count, and the quiet-end
+  instant when the send would defer. INPUT IS THE OWNER ONLY (plus the
+  candidate `contactId` for the add-member variant) - the server resolves the
+  roster through the SAME resolver the send path uses. The client never
+  passes a roster: a client-supplied list invites drift between what was
+  previewed and what provision resolves.
 
 VOICE (D10)
 
@@ -737,9 +771,13 @@ re-point calls while texts still follow `landlordId`).
 1. RENAME. `primaryVoice` -> `primaryContact`, scalar, error class, 409 code,
    the stale `voice.ts:388` comment, glossary. Purely mechanical, no behavior.
 2. TABS REFACTOR (mechanical). Retire `TourPersonKey`; key the rail and
-   channels on the CURRENT resolution output (today: the same two people, so
-   no visible change); scrolling rail with edge fade and carried unread dot;
-   selection-on-remove rule. Pure re-plumbing ahead of the semantic switch.
+   channels on the ID PAIR the page already renders - `tour.tenantId` +
+   `unit.landlordId` - NOT on `resolveTourMembers`, which is phone-gated
+   (a phone-less tenant returns `unresolvable`, and consuming it here would
+   silently drop that tenant's tab in a "no visible change" slice). The
+   membership-based resolver takes over in slice 3. Scrolling rail with edge
+   fade and carried unread dot; selection-on-remove rule. Pure re-plumbing
+   ahead of the semantic switch.
 3. ROSTER MODEL. Plan override + validation, the shared resolver (participants
    / plan / default + fallback), provision-consumes-plan, conversion
    inheritance + pending-action migration hooks, derived roles, deliverability
@@ -834,7 +872,15 @@ time rather than discovered.
   control or widen the gate.
 - Reopening a closed group is a pure status flip today - no confirm, no
   notice. Now that the card edits closed threads' participants, decide whether
-  reopen deserves its own confirm/preview.
+  reopen deserves its own confirm/preview - INCLUDING the never-introduced-
+  member case: an add to a closed thread is silent-and-immediate (section 7),
+  so a later reopen yields a member the group was never told about. The scope
+  is reopen SEMANTICS, not just a confirm dialog.
+- Stale participant phones: a group keeps texting the number stored on the
+  participant row even after the contact's phone is corrected (pre-existing;
+  5.2's fact-mode deliverability rule makes it visible on the card, not
+  fixed). Decide whether call-through remove+re-add is the blessed remedy or
+  whether a "refresh member phone" affordance is warranted.
 - The future "main-business-number -> landlord-by-unit" voice path (stale
   comment at `voice.ts:388`) must consult the THREAD roster when built, or
   goal 4 silently regresses on business-number calls.

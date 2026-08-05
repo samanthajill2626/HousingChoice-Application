@@ -47,7 +47,7 @@ import {
   type RosterResolutionDeps,
 } from '../lib/rosterResolution.js';
 import { isDeleted, type ContactsRepo } from '../repos/contactsRepo.js';
-import { nameFromContact } from './relayMembers.js';
+import { LAST_MEMBER_REFUSAL, nameFromContact } from './relayMembers.js';
 
 /** A refusal the route renders verbatim. */
 export interface RosterEditRefusal {
@@ -203,13 +203,7 @@ function applyEdit(entries: RosterEntry[], edit: RosterPlanEdit): EditApplicatio
   // D6 lets ANYONE be removed - but never the last one: an empty roster can
   // open no group and would silently re-resolve to nobody.
   if (entries.length <= 1) {
-    return {
-      refusal: {
-        status: 409,
-        error: 'last_member',
-        message: 'A roster needs at least one member. Add someone else before removing this one.',
-      },
-    };
+    return { refusal: LAST_MEMBER_REFUSAL };
   }
   return { entries: entries.filter((_, i) => i !== index) };
 }

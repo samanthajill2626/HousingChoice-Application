@@ -107,6 +107,16 @@ export type RelayMemberResult =
   | { ok: false; refusal: RelayMemberRefusal };
 
 /**
+ * The roster floor, shared by the PLAN engine (rosterEdits) and the LIVE
+ * remove path (opt-in below): a roster/thread never goes empty.
+ */
+export const LAST_MEMBER_REFUSAL: RelayMemberRefusal = {
+  status: 409,
+  error: 'last_member',
+  message: 'A roster needs at least one member. Add someone else before removing this one.',
+};
+
+/**
  * Add ONE member to a relay group (idempotent on phone).
  *
  * `announce: false` skips ONLY the relay.member_added announcement - the
@@ -282,7 +292,7 @@ export async function removeMemberFromRelay(
   deps: RelayMemberDeps,
   conversationId: string,
   memberKey: string,
-  opts: { actor?: string } = {},
+  opts: { actor?: string; refuseLastMember?: boolean } = {},
 ): Promise<RelayMemberResult> {
   const { conversations, audit, activityEvents, events, log } = deps;
   const actor = opts.actor;
@@ -307,6 +317,12 @@ export async function removeMemberFromRelay(
   const phone = resolveRemovalPhone(participants, memberKey);
   if (phone === undefined) {
     return { ok: false, refusal: { status: 404, error: 'member_not_found' } };
+  }
+  // The roster floor (spec: "a thread's participants never go empty") is the
+  // OWNER endpoints' rule. The standalone relay routes keep their historical
+  // behavior, so the guard is opt-in and defaults OFF.
+  if (opts.refuseLastMember === true && participants.length <= 1) {
+    return { ok: false, refusal: LAST_MEMBER_REFUSAL };
   }
   // Capture the member being removed (for the milestone's contactId) BEFORE
   // the mutation - removeMember is idempotent, so a no-op (absent phone)

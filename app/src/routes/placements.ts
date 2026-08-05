@@ -1092,7 +1092,10 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
       memberDeps,
       threadId,
       String(req.params['memberKey'] ?? ''),
-      { ...(actor !== undefined && { actor }) },
+      // refuseLastMember: the roster floor holds on live threads too (spec:
+      // "a thread's participants never go empty") - the card disables the
+      // last row's remove, this is the server backstop.
+      { refuseLastMember: true, ...(actor !== undefined && { actor }) },
     );
     if (!result.ok) {
       sendRefusal(res, result.refusal);

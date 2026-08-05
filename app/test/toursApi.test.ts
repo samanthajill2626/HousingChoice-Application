@@ -3575,6 +3575,21 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(keysOf(res.body)).toEqual(['contact-tenant-1', 'c-pm']);
   });
 
+  it('LIVE remove refuses the LAST participant (409 last_member) - the floor holds on live threads too', async () => {
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    seedThread(tourId, [{ contactId: 'contact-tenant-1', phone: TENANT_PHONE, name: 'Tina Tenant' }]);
+
+    const res = await authed(app).delete(
+      `/api/tours/${tourId}/roster/live-members/contact-tenant-1`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('last_member');
+    // The participant row survives untouched.
+    expect(world.conversations.get('conv-live')!.participants).toHaveLength(1);
+  });
+
   // --- Previews ------------------------------------------------------------
 
   it('preview-open 409s relay_already_provisioned once the pointer is set', async () => {

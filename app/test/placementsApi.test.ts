@@ -920,6 +920,22 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
     expect(world.sent).toHaveLength(0); // removal never announces
   });
 
+  it('LIVE remove refuses the LAST participant (409 last_member)', async () => {
+    const placementId = await createPlacement();
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+    ]);
+
+    const res = await authedReq.delete(
+      `/api/placements/${placementId}/roster/live-members/c-tenant`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('last_member');
+    // The participant row survives untouched.
+    expect(world.conversations.get('conv-plive')!.participants).toHaveLength(1);
+  });
+
   it('previews: server-composed bodies, 409 relay_already_provisioned once provisioned', async () => {
     const placementId = await createPlacement();
 

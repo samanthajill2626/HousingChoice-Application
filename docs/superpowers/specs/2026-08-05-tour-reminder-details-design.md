@@ -161,12 +161,23 @@ zone. Hardcoding "org timezone" in the panel was rejected: returning the
 composing zone keeps chip and body agreeing even after per-contact zones land.
 
 **D9. NEW - an unbounded address is ACCEPTED here; length is a universal
-concern, not a tour concern.** `line1` caps at 200 chars and `line2` at 100
-(`lib/address.ts` FIELD_CAPS), so a LEGAL address is ~300 chars: about 3 segments
-on every rung, and past the `maxChars: 320` the catalog declares but never
-validates. v1's "adding time and address costs NOTHING in segments" was verified
-only inside a window the schema does not enforce, and that claim is corrected in
-section 4.
+concern, not a tour concern.** Address length has NO storage-level bound.
+DynamoDB is schemaless (only the 400 KB item ceiling applies), and the only cap
+is an application constant: `FIELD_CAPS` in `lib/address.ts:33` (`line1` 200,
+`line2` 100), checked by `validateAddress` at `address.ts:66` and reached from
+exactly ONE call site, the unit write surface `lib/unitFields.ts:175`.
+
+Two gaps follow, and both matter here:
+- `validateAddress` only accepts a STRUCTURED object, so it never applies to a
+  legacy plain-STRING address at all - those are length-unbounded.
+- The seeds write straight to DynamoDB, bypassing `unitFields` entirely. That is
+  precisely why every seeded address is an uncapped plain string (D5).
+
+So even the ~300-char figure describes only the validated structured path; a
+seeded or legacy string address has no bound whatsoever. Either way this lands
+past the `maxChars: 320` the catalog declares but never validates. v1's "adding
+time and address costs NOTHING in segments" was verified only inside a window
+nothing enforces, and that claim is corrected in section 4.
 
 No tour-specific cap is added. Cameron's ruling: a length guard belongs at the
 automated-send layer where it protects EVERY message, not bolted onto one
@@ -231,9 +242,11 @@ Tour starts at 3:00 PM. Text us when you're on the way!
 SEGMENT MATH, stated honestly:
 - With the seeded 52-char address every rung is GSM-7 single-segment (longest 138
   units of 160). VERIFIED this session.
-- Address length is UNBOUNDED by this spec (D9). At the schema's legal maximum
-  (~300 chars) every rung is about 3 segments. Accepted here; the universal
-  length guard in section 10 is what will flag it.
+- Address length is UNBOUNDED (D9) - by this spec AND by storage. A structured
+  address validated through the unit write surface reaches ~300 chars (about 3
+  segments per rung); a legacy or seeded plain-string address is capped by
+  nothing at all. Accepted here; the universal length guard in section 10 is
+  what will flag it.
 - If a unit address contains ANY non-ASCII character the whole body becomes UCS-2
   with a 70-char budget. At the seeded address length that is FOUR of four rungs
   at 2+ segments (`morning_of` reaches 95 UCS-2 units). v1 said three of four,

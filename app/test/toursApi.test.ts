@@ -2955,6 +2955,27 @@ describe('GET /api/tours/:tourId/roster', () => {
     expect(pmRow.phoneLast4).toBe('0099');
   });
 
+  it('FACT-mode display name backfills from the contact when the stored row has none', async () => {
+    const { app } = makeWebhookHarness({ world });
+    seedPmProperty();
+    const tourId = await createTour(app);
+    // Rows without names (a pointer at a non-relay thread, or rows predating
+    // name storage) whose people are still positively identified: the card and
+    // tabs must say "Tina Tenant", never "Number ending ..." or a raw id.
+    // Display only - reachability still reads the STORED row phone.
+    seedThread(tourId, [
+      { contactId: 'contact-tenant-1', phone: TENANT_PHONE },
+      { contactId: 'c-pm', phone: PM_PHONE },
+    ]);
+
+    const res = await authed(app).get(`/api/tours/${tourId}/roster`);
+    const byKey = Object.fromEntries(
+      res.body.members.map((m: { memberKey: string; name?: string }) => [m.memberKey, m.name]),
+    );
+    expect(byKey['contact-tenant-1']).toBe('Tina Tenant');
+    expect(byKey['c-pm']).toBe('Pat Manager');
+  });
+
   it('opted-out members are muted: contact-level in PLAN mode, the thread annotation in FACT mode', async () => {
     const { app } = makeWebhookHarness({ world });
     seedPmProperty();

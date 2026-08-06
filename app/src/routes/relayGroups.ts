@@ -56,6 +56,18 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { resolveMessage, resolveWithSettings } from '../messages/index.js';
 import {
+  composeTourReminderBody,
+  UncomposableReminderError,
+} from '../messages/tourCopy.js';
+import {
+  flushComposeFailTally,
+  newComposeFailTally,
+  recordComposeFail,
+} from '../lib/composeFailTally.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+import type { Address } from '../lib/address.js';
+import { readQuietHoursWindow } from '../jobs/tourReminders.js';
+import {
   createPoolNumbersService,
   RelayProvisioningDisabledError,
   type PoolNumbersService,
@@ -85,6 +97,9 @@ export interface RelayGroupsRouterDeps {
    *  resolve the owner tour + its not-yet-sent reminder rungs. */
   toursRepo?: ToursRepo;
   tourRemindersRepo?: TourRemindersRepo;
+  /** The owner tour's unit address, for the SAME composed reminder copy the
+   *  send path and the other preview surfaces build. */
+  unitsRepo?: UnitsRepo;
   events?: EventBus;
 }
 
@@ -109,6 +124,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   // Everything the shared member add/remove implementation touches
   // (services/relayMembers) - built once from this router's resolved repos.
   const memberDeps: RelayMemberDeps = {
@@ -161,6 +177,21 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       return;
     }
     const rows = await tourReminders.listByTour(tour.tourId);
+    // The composing inputs, read ONCE per request: the ORG zone (through
+    // readQuietHoursWindow, never settings.timezone - spec D8) and the owner
+    // tour's unit address. A failed unit read composes without an address
+    // rather than failing the bucket.
+    const window = await readQuietHoursWindow(settings, log);
+    let address: Address | string | undefined;
+    try {
+      address = (await units.getById(tour.unitId))?.address;
+    } catch (err) {
+      log.warn(
+        { err, tourId: tour.tourId },
+        'group scheduled bucket: unit read failed - composing without an address',
+      );
+    }
+    const composeFails = newComposeFailTally();
     const scheduled = rows
       .filter(
         (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
@@ -172,12 +203,41 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         at: row.dueAt,
         source: 'tour_reminder' as const,
         reminderKind: row.kind,
-        body: resolveMessage(`tour.${row.kind}`),
+        // Composed through the ONE composer, exactly like the send path. These
+        // rungs are pending-only (the filter above), so there is no sentBody to
+        // prefer. READ-PATH CONTAINMENT (spec F1): a tour with no usable
+        // scheduledAt yields body: '' instead of 500ing the whole bucket.
+        // DUPLICATED SHAPE (3 copies, keep in sync) - twins in
+        // routes/tourReminders.ts (bodyFor) and routes/contactTimeline.ts
+        // (tourReminderBodyOrEmpty). See the note on bodyFor.
+        body: ((): string => {
+          try {
+            return composeTourReminderBody({
+              kind: row.kind,
+              scheduledAt: tour.scheduledAt ?? '',
+              timezone: window.timezone,
+              ...(address !== undefined && { address }),
+            });
+          } catch (err) {
+            if (err instanceof UncomposableReminderError) {
+              // RECORD, do not warn - this is inside a per-rung map on a thread
+              // view that refetches on every SSE burst. Flushed once below.
+              recordComposeFail(composeFails, row, tour);
+              return '';
+            }
+            throw err;
+          }
+        })(),
         conversationId,
         refType: 'tour' as const,
         refId: tour.tourId,
       }));
-    res.json({ scheduled });
+    flushComposeFailTally(composeFails, log, 'group_thread_scheduled');
+    // `timezone` is the zone these bodies were composed in (spec D8) - the
+    // group thread renders each card's fire time in it, exactly like the
+    // contact timeline. The two EMPTY-bucket early returns above omit it: they
+    // have no window in hand and no row to render a time for.
+    res.json({ scheduled, timezone: window.timezone });
   });
 
   // POST /api/relay-groups — create a relay group + provision a pool number +

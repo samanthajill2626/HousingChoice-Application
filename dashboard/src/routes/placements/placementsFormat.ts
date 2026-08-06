@@ -204,17 +204,47 @@ export function wasDue(iso: string, now: number = Date.now()): string {
 
 /** A date-and-time label for a history row, e.g. "Jun 18, 1:02 PM". Accepts a clean
  *  ISO instant OR a `<ISO>#<suffix>` audit sort key (normalised via isoOf) so the
- *  raw key never renders; falls back to the normalised string when unparseable. */
-export function dateTime(iso: string): string {
+ *  raw key never renders; falls back to the normalised string when unparseable.
+ *
+ *  `timeZone` is an OPTIONAL IANA zone (spec D8): pass it only where the label
+ *  sits next to text that was COMPOSED in a specific zone -- a tour reminder body
+ *  now carries an org-local time, so a navigator in another zone would otherwise
+ *  read a chip and a body that disagree. OMITTING it is byte-identical to the
+ *  browser-zone behavior every other caller (placement deadlines, activity rows)
+ *  still wants, and that default is pinned by a test. */
+export function dateTime(iso: string, timeZone?: string): string {
   const norm = isoOf(iso);
   const d = new Date(norm);
   if (Number.isNaN(d.getTime())) return norm;
+  // A zone marker is added ONLY when the caller pinned a zone AND it differs
+  // from the viewer's own. Rationale: an unlabeled absolute time reads as "my
+  // clock". Before this label existed, that reading was always correct because
+  // every timestamp WAS browser-zone; pinning a zone made it silently wrong for
+  // anyone outside it ("Aug 7, 3:00 PM" against their own 12:00 PM). Labelling
+  // unconditionally would instead put "EDT" on every row for the org-zone staff
+  // who are the overwhelming majority and have no ambiguity to resolve.
+  // Omitting timeZone stays byte-identical to the pre-D8 behavior every other
+  // caller wants - pinned by a test.
+  const foreign = timeZone !== undefined && timeZone !== viewerTimeZone();
   return d.toLocaleString('en-US', {
     month: 'short',
     day: 'numeric',
     hour: 'numeric',
     minute: '2-digit',
+    ...(timeZone !== undefined && { timeZone }),
+    ...(foreign && { timeZoneName: 'short' as const }),
   });
+}
+
+/** The viewer's own IANA zone. Wrapped so a test can stub it and so a hostile
+ *  environment that returns undefined degrades to "no marker" rather than
+ *  throwing inside a formatter. */
+function viewerTimeZone(): string | undefined {
+  try {
+    return Intl.DateTimeFormat().resolvedOptions().timeZone;
+  } catch {
+    return undefined;
+  }
 }
 
 /** Humanize a raw snake_case token into a Sentence-case phrase, e.g.

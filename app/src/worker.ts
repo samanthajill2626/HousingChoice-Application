@@ -232,8 +232,11 @@ runWithContext(bootContext, () => {
     toursRepo: createToursRepo({ logger }),
     contactsRepo: createContactsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
-    // Roster resolution (contact-rosters D11): the tenant-1:1 suppression check
-    // reads the property's primary contact for the DEFAULT roster.
+    // ONE unit read, TWO consumers: roster resolution (contact-rosters D11 -
+    // the tenant-1:1 suppression check reads the property's primary contact for
+    // the DEFAULT roster), AND the address that rides in the reminder copy (a
+    // failed read degrades to the no-address variant rather than losing the
+    // reminder).
     unitsRepo: createUnitsRepo({ logger }),
     // D7 (contact-rosters): a group-eligible rung WAITS while its tour's group
     // open is deferred to quiet-end, instead of falling back to the tenant 1:1.

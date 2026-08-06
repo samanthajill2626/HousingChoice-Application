@@ -163,6 +163,10 @@ export interface TimelineProps {
    *  between the stream and the composer (shown only when non-empty). Never part
    *  of `items`. */
   upcoming?: TimelineScheduled[];
+  /** The IANA zone the `upcoming` BODIES were composed in (spec D8), passed
+   *  straight through to each card's fire-time label. Omitted (or from a
+   *  response that predates the field) -> the card keeps the browser zone. */
+  upcomingTimezone?: string;
   /** Which path produced items — drives an honest "(assembled)" note when the
    *  server timeline (with milestones) isn't live yet. */
   source: 'server' | 'fallback';
@@ -799,6 +803,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     status,
     items,
     upcoming,
+    upcomingTimezone,
     source,
     replyToPhone,
     replyToLabel,
@@ -1237,7 +1242,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
           <header className={styles.upcomingHead}>Upcoming ({upcoming.length})</header>
           <div className={styles.upcomingList}>
             {upcoming.map((sched) => (
-              <ScheduledCard key={sched.id} item={sched} />
+              <ScheduledCard key={sched.id} item={sched} timezone={upcomingTimezone} />
             ))}
           </div>
         </section>

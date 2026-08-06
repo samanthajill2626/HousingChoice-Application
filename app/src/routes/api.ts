@@ -742,8 +742,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
-      // D11 (contact-rosters): send-now resolves the tour's roster, whose
-      // DEFAULT rung is the property's primary contact.
+      // ONE unit read, TWO consumers: D11 (contact-rosters) - send-now resolves
+      // the tour's roster, whose DEFAULT rung is the property's primary contact
+      // - AND the unit address behind the composed reminder copy. Forwarded as
+      // the RESOLVED local (same rationale as the timeline gather above) so
+      // prod/e2e read a real repo while injected fakes still win.
       unitsRepo: units,
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.
@@ -784,9 +787,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       activityEventsRepo: activityEvents,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       // The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled)
-      // resolves the owner tour + its pending reminder rungs.
+      // resolves the owner tour + its pending reminder rungs, and composes each
+      // rung's body from the tour time + the unit address (the RESOLVED local,
+      // so prod/e2e read a real repo).
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      unitsRepo: units,
       events,
     }),
   );

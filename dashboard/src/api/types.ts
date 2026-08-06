@@ -932,7 +932,10 @@ export interface TourReminderView {
     | 'quiet_hours_superseded'
     | 'past_event'
     | 'tenant_not_on_roster'
-    | 'roster_unavailable';
+    | 'roster_unavailable'
+    // The tour has no usable scheduledAt, so no body could be composed for the
+    // rung - the poll retires it rather than sending a half-written text.
+    | 'invalid_schedule';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -944,6 +947,14 @@ export interface TourRemindersPage {
   reminders: TourReminderView[];
   /** The next reminder due to fire (highlight it in the UI). Absent when none upcoming. */
   next?: TourReminderView;
+  /** The IANA zone the reminder bodies were composed in (the ORG's zone, spec
+   *  D8) - render every timestamp shown beside those bodies in THIS zone, not
+   *  the browser's. Optional in the same spirit as `upcoming` below: a client
+   *  bundle can outlive the response that fed it (a stale cache, an older
+   *  backend), and the panel then falls back to the browser zone rather than
+   *  crashing. The PATCH / send-now single-row payloads deliberately do NOT
+   *  carry it - the panel re-uses the zone from the list it is already holding. */
+  timezone?: string;
 }
 
 /** Human-readable labels for the reminder rungs (staff-facing). */
@@ -980,6 +991,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   past_event: 'would land after the tour starts',
   tenant_not_on_roster: "tenant not on this tour's roster",
   roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
+  invalid_schedule: 'schedule unusable',
 };
 
 /**
@@ -1002,6 +1014,9 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   no_conversation: 'There is no text thread with that person yet, so nothing was sent.',
   stage_moved: 'The placement moved on from this stage, so the message would be out of date.',
   tour_missing: 'That tour is gone, so nothing was sent.',
+  // Reminder-only: the tour has no usable date and time, so no body could be
+  // composed. Nothing was claimed and the rung is still pending.
+  invalid_schedule: 'That tour has no usable date and time, so nothing was sent.',
   placement_missing: 'That placement is gone, so nothing was sent.',
   unit_missing: 'That property is gone, so nothing was sent.',
   no_landlord: 'That property has no landlord on file, so nothing was sent.',
@@ -1945,6 +1960,21 @@ export interface ContactTimelinePage {
   /** Not-yet-sent scheduled messages (the pinned "Upcoming" section). Absent on
    *  an older backend that predates the bucket → the client defaults to []. */
   upcoming?: TimelineScheduled[];
+  /** The IANA zone the `upcoming` bodies were composed in (the ORG's zone, spec
+   *  D8) - the fire-time label on each ScheduledCard renders in THIS zone so the
+   *  card and the body it shows never disagree. Absent on an older backend (and
+   *  on the client-assembled fallback, which has no scheduled bucket at all) ->
+   *  the card falls back to the browser zone. */
+  timezone?: string;
+}
+
+/** GET /api/conversations/:conversationId/scheduled response: the GROUP thread's
+ *  "Upcoming" bucket - the same TimelineScheduled rows the contact timeline
+ *  ships, plus the zone they were composed in (same contract as
+ *  `ContactTimelinePage.timezone`). Empty for a non-relay conversation. */
+export interface ConversationScheduledPage {
+  scheduled: TimelineScheduled[];
+  timezone?: string;
 }
 
 // --- C4: Sent-to-tenants / listings-sent (§API Contract C4) -----------------

@@ -15,6 +15,8 @@ import { makeWebhookHarness, ORIGIN_SECRET, OUR_NUMBER, createFakeWorld, type Fa
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { createContactTimelineRouter } from '../src/routes/contactTimeline.js';
 import { resolveMessage } from '../src/messages/index.js';
+import { composeTourReminderBody } from '../src/messages/tourCopy.js';
+import { DEFAULT_ORG_SETTINGS } from '../src/repos/settingsRepo.js';
 import type { AppConfig } from '../src/lib/config.js';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -670,8 +672,24 @@ describe('GET /api/contacts/:id/timeline — landlord property interleave', () =
 // (no DynamoDB) so the gather's three walks + suppression are exercised.
 // ---------------------------------------------------------------------------
 
-const CONFIRMATION_BODY = resolveMessage('tour.confirmation');
-const DAY_BEFORE_BODY = resolveMessage('tour.day_before');
+// Tour bodies are COMPOSED, not resolved: every tour.* default carries
+// {when}/{time}/{where}, so the expectation has to be built from the same
+// context the route composes from - this bucket's tour instant, the org-default
+// zone the quiet-hours window resolves to (the stubs all inherit
+// DEFAULT_ORG_SETTINGS.timezone), and no address (these fixtures seed no unit,
+// so both sides take the _no_address variant).
+/** The instant every tour fixture in this bucket books. */
+const TOUR_AT = '2099-01-10T10:00:00.000Z';
+const CONFIRMATION_BODY = composeTourReminderBody({
+  kind: 'confirmation',
+  scheduledAt: TOUR_AT,
+  timezone: DEFAULT_ORG_SETTINGS.timezone,
+});
+const DAY_BEFORE_BODY = composeTourReminderBody({
+  kind: 'day_before',
+  scheduledAt: TOUR_AT,
+  timezone: DEFAULT_ORG_SETTINGS.timezone,
+});
 const APPROVAL_BODY = resolveMessage('nudge.approval_check');
 
 describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B server)', () => {
@@ -769,6 +787,54 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     expect(up.every((i) => i.suppression === undefined)).toBe(true);
     expect(up[0]!.refType).toBe('tour');
     expect(up[0]!.refId).toBe(tour.tourId);
+    // The response carries the zone those bodies were composed in (spec D8), so
+    // each card's fire-time label renders in the zone its body quotes rather
+    // than in whatever zone the navigator's browser happens to sit in.
+    expect(res.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
+  });
+
+  it('reads the org window ONLY when the gather runs: no settings read and NO timezone on a kinds=message request', async () => {
+    // The other half of the rule above. /timeline is one of the hottest read
+    // paths in the dashboard (contact page + both 1:1 comms tabs, refetched on
+    // every debounced SSE burst); a request that can carry no scheduled item -
+    // a kinds filter without `scheduled`, a cursor page, or a deployment with no
+    // scheduled repos - must pay no settings GetItem and must not advertise a
+    // zone for a bucket that is empty by construction.
+    let reads = 0;
+    const counting: SettingsReadRepo = {
+      async getOrgSettings() {
+        reads += 1;
+        return quietOffSettingsRepo().getOrgSettings();
+      },
+    };
+    const { world, app } = makeGatherHarness(counting);
+    const phone = '+15550600011';
+    world.contacts.push({ contactId: 'ct-tz', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-tz', phone, 'tenant_1to1');
+    const tour = await world.toursRepo.create({
+      tenantId: 'ct-tz',
+      unitId: 'u-tz',
+      scheduledAt: TOUR_AT,
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: tour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+
+    const filtered = await request(app).get('/api/contacts/ct-tz/timeline?kinds=message');
+    expect(filtered.status).toBe(200);
+    expect(filtered.body.upcoming).toEqual([]);
+    expect(filtered.body.timezone).toBeUndefined();
+    expect(reads).toBe(0);
+
+    // ...and the gathering shape still reads it exactly once and reports it.
+    const gathered = await request(app).get('/api/contacts/ct-tz/timeline');
+    expect(gathered.status).toBe(200);
+    expect(gathered.body.upcoming).toHaveLength(1);
+    expect(gathered.body.timezone).toBe(DEFAULT_ORG_SETTINGS.timezone);
+    expect(reads).toBe(1);
   });
 
   it('non-self_guided tour with an UNUSABLE (closed) group still surfaces its rungs as 1:1 items (M3)', async () => {
@@ -1074,5 +1140,66 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const res = await request(app).get('/api/contacts/ct-7/timeline?kinds=message');
     expect(res.status).toBe(200);
     expect(res.body.upcoming).toEqual([]);
+  });
+
+  it('an uncomposable tour empties ONLY its own rung - the rest of the bucket survives', async () => {
+    // READ-PATH CONTAINMENT (spec F1), and the failure mode here is NOT a 500:
+    // an uncontained throw lands in the gather's own catch, which returns `[]`
+    // and silently deletes the OTHER tours AND both nudge walks from the page.
+    // So the assertion is that the bucket SURVIVES, not merely that we got 200.
+    const { world, app } = makeGatherHarness();
+    const phone = '+15550600009';
+    world.contacts.push({ contactId: 'ct-9', type: 'tenant', status: 'active', phone });
+    seedConv(world, 'conv-ct-9', phone, 'tenant_1to1');
+
+    const goodTour = await world.toursRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-good',
+      scheduledAt: '2099-01-10T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: goodTour.tourId,
+      kind: 'confirmation',
+      dueAt: '2099-01-05T10:00:00.000Z',
+    });
+    const badTour = await world.toursRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-bad',
+      scheduledAt: '2099-01-12T10:00:00.000Z',
+      tourType: 'self_guided',
+    });
+    await world.tourRemindersRepo.create({
+      tourId: badTour.tourId,
+      kind: 'day_before',
+      dueAt: '2099-01-11T10:00:00.000Z',
+    });
+    // Corrupt AFTER arming - the only way to reach this state.
+    await world.toursRepo.patch(badTour.tourId, { scheduledAt: 'not-an-instant' });
+
+    // A tenant-recipient nudge from walk 2: it shares the bucket, so it proves
+    // the OTHER walks are untouched by the tour walk's bad row.
+    const placement = await world.placementsRepo.create({
+      tenantId: 'ct-9',
+      unitId: 'u-9-good',
+      stage: 'awaiting_receipt',
+    });
+    await world.placementNudgesRepo.create({
+      placementId: placement.placementId,
+      kind: 'receipt_check',
+      dueAt: '2099-02-01T10:00:00.000Z',
+    });
+
+    const res = await request(app).get('/api/contacts/ct-9/timeline');
+
+    expect(res.status).toBe(200);
+    const up = res.body.upcoming as Array<Record<string, unknown>>;
+    expect(up).toHaveLength(3);
+    const bad = up.find((i) => i.refId === badTour.tourId)!;
+    expect(bad.body).toBe('');
+    expect(bad.reminderKind).toBe('day_before');
+    const good = up.find((i) => i.refId === goodTour.tourId)!;
+    expect(good.body).toBe(CONFIRMATION_BODY);
+    expect(up.some((i) => i.source === 'placement_nudge')).toBe(true);
   });
 });

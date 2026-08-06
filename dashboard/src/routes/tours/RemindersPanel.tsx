@@ -73,10 +73,20 @@ export function nextReminderRefetchDelay(
   return Math.min(untilFire + FIRE_BUFFER_MS, MAX_ANCHOR_MS);
 }
 
-/** A compact state chip for a single rung, mirroring DeadlineChip's tone pattern. */
-function StateChip({ rung }: { rung: TourReminderView }): React.JSX.Element {
+/** A compact state chip for a single rung, mirroring DeadlineChip's tone pattern.
+ *  `timezone` is the zone the LIST response composed the bodies in (spec D8):
+ *  the absolute sent-at renders in it so the chip and the body underneath it
+ *  quote the same clock. Absent (a stale response that predates the field) ->
+ *  the browser zone, i.e. exactly today's behavior. */
+function StateChip({
+  rung,
+  timezone,
+}: {
+  rung: TourReminderView;
+  timezone?: string;
+}): React.JSX.Element {
   if (rung.state === 'sent') {
-    const when = rung.sentAt !== undefined ? dateTime(rung.sentAt) : '';
+    const when = rung.sentAt !== undefined ? dateTime(rung.sentAt, timezone) : '';
     return (
       <span className={`${styles.chip} ${styles.sent}`}>
         {when ? `Sent - ${when}` : 'Sent'}
@@ -119,6 +129,12 @@ interface Committed {
   forId: string;
   /** False until the first fetch for forId lands. */
   loaded: boolean;
+  /** The zone the LIST response composed these bodies in (spec D8), held HERE
+   *  rather than read per-row: the PATCH / send-now payloads return a single row
+   *  and carry no zone, so a chip re-rendered from one of those would otherwise
+   *  fall back to the browser zone and reintroduce the mismatch. Undefined until
+   *  the first list lands (and on a response that predates the field). */
+  timezone: string | undefined;
 }
 
 export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Element {
@@ -128,6 +144,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
     error: null,
     forId: tourId,
     loaded: false,
+    timezone: undefined,
   });
 
   // Track the in-flight request so a refetch (SSE-driven or tourId change)
@@ -150,6 +167,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           error: null,
           forId: tourId,
           loaded: true,
+          timezone: page.timezone,
         });
       })
       .catch((err: unknown) => {
@@ -162,6 +180,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
           error: err instanceof ApiError ? err.message : 'Failed to load reminders',
           forId: tourId,
           loaded: true,
+          timezone: undefined,
         });
       });
   }, [tourId]);
@@ -307,7 +326,7 @@ export function RemindersPanel({ tourId }: { tourId: string }): React.JSX.Elemen
                     {kindLabel}
                   </span>
                   {isNext ? <span className={styles.nextTag}>Next</span> : null}
-                  <StateChip rung={rung} />
+                  <StateChip rung={rung} timezone={state.timezone} />
                   {/* Send now: only a PENDING rung can be forced out. Distinct
                       accessible name per rung (A10) - a bare repeated "Send now"
                       would be a strict-mode violation for the e2e harness. */}

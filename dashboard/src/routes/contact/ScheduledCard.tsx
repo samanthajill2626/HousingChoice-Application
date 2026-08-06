@@ -29,21 +29,29 @@ const SUPPRESSION_COPY: Readonly<
 
 /** The fire-time line: while the send is still in the future, "sends <relative> -
  *  <absolute>"; once it's at/past due (the worker just hasn't run yet), the
- *  honest "sending shortly". */
-function fireTimeLabel(at: string, now: number): string {
+ *  honest "sending shortly". The ABSOLUTE half renders in `timezone` - the zone
+ *  the body below it was composed in (spec D8) - so a navigator outside the org's
+ *  zone never reads a card whose time disagrees with its own text. sendRelative
+ *  is purely relative, hence zone-independent, and stays untouched. */
+function fireTimeLabel(at: string, now: number, timezone?: string): string {
   // Imminent (at/past fire time) → the honest "sending shortly", no absolute.
   if (new Date(at).getTime() <= now) return 'sending shortly';
   // Future → "sends in Nh - <absolute>" (sendRelative is the shared wording).
-  return [sendRelative(at, now), dateTime(at)].filter(Boolean).join(' - ');
+  return [sendRelative(at, now), dateTime(at, timezone)].filter(Boolean).join(' - ');
 }
 
 export function ScheduledCard({
   item,
   now = Date.now(),
+  timezone,
 }: {
   item: TimelineScheduled;
   /** Injectable clock for deterministic tests (defaults to Date.now()). */
   now?: number;
+  /** IANA zone the body was composed in. Absent (older backend, a stale cached
+   *  response, a failed bucket fetch) -> the absolute time keeps the browser
+   *  zone, i.e. exactly today's behavior. */
+  timezone?: string;
 }): React.JSX.Element {
   // "Will wait" for quiet hours (the send is DEFERRED to quiet-end), "Will be
   // skipped" for every reason that really drops the message.
@@ -58,7 +66,7 @@ export function ScheduledCard({
         <span className={styles.scheduledClock} aria-hidden="true">
           🕐
         </span>
-        <span className={styles.scheduledFire}>{fireTimeLabel(item.at, now)}</span>
+        <span className={styles.scheduledFire}>{fireTimeLabel(item.at, now, timezone)}</span>
         <span className={styles.scheduledTag}>{SOURCE_TAG[item.source]}</span>
       </div>
       <div className={styles.scheduledBody}>{item.body}</div>

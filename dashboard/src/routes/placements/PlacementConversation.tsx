@@ -321,6 +321,7 @@ function GroupChannel({ conversationId }: { conversationId: string }): React.JSX
       status={thread.status}
       items={thread.items}
       upcoming={thread.upcoming}
+      upcomingTimezone={thread.upcomingTimezone}
       source="server"
       canSend={canSend}
       {...(canSend && { onSend })}

@@ -6,9 +6,25 @@ severity: medium
 status: open
 area: e2e
 created: 2026-07-10
-updated: 2026-08-04
-refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:85, e2e/tests/scenarios/scheduled-visibility.spec.ts:140, e2e/tests/scenarios/steps.ts:2962
+updated: 2026-08-05
+refs: e2e/tests/scenarios/scheduled-visibility.spec.ts:103, e2e/tests/scenarios/scheduled-visibility.spec.ts:132, e2e/scenarios/steps.ts:3242
 ---
+
+**Update (2026-08-05, feat/tour-reminder-details).** Status of the two halves:
+
+- The DETERMINISTIC half (morning_of never armed before 08:00 org-local) was
+  CLOSED before this branch: suggested fix (a) landed at `150fbfa4`
+  (`tourScheduleFullLadder()` books Part A at 14:00 org-local, spec line :86).
+  A morning_of failure in Part A is therefore a REAL regression now, not this
+  issue.
+- The CONFIRMATION-race half (2026-08-03 sighting) stays OPEN and is the only
+  remaining scope. Not reproduced since: this branch's gate run (204 passed)
+  and four per-file runs were all green.
+- Refs refreshed: `expectReminderRung` moved to `e2e/scenarios/steps.ts:3242`;
+  Part A rung asserts are `scheduled-visibility.spec.ts:103-106`, the
+  post-tick asserts `:132-133`. Part A also now asserts the day_before rung's
+  COMPOSED preview body (address + org-local time), added by
+  feat/tour-reminder-details.
 
 **Observation (2026-07-10, during the remove-conversation-assignment review).**
 One full-suite e2e run failed exactly one test:

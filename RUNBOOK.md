@@ -618,6 +618,28 @@ defense #1 — an inbound webhook whose From matches is our own outbound project
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
 
+**ORDER MATTERS — the FIRST entry is "the main business number."** The whole list answers "is this
+one of ours?", but `ourPhoneNumbers[0]` alone drives four outward-facing things:
+
+- the **outbound voice caller ID** (`services/originateCall.ts`, `routes/webhooks/voice.ts`)
+- the **public flyer's "text us" CTA** (`routes/public.ts`, `app.ts`)
+- the **outbound 1:1 SMS sender** — the `from` pinned on every non-relay send
+  (`services/sendMessage.ts`) and on the staff cell-verification code (`routes/voiceApi.ts`)
+- which side of a thread renders as us (`routes/contactTimeline.ts`)
+
+**At the M1.11 cutover, when the ported number `+16782842537` is added, it must go FIRST** —
+`OUR_PHONE_NUMBERS=+16782842537,+14049824978`, **not** appended to the end. Appending is the
+natural thing to do and it is wrong: calls would keep presenting the old (404) number, the flyer
+would keep advertising it, and the 629 imported contacts would keep receiving texts from a number
+they do not recognize — which is the entire reason for porting. Nothing errors if you get this
+wrong; it just quietly presents the wrong number, so **verify with a test call + a test text after
+the deploy**, not just a green boot.
+
+Separately, the ported number must also be **added to the Messaging Service's sender pool** (and
+covered by the A2P campaign) before it can be sent from — the app pins `from`, but the number has
+to be IN the pool for the service to accept it. Config order and pool membership are two different
+steps; do both.
+
 #### Voice Intelligence transcription + platform voicemail
 
 Business-line CALL recordings (the founder bridge) and platform VOICEMAILS are transcribed by Twilio
@@ -1077,6 +1099,60 @@ notification settings, so this checklist *is* the fix:
 > Push subscriptions are **origin-scoped** — see [PWA re-install + push re-grant](#pwa-re-install--push-re-grant-origin-change):
 > after a domain cutover every device must re-install the PWA and re-grant permission, then redo
 > this setup.
+
+## Importing the founder's Quo + Airtable data (M1.6)
+
+Two commands with a human review step between them. Design + rationale:
+[docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md](docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md).
+
+**`import:plan` writes no database.** It reads the exports and emits a review
+workbook (3 CSVs) the founder edits. **`import:apply`** reads the *reviewed*
+workbook plus the raw exports and upserts DynamoDB.
+
+```powershell
+npm run import:plan -- --quo "W:\AI Projects\Housing Choice\Quo Exports" --airtable "W:\AI Projects\Housing Choice\Airtable Exports" --out "W:\AI Projects\Housing Choice\Import Review\<date>"
+```
+
+Carry a previous review forward so she reviews a DIFF, not the whole corpus:
+
+```powershell
+npm run import:plan -- --quo "<quo dir>" --airtable "<airtable dir>" --out "W:\AI Projects\Housing Choice\Import Review\<new date>" --prior "W:\AI Projects\Housing Choice\Import Review\<old date>"
+```
+
+Apply — **always dry-run first**; the write needs an explicit `--yes`:
+
+```powershell
+npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+```
+
+Target is whatever `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` point at — there is no
+built-in prod mode, exactly like `db:seed`. Set them deliberately per stage.
+
+**Things that will bite you:**
+
+- **PII.** The workbook holds real names and phone numbers, and this repo pushes
+  to Azure DevOps. `import:plan` REFUSES to write inside the working tree; keep
+  the workbook next to the exports. `.gitignore` is the second line of defence.
+- **Re-running is safe and is the intended delta.** Every write is keyed on a
+  value derived from the source data, so applying the 8/09 export over the 8/05
+  one converges. No wipe needed, and a bug found *after* cutover can be fixed by
+  re-running.
+- **A re-run will not revert the founder.** Status is only rewritten when the
+  import wrote the stored one; anything she or the automation changed afterwards
+  stays. Messages and calls are immutable and simply rewrite themselves.
+- **`drop` retracts.** Marking `drop` on a row the import already created removes
+  the contact, thread and messages — but only items carrying the import's stamp.
+  A thread holding any message the import did not create is KEPT and reported.
+- **The totals are short by design and say so.** 2 messages Sam addressed to her
+  own number and 1 call from a withheld caller ID belong to no importable thread.
+  Both commands print the reconciliation; a short count is never silent.
+- **`connect_day_one` records intent only.** Groups import as `connecting` with no
+  pool number. Provisioning a Twilio number stays a deliberate operator step — the
+  import never buys a number because of a spreadsheet cell.
+- **Verify Quo's ids are stable across exports** before trusting the carry-forward
+  (diff contact ids between two exports). If they turn out to be per-export, the
+  fallback is a content hash — one function, not a redesign.
 
 ## Rollback
 

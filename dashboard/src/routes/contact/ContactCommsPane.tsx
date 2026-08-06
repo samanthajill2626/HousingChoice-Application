@@ -320,6 +320,7 @@ export function ContactCommsPane(props: ContactCommsPaneProps): React.JSX.Elemen
         status={timeline.status}
         items={timeline.items}
         upcoming={timeline.upcoming}
+        upcomingTimezone={timeline.upcomingTimezone}
         source={timeline.source}
         {...(replyToPhone !== undefined && { replyToPhone })}
         replyToLabel={defaultPhoneLabel(phones)}

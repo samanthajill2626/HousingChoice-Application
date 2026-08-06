@@ -7,4 +7,5 @@ export {
   type MessageDef,
   type MessageClass,
 } from './catalog.js';
-export { resolveMessage, resolveWithSettings, settingsToOverrides } from './resolve.js';
+export { resolveMessage, settingsToOverrides } from './resolve.js';
+export { resolveWithSettings } from './resolveWithSettings.js';

@@ -56,3 +56,16 @@ Thumbs.db
 # the index out of git is what makes concurrent issue-filing conflict-free.
 docs/issues/INDEX.md
 test-results/
+
+# M1.6 import: real founder data and the generated review workbook contain live
+# contact names and phone numbers, and this repo pushes to Azure DevOps. The
+# primary guard is in import-plan.ts, which REFUSES to write inside the working
+# tree; this is the second line of defence for anything copied here by hand.
+.scratch/
+*-export/
+Quo Exports/
+Airtable Exports/
+Import Review/
+contacts.csv
+groups.csv
+units.csv

@@ -465,6 +465,7 @@ function GroupChannel({
       status={thread.status}
       items={items}
       upcoming={thread.upcoming}
+      upcomingTimezone={thread.upcomingTimezone}
       source="server"
       canSend={canSend}
       {...(canSend && { onSend })}

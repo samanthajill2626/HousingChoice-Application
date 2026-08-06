@@ -257,8 +257,11 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       toursRepo: createToursRepo({ logger: log }),
       contactsRepo: createContactsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
-      // Roster resolution (contact-rosters D11): the tenant-1:1 suppression
-      // check reads the property's primary contact for the DEFAULT roster.
+      // ONE unit read, TWO consumers: roster resolution (contact-rosters D11 -
+      // the tenant-1:1 suppression check reads the property's primary contact
+      // for the DEFAULT roster), AND the address that rides in the reminder
+      // copy. THIS is the path every e2e reminder assertion runs through, so an
+      // unwired tick would silently strip the address from every hermetic body.
       unitsRepo: createUnitsRepo({ logger: log }),
       // D7 (contact-rosters): wait while the tour's group open is deferred.
       pendingRosterActionsRepo: createPendingRosterActionsRepo({ logger: log }),

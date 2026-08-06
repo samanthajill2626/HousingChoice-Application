@@ -247,6 +247,22 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
       .poll(async () => (await getOutbox(request, { to: phone })).length, { timeout: 10_000 })
       .toBeGreaterThan(0);
 
+    // ...and it was SENT FROM the very number this flyer advertises. Before
+    // one-to-one-sender-not-pinned-to-ported-number (2026-08-06) the send path
+    // passed no `from` at all and Twilio's Messaging Service picked from its
+    // whole sender pool - which also holds the relay pool numbers - so the
+    // flyer's "text us at this number" promise was aspirational. The send
+    // service now pins OUR_PHONE_NUMBERS[0], the same value the flyer reads.
+    const flyerForCta = await request.get(`${NEXT}/public/units/${unit.unitId}/flyer`);
+    const advertised = (await flyerForCta.json()).flyer.contact_number as string;
+    // Guard against a VACUOUS pass: with an unconfigured OUR_PHONE_NUMBERS the
+    // flyer advertises null AND the send omits `from`, and undefined === null
+    // would compare two absences. Pin that `advertised` is a real E.164 number
+    // first, so the equality below can only pass by actually matching.
+    expect(advertised).toMatch(/^\+1\d{10}$/);
+    const welcome = (await getOutbox(request, { to: phone }))[0]!;
+    expect(welcome.from).toBe(advertised);
+
     await staff.close();
   });
 

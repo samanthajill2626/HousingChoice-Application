@@ -34,6 +34,11 @@ interface TimelineData {
   /** Not-yet-sent scheduled messages (the pinned "Upcoming" section). The
    *  fallback path (no /timeline endpoint yet) has none → []. */
   upcoming: TimelineScheduled[];
+  /** The IANA zone those `upcoming` BODIES were composed in (spec D8) - the
+   *  cards label their fire times in it so the card never contradicts the body
+   *  it shows. Undefined on the fallback path (no scheduled bucket) or an older
+   *  backend; the card then falls back to the browser zone. */
+  upcomingTimezone: string | undefined;
   /** Which path produced `items` — 'server' (/timeline) or 'fallback' (assembled). */
   source: TimelineSource;
 }
@@ -126,7 +131,12 @@ async function loadTimeline(
   contactId: string,
   kinds: string | undefined,
   signal: AbortSignal,
-): Promise<{ items: TimelineItem[]; upcoming: TimelineScheduled[]; source: TimelineSource }> {
+): Promise<{
+  items: TimelineItem[];
+  upcoming: TimelineScheduled[];
+  upcomingTimezone: string | undefined;
+  source: TimelineSource;
+}> {
   try {
     const page = await getContactTimeline(
       contactId,
@@ -136,6 +146,7 @@ async function loadTimeline(
     return {
       items: normalizeServerItems(page.items),
       upcoming: page.upcoming ?? [],
+      upcomingTimezone: page.timezone,
       source: 'server',
     };
   } catch (err) {
@@ -164,9 +175,11 @@ async function loadTimeline(
     }
     // The messages-only fallback has no scheduled bucket (that's a /timeline-only
     // envelope) — default upcoming to [] (m1).
+    // With no bucket there is no composing zone to carry either.
     return {
       items: buildTimelineFallback(conversations, messagesByConvId),
       upcoming: [],
+      upcomingTimezone: undefined,
       source: 'fallback',
     };
   }
@@ -177,6 +190,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     status: 'loading',
     items: [],
     upcoming: [],
+    upcomingTimezone: undefined,
     source: 'server',
   });
 
@@ -278,9 +292,13 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     const controller = new AbortController();
     abortRef.current = controller;
     try {
-      const { items, upcoming, source } = await loadTimeline(contactId, kinds, controller.signal);
+      const { items, upcoming, upcomingTimezone, source } = await loadTimeline(
+        contactId,
+        kinds,
+        controller.signal,
+      );
       if (controller.signal.aborted) return;
-      setState({ status: 'ready', items, upcoming, source });
+      setState({ status: 'ready', items, upcoming, upcomingTimezone, source });
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -339,6 +357,7 @@ export function useContactTimeline(contactId: string, kinds?: string): ContactTi
     status: state.status,
     items,
     upcoming: state.upcoming,
+    upcomingTimezone: state.upcomingTimezone,
     source: state.source,
     // Shares the SSE debounce, so an on-page mutation racing an SSE burst still
     // coalesces into one refetch.

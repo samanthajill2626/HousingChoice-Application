@@ -13,6 +13,7 @@ import {
   getConversationMessages,
   getConversationScheduled,
   useEventStream,
+  type ConversationScheduledPage,
   type Message,
   type SendMessageResult,
   type TimelineItem,
@@ -91,6 +92,11 @@ export interface RelayThreadState {
    *  best-effort: a failed fetch leaves the bucket empty, never errors the
    *  thread. */
   upcoming: TimelineScheduled[];
+  /** The IANA zone the `upcoming` BODIES were composed in (spec D8) - the cards
+   *  label their fire times in it so a navigator outside the org's zone never
+   *  reads a time that contradicts the body beside it. Undefined when the bucket
+   *  is empty or the fetch failed; the card then falls back to the browser zone. */
+  upcomingTimezone: string | undefined;
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
   addOptimistic: (
@@ -109,6 +115,9 @@ export function useRelayThread(conversationId: string): RelayThreadState {
   const [status, setStatus] = useState<RelayThreadStatus>('loading');
   const [serverItems, setServerItems] = useState<TimelineItem[]>([]);
   const [upcoming, setUpcoming] = useState<TimelineScheduled[]>([]);
+  // Rides with the bucket (same fetch, same failure posture): the zone those
+  // bodies were composed in.
+  const [upcomingTimezone, setUpcomingTimezone] = useState<string | undefined>(undefined);
 
   // In-flight OPTIMISTIC sends, reconciled against the server thread by tsMsgId.
   const [pending, setPending] = useState<PendingSend[]>([]);
@@ -187,12 +196,13 @@ export function useRelayThread(conversationId: string): RelayThreadState {
       const [messages, scheduled] = await Promise.all([
         getConversationMessages(conversationId, controller.signal),
         getConversationScheduled(conversationId, controller.signal).catch(
-          (): TimelineScheduled[] => [],
+          (): ConversationScheduledPage => ({ scheduled: [] }),
         ),
       ]);
       if (controller.signal.aborted) return;
       setServerItems(buildRelayItems(messages));
-      setUpcoming(scheduled);
+      setUpcoming(scheduled.scheduled);
+      setUpcomingTimezone(scheduled.timezone);
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -244,5 +254,13 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     return extra.length === 0 ? serverItems : [...serverItems, ...extra];
   }, [serverItems, pending]);
 
-  return { status, items, upcoming, addOptimistic, resolveOptimistic, failOptimistic };
+  return {
+    status,
+    items,
+    upcoming,
+    upcomingTimezone,
+    addOptimistic,
+    resolveOptimistic,
+    failOptimistic,
+  };
 }

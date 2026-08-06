@@ -96,7 +96,8 @@ beforeEach(() => {
   getContacts.mockReset();
   getConversationScheduled.mockReset();
   getConversationMessages.mockResolvedValue([]);
-  getConversationScheduled.mockResolvedValue([]);
+  // The endpoint returns the whole ENVELOPE now (rows + the composing zone).
+  getConversationScheduled.mockResolvedValue({ scheduled: [] });
   getConversationMembers.mockResolvedValue([KEISHA, LARS]);
   markConversationRead.mockResolvedValue(undefined);
   // useContacts('all') fans out per type; return the candidate for tenants only
@@ -132,23 +133,55 @@ describe('ConversationDetail dispatch', () => {
 
   it('shows the pinned Upcoming section for group-routed scheduled reminders', async () => {
     getConversation.mockResolvedValue(relayHeader());
-    getConversationScheduled.mockResolvedValue([
-      {
-        kind: 'scheduled',
-        id: 'sched#tour_reminder#rem-1',
-        at: '2026-08-03T18:00:00.000Z',
-        conversationId: 'conv-g1',
-        source: 'tour_reminder',
-        reminderKind: 'day_before',
-        body: 'Reminder: your property tour is tomorrow.',
-        refType: 'tour',
-        refId: 'tour-1',
-      },
-    ]);
+    getConversationScheduled.mockResolvedValue({
+      scheduled: [
+        {
+          kind: 'scheduled',
+          id: 'sched#tour_reminder#rem-1',
+          at: '2026-08-03T18:00:00.000Z',
+          conversationId: 'conv-g1',
+          source: 'tour_reminder',
+          reminderKind: 'day_before',
+          body: 'Reminder: your property tour is tomorrow.',
+          refType: 'tour',
+          refId: 'tour-1',
+        },
+      ],
+    });
     renderAt('conv-g1');
     const region = await screen.findByRole('region', { name: 'Upcoming scheduled messages' });
     expect(within(region).getByText('Reminder: your property tour is tomorrow.')).toBeInTheDocument();
     expect(getConversationScheduled).toHaveBeenCalledWith('conv-g1', expect.anything());
+  });
+
+  it('labels a group-thread fire time in the zone the body was composed in', async () => {
+    // ADJ-2 / spec D8: the GROUP thread renders the SAME ScheduledCard as the
+    // contact timeline, so the envelope's zone has to survive the whole path
+    // (endpoint -> useRelayThread -> Timeline -> card) or a navigator outside
+    // the org's zone reads a fire time that contradicts the body beside it.
+    // Asia/Tokyo is deliberately nobody's plausible browser zone, so the
+    // assertion cannot pass by accident on a machine that happens to sit in the
+    // org's zone. 2099-01-10T10:00Z is 19:00 the same day in Tokyo.
+    getConversation.mockResolvedValue(relayHeader());
+    getConversationScheduled.mockResolvedValue({
+      scheduled: [
+        {
+          kind: 'scheduled',
+          id: 'sched#tour_reminder#rem-tz',
+          at: '2099-01-10T10:00:00.000Z',
+          conversationId: 'conv-g1',
+          source: 'tour_reminder',
+          reminderKind: 'day_before',
+          body: 'Reminder: tour at 412 Sender Way NW is tomorrow, Sat, Jan 10 at 7:00 PM.',
+          refType: 'tour',
+          refId: 'tour-1',
+        },
+      ],
+      timezone: 'Asia/Tokyo',
+    });
+    renderAt('conv-g1');
+    const region = await screen.findByRole('region', { name: 'Upcoming scheduled messages' });
+    expect(within(region).getByText(/Jan 10, 7:00 PM/)).toBeInTheDocument();
   });
 
   it('redirects a 1:1 conversation to its contact page', async () => {

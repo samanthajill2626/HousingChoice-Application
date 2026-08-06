@@ -234,6 +234,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         // rungs are pending-only (the filter above), so there is no sentBody to
         // prefer. READ-PATH CONTAINMENT (spec F1): a tour with no usable
         // scheduledAt yields body: '' instead of 500ing the whole bucket.
+        // DUPLICATED SHAPE (3 copies, keep in sync) - twins in
+        // routes/tourReminders.ts (bodyFor) and routes/contactTimeline.ts
+        // (tourReminderBodyOrEmpty). See the note on bodyFor.
         body: ((): string => {
           try {
             return composeTourReminderBody({

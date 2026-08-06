@@ -198,6 +198,14 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
    * failing the whole ladder - `body` is required on the wire view, on the
    * dashboard mirror and on TimelineScheduled, so it is emptied, never omitted.
    */
+  // DUPLICATED SHAPE (3 copies, keep in sync): the sentBody-first read plus
+  // UncomposableReminderError containment also lives in
+  // routes/contactTimeline.ts (tourReminderBodyOrEmpty) and
+  // routes/relayGroups.ts (the scheduled-bucket map). Left duplicated on
+  // purpose - consolidating would rewrite containment three review passes
+  // verified. If you change the containment RULE here, change it in all three
+  // or the preview surfaces diverge, which is precisely the drift the shared
+  // composer exists to prevent.
   const bodyFor = (
     row: TourReminderItem,
     tour: TourItem,

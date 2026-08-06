@@ -534,6 +534,9 @@ interface ScheduledGatherRepos {
  * rungs out entirely, so the branch is a guard for future callers, not dead
  * weight - the shape is identical on every preview surface.
  */
+// DUPLICATED SHAPE (3 copies, keep in sync) - twins in routes/tourReminders.ts
+// (bodyFor) and routes/relayGroups.ts (the scheduled-bucket map). See the note
+// on bodyFor for why they are deliberately not consolidated.
 function tourReminderBodyOrEmpty(
   row: TourReminderItem,
   tour: TourItem,

@@ -1,13 +1,15 @@
 # AI Run Log - Design
 
 Date: 2026-08-06
-Status: DRAFT - revised after adversarial review round 1
+Status: DRAFT - revised after adversarial review rounds 1-2
 Phase: 2 (automations), observability slice
 
-Revision note: round 1 of adversarial review (two blind reviewers) accepted
-23 findings, 6 of them structural. Adjudications, including rejections with
-reasoning, are at `.superpowers/design-review/adjudications.md` in the
-feature worktree.
+Revision note: two rounds of adversarial review. Round 1 (two blind
+reviewers) accepted 23 findings, 6 structural. Round 2 (one continued
+reviewer, re-review charge) accepted 16 more, 5 structural - including two
+defects the round-1 revision itself introduced, and one successful contest of
+a round-1 rejection. Adjudications, with every rejection and its reasoning,
+are at `.superpowers/design-review/adjudications.md` in the feature worktree.
 
 ## 1. Overview
 
@@ -77,8 +79,11 @@ What is not persisted anywhere:
   approximation and section 13 states its limits.
 - Replaying a stored run. The record supports drift detection, not
   byte-identical replay (section 6.1).
-- Versioning the truncation algorithm itself. Rejected as scope creep; a
-  `windowBuilderVersion` marker is recorded instead.
+- Versioning the truncation algorithm itself. Rejected as scope creep. The
+  byte-affecting CONSTANTS are recorded instead (`windowParams`, 6.1); a pure
+  algorithm change then surfaces as an unexplained hash mismatch, which is the
+  honest signal. A hand-bumped builder version was considered and rejected -
+  it reintroduces the same drift failure mode as a hand-bumped prompt version.
 
 ## 5. Storage
 
@@ -109,7 +114,8 @@ One GSI, `byEntity`: hash `entityKey` (S), range `sortKey` (S), formatted
 Projection is ALL. It is not a choice: `dynamoAdmin.ts:48` and
 `infra/modules/dynamodb/main.tf:57` both hardcode `ProjectionType: 'ALL'`,
 and `GsiSpec` has no projection field. Pointer rows are tiny, so ALL costs
-nothing and the `runId` attribute is available directly from the index.
+nothing. Each pointer row carries an explicit `runId` attribute, which ALL
+projection then makes readable straight off the index.
 
 `ttlAttribute: 'expires_at'` (epoch seconds), registered in
 [app/src/lib/tables.ts](../../../app/src/lib/tables.ts) alongside the
@@ -163,12 +169,14 @@ run#<runId>
   trigger:  sms | voice | triage | email        (the due row's channel)
   outcome:  applied | no_op | skipped | failed
   skipReason?:  see 6.3
-  error?:   { kind: refusal | driver, message, attempts, parked }
+  error?:   { kind: refusal | driver | complete, message, attempts, parked }
 
   driver:   anthropic | console | fake
   model?:   the model id actually called
-  promptFingerprint?: sha256 of the assembled system prompt, first 12 hex
-  windowBuilderVersion: integer
+  promptFingerprint?: sha256 of the assembled system prompt CONCATENATED with
+            the serialized EXTRACTION_SCHEMA, first 12 hex. Both are sent on
+            the same call and both define the model contract; fingerprinting
+            the prompt alone would miss half of it.
   usage?:   { inputTokens, outputTokens }
 
   window:   see 6.1
@@ -187,6 +195,9 @@ run#<runId>
 window:
   cursor, newestTsMsgId, hasInferredRoleContent, totalChars
   windowCappedAtLimit: boolean
+  windowParams: { newMessageCharCap, seenMessageCharCap, windowCharBudget,
+                  maxTranscriptMessages, maxTranscriptAgeDays,
+                  truncationMarker }
   messages: [ { tsMsgId, type, direction, tier, capChars,
                 truncated, chars, hash } ]
   excluded: [ { tsMsgId, cause } ]
@@ -200,18 +211,23 @@ time. Supporting fields:
 `new`/`seen` tier label, so a later tuning of `NEW_MESSAGE_CHAR_CAP` or
 `SEEN_MESSAGE_CHAR_CAP` does not silently misrepresent historical runs.
 
-`hash` - sha256 of the exact utterance text sent for that message, first 16
-hex. For a multi-utterance message the hash covers the utterance texts joined
-by `\n`, in order, as sent.
+`hash` - sha256, first 16 hex, of the EXACT per-message substring that
+`buildExtractionUserContent` renders into the user content for this message.
+It is NOT a `\n`-join of the utterance texts: the real renderer applies
+single-line normalization and speaker prefixes, so a naive join would hash
+bytes that were never sent and produce a permanent false mismatch. The hash
+must be taken from the same renderer that produces the request, not
+reconstructed alongside it.
 
 This is DRIFT DETECTION, not a replay guarantee. A change to utterance
-derivation (`toUtterances`) or to the capping algorithm (`capUtterances`,
-`clampHeadTail`) changes the bytes for the same stored message, so a hash
-mismatch means "something changed", not necessarily "the message changed".
-`windowBuilderVersion` - a hand-bumped integer, incremented whenever
-`toUtterances`, `capUtterances`, or `clampHeadTail` changes - tells a reader
-that comparison across the boundary is invalid. Versioning the algorithm
-itself was considered and rejected as scope creep.
+derivation (`toUtterances`), to the capping algorithm (`capUtterances`,
+`clampHeadTail`), or to the renderer changes the bytes for the same stored
+message, so a hash mismatch means "something changed", not necessarily "the
+message changed". `windowParams` records the byte-affecting CONSTANTS, so a
+reader can tell a constant change from an algorithm change: if the params
+match and the hash does not, the code changed. A hand-bumped builder version
+was rejected - it is the same drift failure mode this spec already rejected
+for prompt versioning, over a larger surface.
 
 `excluded` carries a CAUSE per message, because the causes are not
 equivalent:
@@ -257,18 +273,34 @@ TTL'd at 90 days.
 
 ### 6.3 Field optionality by outcome
 
-| outcome   | window | decisions | rawText/rawResult | usage | error |
-| --------- | ------ | --------- | ----------------- | ----- | ----- |
-| `applied` | yes    | yes       | yes (anthropic)   | yes   | no    |
-| `no_op`   | yes    | yes       | yes (anthropic)   | yes   | no    |
-| `skipped` | no     | no        | no                | no    | no    |
-| `failed`  | yes*   | yes*      | if the call returned | if returned | yes |
+The rule is uniform: **every field the run actually computed is recorded, on
+every terminal path.** There is no outcome that discards work already done.
 
-(*) A `failed` run carries whatever had been assembled when it failed. A
-driver failure has a window but no decisions; an apply-stage failure has
-both. This is the point of accepted finding 3: the previous draft wrote the
-record only after `repo.complete()`, so a run that called the model and
-mutated the contact but failed to complete left NO record at all.
+| outcome   | window        | decisions | rawText/rawResult | usage | error |
+| --------- | ------------- | --------- | ----------------- | ----- | ----- |
+| `applied` | yes           | yes       | yes (anthropic)   | yes   | no    |
+| `no_op`   | yes           | yes       | yes (anthropic)   | yes   | no    |
+| `skipped` | when computed | no        | no                | no    | no    |
+| `failed`  | when computed | when computed | if the call returned | if returned | yes |
+
+"When computed" is load-bearing, not hedging. A `no_new_client` skip has a
+FULLY computed window - the job assembles `fresh` at `extraction.ts:294-296`
+and only then consults the cursor gate at 316 - and that window is precisely
+the evidence a reviewer needs to answer "why did it decide there was nothing
+new". Discarding it because the outcome is "skipped" would contradict goal 3.
+`no_contact` and `ineligible_type` genuinely have no window; they exit before
+the fetch.
+
+`error.kind`:
+
+- `refusal` - `ExtractionRefusedError` (`adapters/extraction.ts:161-163`).
+- `driver` - any other throw from `extract`.
+- `complete` - `repo.complete()` threw after the model ran and the contact
+  was mutated. This is the exact case the write-path fix exists for; without
+  its own kind it would be indistinguishable from a driver failure.
+
+There is no `apply` kind: `applyExtraction` guards every side effect and does
+not throw.
 
 `skipReason` values, derived from the actual skip branches:
 
@@ -296,6 +328,19 @@ The `console` and `fake` drivers return `meta` with `driver` set and the
 model-specific fields absent. This is a required precondition for section 6;
 without it three recorded fields cannot be populated.
 
+This is a BREAKING interface change with known call sites and test fallout,
+all of which are build tasks rather than discoveries: the two production
+drivers plus `extractionFake.ts`, the `processRow` call at
+`extraction.ts:364`, five return-shape assertions in
+`app/test/extractionAdapter.test.ts`, and four driver doubles in
+`app/test/extractionJob.test.ts`.
+
+Four helpers in `jobs/extraction.ts` are module-private today and must be
+exported for the recorder and the detail view to reuse them rather than
+reimplement them: `toUtterances`, `capUtterances`, `clampHeadTail`, and
+`toProfile`. Reimplementing any of them would guarantee the hash mismatch
+described in 6.1.
+
 ## 7. Decisions and verdicts
 
 `decisions` is a map keyed by target (`firstName` .. `porting`, `address`,
@@ -320,26 +365,54 @@ support it: the loop at `apply.ts:166` treats a missing field and an explicit
 `op: 'none'` identically, and `parseExtractionText` folds the address, type,
 and phone sentinels to absent before apply ever sees them.
 
-So decisions are assembled from the PARSED RESULT (for what the model said)
-joined with apply's outcomes (for what we did). This makes two distinct
-negatives observable:
+So decisions are assembled from what the model SAID, joined with apply's
+outcomes for what we DID. Two distinct negatives become observable:
 
 - `no_finding` - the model explicitly returned `op: 'none'` for this target.
 - `not_addressed` - the target is absent from the response entirely.
 
 Only the first is evidence the model considered the field. Conflating them
-would have manufactured evidence of evaluation that never happened.
+manufactures evidence of evaluation that never happened.
+
+**The source differs by target, and this is not optional.** The parsed
+`ExtractionResult` is sufficient for the eight SCALAR fields: a value-less
+write is downgraded to `{ op: 'none' }` and preserved
+(`schema.ts:216-217`). It is NOT sufficient for `address`, `type`, or
+`phone` - `parseExtractionText` folds their `none` sentinels to ABSENT
+(`schema.ts:233` for type, `258-263` for address), so a parsed-only reading
+cannot tell a decline from a silence for exactly those three.
+
+Those three are therefore read from `rawText` (the pre-parse response, which
+section 6 now stores) by re-parsing it as JSON; the scalars are read from the
+parsed result. An earlier revision said "build from the parsed result" for
+all targets, which would have inverted the defect - manufacturing false
+evidence of NON-evaluation instead of false evidence of evaluation.
+
+When `rawText` is absent (the `console` and `fake` drivers, or a driver
+failure before a response), `address`/`type`/`phone` decisions are recorded
+as `not_addressed` only where apply also saw nothing, and never as
+`no_finding` - the spec does not permit inferring a decline that was never
+observed.
 
 ### 7.2 dropReason
 
 Re-enumerated against every discard branch in `apply.ts`:
 
 `wrong_contact_type` (169, 224), `invalid_value` (175),
-`equal_to_current` (198, 270), `address_no_usable_parts` (226),
-`status_not_onboarding_tenant` (338), `type_already_classified` (360),
-`phone_not_canonicalizable` (367), `phone_already_owned` (369),
-`phone_owned_by_other` (379), `note_line_filtered` (409-411),
+`equal_to_current` (198, 270), `status_not_onboarding_tenant` (338),
+`type_already_classified` (360), `phone_not_canonicalizable` (367),
+`phone_already_owned` (369), `phone_owned_by_other` (379),
 `dismissed_before` and `repo_error` (both in `putSuggestionSafe`).
+
+Two candidates were removed after checking the code rather than the
+docstrings. `note_line_filtered` (409-411) has no decision target to attach
+to - note lines are not targets - so it would have been an orphan key;
+filtered notes are visible only as a lower `notedLines`. `address_no_usable_
+parts` (226) is unreachable in production: `parseExtractionText` already
+drops an address with zero usable parts before apply is called
+(`schema.ts:258-263`), so the branch is defensive only. Recording a value
+that can never occur is the same phantom class as the `error.kind: 'apply'`
+this spec already removed.
 
 `lossy_address` and `demoted_inferred_role` are NOT dropReasons. Both produce
 SUGGESTIONS (`apply.ts:256-284` and `189-211`); the earlier draft inverted
@@ -368,19 +441,37 @@ an occupied field as same-fact-better-form, and this is true of all eight
 scalar fields and of address - not address alone. The presence or absence of
 `previousValue` distinguishes the cases.
 
+**Suggestion rows carry a `runId`.** Every verdict surface needs it to know
+which run record to address; without it none of them can. (An earlier
+revision dropped this plumbing while restructuring - it is restored here
+explicitly because it is the precondition for all of section 7.3.)
+
 Three resolution surfaces write verdicts, not one:
 
-1. `suggestions.ts` accept / dismiss -> `accepted` / `dismissed`.
+1. `suggestions.ts` accept (152) / dismiss (316) -> `accepted` / `dismissed`.
 2. `contacts.ts:1321-1327` - a human PATCH edit deletes the pending
-   suggestion for every changed field. Without instrumenting this,
-   those decisions sit `pending` forever. -> `superseded_by_human_edit`.
+   suggestion for every changed field. Without instrumenting this, those
+   decisions sit `pending` forever -> `superseded_by_human_edit`.
 3. `extractionRepo.putSuggestion` displacing an earlier run's suggestion,
    detected via `ReturnValues: 'ALL_OLD'` -> `superseded`.
 
-Target `type` is a special case: `suggestions.ts:157` refuses
-`accept_type_via_triage`, so `type` is resolvable ONLY through the PATCH
-path. Surface 2 is therefore the sole way a `type` decision ever leaves
-`pending`.
+Target `type` is partly special and was previously overstated here. The
+ACCEPT route refuses it (`suggestions.ts:157`, `accept_type_via_triage`), so
+a `type` decision can never reach `accepted` through surface 1 - it reaches
+`accepted` only via the PATCH of surface 2. But the DISMISS route
+(`suggestions.ts:316`) carries no target restriction and handles `type`
+today, so surface 1 can still resolve it to `dismissed`. Instrumenting only
+the PATCH would leave dismissed `type` decisions stranded.
+
+The `superseded` stamp is NOT written inside `putSuggestion`, and NOT by
+`apply.ts` - `apply.ts` is `putSuggestion`'s caller, so "the caller does it"
+would have handed apply an `ai_runs` dependency the write-path section
+explicitly denies. Instead `putSuggestion` RETURNS the displaced row,
+`applyExtraction` surfaces the displaced `runId`s on its `ApplyOutcome`, and
+the JOB writes the stamps. Apply stays free of `ai_runs`, and a stamp failure
+cannot be mistaken for a suggestion failure - which matters, because
+`putSuggestionSafe` treats a throw as a failed suggestion and that suppresses
+the load-bearing `suggestion.updated` emit at `apply.ts:443-445`.
 
 Every verdict write carries `ConditionExpression: attribute_exists(itemId)`.
 Runs TTL at 90 days but pending suggestions never expire, so a verdict can
@@ -394,28 +485,37 @@ load-bearing `suggestion.updated` emit at `apply.ts:443-445`.
 
 ## 8. Write path and failure isolation
 
-The previous draft claimed a single writer. That was false. The real writer
-set:
+An earlier draft claimed a single writer, which was false. The corrected
+model separates the ENVELOPE from the VERDICTS.
 
-- `processRow` (`jobs/extraction.ts`) - the run envelope, on every terminal
-  path including skips.
-- `runDueExtractions` catch - `outcome: failed`, carrying whatever the run
-  had assembled.
-- `suggestions.ts` accept / dismiss - verdicts.
-- `contacts.ts` PATCH - `superseded_by_human_edit` verdicts.
-- the `putSuggestion` caller - `superseded` verdicts.
+**The envelope has exactly one writer, and writes exactly once.**
+`processRow` builds a `RunDraft` as it goes - trigger and ids first, then
+window, then meta and raw response, then decisions - and never writes it
+itself. `runDueExtractions` owns the single write, in a finally-style path,
+on every terminal outcome including skips and failures. A failure carries the
+draft as it stood: `processRow` attaches it to the thrown error rather than
+writing a partial record of its own.
 
-One writer owns the ENVELOPE; four surfaces write verdicts onto it later.
-All five are best-effort.
+This matters because the obvious alternative is wrong in two ways: if
+`processRow` writes on success and the outer catch writes on failure, then
+neither path holds every field, AND a failure after a successful envelope
+write produces TWO records for one run. One writer, one write.
 
-`applyExtraction` widens its `ApplyOutcome` to return per-target outcomes and
-drop reasons; the job joins them with the parsed result to build `decisions`.
-Apply stays the decision authority; it does not gain a dependency on
-`ai_runs`.
+Verdicts are written later by three surfaces, per 7.3: `suggestions.ts`
+accept/dismiss, the `contacts.ts` PATCH, and the job's `superseded` stamp.
 
-The record is assembled incrementally and written on every terminal path, not
-after `repo.complete()`. A `complete()` failure must not lose the record of a
-run that called the model and mutated the contact.
+All four writes are best-effort.
+
+`applyExtraction` widens its `ApplyOutcome` to return per-target outcomes,
+drop reasons, and any displaced `runId`s; the job joins those with the
+model's response to build `decisions`. Apply stays the decision authority and
+gains NO dependency on `ai_runs` - that separation is what makes the
+`superseded` routing in 7.3 necessary rather than fussy.
+
+The record is written on every terminal path, never gated on
+`repo.complete()`. A `complete()` failure must not erase the record of a run
+that called the model and mutated the contact; it is recorded as
+`error.kind: 'complete'`.
 
 The recorder is strictly best-effort: wrapped in try/catch, logged,
 swallowed. It must never fail an extraction run, re-arm a due row, or burn a
@@ -444,9 +544,11 @@ Two-pane master-detail, matching Inbox and Placement detail. List paged 25.
 
 Header states current driver, model, prompt fingerprint, and whether
 extraction is enabled, so an empty log is never mistaken for "the AI reviewed
-everything and found nothing". This extends the existing system-status
-surface (`app/src/services/systemStatus.ts`, `routes/settings.ts`) rather
-than adding a parallel config endpoint.
+everything and found nothing". This extends the existing flags surface -
+`GET /api/system/flags` in `app/src/routes/system.ts` - NOT `routes/settings.ts`,
+which an earlier revision named incorrectly. `SystemFlags` carries no
+extraction fields today, so `aiExtractionEnabled`, `driver`, `model`, and
+`promptFingerprint` are added to it as an explicit task.
 
 **Scope is a single exclusive selector, not a filter matrix.** One Query has
 one hash key, so `global`, a contact, a conversation, and an outcome cannot
@@ -486,8 +588,16 @@ on both client and server, and TTL bounds the window.
   `no_finding` vs `not_addressed`, `demotedFrom`, and every `dropReason`
   branch. These branches have no test coverage today because they were
   `logger.debug` dead ends.
-- Unit: all four verdict surfaces, including `superseded_by_human_edit` via
-  the contacts PATCH path and the `type`-only-via-PATCH case.
+- Unit: all three verdict surfaces, including `superseded_by_human_edit` via
+  the contacts PATCH path, `type` reaching `accepted` ONLY via that PATCH,
+  and `type` reaching `dismissed` via the unrestricted dismiss route.
+- Unit: `no_finding` vs `not_addressed` sourced correctly per target - the
+  scalars from the parsed result, `address`/`type`/`phone` from `rawText` -
+  including the case where `rawText` is absent and neither may be inferred.
+- Unit: the envelope is written EXACTLY ONCE per run on every terminal path,
+  including a failure after the model ran (no double record, no lost record).
+- Unit: the window `hash` is produced by the same renderer that builds the
+  request, so a round trip over an unchanged message matches.
 - Unit: the `attribute_exists` guard - a verdict write against an expired run
   fails cleanly and creates nothing.
 - Unit: recorder failure isolation - a throwing run-log write leaves the
@@ -524,8 +634,9 @@ Separately and independently: `AI_EXTRACTION_ENABLED` is being flipped to
   from a LATER AI run overwriting the same field - both look identical.
 - Messages beyond `MAX_TRANSCRIPT_MESSAGES` cannot be enumerated in
   `excluded`; only the `windowCappedAtLimit` flag signals they may exist.
-- The `hash` detects drift but does not guarantee replay; a
-  `windowBuilderVersion` change invalidates cross-boundary comparison.
+- The `hash` detects drift but does not guarantee replay. `windowParams`
+  distinguishes a constant change from an algorithm change, but a pure
+  algorithm change is visible only as an unexplained mismatch.
 - Aggregate quality statistics are not built.
 - A run whose record fails to write is invisible while the extraction itself
   succeeded - the accepted cost of best-effort recording. Such failures log.

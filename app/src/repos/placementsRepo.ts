@@ -396,12 +396,21 @@ export function createPlacementsRepo(deps: RepoDeps = {}): PlacementsRepo {
             Key: { placementId },
             UpdateExpression: 'SET #r = :r, #rv = :nv, #updatedAt = :now',
             // MATERIALIZE (no expectedVersion) vs OPTIMISTIC UPDATE - identical
-            // discipline to toursRepo.setRoster.
+            // discipline to toursRepo.setRoster, INCLUDING the thread-pointer
+            // guard on the materialize: once `group_thread` is set the roster is
+            // a FACT (D1) and provision has cleared the plan, so without it a
+            // plan edit racing a concurrent open would write an INERT plan onto
+            // a thread-bearing placement and answer "saved".
             ConditionExpression:
               expectedVersion === undefined
-                ? 'attribute_exists(placementId) AND attribute_not_exists(#r)'
+                ? 'attribute_exists(placementId) AND attribute_not_exists(#r) AND attribute_not_exists(#gt)'
                 : 'attribute_exists(placementId) AND #rv = :ev',
-            ExpressionAttributeNames: { '#r': 'roster', '#rv': 'rosterVersion', '#updatedAt': 'updated_at' },
+            ExpressionAttributeNames: {
+              '#r': 'roster',
+              '#rv': 'rosterVersion',
+              '#updatedAt': 'updated_at',
+              ...(expectedVersion === undefined && { '#gt': 'group_thread' }),
+            },
             ExpressionAttributeValues: {
               ':r': roster,
               ':nv': nextVersion,

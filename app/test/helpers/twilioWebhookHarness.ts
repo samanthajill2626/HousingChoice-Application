@@ -1640,12 +1640,15 @@ export function createFakeWorld(): FakeWorld {
       return { items: items.map((c) => ({ ...c })) };
     },
     async setRoster(placementId, roster, expectedVersion) {
-      // Mirror the conditional write: MATERIALIZE only when no plan exists,
-      // otherwise the stored version must equal the caller's.
+      // Mirror the conditional write: MATERIALIZE only when no plan exists AND
+      // no thread pointer does (D1 - a plan on a thread-bearing placement is
+      // inert), otherwise the stored version must equal the caller's.
       const c = placements.get(placementId);
       const conflict =
         !c ||
-        (expectedVersion === undefined ? c.roster !== undefined : c.rosterVersion !== expectedVersion);
+        (expectedVersion === undefined
+          ? c.roster !== undefined || c.group_thread !== undefined
+          : c.rosterVersion !== expectedVersion);
       if (conflict) throw new RosterPlanConflictError();
       c.roster = roster;
       c.rosterVersion = (expectedVersion ?? 0) + 1;
@@ -2082,12 +2085,15 @@ export function createFakeWorld(): FakeWorld {
       toursMap.set(tourId, t);
     },
     async setRoster(tourId, roster, expectedVersion) {
-      // Mirror the conditional write: MATERIALIZE only when no plan exists,
+      // Mirror the conditional write: MATERIALIZE only when no plan exists AND
+      // no thread pointer does (D1 - a plan on a thread-bearing tour is inert),
       // otherwise the stored version must equal the caller's.
       const t = toursMap.get(tourId);
       const conflict =
         !t ||
-        (expectedVersion === undefined ? t.roster !== undefined : t.rosterVersion !== expectedVersion);
+        (expectedVersion === undefined
+          ? t.roster !== undefined || t.groupThreadId !== undefined
+          : t.rosterVersion !== expectedVersion);
       if (conflict) throw new RosterPlanConflictError();
       t.roster = roster;
       t.rosterVersion = (expectedVersion ?? 0) + 1;

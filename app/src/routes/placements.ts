@@ -950,6 +950,9 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
   const planStateOf = (item: PlacementItem): RosterPlanState => ({
     ...(item.roster !== undefined && { roster: item.roster }),
     ...(item.rosterVersion !== undefined && { rosterVersion: item.rosterVersion }),
+    // Carried so a lost MATERIALIZE can tell "someone else materialized first"
+    // from "a group text just opened" (the latter is 409 thread_exists).
+    ...(typeof item.group_thread === 'string' && { groupThreadId: item.group_thread }),
   });
 
   const planStoreFor = (placementId: string): RosterPlanStore => ({

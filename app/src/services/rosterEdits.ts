@@ -84,10 +84,16 @@ export const ROSTER_UNAVAILABLE: RosterEditRefusal = {
   message: 'This roster could not be read just now. Refresh and try again.',
 };
 
-/** The owner's stored plan state - the two attributes the write path guards on. */
+/** The owner's stored plan state - the attributes the write path guards on. */
 export interface RosterPlanState {
   roster?: RosterEntry[];
   rosterVersion?: number;
+  /**
+   * The owner's thread pointer (tours: `groupThreadId`; placements:
+   * `group_thread`), present ONLY so a lost MATERIALIZE can be told apart from
+   * a lost race with another editor - the plan writes themselves never read it.
+   */
+  groupThreadId?: string;
 }
 
 /** The owner's repo, narrowed to the three plan operations. */
@@ -237,10 +243,19 @@ export async function applyRosterPlanEdit(
         state = await store.setRoster(entriesOf(resolved.members), undefined);
       } catch (err) {
         if (!(err instanceof RosterPlanConflictError)) throw err;
-        // (b) Someone materialized first: continue onto THEIR override.
+        // (b) The materialize lost - and its condition now has TWO ways to
+        // fail, so re-read the owner to tell them apart:
+        //   - a THREAD landed (the pointer guard): the plan is no longer the
+        //     roster (D1), and materializing here would write an INERT plan
+        //     while answering "saved". Refuse with the SAME 409 the route
+        //     itself answers for a thread-bearing owner.
+        //   - someone materialized first: continue onto THEIR override.
         const fresh = await store.reload();
         if (fresh === undefined) {
           return { ok: false, refusal: { status: 404, error: req.notFoundError } };
+        }
+        if (typeof fresh.groupThreadId === 'string' && fresh.groupThreadId.length > 0) {
+          return { ok: false, refusal: ROSTER_THREAD_EXISTS };
         }
         state = fresh;
         continue;

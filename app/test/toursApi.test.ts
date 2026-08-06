@@ -3511,6 +3511,56 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     }
   });
 
+  it('a plan edit racing a CONCURRENT OPEN answers 409 thread_exists - never an inert plan on a thread-bearing tour', async () => {
+    // The interleaving (D1): the route read a tour with NO thread and a plan at
+    // version 1, so the edit goes straight to the version-conditional write.
+    // The open lands in between - pointer stamped, plan CONSUMED - so that
+    // write fails, the reload finds no roster, and the retry falls into the
+    // MATERIALIZE branch. Without the pointer guard that branch SUCCEEDS: a
+    // fresh plan lands on a thread-bearing tour (inert by precedence - the
+    // resolver reads participants) and the operator is told "saved".
+    const { app } = makeWebhookHarness({ world });
+    const tourId = await createTour(app);
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const realSetRoster = world.toursRepo.setRoster.bind(world.toursRepo);
+    let raced = false;
+    world.toursRepo.setRoster = async (id, roster, expectedVersion) => {
+      if (!raced) {
+        raced = true;
+        // The concurrent open: claim the slot, then consume the plan (A8's
+        // order - clearRoster runs only after the pointer write).
+        await world.toursRepo.claimGroupThread(id, 'conv-raced-open');
+        await world.toursRepo.clearRoster(id);
+      }
+      return realSetRoster(id, roster, expectedVersion);
+    };
+    try {
+      const res = await authed(app)
+        .post(`/api/tours/${tourId}/roster/members`)
+        .send({ contactId: 'c-caseworker' });
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('thread_exists');
+      // The same renderable copy the plan endpoints already answer with.
+      expect(res.body.message).toBe(
+        'This group text is already open. Edit its members from the live group.',
+      );
+    } finally {
+      world.toursRepo.setRoster = realSetRoster;
+    }
+
+    // ...and NOTHING was written: the thread-bearing tour carries no roster.
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.groupThreadId).toBe('conv-raced-open');
+    expect(stored.roster, 'an inert plan must never be materialized').toBeUndefined();
+    expect(stored.rosterVersion).toBeUndefined();
+  });
+
   it('the provisioning:<tourId> claim sentinel counts as a thread (A17) - plan edits 409', async () => {
     const { app } = makeWebhookHarness({ world });
     const tourId = await createTour(app);

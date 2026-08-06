@@ -581,6 +581,9 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
   const planStateOf = (tour: TourItem): RosterPlanState => ({
     ...(tour.roster !== undefined && { roster: tour.roster }),
     ...(tour.rosterVersion !== undefined && { rosterVersion: tour.rosterVersion }),
+    // Carried so a lost MATERIALIZE can tell "someone else materialized first"
+    // from "a group text just opened" (the latter is 409 thread_exists).
+    ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
   });
 
   const planStoreFor = (tourId: string): RosterPlanStore => ({

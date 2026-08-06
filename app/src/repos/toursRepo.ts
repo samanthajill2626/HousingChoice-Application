@@ -451,11 +451,25 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
             // MATERIALIZE (no expectedVersion) vs OPTIMISTIC UPDATE: the first
             // may only create the plan, the second may only advance the exact
             // version the caller read.
+            //
+            // The materialize is ALSO guarded by the thread pointer (D1): once a
+            // thread exists the roster is a FACT, and provision CLEARS the plan -
+            // so attribute_not_exists(roster) goes true again and a plan edit
+            // racing a concurrent open would otherwise write a fresh plan onto a
+            // thread-bearing tour. That plan is INERT (the resolver reads
+            // participants whenever the pointer is set), so the request would
+            // answer "saved" for an edit that changes nothing. Refuse instead;
+            // services/rosterEdits re-reads and answers 409 thread_exists.
             ConditionExpression:
               expectedVersion === undefined
-                ? 'attribute_exists(tourId) AND attribute_not_exists(#r)'
+                ? 'attribute_exists(tourId) AND attribute_not_exists(#r) AND attribute_not_exists(#gt)'
                 : 'attribute_exists(tourId) AND #rv = :ev',
-            ExpressionAttributeNames: { '#r': 'roster', '#rv': 'rosterVersion', '#updatedAt': 'updatedAt' },
+            ExpressionAttributeNames: {
+              '#r': 'roster',
+              '#rv': 'rosterVersion',
+              '#updatedAt': 'updatedAt',
+              ...(expectedVersion === undefined && { '#gt': 'groupThreadId' }),
+            },
             ExpressionAttributeValues: {
               ':r': roster,
               ':nv': nextVersion,

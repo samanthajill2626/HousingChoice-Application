@@ -279,4 +279,28 @@ describe.skipIf(!reachable)('placementsRepo against DynamoDB Local (throwaway pr
     const all = await deadlines.listAllPending();
     expect(ids.every((id) => all.some((d) => d.placementId === id))).toBe(true);
   });
+
+  it('setRoster MATERIALIZE refuses once the placement carries a group_thread pointer', async () => {
+    // The toursRepo twin: after an open the roster is a FACT (D1), so a plan
+    // must never be materialized onto a thread-bearing placement - it would be
+    // INERT, written by a request that answered "saved".
+    const { RosterPlanConflictError } = await import('../src/lib/rosterResolution.js');
+    const p = await placements.create({
+      tenantId: `contact-mat-${randomUUID().slice(0, 6)}`,
+      unitId: 'unit-mat-1',
+      stage: 'awaiting_approval',
+    });
+
+    const materialized = await placements.setRoster(p.placementId, [{ contactId: 'c-a' }], undefined);
+    expect(materialized.rosterVersion).toBe(1);
+
+    // The group opens (pointer linked) and CONSUMES the plan.
+    await placements.update(p.placementId, { group_thread: 'conv-mat-1' });
+    await placements.clearRoster(p.placementId);
+
+    await expect(
+      placements.setRoster(p.placementId, [{ contactId: 'c-b' }], undefined),
+    ).rejects.toBeInstanceOf(RosterPlanConflictError);
+    expect((await placements.getById(p.placementId))!.roster).toBeUndefined();
+  });
 });

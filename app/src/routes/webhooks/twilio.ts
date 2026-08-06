@@ -65,6 +65,7 @@ import {
   type MessagesRepo,
 } from '../../repos/messagesRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import {
   enqueueSendRetry,
@@ -275,11 +276,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     auditRepo: audit,
     logger: deps.logger,
   });
-  // INTERIM (Task 4 replaces this with createOurNumberKind): preserve today's
-  // exact membership semantics with the singular value.
-  const ourNumbers = new Set(
-    config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [],
-  );
+  const ourNumberKind = createOurNumberKind({ config, conversations });
   const statusRetryDelayMs = deps.statusUnknownSidRetryDelayMs ?? STATUS_UNKNOWN_SID_RETRY_DELAY_MS;
 
   const router = Router();
@@ -871,15 +868,22 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // core; Direction/SmsStatus params can corroborate but are not relied on.
     // M1.7: pool numbers are ALSO "ours" — a relay fan-out (From = pool
     // number) projected back must drop here too, before any relay routing.
-    if (ourNumbers.has(From)) {
+    const kind = await ourNumberKind(From);
+    if (kind === 'business') {
       log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is our number) — acknowledged, dropped');
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
-    // Multiplexing: a pool number fronts MANY groups (open + closed), so the
-    // echo guard checks getAllByPoolNumber (any group, open or closed). The
-    // voice-only getByPoolNumber wrapper is no longer used on the SMS path.
-    if ((await conversations.getAllByPoolNumber(From)).length > 0) {
+    // Multiplexing: a pool number fronts MANY groups (open + closed), and the
+    // pool arm of ourNumberKind still matches ANY of them. It reads
+    // getByPoolNumber (ONE Query) where this guard used to page
+    // getAllByPoolNumber; as a MEMBERSHIP test the two are equivalent - same
+    // unfiltered byPoolNumber query, and getByPoolNumber returns
+    // `items.find(open) ?? items[0]`, so it is truthy exactly when the GSI
+    // holds any item, open or closed. This is NOT a regression to
+    // one-group-per-number; it only avoids paging a whole partition to answer
+    // a yes/no. ROUTING below keeps getAllByPoolNumber, which needs every group.
+    if (kind === 'pool') {
       log.info({ providerSid: MessageSid }, 'twilio webhook echo (From is a pool number) — acknowledged, dropped');
       res.type('text/xml').send(EMPTY_TWIML);
       return;

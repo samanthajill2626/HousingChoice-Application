@@ -83,6 +83,7 @@ import {
 } from '../../lib/voiceMasking.js';
 import type { AuditRepo } from '../../repos/auditRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
@@ -288,11 +289,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     auditRepo: deps.auditRepo,
     logger: deps.logger,
   });
-  // INTERIM (Task 4 replaces this with createOurNumberKind): preserve today's
-  // exact membership semantics with the singular value.
-  const ourNumbers = new Set(
-    config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [],
-  );
+  const ourNumberKind = createOurNumberKind({ config, conversations });
   const baseUrl = config.publicBaseUrl ?? '';
   // Founder-bridge caller ID: ALWAYS a number we own (the business number),
   // NEVER the real caller's From (the M1.9b guardrail).
@@ -363,12 +360,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // outbound leg projected back. Answer with an empty <Response/> and drop:
     // never bridge, never persist. (Our masked bridge dials FROM the pool
     // number, so a misconfigured loop would otherwise re-enter here.)
-    if (ourNumbers.has(From)) {
+    const kind = await ourNumberKind(From);
+    if (kind === 'business') {
       log.info({ callSid: CallSid }, 'twilio voice echo (From is our number) — dropped');
       sendTwiml(res, new VoiceResponse());
       return;
     }
-    if (await conversations.getByPoolNumber(From)) {
+    if (kind === 'pool') {
       log.info({ callSid: CallSid }, 'twilio voice echo (From is a pool number) — dropped');
       sendTwiml(res, new VoiceResponse());
       return;

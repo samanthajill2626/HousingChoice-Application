@@ -42,7 +42,7 @@ import type {
 } from '../repos/placementNudgesRepo.js';
 import type { PlacementItem, PlacementsRepo } from '../repos/placementsRepo.js';
 import type { UnitsRepo } from '../repos/unitsRepo.js';
-import { isOnRoster, resolveRoster } from '../lib/rosterResolution.js';
+import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
   type SendMessageService,
@@ -561,6 +561,18 @@ async function processNudgeRow(
   if (rung.recipient === 'tenant') {
     const gate = await tenantRosterGate(target.placement, deps, log);
     if (gate === 'unavailable') {
+      // BOUNDED BY TIME PAST DUE (the tourReminders twin): 'unavailable' can be
+      // PERMANENT - a pointer at a conversation that will never load - and an
+      // unbounded wait re-lists this rung every tick forever, never sent and
+      // never visibly skipped. Past the grace window, retire it VISIBLY.
+      if (rosterWaitExpired(row.dueAt, nowIso)) {
+        log.warn(
+          { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind, dueAt: row.dueAt },
+          'placement nudge: roster STILL unreadable past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'roster_unavailable', nowIso, deps, target.placement.tenantId);
+        return;
+      }
       log.warn(
         { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
         'placement nudge: roster unreadable - leaving the rung unclaimed for the next tick',
@@ -657,13 +669,13 @@ export type NudgeForceSendRefusal =
   | 'contact_deleted'
   | 'no_consent'
   /**
-   * D11: the roster could not be READ. Never a claim-skip - the poll leaves such
-   * a rung pending - so a human is told to try again rather than being allowed
-   * to text a tenant who may have been removed. Deliberately absent from the
-   * dashboard's copy map: `sendNowErrorMessage` falls back to its generic retry
-   * sentence, which is exactly the right thing to say.
+   * Includes D11's `roster_unavailable` (the roster could not be READ): on the
+   * HUMAN path it is only ever a refusal - the row is left pending and the
+   * operator is told to try again, rather than being allowed to text a tenant
+   * who may have been removed. Deliberately absent from the dashboard's copy
+   * map: `sendNowErrorMessage` falls back to its generic retry sentence, which
+   * is exactly the right thing to say.
    */
-  | 'roster_unavailable'
   | NudgeSkipReason;
 
 export type NudgeForceSendResult =

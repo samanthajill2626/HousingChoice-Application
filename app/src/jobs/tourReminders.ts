@@ -48,7 +48,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import type { UnitsRepo } from '../repos/unitsRepo.js';
-import { isOnRoster, resolveRoster } from '../lib/rosterResolution.js';
+import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
   type SendMessageService,
@@ -672,6 +672,20 @@ async function processReminderRow(
   // skip. A removed tenant IS an answer, so that rung is retired visibly.
   const gate = await tenantRosterGate(tour, deps, log);
   if (gate === 'unavailable') {
+    // BOUNDED BY TIME PAST DUE. 'unavailable' is not always transient: a
+    // pointer at a conversation that no longer exists (or a provisioning
+    // sentinel a crash left behind) never resolves, and an unbounded wait means
+    // this rung re-lists every tick FOREVER - never sent, never visibly
+    // skipped, nothing on the panel to say why. Past the grace window the state
+    // is treated as permanent and the rung is retired with a VISIBLE skip.
+    if (rosterWaitExpired(row.dueAt, now)) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+        'tour reminder: roster STILL unreadable past the grace window - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'roster_unavailable', now, deps, tour.tenantId);
+      return;
+    }
     log.warn(
       { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
       'tour reminder: roster unreadable - leaving the rung unclaimed for the next tick',
@@ -900,11 +914,14 @@ export type ForceSendRefusal =
   | 'tenant_not_on_roster'
   /**
    * D11, the other half: the roster could not be READ (an unloadable thread
-   * pointer). Never a claim-skip - the poll leaves such a rung pending - so a
-   * human is told to try again rather than being allowed to text a tenant who
-   * may have been removed. Deliberately absent from the dashboard's copy map:
-   * `sendNowErrorMessage` falls back to its generic retry sentence, which is
-   * exactly the right thing to say.
+   * pointer). On the HUMAN path this is only ever a refusal - the row is left
+   * pending and the operator is told to try again, rather than being allowed to
+   * text a tenant who may have been removed. (The POLL does eventually retire
+   * such a rung, once it is more than ROSTER_UNAVAILABLE_GRACE_MS past due -
+   * that is the same token as a ReminderSkipReason, listed here because tours'
+   * refusal union does not include the skip union.) Deliberately absent from
+   * the dashboard's copy map: `sendNowErrorMessage` falls back to its generic
+   * retry sentence, which is exactly the right thing to say.
    */
   | 'roster_unavailable'
   | ReminderResolutionFailure;

@@ -53,7 +53,14 @@ export type ReminderSkipReason =
    *  arrangement. Removal means removal: the rung is retired with a visible
    *  skipped row instead of texting someone the operator took off. Binds to the
    *  ROUTING OUTCOME, so a group rung falling back to the 1:1 is covered too. */
-  | 'tenant_not_on_roster';
+  | 'tenant_not_on_roster'
+  /** CLAIM time, the other half of D11: the roster could NOT BE READ (a thread
+   *  pointer that will not load) for longer than
+   *  ROSTER_UNAVAILABLE_GRACE_MS past this rung's dueAt. Inside that window the
+   *  poll leaves the rung unclaimed and retries; past it the state is treated
+   *  as permanent and the rung is retired VISIBLY - a rung that re-lists
+   *  forever is never sent and never says so. */
+  | 'roster_unavailable';
 
 export interface TourReminderItem {
   /** PK */

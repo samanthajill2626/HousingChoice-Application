@@ -332,8 +332,32 @@ export async function openTourGroup(
     throw err;
   }
 
-  // Stamp the real groupThreadId over the claim sentinel.
-  let updatedTour = await deps.tours.patch(tourId, { groupThreadId: conversation.conversationId });
+  // Stamp the real groupThreadId over the claim sentinel - the ONE write that
+  // turns the claim into a pointer, and therefore the one that must not fail
+  // unguarded: an unguarded transient failure here left the sentinel on the
+  // tour FOREVER (every later open refuses relay_already_provisioned, every
+  // resolver read goes 'unavailable', and no code path ever clears it). So
+  // RELEASE the claim, say loudly that a provisioned group is now unpointered
+  // (the known no-atomic-claim class - ids only, never members), and let the
+  // failure propagate in this route's existing shape (the 500 handler).
+  let updatedTour: TourItem;
+  try {
+    updatedTour = await deps.tours.patch(tourId, { groupThreadId: conversation.conversationId });
+  } catch (err) {
+    try {
+      await deps.tours.releaseGroupThreadClaim(tourId, claimSentinel);
+    } catch (releaseErr) {
+      log.error(
+        { err: releaseErr, tourId },
+        'tour relay: releasing the claim after a failed pointer write ALSO failed - the tour is stuck on its provisioning sentinel until groupThreadId is removed by hand',
+      );
+    }
+    log.error(
+      { err, tourId, conversationId: conversation.conversationId },
+      'tour relay: writing the group-thread pointer FAILED - claim released and the plan kept, but the provisioned group has no owner pointing at it',
+    );
+    throw err;
+  }
 
   // THE PLAN IS CONSUMED (spec D1) - and only now, AFTER the thread pointer is
   // written. From here the conversation's participants are the roster, so a

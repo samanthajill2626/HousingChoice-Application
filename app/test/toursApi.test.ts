@@ -2411,6 +2411,46 @@ describe('POST /api/tours/:tourId/relay — provision tour relay group (Task 5)'
     expect(stored.groupThreadId).toBeUndefined(); // claim released
   });
 
+  it('a FAILED pointer stamp RELEASES the claim (no stuck provisioning: sentinel) and keeps the plan', async () => {
+    // The stamp is the ONE write that turns the claim sentinel into the real
+    // pointer. Before the guard, a single transient failure there left
+    // groupThreadId = 'provisioning:<tourId>' on the tour FOREVER: every later
+    // open refused relay_already_provisioned and every resolver read went
+    // 'unavailable'.
+    const pool = makeFakePoolNumbers();
+    const { app } = makeWebhookHarness({ world, poolNumbersService: pool });
+    seedAutoResolveWorld();
+    seedPlanContacts();
+
+    const created = await authed(app).post('/api/tours').send(BASE_CREATE_BODY);
+    const tourId = created.body.tour.tourId as string;
+    await world.toursRepo.setRoster(
+      tourId,
+      [{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const realPatch = world.toursRepo.patch.bind(world.toursRepo);
+    world.toursRepo.patch = async (id, updates) => {
+      if (typeof updates.groupThreadId === 'string') throw new Error('dynamo unavailable');
+      return realPatch(id, updates);
+    };
+    try {
+      // The route's existing failure shape - the express error handler's 500.
+      const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+      expect(res.status).toBe(500);
+    } finally {
+      world.toursRepo.patch = realPatch;
+    }
+
+    const stored = world.toursMap.get(tourId)!;
+    expect(stored.groupThreadId, 'the claim sentinel must not outlive a failed stamp').toBeUndefined();
+    // A8: the plan is consumed only AFTER a successful pointer write, so a
+    // failed stamp leaves the operator's roster exactly where it was.
+    expect(stored.roster).toEqual([{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }]);
+    expect(stored.rosterVersion).toBe(1);
+  });
+
   it('a phone-less plan member is excluded, and a plan too thin to relay 400s WITHOUT consuming it', async () => {
     const pool = makeFakePoolNumbers();
     const { app } = makeWebhookHarness({ world, poolNumbersService: pool });

@@ -81,6 +81,36 @@ export interface RosterOwner {
 /** Which of the three sources answered - plus the unreadable-thread outcome. */
 export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
 
+/**
+ * HOW LONG A SCHEDULED SEND WAITS ON AN 'unavailable' ROSTER (one hour).
+ *
+ * Both ladders (jobs/tourReminders, jobs/placementNudges) leave a tenant-routed
+ * rung UNCLAIMED while the roster cannot be read - the right answer for a
+ * transient blip, since the next tick retries and nothing was burned on a false
+ * skip. But 'unavailable' can also be PERMANENT (a pointer at a conversation
+ * that no longer exists, a provisioning sentinel a crash left behind): then the
+ * rung re-lists every tick forever - never sent, never visibly skipped, and
+ * nothing on the panel ever says so.
+ *
+ * So the wait is bounded by TIME PAST DUE: past this window the rung is retired
+ * with the visible `roster_unavailable` skip. Measured from the rung's own
+ * dueAt (not from when the outage started - the rows carry no such stamp), and
+ * one hour is long enough that a Dynamo blip or a redeploy never trips it.
+ */
+export const ROSTER_UNAVAILABLE_GRACE_MS = 60 * 60 * 1000;
+
+/**
+ * Has a rung due at `dueAt` waited longer than the grace window for a roster
+ * that will not resolve? An unparseable dueAt answers false - keep waiting is
+ * always the safer half of this decision.
+ */
+export function rosterWaitExpired(dueAt: string, nowIso: string): boolean {
+  const due = Date.parse(dueAt);
+  const now = Date.parse(nowIso);
+  if (Number.isNaN(due) || Number.isNaN(now)) return false;
+  return now - due > ROSTER_UNAVAILABLE_GRACE_MS;
+}
+
 export interface ResolvedMember {
   /** Absent for bare-phone participants / plan entries. */
   contactId?: string;

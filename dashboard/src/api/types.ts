@@ -931,7 +931,8 @@ export interface TourReminderView {
     | 'tour_missing'
     | 'quiet_hours_superseded'
     | 'past_event'
-    | 'tenant_not_on_roster';
+    | 'tenant_not_on_roster'
+    | 'roster_unavailable';
   body: string;
   /** Present when the rung is armed but will not go out at dueAt (skipped - or,
    *  for `quiet_hours`, DEFERRED to the end of the window). */
@@ -978,6 +979,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   quiet_hours_superseded: 'superseded by a later reminder',
   past_event: 'would land after the tour starts',
   tenant_not_on_roster: "tenant not on this tour's roster",
+  roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
 };
 
 /**
@@ -1129,7 +1131,8 @@ export type NudgeSkipReason =
   | 'no_landlord'
   | 'contact_missing'
   | 'contact_no_phone'
-  | 'tenant_not_on_roster';
+  | 'tenant_not_on_roster'
+  | 'roster_unavailable';
 
 export interface PlacementNudgeView {
   nudgeId: string;

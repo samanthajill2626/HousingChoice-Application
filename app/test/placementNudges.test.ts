@@ -29,6 +29,7 @@ import type {
 import type { PlacementItem, PlacementsRepo } from '../src/repos/placementsRepo.js';
 import type { UnitItem, UnitsRepo } from '../src/repos/unitsRepo.js';
 import type { PlacementStage } from '../src/lib/statusModel.js';
+import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type {
   SendMessageInput,
   SendMessageOutcome,
@@ -600,6 +601,35 @@ describe('runDuePlacementNudges', () => {
     expect(row.skippedAt).toBeUndefined();
     // Still live: the next poll tick retries it.
     expect(await repo.listDue(NOW)).toHaveLength(1);
+  });
+
+  it('an UNREADABLE roster is BOUNDED by time-past-due: unclaimed at the grace boundary, claim-skipped past it', async () => {
+    // The unclaimed wait above is right for a BLIP. A PERMANENT sentinel (a
+    // pointer at a conversation that will never load) used to re-list the rung
+    // every tick forever: never sent, never visibly skipped.
+    const { deps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check', {
+      group_thread: 'conv-vanished',
+    });
+
+    // Exactly ONE grace window past due is not PAST it - still a wait. (The
+    // neighbouring test's NOW sits on this very boundary.)
+    const atBoundary = new Date(
+      Date.parse(row.dueAt) + ROSTER_UNAVAILABLE_GRACE_MS,
+    ).toISOString();
+    await runDuePlacementNudges(atBoundary, deps);
+    expect(row.skippedAt).toBeUndefined();
+    expect(await repo.listDue(atBoundary)).toHaveLength(1);
+
+    // One minute past it - retire it VISIBLY rather than wait forever.
+    const pastGrace = new Date(
+      Date.parse(row.dueAt) + ROSTER_UNAVAILABLE_GRACE_MS + 60_000,
+    ).toISOString();
+    await runDuePlacementNudges(pastGrace, deps);
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt, 'a skip is never a send').toBeUndefined();
+    expect(row.skippedAt).toBe(pastGrace);
+    expect(row.skipReason).toBe('roster_unavailable');
+    expect(await repo.listDue(pastGrace), 'it leaves listDue exactly once').toHaveLength(0);
   });
 
   // QUIET-HOURS BACKSTOP (spec 2026-08-03 section 6): the check is PRE-CLAIM -

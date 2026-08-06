@@ -26,6 +26,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
+import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
@@ -2582,6 +2583,49 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     await runDueTourReminders(NOW_D11, rig.deps);
     expect(rig.world.sent).toHaveLength(1);
     expect((await rungOf(tour.tourId, 'confirmation'))?.sentAt).toBe(NOW_D11);
+  });
+
+  it('an UNREADABLE roster is BOUNDED by time-past-due: unclaimed inside the grace, claim-skipped past it', async () => {
+    // The unclaimed wait above is right for a BLIP. A permanent sentinel (a
+    // pointer at a conversation that will never load) used to re-list the rung
+    // every tick forever: never sent, never visibly skipped.
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-f', '+15550800006', 'conv-d11-f', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d11-f',
+      unitId: 'unit-d11-f',
+      groupThreadId: 'conv-d11-never-loads',
+    });
+    const dueAt = (await rungOf(tour.tourId, 'confirmation'))!.dueAt;
+
+    // One minute SHORT of the grace window - still a blip, still unclaimed.
+    const withinGrace = new Date(
+      Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS - 60_000,
+    ).toISOString();
+    await runDueTourReminders(withinGrace, rig.deps);
+    const waiting = await rungOf(tour.tourId, 'confirmation');
+    expect(waiting?.sentAt).toBeUndefined();
+    expect(waiting?.skippedAt, 'inside the grace it re-lists next tick').toBeUndefined();
+    expect(
+      (await tourReminders.listDue(withinGrace)).some((r) => r.reminderId === waiting?.reminderId),
+      'still due - the wait is a wait, not a retirement',
+    ).toBe(true);
+
+    // One minute PAST it - retire it VISIBLY rather than wait forever.
+    const pastGrace = new Date(
+      Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS + 60_000,
+    ).toISOString();
+    await runDueTourReminders(pastGrace, rig.deps);
+    const retired = await rungOf(tour.tourId, 'confirmation');
+    expect(retired?.sentAt, 'a skip is never a send').toBeUndefined();
+    expect(retired?.skippedAt).toBe(pastGrace);
+    expect(retired?.skipReason).toBe('roster_unavailable');
+    expect(rig.world.sent).toHaveLength(0);
+
+    // Terminal: it leaves listDue exactly once.
+    expect(
+      (await tourReminders.listDue(pastGrace)).some((r) => r.reminderId === retired?.reminderId),
+    ).toBe(false);
   });
 
   // -------------------------------------------------------------------------

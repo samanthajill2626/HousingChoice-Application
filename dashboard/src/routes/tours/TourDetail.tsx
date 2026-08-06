@@ -14,7 +14,10 @@
 // /placements/from-tour, lands on the new placement - one step, no second
 // click; Cameron 2026-07-15). The standalone "Start placement" CTA remains for
 // tours that are convertible but unconverted (an API-recorded outcome, or the
-// retry path when the chained conversion fails). Audience: staff see
+// retry path when the chained conversion fails). "Mark toured" likewise opens
+// the Record-outcome modal itself on success (Cameron 2026-08-06) - the CTA
+// ladder still HAS a "Record outcome" rung, but only as the way back in after a
+// dismiss (or for a tour marked toured elsewhere). Audience: staff see
 // "property" for the unit (GLOSSARY).
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useNavigate, useParams } from 'react-router-dom';
@@ -208,20 +211,35 @@ function TourDetailLoaded({
 
   // --- Mutations ------------------------------------------------------------
   // A direct (no-input) status PATCH: apply the returned tour; errors surface in
-  // the header alert bar.
-  const runDirect = async (fn: () => Promise<Tour>, failMsg: string): Promise<void> => {
-    if (busy) return;
+  // the header alert bar. Resolves true only when the PATCH landed, so callers
+  // can chain a follow-on step onto success alone.
+  const runDirect = async (fn: () => Promise<Tour>, failMsg: string): Promise<boolean> => {
+    if (busy) return false;
     setBusy(true);
     setActionError(null);
     try {
       setTour(await fn());
+      return true;
     } catch (err) {
       setActionError(err instanceof ApiError ? err.message : failMsg);
+      return false;
     } finally {
       setBusy(false);
     }
   };
-  const markToured = (): void => void runDirect(() => patchTour(tourId, { status: 'toured' }), 'Status update failed');
+  // Marking toured flows STRAIGHT into the exit gate (Cameron, 2026-08-06):
+  // recording the outcome is what you came to do, so the modal opens itself
+  // instead of parking behind a second "Record outcome" click. Only on a
+  // SUCCESSFUL PATCH - a failure leaves the alert and no dialog. Dismissing the
+  // modal loses nothing: the tour is now 'toured' with no outcome, so the header
+  // CTA reads "Record outcome" and is the way back in.
+  const markToured = (): void => {
+    void runDirect(() => patchTour(tourId, { status: 'toured' }), 'Status update failed').then(
+      (ok) => {
+        if (ok) setModal('outcome');
+      },
+    );
+  };
   const markNoShow = (): void => void runDirect(() => patchTour(tourId, { status: 'no_show' }), 'Status update failed');
 
   // Manual no-show check-in: fetch the editable template, switch the mobile pane to

@@ -1955,12 +1955,24 @@ export class Scenario {
   }
 
   /** [Team, MANUAL] Log the tour outcome: toured (header primary CTA) - this is
-   *  what makes the exit gate reachable. */
+   *  what makes the exit gate reachable. Marking toured OPENS the Record-outcome
+   *  modal itself (2026-08-06), so this step asserts that and then DISMISSES it -
+   *  the step means "toured" alone; teamRecordsExitGate owns the gate. Leaving it
+   *  open would let its backdrop swallow the next click. */
   teamMarksToured(): Promise<void> {
     const tour = this.requireActiveTour();
     return step('Team logs the tour outcome (toured)', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
       await this.page.getByRole('button', { name: 'Mark toured' }).click();
+      const gate = this.page.getByRole('form', { name: 'Record outcome form' });
+      await expect(gate).toBeVisible({ timeout: 10_000 });
+      // Scope Cancel to the dialog: an unscoped 'Cancel' substring-matches the
+      // page's "Cancel tour" affordances too.
+      await this.page
+        .getByRole('dialog')
+        .getByRole('button', { name: 'Cancel', exact: true })
+        .click();
+      await expect(gate).toHaveCount(0);
       await expect(this.tourStatusBadge('Toured')).toBeVisible({ timeout: 10_000 });
     });
   }

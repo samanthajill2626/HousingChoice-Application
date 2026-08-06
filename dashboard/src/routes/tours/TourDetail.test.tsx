@@ -277,14 +277,32 @@ describe('TourDetail - primary CTA ladder', () => {
     }
   });
 
-  it('Mark toured PATCHes { status: toured } and applies the returned tour', async () => {
+  it('Mark toured PATCHes { status: toured }, applies the tour, and OPENS the outcome modal', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
     patchTour.mockResolvedValue(makeTour({ status: 'toured' }));
     renderDetail();
     await waitLoaded();
     await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
     expect(patchTour).toHaveBeenCalledWith('tour-abc', { status: 'toured' });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Record outcome' })).toBeInTheDocument());
+    // The exit gate opens itself - no second CTA click (Cameron, 2026-08-06).
+    await waitFor(() =>
+      expect(screen.getByRole('form', { name: 'Record outcome form' })).toBeInTheDocument(),
+    );
+    // Dismissing it leaves the "Record outcome" rung as the way back in.
+    await userEvent.click(screen.getByRole('button', { name: 'Cancel' }));
+    expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Record outcome' })).toBeInTheDocument();
+  });
+
+  it('a FAILED Mark toured surfaces the alert and opens no outcome modal', async () => {
+    getTour.mockResolvedValue(makeTour({ status: 'scheduled' }));
+    patchTour.mockRejectedValue(new ApiError(409, 'bad_status', 'bad_status'));
+    renderDetail();
+    await waitLoaded();
+    await userEvent.click(screen.getByRole('button', { name: 'Mark toured' }));
+    await waitFor(() => expect(screen.getByRole('alert')).toHaveTextContent(/bad_status/i));
+    expect(screen.queryByRole('form', { name: 'Record outcome form' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Mark toured' })).toBeInTheDocument();
   });
 
   it('Start placement converts then navigates to the new placement', async () => {

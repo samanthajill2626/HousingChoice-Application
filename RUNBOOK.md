@@ -602,6 +602,28 @@ defense #1 — an inbound webhook whose From matches is our own outbound project
 number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
 list refuses to boot.
 
+**ORDER MATTERS — the FIRST entry is "the main business number."** The whole list answers "is this
+one of ours?", but `ourPhoneNumbers[0]` alone drives four outward-facing things:
+
+- the **outbound voice caller ID** (`services/originateCall.ts`, `routes/webhooks/voice.ts`)
+- the **public flyer's "text us" CTA** (`routes/public.ts`, `app.ts`)
+- the **outbound 1:1 SMS sender** — the `from` pinned on every non-relay send
+  (`services/sendMessage.ts`) and on the staff cell-verification code (`routes/voiceApi.ts`)
+- which side of a thread renders as us (`routes/contactTimeline.ts`)
+
+**At the M1.11 cutover, when the ported number `+16782842537` is added, it must go FIRST** —
+`OUR_PHONE_NUMBERS=+16782842537,+14049824978`, **not** appended to the end. Appending is the
+natural thing to do and it is wrong: calls would keep presenting the old (404) number, the flyer
+would keep advertising it, and the 629 imported contacts would keep receiving texts from a number
+they do not recognize — which is the entire reason for porting. Nothing errors if you get this
+wrong; it just quietly presents the wrong number, so **verify with a test call + a test text after
+the deploy**, not just a green boot.
+
+Separately, the ported number must also be **added to the Messaging Service's sender pool** (and
+covered by the A2P campaign) before it can be sent from — the app pins `from`, but the number has
+to be IN the pool for the service to accept it. Config order and pool membership are two different
+steps; do both.
+
 #### Voice Intelligence transcription + platform voicemail
 
 Business-line CALL recordings (the founder bridge) and platform VOICEMAILS are transcribed by Twilio

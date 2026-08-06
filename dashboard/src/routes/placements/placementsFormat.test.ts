@@ -209,9 +209,33 @@ describe('date-vocabulary formatters', () => {
 describe('dateTime timeZone parameter', () => {
   const iso = '2026-07-23T19:00:00.000Z';
 
+  // Derived, not hardcoded, so these hold on any developer's machine and in CI.
+  const viewerZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const foreignZone = viewerZone === 'Asia/Tokyo' ? 'America/New_York' : 'Asia/Tokyo';
+  /** A trailing zone abbreviation ("EDT") or offset ("GMT+9"), which always
+   *  follows the meridiem. Anchoring on AM/PM is deliberate: a bare
+   *  `[A-Z]{2,5}$` also matches the "PM" in "Jul 23, 3:00 PM", so it would
+   *  report a marker on EVERY string and both assertions below would pass
+   *  vacuously. */
+  const ZONE_MARKER = / (?:AM|PM) (?:[A-Z]{2,5}|GMT[+-]\d{1,2}(?::\d{2})?)$/;
+
   it('renders in an explicitly supplied zone', () => {
-    expect(dateTime(iso, 'America/New_York')).toBe('Jul 23, 3:00 PM');
-    expect(dateTime(iso, 'America/Los_Angeles')).toBe('Jul 23, 12:00 PM');
+    expect(dateTime(iso, 'America/New_York')).toContain('Jul 23, 3:00 PM');
+    expect(dateTime(iso, 'America/Los_Angeles')).toContain('Jul 23, 12:00 PM');
+  });
+
+  it('adds NO zone marker when the pinned zone IS the viewer zone', () => {
+    // The org-zone navigator - every Housing Choice navigator today - sees
+    // exactly what they saw before. Pinning your own zone must be a no-op, or
+    // we have added "EDT" noise to every row for people with no ambiguity.
+    expect(dateTime(iso, viewerZone)).toBe(dateTime(iso));
+    expect(dateTime(iso, viewerZone)).not.toMatch(ZONE_MARKER);
+  });
+
+  it('adds a zone marker when the pinned zone is FOREIGN to the viewer', () => {
+    // Without this, a navigator outside the org zone reads an absolute time as
+    // their own clock and is silently wrong - the failure S1 identified.
+    expect(dateTime(iso, foreignZone)).toMatch(ZONE_MARKER);
   });
 
   it('OMITTING the parameter is byte-identical to the previous behavior', () => {

@@ -104,7 +104,13 @@ describe('RemindersPanel', () => {
       timezone: 'Asia/Tokyo',
     } satisfies TourRemindersPage);
     render(<RemindersPanel tourId="tour-1" />);
-    await waitFor(() => expect(screen.getByText('Sent - Jun 18, 10:02 PM')).toBeInTheDocument());
+    // GMT+9 is the FOREIGN-ZONE MARKER (S1): Tokyo is not this runner's own
+    // zone, so the chip is labelled rather than left to read as the viewer's
+    // clock. An org-zone navigator sees no marker - pinned in
+    // placementsFormat.test.ts, which is what keeps this from becoming noise.
+    await waitFor(() =>
+      expect(screen.getByText('Sent - Jun 18, 10:02 PM GMT+9')).toBeInTheDocument(),
+    );
   });
 
   it('falls back to the browser zone when the response carries no zone', async () => {

@@ -33,7 +33,11 @@ describe('ScheduledCard', () => {
     // Asia/Tokyo is nobody's plausible browser zone here, so this cannot pass by
     // accident: 2026-06-18T15:00Z is 12:00 AM on Jun 19 in Tokyo.
     render(<ScheduledCard item={BASE} now={NOW} timezone="Asia/Tokyo" />);
-    expect(screen.getByText('sends in 3h - Jun 19, 12:00 AM')).toBeInTheDocument();
+    // The GMT+9 suffix is the FOREIGN-ZONE MARKER: because Tokyo is not this
+    // runner's own zone, the time is labelled so a reader cannot mistake it for
+    // their own clock. An org-zone navigator - every Housing Choice navigator
+    // today - gets no marker at all (pinned in placementsFormat.test.ts).
+    expect(screen.getByText('sends in 3h - Jun 19, 12:00 AM GMT+9')).toBeInTheDocument();
   });
 
   it('falls back to the browser zone when no zone is supplied', () => {

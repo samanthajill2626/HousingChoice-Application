@@ -88,6 +88,7 @@ import {
   buildOpenPreview,
   parseRosterEntryInput,
   resolveRosterCandidate,
+  ROSTER_ACTION_NOT_READY,
   ROSTER_NO_THREAD,
   ROSTER_THREAD_EXISTS,
   ROSTER_UNAVAILABLE,
@@ -882,6 +883,13 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const outcome = await applyTourRosterAction(row, getNow(), actionDeps);
     if (outcome.result === 'lost') {
       res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
+    // 'waiting' = the world was unreadable, so the applier claimed NOTHING and
+    // did nothing. Say so: a 200 carrying the unchanged payload would read as
+    // "your click landed" for a click that did not.
+    if (outcome.result === 'waiting') {
+      sendRefusal(res, ROSTER_ACTION_NOT_READY);
       return;
     }
     log.info({ tourId, actionId: row.actionId, outcome: outcome.result }, 'pending roster action applied by operator');

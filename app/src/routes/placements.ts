@@ -99,6 +99,7 @@ import {
   buildOpenPreview,
   parseRosterEntryInput,
   resolveRosterCandidate,
+  ROSTER_ACTION_NOT_READY,
   ROSTER_NO_THREAD,
   ROSTER_THREAD_EXISTS,
   ROSTER_UNAVAILABLE,
@@ -1596,6 +1597,12 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     const outcome = await applyPlacementRosterAction(row, getNow(), actionDeps);
     if (outcome.result === 'lost') {
       res.status(409).json({ error: 'action_not_pending' });
+      return;
+    }
+    // 'waiting' = unreadable world, nothing claimed and nothing done (the tours
+    // twin): an honest refusal rather than a 200 that reads as success.
+    if (outcome.result === 'waiting') {
+      sendRefusal(res, ROSTER_ACTION_NOT_READY);
       return;
     }
     log.info(

@@ -84,6 +84,19 @@ export const ROSTER_UNAVAILABLE: RosterEditRefusal = {
   message: 'This roster could not be read just now. Refresh and try again.',
 };
 
+/**
+ * Apply-now hit the applier's 'waiting' outcome: the world could not be read,
+ * so NOTHING was claimed and nothing happened - the row is still pending and
+ * the poller still owns it. An honest refusal, never a 200 with an unchanged
+ * payload that reads as "your click landed".
+ */
+export const ROSTER_ACTION_NOT_READY: RosterEditRefusal = {
+  status: 409,
+  error: 'action_not_ready',
+  message:
+    'We could not read this roster just now, so nothing changed. It will retry on its own - or try again in a moment.',
+};
+
 /** The owner's stored plan state - the attributes the write path guards on. */
 export interface RosterPlanState {
   roster?: RosterEntry[];

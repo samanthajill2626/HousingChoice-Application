@@ -4181,6 +4181,31 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect((await world.pendingRosterActionsRepo.getById(actionId))!.status).toBe('applied');
   });
 
+  it('APPLY-NOW answers 409 action_not_ready when the applier can only WAIT', async () => {
+    // 'waiting' means NOTHING was claimed and nothing happened - the world could
+    // not be read. Answering 200 with an unchanged payload told the operator
+    // their click landed when it did not.
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+    const actionId = `tour#${tourId}#open`;
+    // A pointer at a conversation nobody can load: the resolver says
+    // 'unavailable', so the applier waits for the next tick.
+    world.toursMap.set(tourId, { ...world.toursMap.get(tourId)!, groupThreadId: 'conv-gone' });
+
+    const res = await authed(app).post(
+      `/api/tours/${tourId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('action_not_ready');
+    // The dashboard renders `message` verbatim (rosterWrites.refusalMessage), so
+    // it has to be a sentence, not a token.
+    expect(res.body.message).toMatch(/try again/i);
+    // Untouched: the row is still the poller's to apply.
+    expect((await world.pendingRosterActionsRepo.getById(actionId))!.status).toBe('pending');
+  });
+
   it('404s an action that belongs to another owner', async () => {
     const { app } = await quietHarness();
     const tourId = await createTour(app);

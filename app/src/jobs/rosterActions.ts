@@ -58,6 +58,7 @@ import {
   type OpenTourGroupDeps,
 } from '../services/rosterProvision.js';
 import { resolveRoster, type RosterOwner } from '../lib/rosterResolution.js';
+import { normalizeToE164 } from '../lib/phone.js';
 
 // ---------------------------------------------------------------------------
 // Deps
@@ -382,8 +383,14 @@ async function validateAction(
   // contact with no phone cannot be put on a relay at all (the add path would
   // refuse), and the card's notice reads the same either way.
   if (!contact || isDeleted(contact)) return { skip: 'contact_deleted' };
-  const phone = typeof contact.phone === 'string' ? contact.phone : '';
-  if (phone.length === 0) return { skip: 'contact_deleted' };
+  // NORMALIZE ONCE, then use the SAME value to compare and to add. Participant
+  // rows are E.164 (the storage convention) while a contact's stored phone is
+  // whatever a human typed, so a raw compare read a bare-phone member and their
+  // own contact record as two different people - and added them twice, with a
+  // join announcement for someone already in the group.
+  const stored = typeof contact.phone === 'string' ? contact.phone : '';
+  const phone = stored.length > 0 ? normalizeToE164(stored) : undefined;
+  if (phone === undefined) return { skip: 'contact_deleted' };
 
   const participants = conversation.participants ?? [];
   if (participants.some((p) => p.contactId === contactId || p.phone === phone)) {
@@ -511,8 +518,15 @@ async function performClaimedAction(
       // provisioning failure. The claim stands - this NEVER retries - so log
       // loudly: the operator sees no group and no pending banner, and opens it
       // again by hand.
+      // The TOKEN only, never the body: one of the refusal bodies this can
+      // carry is `relay_exists`, whose `conversation` is a whole thread -
+      // participant phones and names included (doc section 9: ids/codes only).
       log.error(
-        { actionId: row.actionId, refusal: opened.refusal?.body },
+        {
+          actionId: row.actionId,
+          status: opened.refusal?.status,
+          refusal: opened.refusal?.body['error'],
+        },
         'roster action: deferred open REFUSED after the claim - nothing was provisioned',
       );
     }

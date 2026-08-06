@@ -309,13 +309,23 @@ export type RosterMemberRole = 'tenant' | UnitContact['role'] | 'added' | 'remov
 /** Whether this member would actually receive the group text, right now. */
 export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
 
-/** One roster row on the wire. NO FULL PHONE - `phoneLast4` is display only. */
+/**
+ * One roster row on the wire.
+ *
+ * PHONES: a CONTACT-BACKED row carries no phone anywhere - `phoneLast4` is the
+ * only digits it exposes, and it is display-only. A BARE-PHONE row is different
+ * BY DESIGN: it has no other identity, so its `memberKey` IS `phone:<E164>` -
+ * the full number - because that key is what a client sends back to remove it.
+ * (Bare-phone rows exist only where the operator typed a number, and the
+ * membership itself is the only thing the key reveals.)
+ */
 export interface RosterMemberView {
   /**
    * The ONLY key a client ever sends back: the contactId when the member has
-   * one, else `phone:<E164>`. (Deliberately NOT relayMemberKey's `phone#<E164>`
-   * - that key is the delivery-map/pointer key and must not become a client
-   * contract.)
+   * one, else `phone:<E164>` (see the PHONES note above - a bare-phone member
+   * is keyed by its full number). Deliberately NOT relayMemberKey's
+   * `phone#<E164>` - that key is the delivery-map/pointer key and must not
+   * become a client contract.
    */
   memberKey: string;
   contactId?: string;
@@ -632,10 +642,14 @@ async function describeRosterActions(
 
   const pending: RosterPendingActionView[] = [];
   const skipped: RosterSkippedActionView[] = [];
+  // The name lookup is a SERIAL contact read, so it happens only for rows this
+  // payload actually renders. Action rows are never deleted, so every roster GET
+  // re-walks the owner's whole history: naming rows that are then discarded made
+  // the card degrade monotonically for the life of the tour/placement.
   for (const row of rows) {
     const contactId = nonEmpty(row.contactId);
-    const name = await nameOf(contactId);
     if (row.status === 'pending') {
+      const name = await nameOf(contactId);
       pending.push({
         actionId: row.actionId,
         kind: row.action,
@@ -646,6 +660,7 @@ async function describeRosterActions(
       continue;
     }
     if (row.status === 'applied' || row.dismissedAt !== undefined) continue;
+    const name = await nameOf(contactId);
     skipped.push({
       actionId: row.actionId,
       kind: row.action,

@@ -430,6 +430,33 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     expect(world.sent).toHaveLength(0);
   });
 
+  it('skips already_member when the CONTACT phone is loosely formatted and the participant row is E.164', async () => {
+    // Participant rows are E.164 (the storage convention); a contact's stored
+    // phone is whatever a human typed. Comparing the two raw made a
+    // bare-phone member and their contact record look like different people:
+    // the poll would ADD them a second time and announce the join.
+    const tourId = await createTour();
+    const loose = world.contacts.find((c) => c.contactId === 'c-case')!;
+    loose.phone = '(555) 050-0021'; // the same number as CASEWORKER_PHONE
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+    seedThread('conv-live', [
+      { contactId: 'c-tenant', phone: TENANT_PHONE },
+      // Typed into the group by hand: a BARE-PHONE row, no contactId to match.
+      { contactId: '', phone: CASEWORKER_PHONE },
+    ]);
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-live' });
+    world.sent.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('already_member');
+    expect(world.sent, 'no second join notice for someone already there').toHaveLength(0);
+    expect(world.conversations.get('conv-live')!.participants).toHaveLength(2);
+  });
+
   it('skips contact_deleted: the contact was soft-deleted while the add was pending', async () => {
     const tourId = await createTour();
     seedThread('conv-live', [

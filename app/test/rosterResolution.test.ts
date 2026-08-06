@@ -13,6 +13,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
+  describeRoster,
   isOnRoster,
   resolveRoster,
   rosterEquals,
@@ -20,6 +21,7 @@ import {
   type RosterOwner,
   type RosterResolutionDeps,
 } from '../src/lib/rosterResolution.js';
+import type { PendingRosterActionItem } from '../src/repos/pendingRosterActionsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -38,10 +40,13 @@ interface WorldOpts {
 /** Fake repos = plain objects with getById maps (no DynamoDB, no harness). */
 function makeDeps(opts: WorldOpts = {}): RosterResolutionDeps & {
   conversationReads: string[];
+  contactReads: string[];
 } {
   const conversationReads: string[] = [];
+  const contactReads: string[] = [];
   return {
     conversationReads,
+    contactReads,
     conversations: {
       getById: vi.fn(async (conversationId: string) => {
         conversationReads.push(conversationId);
@@ -57,6 +62,7 @@ function makeDeps(opts: WorldOpts = {}): RosterResolutionDeps & {
     },
     contacts: {
       getById: vi.fn(async (contactId: string) => {
+        contactReads.push(contactId);
         if (opts.contactsThrow) throw new Error('dynamodb: ProvisionedThroughputExceededException');
         return opts.contacts?.[contactId];
       }),
@@ -506,5 +512,81 @@ describe('rosterEquals - order-insensitive, contactId first, else E.164 phone', 
 
   it('two empty rosters are equal', () => {
     expect(rosterEquals([], [])).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// describeRoster - the card payload's pending[]/skipped[] half (spec 6.5)
+// ---------------------------------------------------------------------------
+
+describe('describeRosterActions - historical rows cost NOTHING to serve', () => {
+  const actionRow = (
+    over: Partial<PendingRosterActionItem> & { actionId: string },
+  ): PendingRosterActionItem => ({
+    ownerKey: 'tour#tour-1',
+    ownerType: 'tour',
+    ownerId: 'tour-1',
+    action: 'add_member',
+    dueAt: '2026-08-05T12:00:00.000Z',
+    _actionPartition: 'roster_actions',
+    reason: 'quiet_hours',
+    status: 'pending',
+    createdAt: '2026-08-05T03:00:00.000Z',
+    ...over,
+  });
+
+  it('reads a contact for a LIVE row only - applied and dismissed rows are skipped first', async () => {
+    // Action rows are never deleted, so every roster GET re-walks the whole
+    // history. Paying a serial contact read per row that is then discarded made
+    // the card degrade monotonically for the life of the owner.
+    const deps = makeDeps({
+      units: { 'unit-1': { unitId: 'unit-1', landlordId: 'c-owner', status: 'available' } },
+      contacts: {
+        'c-tenant': contact('c-tenant', '+15550100001', 'Tina'),
+        'c-owner': contact('c-owner', '+15550100002', 'Ollie'),
+        'c-pending': contact('c-pending', '+15550100003', 'Percy'),
+        'c-applied': contact('c-applied', '+15550100004', 'Aggie'),
+        'c-dismissed': contact('c-dismissed', '+15550100005', 'Dee'),
+        'c-skipped': contact('c-skipped', '+15550100006', 'Skye'),
+      },
+    });
+    const rows: PendingRosterActionItem[] = [
+      actionRow({ actionId: 'tour#tour-1#add#c-pending', contactId: 'c-pending' }),
+      actionRow({
+        actionId: 'tour#tour-1#add#c-applied',
+        contactId: 'c-applied',
+        status: 'applied',
+        resolvedAt: '2026-08-05T12:00:01.000Z',
+      }),
+      actionRow({
+        actionId: 'tour#tour-1#add#c-dismissed',
+        contactId: 'c-dismissed',
+        status: 'skipped',
+        skippedReason: 'contact_deleted',
+        resolvedAt: '2026-08-05T12:00:02.000Z',
+        dismissedAt: '2026-08-05T13:00:00.000Z',
+      }),
+      actionRow({
+        actionId: 'tour#tour-1#add#c-skipped',
+        contactId: 'c-skipped',
+        status: 'skipped',
+        skippedReason: 'already_member',
+        resolvedAt: '2026-08-05T12:00:03.000Z',
+      }),
+    ];
+
+    const view = await describeRoster(
+      { ...deps, actions: { listByOwner: async () => rows } },
+      TOUR,
+    );
+
+    // The rows that SHOW carry their name...
+    expect(view.pending.map((p) => p.name)).toEqual(['Percy Person']);
+    expect(view.skipped.map((s) => s.name)).toEqual(['Skye Person']);
+    // ...and the discarded ones cost no read at all.
+    expect(deps.contactReads).toContain('c-pending');
+    expect(deps.contactReads).toContain('c-skipped');
+    expect(deps.contactReads, 'an applied row is never rendered').not.toContain('c-applied');
+    expect(deps.contactReads, 'a dismissed row is never rendered').not.toContain('c-dismissed');
   });
 });

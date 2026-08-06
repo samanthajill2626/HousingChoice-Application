@@ -1250,6 +1250,26 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       expect(world.sent).toHaveLength(0);
     });
 
+    it('APPLY-NOW answers 409 action_not_ready when the applier can only WAIT', async () => {
+      // The tours twin: 'waiting' claimed nothing and did nothing, so a 200
+      // with an unchanged payload would tell the operator their click landed.
+      const placementId = await createPlacement();
+      const deferred = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${placementId}#open`;
+      // A pointer at a conversation nobody can load -> resolver 'unavailable'.
+      await world.placementsRepo.update(placementId, { group_thread: 'conv-gone' });
+
+      const res = await quietReq.post(
+        `/api/placements/${placementId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+      );
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('action_not_ready');
+      expect(res.body.message).toMatch(/try again/i);
+      expect((await world.pendingRosterActionsRepo.getById(actionId))!.status).toBe('pending');
+    });
+
     it('cancel / apply-now / dismiss round-trip on the placement mirror', async () => {
       const placementId = await createPlacement();
       const deferred = await quietReq.post(`/api/placements/${placementId}/relay`);

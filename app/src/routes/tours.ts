@@ -104,6 +104,7 @@ import {
 import { createPoolNumbersService, type PoolNumbersService } from '../services/poolNumbers.js';
 import {
   openTourGroup,
+  tourOpenDeferralRefusal,
   tourOpenGuard,
   type OpenTourGroupDeps,
 } from '../services/rosterProvision.js';
@@ -1323,6 +1324,20 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     if (explicitMembers === undefined && !isForceSendNow(req)) {
       const quiet = await quietHoursState();
       if (isQuietTime(quiet.nowIso, quiet.window)) {
+        // ...but only for a click that COULD be honored at quiet-end. The two
+        // pre-checks the poller runs before it claims are run here too (spec
+        // 6.2: "The route keeps its guard regardless"), answering the immediate
+        // path's exact refusal instead of a 202 that promises an open the
+        // server already knows it must refuse.
+        const refusal = await tourOpenDeferralRefusal(
+          provisionDeps,
+          tour,
+          config.relayLiveProvisioning,
+        );
+        if (refusal !== undefined) {
+          res.status(refusal.status).json(refusal.body);
+          return;
+        }
         const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
         await rosterActions.upsertPending({
           ownerType: 'tour',

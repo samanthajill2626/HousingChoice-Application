@@ -90,6 +90,17 @@ export class RelayProvisioningDisabledError extends Error {
   }
 }
 
+/**
+ * The message the GROUP-open path refuses with when the kill-switch is off (the
+ * routes render it as 503 `relay_provisioning_disabled`). A CONSTANT because
+ * the quiet-hours deferral pre-check (services/rosterProvision) has to answer
+ * the byte-identical refusal WITHOUT reaching provisioning - two copies of this
+ * sentence would drift.
+ */
+export const RELAY_PROVISIONING_DISABLED_MESSAGE =
+  'relay number provisioning is disabled in this environment - set ' +
+  'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number';
+
 export interface PoolNumbersServiceDeps {
   config?: AppConfig;
   logger?: Logger;
@@ -561,10 +572,7 @@ export function createPoolNumbersService(deps: PoolNumbersServiceDeps = {}): Poo
       // flag off NOTHING is enqueued and the whole warm/connect path stays dormant.
       // Tiers 1/2 are unaffected (they never buy, so they resolve regardless).
       if (!config.relayLiveProvisioning) {
-        throw new RelayProvisioningDisabledError(
-          'relay number provisioning is disabled in this environment - set ' +
-            'RELAY_LIVE_PROVISIONING=true after A2P approval to enable buying a pool number',
-        );
+        throw new RelayProvisioningDisabledError(RELAY_PROVISIONING_DISABLED_MESSAGE);
       }
 
       // Flag ON: do NOT buy here (buying is solely warmOneNumber, T4) - signal the

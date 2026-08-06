@@ -3925,6 +3925,50 @@ describe('tour roster editing endpoints (contact-rosters Task 10)', () => {
     expect(row!.createdAt).toBe(QUIET_NOW);
   });
 
+  it('OPEN during quiet hours on a TOO-THIN roster refuses NOW (400) instead of deferring work it must refuse', async () => {
+    // Spec 6.2: "The route keeps its guard regardless." The poller pre-checks
+    // exactly this before it claims (jobs/rosterActions: 'roster_too_thin'), so
+    // a 202 would promise an open that is already known to be impossible - and
+    // hide the reason behind an "Opens at 8:00 AM" banner until quiet-end.
+    const { app } = await quietHarness();
+    const tourId = await createTour(app);
+    // A one-member plan: the resolver answers, provisionMembersOf yields 1.
+    await world.toursRepo.setRoster(tourId, [{ contactId: 'c-pm' }], undefined);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+
+    // The IMMEDIATE path's exact refusal, verbatim.
+    expect(res.status).toBe(400);
+    expect(res.body.error).toBe('relay_member_unresolvable');
+    expect(res.body.detail).toBe('this tour roster has fewer than two reachable members');
+    expect(await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`)).toBeUndefined();
+  });
+
+  it('OPEN during quiet hours with relay provisioning OFF refuses NOW (503), never a pending row', async () => {
+    // The poller's other pre-claim check ('provisioning_unavailable'): with the
+    // kill-switch off the open cannot complete at quiet-end either.
+    await world.settingsRepo.putOrgSettings({
+      quietHoursEnabled: true,
+      quietHoursStart: '21:00',
+      quietHoursEnd: '08:00',
+      timezone: 'America/New_York',
+    });
+    const { app } = makeWebhookHarness({
+      world,
+      poolNumbersService: makeFakePoolNumbers(),
+      toursNow: () => QUIET_NOW,
+      env: { RELAY_LIVE_PROVISIONING: 'false' },
+    });
+    const tourId = await createTour(app);
+
+    const res = await authed(app).post(`/api/tours/${tourId}/relay`).send({});
+
+    expect(res.status).toBe(503);
+    expect(res.body.error).toBe('relay_provisioning_disabled');
+    expect(res.body.message).toMatch(/RELAY_LIVE_PROVISIONING=true/);
+    expect(await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`)).toBeUndefined();
+  });
+
   it('OPEN with ?force=send_now during quiet hours provisions immediately', async () => {
     const { app } = await quietHarness();
     const tourId = await createTour(app);

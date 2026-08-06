@@ -74,6 +74,7 @@ import { readQuietHoursWindow } from '../jobs/tourReminders.js';
 import { clampOutOfQuietHours, isQuietTime } from '../lib/quietHours.js';
 import {
   openPlacementGroup,
+  placementOpenDeferralRefusal,
   placementOpenGuard,
   type OpenPlacementGroupDeps,
 } from '../services/rosterProvision.js';
@@ -1490,6 +1491,19 @@ export function createPlacementsRouter(deps: PlacementsRouterDeps = {}): Router 
     if (!isForceSendNow(req)) {
       const quiet = await quietHoursState();
       if (isQuietTime(quiet.nowIso, quiet.window)) {
+        // ...but only for a click that COULD be honored at quiet-end: the same
+        // two pre-checks the poller runs before it claims (spec 6.2, tours
+        // parity), answering the immediate path's exact refusal rather than a
+        // 202 for work the server already knows it must refuse.
+        const refusal = await placementOpenDeferralRefusal(
+          provisionDeps,
+          item,
+          config.relayLiveProvisioning,
+        );
+        if (refusal !== undefined) {
+          res.status(refusal.status).json(refusal.body);
+          return;
+        }
         const dueAt = clampOutOfQuietHours(quiet.nowIso, quiet.window);
         await rosterActions.upsertPending({
           ownerType: 'placement',

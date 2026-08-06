@@ -50,7 +50,11 @@ import type { PlacementItem, PlacementsRepo } from '../repos/placementsRepo.js';
 import type { TourItem, ToursRepo } from '../repos/toursRepo.js';
 import { unitContacts, type UnitsRepo } from '../repos/unitsRepo.js';
 import { TERMINAL_STAGES } from '../lib/statusModel.js';
-import { RelayProvisioningDisabledError, type PoolNumbersService } from './poolNumbers.js';
+import {
+  RelayProvisioningDisabledError,
+  RELAY_PROVISIONING_DISABLED_MESSAGE,
+  type PoolNumbersService,
+} from './poolNumbers.js';
 import { provisionRelayGroup } from './relayProvisioning.js';
 
 /** A refusal the caller renders verbatim (each route's exact wire contract). */
@@ -159,6 +163,17 @@ export function tourOpenGuard(tour: TourItem): RosterOpenRefusal | undefined {
   return undefined;
 }
 
+/**
+ * The kill-switch refusal, identical to the one the immediate path renders when
+ * provisioning throws from inside the open (both owners answer this body).
+ */
+function provisioningDisabledRefusal(): RosterOpenRefusal {
+  return {
+    status: 503,
+    body: { error: 'relay_provisioning_disabled', message: RELAY_PROVISIONING_DISABLED_MESSAGE },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Tours
 // ---------------------------------------------------------------------------
@@ -230,6 +245,43 @@ async function resolveTourMembers(
   // Both rungs resolve and share ONE number (tenant === property contact): a
   // relay needs two distinct parties.
   return { unresolvable: 'this tour roster has fewer than two reachable members' };
+}
+
+/**
+ * WHAT A QUIET-HOURS DEFERRAL MUST STILL REFUSE (spec 6.2: "The route keeps its
+ * guard regardless"). Deferring is a promise that this open will happen at
+ * quiet-end - so a click the server ALREADY KNOWS it must refuse has to be
+ * refused NOW, in the immediate path's exact wire shape, rather than answered
+ * 202 with an "Opens at 8:00 AM" banner that resolves hours later into a skip
+ * notice nobody is watching for.
+ *
+ * These are precisely the two checks the poller runs PRE-CLAIM against the same
+ * world (jobs/rosterActions: 'roster_too_thin', 'provisioning_unavailable'):
+ *
+ *   1. a roster too thin to relay -> the immediate 400 (each owner's ladder),
+ *   2. relay live provisioning off -> the immediate 503.
+ *
+ * Reads only, and deliberately NOT a copy of the dead-owner / already-open
+ * guards (the routes run those first, before any body parsing). The resolver's
+ * 'unavailable' is deliberately NOT a refusal here either: the poller WAITS on
+ * an unreadable world rather than skipping, so that deferral still stands.
+ */
+export async function tourOpenDeferralRefusal(
+  deps: OpenTourGroupDeps,
+  tour: TourItem,
+  relayLiveProvisioning: boolean,
+): Promise<RosterOpenRefusal | undefined> {
+  // 'unavailable' cannot reach this line: tourOpenGuard already refused every
+  // tour carrying a pointer, and the resolver only reports it FOR a pointer.
+  const resolved = await resolveTourMembers(deps, tour);
+  if ('unresolvable' in resolved) {
+    return {
+      status: 400,
+      body: { error: 'relay_member_unresolvable', detail: resolved.unresolvable },
+    };
+  }
+  if (!relayLiveProvisioning) return provisioningDisabledRefusal();
+  return undefined;
 }
 
 /**
@@ -506,6 +558,29 @@ export function placementOpenGuard(item: PlacementItem): RosterOpenRefusal | und
       },
     };
   }
+  return undefined;
+}
+
+/**
+ * The placement twin of `tourOpenDeferralRefusal` (same contract, same two
+ * checks, this owner's refusal ladder). An 'unavailable' roster - a closed or
+ * unreadable pointer, which this owner's guard does NOT refuse - defers as
+ * before: the poller waits on it, so the deferral is still honest.
+ */
+export async function placementOpenDeferralRefusal(
+  deps: OpenPlacementGroupDeps,
+  item: PlacementItem,
+  relayLiveProvisioning: boolean,
+): Promise<RosterOpenRefusal | undefined> {
+  const resolved = await resolveRoster(
+    { conversations: deps.conversations, units: deps.units, contacts: deps.contacts, log: deps.log },
+    placementRosterOwner(item),
+  );
+  if (resolved.source === 'unavailable') return undefined;
+  if (provisionMembersOf(resolved).length < 2) {
+    return await describeThinPlacementRoster(deps, item, resolved.source);
+  }
+  if (!relayLiveProvisioning) return provisioningDisabledRefusal();
   return undefined;
 }
 

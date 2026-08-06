@@ -1100,6 +1100,48 @@ describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
       ).toBeUndefined();
     });
 
+    it('a TOO-THIN roster answers 400 relay_member_unresolvable NOW, never a pending row', async () => {
+      // Spec 6.2: "The route keeps its guard regardless." The poller pre-checks
+      // this before it claims ('roster_too_thin'), so a 202 would promise an
+      // open the server already knows it must refuse - and hide the reason
+      // behind an "Opens at 8:00 AM" banner until quiet-end.
+      const placementId = await createPlacement();
+      await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-pm' }], undefined);
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('relay_member_unresolvable');
+      expect(res.body.detail).toBe('this placement roster has fewer than two reachable members');
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('relay provisioning OFF answers 503 NOW, never a pending row', async () => {
+      // The poller's other pre-claim check ('provisioning_unavailable'): with
+      // the kill-switch off the open cannot complete at quiet-end either.
+      const offApp = makeWebhookHarness({
+        world,
+        poolNumbersService: makeFakePoolNumbers(),
+        placementsNow: () => QUIET_NOW,
+        env: { RELAY_LIVE_PROVISIONING: 'false' },
+      }).app;
+      const placementId = await createPlacement();
+
+      const res = await request(offApp)
+        .post(`/api/placements/${placementId}/relay`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe('relay_provisioning_disabled');
+      expect(res.body.message).toMatch(/RELAY_LIVE_PROVISIONING=true/);
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
     it('a CLOSED-thread pointer passes the guards in BOTH forms, and the deferred one answers visibly', async () => {
       // Neither form is refused by the guards (a closed relay does not block a
       // re-open) - that is the parity the reorder buys. The OUTCOMES still

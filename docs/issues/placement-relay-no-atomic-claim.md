@@ -6,7 +6,7 @@ severity: med
 status: open
 area: app
 created: 2026-08-05
-refs: app/src/routes/placements.ts:1049, app/src/routes/tours.ts:861
+refs: app/src/services/rosterProvision.ts:281, app/src/services/rosterProvision.ts:696
 ---
 
 **Problem.** `POST /api/placements/:placementId/relay` guards one-thread-per-

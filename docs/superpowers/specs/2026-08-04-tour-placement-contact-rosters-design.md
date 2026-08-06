@@ -503,7 +503,14 @@ SkipReason =
   | 'member_no_longer_on_roster'   // removed while the add was pending
   | 'roster_too_thin'              // lost its second reachable member
   | 'converted'                    // only if migration to the placement failed
+  | 'provisioning_unavailable'     // live number provisioning is off - a
+                                   //   visible refusal beats a silent loss
 ```
+
+(The reminder/nudge ladders' own skip vocabulary gains the sibling
+`roster_unavailable`: a rung whose thread pointer would not read for a full
+grace window past its due time is claim-skipped VISIBLY instead of waiting
+forever - the bounded form of the transient unclaimed-wait rule above.)
 
 Applied by the worker at `dueAt`, following the reminder ladder's
 claim-and-skip discipline. An action whose world moved underneath it resolves

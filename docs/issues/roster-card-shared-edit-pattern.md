@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-08-05
-refs: dashboard/src/routes/shared/PeopleCard.tsx,dashboard/src/routes/listings/ListingDetail.tsx
+refs: dashboard/src/routes/shared/PeopleCard.tsx,dashboard/src/routes/listing/ListingDetail.tsx
 ---
 
 **Problem.** The property Contacts card editor (contact-rosters Task 9) and

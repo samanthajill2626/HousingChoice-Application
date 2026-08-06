@@ -302,9 +302,6 @@ A few practical notes:
 
 ### A couple of smaller things
 
-- **Which email should the system use?** `Sam@affordableplacements.com` shows up in
-  your texts, but your Quo account is under a Gmail address. Which one should
-  tenants see?
 - **Did anyone else send texts from Quo?** The export shows just you and one number.
   If anyone else was texting tenants from their own phone or login, those
   conversations aren't in what we have.

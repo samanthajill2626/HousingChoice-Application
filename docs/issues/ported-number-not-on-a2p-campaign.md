@@ -3,7 +3,7 @@ id: ported-number-not-on-a2p-campaign
 title: The ported 678 number is not on the A2P campaign's number inventory
 type: bug
 severity: high
-status: open
+status: in-progress
 area: ops/a2p
 created: 2026-08-06
 refs: docs/a2p/campaign-resubmission.md:209, docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md:18
@@ -29,6 +29,12 @@ look fine on our end and still be broken".
 A grep of `docs/` and `RUNBOOK.md` finds the number only in the M1.6 import
 design; nothing ties it to the campaign, the Messaging Service, or the cutover
 checklist.
+
+**Operator plan (Cameron, 2026-08-06).** Attaching the ported number to the
+Messaging Service via the Twilio console, immediately after the port completes, as
+part of the cutover run. That is the correct mechanism and closes the filtering
+risk above - this issue stays open only until the step is actually performed and
+item 9 of the campaign doc is updated.
 
 **Suggested fix.** Add attaching the ported number to the campaign's Messaging
 Service as an explicit, ordered step in the M1.11 cutover procedure — it can only

@@ -1,6 +1,8 @@
-/* NumbersSection - the admin "Group text numbers" inventory table + state-filter
- * chips + per-number group expansion. Tokens only (shares the TeamSection table
- * idiom and the AudienceFilters chip idiom). */
+/* NumbersSection - the "Phone numbers" section: the everyone-visible "Our
+ * number" block plus the admin-only "Group text numbers" inventory table +
+ * state-filter chips + per-number group expansion. Tokens only (shares the
+ * TeamSection table idiom, the AudienceFilters chip idiom, and the VoiceSection
+ * labelled-value block idiom). */
 
 .section {
   display: flex;
@@ -19,6 +21,35 @@
   margin: 0;
   color: var(--c-text-muted);
   font-size: var(--fs-sm);
+}
+
+/* --- Our number (the ONE business number; every role sees this) ------------ */
+.blockHeading {
+  margin: 0;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--c-text);
+}
+
+.ourNumber {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  padding: var(--sp-3);
+  background: var(--c-surface-2);
+  border-radius: var(--radius-sm);
+}
+
+.ourNumberValue {
+  font-size: var(--fs-md);
+  font-weight: var(--fw-medium);
+  color: var(--c-text);
+  font-variant-numeric: tabular-nums;
+}
+
+.ourNumberUnset {
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
 }
 
 .center {

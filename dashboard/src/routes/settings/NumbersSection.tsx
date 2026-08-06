@@ -1,16 +1,28 @@
-// NumbersSection - the admin-only "Group text numbers" inventory. A read-only
-// table of every relay pool number: state, group counts, burn count, last
-// activity / last-closed stamps, and a retirement countdown that MIRRORS the
-// gated sweep exactly. Each number expands into its group history (newest first),
-// every group linking to its conversation thread. Filter chips scope by lifecycle
-// state - "Active" (active + releasing; the default), "Released", "All". No
-// mutations: retirement stays the gated CLI sweep; the page only SHOWS what that
-// sweep would consider so the two never disagree.
+// NumbersSection - the "Phone numbers" section, two read-only blocks with
+// DIFFERENT audiences:
+//   1. "Our number" - OUR one business number (env-sourced, read-only), shown
+//      to EVERY authenticated user. It is what this app texts and calls from;
+//      it is printed on public flyers, so it is not a contact's PII.
+//   2. "Group text numbers" - the ADMIN-ONLY relay pool inventory. A read-only
+//      table of every pool number: state, group counts, burn count, last
+//      activity / last-closed stamps, and a retirement countdown that MIRRORS
+//      the gated sweep exactly. Each number expands into its group history
+//      (newest first), every group linking to its conversation thread. Filter
+//      chips scope by lifecycle state - "Active" (active + releasing; the
+//      default), "Released", "All".
+// The role gate sits ABOVE the whole pool block - its lede, its status states
+// and its fetch - so a VA is never shown, or told anything about, the pool.
+// `GET /api/pool-numbers` stays role-guarded on the SERVER: this gate is UX,
+// never the security boundary. No mutations anywhere: retirement stays the
+// gated CLI sweep; the page only SHOWS what that sweep would consider so the
+// two never disagree.
 import { Fragment, useCallback, useEffect, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { listPoolNumbers, type PoolNumberRow } from '../../api/index.js';
+import { useAuth } from '../../app/AuthContext.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
 import { Button, Spinner } from '../../ui/index.js';
+import { useSettings, type SettingsStatus } from './useSettings.js';
 import styles from './NumbersSection.module.css';
 
 type Status = 'loading' | 'ready' | 'error';
@@ -63,13 +75,24 @@ function retirementLabel(n: PoolNumberRow): string {
 }
 
 /** Owns the inventory data: status + rows + retry, AbortController-guarded
- *  (the useTeam idiom; no react-query in this app). Read-only - no mutations. */
-function usePoolNumbers(): { status: Status; numbers: PoolNumberRow[]; retry: () => void } {
+ *  (the useTeam idiom; no react-query in this app). Read-only - no mutations.
+ *
+ *  `enabled` is the viewer's admin flag: when false NOTHING is requested (the
+ *  inventory is admin-only on the server too, so a VA would only earn a 403 and
+ *  an error alert) and the status settles at 'ready' so nothing can hang on a
+ *  spinner. The caller renders no pool UI at all in that case. */
+function usePoolNumbers(enabled: boolean): {
+  status: Status;
+  numbers: PoolNumberRow[];
+  retry: () => void;
+} {
   const [status, setStatus] = useState<Status>('loading');
   const [numbers, setNumbers] = useState<PoolNumberRow[]>([]);
   const abortRef = useRef<AbortController | null>(null);
 
   const load = useCallback(async () => {
+    // A non-admin never fires the admin-only request, not even on a retry.
+    if (!enabled) return;
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
@@ -84,14 +107,22 @@ function usePoolNumbers(): { status: Status; numbers: PoolNumberRow[]; retry: ()
       }
       setStatus('error');
     }
-  }, []);
+  }, [enabled]);
 
   useEffect(() => {
+    if (!enabled) {
+      // Settle the status: no fetch will ever resolve it, and a stuck
+      // 'loading' would be a permanent spinner if this block were ever
+      // rendered for a non-admin.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setStatus('ready');
+      return undefined;
+    }
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     void load();
     return () => abortRef.current?.abort();
-  }, [load]);
+  }, [enabled, load]);
 
   const retry = useCallback(() => {
     setStatus('loading');
@@ -101,12 +132,52 @@ function usePoolNumbers(): { status: Status; numbers: PoolNumberRow[]; retry: ()
   return { status, numbers, retry };
 }
 
+/** OUR one business number - read-only, and shown to EVERY authenticated user
+ *  (it is the number on our public flyers, not a contact's PII).
+ *
+ *  UNSET IS AN EXPLICIT BRANCH: the backend OMITS the key when the environment
+ *  has no number (never `null`), and `formatPhoneDisplay(undefined)` returns an
+ *  empty string - rendering it bare would leave a silent blank. */
+function OurNumber({
+  status,
+  number,
+}: {
+  status: SettingsStatus;
+  number: string | undefined;
+}): React.JSX.Element {
+  return (
+    <div className={styles.ourNumber}>
+      <h3 className={styles.blockHeading}>Our number</h3>
+      <p className={styles.lede}>
+        The number this app is configured to text and call from - the one printed on our
+        flyers. Read-only. Being configured here does not prove a text will send: the
+        number must also be attached to the Messaging Service and covered by the A2P
+        campaign.
+      </p>
+      {status === 'error' ? (
+        <span className={styles.ourNumberUnset}>Couldn't load our number.</span>
+      ) : number !== undefined ? (
+        <span className={styles.ourNumberValue}>{formatPhoneDisplay(number)}</span>
+      ) : status === 'loading' ? (
+        <span className={styles.ourNumberUnset}>Loading</span>
+      ) : (
+        <span className={styles.ourNumberUnset}>Not set</span>
+      )}
+    </div>
+  );
+}
+
 // The data columns (excluding the leading expander control column). colSpan on
 // the expanded detail row = COLUMN_COUNT + 1 (the expander column).
 const COLUMN_COUNT = 8;
 
 export function NumbersSection(): React.JSX.Element {
-  const { status, numbers, retry } = usePoolNumbers();
+  const { isAdmin } = useAuth();
+  // OUR one business number rides on the settings response (read-only, never
+  // patchable) - the same hook the other Settings sections use, so a save
+  // elsewhere re-stores it rather than blanking it.
+  const { status: settingsStatus, businessPhoneNumber } = useSettings();
+  const { status, numbers, retry } = usePoolNumbers(isAdmin);
   const [filter, setFilter] = useState<StateFilter>('active');
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
@@ -129,11 +200,30 @@ export function NumbersSection(): React.JSX.Element {
   const warmingCount = numbers.filter((n) => n.state === 'warming').length;
   const freshSpareCount = numbers.filter(isFreshSpare).length;
 
+  // THE ROLE GATE, hoisted above EVERYTHING pool-related: the pool heading, its
+  // lede, the whole status chain (spinner / error alert / "no numbers yet" /
+  // counts / chips / table) and - via usePoolNumbers(isAdmin) - the fetch
+  // itself. A VA's tree contains no pool markup at all, so they are never told
+  // anything about the pool, including the false "it is empty".
+  if (!isAdmin) {
+    return (
+      <section className={styles.section} aria-labelledby="numbers-heading">
+        <h2 id="numbers-heading" className={styles.heading}>
+          Phone numbers
+        </h2>
+        <OurNumber status={settingsStatus} number={businessPhoneNumber} />
+      </section>
+    );
+  }
+
   return (
     <section className={styles.section} aria-labelledby="numbers-heading">
       <h2 id="numbers-heading" className={styles.heading}>
-        Group text numbers
+        Phone numbers
       </h2>
+      <OurNumber status={settingsStatus} number={businessPhoneNumber} />
+
+      <h3 className={styles.blockHeading}>Group text numbers</h3>
       <p className={styles.lede}>
         Every relay number the pool holds - its usage history, burn count, and
         retirement eligibility. Read-only: retirement runs as the gated sweep.

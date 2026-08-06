@@ -1,18 +1,23 @@
 import { test, expect, type Page } from '@playwright/test';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
+import { APP_NUMBER } from '../../scenarios/steps.js';
 
-// Settings > Group text numbers (:5174) - the admin-only, READ-ONLY pool-number
-// inventory (spec docs/superpowers/specs/2026-07-18-pool-numbers-admin-design.md
-// section 7). Proves the role-aware surface end-to-end against the real backend:
+// Settings > Phone numbers (:5174) - the READ-ONLY numbers surface, whose two
+// blocks have DIFFERENT audiences (spec docs/superpowers/specs/
+// 2026-07-18-pool-numbers-admin-design.md section 7, amended by
+// 2026-08-06-business-number-config-design.md D7). Proves the role-aware surface
+// end-to-end against the real backend:
 //   - ADMIN: create a relay group via POST /api/relay-groups (mints a pool
 //     number); /settings/numbers shows that number's row (formatted display,
 //     State "active", an open group, retirement "-" because an open group is not
 //     retirement-eligible); expanding the row reveals the group row, which links
 //     to its conversation thread; following the link lands on the group view.
-//     The "Group text numbers" tab is visible for an admin.
-//   - VA/default: the tab is absent and a direct nav to /settings/numbers is
-//     route-guarded (AdminRoute) - it bounces to /settings/templates and the
-//     numbers heading/table never render.
+//     An admin sees BOTH blocks: "Our number" and "Group text numbers".
+//   - VA/default: the "Phone numbers" tab IS visible and the route is NOT
+//     guarded any more - a VA lands on /settings/numbers, sees OUR one business
+//     number, and sees NOTHING of the pool: no "Group text numbers" block, no
+//     table, and no /api/pool-numbers request is ever fired (that route stays
+//     admin-only on the server - this is UX gating, not the security boundary).
 // The lean profile the harness boots seeds ZERO pool numbers, so the created
 // group's number is matched directly (no reseed); the number is MINTED
 // dynamically (POOL_NUMBER_RE in e2e/scenarios/steps.ts: the "019" exchange is
@@ -53,8 +58,8 @@ function formatPhoneDisplay(e164: string): string {
   return m ? `(${m[1]}) ${m[2]}-${m[3]}` : e164;
 }
 
-test.describe('Settings - Group text numbers (admin path)', () => {
-  test('admin sees the minted pool number, expands it to the linked group thread, and the tab is visible', async ({
+test.describe('Settings - Phone numbers (admin path)', () => {
+  test('admin sees both blocks: our business number and the minted pool number, expanded to its linked group thread', async ({
     page,
   }) => {
     await devLoginAs(page, 'founder@example.com');
@@ -76,13 +81,20 @@ test.describe('Settings - Group text numbers (admin path)', () => {
     const formatted = formatPhoneDisplay(group.pool_number);
 
     await page.goto(`${NEXT}/settings/numbers`);
-    // The admin-only tab + the section heading render for an admin.
-    await expect(page.getByRole('tab', { name: 'Group text numbers' })).toBeVisible({
+    // The tab + the section heading render for an admin.
+    await expect(page.getByRole('tab', { name: 'Phone numbers' })).toBeVisible({
       timeout: 15_000,
     });
-    await expect(
-      page.getByRole('heading', { name: 'Group text numbers', level: 2 }),
-    ).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Phone numbers', level: 2 })).toBeVisible();
+
+    // BLOCK 1 - "Our number": the ONE business number this stack is configured
+    // to send from (BUSINESS_PHONE_NUMBER), rendered in the same formatted
+    // display shape as the pool rows. An admin sees it too, not just a VA.
+    await expect(page.getByRole('heading', { name: 'Our number', level: 3 })).toBeVisible();
+    await expect(page.getByText(formatPhoneDisplay(APP_NUMBER))).toBeVisible();
+
+    // BLOCK 2 - the admin-only pool inventory.
+    await expect(page.getByRole('heading', { name: 'Group text numbers', level: 3 })).toBeVisible();
 
     // The pool number's row: formatted number, State "active" (the raw lowercase
     // lifecycle value), an open group, and retirement "-" (an open group is never
@@ -115,26 +127,53 @@ test.describe('Settings - Group text numbers (admin path)', () => {
   });
 });
 
-test.describe('Settings - Group text numbers (VA path)', () => {
-  test('a VA has no Group text numbers tab and a direct nav bounces to Templates (page never renders)', async ({
+test.describe('Settings - Phone numbers (VA path)', () => {
+  test('a VA reaches the tab and sees our business number, but never the pool inventory or its request', async ({
     page,
   }) => {
+    // Record every admin-only pool request this page fires. Registered BEFORE
+    // the first navigation so nothing can slip through un-observed.
+    const poolRequests: string[] = [];
+    page.on('request', (req) => {
+      if (req.url().includes('/api/pool-numbers')) poolRequests.push(req.url());
+    });
+
     await devLoginAs(page, 'va@example.com');
     await page.goto(`${NEXT}/settings`);
-    // /settings redirects a VA to Templates (the first tab they can see).
+    // /settings still redirects a VA to Templates (the first tab they can see).
     await page.waitForURL(/\/settings\/templates$/, { timeout: 15_000 });
 
-    // The admin-only tab is absent for a VA.
-    await expect(page.getByRole('tab', { name: 'Group text numbers' })).toHaveCount(0);
+    // The tab is VISIBLE for a VA now, and reaching the section from it does
+    // not bounce: the route carries no AdminRoute wrapper any more.
+    const tab = page.getByRole('tab', { name: 'Phone numbers' });
+    await expect(tab).toBeVisible({ timeout: 15_000 });
+    await tab.click();
+    await page.waitForURL(/\/settings\/numbers$/, { timeout: 15_000 });
 
-    // The route is GUARDED, not merely hidden: a VA hitting /settings/numbers
-    // directly is redirected back to Templates, and the numbers heading + table
-    // never render (the "People burned" column is unique to the numbers table).
+    // A direct navigation lands there too (no redirect back to Templates).
     await page.goto(`${NEXT}/settings/numbers`);
-    await expect(page).toHaveURL(/\/settings\/templates$/);
-    await expect(
-      page.getByRole('heading', { name: 'Group text numbers', level: 2 }),
-    ).toHaveCount(0);
-    await expect(page.getByRole('columnheader', { name: 'People burned' })).toHaveCount(0);
+    await expect(page).toHaveURL(/\/settings\/numbers$/);
+
+    // What a VA DOES see: the section and our one business number. The section
+    // is a NAMED region (its <section> is aria-labelledby its own <h2>), so
+    // every assertion below scopes to it rather than the whole page.
+    await expect(page.getByRole('heading', { name: 'Phone numbers', level: 2 })).toBeVisible();
+    const section = page.getByRole('region', { name: 'Phone numbers' });
+    await expect(section.getByRole('heading', { name: 'Our number', level: 3 })).toBeVisible();
+    await expect(section.getByText(formatPhoneDisplay(APP_NUMBER))).toBeVisible();
+
+    // What a VA does NOT see: any part of the pool inventory - its heading, its
+    // table (the "People burned" column is unique to it), its error alert, or
+    // its "no numbers yet" empty state (which would be a false claim, not just
+    // a leak). The whole block is gated, not merely the table.
+    await expect(section.getByRole('heading', { name: 'Group text numbers' })).toHaveCount(0);
+    await expect(section.getByRole('columnheader', { name: 'People burned' })).toHaveCount(0);
+    await expect(section.getByRole('table')).toHaveCount(0);
+    await expect(section.getByRole('alert')).toHaveCount(0);
+    await expect(section.getByText(/No group text numbers yet/)).toHaveCount(0);
+
+    // ...and no admin-only request was ever fired (the server would 403 it; the
+    // UI must not ask in the first place).
+    expect(poolRequests).toEqual([]);
   });
 });

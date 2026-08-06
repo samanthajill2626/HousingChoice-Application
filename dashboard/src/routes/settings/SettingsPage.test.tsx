@@ -63,15 +63,17 @@ describe('SettingsPage — role gating (desktop tabs)', () => {
       'Notifications',
       'Voice',
       'System status',
-      'Group text numbers',
+      'Phone numbers',
     ]);
   });
 
-  it('a VA sees Templates + Notifications + Voice (no Team, no System)', () => {
+  it('a VA sees Templates + Notifications + Voice + Phone numbers (no Team, no System)', () => {
     isAdmin = false;
     renderPage();
     const tabNames = screen.getAllByRole('tab').map((t) => t.textContent);
-    expect(tabNames).toEqual(['Templates', 'Notifications', 'Voice']);
+    // Phone numbers is visible to every role now (the section shows OUR one
+    // business number read-only; its pool inventory is gated inside).
+    expect(tabNames).toEqual(['Templates', 'Notifications', 'Voice', 'Phone numbers']);
     expect(screen.queryByRole('tab', { name: 'Team' })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'System status' })).not.toBeInTheDocument();
   });
@@ -98,6 +100,6 @@ describe('SettingsPage — responsive switch', () => {
     renderPage();
     const select = screen.getByRole('combobox', { name: 'Settings section' });
     const options = within(select).getAllByRole('option').map((o) => o.textContent);
-    expect(options).toEqual(['Templates', 'Notifications', 'Voice']);
+    expect(options).toEqual(['Templates', 'Notifications', 'Voice', 'Phone numbers']);
   });
 });

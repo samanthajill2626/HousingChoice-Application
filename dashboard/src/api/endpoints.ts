@@ -1535,8 +1535,10 @@ export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }>
   });
 }
 
-// --- Settings > Group text numbers (/api/pool-numbers) (admin-only) ----------
-// The admin pool-number inventory. requireRole('admin') upstream; a VA gets 403.
+// --- Settings > Phone numbers: the group text pool (/api/pool-numbers) -------
+// The ADMIN-ONLY pool-number inventory (the other half of that section, OUR one
+// business number, rides on /api/settings and is visible to everyone).
+// requireRole('admin') upstream; a VA gets 403.
 
 /** GET /api/pool-numbers - the pool-number inventory (unwrapped from { numbers }). */
 export async function listPoolNumbers(signal?: AbortSignal): Promise<PoolNumberRow[]> {
@@ -1658,7 +1660,8 @@ export function confirmCellVerify(code: string): Promise<{ ok: true; cell_verifi
 // VAs may VIEW (GET requireAuth); only admins EDIT (PUT requireRole('admin')).
 
 /** GET /api/settings — the founder-editable templates plus `welcomeTextDefault`
- *  (the read-only built-in welcome body, shown so admins see what "blank" sends). */
+ *  (the read-only built-in welcome body, shown so admins see what "blank" sends)
+ *  and `businessPhoneNumber` (OUR one number, omitted when unconfigured). */
 export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
   return request<SettingsResponse>('/api/settings', {
     ...(signal !== undefined && { signal }),
@@ -1666,7 +1669,8 @@ export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
 }
 
 /** PUT /api/settings { ...patch } — admin-only edit; send ONLY changed fields.
- *  Returns the merged settings (+ welcomeTextDefault). 400 on a validation
+ *  Returns the merged settings (+ the SAME read-only siblings the GET carries,
+ *  welcomeTextDefault + businessPhoneNumber). 400 on a validation
  *  failure. `welcomeText: null` is an explicit CLEAR (revert to the default). */
 export function putSettings(patch: SettingsPatch): Promise<SettingsResponse> {
   return request<SettingsResponse>('/api/settings', {

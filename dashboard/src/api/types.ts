@@ -66,7 +66,7 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
-// --- Settings: Group text numbers (admin pool-number inventory) --------------
+// --- Settings > Phone numbers: the group text pool (admin-only inventory) ----
 // Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
 // The dashboard is a separate package and cannot import from app/src, so these
 // are duplicated; keep them in sync with the router when the shape changes.
@@ -138,13 +138,19 @@ export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
   welcomeText?: string | null;
 };
 
-/** GET/PUT /api/settings response. `welcomeTextDefault` rides alongside the
- *  settings (read-only, never patchable): the exact welcome body the backend
- *  sends when `welcomeText` is unset, so the UI can show the admin what "the
- *  default" actually says. */
+/** GET/PUT /api/settings response. `welcomeTextDefault` and
+ *  `businessPhoneNumber` ride alongside the settings (read-only, never
+ *  patchable): the exact welcome body the backend sends when `welcomeText` is
+ *  unset, so the UI can show the admin what "the default" actually says, and
+ *  OUR one business number, so the UI can show what this app sends from. */
 export interface SettingsResponse {
   settings: OrgSettings;
   welcomeTextDefault: string;
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164. OPTIONAL: the
+   *  backend OMITS the key when unconfigured - it is never `null`, so test the
+   *  unset case with `=== undefined`. Carried by BOTH the GET and the PUT (the
+   *  dashboard re-sets this state from the PUT response). */
+  businessPhoneNumber?: string;
 }
 
 // --- Settings: System Status (admin-only) -----------------------------------

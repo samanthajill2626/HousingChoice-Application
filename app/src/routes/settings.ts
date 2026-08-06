@@ -3,10 +3,15 @@
 //   GET /api/settings   → { settings }                 (requireAuth — VAs may VIEW)
 //   PUT /api/settings   { patch } → { settings }        (requireRole('admin') — only admins EDIT)
 //
+// BOTH responses also carry two READ-ONLY, env/code-sourced siblings that ride
+// ALONGSIDE the settings and are never patchable: `welcomeTextDefault` and
+// `businessPhoneNumber` (omitted when unconfigured).
+//
 // Stores the founder-editable templates Change Order 2 introduced (missed-call
 // auto-text + quick replies). M1.4 only stores/edits them — they are CONSUMED
 // in M1.9 (the voice/call-triage milestone). See repos/settingsRepo.ts.
 import { Router } from 'express';
+import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { templateHasOptOutLanguage, WELCOME_SMS } from '../lib/smsCompliance.js';
@@ -23,6 +28,12 @@ export interface SettingsRouterDeps {
   logger?: Logger;
   settingsRepo?: SettingsRepo;
   auditRepo?: AuditRepo;
+  /**
+   * Read-only source of the env-sourced business number. It rides ALONGSIDE the
+   * settings on both responses and is NEVER patchable (parsePatch does not
+   * accept it) - it comes from BUSINESS_PHONE_NUMBER, not the settings item.
+   */
+  config?: AppConfig;
 }
 
 /** Quick replies: each non-empty string, the whole array <= this many, each <= this long. */
@@ -147,6 +158,7 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
+  const config = deps.config ?? loadConfig();
 
   const router = Router();
 
@@ -157,7 +169,20 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
   // instead of asking them to trust a blank box.
   router.get('/', async (_req, res) => {
     const current = await settings.getOrgSettings();
-    res.json({ settings: current, welcomeTextDefault: WELCOME_SMS });
+    res.json({
+      settings: current,
+      welcomeTextDefault: WELCOME_SMS,
+      // Env-sourced and READ-ONLY (never patchable), the same shape as
+      // welcomeTextDefault above: the Settings UI shows the number this app
+      // sends from without implying it can be edited here. OMITTED when
+      // unconfigured (the repo's conditional-spread idiom) rather than null -
+      // "not configured" is `=== undefined` on the wire, and the same
+      // convention holds on /api/system/flags, whose payload is asserted to
+      // hold primitives only.
+      ...(config.businessPhoneNumber !== undefined && {
+        businessPhoneNumber: config.businessPhoneNumber,
+      }),
+    });
   });
 
   // PUT /api/settings — only admins may edit.
@@ -191,7 +216,16 @@ export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
       { actor: req.user?.userId, fields: Object.keys(parsed.patch) },
       'org settings updated via API',
     );
-    res.json({ settings: updated, welcomeTextDefault: WELCOME_SMS });
+    // The SAME three keys as the GET: SettingsResponse is shared by both calls
+    // and the dashboard re-sets its state from THIS response, so a GET-only
+    // field would blank the block the first time an admin saves.
+    res.json({
+      settings: updated,
+      welcomeTextDefault: WELCOME_SMS,
+      ...(config.businessPhoneNumber !== undefined && {
+        businessPhoneNumber: config.businessPhoneNumber,
+      }),
+    });
   });
 
   return router;

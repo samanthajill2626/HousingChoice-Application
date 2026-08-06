@@ -42,6 +42,53 @@ describe('GET /api/settings', () => {
   });
 });
 
+describe('/api/settings - the env-sourced business number', () => {
+  it('GET returns it ALONGSIDE the settings (never inside them - it is not patchable)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .get('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE); // a VA cookie
+    expect(res.status).toBe(200);
+    expect(res.body.businessPhoneNumber).toBe('+15550009999');
+    expect(res.body.settings.businessPhoneNumber).toBeUndefined();
+  });
+
+  it('PUT returns it too (the dashboard re-sets its state from the save response)', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ quietHoursEnabled: false });
+    expect(res.status).toBe(200);
+    expect(res.body.businessPhoneNumber).toBe('+15550009999');
+  });
+
+  it('is env-sourced and NOT patchable: a body carrying it changes nothing', async () => {
+    const { app } = makeWebhookHarness();
+    const res = await request(app)
+      .put('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_ADMIN_COOKIE)
+      .send({ businessPhoneNumber: '+15550001111' });
+    expect(res.status).toBe(200);
+    // The response still carries the ENV value, and nothing was stored.
+    expect(res.body.businessPhoneNumber).toBe('+15550009999');
+    expect(res.body.settings.businessPhoneNumber).toBeUndefined();
+  });
+
+  it('is OMITTED (never null) when the env has no business number', async () => {
+    const { app } = makeWebhookHarness({ env: { BUSINESS_PHONE_NUMBER: undefined } });
+    const res = await request(app)
+      .get('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+    expect(res.status).toBe(200);
+    expect('businessPhoneNumber' in res.body).toBe(false);
+  });
+});
+
 describe('PUT /api/settings — admin only', () => {
   it('a VA is forbidden (403)', async () => {
     const { app } = makeWebhookHarness();

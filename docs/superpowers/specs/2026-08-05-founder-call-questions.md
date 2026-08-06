@@ -25,10 +25,10 @@ Here's what we're working with:
 | Conversations | **721**, including 123 group texts |
 | Properties | **75** |
 
-There are three of them - your people, your group texts, and your properties.
-**Only 117 rows are marked for you to look at.** The other 512 we're confident
-about, so a quick scan is plenty. There's a guide to filling them in at the end
-of this note.
+There are three spreadsheets - your people, your group texts, and your
+properties. **Only 117 rows are marked for you to look at.** The other 512 we're
+confident about, so a quick scan is plenty. There's a guide to filling them in at
+the end of this note.
 
 ---
 
@@ -302,12 +302,12 @@ meant we could pull **voucher sizes for 478 people and identify your landlords
 automatically**, without you typing anything.
 
 That's genuinely the reason this import is in good shape rather than a mess. It also
-means the spreadsheet should look familiar - it's mostly your own shorthand, tidied
-up.
+means the spreadsheets should look familiar - they're mostly your own shorthand,
+tidied up.
 
-### The spreadsheet is yours to overrule
+### The spreadsheets are yours to overrule
 
-Everything in it is our best guess, not a decision. If you change a name, a voucher
+Everything in them is our best guess, not a decision. If you change a name, a voucher
 size, or say someone's a landlord rather than a tenant, **that's what goes in.** If
 someone shouldn't come across at all, put a `Y` in the **drop** column.
 

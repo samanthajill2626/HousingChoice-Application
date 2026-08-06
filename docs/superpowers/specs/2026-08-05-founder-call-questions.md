@@ -3,10 +3,18 @@
 Context: go-live **2026-08-10**. Number `+16782842537` ports, this application
 becomes the system of record, Quo and Airtable switch off.
 
-Everything below is grounded in the actual exports (profiled 2026-08-05):
-828 Quo contacts -> 543 people, 17,854 messages, 1,571 calls, 707 conversations,
-2026-03-05 -> 2026-08-03. Airtable: 40 landlord rows, 10 properties, 17 tenants,
-13 tours.
+Everything below is grounded in the actual exports, and the importer has been
+built and run against them end to end:
+
+- **828 Quo contact rows -> 629 people** (264 duplicate rows collapsed, 86 numbers
+  with traffic she never saved, 1 Airtable-only)
+- **17,854 messages, 1,571 calls**, 2026-03-05 -> 2026-08-03
+- **721 threads**, 123 of them multi-party
+- **75 properties** - 10 from Airtable, 65 mined from her sent texts
+- **116 rows (18%) flagged for her review**; the rest are a spot-check
+
+A full import into a scratch database completed and re-ran cleanly (19,422 message
+items, zero duplicates), so the numbers below are measured, not projected.
 
 Questions are ordered by what blocks us. Tier 1 can stop the cutover; tier 2
 changes what we import; tier 3 is nice to have.
@@ -108,30 +116,75 @@ the size she is *looking* for?
 attribute in the whole corpus and it drives matching. Those are different fields
 with different behaviour - a 3-bed voucher holder may be willing to take a 2-bed.
 
-### 8. The four conflicting bed sizes
+### 8. The twelve conflicting bed sizes
 
-**Ask:** These four people appear with two different voucher sizes. Which is right?
+These are rows **HC-0001 through HC-0012** - the very top of the contacts sheet,
+so they are the first thing she sees. Every one is a real person with real
+traffic, and we deliberately left `voucher_beds` blank on all twelve rather than
+guess, because voucher size drives matching.
 
-| Names seen | Sizes |
-| --- | --- |
-| `Jasmine Maddox-2bed` / `Jasmine Maddox*-3bed` | 2 or 3 |
-| `Candy Faulk-3bed` / `Candy-4bed` / `Candy Faulk-4bed` | 3 or 4 |
-| `Maliko Hawkins-2bed` / `Maliko Hawkins-3 Bed` | 2 or 3 |
-| `there-1bed` / `June-2bed` / `sam-3bed` / `June-5bed` / `Davis-3bed` / `Sam-2bed` (all one number) | 1, 2, 3, 5 |
+| Row | Names saved | Sizes | Msgs |
+| --- | --- | --- | --- |
+| HC-0001 | `Angela-1bed` / `Angela-2bed` | 1 or 2 | 201 |
+| HC-0002 | `there-1bed` / `June-2bed` / `sam-3bed` / `June-5bed` / `Davis-3bed` / `Sam-2bed` | 1,2,3,5 | 157 |
+| HC-0003 | `Smith-1bed` / `Smith-2bed` | 1 or 2 | 74 |
+| HC-0004 | `Candy Faulk-3bed` / `Candy-4bed` / `Candy Faulk-4bed` | 3 or 4 | 66 |
+| HC-0005 | `Mohammed Katib-1bed` / `mohammed grady-3bed` / `mohammed grady-2bed` / `Muhammad Khateeb caseworker` | 1,2,3 | 53 |
+| HC-0006 | `Patricia Wingo-1 Bed` / `Patricia Wingo-2bed` | 1 or 2 | 42 |
+| HC-0007 | `Devontrae Henderson-4bed` / `-5bed` / `Devontrae-4bed` | 4 or 5 | 43 |
+| HC-0008 | `Jasmine Maddox-2bed` / `Jasmine Maddox*-3bed` | 2 or 3 | 43 |
+| HC-0009 | `Tempest Davis-4bed` / `-5bed` | 4 or 5 | 35 |
+| HC-0010 | `Maliko Hawkins-2bed` / `Maliko Hawkins-3 Bed` | 2 or 3 | 31 |
+| HC-0011 | `Roshanda Campbell-3bed` / `-4bed` | 3 or 4 | 20 |
+| HC-0012 | `Doriyah Jordan-4bed` / `-5bed` | 4 or 5 | 9 |
 
-**Why it matters:** Four out of 478 is a remarkably clean rate and we do not want
-to auto-resolve them. The last one looks like a shared or reassigned phone - worth
-understanding on its own.
+**Two deserve extra attention:**
+
+- **HC-0002** - one phone number carrying six different names (June, Sam, Davis,
+  "there") and four voucher sizes, with 157 messages. A shared household phone? A
+  reassigned number? An office line? Whatever it is, it collapses to ONE contact
+  record in our system, so she needs to tell us what it actually is.
+- **HC-0005** - three spellings (`Mohammed Katib`, `mohammed grady`,
+  `Muhammad Khateeb`), a caseworker marker, three voucher sizes, 53 messages.
+  Very likely a **caseworker whose number covers several clients**, which
+  one-contact-per-phone cannot represent. Worth understanding before cutover: if
+  she has more of these, we need a plan for them.
+
+**Why twelve and not four:** an earlier pass over the raw export found only four,
+because it read just the name fields. Quo also mirrors a near-duplicate name into
+the `company` column, and reading that too surfaced eight more. All twelve were
+verified genuine by hand - no false positives.
 
 ### 9. Where does your real property list live?
 
 **Ask:** The Airtable properties table has 10 rows, and 26 of its 38 columns are
 completely empty. Is that everything, or do properties live somewhere else?
 
-**Why it matters:** She texts addresses constantly - the same address bodies repeat
-49, 40, 26 and 23 times in her outbound messages. That does not look like a
-10-property operation. We are pre-filling the workbook with addresses mined from
-her texts so she can confirm or delete them rather than typing from scratch.
+**Why it matters:** We mined her sent texts for addresses and found **65
+properties that are not in Airtable** - and they are not marginal. Her ten
+most-texted addresses:
+
+| Times texted | Address | In Airtable? |
+| --- | --- | --- |
+| 88 | 1460 Lavender Dr NW Atlanta, GA 30314 | **no** |
+| 80 | 1721 Browning St. SW, Atlanta, GA 30314 | **no** |
+| 71 | 2018 Ruth St 30318 | yes |
+| 62 | 470 Bolton Rd NW Atlanta, GA 30331 | **no** |
+| 47 | 934 Joseph E Boone Blvd NW, Atlanta, GA 30314 | **no** |
+| 45 | 846 Durant Pl NE Unit 2 Atlanta, GA 30308 | **no** |
+| 42 | 2840 Alexandria Drive SW 30331 | yes |
+| 42 | 1940 Fremont St SE Atlanta, GA 30315 | **no** |
+| 41 | 1385 Nash Road NW Atlanta, GA 30331 | **no** |
+| 40 | 944 Joseph E Boone Blvd NW Atlanta, GA 30314 | **no** |
+
+The property she texts most in the entire corpus - 88 times - is not in her
+properties table at all. Only 5 of the 10 Airtable rows show up in her texts
+even once. So Airtable is not the property book; her outbox is.
+
+The units tab has all 75 pre-filled with send counts, so she confirms or deletes
+rather than typing. **This is the single strongest piece of evidence in this
+document that the founder's real workflow lives somewhere we were not looking** -
+worth walking her through on screen.
 
 **Follow-ups:** Rent, bedrooms, application fee, pet policy, requirements - the
 columns exist in Airtable and were never filled. Where does that live today?
@@ -234,3 +287,8 @@ sharing a line, or an office number?
   the rest are a spot-check.
 - **Do not edit the `row_key` column**, and if she opens it in Excel, the phone
   column may lose its `+`. That is expected and harmless - we do not join on it.
+- **The workbook is ready now** - `W:\AI Projects\Housing Choice\Import Review  2026-08-05\` (contacts.csv 629 rows, groups.csv 123, units.csv 75). It can go to
+  her during or straight after the call.
+- **Her review can start before the final export exists.** Re-planning against the
+  8/09 export carries her edits forward and marks only genuinely new people, so
+  she reviews a diff of maybe 20-40 rows rather than 629 twice.

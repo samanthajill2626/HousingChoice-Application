@@ -48,6 +48,21 @@ export interface ThreadIndex {
   traffic: Map<string, TrafficStats>;
   /** Phones with traffic that Quo has no contact row for (80 in the real export). */
   orphanPhones: Set<string>;
+  /**
+   * Messages and calls that belong to NO importable thread, because their
+   * conversation has no outside participant. Counted and surfaced rather than
+   * quietly dropped: on the real export this is 2 messages Sam sent to her own
+   * number and 1 call from a withheld caller ID, and "17,852 of 17,854 written"
+   * with no explanation is indistinguishable from a bug.
+   */
+  unroutable: {
+    messages: QuoMessage[];
+    calls: QuoCall[];
+    /** Withheld caller ID (`Anonymous` in the `from` column) — recurs in production. */
+    anonymousCalls: number;
+    /** Traffic where every participant is one of our own numbers (self-texts). */
+    selfAddressed: number;
+  };
   warnings: string[];
 }
 
@@ -101,12 +116,14 @@ export function buildThreadIndex(quo: QuoExport): ThreadIndex {
   const threadIdOf = new Map<string, string>();
   const threads = new Map<string, ImportedThread>();
 
+  const unroutableConvIds = new Set<string>();
   for (const [quoConvId, partSet] of partsByQuoConv) {
     const participants = [...partSet].sort();
     if (participants.length === 0) {
-      // A thread with no outside participant is ours-to-ourselves (2 rows in the
-      // real export). Nothing to import; report rather than silently drop.
-      warnings.push(`Quo conversation ${quoConvId} has no outside participant — skipped.`);
+      // No outside participant: either we texted ourselves, or the counterparty
+      // number is unusable (a withheld caller ID). Nothing to attach a thread
+      // to. Recorded so the totals reconcile against the export.
+      unroutableConvIds.add(quoConvId);
       continue;
     }
     const isGroup = participants.length > 1;
@@ -185,10 +202,37 @@ export function buildThreadIndex(quo: QuoExport): ThreadIndex {
   const orphanPhones = new Set<string>();
   for (const phone of traffic.keys()) if (!contactPhones.has(phone)) orphanPhones.add(phone);
 
+  // --- reconcile: everything the export held that no thread claimed ---
+  const unroutableMessages = quo.messages.filter((m) => unroutableConvIds.has(m.conversationId));
+  const unroutableCalls = quo.calls.filter((c) => unroutableConvIds.has(c.conversationId));
+  const anonymousCalls = unroutableCalls.filter(
+    (c) => !normalizeToE164(c.direction === 'incoming' ? c.from : c.to),
+  ).length;
+  const selfAddressed =
+    unroutableMessages.filter((m) => {
+      const ends = [m.from, ...m.to].map((p) => normalizeToE164(p));
+      return ends.every((p) => p !== undefined && ownNumbers.has(p));
+    }).length + (unroutableCalls.length - anonymousCalls);
+
+  if (unroutableMessages.length > 0 || unroutableCalls.length > 0) {
+    warnings.push(
+      `${unroutableMessages.length} message(s) and ${unroutableCalls.length} call(s) belong to no ` +
+        `importable thread and were NOT imported: ${selfAddressed} addressed only to our own ` +
+        `number(s), ${anonymousCalls} from a withheld caller ID. ` +
+        `Import totals will be short by exactly this much.`,
+    );
+  }
+
   return {
     threads: [...threads.values()].sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt)),
     traffic,
     orphanPhones,
+    unroutable: {
+      messages: unroutableMessages,
+      calls: unroutableCalls,
+      anonymousCalls,
+      selfAddressed,
+    },
     warnings,
   };
 }

@@ -56,6 +56,9 @@ export interface PlanSummary {
   needsReview: number;
   messages: number;
   calls: number;
+  /** Messages/calls that belong to no importable thread — the totals reconcile. */
+  unroutableMessages: number;
+  unroutableCalls: number;
   threads: number;
   groupThreads: number;
   optedOut: number;
@@ -125,6 +128,8 @@ export function runPlan(options: PlanOptions): PlanResult {
       needsReview: merge.stats.flagged,
       messages: quo.messages.length,
       calls: quo.calls.length,
+      unroutableMessages: threads.unroutable.messages.length,
+      unroutableCalls: threads.unroutable.calls.length,
       threads: threads.threads.length,
       groupThreads: threads.threads.filter((t) => t.isGroup).length,
       optedOut: optOutPhones.size,

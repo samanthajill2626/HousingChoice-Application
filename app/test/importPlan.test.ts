@@ -144,6 +144,17 @@ describe('thread folding', () => {
     expect(new Set(ids).size).toBe(ids.length);
     expect(ids).toHaveLength(plan.quo.messages.length);
   });
+
+  it('reconciles: every export row is either threaded or reported unroutable', () => {
+    // The totals must always add up on screen. A short import count with no
+    // explanation reads as data loss, which is the one failure mode that would
+    // look like success (spec section 5).
+    const threaded = plan.threads.threads.reduce((n, t) => n + t.messages.length, 0);
+    expect(threaded + plan.threads.unroutable.messages.length).toBe(plan.quo.messages.length);
+
+    const threadedCalls = plan.threads.threads.reduce((n, t) => n + t.calls.length, 0);
+    expect(threadedCalls + plan.threads.unroutable.calls.length).toBe(plan.quo.calls.length);
+  });
 });
 
 describe('address mining', () => {

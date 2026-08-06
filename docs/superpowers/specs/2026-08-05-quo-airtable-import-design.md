@@ -1,7 +1,8 @@
 # Quo + Airtable import (M1.6) - design
 
 - Date: 2026-08-05
-- Status: approved (brainstorm 2026-08-05, Cameron)
+- Status: BUILT (2026-08-05/06). Both commands implemented, 77 import tests,
+  full gates green, exercised end-to-end against the real export.
 - Milestone: M1.6 "Data import" (PHASE1_KICKOFF_PROMPT.md)
 - Hard deadline: **go-live 2026-08-10** - number port + cutover
 
@@ -60,16 +61,23 @@ finding in the exports:
   (`L'Oreal Cleveland-4bed`). Used only as a name fallback; never imported as an
   employer.
 
-After merging on phone, 543 people classify as:
+After merging on phone AND folding in the orphan numbers and Airtable rows, the
+importer produces **629 people** (verified by running it):
 
 | Class | Count |
 | --- | --- |
 | Tenant (`-Nbed`) | 478 |
-| Landlord (handshake) | 16 |
-| Caseworker | 16 |
-| Unclassified | 33 |
+| Unknown / unclassified | 110 |
+| Landlord (handshake) | 22 |
+| Partner (caseworker) | 19 |
 
-Only **4** phones carry conflicting bed sizes across their merged rows.
+629 = 542 distinct Quo phones + 86 numbers with traffic she never saved + 1
+Airtable-only person. 264 duplicate Quo rows collapse away.
+
+**12** phones carry conflicting bed sizes. An earlier hand-profile of the raw
+export found only 4 because it read just the name fields; reading `company` too
+(where Quo mirrors a near-duplicate name) surfaced 8 more. All 12 verified
+genuine - no false positives.
 
 ### 2.4 Multi-party threads
 
@@ -98,13 +106,42 @@ detail.
 
 ### 2.6 Loose ends in the data
 
-- **80 phone numbers have traffic but no contact row** (642 messages; 47 have 5+;
-  the busiest has 51 and was active 2026-08-02). Real people Sam never saved.
+- **86 phone numbers have traffic but no contact row.** Real people Sam never
+  saved. (A first hand-profile said 80; it under-counted because it took only one
+  counterparty per message and so missed members of group threads.)
 - **19 contacts have a phone but no traffic at all.**
 - **2 malformed phones**: `+140428542854` (11 digits), `+7143055014` (non-US).
 - **1 inbound STOP** across the whole corpus - must be honoured on import.
 - Only **1 email address** in 828 contacts. Email is not a meaningful import channel.
 - 2 contacts carry Sam's own number as their phone (self-contacts) - dropped.
+- **3 rows cannot be imported at all** and the totals say so out loud: 2 messages
+  Sam addressed to her own number, and 1 call from a withheld caller ID
+  (`Anonymous` in the `from` column - this will recur in production). Import
+  totals are short by exactly this much, and both CLIs print the reconciliation
+  rather than leaving a short count looking like data loss.
+
+### 2.7 Source-data defects found by building against the real files
+
+These are properties of Quo's export, not of our code. They will be present again
+in the 8/09 export, so they are recorded here rather than only in commit messages.
+
+- **Lone CR characters inside message bodies.** The messages export is
+  LF-terminated (22,035 LF, 155 CRLF) yet contains **18 bare CR** characters
+  sitting inside unquoted bodies - trailing whitespace in what a tenant typed.
+  A parser that treats a lone CR as a record terminator (the classic pre-OSX Mac
+  reading) splits those records in half: 15 real messages were lost and each tail
+  manufactured a phantom contact. `csv.ts` treats a lone CR as content. Quote
+  balance was independently verified across the whole file - there is no
+  desynchronization, so this was the only structural defect.
+- **`company` mirrors the display name.** It is not an employer field. Reading it
+  as a name variant is what raises voucher-size conflict detection from 4 to 12.
+- **Junk in the Airtable `Quo Id` column** - two rows contain the literal string
+  `Claratel`. Shape-checked (24-hex) before joining.
+- **Withheld caller ID** arrives as the literal `Anonymous` in a call's `from`
+  column, not as an empty value or a number.
+- **Airtable column names carry trailing spaces and the founder's spelling**
+  (`tenant type `, `caseworker organization `, `Eviction History `, and the value
+  `Casewoker`). Matched verbatim; tidying them silently returns empty.
 
 ## 3. Design
 
@@ -356,7 +393,7 @@ already understood and directly testable.
 
 | When | What |
 | --- | --- |
-| 8/05 (tonight) | Spec, `import:plan`, `import:apply`, tests, workbook v1 generated |
+| 8/05 (done) | Spec, `import:plan`, `import:apply`, 77 tests, workbook v1 generated from the real export; full import rehearsed twice against a scratch DB (19,422 message items, zero duplicates) |
 | 8/06 | Founder call. Confirm conventions, get her the workbook. Second Quo export requested (id-stability check). |
 | 8/07-8/08 | She reviews. We fix whatever the call changed. |
 | 8/09 | Final export. `import:plan --prior` -> she reviews the diff only. Full rehearsal: apply to **dev**, review in the real dashboard. |

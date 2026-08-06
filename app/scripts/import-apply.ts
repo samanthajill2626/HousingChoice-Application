@@ -151,8 +151,24 @@ console.log(`    status preserved      : ${report.contacts.statusPreserved} (a h
 console.log(`  conversations written   : ${report.conversations.written}`);
 console.log(`    relay groups          : ${report.conversations.groups}`);
 console.log(`    flagged connect-day-1 : ${report.conversations.connectedDayOne}`);
-console.log(`  messages written        : ${report.messages.written}`);
-console.log(`  calls written           : ${report.calls.written}`);
+// Print the reconciliation, not just the total, so a short count is never left
+// looking like data loss (spec §5).
+const unroutable = plan.threads.unroutable;
+console.log(
+  `  messages written        : ${report.messages.written} of ${plan.quo.messages.length} in the export`,
+);
+if (unroutable.messages.length > 0) {
+  console.log(`    not importable        : ${unroutable.messages.length} (no outside participant)`);
+}
+console.log(
+  `  calls written           : ${report.calls.written} of ${plan.quo.calls.length} in the export`,
+);
+if (unroutable.calls.length > 0) {
+  console.log(
+    `    not importable        : ${unroutable.calls.length} ` +
+      `(${unroutable.anonymousCalls} withheld caller ID)`,
+  );
+}
 console.log(`  units written           : ${report.units.written}`);
 console.log(`    dropped by review     : ${report.units.skippedDropped}`);
 

@@ -139,8 +139,20 @@ console.log(
 console.log(`  SMS suppressed (sent STOP)      : ${s.optedOut}`);
 
 console.log('\n--- conversations ---');
-console.log(`  messages                        : ${s.messages}`);
-console.log(`  calls                           : ${s.calls}`);
+console.log(`  messages in export              : ${s.messages}`);
+console.log(`  calls in export                 : ${s.calls}`);
+// State the reconciliation explicitly. "17,852 of 17,854 imported" with no
+// explanation is indistinguishable from a bug (spec §5).
+console.log(
+  `  will import                     : ${s.messages - s.unroutableMessages} messages, ` +
+    `${s.calls - s.unroutableCalls} calls`,
+);
+if (s.unroutableMessages > 0 || s.unroutableCalls > 0) {
+  console.log(
+    `  NOT importable                  : ${s.unroutableMessages} messages, ${s.unroutableCalls} calls ` +
+      `(no outside participant — see warnings)`,
+  );
+}
 console.log(`  threads                         : ${s.threads}`);
 console.log(`  ...of which multi-party groups  : ${s.groupThreads}`);
 

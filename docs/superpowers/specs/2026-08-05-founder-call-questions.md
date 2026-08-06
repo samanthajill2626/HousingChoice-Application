@@ -53,6 +53,23 @@ avoid it if we can.
 
 Where does the new A2P registration stand?
 
+We re-filed the campaign on **26 July** because the app had picked up things the
+original filing didn't cover - photo attachments, group texting, and verification
+codes for staff. Two items were left with you to confirm at the time:
+
+- The **Terms and Privacy pages** being live at `tenant.place/terms` and
+  `tenant.place/privacypolicy`
+- The **number list** - every number we're able to text from has to be attached to
+  the campaign
+
+Worth knowing why we keep asking: **we can't send any texts at all until that
+campaign is approved.** Changing the link and opt-in answers can also trigger a
+fresh review, which adds time. So if it's still pending on Monday, texting won't
+work on day one even though everything else will.
+
+**One number to add:** 678-284-2537 needs to go on that list too, once it
+transfers across. It wasn't on the original because it wasn't ours yet.
+
 ### 3. Please export from Quo one more time this week
 
 Could you run the same three Quo exports again - contacts, messages, and calls -

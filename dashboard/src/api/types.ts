@@ -172,6 +172,20 @@ export interface SystemFlags {
   /** Outbound messaging driver as displayed. `mock` = the twilio driver
    *  redirected to a fake host (local `--mock` loop); never appears deployed. */
   messagingDriver: 'twilio' | 'console' | 'mock';
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164 - what this app is
+   *  configured to send FROM. OPTIONAL: the backend OMITS the key when the env
+   *  has no number - it is never `null` (a `null` would also break the
+   *  every-flag-is-a-boolean-or-string assertion in the backend's service
+   *  test), so test the unset case with `=== undefined`.
+   *
+   *  PII: this is the ONLY phone number this payload may ever carry, and it is
+   *  ours - the number on our public flyers - never a contact's or the
+   *  founder's. It does NOT weaken the "never secrets" rule above.
+   *
+   *  HONEST SCOPE: configured here is not proof a send succeeds; the number
+   *  must also be attached to the Messaging Service and covered by the A2P
+   *  campaign, neither of which this payload checks. */
+  businessPhoneNumber?: string;
 }
 
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */

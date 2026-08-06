@@ -75,6 +75,31 @@ describe('FlagPills', () => {
     expect(screen.queryByText('twilio')).not.toBeInTheDocument();
   });
 
+  it('shows the configured sending number and says plainly what it does not prove', async () => {
+    getSystemFlags.mockResolvedValue(flags({ businessPhoneNumber: '+16782842537' }));
+    render(<FlagPills />);
+
+    expect(await screen.findByText('(678) 284-2537')).toBeVisible();
+    expect(screen.getByText('Sending from')).toBeInTheDocument();
+    // HONEST SCOPE: the row shows what this app is configured to send FROM. It
+    // does NOT prove a send succeeds, and the copy has to say so out loud.
+    expect(screen.getByText(/must also be attached to the Messaging Service/i)).toBeVisible();
+  });
+
+  it('renders an explicit Not set state rather than an empty sending-number pill', async () => {
+    // Unconfigured means the key is ABSENT, not null (the backend omits it), so
+    // `flags()` with no override already IS the unconfigured shape - do not give
+    // the builder a default. The copy is `Not set`, NOT `Not configured`: the
+    // push pill already owns that literal and the singular getByText above
+    // ("shows push Configured/Not configured by text") would throw on a second
+    // match.
+    getSystemFlags.mockResolvedValue(flags());
+    render(<FlagPills />);
+
+    expect(await screen.findByText('Not set')).toBeVisible();
+    expect(screen.getByText('Sending from')).toBeInTheDocument();
+  });
+
   it('shows an error block + Retry when the fetch fails, and retries on click', async () => {
     getSystemFlags.mockRejectedValueOnce(new ApiError(500, 'server_error', 'boom'));
     render(<FlagPills />);

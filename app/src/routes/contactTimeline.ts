@@ -45,6 +45,12 @@ import {
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
 import {
+  flushComposeFailTally,
+  newComposeFailTally,
+  recordComposeFail,
+  type ComposeFailTally,
+} from '../lib/composeFailTally.js';
+import {
   createContactsRepo,
   type ContactItem,
   type ContactsRepo,
@@ -533,7 +539,7 @@ function tourReminderBodyOrEmpty(
   tour: TourItem,
   timezone: string,
   address: Address | string | undefined,
-  log: Logger,
+  tally: ComposeFailTally,
 ): string {
   if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
   try {
@@ -545,10 +551,9 @@ function tourReminderBodyOrEmpty(
     });
   } catch (err) {
     if (err instanceof UncomposableReminderError) {
-      log.warn(
-        { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
-        'tour reminder body uncomposable on a read path - returning an empty body',
-      );
+      // RECORD, do not warn: this runs per rung inside a per-tour walk, and the
+      // timeline is refetched on every SSE burst. The caller flushes ONE warn.
+      recordComposeFail(tally, row, tour);
       return '';
     }
     throw err;
@@ -660,6 +665,7 @@ async function gatherUpcoming(params: {
   };
 
   // Walk 1 — tenant tours → 1:1-routed tour reminders.
+  const composeFails = newComposeFailTally();
   const tourWalk = (async (): Promise<TimelineScheduled[]> => {
     const tours = await repos.toursRepo.listByTenant(contactId);
     const perTour = await Promise.all(
@@ -695,7 +701,7 @@ async function gatherUpcoming(params: {
             at: row.dueAt,
             source: 'tour_reminder',
             reminderKind: row.kind,
-            body: tourReminderBodyOrEmpty(row, tour, timezone, address, log),
+            body: tourReminderBodyOrEmpty(row, tour, timezone, address, composeFails),
             ...(tenantConv !== undefined && { conversationId: tenantConv.conversationId }),
             ...(suppression !== undefined && { suppression }),
             refType: 'tour',
@@ -704,6 +710,7 @@ async function gatherUpcoming(params: {
         });
       }),
     );
+    flushComposeFailTally(composeFails, log, 'contact_timeline_upcoming');
     return perTour.flat();
   })();
 

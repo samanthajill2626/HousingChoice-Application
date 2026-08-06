@@ -68,6 +68,12 @@ import {
   type RunDueTourRemindersDeps,
 } from '../jobs/tourReminders.js';
 import { isQuietTime } from '../lib/quietHours.js';
+import {
+  flushComposeFailTally,
+  newComposeFailTally,
+  recordComposeFail,
+  type ComposeFailTally,
+} from '../lib/composeFailTally.js';
 import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createMessagingAdapter, type MessagingAdapter } from '../adapters/messaging.js';
@@ -197,6 +203,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     tour: TourItem,
     tz: string,
     address?: Address | string,
+    tally?: ComposeFailTally,
   ): string => {
     if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
     try {
@@ -208,10 +215,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       });
     } catch (err) {
       if (err instanceof UncomposableReminderError) {
-        log.warn(
-          { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
-          'tour reminder body uncomposable on a read path - returning an empty body',
-        );
+        // A tally means the caller is mapping a LADDER and will flush ONE warn
+        // for the whole request (see ComposeFailTally). Without one - the
+        // single-row PATCH / send-now responses - warn here, which is already
+        // once per request.
+        if (tally !== undefined) recordComposeFail(tally, row, tour);
+        else
+          log.warn(
+            { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
+            'tour reminder body uncomposable on a read path - returning an empty body',
+          );
         return '';
       }
       throw err;
@@ -417,6 +430,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         evaluate((dueAt > nowIso && isQuietTime(dueAt, window)) || (wallClockQuiet && dueAt <= nowIso));
     }
 
+    const tally = newComposeFailTally();
     const reminderViews: TourReminderView[] = rows
       .map((row) => {
         const state = stateOf(row);
@@ -427,7 +441,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           kind: row.kind,
           dueAt: row.dueAt,
           state,
-          body: bodyFor(row, tour, window.timezone, address),
+          body: bodyFor(row, tour, window.timezone, address, tally),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -438,6 +452,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       })
       // Ascending by dueAt (the ladder's chronological order).
       .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0));
+    flushComposeFailTally(tally, log, 'tour_reminders_list');
 
     const next = reminderViews.find((v) => v.state === 'upcoming');
 

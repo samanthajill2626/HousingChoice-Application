@@ -55,6 +55,11 @@ import {
   composeTourReminderBody,
   UncomposableReminderError,
 } from '../messages/tourCopy.js';
+import {
+  flushComposeFailTally,
+  newComposeFailTally,
+  recordComposeFail,
+} from '../lib/composeFailTally.js';
 import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import type { Address } from '../lib/address.js';
 import { readQuietHoursWindow } from '../jobs/tourReminders.js';
@@ -213,6 +218,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         'group scheduled bucket: unit read failed - composing without an address',
       );
     }
+    const composeFails = newComposeFailTally();
     const scheduled = rows
       .filter(
         (r) => r.sentAt === undefined && r.canceledAt === undefined && r.skippedAt === undefined,
@@ -238,10 +244,9 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
             });
           } catch (err) {
             if (err instanceof UncomposableReminderError) {
-              log.warn(
-                { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
-                'tour reminder body uncomposable on a read path - returning an empty body',
-              );
+              // RECORD, do not warn - this is inside a per-rung map on a thread
+              // view that refetches on every SSE burst. Flushed once below.
+              recordComposeFail(composeFails, row, tour);
               return '';
             }
             throw err;
@@ -251,6 +256,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
         refType: 'tour' as const,
         refId: tour.tourId,
       }));
+    flushComposeFailTally(composeFails, log, 'group_thread_scheduled');
     // `timezone` is the zone these bodies were composed in (spec D8) - the
     // group thread renders each card's fire time in it, exactly like the
     // contact timeline. The two EMPTY-bucket early returns above omit it: they

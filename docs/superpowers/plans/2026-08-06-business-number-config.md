@@ -76,10 +76,46 @@ Use these EXACT names. A later task depends on each of them.
 
 ## Task order and independence
 
-Tasks 1-3 are the rename and MUST land together (task 1 alone leaves the tree
-red). Task 4 (predicate), Task 5 (press-0), and Tasks 6-8 (dashboard) are
-independently mergeable after 1-3. Task 9 (docs) can land any time after 1-3.
+Tasks 1-3 are ONE rename and land in ONE commit at the end of Task 3. Task 1
+alone leaves the tree red, and committing Tasks 1-2 without Task 3 leaves the
+e2e stack booting on a dead env name. Do not commit until Task 3's gates pass.
+
+Task 4 (predicate), Task 5 (press-0), and Tasks 6-8 (dashboard) are
+independently mergeable after that. Task 9 (docs) can land any time after 1-3.
 If time runs short, stop AFTER a task, never inside one.
+
+## Verified anchors (checked 2026-08-06 - re-verify before editing)
+
+Line numbers drift. Every anchor below was read; if what you find does not
+match, TRUST THE CODE and adjust, do not force the number.
+
+- `app/src/lib/config.ts` - the OAuth domain loop CLOSES at :1126. The phone
+  block's comment starts at :1128 and the production fail-fast closes at :1149.
+  EDIT :1128-1149 ONLY. Starting at :1126 eats the OAuth loop's brace and
+  produces a syntax error.
+- `RUNBOOK.md` - the ORDER MATTERS section is :605-620. Line :622 begins
+  "Separately, the ported number must also be added to the Messaging Service's
+  sender pool", which is the caveat D7 and Task 8 depend on. DELETE :605-620,
+  KEEP :622-625.
+- `app/src/routes/webhooks/twilio.ts:875-877` - a comment stating the SMS path
+  no longer uses `getByPoolNumber`. Task 4 makes it use exactly that. The
+  comment MUST be rewritten in the same edit (see Task 4 Step 5).
+- `dashboard/src/routes/settings/NumbersSection.test.tsx:355-372` - the
+  AdminRoute BOUNCE test, not a title pin. Its
+  `queryByRole('heading', { name: 'Group text numbers' })` negative assertion
+  goes VACUOUS after the retitle. See Task 7 Step 5.
+- `app/test/founderTriage.test.ts:467` - the ONE
+  `not.toContain('reach the team')` assertion. There is no second one.
+- `app/test/systemStatus.service.test.ts:66-68` - a loop asserting EVERY flag
+  value is `boolean` or `string`. This is why the new field must be OPTIONAL
+  and omitted when unset, never `null` (`typeof null === 'object'` fails it).
+- `app/src/services/systemStatus.ts` - where `getFlags` and `SystemFlags`
+  actually live. `app/src/routes/system.ts` needs no change for the payload.
+- `app/src/routes/settings.ts:22-26` - `SettingsRouterDeps` has NO config
+  member, and `app/src/routes/api.ts:530-537` passes none. Task 6 ADDS both.
+- `fake-twilio` - `sayContainsPress0` exists in exactly FOUR places:
+  `src/engine/twimlInterpreter.ts:10,62` and `test/twimlInterpreter.test.ts:36,60`.
+  The engine never consumes it. NO fixture churn results from Task 5.
 
 ---
 
@@ -100,10 +136,12 @@ blank `BUSINESS_PHONE_NUMBER` MUST NOT throw.
 
 - [ ] **Step 1: Rewrite the config-parse test to describe the singular value**
 
-Replace the whole `describe('config: OUR_PHONE_NUMBERS / MEDIA_BUCKET parsing')`
-block's phone-number tests in `app/test/twilioSmsWebhook.test.ts` (the
-multi-entry parse test at :1056-1062 and the default/fail-fast test that
-follows) with:
+In `app/test/twilioSmsWebhook.test.ts`, the describe block
+`config: OUR_PHONE_NUMBERS / MEDIA_BUCKET parsing` contains THREE tests: the
+multi-entry parse test, the default/fail-fast test, and a `MEDIA_BUCKET` test
+at approximately :1071-1074. RENAME the describe to
+`config: BUSINESS_PHONE_NUMBER / MEDIA_BUCKET parsing`, KEEP the MEDIA_BUCKET
+test untouched, and replace ONLY the two phone tests with:
 
 ```ts
 describe('config: BUSINESS_PHONE_NUMBER parsing', () => {
@@ -136,11 +174,18 @@ describe('config: BUSINESS_PHONE_NUMBER parsing', () => {
 });
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run the test to verify it fails FOR THE RIGHT REASON**
 
 Run: `cd app && npx vitest run test/twilioSmsWebhook.test.ts -t "BUSINESS_PHONE_NUMBER"`
-Expected: FAIL - `businessPhoneNumber` is undefined on every case because the
-field does not exist yet, so the first test fails on the expected value.
+
+Expected: the FIRST test ("parses a single E.164 number") and the FOURTH
+("fails fast on a non-E.164 value") FAIL. Those two are the real RED gate.
+
+HONEST NOTE: the two `toBeUndefined()` tests PASS before the implementation
+exists, because reading a missing property yields `undefined`. They are
+regression guards, not RED gates - do not treat their passing as evidence of
+anything. If test 1 or test 4 passes at this step, STOP: your test is wrong,
+not the code.
 
 - [ ] **Step 3: Replace the type declaration**
 
@@ -163,8 +208,10 @@ In `app/src/lib/config.ts`, replace the `ourPhoneNumbers` declaration at
 
 - [ ] **Step 4: Replace the parse and validation block**
 
-Replace `app/src/lib/config.ts:1126-1150` (from the `// Comma-separated E.164
-list` comment through the closing brace of the production fail-fast) with:
+Replace `app/src/lib/config.ts:1128-1149` - from the `// Comma-separated E.164
+list` comment through the closing brace of the production fail-fast. DO NOT
+start at :1126: that is the closing brace of the OAuth domain loop above, and
+deleting it is a syntax error. Replace with:
 
 ```ts
   // Exactly one E.164 business number; whitespace tolerated. Absent OR blank
@@ -257,10 +304,10 @@ Run: `cd app && npx vitest run test/sendMessage.test.ts`
 Expected: FAIL - the pinning tests fail because `sendMessage.ts` still reads
 `config.ourPhoneNumbers[0]`, which no longer exists.
 
-- [ ] **Step 3: Update the eight production reads**
+- [ ] **Step 3: Update the SEVEN `[0]` reads and the TWO whole-list reads**
 
-Each is a mechanical substitution of `config.ourPhoneNumbers[0]` with
-`config.businessPhoneNumber`. Exact sites:
+Each `[0]` read is a mechanical substitution of `config.ourPhoneNumbers[0]`
+with `config.businessPhoneNumber`. Exact sites:
 
 ```
 app/src/app.ts:136                      contactNumber wiring
@@ -271,6 +318,21 @@ app/src/services/originateCall.ts:96    outbound voice caller ID
 app/src/services/sendMessage.ts:338     pinned 1:1 SMS sender
 app/src/routes/voiceApi.ts:248          staff cell-verification sender
 ```
+
+The TWO whole-list reads must ALSO change here, or typecheck cannot go green -
+Task 4 replaces them properly, but they cannot be left referencing a deleted
+field in the meantime. Make them INTERIM one-element sets:
+
+```ts
+  // INTERIM (Task 4 replaces this with createOurNumberKind): preserve today's
+  // exact membership semantics with the singular value.
+  const ourNumbers = new Set(
+    config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [],
+  );
+```
+
+at `app/src/routes/webhooks/twilio.ts:278` and
+`app/src/routes/webhooks/voice.ts:291`.
 
 In `app/src/services/sendMessage.ts:327`, update the comment that names
 `ourPhoneNumbers[0]` to name `businessPhoneNumber`.
@@ -300,27 +362,34 @@ Then grep and update the rest:
 cd app && grep -rn "OUR_PHONE_NUMBERS\|ourPhoneNumbers" test/ src/
 ```
 
-Every remaining hit is either an env key in a `loadConfig({...})` call (rename
-the key) or a comment (reword). There must be ZERO hits when you are done.
+Most hits are an env key in a `loadConfig({...})` call (rename the key) or a
+comment (reword). THREE are NOT, and each needs a real edit rather than a
+rename - they use the field as an ARRAY:
+
+- `app/test/messaging.test.ts:95-110` - array-shaped assertions on the parsed
+  value. Rewrite them for a single string.
+- `app/test/voiceReadiness.test.ts:46-50` - same, plus the readiness log
+  literal from Step 4.
+- `app/test/contactTimeline.test.ts:706` - a config-field override cast
+  `as unknown as AppConfig`. THE CAST DEFEATS TYPECHECK: this one will NOT
+  appear as a compile error, so it must be found by grep. Change the field to
+  `businessPhoneNumber: '<the number>'`.
+
+There must be ZERO hits in `app/` when you are done.
 
 - [ ] **Step 6: Run typecheck and the app suite**
 
 Run: `npm run typecheck`
 Expected: PASS. A remaining `ourPhoneNumbers` reference is a compile error -
-that is the point of deleting the old symbol.
+that is the point of deleting the old symbol - EXCEPT behind the
+`as unknown as AppConfig` cast noted in Step 5, which the compiler cannot see.
 
 Run: `cd app && npx vitest run`
 Expected: PASS.
 
-- [ ] **Step 7: Commit tasks 1 and 2 together**
-
-```bash
-git status
-git add app/src/lib/config.ts app/src/app.ts app/src/routes/contactTimeline.ts app/src/routes/webhooks/voice.ts app/src/services/originateCall.ts app/src/services/sendMessage.ts app/src/routes/voiceApi.ts app/src/adapters/messaging.ts app/src/routes/public.ts app/test
-git commit -m "refactor(config): OUR_PHONE_NUMBERS list becomes singular BUSINESS_PHONE_NUMBER"
-```
-
-(Run `git status` as its own command FIRST, and read it, before the add.)
+DO NOT COMMIT YET. The commit happens at the end of Task 3, so the tree never
+holds a state where the app reads the new name and the e2e stack sets the old
+one.
 
 ---
 
@@ -376,10 +445,32 @@ and update the empty-case message at :201 to
 `'(BUSINESS_PHONE_NUMBER is empty!)'` and the header at :226 to
 `'Business (BUSINESS_PHONE_NUMBER - never pool, never touched):'`.
 
-- [ ] **Step 3: Prove nothing references the old name**
+- [ ] **Step 3: Sweep the remaining code references**
 
-Run: `grep -rn "OUR_PHONE_NUMBERS" --include="*.ts" --include="*.mjs" --include="*.tsx" app dashboard e2e scripts fake-twilio`
-Expected: NO output. (Documentation is Task 9.)
+The rename touches more files than the four above. Run:
+
+```bash
+grep -rn "OUR_PHONE_NUMBERS\|ourPhoneNumbers" --include="*.ts" --include="*.mjs" --include="*.tsx" app dashboard e2e scripts fake-twilio
+```
+
+Files with hits NOT already covered by Tasks 1-2 or the steps above, all
+COMMENTS or a fixture constant - fix every one:
+
+```
+app/src/lib/config.ts:719,1063,1114        comments referencing the old name
+app/src/adapters/messaging.ts              JSDoc (also touched in Task 2)
+app/src/services/sendMessage.ts:336        comment (also touched in Task 2)
+app/src/routes/contactTimeline.ts          comment
+app/src/routes/webhooks/voice.ts           comments
+fake-twilio/src/engine/registry.ts:4       comment naming the env var
+e2e/tests/dashboard-next/public-pages.spec.ts          4 comment sites
+e2e/tests/dashboard-next/unknown-caller-triage.spec.ts 1 comment site
+e2e/tests/dashboard-next/voice-outbound.spec.ts        1 comment site
+e2e/tests/dashboard-next/voice-transcription.spec.ts   1 comment site
+```
+
+Re-run the grep. Expected: NO output. (Documentation is Task 9; `.md` files
+are excluded by the `--include` filters above.)
 
 - [ ] **Step 4: Run the full gates**
 
@@ -388,13 +479,17 @@ Run: `npm test`
 Run: `timeout 1500 npm run e2e`
 Expected: all PASS. e2e proves the renamed env actually boots the stack.
 
-- [ ] **Step 5: Commit**
+- [ ] **Step 5: Commit Tasks 1-3 as ONE commit**
 
 ```bash
 git status
-git add scripts/dev.mjs scripts/e2e-session.mjs scripts/poolNumbersAudit.mjs e2e/fixtures/fakeTwilio.ts e2e/scenarios/steps.ts
-git commit -m "refactor(tooling): scripts and e2e fixtures read BUSINESS_PHONE_NUMBER"
+git add app/src app/test scripts dashboard/src e2e fake-twilio/src
+git commit -m "refactor(config): OUR_PHONE_NUMBERS list becomes singular BUSINESS_PHONE_NUMBER"
 ```
+
+Read the `git status` output BEFORE the add and confirm every path is one you
+touched. This is the only commit for Tasks 1-3: an intermediate commit would
+leave a tree where the app reads one env name and the e2e stack sets another.
 
 ---
 
@@ -544,56 +639,61 @@ Expected: PASS (5 tests).
 
 - [ ] **Step 5: Wire the SMS webhook**
 
-In `app/src/routes/webhooks/twilio.ts`, replace the set build at :278
-(`const ourNumbers = new Set(config.ourPhoneNumbers);` - already renamed in
-Task 2) with:
+In `app/src/routes/webhooks/twilio.ts`, replace the INTERIM set build Task 2
+left at :278 with:
 
 ```ts
   const ourNumberKind = createOurNumberKind({ config, conversations });
 ```
 
-and replace the two-step guard at :870-882 with:
+Then rework the two-step guard at :870-882 IN PLACE. Do not retype the two
+`log.info(...)` lines - MOVE them. Both contain an em dash and must stay
+BYTE-IDENTICAL; this plan is ASCII-only so it cannot reproduce them correctly.
+The resulting shape is:
 
 ```ts
     const kind = await ourNumberKind(From);
     if (kind === 'business') {
-      log.info({ providerSid: MessageSid }, /* EXISTING string from twilio.ts:871 */);
+      // MOVE the existing log.info line from :871 here, unchanged
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
     if (kind === 'pool') {
-      log.info({ providerSid: MessageSid }, /* EXISTING string from twilio.ts:879 */);
+      // MOVE the existing log.info line from :879 here, unchanged
       res.type('text/xml').send(EMPTY_TWIML);
       return;
     }
 ```
 
-CRITICAL: both log strings contain an em dash and MUST stay BYTE-IDENTICAL.
-This plan deliberately does NOT reproduce them (a plan is ASCII-only, so a copy
-here would be wrong). CUT AND PASTE each string from the line it already lives
-on. Do not retype it, and do not "fix" the dash.
+ALSO REWRITE THE COMMENT AT :875-877. It currently says the SMS path uses
+`getAllByPoolNumber` and that "the voice-only getByPoolNumber wrapper is no
+longer used on the SMS path" - which this task reverses. Replace it with a
+comment recording WHY the reversal is safe: for a MEMBERSHIP test the two reads
+are equivalent (`getByPoolNumber` returns `items.find(open) ?? items[0]`, truthy
+whenever the GSI holds any item, open or closed), and the single Query avoids
+paging a whole partition. Leaving that comment in place would tell the next
+reader we regressed the multiplexing fix.
 
 - [ ] **Step 6: Wire the voice webhook**
 
-In `app/src/routes/webhooks/voice.ts`, replace the set build at :291 the same
-way, and replace the guard at :362-370 with:
+In `app/src/routes/webhooks/voice.ts`, replace the INTERIM set build at :291
+the same way, and rework the guard at :362-370 to the same shape:
 
 ```ts
     const kind = await ourNumberKind(From);
     if (kind === 'business') {
-      log.info({ callSid: CallSid }, /* EXISTING string from voice.ts:363 */);
+      // MOVE the existing log.info line from :363 here, unchanged
       sendTwiml(res, new VoiceResponse());
       return;
     }
     if (kind === 'pool') {
-      log.info({ callSid: CallSid }, /* EXISTING string from voice.ts:368 */);
+      // MOVE the existing log.info line from :368 here, unchanged
       sendTwiml(res, new VoiceResponse());
       return;
     }
 ```
 
-Same rule as the SMS guard: cut and paste both strings from their current
-lines. Em dashes, byte-identical.
+Same rule: MOVE both strings, do not retype them.
 
 Leave the ROUTING lookup at :375 (`conversations.getByPoolNumber(To)`) exactly
 as it is - it resolves a conversation to bridge, not membership.
@@ -606,7 +706,7 @@ Expected: PASS.
 Run: `npm run typecheck` then `npm test`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git status
@@ -697,8 +797,12 @@ In `app/src/messages/catalog.ts`:
 our TwiML.
 
 DECISION: KEEP the detector and its type member at :10. It is a generic TwiML
-parser, still correct for any future copy, and removing it would churn seven
-suites for no behavior gain. Add one comment above :62:
+parser, still correct for any future copy, and the engine never consumes the
+field. VERIFIED: it exists in exactly four places - `twimlInterpreter.ts:10,62`
+and `twimlInterpreter.test.ts:36,60` - and those two tests feed it SYNTHETIC
+"press 0" TwiML, so they keep passing untouched. NO fake-twilio fixture needs
+changing. (An earlier draft of this plan claimed removal "would churn seven
+suites"; that figure was wrong.) Add one comment above :62:
 
 ```ts
     // NOTE: the app no longer emits "press 0" copy (the relay team escape was
@@ -706,20 +810,25 @@ suites for no behavior gain. Add one comment above :62:
     // app-specific assertion.
 ```
 
-Then run the fake-twilio suite and fix ONLY fixtures that assert our removed
-copy, not the parser's own behavior:
-
 Run: `cd fake-twilio && npx vitest run`
-Expected: any failure is a fixture asserting the old whisper string. Update
-those fixtures' expected text; do NOT weaken `twimlInterpreter.test.ts`'s own
-parser tests, which legitimately feed it synthetic "press 0" TwiML.
+Expected: PASS with no edits beyond the comment. If something fails, STOP and
+re-read - this plan predicts zero failures here, so a failure means an
+assumption above is wrong.
 
-- [ ] **Step 6: Resolve the vacuous assertions**
+- [ ] **Step 6: Resolve the ONE vacuous assertion**
 
-`app/test/founderTriage.test.ts:455` and `:483` assert
-`not.toContain('reach the team')`. Once the copy is gone these can never fail.
-Delete those two assertions (the tests around them still assert real behavior -
-read them and keep the rest). A test that cannot fail is worse than no test.
+`app/test/founderTriage.test.ts:467` asserts
+`expect(xml).not.toContain('reach the team'); // founder IS the team`. Once the
+copy is deleted from the catalog this can never fail. DELETE that single line;
+the test around it still asserts real founder-whisper behavior, so keep the
+rest.
+
+There is exactly ONE such assertion. Do not go looking for a second - an
+earlier draft of this plan wrongly cited :455 and :483.
+
+Then read the two tests named in the spec's surface map
+(`founderTriage.test.ts:455` and `:483` regions) and confirm they still assert
+something that can fail. If either is now vacuous, resolve it the same way.
 
 - [ ] **Step 7: File the registry issue**
 
@@ -752,10 +861,12 @@ git commit -m "feat(voice): remove the press-0 team escape and the copy advertis
 ### Task 6: Expose the number on both existing endpoints
 
 **Files:**
-- Modify: `app/src/routes/settings.ts:158-161` (GET) and `:194` (PUT)
-- Modify: `app/src/routes/system.ts` (the flags payload)
-- Test: `app/test/systemStatus.service.test.ts:59`,
-  `app/test/system.routes.test.ts:51,130,145`, and the settings route suite
+- Modify: `app/src/routes/settings.ts:22-26` (deps), `:158-161` (GET), `:194` (PUT)
+- Modify: `app/src/routes/api.ts:530-537` (pass the new dep)
+- Modify: `app/src/services/systemStatus.ts` (the flags payload AND the
+  `SystemFlags` type - NOT `routes/system.ts`, which needs no change)
+- Test: `app/test/settings.test.ts`, `app/test/systemStatus.service.test.ts:59`,
+  `app/test/system.routes.test.ts:51` (the FLAGS toEqual only)
 
 **Interfaces:**
 - Consumes: `config.businessPhoneNumber` (Task 1).
@@ -765,14 +876,27 @@ git commit -m "feat(voice): remove the press-0 team escape and the copy advertis
   - `GET /api/system/flags` -> existing keys plus `businessPhoneNumber`
 
 **Watch items:**
+- `settings.ts` HAS NO CONFIG BINDING TODAY. `SettingsRouterDeps` (:22-26) has
+  no config member and `api.ts:530-537` passes none. Step 3 adds both. Writing
+  `config.businessPhoneNumber` without that is a compile error.
 - THE PUT MUST CARRY IT TOO. `SettingsResponse` is shared by both calls and the
   dashboard re-sets its state from the PUT response; a GET-only field blanks
   the block the first time an admin saves quiet hours.
 - `businessPhoneNumber` is env-sourced and immutable. `OrgSettingsPatch` MUST
   NOT accept it.
-- TWO exact-shape `toEqual` assertions break BY DESIGN. Update them
-  deliberately; do not loosen them to `toMatchObject` to make them pass.
-- PII: this amends a stated posture. Our own business number is published on
+- THE FIELD IS OPTIONAL AND OMITTED WHEN UNSET - never `null`.
+  `systemStatus.service.test.ts:66-68` loops every flag value asserting
+  `typeof` is `boolean` or `string`, a deliberate "no nested objects/secrets"
+  guard, and `typeof null === 'object'` fails it. Use the repo's existing
+  conditional-spread idiom and an optional type. Do NOT weaken that loop.
+- ONE exact-shape `toEqual` breaks by design per file:
+  `systemStatus.service.test.ts:59` and `system.routes.test.ts:51`. The other
+  `toEqual`s in `system.routes.test.ts` (:130, :145) are the ALARMS and ERRORS
+  payloads - they have nothing to do with flags. Do not touch them.
+- PII: this amends a stated posture, and the posture is asserted in PROSE in
+  three places that must be updated with it - `app/src/routes/system.ts:14`,
+  `app/src/services/systemStatus.ts:60`, and
+  `dashboard/src/api/types.ts:156`. Our own business number is published on
   public flyers and is not a contact's phone. Neither route logs it.
 
 - [ ] **Step 1: Write the failing route tests**
@@ -789,21 +913,48 @@ Add to `app/test/settings.test.ts`:
   it('PUT returns the business number too (the dashboard re-reads it from the save response)', async () => {
     const res = await request(app)
       .put('/api/settings')
+      .set('x-origin-verify', SECRET)
       .set('cookie', TEST_ADMIN_COOKIE)
-      .send({ patch: { quietHoursEnabled: false } });
+      .send({ quietHoursEnabled: false });
     expect(res.status).toBe(200);
     expect(res.body.businessPhoneNumber).toBe('+15550009999');
   });
 ```
 
-Match the existing suite's harness/cookie helpers - read the file first.
+READ `app/test/settings.test.ts` FIRST and copy the exact request shape its
+existing PUT tests use. Two specifics that are easy to get wrong and that make
+a test pass for the wrong reason:
+- the origin-verify header is REQUIRED on these routes;
+- the PUT body is the patch ITSELF, read top-level by `parsePatch` - NOT
+  wrapped in `{ patch: ... }`. A wrapped body performs an empty no-op save and
+  still returns 200, so the test would pass while exercising nothing.
 
 - [ ] **Step 2: Run to verify they fail**
 
 Run: `cd app && npx vitest run test/<settings suite>.test.ts`
 Expected: FAIL - `businessPhoneNumber` is undefined in both bodies.
 
-- [ ] **Step 3: Add the field to both settings responses**
+- [ ] **Step 3: Give the settings router a config dependency**
+
+`app/src/routes/settings.ts:22-26` gains a config member:
+
+```ts
+export interface SettingsRouterDeps {
+  logger?: Logger;
+  settingsRepo?: SettingsRepo;
+  auditRepo?: AuditRepo;
+  /** Read-only source of the env-sourced business number (never patchable). */
+  config?: AppConfig;
+}
+```
+
+Resolve it inside the factory the same way the file's other optional deps are
+resolved (`deps.config ?? loadConfig()` - follow the surrounding style), import
+`loadConfig`/`AppConfig` from `../lib/config.js`, and pass the app's config
+through from `app/src/routes/api.ts:530-537` where the router is constructed.
+Read that construction site first and match how its siblings receive config.
+
+- [ ] **Step 4: Add the field to both settings responses**
 
 At `app/src/routes/settings.ts:158-161`:
 
@@ -815,41 +966,55 @@ At `app/src/routes/settings.ts:158-161`:
       welcomeTextDefault: WELCOME_SMS,
       // Env-sourced and READ-ONLY (never patchable), the same shape as
       // welcomeTextDefault above: the Settings UI shows the number this app
-      // sends from without implying it can be edited here. `?? null` is
-      // LOAD-BEARING - `undefined` is omitted entirely by JSON.stringify, so
-      // the client would receive no key at all and the wire type would lie.
-      businessPhoneNumber: config.businessPhoneNumber ?? null,
+      // sends from without implying it can be edited here. OMITTED when
+      // unconfigured (the repo's conditional-spread idiom) rather than null -
+      // the flags payload is asserted to hold only primitives, and a shared
+      // convention across both endpoints is worth more than a null.
+      ...(config.businessPhoneNumber !== undefined && {
+        businessPhoneNumber: config.businessPhoneNumber,
+      }),
     });
   });
 ```
 
-Apply the identical three-key shape, `?? null` included, to the PUT's response
-at :194.
+Apply the identical shape to the PUT's response at :194. The dashboard wire
+type is therefore `businessPhoneNumber?: string`, and "not configured" is
+`=== undefined`, not `=== null`.
 
 - [ ] **Step 4: Add the field to the flags payload**
 
-In `app/src/routes/system.ts` (and the service behind it), add
-`businessPhoneNumber: config.businessPhoneNumber ?? null` to the flags object,
-and update the `SystemFlags` type. Same `?? null` reasoning as above.
+In `app/src/services/systemStatus.ts` - NOT `routes/system.ts` - add the same
+conditional spread to the flags object and make `SystemFlags`'
+`businessPhoneNumber?: string`. Update the PII prose at
+`app/src/services/systemStatus.ts:60` and `app/src/routes/system.ts:14` to say
+that the ONE business number is included deliberately (published on public
+flyers, not a contact's phone) and that no contact phone ever appears here.
 
-- [ ] **Step 5: Update the two exact-shape assertions**
+- [ ] **Step 6: Update the two flags assertions**
 
-Add `businessPhoneNumber: <the harness value or undefined>` to the expected
-object in `app/test/systemStatus.service.test.ts:59` and at
-`app/test/system.routes.test.ts:51,130,145`. Keep them as `toEqual` - the
-exact-shape assertion is deliberate and is what caught this.
+Add `businessPhoneNumber: '<the harness value>'` to the expected object in
+`app/test/systemStatus.service.test.ts:59` and `app/test/system.routes.test.ts:51`.
+Keep them as `toEqual` - the exact-shape assertion is deliberate and is what
+caught this.
 
-- [ ] **Step 6: Run the tests and gates**
+Do NOT touch `system.routes.test.ts:130` or `:145`. They are the ALARMS and
+ERRORS payload assertions and have nothing to do with flags; editing them
+breaks two passing tests.
+
+The primitive-type loop at `systemStatus.service.test.ts:66-68` must keep
+passing UNCHANGED. If it fails, you used `null` instead of omitting the key.
+
+- [ ] **Step 7: Run the tests and gates**
 
 Run: `cd app && npx vitest run`
 Run: `npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git status
-git add app/src/routes/settings.ts app/src/routes/system.ts app/test
+git add app/src/routes/settings.ts app/src/routes/api.ts app/src/routes/system.ts app/src/services/systemStatus.ts app/test
 git commit -m "feat(api): expose the business number read-only on settings and system flags"
 ```
 
@@ -872,17 +1037,29 @@ git commit -m "feat(api): expose the business number read-only on settings and s
 - Produces: the retitled "Phone numbers" tab, visible to all roles.
 
 **Watch items (this task's whole risk):**
+- THE ROUTE IS WRAPPED IN `<AdminRoute>` IN `App.tsx` (around :201-208). Making
+  the TAB visible does nothing on its own - `AdminRoute` REDIRECTS a VA away,
+  so the block never renders and the e2e rewrite in Step 6 cannot pass. You
+  must REMOVE the `<AdminRoute>` wrapper from that route and rely on the
+  in-component role gate instead. Read the route element first; other
+  admin-only routes in that file keep their wrapper and must not be touched.
 - `NumbersSection` fetches `/api/pool-numbers` UNCONDITIONALLY in a mount
   effect (:89-94). Gating the TABLE is NOT gating the FETCH. A VA would fire an
   admin-only request and see the "Couldn't load" error alert. Gate the fetch on
   the viewer's role via `useAuth().isAdmin` (the pattern is in
   `AdminRoute.tsx:6,10`).
+- GATING THE FETCH IS NOT ENOUGH ON ITS OWN. The section's status state starts
+  at `'loading'` and only leaves it when the fetch resolves. Skip the fetch
+  without also settling the status and a VA sees a PERMANENT SPINNER - and the
+  Step 1 test still passes, because it only asserts the table is absent. Set
+  the status explicitly for the non-admin path.
 - `GET /api/pool-numbers` MUST STAY role-guarded on the server. UI gating is
   never the security boundary.
-- `e2e/tests/dashboard-next/pool-numbers-admin.spec.ts:118-133` is a describe
-  block asserting the exact VA-cannot-reach-this contract this task INVERTS. It
-  must be REWRITTEN to the new contract (VA sees the tab and the number, VA does
-  NOT see the pool table and fires NO admin request), not deleted.
+- `e2e/tests/dashboard-next/pool-numbers-admin.spec.ts` (the describe block
+  around :118-141) asserts the exact VA-cannot-reach-this contract this task
+  INVERTS, including a direct-navigation redirect assertion and a
+  heading-absent assertion in its final lines. REWRITE the whole block to the
+  new contract; read to its closing brace rather than trusting a line range.
 
 - [ ] **Step 1: Write the failing component test**
 
@@ -919,11 +1096,24 @@ and follow its shape exactly.
 Run: `cd dashboard && npx vitest run src/routes/settings/NumbersSection.test.tsx -t "NON-admin"`
 Expected: FAIL - the block does not exist.
 
-- [ ] **Step 3: Add the wire type and endpoint field**
+- [ ] **Step 3: Add the wire type, and decide where the number comes from**
 
-In `dashboard/src/api/types.ts:141-148`, add
-`businessPhoneNumber: string | null;` to `SettingsResponse` (shared by GET and
-PUT - that is why Task 6 added it to both).
+In `dashboard/src/api/types.ts`, add `businessPhoneNumber?: string;` to
+`SettingsResponse` (find the interface - it is around :145-148 - and note it is
+shared by GET and PUT, which is why Task 6 added the field to both). The field
+is OPTIONAL: Task 6 omits the key when unconfigured.
+
+MAKE IT OPTIONAL, NOT REQUIRED. A required field breaks every hand-written
+`SettingsResponse` literal in the dashboard tests -
+`QuietHoursSection.test.tsx:44`, `TemplatesSection.test.tsx:52` and
+`SystemStatusSection.test.tsx:24` all construct one. Optional leaves them
+compiling untouched.
+
+THE SOURCE: `NumbersSection` does not fetch settings today. Use the existing
+`useSettings()` hook (`dashboard/src/routes/settings/useSettings.ts`) - the
+same hook the other Settings sections use, and the one whose `save()` at
+:59-64 re-sets state from the PUT response, which is precisely why Task 6 had
+to add the field to BOTH endpoints. Do not add a second bespoke fetch.
 
 - [ ] **Step 4: Render the block and gate the fetch**
 
@@ -943,20 +1133,33 @@ the tab exposes the ungated fetch. You are ADDING the auth dependency:
 `AdminRoute.tsx:6,10` uses). The test file already mocks that module, so no
 test-harness work is needed for it.
 
-- [ ] **Step 5: Flip the tab and update its tests**
+- [ ] **Step 5: Flip the tab, drop the route guard, and fix the tests it breaks**
 
-`settingsTabs.ts:25` - `adminOnly: true` becomes `false` for the numbers tab,
-and its label becomes `Phone numbers`. Update `settingsTabs.test.ts:25-28,41`,
-`SettingsPage.test.tsx:66`, and `NumbersSection.test.tsx:369` for the new title
-and visibility. Check `App.tsx:204-206` still guards the route correctly for
-the new visibility.
+- `settingsTabs.ts:25` - `adminOnly: true` becomes `false` for the numbers tab,
+  and its label becomes `Phone numbers`.
+- `App.tsx` (around :201-208) - REMOVE the `<AdminRoute>` wrapper from the
+  numbers route. Without this the tab is visible and then bounces the VA.
+- `settingsTabs.test.ts:25-28,41` and `SettingsPage.test.tsx` (the title pin
+  around :66 AND the VA tab-list test around :72) - update for the new label
+  and the new visibility. The VA test currently asserts the tab is ABSENT for a
+  VA; it must now assert it is PRESENT.
+- `NumbersSection.test.tsx:355-372` - this is the AdminRoute BOUNCE test, NOT a
+  title pin. Its
+  `queryByRole('heading', { name: 'Group text numbers' })` negative assertion
+  goes VACUOUS the moment the heading is renamed: it would pass for the wrong
+  reason forever. REWRITE the whole test to the new contract - a VA reaches the
+  section, sees the "Our number" heading, does NOT see the pool table, and
+  `listPoolNumbers` is not called - or delete it if Step 1's new tests fully
+  cover that. Do not leave an assertion that can no longer fail.
 
 - [ ] **Step 6: Rewrite the e2e contract**
 
 In `e2e/tests/dashboard-next/pool-numbers-admin.spec.ts`, update the title pins
-at :80,:84, and REWRITE the describe block at :118-133 to the new contract:
-a VA reaches the tab, sees the business number, does NOT see the pool table,
-and triggers no admin-only request. Use accessibility-first selectors per
+around :80,:84, and REWRITE the VA describe block (starts around :118; READ TO
+ITS CLOSING BRACE - it runs past :133 and includes a direct-navigation redirect
+assertion and a heading-absent assertion that both invert). New contract: a VA
+reaches the tab, sees the business number, does NOT see the pool table, and
+triggers no admin-only request. Use accessibility-first selectors per
 `e2e/support/selectors.md`.
 
 - [ ] **Step 7: Run the gates**
@@ -965,7 +1168,7 @@ Run: `cd dashboard && npx vitest run`
 Run: `npm run typecheck` then `npm test` then `timeout 1500 npm run e2e`
 Expected: PASS.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git status
@@ -1025,8 +1228,14 @@ Expected: FAIL.
 
 - [ ] **Step 3: Add the wire type**
 
-`dashboard/src/api/types.ts:156-172` - add
-`businessPhoneNumber: string | null;` to `SystemFlags`.
+`dashboard/src/api/types.ts` (the `SystemFlags` interface, around :156-172) -
+add `businessPhoneNumber?: string;`. OPTIONAL, matching Task 6's omitted key,
+and so `SystemStatusSection.test.tsx:24`'s hand-written literal keeps
+compiling. Update the PII comment at :156 that currently states these flags
+carry no phone number.
+
+`useSystemStatus.ts` needs no change if it passes `SystemFlags` through
+untouched - READ it and confirm; if it re-shapes the payload, thread the field.
 
 - [ ] **Step 4: Render the pill and the caveat**
 
@@ -1082,11 +1291,18 @@ that relay pool numbers live in DynamoDB and must NEVER appear here.
 
 - [ ] **Step 2: Delete the obsolete ORDER MATTERS section**
 
-Delete `RUNBOOK.md:604-622` in full. A singular variable has no order to get
-wrong. Replace it with the cutover note: dev keeps the 404 number, prod uses
-the ported `+16782842537`, each in its own Messaging Service and A2P campaign;
-the number must be attached to that environment's Messaging Service before it
-can send.
+Delete `RUNBOOK.md:605-620` - the ORDER MATTERS heading through the end of the
+"verify with a test call + a test text" paragraph. A singular variable has no
+order to get wrong.
+
+DO NOT DELETE THROUGH :622. Line :622 begins "Separately, the ported number
+must also be added to the Messaging Service's sender pool (and covered by the
+A2P campaign) before it can be sent from" - which is STILL TRUE, still needed,
+and is the exact caveat D7 and Task 8's UI copy rest on. KEEP :622-625 intact.
+
+Replace the deleted section with the cutover note: dev keeps the 404 number,
+prod uses the ported `+16782842537`, each in its own Messaging Service and A2P
+campaign.
 
 - [ ] **Step 3: Add the go-live flags note**
 
@@ -1108,7 +1324,21 @@ now describes the relay numbers too) with "the ONE business number for this
 environment, E.164" plus the single-value key. `.env.example:7` needs the name
 changed only.
 
-- [ ] **Step 6: Close the pinning issue**
+- [ ] **Step 6: Update the glossary**
+
+`documentation/GLOSSARY.md:163` names the Settings section by its OLD title.
+The repo rule is that the glossary is updated in the SAME change as any domain
+noun it describes. Update it to "Phone numbers", and grep for other stale
+references to the old section title:
+
+```bash
+grep -rn "Group text numbers" --include="*.md" --include="*.ts" --include="*.tsx" . | grep -v node_modules
+```
+
+Fix every hit that names the UI section (comments included). Leave any that
+describe relay groups generically.
+
+- [ ] **Step 7: Close the pinning issue**
 
 In `docs/issues/one-to-one-sender-not-pinned-to-ported-number.md` set
 `status: resolved`, add `resolved: 2026-08-06`, and add a Resolution section
@@ -1116,7 +1346,11 @@ recording: the fix that landed on `main` (@db54d38d), and that the
 single-Messaging-Service topology its text describes has since been replaced by
 one Messaging Service and one A2P campaign PER ENVIRONMENT.
 
-- [ ] **Step 7: Verify ASCII and no stale references**
+Also update its `refs:` frontmatter - it points at
+`app/src/lib/config.ts:1130`, a line this change rewrites. Point it at the new
+config block and at `services/ourNumberKind.ts`.
+
+- [ ] **Step 8: Verify ASCII and no stale references**
 
 ```bash
 tr -d '\11\12\15\40-\176' < RUNBOOK.md | wc -c
@@ -1125,7 +1359,7 @@ grep -rn "OUR_PHONE_NUMBERS" . --include="*.md" --include="*.example" | grep -v 
 The grep should return only intentional historical mentions, if any. The ASCII
 check applies to lines you added.
 
-- [ ] **Step 8: Commit**
+- [ ] **Step 9: Commit**
 
 ```bash
 git status
@@ -1141,6 +1375,11 @@ git commit -m "docs: BUSINESS_PHONE_NUMBER is one business number per environmen
 - [ ] `npm test` - BARE, expect exit 0
 - [ ] `timeout 1500 npm run e2e` - BARE, from the worktree, expect exit 0
 - [ ] `grep -rn "OUR_PHONE_NUMBERS\|ourPhoneNumbers" app dashboard e2e scripts fake-twilio --include="*.ts" --include="*.tsx" --include="*.mjs"` returns NOTHING
+- [ ] `grep -rn "Group text numbers" . --include="*.md" --include="*.ts" --include="*.tsx" | grep -v node_modules` returns nothing that names the Settings section
+- [ ] No assertion anywhere was left unable to fail. Specifically confirm the
+      rewritten `NumbersSection.test.tsx` bounce test and `founderTriage.test.ts`
+      still fail if you break the behavior they cover - flip the code and watch
+      them go red, then flip it back.
 - [ ] Live self-QA per the profile: `npm run e2e:session`, dev-login, open
       Settings as a NON-admin and confirm the number renders and no admin
       request is fired; open System status as an admin and confirm the row and

@@ -109,8 +109,14 @@ export function formatStreet(a: Address | string | undefined): string {
  * a legacy plain-string address (returns it as-is) and of missing fields.
  * NOT for the public flyer — the flyer never shows the street address.
  */
-export function formatAddress(a: Address | string | undefined): string {
-  if (a === undefined) return '';
+export function formatAddress(a: Address | string | undefined | null): string {
+  // TOTAL FUNCTION - `a == null` catches BOTH undefined and null. A stored
+  // `address: null` is reachable: the seeds write unit items with raw
+  // PutCommands that bypass unitsRepo's null-stripping, and the M1.6 import is
+  // still unbuilt. Its sibling formatStreet was hardened for exactly this; a
+  // module where one projection is total and the next throws on the same input
+  // invites the wrong assumption.
+  if (a == null) return '';
   if (typeof a === 'string') return a.trim();
   const street = formatStreet(a);
   const cityState = [a.city, [a.state, a.zip].filter((s) => s && s.length > 0).join(' ')]

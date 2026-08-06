@@ -104,4 +104,14 @@ describe('formatAddress still behaves after the refactor', () => {
     expect(formatAddress('350 Boulevard SE, Atlanta, GA 30312'))
       .toBe('350 Boulevard SE, Atlanta, GA 30312');
   });
+
+  it('is TOTAL for null, like its formatStreet sibling', () => {
+    // Same reachability as the formatStreet case above: raw-PutCommand seeds
+    // bypass unitsRepo's null-stripping, so `address: null` can be stored. This
+    // one is reached unwrapped from lib/mergeFields.ts, not just the reminder
+    // path.
+    expect(() => formatAddress(null as unknown as Address)).not.toThrow();
+    expect(formatAddress(null as unknown as Address)).toBe('');
+    expect(formatAddress(undefined)).toBe('');
+  });
 });

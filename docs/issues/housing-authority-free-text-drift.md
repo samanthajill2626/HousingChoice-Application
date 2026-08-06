@@ -1,65 +1,88 @@
 ---
 id: housing-authority-free-text-drift
-title: Housing authority is unvalidated free text stored under two names (contact.housingAuthority vs unit.jurisdiction)
+title: Housing authority has two vocabularies (human-readable vs seed slugs) and two field names (contact.housingAuthority vs unit.jurisdiction)
 type: debt
 severity: med
 status: open
 area: app
 created: 2026-08-06
-refs: app/src/repos/contactsRepo.ts, app/src/repos/unitsRepo.ts, dashboard/src/routes/contact/ContactEditForm.tsx, dashboard/src/routes/broadcasts/AudienceFilters.tsx, dashboard/src/routes/listings/ListingsList.tsx
+refs: app/src/services/extraction/schema.ts, app/src/lib/import/airtableSource.ts, dashboard/src/routes/listings/ListingsList.tsx, dashboard/src/routes/listing/listingFormat.ts, app/src/repos/contactsRepo.ts, app/src/repos/unitsRepo.ts
 ---
 
-**Problem.** One real-world entity - the housing authority / jurisdiction that administers a
-voucher or covers a property - is stored under two different field names, and neither value is
-validated:
+**Problem.** One real-world entity - the housing authority administering a voucher or covering a
+property - is stored under two field names, in two different vocabularies, with no validation on
+either.
 
-- `contact.housingAuthority` (camelCase) - the `byHousingAuthority` GSI hash, tenant-sparse.
-- `unit.jurisdiction` - the `byJurisdiction` GSI hash. Documented as "the primary HCV
-  jurisdiction string (free text, no geocoding)".
+**Two names.** `contact.housingAuthority` (the `byHousingAuthority` GSI hash) and
+`unit.jurisdiction` (the `byJurisdiction` GSI hash). Nothing makes them agree, so matching a tenant
+to properties in their own jurisdiction is not possible today.
 
-Both are set by a bare text input. `ContactEditForm` renders a plain `<input>` with placeholder
-`e.g. atlanta_housing`; nothing enforces the slug convention the seeds actually use
-(`atlanta_housing`, `dekalb_housing`, `fulton_housing`, `ga_dca`).
+**Two vocabularies, and the human-readable one is correct.** This is the part that is easy to get
+backwards:
 
-Four consequences, in rough order of how much they cost:
+- **Human-readable is what every real data source uses.** The founder's Airtable "Voucher Type"
+  column IS the housing authority - `airtableSource.ts:41` documents the values in a comment:
+  `"Atlanta Housing"`, `"Dekalb Housing"`, `"Jonesboro Housing"`. The import feeds it into the
+  workbook's unit-side `housing_authority` column (`workbook.ts:291`).
+- **The AI extraction vocabulary is also human-readable and curated**:
+  `HOUSING_AUTHORITY_VOCAB` (`app/src/services/extraction/schema.ts:45-58`) holds
+  `'Jonesboro (JHA)'`, `'Fulton County'`, `'Atlanta (AHA)'`, `'Clayton County'`, `'College Park'`,
+  `'Georgia Housing Voucher (GHV)'`, `'Step Up'`, `'Claratel'`, `'Hope Atlanta'`, `'HUD VASH'`,
+  `'DCA'`, `'McDonough'`, `'East Point'`. `extraction/apply.ts:97-102` validates against it and
+  stores verbatim; extraction is on by default outside production (`config.ts:775`). That file's
+  own comment calls these "EXACT strings as stored in our data" - which is false against every
+  seed.
+- **Slugs are dev-fixture residue, never a product decision.** `atlanta_housing` first appears in
+  commit `01371194` ("M0.3: local dev environment"), whose payload is `app/scripts/db-seed.ts`.
+  From there they leaked into two input placeholders (`ContactEditForm.tsx:486`,
+  `UnitCreateForm.tsx:301` / `ListingEditForm.tsx:223`, all `e.g. atlanta_housing` / `e.g. ga_dca`)
+  and into `humanizeAuthority` (`ListingsList.tsx:36-42`), a helper whose entire job is converting
+  slugs back into the readable names they should have been.
+- **The unit side proves the original intent.** `listingFormat.ts:53` joins `unit.jurisdiction`
+  into an ADDRESS/AREA line ("123 Main St, Atlanta"), which only reads correctly with a place name;
+  a slug renders "123 Main St, atlanta_housing". Even the tests are split -
+  `ListingDetail.test.tsx:86` and `listingFormat.test.ts:70` use `'Atlanta'`, while
+  `ListingsList.test.tsx` uses `'atlanta_housing'`.
+
+**Consequences, worst first.**
 
 1. **Broadcast targeting silently under-reaches.** Audience resolution queries
-   `byHousingAuthority` with an exact hash match, and `AudienceFilters` takes the authority as
-   free text. A tenant whose authority is spelled any other way is simply absent from the
-   audience, and nothing reports that anyone was skipped. This is the failure mode with real
-   consequences for a person - they do not get told about a property.
-2. **Facet fragmentation.** Any list deriving filter options from distinct values - the
-   Properties list today, the Tenants list as of the tenant-list-visibility work - renders
-   "Atlanta Housing" and `atlanta_housing` as two separate authorities. Every typo becomes a
-   permanent phantom facet that never goes away on its own.
-3. **Tenant-to-property cross-referencing is impossible.** Matching a tenant against properties
-   in their own jurisdiction requires the two fields to agree on a vocabulary. Nothing makes
-   them agree - not even the field name.
-4. **Import populates only the unit side.** The review workbook has a `housing_authority` column
-   for UNITS (`apply.ts` writes it to `jurisdiction`) and no equivalent for contacts, so
-   imported tenants arrive with no authority at all.
+   `byHousingAuthority` with an exact hash match and `AudienceFilters` takes the authority as free
+   text. A tenant whose authority is spelled any other way is absent from the audience with no
+   report that anyone was skipped - a person does not get told about a property.
+2. **`humanizeAuthority` corrupts free text.** It uppercases any token of 3 characters or fewer,
+   which is right for slugs and wrong for names: `'Step Up'` renders `'Step UP'`, and a typed
+   `'Housing Authority of the City of Atlanta'` renders `'Housing Authority OF THE City OF
+   Atlanta'`. Any surface that humanizes a non-slug value invents a string.
+3. **Facet fragmentation.** Lists deriving filter options from distinct values render each spelling
+   as its own authority with the counts split between them.
+4. **Import populates only the unit side.** `import/apply.ts` writes `jurisdiction` for units and
+   no contact-side authority at all, so imported tenants arrive with none.
 
-**Suggested fix.** A decision first, then a small build:
+**Suggested fix.** Treat human-readable as canonical and normalize toward it:
 
-- **Decide the canonical vocabulary:** a shared list of authority slugs plus display labels - a
-  constant, or org settings if it needs to be founder-editable. `humanizeAuthority()` is being
-  lifted out of `ListingsList` into a shared module for the tenant-list work, which is the
-  natural home for the list too.
-- **Make both edit surfaces a combobox** over that list. Free-text entry can stay, but as an
-  explicit "add a new authority" rather than a silent typo.
-- **Then decide** whether to rename one field so the two agree, or keep both names and record the
-  mapping in `documentation/GLOSSARY.md`. A rename touches two GSI key attributes and needs a
-  backfill, so it is not free - and per GLOSSARY discipline, if they stay split the split needs
-  to be written down as intentional.
-- **Normalize existing values** as part of whichever rename lands.
+- Adopt `HOUSING_AUTHORITY_VOCAB` as the shared suggestion list for BOTH entry points (the tenant
+  list work does this for the contact form only - see below).
+- Change the three input placeholders from slug examples to real names.
+- Normalize seed fixtures to human-readable values, then delete `humanizeAuthority` and its
+  callers - once no stored value is slug-shaped, the helper has no job.
+- Backfill existing slug-shaped rows in dev.
+- Decide whether to rename one field so the two agree, or keep both names and record the split as
+  intentional in `documentation/GLOSSARY.md`. A rename touches two GSI key attributes and needs a
+  backfill, so it is not free.
 
-**Explicit non-goal.** The tenant-list visibility work does NOT fix this. It derives its filter
-options from whatever is already in the data, so it inherits the fragmentation above rather than
-introducing or correcting it.
+**Partially addressed by the tenant-list visibility work**
+(`docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md`), which does two things and
+deliberately not the rest: it makes the CONTACT edit form a suggestion-backed input over the
+extraction vocabulary (aligning the only human writer with the only machine writer), and it demotes
+`humanizeAuthority` to a legacy fallback applied only to slug-shaped values, so free text is never
+mangled. Everything above - the unit-side inputs, the seeds, deleting the helper, the backfill, and
+the field-name decision - remains open here.
 
-**Adjacent open question.** `voucher_program` has the same half-existing quality: the seeds write
-`voucher_program: 'HCV'` on every cast tenant, but it is absent from the `Contact` type, the edit
-form, the tenant file, and the import, so nothing ever reads it. The Airtable source does carry a
-real `voucherProgram` column ("Georgia Housing Voucher, GHV", "HUD VASH", "Claratel",
-"Hope Atlanta") that the import currently surfaces as read-only evidence and then drops. Whether
-program is a second dimension alongside authority is a question outstanding with the founder.
+**Adjacent open question.** `voucher_program` half-exists: seeds write `voucher_program: 'HCV'` on
+every cast tenant, but it is absent from the `Contact` type, the edit form, the tenant file, and
+the import, so nothing reads it. The Airtable source carries a real `voucherProgram` column
+("Georgia Housing Voucher, GHV", "HUD VASH", "Claratel", "Hope Atlanta") that the import surfaces
+as read-only evidence and then drops. Note the extraction vocabulary above already mixes PHAs and
+program sponsors into one field, which is evidence the distinction has never been drawn. Whether
+program is a second dimension is outstanding with the founder.

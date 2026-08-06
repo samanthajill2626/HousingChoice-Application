@@ -96,10 +96,10 @@ export const MESSAGES: Msg[] = [
   { id: 'AC012', conv: 'CN009', body: 'ok', to: OUR_NUMBER, from: PHONES.groupTenant, dir: 'incoming', at: '2026-03-01T10:00:00.000Z' },
 ];
 
-function quoMessages(): string {
+function quoMessages(extra: readonly Msg[] = []): string {
   return serializeCsv(
     ['id', 'conversationId', 'body', 'sentAt', 'to', 'from', 'direction', 'createdAt'],
-    MESSAGES.map((m) => ({
+    [...MESSAGES, ...extra].map((m) => ({
       id: m.id,
       conversationId: m.conv,
       body: m.body,
@@ -213,15 +213,22 @@ export interface Fixture {
   root: string;
 }
 
-/** Write a synthetic export pair to a temp dir and return the paths. */
-export function writeFixture(): Fixture {
+/**
+ * Write a synthetic export pair to a temp dir and return the paths.
+ *
+ * `extraMessages` simulates a LATER export: the same corpus plus whatever
+ * arrived since. That is the cutover plan's core manoeuvre - export on 8/09,
+ * import, review, then export again after the number ports and re-import to
+ * sweep up the gap - so it needs to be exercised, not assumed.
+ */
+export function writeFixture(extraMessages: readonly Msg[] = []): Fixture {
   const root = mkdtempSync(join(tmpdir(), 'hc-import-'));
   // Mirror the real layout: three Quo job directories, each re-exporting
   // users + phone_numbers.
   const quoDir = join(root, 'quo');
   for (const [job, file, body] of [
     ['jobA', 'ORG_contacts.csv', quoContacts()],
-    ['jobB', 'ORG_messages.csv', quoMessages()],
+    ['jobB', 'ORG_messages.csv', quoMessages(extraMessages)],
     ['jobC', 'ORG_calls.csv', quoCalls()],
   ] as const) {
     const dir = join(quoDir, job);

@@ -20,7 +20,7 @@ import { runApply } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
-import { PHONES, writeFixture } from './importFixture.js';
+import { OUR_NUMBER, PHONES, writeFixture } from './importFixture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 
@@ -285,6 +285,66 @@ describe.skipIf(!reachable)('import:apply', () => {
     // discover it.
     expect(await countMessages(conversationId)).toBeGreaterThan(0);
     expect(report.warnings.some((w) => w.includes('KEPT'))).toBe(true);
+  });
+
+  it('sweeps up a later export without disturbing what is already there', async () => {
+    // THE CUTOVER PLAN'S CORE MANOEUVRE. Rather than making Sam stop working in
+    // Quo before Sunday's export, we export on 8/09, import, let her review, then
+    // export again after the number ports and re-import to collect the gap.
+    // This asserts that actually works: the newer messages land, the existing
+    // ones are untouched, and nothing duplicates.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const id = conversationIdFor1to1(PHONES.tenantBusy);
+    const before = await countMessages(id);
+
+    // A later export: same corpus, plus two messages that arrived in the gap.
+    const laterFixture = writeFixture([
+      {
+        id: 'AC900',
+        conv: 'CN001',
+        body: 'sent after the first export',
+        to: OUR_NUMBER,
+        from: PHONES.tenantBusy,
+        dir: 'incoming',
+        at: '2026-08-08T10:00:00.000Z',
+      },
+      {
+        id: 'AC901',
+        conv: 'CN001',
+        body: 'and one more',
+        to: PHONES.tenantBusy,
+        from: OUR_NUMBER,
+        dir: 'outgoing',
+        at: '2026-08-09T10:00:00.000Z',
+      },
+    ]);
+    const laterPlan = runPlan({
+      quoDir: laterFixture.quoDir,
+      airtableDir: laterFixture.airtableDir,
+    });
+    const laterReview = parseWorkbook({
+      contacts: laterPlan.files['contacts.csv'],
+      groups: laterPlan.files['groups.csv'],
+      units: laterPlan.files['units.csv'],
+    });
+
+    await runApply({
+      doc,
+      plan: laterPlan,
+      review: laterReview,
+      importedAt: '2026-08-11T00:00:00.000Z',
+      env: testEnv,
+    });
+
+    // Exactly the two gap messages were added — nothing duplicated.
+    expect(await countMessages(id)).toBe(before + 2);
+
+    // And the thread's last activity moved forward to the newer message.
+    const conv = await doc.send(
+      new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
+    );
+    expect(conv.Item!.last_activity_at).toBe('2026-08-09T10:00:00.000Z');
   });
 
   it('records connect-day-one as intent without provisioning a number', async () => {

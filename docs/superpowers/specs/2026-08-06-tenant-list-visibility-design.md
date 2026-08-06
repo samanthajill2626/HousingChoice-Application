@@ -165,9 +165,22 @@ third responsibility on top of search and create.
   URL round-trip. Accessibility-first selectors per `e2e/support/selectors.md`.
 - **e2e**: drive the real Tenants view - apply a facet, assert the list narrows, reload and assert
   the filter survived.
-- **Live self-QA at 375px** through the Playwright MCP against the hermetic `e2e:session` lane,
-  before handback, per CLAUDE.md. Never against the live stack.
-- **Gates:** `npm run typecheck` + `npm test` + `npm run e2e`, green on a base synced with `main`.
+- **Live self-QA at 375px** through the project Playwright MCP against a hermetic
+  `npm run e2e:session` lane, before handback. Lane 0 is the human's live stack - never touch it.
+  Reseed with `POST /__dev/reseed?profile=full` (the demo world); never let full-profile work leak
+  into the byte-stable `lean` world. Reseeding logs the browser out - dev-login again. Screenshots
+  need an explicit `.playwright-mcp/` prefix or they resolve at the repo root.
+- **Gates**, bare and never piped, from the worktree, green on a base synced with `main`:
+  - `npm run typecheck` - a REQUIRED separate gate. `npm test` and e2e run through esbuild/tsx,
+    which strip types without checking them, so green suites prove nothing about types.
+  - `npm test` - all workspaces.
+  - `timeout 1500 npm run e2e` - the outer cap is mandatory; the suite can wedge environmentally
+    with zero output and no per-test timeout. Warm the containers first (`npm run db:start` /
+    `npm run s3:start`). e2e runs ONLY from the worktree - a root or stray Playwright run silently
+    targets the human's live dev stack on :5174.
+- **Known flakes** to re-run the full suite against before blaming this change, reporting both
+  runs: `tour-reminders-panel-e2e-flake` and `conversationdetail-members-mock-suite-flake` (both in
+  `docs/issues/`; the latter passes solo).
 
 ## 9. Open questions for the founder
 

@@ -11,7 +11,7 @@
 // auto-text + quick replies). M1.4 only stores/edits them — they are CONSUMED
 // in M1.9 (the voice/call-triage milestone). See repos/settingsRepo.ts.
 import { Router } from 'express';
-import { loadConfig, type AppConfig } from '../lib/config.js';
+import { type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { templateHasOptOutLanguage, WELCOME_SMS } from '../lib/smsCompliance.js';
@@ -32,8 +32,13 @@ export interface SettingsRouterDeps {
    * Read-only source of the env-sourced business number. It rides ALONGSIDE the
    * settings on both responses and is NEVER patchable (parsePatch does not
    * accept it) - it comes from BUSINESS_PHONE_NUMBER, not the settings item.
+   *
+   * REQUIRED, deliberately: a `?? loadConfig()` fallback would be a SECOND
+   * source of truth, re-reading process.env and possibly reporting a business
+   * number that differs from the one the app booted with and sends from. One
+   * number, one source - the caller passes the config it booted with.
    */
-  config?: AppConfig;
+  config: AppConfig;
 }
 
 /** Quick replies: each non-empty string, the whole array <= this many, each <= this long. */
@@ -154,11 +159,11 @@ function parsePatch(body: unknown): { patch: SettingsPatch } | { error: string }
   return { patch };
 }
 
-export function createSettingsRouter(deps: SettingsRouterDeps = {}): Router {
+export function createSettingsRouter(deps: SettingsRouterDeps): Router {
   const log = deps.logger ?? defaultLogger;
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
-  const config = deps.config ?? loadConfig();
+  const { config } = deps;
 
   const router = Router();
 

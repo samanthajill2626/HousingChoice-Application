@@ -1142,6 +1142,22 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
       `BUSINESS_PHONE_NUMBER must be E.164 (+1...), got: ${businessPhoneNumber}`,
     );
   }
+  // Non-production stacks do NOT throw (the hermetic e2e/mock lanes run with no
+  // business number on purpose), but a twilio driver with no business number is
+  // never intentional - local LIVE-mode `npm run dev` reads the real .env.dev
+  // verbatim under NODE_ENV=development, so a stale/renamed key there would
+  // otherwise degrade in complete silence on the one stack that texts real
+  // people. WARN, so the operator sees it in the boot log; the boot outcome is
+  // unchanged (same not-fail-fast idiom as VOICE_TRANSCRIPT_RECONCILE_SECONDS
+  // above). The production throw immediately below still fires for deployed
+  // stacks, which pin NODE_ENV=production.
+  if (messagingDriver === 'twilio' && businessPhoneNumber === undefined) {
+    logger.warn(
+      'BUSINESS_PHONE_NUMBER is unset with MESSAGING_DRIVER=twilio - outbound 1:1 sends are ' +
+        'UNPINNED (the Messaging Service may answer from a relay pool number), the flyer has no ' +
+        'text-us number, and voice has no caller ID.',
+    );
+  }
   // Echo defense #1 (doc 7.1) must be un-misconfigurable: a production stack
   // talking to real Twilio with no business number would silently run on
   // SID-dedupe alone AND let the Messaging Service pick the sender.

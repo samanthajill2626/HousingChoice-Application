@@ -1,6 +1,6 @@
 ---
 id: pool-audit-reimport-strands-business-number
-title: pool:audit --reimport can write a pool_numbers row for the business number when BUSINESS_PHONE_NUMBER is unset
+title: pool:audit --reimport can write a pool_numbers row for a number we own but have not configured as BUSINESS_PHONE_NUMBER (including when it is unset)
 type: bug
 severity: med
 status: open
@@ -34,18 +34,34 @@ The only warning is the existing header line, which prints
 `(the owned numbers do not include BUSINESS_PHONE_NUMBER)` under the Business
 section. Both are easy to scroll past, and neither blocks `--reimport`.
 
-**This is PRE-EXISTING, not introduced by the rename.** An empty
+**The EMPTY case is PRE-EXISTING, not introduced by the rename.** An empty
 `OUR_PHONE_NUMBERS` produced exactly the same empty set and the same
-misclassification before `feat/business-number-config`; the change is a rename
-in both the script and the templates, and the classification is unchanged in
-meaning (design D6). It is filed rather than fixed inside that change because
-N5 forbids pool-lifecycle changes there.
+misclassification before `feat/business-number-config`; for that case the
+classification is unchanged in meaning (design D6). It is filed rather than
+fixed inside that change because N5 forbids pool-lifecycle changes there.
 
-What the rename DOES do is widen the window in which the hazard can be hit: an
-operator whose real `.env.<env>` still says `OUR_PHONE_NUMBERS` while the script
-reads `BUSINESS_PHONE_NUMBER` has a half-done cutover with an empty business
-set, and that is a state nobody was ever in before. See RUNBOOK (Twilio,
-"Renaming the key") for the required order: rename in `.env.<env>` FIRST, then
+**The MULTI-NUMBER case is genuinely NEW: the rename removed the only way to
+protect more than one owned number.** `businessNumbers` is now built from a
+single scalar, so it can hold AT MOST ONE
+element (`:183-184`). Under `OUR_PHONE_NUMBERS` an operator could enumerate
+every number the account owned - the old RUNBOOK said, in bold, that the
+variable "must list EVERY number we own" - and all of them were excluded from
+the pool classes. There is no longer any way to protect a second owned number
+from the classifier. The concrete window is the M1.11 cutover, where setting the
+config value and attaching the ported number to the Messaging Service are two
+DIFFERENT steps whose order the RUNBOOK does not fix: if the ported number is
+attached to the Messaging Service while `BUSINESS_PHONE_NUMBER` still names the
+old one, `--reimport` classifies the ported number STRANDED (`:215`) and writes
+an `active` `pool_numbers` row for it - making the number the port exists to
+serve a claimable relay number. Mitigation until this is fixed: set
+`BUSINESS_PHONE_NUMBER` BEFORE attaching the ported number to the Messaging
+Service, and do not run `--reimport` mid-cutover.
+
+The rename also widens the window on the empty case: an operator whose real
+`.env.<env>` still says `OUR_PHONE_NUMBERS` while the script reads
+`BUSINESS_PHONE_NUMBER` has a half-done cutover with an empty business set, and
+that is a state nobody was ever in before. See RUNBOOK (Twilio, "Renaming the
+key") for the required order: rename in `.env.<env>` FIRST, then
 `secrets:push`, then deploy, then `secrets:prune`.
 
 **Suggested fix.** Make an empty value fatal instead of silent, in the style of
@@ -65,3 +81,9 @@ Service SID is missing, for the same reason, so this is the established shape.
 A narrower alternative is to gate only `--reimport` (a read-only report with no
 business number is merely incomplete, not dangerous), but the guard above is
 simpler and the report is misleading either way.
+
+That guard covers only the EMPTY case. The multi-number case needs something
+else - either an audit-only list of extra protected numbers (a second key read
+by the script alone, so the app keeps its single business number), or having
+`--reimport` print the numbers it is about to import and require an explicit
+confirmation before writing any row.

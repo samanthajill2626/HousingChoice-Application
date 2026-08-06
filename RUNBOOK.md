@@ -610,6 +610,14 @@ pool number is ours. Putting a pool number in `BUSINESS_PHONE_NUMBER` breaks the
 classifier (it would be reported as the business line instead of pool) and can make a pool number
 our outbound caller ID.
 
+**A consequence of the singular design (not a bug): a number we OWN but have not configured is no
+longer recognised as ours anywhere.** Only `BUSINESS_PHONE_NUMBER` and the live relay pool count as
+"us", so if some other owned number ever texts or calls us (a send from the Twilio console, a
+legacy forwarded line, a number kept live during the port), the app treats it as a stranger - the
+SMS pipeline would create a `needs_review` contact for our own number and voice would run founder
+triage on it. Nothing the app itself sends can produce that (every send is pinned to the business
+number or a pool number), so this only bites a human sending from the console.
+
 **At the M1.11 cutover, each environment keeps its OWN number.** Dev stays on the 404 number
 (`+14049824978`); prod uses the ported `+16782842537`. Each environment has its OWN Messaging
 Service and its OWN A2P campaign, so there is no shared list, no second entry, and no ordering to

@@ -344,11 +344,11 @@ function decodeCursor(cursor: string): string | undefined {
 
 /**
  * Our org number to stamp on fromPhone/toPhone. Phase-1 single-number posture:
- * the first configured OUR_PHONE_NUMBERS entry (the dashboard sends/receives on
+ * the configured BUSINESS_PHONE_NUMBER (the dashboard sends/receives on
  * it). Absent when unconfigured (tests/local) → those fields are simply omitted.
  */
 function ourNumberOf(config: AppConfig): string | undefined {
-  return config.ourPhoneNumbers[0];
+  return config.businessPhoneNumber;
 }
 
 /**

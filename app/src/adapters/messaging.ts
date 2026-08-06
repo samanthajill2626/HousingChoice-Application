@@ -54,8 +54,8 @@ export interface SendMessageParams {
    * from its whole pool. Console driver echoes it.
    *
    * EVERY caller is expected to pin (2026-08-06): relay pins its pool number
-   * (M1.7 fan-out + announcements), and the 1:1 paths pin the main business
-   * number, ourPhoneNumbers[0] — `services/sendMessage.ts` for everything that
+   * (M1.7 fan-out + announcements), and the 1:1 paths pin the business
+   * number, config.businessPhoneNumber — `services/sendMessage.ts` for everything that
    * funnels through the send service, and `routes/voiceApi.ts` for the staff
    * cell-verification code, which calls this adapter directly. Leaving it unset
    * means the service may answer from a relay pool number, which is
@@ -598,9 +598,9 @@ export class TwilioMessagingDriver implements MessagingAdapter {
         messagingServiceSid: this.deps.messagingServiceSid,
         // Pin the send to a specific number while staying inside the A2P
         // service (the number is in the service's sender pool): the pool number
-        // for relay, the main business number for 1:1. Callers decide — see the
+        // for relay, the business number for 1:1. Callers decide — see the
         // `from` docs on SendMessageParams. Omitted only when the caller has no
-        // number to pin (unconfigured OUR_PHONE_NUMBERS), where the service
+        // number to pin (unconfigured BUSINESS_PHONE_NUMBER), where the service
         // picks as it always did.
         ...(params.from !== undefined && { from: params.from }),
       });

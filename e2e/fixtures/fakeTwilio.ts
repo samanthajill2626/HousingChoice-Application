@@ -28,8 +28,11 @@ const APP_URL = appUrl;
 const APP_PUBLIC_BASE_URL = publicBaseUrl;
 const TWILIO_AUTH_TOKEN = process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token';
 const ORIGIN_SECRET = process.env.CF_ORIGIN_SECRET ?? 'dev-placeholder-not-a-secret';
-/** The app number the fake uses as OUR_PHONE_NUMBERS (send-as-party's default `to`). */
-export const APP_NUMBER = process.env.OUR_PHONE_NUMBERS?.split(',')[0] ?? '+15550009999';
+/** The app number the fake uses as BUSINESS_PHONE_NUMBER (send-as-party's default
+ *  `to`). The env read is a courtesy: the launcher sets the var on its spawned
+ *  children only, never on the Playwright process, so the literal is the value
+ *  that actually applies here. */
+export const APP_NUMBER = process.env.BUSINESS_PHONE_NUMBER ?? '+15550009999';
 
 /** Sign X-Twilio-Signature exactly as Twilio does (matches signer.ts): URL, then
  *  each POST param key+value sorted by key, HMAC-SHA1 with the auth token, base64. */

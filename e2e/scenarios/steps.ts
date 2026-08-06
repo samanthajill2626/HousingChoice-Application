@@ -40,7 +40,7 @@ import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
 // config load from the lane resolver). Fall back to the lane-0 dev default so
 // `npm run e2e:session` without Playwright still has a sane value.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
-/** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
+/** The app's own number — BUSINESS_PHONE_NUMBER in the e2e stack (owns the conversation). */
 export const APP_NUMBER = '+15550009999';
 /** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */
 const SEEDED_LANDLORD = 'contact-landlord-0001';

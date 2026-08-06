@@ -288,11 +288,15 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     auditRepo: deps.auditRepo,
     logger: deps.logger,
   });
-  const ourNumbers = new Set(config.ourPhoneNumbers);
+  // INTERIM (Task 4 replaces this with createOurNumberKind): preserve today's
+  // exact membership semantics with the singular value.
+  const ourNumbers = new Set(
+    config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [],
+  );
   const baseUrl = config.publicBaseUrl ?? '';
-  // Founder-bridge caller ID: ALWAYS a number we own (the first business
-  // number), NEVER the real caller's From (the M1.9b guardrail).
-  const businessCallerId = config.ourPhoneNumbers[0];
+  // Founder-bridge caller ID: ALWAYS a number we own (the business number),
+  // NEVER the real caller's From (the M1.9b guardrail).
+  const businessCallerId = config.businessPhoneNumber;
 
   // Boot readiness signal (PII-safe — booleans only, never the cell itself):
   // inbound call-triage bridges to the assigned inbound-voice-line HOLDER's
@@ -300,11 +304,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   // so it can't be checked at startup. What IS boot config is the business number
   // used as caller ID; without it every inbound business call degrades to the
   // "text us" fallback (see handleFounderTriage). Log it so a missing
-  // OUR_PHONE_NUMBERS[0] is obvious without a live test call.
+  // BUSINESS_PHONE_NUMBER is obvious without a live test call.
   log.info(
     { hasBusinessNumber: businessCallerId !== undefined },
     `voice: business number ${
-      businessCallerId !== undefined ? 'configured' : 'NOT configured (OUR_PHONE_NUMBERS[0])'
+      businessCallerId !== undefined ? 'configured' : 'NOT configured (BUSINESS_PHONE_NUMBER)'
     }; inbound bridges to the assigned inbound-voice-line holder's verified cell`,
   );
 
@@ -379,7 +383,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       }
     }
 
-    // (3) To is a business number (ourPhoneNumbers) or unknown → FOUNDER
+    // (3) To is the business number (config.businessPhoneNumber) or unknown → FOUNDER
     // CALL-TRIAGE (M1.9b / CO2 §7.1). Pre-ring push to the founder ~preRingPause
     // seconds AHEAD of the ring, then bridge the call to the founder's cell with
     // the BUSINESS number as caller ID (never the real caller's) via the same
@@ -1116,7 +1120,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // outbound call RECORDS like the founder-bridge; the <Dial action> reports
       // the terminal outcome to /voice/status by the PARENT (originated) CallSid.
       const target = await resolveOutboundTarget(conversationId);
-      const businessCallerId = config.ourPhoneNumbers[0];
+      const businessCallerId = config.businessPhoneNumber;
       if (target === undefined || businessCallerId === undefined) {
         vr.hangup();
         log.warn(
@@ -1210,9 +1214,12 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     }
     if (digits === '0' && !isFounderLeg && !isOutboundLeg) {
       // Press-0 escape (masked relay only): dial the team. callerId stays a
-      // number we own (the first configured business number) — NEVER the
+      // number we own (the configured business number) — NEVER the
       // original caller's From (PII).
-      const teamNumbers = config.ourPhoneNumbers;
+      // INTERIM (Task 5 deletes this whole branch): a one-element list keeps
+      // today's exact behavior against the singular value.
+      const teamNumbers =
+        config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [];
       const teamCallerId = teamNumbers[0];
       if (teamNumbers.length > 0 && teamCallerId !== undefined) {
         const dial = vr.dial({ callerId: teamCallerId, record: 'do-not-record' });

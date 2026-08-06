@@ -76,7 +76,7 @@ function wireBroadcastHandler(world: FakeWorld) {
     NODE_ENV: 'test',
     MESSAGING_DRIVER: 'console',
     PUBLIC_BASE_URL,
-    OUR_PHONE_NUMBERS: '+15550009999',
+    BUSINESS_PHONE_NUMBER: '+15550009999',
     SESSION_SECRET: DEV_SESSION_SECRET_DEFAULT,
   } as NodeJS.ProcessEnv);
   const logger = createLogger({ destination: createLogCapture().stream });

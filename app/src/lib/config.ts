@@ -203,12 +203,16 @@ export interface AppConfig {
    */
   sendBreakerMaxPerMinute: number;
   /**
-   * OUR business phone numbers (E.164, from comma-separated
-   * OUR_PHONE_NUMBERS). The webhook echo/author check (doc §7.1 defense 1):
-   * an inbound webhook whose From matches one of these is our own outbound
-   * projected back — acknowledged and dropped, never processed.
+   * OUR one business phone number (E.164, from BUSINESS_PHONE_NUMBER).
+   * Exactly one per environment: dev keeps the 404 number, prod uses the
+   * ported 678 number, under separate Messaging Services (see
+   * docs/superpowers/specs/2026-08-06-business-number-config-design.md).
+   * It is the outbound SMS sender, the outbound voice caller ID, the public
+   * flyer CTA number, and one half of the echo/author defense (the other half
+   * is the dynamic relay pool - see services/ourNumberKind.ts).
+   * `undefined` means unconfigured, which is legal outside prod+twilio.
    */
-  ourPhoneNumbers: string[];
+  businessPhoneNumber: string | undefined;
   /**
    * S3 bucket inbound MMS media is mirrored into (MEDIA_BUCKET) —
    * Terraform-managed in AWS (the s3_media module's bucket). Unset locally:
@@ -716,9 +720,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   // buy into the unhinted search). Deliberate hybrid of two idioms in this
   // file: the `let x = X_DEFAULT` shape of the RELAY_WARMING_MAX_WAIT block
   // above (this knob needs a NON-empty default on unset, so it cannot use the
-  // `(env.X ?? '')` chain of OAUTH_ALLOWED_DOMAINS / OUR_PHONE_NUMBERS - only
-  // an `=== undefined` check distinguishes unset from explicitly empty) plus
-  // that pair's split/trim/filter chain and bare-throw validation loop.
+  // `(env.X ?? '')` chain of OAUTH_ALLOWED_DOMAINS - only an `=== undefined`
+  // check distinguishes unset from explicitly empty) plus that block's
+  // split/trim/filter chain and bare-throw validation loop.
   const RELAY_PREFERRED_AREA_CODES_DEFAULT = ['404', '470', '678', '770', '943'];
   let relayPreferredAreaCodes: string[];
   if (env.RELAY_PREFERRED_AREA_CODES === undefined) {
@@ -1060,7 +1064,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
   }
 
   // Job-delivery wiring (M1.2) is mandatory in production — same fail-fast
-  // pattern as CF_ORIGIN_SECRET/OUR_PHONE_NUMBERS above. Without it the app
+  // pattern as CF_ORIGIN_SECRET/BUSINESS_PHONE_NUMBER above. Without it the app
   // would accept enqueues into the in-memory adapter (silently undelivered)
   // and the worker would start no poll loop. Local NODE_ENVs keep the
   // WARN + in-memory path (expected: nothing delivers jobs on a laptop).
@@ -1111,7 +1115,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
 
   // Comma-separated Workspace domains, lowercased; empty/unset = NOBODY can
   // log in (safe default — production fails fast above instead). Malformed
-  // entries fail fast (same posture as OUR_PHONE_NUMBERS below: a silently
+  // entries fail fast (same posture as BUSINESS_PHONE_NUMBER below: a silently
   // dropped domain locks the team out; a typo'd one could let outsiders in).
   const oauthAllowedDomains = (env.OAUTH_ALLOWED_DOMAINS ?? '')
     .split(',')
@@ -1125,27 +1129,27 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     }
   }
 
-  // Comma-separated E.164 list; whitespace tolerated; empty/unset = none
-  // (the echo defense then relies on SID dedupe alone — layer 2).
-  const ourPhoneNumbers = (env.OUR_PHONE_NUMBERS ?? '')
-    .split(',')
-    .map((n) => n.trim())
-    .filter((n) => n.length > 0);
-  for (const n of ourPhoneNumbers) {
-    if (!/^\+[1-9]\d{1,14}$/.test(n)) {
-      // Fail fast on a malformed list: a silently-dropped business number
-      // disables the echo/author defense for that number.
-      throw new Error(`OUR_PHONE_NUMBERS entries must be E.164 (+1...), got: ${n}`);
-    }
-  }
-  // Echo defense #1 (doc §7.1) must be un-misconfigurable: a production stack
-  // talking to real Twilio with an empty OUR_PHONE_NUMBERS would silently run
-  // on SID-dedupe alone — fail fast instead (same pattern as TWILIO_* above).
-  if (messagingDriver === 'twilio' && nodeEnv === 'production' && ourPhoneNumbers.length === 0) {
+  // Exactly one E.164 business number; whitespace tolerated. Absent OR blank
+  // means unconfigured (the echo defense then relies on the relay-pool arm
+  // plus SID dedupe). Blank MUST NOT throw - `BUSINESS_PHONE_NUMBER=` is how
+  // dev/test stacks say "no business number".
+  const businessRaw = (env.BUSINESS_PHONE_NUMBER ?? '').trim();
+  const businessPhoneNumber = businessRaw.length > 0 ? businessRaw : undefined;
+  if (businessPhoneNumber !== undefined && !/^\+[1-9]\d{1,14}$/.test(businessPhoneNumber)) {
+    // Fail fast on a malformed value: a silently-dropped business number
+    // disables the echo/author defense AND leaves outbound sends unpinned.
     throw new Error(
-      'OUR_PHONE_NUMBERS is required when MESSAGING_DRIVER=twilio and NODE_ENV=production — it must ' +
-        'list every owned number (echo/author defense 1). Hydrate from Parameter Store (npm run ' +
-        'secrets:push). Refusing to start without it.',
+      `BUSINESS_PHONE_NUMBER must be E.164 (+1...), got: ${businessPhoneNumber}`,
+    );
+  }
+  // Echo defense #1 (doc 7.1) must be un-misconfigurable: a production stack
+  // talking to real Twilio with no business number would silently run on
+  // SID-dedupe alone AND let the Messaging Service pick the sender.
+  if (messagingDriver === 'twilio' && nodeEnv === 'production' && businessPhoneNumber === undefined) {
+    throw new Error(
+      'BUSINESS_PHONE_NUMBER is required when MESSAGING_DRIVER=twilio and NODE_ENV=production - it ' +
+        'is the echo/author defense and the pinned outbound sender. Hydrate from Parameter Store ' +
+        '(npm run secrets:push). Refusing to start without it.',
     );
   }
 
@@ -1202,7 +1206,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     voiceTranscriptReconcileSeconds,
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
-    ourPhoneNumbers,
+    businessPhoneNumber,
     mediaBucket: env.MEDIA_BUCKET,
     mediaS3Endpoint: mediaS3Endpoint !== undefined && mediaS3Endpoint.length > 0 ? mediaS3Endpoint : undefined,
     sseMaxConnections,

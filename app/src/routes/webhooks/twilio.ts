@@ -275,7 +275,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     auditRepo: audit,
     logger: deps.logger,
   });
-  const ourNumbers = new Set(config.ourPhoneNumbers);
+  // INTERIM (Task 4 replaces this with createOurNumberKind): preserve today's
+  // exact membership semantics with the singular value.
+  const ourNumbers = new Set(
+    config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [],
+  );
   const statusRetryDelayMs = deps.statusUnknownSidRetryDelayMs ?? STATUS_UNKNOWN_SID_RETRY_DELAY_MS;
 
   const router = Router();

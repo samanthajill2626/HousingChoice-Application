@@ -92,6 +92,39 @@ describe('RemindersPanel', () => {
     expect(screen.getByText(/Sent -/i)).toBeInTheDocument();
   });
 
+  it('stamps the sent chip in the zone the LIST response composed the bodies in', async () => {
+    // Spec D8: the body beside this chip quotes an ORG-local time, so the chip
+    // has to use the response's zone rather than the navigator's browser zone.
+    // Asia/Tokyo is nobody's plausible browser zone here, so the assertion
+    // cannot pass by accident: 2026-06-18T13:02Z is 10:02 PM the same day there.
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({ reminderId: 'r-1', kind: 'confirmation', state: 'sent', sentAt: '2026-06-18T13:02:00Z' }),
+      ],
+      timezone: 'Asia/Tokyo',
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText('Sent - Jun 18, 10:02 PM')).toBeInTheDocument());
+  });
+
+  it('falls back to the browser zone when the response carries no zone', async () => {
+    // A stale cached response (or an older backend) must render exactly as it
+    // does today - never a crash, never an empty time.
+    const legacy = new Date('2026-06-18T13:02:00Z').toLocaleString('en-US', {
+      month: 'short',
+      day: 'numeric',
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    getTourReminders.mockResolvedValue({
+      reminders: [
+        rung({ reminderId: 'r-1', kind: 'confirmation', state: 'sent', sentAt: '2026-06-18T13:02:00Z' }),
+      ],
+    } satisfies TourRemindersPage);
+    render(<RemindersPanel tourId="tour-1" />);
+    await waitFor(() => expect(screen.getByText(`Sent - ${legacy}`)).toBeInTheDocument());
+  });
+
   it('a claim-skipped rung reads "Skipped - <reason>" (plain hyphen), never "sending shortly"', async () => {
     getTourReminders.mockResolvedValue({
       reminders: [

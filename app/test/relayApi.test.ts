@@ -1332,10 +1332,18 @@ describe('relay-group API (M1.7)', () => {
       expect(first['kind']).toBe('scheduled');
       expect(first['source']).toBe('tour_reminder');
       expect(first['reminderKind']).toBe('confirmation');
-      expect(first['body']).toContain('Your tour is confirmed');
+      // The flipped copy: composed by the SAME composer the send path uses, so
+      // the body opens with the confirmation lead-in and carries the local time
+      // (zone-agnostic shape - this bucket does not pin the org zone).
+      expect(first['body']).toContain('Tour confirmed');
+      expect(first['body']).toMatch(/at \d{1,2}:\d{2} (AM|PM)/);
       expect(first['conversationId']).toBe(conversationId);
       expect(first['refType']).toBe('tour');
       expect(first['refId']).toBe(tour.tourId);
+      // The bucket carries the zone those bodies were composed in (spec D8), so
+      // the group thread renders each card's fire time in the same zone the
+      // body quotes - exactly like the contact timeline.
+      expect(res.body.timezone).toBe(world.settings.timezone);
 
       // Fire one rung (claim = sent) — it must drop out of the bucket.
       const rows = await world.tourRemindersRepo.listByTour(tour.tourId);
@@ -1408,6 +1416,36 @@ describe('relay-group API (M1.7)', () => {
         .set('x-origin-verify', SECRET)
         .set('cookie', TEST_SESSION_COOKIE)
         .expect(404);
+    });
+
+    it('an uncomposable tour time empties the BODIES, not the bucket (read-path containment)', async () => {
+      // The rung text is composed from the tour time + the unit address, and a
+      // tour can lose a usable scheduledAt. On a READ path that degrades to
+      // body: '' (spec F1) - the thread's Upcoming list must still render every
+      // rung with its kind and due time, never 500.
+      const { app } = authedHarness(world, makeFakePoolNumbers());
+      const { tour, conversationId } = await seedTourGroup(app, 'landlord_led');
+      // Corrupt AFTER arming - the only way to reach this state.
+      await world.toursRepo.patch(tour.tourId, { scheduledAt: 'not-an-instant' });
+
+      const res = await request(app)
+        .get(`/api/conversations/${conversationId}/scheduled`)
+        .set('x-origin-verify', SECRET)
+        .set('cookie', TEST_SESSION_COOKIE)
+        .expect(200);
+
+      const scheduled = res.body.scheduled as Array<Record<string, unknown>>;
+      expect(scheduled).toHaveLength(4);
+      expect(scheduled.every((s) => s['body'] === '')).toBe(true);
+      // Everything else about each rung survives.
+      expect(scheduled.map((s) => s['reminderKind'])).toEqual([
+        'confirmation',
+        'day_before',
+        'morning_of',
+        'en_route',
+      ]);
+      expect(scheduled.every((s) => s['refId'] === tour.tourId)).toBe(true);
+      expect(scheduled.every((s) => s['conversationId'] === conversationId)).toBe(true);
     });
   });
 });

@@ -145,7 +145,8 @@ beforeEach(() => {
   getContactTimeline.mockResolvedValue({ items: [], nextCursor: null });
   getConversations.mockResolvedValue({ conversations: [], nextCursor: null });
   getConversationMessages.mockResolvedValue([]);
-  getConversationScheduled.mockResolvedValue([]);
+  // The endpoint returns the whole ENVELOPE now (rows + the composing zone).
+  getConversationScheduled.mockResolvedValue({ scheduled: [] });
   getConversation.mockResolvedValue({
     conversationId: 'g1',
     type: 'relay_group',

@@ -3,6 +3,8 @@
 //
 //   GET   /api/tours/:tourId/reminders
 //        → { reminders: TourReminderView[]; next?: TourReminderView }
+//          ... plus `timezone`: the ORG zone the bodies were composed in
+//          (spec D8), which the panel formats its own time labels with
 //   PATCH /api/tours/:tourId/reminders/:reminderId  { canceled: boolean }
 //        → { reminder: TourReminderView } | 409 (already sent/skipped, or the
 //          transition raced the poll — the honest current state is returned)
@@ -40,6 +42,11 @@ import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { resolveMessage } from '../messages/index.js';
 import {
+  composeTourReminderBody,
+  UncomposableReminderError,
+} from '../messages/tourCopy.js';
+import type { Address } from '../lib/address.js';
+import {
   createTourRemindersRepo,
   type ReminderKind,
   type ReminderSkipReason,
@@ -48,6 +55,7 @@ import {
 } from '../repos/tourRemindersRepo.js';
 import { createToursRepo, type TourItem, type ToursRepo } from '../repos/toursRepo.js';
 import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import { createConversationsRepo, type ConversationsRepo } from '../repos/conversationsRepo.js';
 import {
   evaluateScheduledSendSuppression,
@@ -87,6 +95,9 @@ export interface TourRemindersRouterDeps {
   adapter?: MessagingAdapter;
   /** GROUP route: persists the rung as a system announcement in the thread. */
   messagesRepo?: MessagesRepo;
+  /** The unit's address for the composed reminder copy (both the send-now path
+   *  and the previews below). */
+  unitsRepo?: UnitsRepo;
   /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */
   auditRepo?: AuditRepo;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
@@ -130,6 +141,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
+  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
@@ -147,22 +159,77 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     settingsRepo: settings,
     adapter: deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger }),
     messagesRepo: deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger }),
+    unitsRepo: units,
     events,
     ...(deps.logger !== undefined && { logger: deps.logger }),
   };
 
   const router = Router();
 
+  /**
+   * The unit address behind a tour's reminder copy, resolved ONCE per request
+   * (every rung of a tour shares it). Best-effort: a missing unit or a failed
+   * read composes the no-address variant rather than failing the read.
+   */
+  const addressOf = async (tour: TourItem): Promise<Address | string | undefined> => {
+    try {
+      const unit = await units.getById(tour.unitId);
+      return unit?.address;
+    } catch (err) {
+      log.warn(
+        { err, tourId: tour.tourId },
+        'tour reminder preview: unit read failed - composing without an address',
+      );
+      return undefined;
+    }
+  };
+
+  /**
+   * The body ONE rung previews as. A SENT rung renders what was actually sent
+   * (the claim-time snapshot); only pending rungs recompose, so a reschedule or
+   * an address edit can never rewrite history. Read-path containment (spec F1):
+   * a rung whose tour has no usable scheduledAt renders `body: ''` instead of
+   * failing the whole ladder - `body` is required on the wire view, on the
+   * dashboard mirror and on TimelineScheduled, so it is emptied, never omitted.
+   */
+  const bodyFor = (
+    row: TourReminderItem,
+    tour: TourItem,
+    tz: string,
+    address?: Address | string,
+  ): string => {
+    if (row.sentAt !== undefined && typeof row.sentBody === 'string') return row.sentBody;
+    try {
+      return composeTourReminderBody({
+        kind: row.kind,
+        scheduledAt: tour.scheduledAt ?? '',
+        timezone: tz,
+        ...(address !== undefined && { address }),
+      });
+    } catch (err) {
+      if (err instanceof UncomposableReminderError) {
+        log.warn(
+          { reminderId: row.reminderId, tourId: tour.tourId, kind: row.kind },
+          'tour reminder body uncomposable on a read path - returning an empty body',
+        );
+        return '';
+      }
+      throw err;
+    }
+  };
+
   /** Project one stored row → its wire view (no suppression estimate — the
-   *  PATCH response is a state echo; GET recomputes estimates on refetch). */
-  const viewOf = (row: TourReminderItem): TourReminderView => {
+   *  PATCH response is a state echo; GET recomputes estimates on refetch). The
+   *  body is resolved ONCE per request by the handler and passed IN: composing
+   *  needs async unit/settings reads, and this projection is sync. */
+  const viewOf = (row: TourReminderItem, body: string): TourReminderView => {
     const state = stateOf(row);
     return {
       reminderId: row.reminderId,
       kind: row.kind,
       dueAt: row.dueAt,
       state,
-      body: resolveMessage(`tour.${row.kind}`),
+      body,
       ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
       ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
       ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -199,6 +266,12 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     // Re-read for the HONEST post-write state (also what a lost race reports:
     // e.g. the poll sent the rung between our list and the conditional write).
     const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+    // Composing inputs for the echoed view, read AFTER the conditional write so
+    // they add nothing to the list->write window the poll can race into. This
+    // single-row response carries no timezone field of its own - the panel
+    // reuses the zone from its list state.
+    const window = await readQuietHoursWindow(settings, log);
+    const address = await addressOf(tour);
     if (!won) {
       log.info(
         { tourId, reminderId, wanted: canceled ? 'cancel' : 'restore', state: stateOf(after) },
@@ -206,7 +279,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       );
       res.status(409).json({
         error: canceled ? 'reminder_not_cancelable' : 'reminder_not_restorable',
-        reminder: viewOf(after),
+        reminder: viewOf(after, bodyFor(after, tour, window.timezone, address)),
       });
       return;
     }
@@ -218,7 +291,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       { tourId, reminderId, kind: after.kind, canceled },
       canceled ? 'tour reminder canceled via api' : 'tour reminder restored via api',
     );
-    res.json({ reminder: viewOf(after) });
+    res.json({ reminder: viewOf(after, bodyFor(after, tour, window.timezone, address)) });
   });
 
   // POST /:tourId/reminders/:reminderId/send-now - "Send now" (quiet-hours spec
@@ -258,6 +331,11 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
 
     // Re-read for the HONEST post-write state (the send may have raced the poll).
     const after = (await reminders.listByTour(tourId)).find((r) => r.reminderId === reminderId)!;
+    // Composing inputs for the echoed view (same no-timezone note as PATCH). A
+    // rung the force-send just claimed renders its SNAPSHOT, not a recompose.
+    const window = await readQuietHoursWindow(settings, log);
+    const address = await addressOf(tour);
+    const afterBody = bodyFor(after, tour, window.timezone, address);
 
     if (result.outcome === 'sent') {
       await audit.append(`tours#${tourId}`, 'reminder_force_sent', {
@@ -266,7 +344,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
         ...(actor !== undefined && { actor }),
       });
       log.info({ tourId, reminderId, kind: after.kind }, 'tour reminder force-sent via api');
-      res.json({ reminder: viewOf(after) });
+      res.json({ reminder: viewOf(after, afterBody) });
       return;
     }
 
@@ -277,7 +355,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       { tourId, reminderId, kind: after.kind, outcome: result.outcome, error },
       'tour reminder send-now refused',
     );
-    res.status(409).json({ error, reminder: viewOf(after) });
+    res.status(409).json({ error, reminder: viewOf(after, afterBody) });
   });
 
   router.get('/:tourId/reminders', async (req, res) => {
@@ -290,6 +368,13 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     }
 
     const rows = await reminders.listByTour(tourId);
+
+    // The composing inputs, read ONCE per request and ABOVE the suppression
+    // guard below: EVERY response needs the zone (a landlord_led tour and all
+    // four viewOf responses used to read settings zero times), and every rung of
+    // this tour shares the one unit address.
+    const window = await readQuietHoursWindow(settings, log);
+    const address = await addressOf(tour);
 
     // Resolve the tenant's send-time suppression estimate ONCE per request (the
     // same conversation/contact backs every 1:1-routed rung). Only needed when
@@ -321,7 +406,6 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       // never chip - correct, they really will fire at their stored dueAt.
       // routes/placementNudges.ts and routes/contactTimeline.ts apply the same
       // formula; this comment is the single explanation for all three.
-      const window = await readQuietHoursWindow(settings, log);
       const nowIso = new Date().toISOString();
       const wallClockQuiet = isQuietTime(nowIso, window);
       // The tenant's contact/thread inputs cost IO and back EVERY 1:1-routed
@@ -343,7 +427,7 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
           kind: row.kind,
           dueAt: row.dueAt,
           state,
-          body: resolveMessage(`tour.${row.kind}`),
+          body: bodyFor(row, tour, window.timezone, address),
           ...(row.sentAt !== undefined && { sentAt: row.sentAt }),
           ...(row.canceledAt !== undefined && { canceledAt: row.canceledAt }),
           ...(row.skippedAt !== undefined && { skippedAt: row.skippedAt }),
@@ -367,7 +451,16 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
       'tour reminders read',
     );
 
-    res.json({ reminders: reminderViews, ...(next !== undefined && { next }) });
+    // `timezone` is the zone the rung BODIES were composed in (spec D8): the
+    // panel renders every timestamp beside them in THIS zone, so a navigator
+    // outside the org's zone never reads a chip that contradicts the text. Only
+    // this LIST response carries it - the single-row PATCH / send-now payloads
+    // reuse the zone the panel is already holding.
+    res.json({
+      reminders: reminderViews,
+      timezone: window.timezone,
+      ...(next !== undefined && { next }),
+    });
   });
 
   // GET /:tourId/no-show-checkin-draft -> the templated body for the MANUAL

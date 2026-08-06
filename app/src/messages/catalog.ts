@@ -26,11 +26,16 @@ export type MessageClass = 'operational' | 'compliance-locked' | 'voice' | 'tran
 
 /** Every stable message id (also the future operator-override key). */
 export type MessageId =
-  // Operational — tour reminders (jobs/tourReminders.ts)
+  // Operational - tour reminders (jobs/tourReminders.ts). Each address-bearing
+  // rung has a `_no_address` twin for the units whose address we do not hold.
   | 'tour.confirmation'
+  | 'tour.confirmation_no_address'
   | 'tour.day_before'
+  | 'tour.day_before_no_address'
   | 'tour.morning_of'
+  | 'tour.morning_of_no_address'
   | 'tour.en_route'
+  | 'tour.en_route_no_address'
   | 'tour.no_show_checkin'
   // Operational — placement nudges (jobs/placementNudges.ts)
   | 'nudge.receipt_check'
@@ -92,37 +97,77 @@ export interface MessageDef {
 
 export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // --- Operational: tour reminders (moved out of jobs/tourReminders.ts) ---
+  // TOKEN CONTRACT. Address-bearing entries accept {when} {time} {where}; the
+  // _no_address twins accept {when} {time} ONLY. interpolate() iterates over the
+  // DECLARED vars, so a token that is not declared is never inspected - an
+  // override of a _no_address entry containing {where} would emit that text
+  // literally. Declaring {where} on the twins would suppress it only by always
+  // passing a string, which reopens the hole the split exists to close (spec D7).
+  // Unreachable today regardless: settingsToOverrides maps only welcome.sms and
+  // missed_call.autotext, so no tour.* override can exist.
   'tour.confirmation': {
     id: 'tour.confirmation',
-    default: "Your tour is confirmed. We'll send reminders as it approaches.",
+    default: "Tour confirmed at {where} for {when}. We'll text reminders as it gets closer.",
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: [],
+    vars: ['when', 'time', 'where'],
+  },
+  'tour.confirmation_no_address': {
+    id: 'tour.confirmation_no_address',
+    default: "Tour confirmed for {when}. We'll text reminders as it gets closer.",
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['when', 'time'],
   },
   'tour.day_before': {
     id: 'tour.day_before',
-    default: 'Reminder: your property tour is tomorrow.',
+    default: 'Reminder: tour at {where} is tomorrow, {when}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: [],
+    vars: ['when', 'time', 'where'],
+  },
+  'tour.day_before_no_address': {
+    id: 'tour.day_before_no_address',
+    default: 'Reminder: tour is tomorrow, {when}.',
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['when', 'time'],
   },
   'tour.morning_of': {
     id: 'tour.morning_of',
-    default: 'Good morning! Your property tour is today.',
+    default: 'Good morning! Tour at {where} is today at {time}.',
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: [],
+    vars: ['when', 'time', 'where'],
+  },
+  'tour.morning_of_no_address': {
+    id: 'tour.morning_of_no_address',
+    default: 'Good morning! Tour is today at {time}.',
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['when', 'time'],
   },
   'tour.en_route': {
     id: 'tour.en_route',
-    default: 'Your tour is coming up soon. Text us when you\'re on the way!',
+    default: "Tour at {where} starts at {time}. Text us when you're on the way!",
     class: 'operational',
     editable: true,
     channel: 'sms',
-    vars: [],
+    vars: ['when', 'time', 'where'],
+  },
+  'tour.en_route_no_address': {
+    id: 'tour.en_route_no_address',
+    default: "Tour starts at {time}. Text us when you're on the way!",
+    class: 'operational',
+    editable: true,
+    channel: 'sms',
+    vars: ['when', 'time'],
   },
   'tour.no_show_checkin': {
     id: 'tour.no_show_checkin',
@@ -137,7 +182,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.receipt_check': {
     id: 'nudge.receipt_check',
     default:
-      'Just checking in — did the rental application come through? Let us know if you need it re-sent.',
+      'Just checking in - did the rental application come through? Let us know if you need it re-sent.',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -153,7 +198,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   'nudge.approval_check': {
     id: 'nudge.approval_check',
-    default: 'Checking in — any decision yet on the application we sent over?',
+    default: 'Checking in - any decision yet on the application we sent over?',
     class: 'operational',
     editable: true,
     channel: 'sms',
@@ -162,7 +207,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'nudge.rta_window_closing': {
     id: 'nudge.rta_window_closing',
     default:
-      'Friendly reminder — the 48-hour RTA window is closing. Have you been able to submit it?',
+      'Friendly reminder - the 48-hour RTA window is closing. Have you been able to submit it?',
     class: 'operational',
     editable: true,
     channel: 'sms',

@@ -448,6 +448,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
             status={thread.status}
             items={thread.items}
             upcoming={thread.upcoming}
+            upcomingTimezone={thread.upcomingTimezone}
             source="server"
             canSend={canSend}
             {...(canSend && { onSend })}

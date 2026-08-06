@@ -3,11 +3,8 @@
 // failure falls back to the catalog default (no throw); settingsToOverrides maps
 // the legacy editable fields.
 import { describe, expect, it } from 'vitest';
-import {
-  resolveMessage,
-  resolveWithSettings,
-  settingsToOverrides,
-} from '../../src/messages/resolve.js';
+import { resolveMessage, settingsToOverrides } from '../../src/messages/resolve.js';
+import { resolveWithSettings } from '../../src/messages/resolveWithSettings.js';
 import { MESSAGE_CATALOG } from '../../src/messages/catalog.js';
 import { DEFAULT_ORG_SETTINGS, type OrgSettings, type SettingsRepo } from '../../src/repos/settingsRepo.js';
 import { WELCOME_SMS } from '../../src/lib/smsCompliance.js';
@@ -17,13 +14,16 @@ function fakeSettingsRepo(s: OrgSettings): Pick<SettingsRepo, 'getOrgSettings'> 
 }
 
 describe('resolveMessage', () => {
+  // relay.group_closed is the TOKEN-FREE editable example: every tour.* default
+  // now carries {when}/{time}/{where}, and resolving one bare would (rightly)
+  // throw on the missing vars rather than exercise override precedence.
   it('returns the catalog default when no override is supplied', () => {
-    expect(resolveMessage('tour.day_before')).toBe(MESSAGE_CATALOG['tour.day_before'].default);
+    expect(resolveMessage('relay.group_closed')).toBe(MESSAGE_CATALOG['relay.group_closed'].default);
   });
 
   it('an override WINS for an editable entry', () => {
-    const out = resolveMessage('tour.day_before', undefined, {
-      'tour.day_before': 'custom body',
+    const out = resolveMessage('relay.group_closed', undefined, {
+      'relay.group_closed': 'custom body',
     });
     expect(out).toBe('custom body');
   });
@@ -36,8 +36,8 @@ describe('resolveMessage', () => {
   });
 
   it('an empty-string override falls through to the default', () => {
-    const out = resolveMessage('tour.day_before', undefined, { 'tour.day_before': '' });
-    expect(out).toBe(MESSAGE_CATALOG['tour.day_before'].default);
+    const out = resolveMessage('relay.group_closed', undefined, { 'relay.group_closed': '' });
+    expect(out).toBe(MESSAGE_CATALOG['relay.group_closed'].default);
   });
 
   it('substitutes a declared token', () => {

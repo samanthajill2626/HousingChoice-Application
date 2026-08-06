@@ -32,7 +32,7 @@ import {
   freshTenant,
   tourSchedule,
   justAfter,
-  TOUR_REMINDER_BODIES,
+  REMINDER_BODY_MARKERS,
   type Contact,
   type Unit,
 } from '../../scenarios/steps.js';
@@ -262,18 +262,23 @@ test('no-show: booked (no group -> 1:1 fallback) -> no auto check-in -> logged n
 
   // The tenant never shows. The no-show check-in is no longer auto-armed - it is
   // a MANUAL send now (tour-no-show-checkin.spec.ts), so ticking past its OLD due
-  // time fires the earlier rungs (unasserted) but never the check-in body.
+  // time fires the earlier rungs (unasserted) but never the check-in body. ABSENCE,
+  // so this rides the kind-distinctive MARKER: an exact composed string that were
+  // ever mis-composed would make "nothing arrived" pass for the wrong reason.
   await flow.tickTourReminders(justAfter(times.noShowCheckin));
-  await flow.expectNoOutboxMessageContaining(tenant, TOUR_REMINDER_BODIES.no_show_checkin);
+  await flow.expectNoOutboxMessageContaining(tenant, REMINDER_BODY_MARKERS.no_show_checkin);
 
   // Team logs the no-show, then reschedules — no-show tours stay reschedulable,
-  // and rescheduling cancels + RE-ARMS the ladder off the new time: a FRESH
-  // confirmation (the 2nd in this thread) proves the re-arm.
+  // and rescheduling cancels + RE-ARMS the ladder off the new time. Since the
+  // flip a rung's body carries its tour's TIME, so the fresh confirmation is
+  // textually DISTINCT from the first one: its arrival at all proves the re-arm
+  // (a stronger claim than the old "2 identical copies" count - a re-label could
+  // not produce a body composed off newTimes).
   await flow.teamMarksNoShow();
   const newTimes = tourSchedule(72);
   await flow.teamReschedulesTour(newTimes);
   await flow.tickTourReminders();
-  await flow.expectReminderTo1to1('confirmation', tenant, 2);
+  await flow.expectReminderTo1to1('confirmation', tenant);
 });
 
 // Activity coverage: each surfaced tour transition dual-writes a tenant activity

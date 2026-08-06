@@ -53,7 +53,12 @@ import {
 } from '../services/sendMessage.js';
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
-import { resolveMessage } from '../messages/index.js';
+import type { UnitsRepo } from '../repos/unitsRepo.js';
+import type { Address } from '../lib/address.js';
+import {
+  composeTourReminderBody,
+  UncomposableReminderError,
+} from '../messages/tourCopy.js';
 import {
   clampOutOfQuietHours,
   instantAtLocalTime,
@@ -325,6 +330,11 @@ export interface RunDueTourRemindersDeps {
    */
   messagesRepo: MessagesRepo;
   /**
+   * Unit lookup for the address in reminder copy. A missing unit or a read
+   * failure degrades to the no-address variant - never blocks a send.
+   */
+  unitsRepo: UnitsRepo;
+  /**
    * Shared A2P pacing bucket (optional): group-route reminders send N member
    * messages per rung through the raw adapter, so they must draw from the SAME
    * combined-outbound-rate bucket the relay fan-out / intro paths use
@@ -410,6 +420,40 @@ async function claimSkipRow(
       ...(tenantId !== undefined && { contactId: tenantId }),
     });
   }
+}
+
+/**
+ * Compose one rung's body, resolving the unit and the timezone. Total EXCEPT for
+ * UncomposableReminderError, which the caller must contain (see the module
+ * header). A unit-read failure degrades to no address rather than propagating -
+ * a reminder must never be lost over a missing street.
+ *
+ * EVERY caller must run this ABOVE its claimSend: the claim IS the sentAt stamp,
+ * so a compose that threw after it would burn the rung permanently (spec W6).
+ */
+async function composeBodyForRow(
+  row: TourReminderItem,
+  tour: TourItem,
+  window: QuietHoursWindow,
+  deps: Pick<RunDueTourRemindersDeps, 'unitsRepo'>,
+  log: Logger,
+): Promise<string> {
+  let address: Address | string | undefined;
+  try {
+    const unit = await deps.unitsRepo.getById(tour.unitId);
+    address = unit?.address;
+  } catch (err) {
+    log.warn(
+      { err, tourId: tour.tourId, kind: row.kind },
+      'tour reminder: unit read failed - composing without an address',
+    );
+  }
+  return composeTourReminderBody({
+    kind: row.kind,
+    scheduledAt: tour.scheduledAt ?? '',
+    timezone: window.timezone,
+    ...(address !== undefined && { address }),
+  });
 }
 
 /**
@@ -571,12 +615,31 @@ async function processReminderRow(
   }
 
   if (target.route === 'group') {
-    await sendGroupReminder(row, target.tour, target.group, now, deps, log);
+    await sendGroupReminder(row, target.tour, target.group, now, window, deps, log);
     return;
   }
 
   const { tour, conversation: conv } = target;
-  const body = resolveMessage(`tour.${row.kind}`);
+
+  // COMPOSE ABOVE THE CLAIM (spec W6). An unusable scheduledAt cannot produce a
+  // body, and claimSend IS the sentAt stamp - so this must resolve BEFORE it.
+  // An uncontained throw would escape into the caller's per-row catch, leaving
+  // the row unclaimed and re-listed by every tick forever; the claim-skip
+  // retires it exactly once instead.
+  let body: string;
+  try {
+    body = await composeBodyForRow(row, tour, window, deps, log);
+  } catch (err) {
+    if (err instanceof UncomposableReminderError) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder body uncomposable - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
+      return;
+    }
+    throw err;
+  }
 
   // CLAIM-BEFORE-SEND: atomically stamp sentAt BEFORE the outbound send so two
   // concurrent poll ticks both see the same due row but only the first to claim
@@ -584,7 +647,7 @@ async function processReminderRow(
   // cancel-then-poll TOCTOU race in one atomic step.
   // If the claim fails (another tick or a cancelForTour won), skip silently —
   // a benign no-op, NOT an error (mirrors missedCallAutoText's marker pattern).
-  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now);
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now, body);
   if (!claimed) {
     log.info(
       { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
@@ -707,12 +770,31 @@ async function sendGroupReminder(
   tour: TourItem,
   group: UsableGroup,
   now: string,
+  window: QuietHoursWindow,
   deps: RunDueTourRemindersDeps,
   log: Logger,
 ): Promise<void> {
+  // COMPOSE ABOVE THE CLAIM (spec W6) - identical containment to the 1:1 path:
+  // an unusable scheduledAt retires the rung with a claim-skip instead of
+  // burning it post-claim or looping forever unclaimed.
+  let body: string;
+  try {
+    body = await composeBodyForRow(row, tour, window, deps, log);
+  } catch (err) {
+    if (err instanceof UncomposableReminderError) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder body uncomposable - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'invalid_schedule', now, deps, tour.tenantId);
+      return;
+    }
+    throw err;
+  }
+
   // CLAIM-BEFORE-SEND (same atomic claim as the 1:1 path): claim ONCE for the
   // whole group — losing the claim (concurrent tick / cancel) skips silently.
-  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now);
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, now, body);
   if (!claimed) {
     log.info(
       { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
@@ -723,7 +805,7 @@ async function sendGroupReminder(
   // Rung flipped to sent — same live-surface nudge as the 1:1 path.
   (deps.events ?? appEvents).emit('scheduled.updated', { contactId: tour.tenantId });
 
-  const sentCount = await announceGroupReminder(row, group, deps);
+  const sentCount = await announceGroupReminder(row, group, body, deps);
 
   log.info(
     {
@@ -746,10 +828,15 @@ async function sendGroupReminder(
  * (per-member opt-out suppression and A2P pacing live INSIDE the service).
  * Post-claim by contract: both callers claim first. Returns the member count
  * actually sent (0 when the service no-ops on an unusable thread).
+ *
+ * The BODY is composed by the caller, never here: composition can fail, and it
+ * must fail ABOVE the claim (spec W6). This function runs after the claim, so
+ * it takes the already-composed string - the same one snapshotted onto the row.
  */
 async function announceGroupReminder(
   row: TourReminderItem,
   group: UsableGroup,
+  body: string,
   deps: RunDueTourRemindersDeps,
 ): Promise<number> {
   const result = await sendRelayAnnouncement(
@@ -764,7 +851,9 @@ async function announceGroupReminder(
     },
     {
       conversationId: group.conversationId,
-      body: resolveMessage(`tour.${row.kind}`),
+      body,
+      // The kind tag stays derived from the RUNG, never from a catalog id: an
+      // address-variant fork would fork every log line downstream (spec s6).
       kind: `tour.${row.kind}`,
     },
   );
@@ -781,6 +870,10 @@ export type ForceSendRefusal =
   | 'contact_opted_out'
   | 'contact_deleted'
   | 'no_consent'
+  /** The tour has no usable scheduledAt, so no body can be composed. Refused
+   *  PRE-claim and left pending: a human action must never retire a rung (the
+   *  poll's own claim-skip is what retires it). */
+  | 'invalid_schedule'
   | ReminderResolutionFailure;
 
 export type ForceSendResult =
@@ -868,7 +961,26 @@ export async function forceSendReminder(
     if (!hasSmsConsent(target.contact)) return refuse('no_consent');
   }
 
-  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, nowIso);
+  // COMPOSE ABOVE THE CLAIM (spec W6), ONCE for BOTH routes - the claim below
+  // covers them both, and it IS the sentAt stamp. forceSendReminder takes no
+  // window (only the poll reads one per tick), so it reads its OWN here purely
+  // for the composing TIMEZONE: quiet hours are deliberately bypassed by a human
+  // send, and readQuietHoursWindow is what routes the zone through
+  // resolveQuietHoursTimezone (never settings.timezone directly - spec D8/W5).
+  const window = await readQuietHoursWindow(deps.settingsRepo, log);
+  let body: string;
+  try {
+    body = await composeBodyForRow(row, target.tour, window, deps, log);
+  } catch (err) {
+    if (err instanceof UncomposableReminderError) {
+      // PRE-CLAIM REFUSAL, never a claim-skip: a human action must not retire a
+      // rung. The row stays pending and the poll still owns it.
+      return refuse('invalid_schedule');
+    }
+    throw err;
+  }
+
+  const claimed = await deps.tourRemindersRepo.claimSend(row.reminderId, nowIso, body);
   if (!claimed) {
     log.info(
       { reminderId, tourId, kind: row.kind },
@@ -880,7 +992,7 @@ export async function forceSendReminder(
   (deps.events ?? appEvents).emit('scheduled.updated', { contactId: target.tour.tenantId });
 
   if (target.route === 'group') {
-    const sentCount = await announceGroupReminder(row, target.group, deps);
+    const sentCount = await announceGroupReminder(row, target.group, body, deps);
     log.info(
       {
         reminderId,
@@ -900,7 +1012,7 @@ export async function forceSendReminder(
   try {
     await deps.sendMessageService({
       conversationId: target.conversation.conversationId,
-      body: resolveMessage(`tour.${row.kind}`),
+      body,
       author: 'teammate',
       // Human force-send: bypasses manual mode + the breaker (and IS subject to
       // the JIT consent gate pre-checked above).

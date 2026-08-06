@@ -47,7 +47,15 @@ export type ReminderSkipReason =
   /** ARM time: the rung's (clamped) dueAt lands at/after the tour start, so
    *  sending it would be pointless - born skipped as a visible trace (a
    *  near-tour night booking must not silently arm nothing). */
-  | 'past_event';
+  | 'past_event'
+  /** SEND time (the poll's claim-skip): the rung's scheduledAt cannot produce a
+   *  time, so no body can be composed. Retired rather than retried - an
+   *  uncontained compose failure would leave the row unclaimed and re-listed by
+   *  listDue every 60s forever. NOT an arm-time reason: armTourReminders never
+   *  reaches this claim-skip, because `new Date(scheduledAt).toISOString()`
+   *  throws a raw RangeError straight out of the arm call first. (READ paths hit
+   *  the same uncomposable rung but degrade to body:'' - they stamp nothing.) */
+  | 'invalid_schedule';
 
 export interface TourReminderItem {
   /** PK */
@@ -61,6 +69,12 @@ export interface TourReminderItem {
   _reminderPartition: 'reminders';
   /** ISO — set when sent */
   sentAt?: string;
+  /** The body composed for the send that CLAIMED this row. NOT proof of delivery:
+   *  claimSend IS the sentAt stamp, and a SendRefusedError leaves the claim in
+   *  place with nothing delivered. Read paths render this for a sent rung so a
+   *  later reschedule or address edit cannot retroactively rewrite history.
+   *  Absent on rows claimed before this field existed - those compose live. */
+  sentBody?: string;
   /** ISO — set when canceled */
   canceledAt?: string;
   /** ISO — set when the poll retired the rung unsent (see skipReason). Without
@@ -92,8 +106,14 @@ export interface TourRemindersRepo {
    * exists — so a concurrent poll tick or a race with cancelForTour both lose.
    * Returns `true` if this call won the claim, `false` if already claimed/canceled
    * (benign no-op; caller skips the send).
+   *
+   * `sentBody` snapshots the body composed for THIS send onto the row in the same
+   * atomic write, so a later reschedule or address edit can never rewrite what
+   * was already sent. OPTIONAL on purpose: a claim with no body is exactly the
+   * legacy-row case the read paths already handle (they compose live), which
+   * keeps every pre-existing two-argument caller valid.
    */
-  claimSend(reminderId: string, claimedAt: string): Promise<boolean>;
+  claimSend(reminderId: string, claimedAt: string, sentBody?: string): Promise<boolean>;
   /**
    * Atomically retire a rung WITHOUT sending (claim-skip): stamps skippedAt +
    * skipReason under the same no-sentAt/no-canceledAt/no-skippedAt condition
@@ -206,34 +226,47 @@ export function createTourRemindersRepo(deps: RepoDeps = {}): TourRemindersRepo 
       return items;
     },
 
-    async claimSend(reminderId, claimedAt) {
+    async claimSend(reminderId, claimedAt, sentBody) {
       // Atomically claim the row BEFORE sending (claim-before-send pattern).
       // Condition: neither sentAt nor canceledAt may exist — so two concurrent
       // poll ticks over the same row, and a cancel-then-poll race, both result in
       // exactly one send. Returns true if this call won the claim, false (benign
       // no-op) if the row was already claimed, already sent, or already canceled.
+      //
+      // sentBody rides the SAME conditional write - one round trip, and a row can
+      // never end up claimed-but-bodyless through a second failed update. When the
+      // caller passes nothing the attribute is left absent (not written empty):
+      // that is the legacy shape read paths already compose live for.
+      const setBody = typeof sentBody === 'string';
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { reminderId },
-            UpdateExpression: 'SET #sentAt = :sentAt',
+            UpdateExpression: setBody
+              ? 'SET #sentAt = :sentAt, #sentBody = :sentBody'
+              : 'SET #sentAt = :sentAt',
             ConditionExpression:
               'attribute_not_exists(#sentAt) AND attribute_not_exists(#canceledAt) AND attribute_not_exists(#skippedAt)',
             ExpressionAttributeNames: {
               '#sentAt': 'sentAt',
               '#canceledAt': 'canceledAt',
               '#skippedAt': 'skippedAt',
+              ...(setBody && { '#sentBody': 'sentBody' }),
             },
-            ExpressionAttributeValues: { ':sentAt': claimedAt },
+            ExpressionAttributeValues: {
+              ':sentAt': claimedAt,
+              ...(setBody && { ':sentBody': sentBody }),
+            },
           }),
         );
+        // Never log sentBody - it is user-facing copy (module header: PII).
         log.info({ reminderId, claimedAt }, 'tour reminder claimed for send');
         return true;
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           // Benign: another poll tick or a cancel won the race. Not an error.
-          log.debug({ reminderId }, 'tour reminder claim lost (already claimed/canceled) — skipping');
+          log.debug({ reminderId }, 'tour reminder claim lost (already claimed/canceled) - skipping');
           return false;
         }
         throw err;

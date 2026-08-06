@@ -30,9 +30,11 @@ import {
   legPhones,
   uniqueVoicePhone,
 } from '../fixtures/voiceSetup.js';
-// The single source of truth for automated-message copy. Import the PURE catalog
-// module (no repo/AWS deps) so the e2e bundle stays light.
-import { MESSAGE_CATALOG } from '../../app/src/messages/catalog.js';
+// The single source of truth for tour-reminder copy: the app's OWN composer.
+// Same cross-workspace idiom as the MESSAGE_CATALOG imports in the specs, and
+// the module is PURE (no repo/AWS deps - resolve.ts's settings dependency was
+// split out into resolveWithSettings.ts), so the e2e bundle stays light.
+import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
 
 // Read the resolved dashboard URL from the env (set by playwright.config.ts at
 // config load from the lane resolver). Fall back to the lane-0 dev default so
@@ -126,14 +128,68 @@ export type ReminderKind =
   | 'en_route'
   | 'no_show_checkin';
 
-/** Rung bodies sourced from the app message catalog (the single source of truth)
- *  — asserted by exact body equality in the fake threads. */
-export const TOUR_REMINDER_BODIES: Record<ReminderKind, string> = {
-  confirmation: MESSAGE_CATALOG['tour.confirmation'].default,
-  day_before: MESSAGE_CATALOG['tour.day_before'].default,
-  morning_of: MESSAGE_CATALOG['tour.morning_of'].default,
-  en_route: MESSAGE_CATALOG['tour.en_route'].default,
-  no_show_checkin: MESSAGE_CATALOG['tour.no_show_checkin'].default,
+/** The org timezone the backend composes reminder copy in - settingsRepo's
+ *  DEFAULT_ORG_SETTINGS. The lean seed writes no settings item, so the hermetic
+ *  world always serves this (independently pinned by quiet-hours.spec.ts, which
+ *  asserts the Settings UI renders 'Eastern - America/New_York'). */
+export const ORG_TIMEZONE = 'America/New_York';
+
+/** What a rung body is composed FROM: the tour's instant, the zone the app
+ *  renders it in, and the unit's street (absent -> the `_no_address` variant). */
+export interface TourReminderContext {
+  scheduledAt: string;
+  timezone: string;
+  address?: string;
+}
+
+/**
+ * The booked INSTANT behind a `TourTimes`, as the app stores it.
+ *
+ * `scheduledAtLocal` is a ZONE-LESS 'YYYY-MM-DDTHH:mm' - the raw datetime-local
+ * value the Book/Reschedule forms send - so it has to be resolved against a zone
+ * before it can be composed with. `new Date(...)` parses it in the HOST zone,
+ * which is exactly what the app does with the very same string (routes/tours.ts
+ * canonicalizes the boundary value with `new Date(x).toISOString()`), and the app
+ * runs on this same box in the hermetic stack - so both sides land on the same
+ * instant. Deliberate mirroring, same as `timesFor` below.
+ */
+export function instantOf(times: TourTimes): string {
+  return new Date(times.scheduledAtLocal).toISOString();
+}
+
+/** The composition context behind a booking, for specs that need an expected body
+ *  outside the reminder step helpers (the helpers derive their own from the tour
+ *  the Scenario is driving). */
+export function tourReminderContext(unit: Unit, times: TourTimes): TourReminderContext {
+  return { scheduledAt: instantOf(times), timezone: ORG_TIMEZONE, address: unit.addressLine1 };
+}
+
+/** A rung body composed by the APP's OWN composer (the single source of truth),
+ *  so exact-equality assertions track a copy change instead of pinning a literal
+ *  by hand. Replaces the old TOUR_REMINDER_BODIES map of catalog DEFAULTS, which
+ *  stopped being an answer the moment those defaults grew {when}/{where} tokens
+ *  (a raw default now literally contains "{when}"). */
+export function tourReminderBody(kind: ReminderKind, ctx: TourReminderContext): string {
+  return composeTourReminderBody({
+    kind,
+    scheduledAt: ctx.scheduledAt,
+    timezone: ctx.timezone,
+    ...(ctx.address !== undefined && { address: ctx.address }),
+  });
+}
+
+/** Kind-distinctive fragments for ABSENCE assertions ("this rung never sent").
+ *  An absence check against a fully composed body can pass VACUOUSLY - a
+ *  mis-composed expectation matches nothing whether or not the rung went out - so
+ *  "did not send" is always asserted against a fragment that is stable across
+ *  times and addresses AND present in both the addressed and `_no_address`
+ *  variants. (tour-no-show-checkin.spec.ts already uses this idiom.) */
+export const REMINDER_BODY_MARKERS: Record<ReminderKind, string> = {
+  confirmation: 'Tour confirmed',
+  day_before: 'is tomorrow,',
+  morning_of: 'is today at',
+  en_route: "Text us when you're on the way!",
+  no_show_checkin: 'may have missed your tour',
 };
 
 /** The staff-facing rung labels the Reminders panel renders (verbatim mirror of
@@ -248,6 +304,23 @@ export function hoursFromNow(hours: number): string {
  */
 const POOL_NUMBER_RE = /^\+1\d{3}019\d{4}$/;
 
+/** The tour a Scenario is driving. `tourId` is known from create; the group pair
+ *  and the copy context (`scheduledAt`, `addressLine1`) fill in as the flow
+ *  reaches the verbs that produce them. */
+interface ActiveTour {
+  tourId: string;
+  poolNumber?: string;
+  groupThreadId?: string;
+  /** The booked instant, ISO. Set by teamBooksTour, REPLACED by
+   *  teamReschedulesTour - so a body composed after a reschedule uses the NEW
+   *  time, exactly as the re-armed ladder does. */
+  scheduledAt?: string;
+  /** The toured unit's street line, as `formatStreet` will render it (the units
+   *  the harness creates carry a STRUCTURED address, so line1 alone is the whole
+   *  {where} value - no city/state/zip noise). */
+  addressLine1?: string;
+}
+
 export class Scenario {
   private activeContactId: string | null = null;
   private activeTenant: Tenant | null = null;
@@ -257,8 +330,12 @@ export class Scenario {
    *  scenario (teamMaskedCallsLandlord), reused on any re-call. Null until verified. */
   private activeNavCell: string | null = null;
   /** The tour the scenario is driving (set by teamCreatesTourFromInterest); the
-   *  group fields fill in when teamOpensTourGroup provisions the masked relay. */
-  private activeTour: { tourId: string; poolNumber?: string; groupThreadId?: string } | null = null;
+   *  group fields fill in when teamOpensTourGroup provisions the masked relay,
+   *  and `scheduledAt` fills in (or is REPLACED) on every book/reschedule.
+   *  `addressLine1` + `scheduledAt` are what the reminder-body helpers compose
+   *  their expected text from - the tour's own copy context, carried here
+   *  because those helpers take neither the unit nor the times as arguments. */
+  private activeTour: ActiveTour | null = null;
   /** The placement the Post-Tour & Application scenario is driving (set by
    *  teamRecordsExitGate('yes') — the exit gate converts the active tour and
    *  lands on the new placement in the same step). */
@@ -1594,7 +1671,9 @@ export class Scenario {
       const m = /\/tours\/([^/?#]+)/.exec(this.page.url());
       if (!m) throw new Error('teamCreatesTourFromInterest: expected a /tours/:tourId URL after create');
       const tourId = decodeURIComponent(m[1]!);
-      this.activeTour = { tourId };
+      // Carry the unit's street: the reminder-body helpers compose {where} from
+      // it, and this is the only verb that sees the Unit.
+      this.activeTour = { tourId, addressLine1: unit.addressLine1 };
       // Requested + not booked - the rebuilt page shows the tour StatusBadge in
       // the header band (no more <dd> aria-labels) plus a "Not booked" facts line.
       await expect(this.tourStatusBadge('Requested')).toBeVisible();
@@ -1776,6 +1855,7 @@ export class Scenario {
       // form=), so it's scoped to the page, not the form.
       await this.page.getByRole('button', { name: 'Confirm schedule' }).click();
       await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
+      tour.scheduledAt = instantOf(times);
     });
   }
 
@@ -1798,7 +1878,7 @@ export class Scenario {
    *  the pool number (the founder routing rule for landlord_led/pm_team tours). */
   expectReminderInGroup(kind: ReminderKind, members: Contact[]): Promise<void> {
     const pool = this.requireActiveTourGroup().poolNumber;
-    const body = TOUR_REMINDER_BODIES[kind];
+    const body = tourReminderBody(kind, this.requireTourReminderContext());
     return step(`App: '${kind}' reminder lands in the group (every member)`, async () => {
       for (const member of members) {
         await expect
@@ -1824,7 +1904,7 @@ export class Scenario {
    *  "Automated" bubble carrying the rung body on the conversation view. */
   expectReminderVisibleInGroupThread(kind: ReminderKind): Promise<void> {
     const groupThreadId = this.requireActiveTourGroup().groupThreadId;
-    const body = TOUR_REMINDER_BODIES[kind];
+    const body = tourReminderBody(kind, this.requireTourReminderContext());
     return step(`Team sees the '${kind}' reminder in the group thread (Automated bubble)`, async () => {
       await this.page.goto(`${NEXT}/conversations/${groupThreadId}`);
       await expect(this.page.getByText(body)).toBeVisible({ timeout: 15_000 });
@@ -1834,9 +1914,11 @@ export class Scenario {
 
   /** [App→Tenant, AUTO] A reminder rung landed in the tenant's 1:1 thread FROM
    *  the APP number (self_guided always; landlord_led with no group falls back).
-   *  `atLeast` supports the re-armed-ladder assert (a 2nd 'confirmation' copy). */
+   *  The expected body is composed from the ACTIVE tour's time + address, so a
+   *  re-armed ladder is proven by the NEW body arriving at all, not by counting
+   *  copies of an identical one - `atLeast` stays for genuinely repeated sends. */
   expectReminderTo1to1(kind: ReminderKind, t: Tenant, atLeast = 1): Promise<void> {
-    const body = TOUR_REMINDER_BODIES[kind];
+    const body = tourReminderBody(kind, this.requireTourReminderContext());
     return step(`App: '${kind}' reminder lands 1:1 with the tenant (×${atLeast})`, async () => {
       await expect
         .poll(
@@ -1940,6 +2022,9 @@ export class Scenario {
       // Confirm sits in the modal FOOTER (outside the <form>), so scope to the page.
       await this.page.getByRole('button', { name: 'Confirm reschedule' }).click();
       await expect(this.tourStatusBadge('Scheduled')).toBeVisible({ timeout: 10_000 });
+      // REPLACE the copy context: the re-armed ladder composes off the new time,
+      // so every body expected from here on must too.
+      tour.scheduledAt = instantOf(times);
     });
   }
 
@@ -3229,9 +3314,26 @@ export class Scenario {
     await expect(this.page.getByText(body)).toBeVisible();
   }
 
-  private requireActiveTour(): { tourId: string; poolNumber?: string; groupThreadId?: string } {
+  private requireActiveTour(): ActiveTour {
     if (!this.activeTour) throw new Error('no active tour — call teamCreatesTourFromInterest first');
     return this.activeTour;
+  }
+
+  /** The active tour's reminder-copy context. `scheduledAt` only exists once the
+   *  tour is BOOKED, which is also the only moment a ladder is armed - so a
+   *  missing one means the caller asserted a rung before anything could have been
+   *  scheduled, and that deserves a named error rather than a body composed off
+   *  an invented time. */
+  private requireTourReminderContext(): TourReminderContext {
+    const tour = this.requireActiveTour();
+    if (tour.scheduledAt === undefined) {
+      throw new Error('no booked tour - call teamBooksTour before asserting a reminder body');
+    }
+    return {
+      scheduledAt: tour.scheduledAt,
+      timezone: ORG_TIMEZONE,
+      ...(tour.addressLine1 !== undefined && { address: tour.addressLine1 }),
+    };
   }
 
   private requireActiveTourGroup(): { tourId: string; poolNumber: string; groupThreadId: string } {

@@ -79,6 +79,31 @@ export function isValidAddress(value: unknown): value is Address {
 }
 
 /**
+ * The STREET portion only - line1 plus line2, no city/state/zip. This is what
+ * user-facing SMS copy uses: a tenant needs the street to navigate, not the
+ * postal tail (spec D5).
+ *
+ * Tolerant of a legacy plain-string address, which is returned trimmed and
+ * VERBATIM - such a value usually contains city/state/zip and we do not attempt
+ * to parse it out. Every seeded unit is this shape today.
+ */
+export function formatStreet(a: Address | string | undefined): string {
+  // TOTAL FUNCTION (runtime hardening, same discipline as zipFive below). The
+  // declared type says undefined, but a stored `address: null` is reachable: the
+  // seeds write unit items with a raw PutCommand around unitsRepo (which strips
+  // nulls), the M1.6 import is unbuilt, and rows can be hand-edited. A null here
+  // would throw a TypeError on `a.line1` - and the four containment blocks that
+  // wrap this on the reminder paths catch only UncomposableReminderError, so
+  // that throw would escape into an unclaimed-and-re-listed-forever poll row, a
+  // 500 on GET reminders, and a BLANKED contact-timeline upcoming bucket.
+  if (a == null) return '';
+  if (typeof a === 'string') return a.trim();
+  // Same reasoning for the fields: an unpoliced legacy row can hold a non-string
+  // line1, which would otherwise interpolate "[object Object]" into a tenant SMS.
+  return [a.line1, a.line2].filter((s): s is string => typeof s === 'string' && s.length > 0).join(' ');
+}
+
+/**
  * One-line display string for server-side logging / display needs. Joins the
  * present fields in postal order; "city, state zip" reads naturally. Tolerant of
  * a legacy plain-string address (returns it as-is) and of missing fields.
@@ -87,7 +112,7 @@ export function isValidAddress(value: unknown): value is Address {
 export function formatAddress(a: Address | string | undefined): string {
   if (a === undefined) return '';
   if (typeof a === 'string') return a.trim();
-  const street = [a.line1, a.line2].filter((s) => s && s.length > 0).join(' ');
+  const street = formatStreet(a);
   const cityState = [a.city, [a.state, a.zip].filter((s) => s && s.length > 0).join(' ')]
     .filter((s) => s && s.length > 0)
     .join(', ');

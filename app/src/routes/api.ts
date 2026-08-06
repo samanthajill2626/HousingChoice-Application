@@ -739,6 +739,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       adapter,
       messagesRepo: messages,
       auditRepo: audit,
+      // The unit address behind the composed reminder copy - forwarded as the
+      // RESOLVED local (same rationale as the timeline gather above) so prod/e2e
+      // read a real repo while injected fakes still win.
+      unitsRepo: units,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -767,9 +771,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       activityEventsRepo: activityEvents,
       ...(deps.poolNumbersService !== undefined && { poolNumbersService: deps.poolNumbersService }),
       // The group thread's "Upcoming" bucket (GET /conversations/:id/scheduled)
-      // resolves the owner tour + its pending reminder rungs.
+      // resolves the owner tour + its pending reminder rungs, and composes each
+      // rung's body from the tour time + the unit address (the RESOLVED local,
+      // so prod/e2e read a real repo).
       ...(deps.toursRepo !== undefined && { toursRepo: deps.toursRepo }),
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
+      unitsRepo: units,
       events,
     }),
   );

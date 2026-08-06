@@ -47,7 +47,7 @@ import { test, expect, type APIRequestContext, type Locator, type Page } from '@
 import { listThreads, registerParty, sendAsParty } from '../../fixtures/fakeTwilio.js';
 import { sendInboundEmail } from '../../fixtures/fakeEmail.js';
 import { driveConnectingGroupToOpen } from '../../fixtures/relayConnect.js';
-import { APP_NUMBER, TOUR_REMINDER_BODIES } from '../../scenarios/steps.js';
+import { APP_NUMBER, ORG_TIMEZONE, tourReminderBody } from '../../scenarios/steps.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -103,8 +103,13 @@ async function createContact(
   return { contactId, firstName, lastName, phone };
 }
 
-/** An AVAILABLE property owned by `landlordId` (POST /api/units + publish). */
-async function createAvailableUnit(request: APIRequestContext, landlordId: string): Promise<string> {
+/** An AVAILABLE property owned by `landlordId` (POST /api/units + publish).
+ *  Returns `line1` too: the address is STRUCTURED, so line1 alone is the whole
+ *  {where} a tour-reminder body composes to, and the reminder assertions need it. */
+async function createAvailableUnit(
+  request: APIRequestContext,
+  landlordId: string,
+): Promise<{ unitId: string; line1: string }> {
   const line1 = `${`${Date.now()}`.slice(-6)} Comms Pane Way NW`;
   const res = await request.post(`${NEXT}/api/units`, {
     data: {
@@ -122,7 +127,7 @@ async function createAvailableUnit(request: APIRequestContext, landlordId: strin
     data: { toStatus: 'available', source: 'manual' },
   });
   expect(pub.ok(), await pub.text()).toBeTruthy();
-  return unitId;
+  return { unitId, line1 };
 }
 
 /** A tour via the real route. With `scheduledAt` the ladder arms and the
@@ -179,7 +184,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const stamp = `${Date.now()}`.slice(-6);
 
     const landlord = await createContact(req, 'landlord', `Cpsgl${stamp}`);
-    const unitId = await createAvailableUnit(req, landlord.contactId);
+    const { unitId, line1 } = await createAvailableUnit(req, landlord.contactId);
     const tenant = await createContact(req, 'tenant', `Cpsgt${stamp}`);
 
     // 48h out: every rung is still in the future at arm time, so day_before
@@ -206,10 +211,17 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const upcoming = page.getByRole('region', { name: 'Upcoming scheduled messages' });
     await expect(upcoming).toBeVisible({ timeout: 15_000 });
     // Card roots are grandchild divs of the region (region -> list -> card), so a
-    // body filter cannot accidentally select an ancestor container.
-    const dayBefore = upcoming
-      .locator('> div > div')
-      .filter({ hasText: TOUR_REMINDER_BODIES.day_before });
+    // body filter cannot accidentally select an ancestor container. The body is
+    // composed by the APP's own composer off THIS tour's instant + address (the
+    // unit's address is structured, so {where} is line1 alone), which keeps the
+    // filter exact through a copy change.
+    const dayBefore = upcoming.locator('> div > div').filter({
+      hasText: tourReminderBody('day_before', {
+        scheduledAt,
+        timezone: ORG_TIMEZONE,
+        address: line1,
+      }),
+    });
     await expect(dayBefore).toHaveCount(1, { timeout: 15_000 });
     await expect(dayBefore.getByText('Tour reminder', { exact: true })).toBeVisible();
 
@@ -238,7 +250,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const stamp = `${Date.now()}`.slice(-6);
 
     const landlord = await createContact(req, 'landlord', `Cpgll${stamp}`);
-    const unitId = await createAvailableUnit(req, landlord.contactId);
+    const { unitId } = await createAvailableUnit(req, landlord.contactId);
     const tenant = await createContact(req, 'tenant', `Cpgtn${stamp}`);
 
     // A SECOND number on the tenant, so "clears the WHOLE row" is a real claim:
@@ -371,7 +383,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const stamp = `${Date.now()}`.slice(-6);
 
     const landlord = await createContact(req, 'landlord', `Cpsnl${stamp}`);
-    const unitId = await createAvailableUnit(req, landlord.contactId);
+    const { unitId } = await createAvailableUnit(req, landlord.contactId);
     // Consented at create, and NEVER texted: this tenant owns no conversation at
     // all, so the first send has to create one on demand.
     const tenant = await createContact(req, 'tenant', `Cpsnt${stamp}`);
@@ -421,7 +433,7 @@ test.describe('Tour + placement comms pane - the person-centric 1:1 tabs', () =>
     const stamp = `${Date.now()}`.slice(-6);
 
     const landlord = await createContact(req, 'landlord', `Cpeml${stamp}`);
-    const unitId = await createAvailableUnit(req, landlord.contactId);
+    const { unitId } = await createAvailableUnit(req, landlord.contactId);
     const tenantEmail = `cpane.tenant.${stamp}@example.com`;
     const tenant = await createContact(req, 'tenant', `Cpemt${stamp}`, { email: tenantEmail });
 

@@ -24,6 +24,7 @@ import type {
   ContactTimelinePage,
   ContactType,
   ContactVocabulary,
+  ConversationScheduledPage,
   EmailMediaAttachment,
   SendEmailResult,
   UnmatchedEmailPage,
@@ -55,7 +56,6 @@ import type {
   SystemFlags,
   TenantStatus,
   TodayResponse,
-  TimelineScheduled,
   TransitionSource,
   Tour,
   TourActivityEvent,
@@ -463,16 +463,19 @@ export async function getConversationMessages(
 /** GET /api/conversations/:id/scheduled - the group thread's "Upcoming" bucket:
  *  the not-yet-sent tour-reminder rungs that will route to this masked group
  *  (same TimelineScheduled shape the contact timeline ships). Empty for 1:1
- *  conversations (their upcoming lives on the contact timeline). */
+ *  conversations (their upcoming lives on the contact timeline).
+ *
+ *  Returns the WHOLE envelope, not just the rows: `timezone` is the zone those
+ *  bodies were composed in (spec D8) and the cards need it to label their fire
+ *  times in the same zone the body quotes. */
 export async function getConversationScheduled(
   conversationId: string,
   signal?: AbortSignal,
-): Promise<TimelineScheduled[]> {
-  const res = await request<{ scheduled: TimelineScheduled[] }>(
+): Promise<ConversationScheduledPage> {
+  return request<ConversationScheduledPage>(
     `/api/conversations/${encodeURIComponent(conversationId)}/scheduled`,
     { ...(signal !== undefined && { signal }) },
   );
-  return res.scheduled;
 }
 
 /** POST /api/conversations/:id/messages - a manual human send (the reply box).

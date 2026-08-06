@@ -57,3 +57,10 @@ deferral poller adds a SECOND automated writer to this unclaimed path: a
 deferred open applied at quiet-end and an operator force-open can now race
 each other as well as two operators. Same gap, higher probability - worth
 weighing when this is prioritized.
+
+**Update (2026-08-06, planner-wave re-verify).** The MF-A stamp guard adds a
+tours-side sibling of this residue: when the tours pointer STAMP fails after
+a successful provision, the claim is released (no permanent sentinel - the
+fix's point) at the cost of an ORPHANED provisioned group and its burned
+number, logged ids-only. Deliberate trade-off; any janitor built for this
+issue should sweep that orphan class too.

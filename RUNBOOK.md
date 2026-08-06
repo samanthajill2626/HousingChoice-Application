@@ -1046,6 +1046,60 @@ notification settings, so this checklist *is* the fix:
 > after a domain cutover every device must re-install the PWA and re-grant permission, then redo
 > this setup.
 
+## Importing the founder's Quo + Airtable data (M1.6)
+
+Two commands with a human review step between them. Design + rationale:
+[docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md](docs/superpowers/specs/2026-08-05-quo-airtable-import-design.md).
+
+**`import:plan` writes no database.** It reads the exports and emits a review
+workbook (3 CSVs) the founder edits. **`import:apply`** reads the *reviewed*
+workbook plus the raw exports and upserts DynamoDB.
+
+```powershell
+npm run import:plan -- --quo "W:\AI Projects\Housing Choice\Quo Exports" --airtable "W:\AI Projects\Housing Choice\Airtable Exports" --out "W:\AI Projects\Housing Choice\Import Review\<date>"
+```
+
+Carry a previous review forward so she reviews a DIFF, not the whole corpus:
+
+```powershell
+npm run import:plan -- --quo "<quo dir>" --airtable "<airtable dir>" --out "W:\AI Projects\Housing Choice\Import Review\<new date>" --prior "W:\AI Projects\Housing Choice\Import Review\<old date>"
+```
+
+Apply — **always dry-run first**; the write needs an explicit `--yes`:
+
+```powershell
+npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+```
+
+Target is whatever `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` point at — there is no
+built-in prod mode, exactly like `db:seed`. Set them deliberately per stage.
+
+**Things that will bite you:**
+
+- **PII.** The workbook holds real names and phone numbers, and this repo pushes
+  to Azure DevOps. `import:plan` REFUSES to write inside the working tree; keep
+  the workbook next to the exports. `.gitignore` is the second line of defence.
+- **Re-running is safe and is the intended delta.** Every write is keyed on a
+  value derived from the source data, so applying the 8/09 export over the 8/05
+  one converges. No wipe needed, and a bug found *after* cutover can be fixed by
+  re-running.
+- **A re-run will not revert the founder.** Status is only rewritten when the
+  import wrote the stored one; anything she or the automation changed afterwards
+  stays. Messages and calls are immutable and simply rewrite themselves.
+- **`drop` retracts.** Marking `drop` on a row the import already created removes
+  the contact, thread and messages — but only items carrying the import's stamp.
+  A thread holding any message the import did not create is KEPT and reported.
+- **The totals are short by design and say so.** 2 messages Sam addressed to her
+  own number and 1 call from a withheld caller ID belong to no importable thread.
+  Both commands print the reconciliation; a short count is never silent.
+- **`connect_day_one` records intent only.** Groups import as `connecting` with no
+  pool number. Provisioning a Twilio number stays a deliberate operator step — the
+  import never buys a number because of a spreadsheet cell.
+- **Verify Quo's ids are stable across exports** before trusting the carry-forward
+  (diff contact ids between two exports). If they turn out to be per-export, the
+  fallback is a content hash — one function, not a redesign.
+
 ## Rollback
 
 One-liner per env (re-deploys an EXISTING ECR tag — no build, ~20–25 s end to end):

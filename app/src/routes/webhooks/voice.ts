@@ -1,7 +1,7 @@
 // Twilio Programmable Voice webhooks (M1.9a Change Order 1, doc §7.1 v2.17):
 //   POST /webhooks/twilio/voice              — inbound call entry point
 //   POST /webhooks/twilio/voice/whisper      — callee-leg whisper + press-1 gate
-//   POST /webhooks/twilio/voice/whisper-gate — the press-1/press-0/timeout gate
+//   POST /webhooks/twilio/voice/whisper-gate — the press-1/timeout gate
 //   POST /webhooks/twilio/voice/status       — call status callback (forward-only)
 //   POST /webhooks/twilio/voice/recording    — recordingStatusCallback (M1.9c)
 //   POST /webhooks/twilio/voice/intelligence - Voice Intelligence completion webhook (JSON)
@@ -14,7 +14,7 @@
 // pool_number + participants[]. When a member calls the pool number, we bridge
 // them to the OTHER member(s) with the POOL NUMBER as caller ID (NEVER the real
 // caller's number), after a whisper + press-1 gate on the callee leg (blocks
-// carrier voicemail), with press-0 → team. Masked calls are NEVER recorded /
+// carrier voicemail). Masked calls are NEVER recorded /
 // transcribed (record="do-not-record") — they produce a metadata-only `call`
 // timeline entry (who→whom by ROLE, when, duration, answered/missed).
 //
@@ -1046,13 +1046,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       typeof q['callerLabel'] === 'string' ? q['callerLabel'] : resolveMessage('voice.caller_label_default');
     const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
     const parentCallSid = typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
-    // leg=founder selects the founder-bridge whisper copy (M1.9b): the founder
-    // IS the team, so there is no press-0 "reach the team" escape on her leg —
-    // just press-1 to accept (the same gate that blocks carrier voicemail).
+    // leg=founder selects the founder-bridge whisper copy (M1.9b). Both legs
+    // now offer the same single choice: press-1 to accept (the gate that
+    // blocks carrier voicemail).
     const isFounderLeg = q['leg'] === 'founder';
     if (conversationId.length > 0) mergeContext({ conversationId });
 
-    // Carry leg forward to the gate so it can pick the right press-0 behavior.
+    // Carry leg forward to the gate so it can log which leg answered.
     const gateUrl =
       `${baseUrl}/webhooks/twilio/voice/whisper-gate` +
       `?conversationId=${encodeURIComponent(conversationId)}` +
@@ -1067,9 +1067,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       method: 'POST',
     });
     // Masked announcement: the caller's ROLE/name only — NEVER a phone (PII).
-    // Press 1 to accept (gates the bridge, blocks carrier voicemail). The masked
-    // (relay) leg also offers press-0 → team; the founder leg does not (she is
-    // the team).
+    // Press 1 to accept (gates the bridge, blocks carrier voicemail). That is
+    // the ONLY offered key on both legs; anything else falls through to hangup.
     gather.say(
       isFounderLeg
         ? resolveMessage('voice.whisper_founder', { callerLabel })
@@ -1086,10 +1085,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   });
 
   // ---------------------------------------------------------------------
-  // Whisper gate — POST /voice/whisper-gate. The press-1/press-0/timeout
-  // decision, stateless (context via the query string). Runs on the CALLEE leg.
+  // Whisper gate — POST /voice/whisper-gate. The press-1/timeout decision,
+  // stateless (context via the query string). Runs on the CALLEE leg.
   //   Digits == '1' → empty/<Pause> TwiML → the bridge PROCEEDS (callee accepted)
-  //   Digits == '0' → <Dial> the team (press-0 escape)
   //   else          → <Hangup> the callee leg (caller hears masked no-answer,
   //                   never the carrier voicemail)
   // ---------------------------------------------------------------------
@@ -1099,9 +1097,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     const digits = params['Digits'];
     const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
     const parentCallSid = typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
-    // Founder-bridge leg (M1.9b): the founder IS the team, so press-0 has no
-    // team to escape to — it falls through to hangup (→ MISSED → the status
-    // handler fires the missed-call push + auto-text).
+    // Founder-bridge leg (M1.9b). The gate treats both legs identically now;
+    // this only labels the log line. A non-accept on the founder leg still
+    // falls through to hangup (→ MISSED → the status handler fires the
+    // missed-call push + auto-text).
     const isFounderLeg = q['leg'] === 'founder';
     // Outbound-bridge leg (Voice Phase 1, spec §5): the navigator's press-1
     // ORIGINATES the leg to the target (a <Dial>), rather than accepting an
@@ -1210,31 +1209,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       sendTwiml(res, vr);
       return;
     }
-    if (digits === '0' && !isFounderLeg && !isOutboundLeg) {
-      // Press-0 escape (masked relay only): dial the team. callerId stays a
-      // number we own (the configured business number) — NEVER the
-      // original caller's From (PII).
-      // INTERIM (Task 5 deletes this whole branch): a one-element list keeps
-      // today's exact behavior against the singular value.
-      const teamNumbers =
-        config.businessPhoneNumber !== undefined ? [config.businessPhoneNumber] : [];
-      const teamCallerId = teamNumbers[0];
-      if (teamNumbers.length > 0 && teamCallerId !== undefined) {
-        const dial = vr.dial({ callerId: teamCallerId, record: 'do-not-record' });
-        for (const n of teamNumbers) dial.number(n);
-        log.info({ callSid: parentCallSid, gate: 'team', masked: true }, 'masked whisper gate: press-0 — dialing team');
-      } else {
-        // No team number configured — say + hangup rather than leak/await.
-        vr.say(resolveMessage('voice.team_unreachable'));
-        vr.hangup();
-        log.warn({ callSid: parentCallSid, gate: 'team' }, 'masked whisper gate: press-0 but no team number configured');
-      }
-      sendTwiml(res, vr);
-      return;
-    }
-    // Timeout / press-0 on the founder leg / any other key → hang up the bridged
-    // leg so the caller hears a no-answer (the press-1 gate is exactly what
-    // blocks the leg's carrier voicemail from silently "answering" the bridge).
+    // Timeout, or ANY key other than the accept, on ANY leg -> hang up the
+    // bridged leg so the caller hears a no-answer (the press-1 gate is exactly
+    // what blocks the leg's carrier voicemail from silently "answering" the
+    // bridge). '0' is not special: the team escape was removed
+    // (docs/issues/press-0-team-escape-removed.md).
     vr.hangup();
     log.info(
       { callSid: parentCallSid, gate: 'hangup', leg: isFounderLeg ? 'founder' : 'callee' },

@@ -318,7 +318,9 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).not.toContain('<Dial');
   });
 
-  it("gate: Digits='0' → <Dial> the team from OUR number, never the caller's From", async () => {
+  it("gate: Digits='0' -> <Hangup> (the press-0 team escape was removed)", async () => {
+    // '0' is no longer special: it takes the same fall-through as a Gather
+    // timeout or any other key. See docs/issues/press-0-team-escape-removed.md.
     const world = createFakeWorld();
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
@@ -329,10 +331,8 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     });
     expect(res.status).toBe(200);
     const xml = res.text;
-    expect(xml).toContain('<Dial');
-    expect(xml).toContain(OUR_NUMBER); // team number = our business number
-    expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
-    expect(xml).not.toContain(ALICE);
+    expect(xml).toContain('<Hangup');
+    expect(xml).not.toContain('<Dial');
   });
 
   it('gate: timeout / other key → <Hangup> the callee leg (no carrier voicemail)', async () => {

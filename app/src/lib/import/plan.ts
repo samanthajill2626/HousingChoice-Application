@@ -79,14 +79,18 @@ export function runPlan(options: PlanOptions): PlanResult {
     optOutPhones,
   });
 
-  const addresses = mineAddresses(quo.messages, {
-    minSendCount: options.minAddressSendCount ?? 2,
-  });
+  // Mine EVERY spelling, then apply the relevance threshold per PROPERTY in
+  // buildUnitRows. Thresholding here would count each spelling separately, so a
+  // property she texted five times in five slightly different ways would score 1
+  // on each and be dropped entirely — exactly the busy properties we most want.
+  const addresses = mineAddresses(quo.messages, { minSendCount: 1 });
 
   const sheets: WorkbookSheets = {
     contacts: buildContactRows(merge.people, options.prior),
     groups: buildGroupRows(threads.threads, options.prior),
-    units: buildUnitRows(airtable.properties, addresses, options.prior),
+    units: buildUnitRows(airtable.properties, addresses, options.prior, {
+      minSendCount: options.minAddressSendCount ?? 2,
+    }),
   };
 
   const byStatus: Record<string, number> = {};

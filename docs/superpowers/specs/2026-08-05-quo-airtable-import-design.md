@@ -219,8 +219,7 @@ founder reviews a diff and not the corpus. This is what lets her review start
 ### 3.4 Derived tenant status
 
 Status is derived from last message activity and stamped
-`status_source: 'import'`, which outranks `derived` in `SOURCE_PRECEDENCE`, so
-anything Sam or the automation does later cleanly overrides it.
+`status_source: 'import'`.
 
 | Condition | Status |
 | --- | --- |
@@ -232,6 +231,20 @@ anything Sam or the automation does later cleanly overrides it.
 a single constant, changed and re-planned in seconds. Landlords default to
 `active` (a handshake in her book means she is working with them); unclassified
 contacts and the 80 orphans default to `unknown` / `needs_review`.
+
+**Re-runs never revert a human.** On a second apply, the status is only rewritten
+when the stored `status_source` is `import` — i.e. when WE wrote the value that is
+there. Any other provenance (or none) means someone has since decided, and the
+import defers.
+
+This deliberately does NOT consult `SOURCE_PRECEDENCE`. An earlier draft of this
+spec claimed `import` outranks `derived` there and that the rank would protect
+manual edits; that is wrong. In `lib/statusModel.ts` the rank is provenance/audit
+metadata only — `derived` is 0 and *every* non-derived source (`import`,
+`automation`, `ai`, `manual`) is an equal 1 — so a precedence comparison is never
+true and would have silently preserved nothing. Real gating in this codebase is
+state-based (`isTenantOverrideStatus`). Caught by the integration test that sets a
+status to `placed`/`manual` and re-applies.
 
 ### 3.5 Caseworkers
 
@@ -314,7 +327,16 @@ already understood and directly testable.
   partial but *consistent* state, and re-running converges. This is a direct
   consequence of 3.2 and is the reason no wipe is needed.
 - **Apply refuses to run** against a workbook whose `row_key` set does not match
-  the exports it was generated from, unless `--replan` is passed.
+  the exports it was generated from, or where a `row_key`'s phone disagrees with
+  the export's — her decisions would attach to the wrong people.
+- **`drop` retracts, it does not merely skip.** If an earlier run already imported
+  someone the founder later drops, skipping the write would leave the row behind
+  and "drop" would quietly do nothing. So apply removes the contact, the 1:1
+  thread and its messages — but ONLY items carrying this import's `imported_from`
+  stamp. A thread holding any message the import did not create is KEPT and
+  reported. Dropping a spreadsheet row must never be able to destroy live
+  conversation history. Group threads are never dismantled (their history belongs
+  to the other members too).
 - Every skipped or flagged row is counted and printed. Silent truncation is the
   one failure mode that would read as success.
 

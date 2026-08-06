@@ -191,7 +191,9 @@ export function buildUnitRows(
   properties: readonly AirtableProperty[],
   mined: readonly AddressCandidate[],
   prior?: PriorReview,
+  options: { minSendCount?: number } = {},
 ): CsvRow[] {
+  const minSendCount = options.minSendCount ?? 1;
   const groups = new Map<string, PropertyGroup>();
   const group = (address: string): PropertyGroup => {
     const key = looseAddressKey(address);
@@ -216,6 +218,11 @@ export function buildUnitRows(
   for (const g of groups.values()) {
     const sendCount = g.mined.reduce((s, c) => s + c.sendCount, 0);
     const threadCount = g.mined.reduce((s, c) => s + c.threadCount, 0);
+
+    // A property she confirmed in Airtable is always offered. A purely mined one
+    // must clear the relevance threshold on its COMBINED send count across every
+    // spelling.
+    if (!g.airtable && sendCount < minSendCount) continue;
     const lastSeen = g.mined.map((c) => c.lastSeenAt).sort().pop() ?? '';
     const source = g.airtable
       ? g.mined.length > 0

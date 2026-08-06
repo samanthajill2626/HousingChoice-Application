@@ -100,7 +100,7 @@ match, TRUST THE CODE and adjust, do not force the number.
 - `app/src/routes/webhooks/twilio.ts:875-877` - a comment stating the SMS path
   no longer uses `getByPoolNumber`. Task 4 makes it use exactly that. The
   comment MUST be rewritten in the same edit (see Task 4 Step 5).
-- `dashboard/src/routes/settings/NumbersSection.test.tsx:355-372` - the
+- `dashboard/src/routes/settings/NumbersSection.test.tsx:351-373` - the
   AdminRoute BOUNCE test, not a title pin. Its
   `queryByRole('heading', { name: 'Group text numbers' })` negative assertion
   goes VACUOUS after the retitle. See Task 7 Step 5.
@@ -261,7 +261,8 @@ and Task 2 fixes it. Do NOT commit yet.
 
 **Files:**
 - Modify: `app/src/app.ts:136`, `app/src/routes/contactTimeline.ts:351`,
-  `app/src/routes/webhooks/voice.ts:295,303-309,1119`,
+  `app/src/routes/webhooks/twilio.ts:278` (interim Set),
+  `app/src/routes/webhooks/voice.ts:291` (interim Set), `:295,303-309,1119`,
   `app/src/services/originateCall.ts:96`,
   `app/src/services/sendMessage.ts:327,338`,
   `app/src/routes/voiceApi.ts:248`,
@@ -483,7 +484,7 @@ Expected: all PASS. e2e proves the renamed env actually boots the stack.
 
 ```bash
 git status
-git add app/src app/test scripts dashboard/src e2e fake-twilio/src
+git add app/src app/test scripts e2e fake-twilio/src
 git commit -m "refactor(config): OUR_PHONE_NUMBERS list becomes singular BUSINESS_PHONE_NUMBER"
 ```
 
@@ -706,7 +707,7 @@ Expected: PASS.
 Run: `npm run typecheck` then `npm test`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git status
@@ -826,6 +827,11 @@ rest.
 There is exactly ONE such assertion. Do not go looking for a second - an
 earlier draft of this plan wrongly cited :455 and :483.
 
+Two more places outlive the founder-vs-relay press-0 distinction D4 deletes and
+must be reworded in the same edit, or they describe a distinction that no
+longer exists: the TEST NAME at `founderTriage.test.ts:482` and the comment at
+`app/src/routes/webhooks/voice.ts:1048`.
+
 Then read the two tests named in the spec's surface map
 (`founderTriage.test.ts:455` and `:483` regions) and confirm they still assert
 something that can fail. If either is now vacuous, resolve it the same way.
@@ -905,7 +911,10 @@ Add to `app/test/settings.test.ts`:
 
 ```ts
   it('GET returns the env-sourced business number alongside the settings', async () => {
-    const res = await request(app).get('/api/settings').set('cookie', TEST_SESSION_COOKIE);
+    const res = await request(app)
+      .get('/api/settings')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(200);
     expect(res.body.businessPhoneNumber).toBe('+15550009999');
   });
@@ -981,7 +990,7 @@ Apply the identical shape to the PUT's response at :194. The dashboard wire
 type is therefore `businessPhoneNumber?: string`, and "not configured" is
 `=== undefined`, not `=== null`.
 
-- [ ] **Step 4: Add the field to the flags payload**
+- [ ] **Step 5: Add the field to the flags payload**
 
 In `app/src/services/systemStatus.ts` - NOT `routes/system.ts` - add the same
 conditional spread to the flags object and make `SystemFlags`'
@@ -990,16 +999,32 @@ conditional spread to the flags object and make `SystemFlags`'
 that the ONE business number is included deliberately (published on public
 flyers, not a contact's phone) and that no contact phone ever appears here.
 
-- [ ] **Step 6: Update the two flags assertions**
+- [ ] **Step 6: Cover the flags assertions - READ BEFORE EDITING**
 
-Add `businessPhoneNumber: '<the harness value>'` to the expected object in
-`app/test/systemStatus.service.test.ts:59` and `app/test/system.routes.test.ts:51`.
-Keep them as `toEqual` - the exact-shape assertion is deliberate and is what
-caught this.
+DO NOT blindly add the key to the existing `toEqual`s. Because the key is
+OMITTED when unconfigured, whether each assertion needs changing depends on
+whether its harness configures a business number:
+
+- `app/test/systemStatus.service.test.ts:59` builds its config with
+  `deployedConfig()` (:31-34), which calls `loadConfig` WITHOUT
+  `BUSINESS_PHONE_NUMBER`. The field is therefore absent from the payload and
+  THE EXISTING ASSERTION REMAINS CORRECT AS WRITTEN. Adding the key turns a
+  passing test RED. Leave it alone.
+- `app/test/system.routes.test.ts:51` - READ its harness first and apply the
+  same rule: add the key ONLY if that harness actually configures a number.
+
+Then ADD one new test that configures a business number and asserts it appears:
+
+```ts
+  it('includes the configured business number', () => {
+    const config = deployedConfig({ businessPhoneNumber: '+15550009999' });
+    const service = makeService({ config, cloudwatch: fakeSeam() });
+    expect(service.getFlags().businessPhoneNumber).toBe('+15550009999');
+  });
+```
 
 Do NOT touch `system.routes.test.ts:130` or `:145`. They are the ALARMS and
-ERRORS payload assertions and have nothing to do with flags; editing them
-breaks two passing tests.
+ERRORS payload assertions and have nothing to do with flags.
 
 The primitive-type loop at `systemStatus.service.test.ts:66-68` must keep
 passing UNCHANGED. If it fails, you used `null` instead of omitting the key.
@@ -1010,7 +1035,7 @@ Run: `cd app && npx vitest run`
 Run: `npm run typecheck`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git status
@@ -1080,7 +1105,9 @@ describe('NumbersSection - our number', () => {
   });
 
   it('renders a Not configured state when no number is set', async () => {
-    getSettings.mockResolvedValue({ businessPhoneNumber: null });
+    // The key is OMITTED when unconfigured (Task 6), so the unset case is an
+    // absent property - NOT null. Mock it absent.
+    getSettings.mockResolvedValue({});
     renderSection();
     expect(await screen.findByText(/not configured/i)).toBeVisible();
   });
@@ -1115,14 +1142,21 @@ same hook the other Settings sections use, and the one whose `save()` at
 :59-64 re-sets state from the PUT response, which is precisely why Task 6 had
 to add the field to BOTH endpoints. Do not add a second bespoke fetch.
 
+AND YOU MUST THREAD THE FIELD THROUGH THAT HOOK - naming it is not enough.
+Read `useSettings.ts` in full and add `businessPhoneNumber` to its state shape,
+to what `load()` stores from the GET response, and to what `save()` re-stores
+from the PUT response. Miss the `save()` path and the block blanks the first
+time an admin saves quiet hours, which is the exact bug D8 exists to prevent.
+`useSettings.ts` belongs in this task's Files list and its commit.
+
 - [ ] **Step 4: Render the block and gate the fetch**
 
 In `NumbersSection.tsx`:
 - Retitle at :135 to `Phone numbers`.
 - Render an "Our number" block ABOVE the pool table, for ALL roles, formatting
   via the existing `formatPhoneDisplay` helper already imported in that file.
-  When the value is null, render an explicit "Not configured" state, never an
-  empty element.
+  When the value is UNDEFINED (the key is omitted, never null - see Task 6),
+  render an explicit "Not configured" state, never an empty element.
 - Gate BOTH the pool table AND the mount-effect fetch at :89-94 on
   `isAdmin`. The effect must not call `listPoolNumbers` at all for a non-admin.
 
@@ -1139,11 +1173,14 @@ test-harness work is needed for it.
   and its label becomes `Phone numbers`.
 - `App.tsx` (around :201-208) - REMOVE the `<AdminRoute>` wrapper from the
   numbers route. Without this the tab is visible and then bounces the VA.
-- `settingsTabs.test.ts:25-28,41` and `SettingsPage.test.tsx` (the title pin
-  around :66 AND the VA tab-list test around :72) - update for the new label
-  and the new visibility. The VA test currently asserts the tab is ABSENT for a
-  VA; it must now assert it is PRESENT.
-- `NumbersSection.test.tsx:355-372` - this is the AdminRoute BOUNCE test, NOT a
+- `settingsTabs.test.ts:25-28,41` - update for the new label and visibility.
+- `SettingsPage.test.tsx` - TWO separate things, do not conflate them: `:66` is
+  the ADMIN tab-list entry (a label change only), while the VA test is around
+  `:70-77` with its assertion at `:73` and it currently asserts the tab is
+  ABSENT for a VA. That test must now assert the tab is PRESENT - AND ITS OWN
+  NAME must change, or the suite is left with a test whose name states the
+  opposite of what it asserts.
+- `NumbersSection.test.tsx:351-373` - this is the AdminRoute BOUNCE test, NOT a
   title pin. Its
   `queryByRole('heading', { name: 'Group text numbers' })` negative assertion
   goes VACUOUS the moment the heading is renamed: it would pass for the wrong
@@ -1168,7 +1205,7 @@ Run: `cd dashboard && npx vitest run`
 Run: `npm run typecheck` then `npm test` then `timeout 1500 npm run e2e`
 Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 8: Commit**
 
 ```bash
 git status
@@ -1182,10 +1219,14 @@ git commit -m "feat(settings): show our business number to every authenticated u
 
 **Files:**
 - Modify: `dashboard/src/routes/settings/FlagPills.tsx:55-73`,
+  `dashboard/src/api/types.ts` (the `SystemFlags` interface)
+- Read and change ONLY if they re-shape the payload:
   `dashboard/src/routes/settings/useSystemStatus.ts`,
-  `dashboard/src/api/types.ts:156-172`, `dashboard/src/api/endpoints.ts`
+  `dashboard/src/api/endpoints.ts`
 - Test: `dashboard/src/routes/settings/FlagPills.test.tsx`,
-  `dashboard/src/routes/settings/SystemStatusSection.test.tsx`
+  `dashboard/src/routes/settings/SystemStatusSection.test.tsx:24` (a
+  hand-written `SystemFlags` literal - it keeps compiling BECAUSE the new field
+  is optional; if you made it required, stop and re-read Task 6)
 
 **Interfaces:**
 - Consumes: `GET /api/system/flags` -> `businessPhoneNumber` (Task 6).
@@ -1213,7 +1254,9 @@ new field, then add:
   });
 
   it('renders a Not configured state rather than an empty pill', async () => {
-    getSystemFlags.mockResolvedValue(flags({ businessPhoneNumber: null }));
+    // Unconfigured means the key is ABSENT, not null (Task 6 omits it).
+    // `flags()` already returns an object without it, so pass no override.
+    getSystemFlags.mockResolvedValue(flags());
     render(<FlagPills />);
     expect(await screen.findByText(/not configured/i)).toBeVisible();
   });
@@ -1324,7 +1367,12 @@ now describes the relay numbers too) with "the ONE business number for this
 environment, E.164" plus the single-value key. `.env.example:7` needs the name
 changed only.
 
-- [ ] **Step 6: Update the glossary**
+- [ ] **Step 6: Update the glossary - THIS STEP BELONGS TO TASK 7's LANDING**
+
+ORDERING EXCEPTION: this step depends on Task 7's retitle and touches `.ts`/
+`.tsx` files outside Task 9's commit pathspec. If Task 7 has NOT landed, SKIP
+this step and do it as part of Task 7 instead. Task 9 is otherwise landable any
+time after Tasks 1-3; this one step is not.
 
 `documentation/GLOSSARY.md:163` names the Settings section by its OLD title.
 The repo rule is that the glossary is updated in the SAME change as any domain
@@ -1346,9 +1394,11 @@ recording: the fix that landed on `main` (@db54d38d), and that the
 single-Messaging-Service topology its text describes has since been replaced by
 one Messaging Service and one A2P campaign PER ENVIRONMENT.
 
-Also update its `refs:` frontmatter - it points at
-`app/src/lib/config.ts:1130`, a line this change rewrites. Point it at the new
-config block and at `services/ourNumberKind.ts`.
+Also update its `refs:` frontmatter. It cites THREE lines, all of which this
+change rewrites: `app/src/services/sendMessage.ts:326`,
+`app/src/adapters/messaging.ts:590`, and `app/src/lib/config.ts:1130`. Point
+them at the new config block, the new `services/ourNumberKind.ts`, and the
+current sender-pinning line.
 
 - [ ] **Step 8: Verify ASCII and no stale references**
 

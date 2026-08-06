@@ -90,7 +90,7 @@ export function runPlan(options: PlanOptions): PlanResult {
 
   const sheets: WorkbookSheets = {
     contacts: buildContactRows(merge.people, options.prior),
-    groups: buildGroupRows(threads.threads, options.prior),
+    groups: buildGroupRows(threads.threads, merge.people, options.prior),
     units: buildUnitRows(airtable.properties, addresses, options.prior, {
       minSendCount: options.minAddressSendCount ?? 2,
     }),

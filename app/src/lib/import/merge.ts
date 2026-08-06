@@ -1,14 +1,15 @@
 // Merge 828 Quo contact rows + 40 Airtable landlords + 17 Airtable tenants +
-// 80 orphan phone numbers into ONE reviewable person per phone (spec §2.3, §3.1).
+// 86 orphan phone numbers into ONE reviewable person per phone (-> 629 people;
+// spec §2.3, §3.1).
 //
 // The merge key is the E.164 phone because our byPhone GSI is one contact per
 // number. That is not a preference — a second contact on the same number is
 // unreachable by the hottest lookup in the system (inbound phone -> person).
 //
 // Every judgment this module makes is a SUGGESTION that lands in the review
-// workbook for the founder to overrule. Where it cannot decide (4 conflicting
-// bed sizes, 33 unclassified names) it flags rather than guesses, which is the
-// same rule auto-capture already follows: never record a guess as fact.
+// workbook for the founder to overrule. Where it cannot decide (12 conflicting
+// bed sizes, 110 unclassified) it flags rather than guesses, which is the same
+// rule auto-capture already follows: never record a guess as fact.
 
 import type { ContactType } from '../../repos/contactsRepo.js';
 import { contactIdForPhone, rowKey } from './ids.js';
@@ -21,7 +22,7 @@ import type { ThreadIndex, TrafficStats } from './threads.js';
 /**
  * Why a row needs the founder's eyes. These drive both the `needs_your_input`
  * column and the workbook sort order — flagged rows go to the top so she can
- * review ~150 of 543 and spot-check the rest.
+ * review 116 of 629 and spot-check the rest.
  */
 export type PersonFlag =
   | 'bed_size_conflict'
@@ -34,7 +35,8 @@ export type PersonFlag =
   | 'no_name'
   | 'no_inbound_consent'
   | 'opted_out'
-  | 'airtable_only';
+  | 'airtable_only'
+  | 'role_contradiction';
 
 const FLAG_EXPLANATIONS: Readonly<Record<PersonFlag, string>> = {
   bed_size_conflict: 'Saved with two different voucher sizes - which is right?',
@@ -42,6 +44,7 @@ const FLAG_EXPLANATIONS: Readonly<Record<PersonFlag, string>> = {
   caseworker: 'Looks like a caseworker - imported as a partner contact. Correct?',
   non_person: 'Looks like a test or system contact rather than a real person - drop it?',
   airtable_only: 'In Airtable but no Quo contact and no messages - still current?',
+  role_contradiction: 'Name says landlord/agent but the -Nbed suffix made us call this a tenant - which is it?',
   unclassified: 'Could not tell tenant from landlord - which is it?',
   no_contact_record: 'You texted this number but never saved it - who is it?',
   opted_out: 'Sent STOP - imported with texting switched off',
@@ -59,6 +62,7 @@ const FLAG_EXPLANATIONS: Readonly<Record<PersonFlag, string>> = {
 const FLAG_SEVERITY: Readonly<Record<PersonFlag, number>> = {
   bed_size_conflict: 100, // real person, real ambiguity, drives matching
   star_marker: 90, // decodes a convention covering 18 people
+  role_contradiction: 80, // the two signals on this row disagree
   caseworker: 70, // classification we cannot make for her
   non_person: 60,
   airtable_only: 50,
@@ -77,6 +81,7 @@ const ALWAYS_ASK: ReadonlySet<PersonFlag> = new Set<PersonFlag>([
   'caseworker',
   'non_person',
   'airtable_only',
+  'role_contradiction',
 ]);
 
 /**
@@ -92,6 +97,14 @@ const ASK_IF_ENGAGED: ReadonlySet<PersonFlag> = new Set<PersonFlag>([
 
 /** Messages+calls at or above which an ASK_IF_ENGAGED flag earns her attention. */
 const ENGAGEMENT_THRESHOLD = 5;
+
+/**
+ * Role words that contradict a `tenant` classification. Deliberately TIGHT -
+ * no bare `pm`, `agent`, `homes` or `properties`, all of which appear innocently
+ * in real names and addresses. Only used to raise a question, never to retype.
+ */
+const NON_TENANT_ROLE_RE =
+  /\b(landlord|property manager|real estate agent|realtor|leasing agent)\b/i;
 
 export interface MergedPerson {
   /** Workbook join column (`HC-0001`). Opaque on purpose — see ids.ts. */
@@ -260,6 +273,14 @@ export function mergePeople(
       flags.push('caseworker');
     }
     if (parsed.some((p) => p.isNonPerson)) flags.push('non_person');
+    if (suggestedType === 'tenant' && NON_TENANT_ROLE_RE.test(a.rawNames.join(' '))) {
+      // Both signals fired and they disagree: the -Nbed suffix says tenant, the
+      // name says landlord/agent. Deliberately a FLAG, not a reclassification -
+      // it fires on ~1 row in 629, so a rule that guessed would carry far more
+      // false-positive risk than value ("Homes" in a surname, a tenant living at
+      // "X Properties"). She decides.
+      flags.push('role_contradiction');
+    }
     if (!suggestedName) flags.push('no_name');
     if (traffic.inboundMessageCount === 0 && traffic.callCount === 0) {
       flags.push('no_inbound_consent');

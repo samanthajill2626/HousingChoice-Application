@@ -66,11 +66,13 @@ export const GROUP_COLUMNS = [
   'notes',
   // --- read-only evidence ---
   'why',
-  'participants',
-  'participant_phones',
+  // WHO is in the group, by name — the column that makes the yes/no answerable.
+  'who',
+  'composition',
   'messages',
   'last_activity',
-  'composition',
+  'participants',
+  'participant_phones',
 ] as const;
 
 export const UNIT_COLUMNS = [
@@ -148,9 +150,39 @@ export function buildContactRows(people: readonly MergedPerson[], prior?: PriorR
   });
 }
 
-export function buildGroupRows(threads: readonly ImportedThread[], prior?: PriorReview): CsvRow[] {
+export function buildGroupRows(
+  threads: readonly ImportedThread[],
+  people: readonly MergedPerson[],
+  prior?: PriorReview,
+): CsvRow[] {
+  // Resolve each participant to a NAME. Without this the tab is unanswerable:
+  // "GRP-0001, 43 msgs, 2 participants" gives the founder nothing to decide
+  // "should this be live on day one?" with — she needs to see who is in it.
+  const byPhone = new Map(people.map((p) => [p.phone, p]));
+  const describe = (phone: string): string => {
+    const person = byPhone.get(phone);
+    if (!person) return `unknown (${phone})`;
+    const name = person.suggestedName || `unnamed (${phone})`;
+    const beds = person.suggestedVoucherBeds;
+    const role =
+      person.suggestedType === 'tenant'
+        ? beds === undefined
+          ? 'tenant'
+          : `tenant ${beds}bed`
+        : person.suggestedType;
+    return `${name} (${role})`;
+  };
+
   const groups = threads.filter((t) => t.isGroup);
   return groups.map((t, i) => {
+    const roles = t.participants.map((p) => byPhone.get(p)?.suggestedType ?? 'unknown');
+    const tally = new Map<string, number>();
+    for (const r of roles) tally.set(r, (tally.get(r) ?? 0) + 1);
+    const composition = [...tally.entries()]
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([role, n]) => `${n} ${role}`)
+      .join(' + ');
+
     const suggested: CsvRow = {
       row_key: rowKey('GRP', i),
       // Every group needs a yes/no on day-one connection, so all of them are
@@ -161,11 +193,12 @@ export function buildGroupRows(threads: readonly ImportedThread[], prior?: Prior
       label: '',
       notes: '',
       why: 'Group texting changes at cutover - connect only what must work on day one',
+      who: t.participants.map(describe).join(' | '),
       participants: String(t.participants.length),
       participant_phones: t.participants.join(' | '),
       messages: String(t.messages.length),
       last_activity: t.lastActivityAt.slice(0, 10),
-      composition: '',
+      composition,
     };
     return applyCarryForward(suggested, prior?.groups, ['connect_day_one', 'label', 'notes']);
   });

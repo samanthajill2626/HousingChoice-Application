@@ -13,7 +13,7 @@ const person = (phone: string) => plan.merge.people.find((p) => p.phone === phon
 
 describe('loading', () => {
   it('finds all three Quo entity files across separate job directories', () => {
-    expect(plan.quo.contacts).toHaveLength(8);
+    expect(plan.quo.contacts).toHaveLength(9);
     expect(plan.quo.messages).toHaveLength(12);
     expect(plan.quo.calls).toHaveLength(2);
   });
@@ -219,6 +219,29 @@ describe('the workbook', () => {
     const groups = parseCsv(plan.files['groups.csv']!).rows;
     expect(groups).toHaveLength(1);
     expect(groups[0]!.connect_day_one).toBe('N');
+  });
+
+  it('names the people in each group', () => {
+    // Without this the tab is unanswerable: "GRP-0001, 43 msgs, 2 participants"
+    // gives her nothing to decide "should this be live on day one?" with.
+    const groups = parseCsv(plan.files['groups.csv']!).rows;
+    const row = groups[0]!;
+    expect(row.who).toContain('Marlon Pike (landlord)');
+    expect(row.who).toContain('Priya Raman (tenant 3bed)');
+    expect(row.composition).toBe('1 landlord + 1 tenant');
+  });
+});
+
+describe('role contradiction', () => {
+  it('flags a -Nbed contact whose name says landlord, without retyping it', () => {
+    // Both signals fired and disagree. We raise the question rather than guess:
+    // the rule fires on ~1 row in 629, so guessing carries more false-positive
+    // risk than value.
+    const contacts = parseCsv(plan.files['contacts.csv']!).rows;
+    const row = contacts.find((r) => (r.quo_names_seen ?? '').includes('Landlord Larry'))!;
+    expect(row.type).toBe('tenant'); // NOT reclassified
+    expect(row.needs_your_input).toBe('YES');
+    expect(row.why).toContain('Name says landlord/agent');
   });
 });
 

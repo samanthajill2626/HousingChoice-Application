@@ -20,6 +20,7 @@ export const PHONES = {
   optedOut: '+15550100006', // sent STOP
   noTraffic: '+15550100007', // saved contact, no messages
   groupTenant: '+15550100008',
+  roleClash: '+15550100009', // -Nbed suffix but the name says landlord
 } as const;
 
 // Fixtures go through the real serializer, never hand-joined: a body containing
@@ -46,6 +47,7 @@ function quoContacts(): string {
     ['695ef5b40bdaade262577c06', 'Tomas Vega-1bed', PHONES.optedOut],
     ['695ef5b40bdaade262577c07', 'Ghost Contact-2bed', PHONES.noTraffic],
     ['695ef5b40bdaade262577c08', 'Priya Raman-3bed', PHONES.groupTenant],
+    ['695ef5b40bdaade262577c09', 'Landlord Larry-2bed', PHONES.roleClash],
   ].map(([id, firstName, phone]) => ({
     id: id!,
     userId: 'US1',

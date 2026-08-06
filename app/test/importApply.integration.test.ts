@@ -16,7 +16,7 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { runApply } from '../src/lib/import/apply.js';
+import { housingAuthorityFor, runApply, splitReviewedName } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
@@ -153,6 +153,59 @@ describe.skipIf(!reachable)('import:apply', () => {
       }),
     );
     expect(displayNameOf(singleToken.Item!)).toBe('Landlord Larry');
+  });
+
+  it('keeps an honorific attached so broadcasts do not greet someone "Hi Ms."', () => {
+    // firstName is NOT display-only: lib/mergeFields.ts renderBody substitutes
+    // [TenantName] with firstName ALONE, so a naive first-token split sends a
+    // real tenant a text saying "Hi Ms.,". Ten of the founder's 478 named
+    // tenants are titled (Ms. Cooper, Miss Johnson, Ms Kendrick...).
+    expect(splitReviewedName('Ms. Cooper')).toEqual({ firstName: 'Ms. Cooper', lastName: '' });
+    expect(splitReviewedName('Miss Johnson')).toEqual({ firstName: 'Miss Johnson', lastName: '' });
+    expect(splitReviewedName('Ms Kendrick')).toEqual({ firstName: 'Ms Kendrick', lastName: '' });
+    // An honorific with a full name keeps the remainder as the surname.
+    expect(splitReviewedName('Dr. Maya Fernandez')).toEqual({
+      firstName: 'Dr. Maya',
+      lastName: 'Fernandez',
+    });
+    // Ordinary names are unaffected - first token is the first name.
+    expect(splitReviewedName('Candy Faulk')).toEqual({ firstName: 'Candy', lastName: 'Faulk' });
+    // Multi-word surnames survive intact rather than being dropped.
+    expect(splitReviewedName('Mary-Jo Van Der Berg')).toEqual({
+      firstName: 'Mary-Jo',
+      lastName: 'Van Der Berg',
+    });
+    // Single token: whole name is the first name, empty surname.
+    expect(splitReviewedName('Angela')).toEqual({ firstName: 'Angela', lastName: '' });
+    // A bare honorific has nothing to attach to - treated as the name itself.
+    expect(splitReviewedName('Ms.')).toEqual({ firstName: 'Ms.', lastName: '' });
+  });
+
+  it('maps the Airtable program onto the exact housing-authority vocabulary', async () => {
+    // Broadcast audience resolution queries the byHousingAuthority GSI with an
+    // EXACT hash match, so a near-miss spelling makes the tenant invisible to a
+    // targeted send with nothing reporting that they were skipped. All four of
+    // the founder's values are in HOUSING_AUTHORITY_VOCAB.
+    expect(housingAuthorityFor('Georgia Housing Voucher, GHV')).toBe(
+      'Georgia Housing Voucher (GHV)',
+    );
+    expect(housingAuthorityFor('HUD VASH')).toBe('HUD VASH');
+    expect(housingAuthorityFor('Hope Atlanta')).toBe('Hope Atlanta');
+    expect(housingAuthorityFor('Claratel')).toBe('Claratel');
+    // Unknown values are left unset, never guessed into the GSI.
+    expect(housingAuthorityFor('Some New Authority')).toBeUndefined();
+    expect(housingAuthorityFor('')).toBeUndefined();
+    expect(housingAuthorityFor(undefined)).toBeUndefined();
+
+    // And it lands on the contact: the fixture's caseworker carries Hope Atlanta.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    const item = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.caseworker) },
+      }),
+    );
+    expect(item.Item!.housingAuthority).toBe('Hope Atlanta');
   });
 
   it('folds two Quo conversations for one phone into a single thread', async () => {

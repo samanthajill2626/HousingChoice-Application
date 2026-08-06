@@ -377,26 +377,35 @@ already understood and directly testable.
 - Every skipped or flagged row is counted and printed. Silent truncation is the
   one failure mode that would read as success.
 
-### 5.1 Fields the import deliberately does NOT write
+### 5.1 Contact-side housing authority
 
 `housingAuthority` (the contacts byHousingAuthority GSI) feeds
 `services/audienceResolution.ts` - the broadcast audience filter that picks
-tenants by bedroom size and housing authority. The import leaves it unset, on
-purpose:
+tenants by bedroom size and housing authority. The import writes it from the
+Airtable "voucher program" column, mapped to the EXACT strings in
+`HOUSING_AUTHORITY_VOCAB` (`services/extraction/schema.ts`).
 
-- Only **17 of 629** contacts carry anything authority-shaped, and only **12 of
-  478 tenants**.
-- What they carry are PROGRAMS (`Georgia Housing Voucher, GHV`, `HUD VASH`) or
-  caseworker ORGANISATIONS (`Hope Atlanta`, `Claratel`) - not authorities. The
-  authorities (`Atlanta Housing`, `Dekalb Housing`, `Jonesboro Housing`) appear
-  only on the Airtable PROPERTIES table.
-- Writing a program into an authority field would be worse than leaving it empty:
-  it poisons a GSI that drives who receives a broadcast, and the failure would be
-  a wrong audience rather than an empty one.
+Exactness is the point: audience resolution does an exact hash match on that GSI,
+so a near-miss spelling makes a tenant invisible to a targeted broadcast and
+NOTHING reports that they were skipped - the person just never hears about a
+property. Values outside the vocabulary are reported and left unset rather than
+guessed, because a wrong authority sends a property to the wrong audience, which
+is worse than an empty one.
 
-This is the subject of founder question 9 (are program, authority and caseworker
-org three separate things?). Until she answers, unset is the honest state.
-NOT an import defect - the data simply is not there.
+CORRECTION (2026-08-06). An earlier version of this section claimed the import
+deliberately skipped this field because her values were "PROGRAMS (GHV, HUD VASH)
+or caseworker orgs (Hope Atlanta, Claratel), not authorities". That is wrong by
+the app's own definition: all four appear verbatim in `HOUSING_AUTHORITY_VOCAB`,
+alongside `Atlanta (AHA)` and `Fulton County`. The system already treats them as
+housing authorities, so declining to write them left imported tenants
+unreachable by authority-filtered broadcasts for no reason. Caught by
+`docs/issues/housing-authority-free-text-drift.md`, consequence 4, which names
+this file.
+
+Coverage is thin because her data is thin - 17 of 629 contacts carry a program
+value at all. That is a founder-side gap (question 9), not an import defect, and
+the wider two-vocabulary drift between `contact.housingAuthority` and
+`unit.jurisdiction` is tracked in that same issue rather than solved here.
 
 ## 6. Testing
 

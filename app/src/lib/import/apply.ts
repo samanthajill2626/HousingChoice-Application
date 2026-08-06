@@ -38,6 +38,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import type { TransitionSource } from '../statusModel.js';
+import { HOUSING_AUTHORITY_VOCAB } from '../../services/extraction/schema.js';
 import type { ContactType } from '../../repos/contactsRepo.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
 import { normalizeAddress } from './addresses.js';
@@ -271,6 +272,68 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 }
 
 /**
+ * The founder's Airtable "voucher program" spellings -> the EXACT strings in
+ * `HOUSING_AUTHORITY_VOCAB` (services/extraction/schema.ts).
+ *
+ * Exactness is the whole point: `audienceResolution` queries the
+ * byHousingAuthority GSI with an exact hash match, so a near-miss spelling makes
+ * the tenant invisible to a targeted broadcast — and nothing reports that anyone
+ * was skipped. A person simply never hears about a property.
+ *
+ * Only her four observed values are mapped. Anything else is REPORTED and left
+ * unset rather than guessed into the GSI, because a wrong authority sends a
+ * property to the wrong audience, which is worse than an empty one.
+ */
+const AIRTABLE_PROGRAM_TO_AUTHORITY: Readonly<Record<string, string>> = {
+  'georgia housing voucher, ghv': 'Georgia Housing Voucher (GHV)',
+  'georgia housing voucher (ghv)': 'Georgia Housing Voucher (GHV)',
+  ghv: 'Georgia Housing Voucher (GHV)',
+  'hud vash': 'HUD VASH',
+  claratel: 'Claratel',
+  'hope atlanta': 'Hope Atlanta',
+};
+
+/** Map an Airtable program value to the app's controlled vocabulary, or undefined. */
+export function housingAuthorityFor(rawProgram: string | undefined): string | undefined {
+  if (!rawProgram) return undefined;
+  const key = rawProgram.trim().toLowerCase().replace(/\s+/g, ' ');
+  const mapped = AIRTABLE_PROGRAM_TO_AUTHORITY[key];
+  if (mapped === undefined) return undefined;
+  // Belt-and-braces: never write a value the app's own vocabulary does not know.
+  return HOUSING_AUTHORITY_VOCAB.includes(mapped) ? mapped : undefined;
+}
+
+/** Honorifics that must not become someone's first name (spelt with or without a dot). */
+const HONORIFIC_RE = /^(mr|mrs|ms|miss|dr|rev|pastor|sir|madam)\.?$/i;
+
+/**
+ * Split a founder-reviewed name into the `firstName` / `lastName` the app reads.
+ *
+ * Two consumers, and they want different things from the same split:
+ *   - DISPLAY (`contactDisplayName` in the dashboard, `displayNameOf` in the API)
+ *     re-joins both parts, so any split renders identically. Display cannot be
+ *     got wrong here.
+ *   - BROADCASTS (`lib/mergeFields.ts` renderBody) substitute `[TenantName]` with
+ *     **firstName ALONE**. That is what makes the split consequential: a wrong
+ *     first token greets a real tenant badly in a real text message.
+ *
+ * So the rule is first-token-is-the-first-name, EXCEPT when that token is an
+ * honorific. "Ms. Cooper" split naively greets her "Hi Ms." — keeping the
+ * honorific attached to the following token yields firstName "Ms. Cooper",
+ * which renders the same and greets her "Hi Ms. Cooper". Ten of the founder's
+ * 478 named tenants are titled this way.
+ */
+export function splitReviewedName(raw: string): { firstName: string; lastName: string } {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return { firstName: '', lastName: '' };
+  // Honorific + at least one more token: keep them together as the first name.
+  if (tokens.length > 1 && HONORIFIC_RE.test(tokens[0]!)) {
+    return { firstName: `${tokens[0]} ${tokens[1]}`, lastName: tokens.slice(2).join(' ') };
+  }
+  return { firstName: tokens[0]!, lastName: tokens.slice(1).join(' ') };
+}
+
+/**
  * Undo a previous import of one person, for a `drop` marked in a later review.
  *
  * SAFETY RULE: only items this importer created are removed, verified by the
@@ -354,6 +417,8 @@ interface ResolvedPerson {
   voucherBeds?: number;
   status: string;
   notes?: string;
+  /** Exact HOUSING_AUTHORITY_VOCAB string, when her Airtable program maps to one. */
+  housingAuthority?: string;
 }
 
 function resolvePerson(
@@ -390,12 +455,23 @@ function resolvePerson(
   const status = (row?.status ?? '').trim() || person.suggestedStatus;
   const notes = (row?.notes ?? '').trim();
 
+  const rawProgram = person.airtableTenant?.voucherProgram;
+  const housingAuthority = housingAuthorityFor(rawProgram);
+  if (rawProgram && rawProgram.trim() && housingAuthority === undefined) {
+    warnings.push(
+      `${person.rowKey}: Airtable program ${JSON.stringify(rawProgram)} is not in the app's ` +
+        `housing-authority vocabulary - left unset rather than guessed (it would decide who ` +
+        `receives a broadcast).`,
+    );
+  }
+
   return {
     name,
     type,
     ...(voucherBeds !== undefined && { voucherBeds }),
     status,
     ...(notes && { notes }),
+    ...(housingAuthority !== undefined && { housingAuthority }),
   };
 }
 
@@ -475,9 +551,7 @@ async function upsertContact(
     // multi-word and hyphenated surnames survive). A single-token name — 122 of
     // hers are first-name-only — yields an empty lastName, which displayNameOf
     // filters out before joining, rendering just "Angela".
-    const tokens = resolved.name.trim().split(/\s+/);
-    const firstName = tokens[0] ?? '';
-    const lastName = tokens.slice(1).join(' ');
+    const { firstName, lastName } = splitReviewedName(resolved.name);
     sets.push('firstName = :firstName', 'lastName = :lastName');
     values[':firstName'] = firstName;
     values[':lastName'] = lastName;
@@ -489,6 +563,14 @@ async function upsertContact(
   if (resolved.notes) {
     sets.push('notes = :notes');
     values[':notes'] = resolved.notes;
+  }
+  // Contact-side housing authority (the byHousingAuthority GSI that broadcast
+  // audience resolution queries). Without it an imported tenant can never be
+  // reached by an authority-filtered broadcast - see the
+  // housing-authority-free-text-drift issue, consequence 4.
+  if (resolved.housingAuthority) {
+    sets.push('housingAuthority = :housingAuthority');
+    values[':housingAuthority'] = resolved.housingAuthority;
   }
   if (!preserveStatus) {
     sets.push('#status = :status', 'status_source = :statusSource');

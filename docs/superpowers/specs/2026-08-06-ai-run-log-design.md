@@ -1,15 +1,17 @@
 # AI Run Log - Design
 
 Date: 2026-08-06
-Status: DRAFT - revised after adversarial review rounds 1-2
+Status: DRAFT - revised after adversarial review rounds 1-3
 Phase: 2 (automations), observability slice
 
-Revision note: two rounds of adversarial review. Round 1 (two blind
-reviewers) accepted 23 findings, 6 structural. Round 2 (one continued
-reviewer, re-review charge) accepted 16 more, 5 structural - including two
-defects the round-1 revision itself introduced, and one successful contest of
-a round-1 rejection. Adjudications, with every rejection and its reasoning,
-are at `.superpowers/design-review/adjudications.md` in the feature worktree.
+Revision note: three rounds of adversarial review, 52 findings accepted.
+R1 (two blind reviewers) 23 accepted, 6 structural, 3 rejected. R2 (continued
+reviewer, re-review charge) 16 accepted, 5 structural - including two defects
+the R1 revision itself introduced. R3 13 accepted, 3 structural, zero
+BLOCKING. Reviewers won two contests against my adjudications, both of which
+changed the design. Full adjudications, with every rejection and its
+reasoning, are at `.superpowers/design-review/adjudications.md` in the
+feature worktree.
 
 ## 1. Overview
 
@@ -168,6 +170,13 @@ run#<runId>
   conversationId, contactId?
   trigger:  sms | voice | triage | email        (the due row's channel)
   outcome:  applied | no_op | skipped | failed
+            applied = at least one decision reached outcome `wrote` or
+              `suggested`, OR notedLines > 0.
+            no_op   = the model was called and NOTHING was written,
+              suggested, or noted - including the case where every finding
+              was dropped. A run full of drops is a no_op, not an applied.
+            This boundary is a pointer partition and the primary QA scope
+            selector, so it is defined here rather than left to the builder.
   skipReason?:  see 6.3
   error?:   { kind: refusal | driver | complete, message, attempts, parked }
 
@@ -211,13 +220,29 @@ time. Supporting fields:
 `new`/`seen` tier label, so a later tuning of `NEW_MESSAGE_CHAR_CAP` or
 `SEEN_MESSAGE_CHAR_CAP` does not silently misrepresent historical runs.
 
-`hash` - sha256, first 16 hex, of the EXACT per-message substring that
-`buildExtractionUserContent` renders into the user content for this message.
-It is NOT a `\n`-join of the utterance texts: the real renderer applies
-single-line normalization and speaker prefixes, so a naive join would hash
-bytes that were never sent and produce a permanent false mismatch. The hash
-must be taken from the same renderer that produces the request, not
-reconstructed alongside it.
+`hash` - sha256, first 16 hex, of the EXACT rendered text this message
+contributes to the user content. It is NOT a `\n`-join of the raw utterance
+texts: the real renderer applies single-line normalization and speaker
+prefixes, so a naive join would hash bytes that were never sent and produce a
+permanent false mismatch on every run.
+
+Two changes are required to make this implementable, and the spec is only
+honest if it names them. Today `TranscriptUtterance`
+(`adapters/extraction.ts:21-32`) carries no message id, and `toSingleLine`
+(`prompt.ts:89`) is module-private, so `buildExtractionUserContent` cannot
+attribute rendered output back to a message:
+
+1. `TranscriptUtterance` gains `tsMsgId`. It is an internal type produced by
+   `toUtterances` and consumed by the prompt builder; the id is already in
+   hand at the only construction site.
+2. `prompt.ts` exports `renderUtteranceLine(u)`, the single function that
+   turns one utterance into its rendered line, and
+   `buildExtractionUserContent` is refactored to call it. The recorder hashes
+   the join of that function's output for the message's utterances.
+
+Both the request and the hash then come from one function. Any other
+arrangement reconstructs the rendering and reintroduces exactly the drift
+this field exists to detect.
 
 This is DRIFT DETECTION, not a replay guarantee. A change to utterance
 derivation (`toUtterances`), to the capping algorithm (`capUtterances`,
@@ -291,13 +316,19 @@ new". Discarding it because the outcome is "skipped" would contradict goal 3.
 `no_contact` and `ineligible_type` genuinely have no window; they exit before
 the fetch.
 
-`error.kind`:
+`error.kind` - set AT THE THROW SITE, never inferred afterwards. A writer
+that cannot see which stage failed cannot distinguish these, which was the
+whole reason `complete` was added:
 
 - `refusal` - `ExtractionRefusedError` (`adapters/extraction.ts:161-163`).
-- `driver` - any other throw from `extract`.
+- `parse` - the response arrived but did not parse (see 6.4).
+- `driver` - any other failure inside `extract`.
 - `complete` - `repo.complete()` threw after the model ran and the contact
-  was mutated. This is the exact case the write-path fix exists for; without
-  its own kind it would be indistinguishable from a driver failure.
+  was mutated.
+- `repo` - any other repository throw on the run path. These are real and
+  currently unguarded: `repo.claim`, `contacts.getById`,
+  `contacts.findByPhone`, and `messages.listByConversation` can all throw
+  before or around the model call.
 
 There is no `apply` kind: `applyExtraction` guards every side effect and does
 not throw.
@@ -310,8 +341,14 @@ not throw.
 - `no_new_client` - nothing newer than the cursor (`extraction.ts:316`).
 - `empty_window` - nothing survived the cutoffs (`extraction.ts:327`).
 
-Claim-lost skips (`extraction.ts:256`) are NOT recorded: they are the sliding
-debounce working as designed and would be pure noise.
+Two branches are NOT recorded at all, and the writer must skip them
+explicitly now that it runs on every path:
+
+- claim-lost (`extraction.ts:256`) - the sliding debounce working as
+  designed; recording it would be pure noise.
+- the defensive `listedDueAt === undefined` return (`extraction.ts:254`) - a
+  listed row always carries `dueAt`, so this is unreachable in practice and
+  has no meaningful `skipReason`.
 
 ### 6.4 Driver interface change
 
@@ -320,9 +357,26 @@ debounce working as designed and would be pure noise.
 job. The interface widens to return the result plus a metadata envelope:
 
 ```
-extract(input): Promise<{ result: ExtractionResult; meta: ExtractionMeta }>
+extract(input): Promise<ExtractionCall>
+ExtractionCall =
+  | { ok: true;  meta: ExtractionMeta; result: ExtractionResult }
+  | { ok: false; meta: ExtractionMeta; failure: 'refusal' | 'parse' | 'driver';
+      message: string }
 ExtractionMeta = { driver, model?, rawText?, usage?, promptFingerprint? }
 ```
+
+`extract` returns a DISCRIMINATED result rather than throwing, for the same
+two reasons as `processRow` (section 8): the caller must know which stage
+failed, and a thrown error carrying `rawText` would put PII on the object
+loggers serialize wholesale.
+
+This also closes a case the previous draft lost outright. Today
+`parseExtractionText` is invoked inside `extract`'s return expression
+(`adapters/extraction.ts:170`), so a malformed response throws before any
+envelope is constructed - discarding `rawText` for the ONE failure mode where
+the response text is the entire answer to "what went wrong". Under the
+discriminated return, meta is assembled first and `rawText` survives a parse
+failure.
 
 The `console` and `fake` drivers return `meta` with `driver` set and the
 model-specific fields absent. This is a required precondition for section 6;
@@ -334,6 +388,10 @@ drivers plus `extractionFake.ts`, the `processRow` call at
 `extraction.ts:364`, five return-shape assertions in
 `app/test/extractionAdapter.test.ts`, and four driver doubles in
 `app/test/extractionJob.test.ts`.
+
+`putSuggestion` returning the displaced row (7.3) is a SECOND breaking
+signature change, with its own fallout at `app/test/extractionRepo.test.ts`
+lines 435, 471, and 504.
 
 Four helpers in `jobs/extraction.ts` are module-private today and must be
 exported for the recorder and the detail view to reuse them rather than
@@ -374,25 +432,38 @@ outcomes for what we DID. Two distinct negatives become observable:
 Only the first is evidence the model considered the field. Conflating them
 manufactures evidence of evaluation that never happened.
 
-**The source differs by target, and this is not optional.** The parsed
-`ExtractionResult` is sufficient for the eight SCALAR fields: a value-less
-write is downgraded to `{ op: 'none' }` and preserved
-(`schema.ts:216-217`). It is NOT sufficient for `address`, `type`, or
-`phone` - `parseExtractionText` folds their `none` sentinels to ABSENT
-(`schema.ts:233` for type, `258-263` for address), so a parsed-only reading
-cannot tell a decline from a silence for exactly those three.
+**ALL TWELVE targets are read from `rawText`, never from the parsed result.**
 
-Those three are therefore read from `rawText` (the pre-parse response, which
-section 6 now stores) by re-parsing it as JSON; the scalars are read from the
-parsed result. An earlier revision said "build from the parsed result" for
-all targets, which would have inverted the defect - manufacturing false
-evidence of NON-evaluation instead of false evidence of evaluation.
+The parsed `ExtractionResult` is unusable for this purpose at every target,
+for two different reasons:
 
-When `rawText` is absent (the `console` and `fake` drivers, or a driver
-failure before a response), `address`/`type`/`phone` decisions are recorded
-as `not_addressed` only where apply also saw nothing, and never as
-`no_finding` - the spec does not permit inferring a decline that was never
-observed.
+- `address` and `type`: `parseExtractionText` folds their `none` sentinels to
+  ABSENT (`schema.ts:233`, `258-263`), so a decline is indistinguishable from
+  a silence.
+- the eight scalars: `schema.ts:215-219` REWRITES a `write`/`suggest` whose
+  value is unusable into `{ op: 'none' }` and drops the reason. A parsed
+  `none` therefore means EITHER "the model declined" OR "the model tried and
+  supplied an unusable value" - and the second is precisely the case QA needs
+  to see, since it is the model failing rather than abstaining.
+
+Two earlier revisions got this wrong in opposite directions: first deriving
+`no_finding` inside `apply.ts` (which fabricates evidence of evaluation),
+then splitting the source by target (which still fabricates a decline
+whenever the downgrade at 215-219 fires). Reading `rawText` for everything is
+both simpler and the only correct option.
+
+To avoid re-encoding the sentinel contract in a second place - the same
+mistake `6.4` avoids for the window helpers - `schema.ts` exports a
+`parseExtractionOps(rawText)` that returns the per-target op view BEFORE any
+folding or downgrading. The recorder calls that; it does not hand-roll a
+JSON walk.
+
+When `rawText` is absent (the `console` driver, or a driver failure before a
+response arrived) no target may be recorded as `no_finding` - only
+`not_addressed`. The spec does not permit inferring a decline that was never
+observed. The `fake` driver DOES emit a synthetic `rawText` matching its
+`EXTRACT:` marker protocol, so the e2e exercises this mechanism rather than
+only its fallback.
 
 ### 7.2 dropReason
 
@@ -478,10 +549,8 @@ Runs TTL at 90 days but pending suggestions never expire, so a verdict can
 land on an expired run; without the guard, a nested-path `UpdateItem` either
 errors or upserts a malformed partial item.
 
-The `superseded` stamp is performed by the caller of `putSuggestion`, NOT
-inside it. A throw inside `putSuggestion` would be caught by
-`putSuggestionSafe` and counted as a suggestion failure, which suppresses the
-load-bearing `suggestion.updated` emit at `apply.ts:443-445`.
+(An earlier revision's paragraph naming apply.ts as the stamp writer stood
+here and has been deleted; it contradicted the routing above.)
 
 ## 8. Write path and failure isolation
 
@@ -491,15 +560,32 @@ model separates the ENVELOPE from the VERDICTS.
 **The envelope has exactly one writer, and writes exactly once.**
 `processRow` builds a `RunDraft` as it goes - trigger and ids first, then
 window, then meta and raw response, then decisions - and never writes it
-itself. `runDueExtractions` owns the single write, in a finally-style path,
-on every terminal outcome including skips and failures. A failure carries the
-draft as it stood: `processRow` attaches it to the thrown error rather than
-writing a partial record of its own.
+itself.
 
-This matters because the obvious alternative is wrong in two ways: if
-`processRow` writes on success and the outer catch writes on failure, then
-neither path holds every field, AND a failure after a successful envelope
-write produces TWO records for one run. One writer, one write.
+**`processRow` no longer throws, and no longer returns a bare discriminator.**
+It returns `{ outcome, draft }` on every path: success, skip, and failure
+alike. It catches internally at each stage and stamps `draft.error.kind` at
+the throw site (6.3), which is the only place that information exists.
+`runDueExtractions` then performs the single write and derives its
+backoff/park decision from `outcome === 'failed'` instead of from a caught
+exception.
+
+Three defects are closed by that one change, and they are why the obvious
+designs were rejected:
+
+- If `processRow` writes on success and the outer catch writes on failure,
+  neither path holds every field AND a failure after a successful write
+  emits TWO records for one run.
+- If the draft rides on a thrown `Error`, `error.kind` still cannot name the
+  failing stage, because the outer catch sees only an exception.
+- If the draft rides on a thrown `Error`, then `rawText`, `previousValue`,
+  and `proposedValue` - all PII - are attached to the one object type the
+  logging conventions serialize WHOLESALE (`logger.error({ err })` appears
+  throughout this codebase, including `extraction.ts:418-422`). That would
+  put contact PII into logs, violating section 10's absolute rule as a side
+  effect of an error path nobody would think to audit.
+
+The third is the decisive one. A returned draft never touches a logger.
 
 Verdicts are written later by three surfaces, per 7.3: `suggestions.ts`
 accept/dismiss, the `contacts.ts` PATCH, and the job's `superseded` stamp.
@@ -591,9 +677,16 @@ on both client and server, and TTL bounds the window.
 - Unit: all three verdict surfaces, including `superseded_by_human_edit` via
   the contacts PATCH path, `type` reaching `accepted` ONLY via that PATCH,
   and `type` reaching `dismissed` via the unrestricted dismiss route.
-- Unit: `no_finding` vs `not_addressed` sourced correctly per target - the
-  scalars from the parsed result, `address`/`type`/`phone` from `rawText` -
-  including the case where `rawText` is absent and neither may be inferred.
+- Unit: `no_finding` vs `not_addressed` for all twelve targets sourced from
+  `rawText` via `parseExtractionOps`, including the two cases a parsed-result
+  reading gets wrong (a folded address/type sentinel, and a scalar downgraded
+  by `schema.ts:215-219`), plus the absent-`rawText` case where neither may
+  be inferred.
+- Unit: `processRow` returns a draft rather than throwing on every failure
+  stage, and `error.kind` names the correct stage for refusal, parse, driver,
+  complete, and repo failures.
+- Unit: no run-path error object ever carries `rawText` or decision values -
+  the PII-on-Error regression guard.
 - Unit: the envelope is written EXACTLY ONCE per run on every terminal path,
   including a failure after the model ran (no double record, no lost record).
 - Unit: the window `hash` is produced by the same renderer that builds the

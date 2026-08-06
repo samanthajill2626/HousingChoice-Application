@@ -2,10 +2,14 @@
 
 Hi Sam,
 
-We've been through everything you exported from Quo and Airtable, and we've
-built the tool that moves it into the new system. It's already run end to end
-against your real data, so what's below isn't guesswork - it's what we actually
-found.
+We've been through everything you exported from Quo and Airtable, cleaned it up,
+and loaded it into the new system as a trial run. It worked - so what's below
+isn't guesswork, it's what we actually found in your data.
+
+**We've also done the tidying for you.** Duplicates merged, names cleaned up,
+voucher sizes and landlords picked out automatically. What's left is a set of
+spreadsheets with our best guesses filled in, for you to correct where we got it
+wrong. They're attached alongside this note.
 
 The short version: **your data came through well.** Better than we expected, and
 mostly because of habits you already had. But there are some things only you can
@@ -21,9 +25,10 @@ Here's what we're working with:
 | Conversations | **721**, including 123 group texts |
 | Properties | **75** |
 
-Alongside this you'll get a spreadsheet with three tabs - your people, your group
-texts, and your properties. **117 rows are marked for you to look at.** The other
-512 we're confident about; a quick scan is plenty.
+There are three of them - your people, your group texts, and your properties.
+**Only 117 rows are marked for you to look at.** The other 512 we're confident
+about, so a quick scan is plenty. There's a guide to filling them in at the end
+of this note.
 
 ---
 
@@ -31,8 +36,9 @@ texts, and your properties. **117 rows are marked for you to look at.** The othe
 
 ### 1. Is the phone number transfer actually booked?
 
-Can you confirm the transfer of **678-284-2537** to our new system has been
-submitted, and that we have a date in writing?
+We started the transfer of **678-284-2537** to the new system, but we're not
+certain where it stands right now. Can you check and let us know - and if there's
+a completion date confirmed anywhere, we'd like it in writing.
 
 We're asking because moving a phone number between carriers usually takes one to
 three weeks, not five days. Every single one of your 721 conversations is tied to
@@ -43,15 +49,9 @@ alternative: going live on a new number and forwarding your Quo number to it. It
 works, but your tenants and landlords would see a different number, so we'd rather
 avoid it if we can.
 
-### 2. Where does the texting registration stand?
+### 2. A2P registration
 
-Before we can send texts from your number, the business has to be registered with
-the carriers - it's the 10DLC registration, using your business name and EIN. Can
-you tell us where that stands, and confirm the business details on file match what
-you actually operate as?
-
-Without it, the carriers quietly filter your messages and tenants just never get
-them. It's the one thing that can look fine on our end and still be broken.
+Where does the new A2P registration stand?
 
 ### 3. Please export from Quo one more time this week
 
@@ -66,9 +66,14 @@ side. Much better to find out this week than on Monday.
 The second is that you'll be doing this export again on **Sunday 8/9**, and it's
 worth having done it once already so it's familiar.
 
-**One important thing about Sunday's export:** please do it *after* you've stopped
-working in Quo for the day. Anything you do in Quo after you export won't make it
-into the new system.
+**And good news on timing:** you don't need to stop working in Quo before you
+export. We'll take one export on Sunday to set everything up, then a final one
+after the number moves across, which sweeps up anything that came in between. So
+just keep working normally - nothing gets stranded.
+
+**One thing to hold off on:** please don't close or cancel your Quo account until
+we've taken that final export and confirmed it landed. Once the account is gone,
+so is anything we haven't pulled out yet - including the photos below.
 
 ---
 
@@ -97,8 +102,8 @@ actually want it. So the only question is:
 > which? If you'd rather just switch them on as you need them, that's completely
 > fine - it takes seconds.
 
-There's a tab in the spreadsheet listing all 123 with who's in them, how many
-messages, and when they were last active, so you can decide by looking.
+We've listed all 123 for you - who's in each one, how many messages, and when it
+was last active - so you can decide by looking rather than from memory.
 
 ---
 
@@ -130,8 +135,9 @@ like on day one, so we'd rather use your number than ours.
 Is that the voucher size they've been **approved for**, or the size they're
 **looking for**?
 
-It matters more than it sounds - someone approved for a 3-bed might happily take a
-2-bed, and we want the system to suggest the right properties.
+We think it's the size they're approved for, but we'd rather have it confirmed
+than assume. It matters more than it sounds - someone approved for a 3-bed might
+happily take a 2-bed, and we want the system to suggest the right properties.
 
 ### 7. How do you think about caseworkers?
 
@@ -206,9 +212,9 @@ So: **is Airtable actually where your properties live, or is it somewhere else?*
 Your head, your texts, a notebook, another spreadsheet? No wrong answer - we just
 want to point the system at the real thing.
 
-We've pre-filled all 75 into the properties tab with how often you've texted each
-one, so you can confirm or delete rather than typing them out. The ones we found in
-your texts are marked as such, so you can tell them apart from your Airtable ones.
+We've written up all 75 with how often you've texted each one, so you can confirm
+or delete rather than typing them out. The ones we spotted in your texts are
+marked as such, so you can tell them apart from your Airtable ones.
 
 **Also:** rent, bedrooms, application fee, pet policy, requirements - those columns
 exist in Airtable but were never filled in. Where does that information live for
@@ -218,10 +224,10 @@ you day to day?
 
 ## Twelve people we couldn't pin down
 
-These are the **first twelve rows** in the contacts tab, so you'll see them right
-away. Each one is saved in Quo under two or more different voucher sizes, and we
-didn't want to pick one for you - voucher size decides which properties we suggest,
-so a wrong guess would quietly cause problems for months.
+These twelve are right at the top of your list, so you'll see them first. Each one
+is saved in Quo under two or more different voucher sizes, and we didn't want to
+pick one for you - voucher size decides which properties we suggest, so a wrong
+guess would quietly cause problems for months.
 
 We've left the voucher size **blank** on all twelve. Just fill in the right one.
 
@@ -288,6 +294,20 @@ Everything in it is our best guess, not a decision. If you change a name, a vouc
 size, or say someone's a landlord rather than a tenant, **that's what goes in.** If
 someone shouldn't come across at all, put a `Y` in the **drop** column.
 
+**Which columns are yours to edit:**
+
+| Column | Yours? | What it's for |
+| --- | --- | --- |
+| `name` `type` `voucher_beds` `status` | **edit these** | Our best guess. Correct anything we got wrong. |
+| `drop` | **edit this** | Put `Y` here if someone shouldn't come across at all. |
+| `notes` | **edit this** | Anything you want to tell us about that person. |
+| `needs_your_input` | leave it | Says `YES` on the rows we'd like you to check. |
+| `change` | leave it | Ours, for tracking. When we refresh the file it'll say `new` or `unchanged` so we can see what moved - nothing for you to do. |
+| `why` | leave it | Why we flagged the row. |
+| `phone` `last_contact` `messages` `calls` | leave it | Just so you can tell who it is. |
+| `quo_names_seen` | leave it | Every version of the name you had saved in Quo, so you can see why we asked. |
+| `airtable_program` `airtable_caseworker_org` `airtable_note` | leave it | Copied across from Airtable so it's all in one place. |
+
 A few practical notes:
 
 - **You only need to look at the 117 rows marked `YES`** in the "needs your input"
@@ -299,6 +319,24 @@ A few practical notes:
 - **Start whenever you like.** Even though we'll take a fresh export on Sunday,
   your answers carry forward automatically. You won't be asked anything twice - the
   second pass only shows people who are genuinely new, probably 20 or 30 of them.
+
+### Your affordableplacements email address
+
+You've given out **Sam@affordableplacements.com** in at least 24 of your texts, so
+some tenants and landlords have it.
+
+The new system sends and receives email on its own address. **Anything sent to
+your affordableplacements address won't reach it** - it'll keep landing wherever
+it lands today, invisible to the system and to anyone else on the team.
+
+Two questions:
+
+- **Do you want to keep using that address**, or move over to the new one?
+- Either way, **should we forward it** into the new system, so replies from people
+  who already have it don't get missed?
+
+Forwarding is easy to set up and means nothing falls through the cracks. We just
+need to know whether you want it.
 
 ### A couple of smaller things
 

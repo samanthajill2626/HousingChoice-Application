@@ -4,6 +4,7 @@ title: 1:1 SMS lets Twilio pick the sender, so tenants may not see the ported nu
 type: bug
 severity: high
 status: open
+confirmed: 2026-08-06
 area: app/messaging
 created: 2026-08-06
 refs: app/src/services/sendMessage.ts:326, app/src/adapters/messaging.ts:590, app/src/lib/config.ts:1130
@@ -36,7 +37,21 @@ service-chosen number, which may well not be the 678 number they recognise.
 The failure is quiet and the wrong way round: everything is delivered, nothing
 errors, and the tenant simply gets a text from a stranger.
 
-**Suggested fix.** Give the 1:1 path an explicit sender, from config:
+**TWO call sites, not one.** `adapter.sendMessage` has four callers. Two already
+pin correctly (`relayFanOut.ts:482`, `relayAnnouncements.ts:231` - both the pool
+number). The two that do NOT pin are:
+
+- `services/sendMessage.ts:326` - the shared send service, which everything
+  funnels through (broadcasts, missed-call auto-text, placement nudges, tour
+  reminders, retries, the api + public routes)
+- `routes/voiceApi.ts:245` - the **staff cell-verification SMS**, which calls the
+  adapter DIRECTLY and bypasses the send service entirely
+
+Fixing only the first would leave verification codes still service-routed. Low
+harm (they go to our own staff) but it is the same defect and the campaign's
+Sample 5 describes them, so pin both.
+
+**Suggested fix.** Give the unpinned paths an explicit sender, from config:
 
 1. Add a config value for the business sending number (e.g. `SMS_FROM_NUMBER`, or
    derive it from `OUR_PHONE_NUMBERS[0]` which is already the outbound voice caller
@@ -87,12 +102,12 @@ That is what makes the cutover steps asymmetric: adding the ported number to
 does nothing for SMS sending, while adding it to the Messaging Service (required
 for A2P) is precisely the step that introduces sender ambiguity.
 
-UNVERIFIED FROM THE REPO: the live sender pool's actual composition. If it holds
-only the main number today, the port introduces this. If relay pool numbers are
-already attached (they use the same `messagingServiceSid`), 1:1 sends can already
-draw one and we have been carried by Sticky Sender and low volume rather than by
-design - check the Messaging Service's sender pool in the Twilio console to tell
-which.
+**CONFIRMED 2026-08-06 (Cameron, from the Twilio console): at least two relay
+numbers are already attached to that same Messaging Service.** So this is not a
+cutover risk in waiting - the pool ALREADY has multiple senders and a 1:1 send can
+already draw a relay pool number today. We have been carried by Sticky Sender and
+low volume, not by design. The port raises the stakes (it adds the number every
+tenant recognises, and prod SMS turns on) but the defect is live now.
 
 **And note the assumption this issue breaks.** `public.ts:161` describes
 `ourPhoneNumbers[0]` as "the SAME main number all 1:1 Twilio traffic uses". That

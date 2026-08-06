@@ -323,11 +323,24 @@ export function createSendMessageService(deps: SendMessageServiceDeps = {}): Sen
 
     // (3) Provider send — synchronous single send (M1.1; no fan-out exists).
     // M1.7: an explicit `from` pins the sender to a pool number (relay path).
+    //
+    // Otherwise pin the MAIN business number (ourPhoneNumbers[0]) — the same
+    // number that is already the outbound voice caller ID and the public
+    // flyer's "text us" CTA. Without a pin the Messaging Service chooses from
+    // its whole sender pool, which holds the relay pool numbers too, so a 1:1
+    // text could arrive from a number the tenant has never seen (Sticky Sender
+    // has nothing to stick to for a contact we have never messaged). Both stay
+    // INSIDE the service — `from` selects WHICH pooled sender, it does not
+    // bypass A2P registration. See
+    // docs/issues/one-to-one-sender-not-pinned-to-ported-number.md.
+    // Empty OUR_PHONE_NUMBERS (dev/test only — prod+twilio fail-fasts at boot)
+    // degrades to the previous service-picks behavior.
+    const sender = from ?? config.ourPhoneNumbers[0];
     const result = await adapter.sendMessage({
       to: participantPhone,
       ...(body !== undefined && { body }),
       ...(mediaUrls !== undefined && { mediaUrls }),
-      ...(from !== undefined && { from }),
+      ...(sender !== undefined && { from: sender }),
     });
 
     // (4) Persist at send time under the provider SID/timestamp — the

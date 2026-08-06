@@ -240,9 +240,19 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
     // the consumer opt-out-gated sendMessage service). Best-effort: an adapter
     // throw (e.g. SMS disabled) → 503 so the UI can explain. NEVER log the code
     // or the cell (PII/secret, §9).
+    //
+    // Bypassing the send service also means bypassing ITS sender pin, so pin the
+    // main business number here too — otherwise the Messaging Service picks, and
+    // a staff verification code can arrive from a relay pool number
+    // (docs/issues/one-to-one-sender-not-pinned-to-ported-number.md).
+    const sender = config.ourPhoneNumbers[0];
     let providerSid: string | undefined;
     try {
-      ({ providerSid } = await adapter.sendMessage({ to: cell, body: renderCellVerifySms(code) }));
+      ({ providerSid } = await adapter.sendMessage({
+        to: cell,
+        body: renderCellVerifySms(code),
+        ...(sender !== undefined && { from: sender }),
+      }));
     } catch (err) {
       log.error({ err, userId }, 'cell verify-start: sending the code failed — adapter unavailable');
       res.status(503).json({ error: 'sms_unavailable' });

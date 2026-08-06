@@ -714,6 +714,11 @@ describe('self cell verification (spec §7)', () => {
     // A code SMS went out via the adapter (world.sent), to the cell.
     expect(world.sent).toHaveLength(1);
     expect(world.sent[0]!.to).toBe(NAV_CELL);
+    // ...pinned to the main business number. This path calls the adapter
+    // DIRECTLY (it bypasses the opt-out-gated send service), so it needs its own
+    // pin or the Messaging Service picks a sender — possibly a relay pool number
+    // (one-to-one-sender-not-pinned-to-ported-number, 2026-08-06).
+    expect(world.sent[0]!.from).toBe(OUR_NUMBER);
     const bodyText = world.sent[0]!.body!;
     const code = /(\d{6})/.exec(bodyText)![1]!;
     // PII/secret: the code is never logged.
@@ -731,6 +736,20 @@ describe('self cell verification (spec §7)', () => {
     const user = harness.fakeUsers.users.get(TEST_SESSION_USER.userId)!;
     expect(user.cell).toBe(NAV_CELL);
     expect(user.cell_verified_at).toBeDefined();
+  });
+
+  it('verify-start still sends with NO `from` when OUR_PHONE_NUMBERS is empty (degrades, never throws)', async () => {
+    const world = createFakeWorld();
+    const harness = makeWebhookHarness({ world, env: { OUR_PHONE_NUMBERS: '' } });
+
+    const start = await request(harness.app)
+      .post('/api/users/me/cell/verify-start')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ cell: NAV_CELL });
+    expect(start.status).toBe(200);
+    expect(world.sent).toHaveLength(1);
+    expect(world.sent[0]!.from).toBeUndefined();
   });
 
   it('verify-start rejects a non-E.164 cell (400 invalid_cell), sends nothing', async () => {

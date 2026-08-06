@@ -48,11 +48,19 @@ export interface SendMessageParams {
    */
   idempotencyKey?: string;
   /**
-   * Explicit sender number, E.164 (M1.7 relay fan-out): the pool number the
-   * relay message must originate FROM. When set, the Twilio driver sends
-   * `from` AS WELL AS messagingServiceSid (A2P compliance via the service's
-   * sender pool, pinned to this specific number); when unset, the service
-   * picks a sender (the 1:1 path is unchanged). Console driver echoes it.
+   * Explicit sender number, E.164. When set, the Twilio driver sends `from` AS
+   * WELL AS messagingServiceSid (A2P compliance via the service's sender pool,
+   * pinned to this specific number); when unset, the SERVICE picks a sender
+   * from its whole pool. Console driver echoes it.
+   *
+   * EVERY caller is expected to pin (2026-08-06): relay pins its pool number
+   * (M1.7 fan-out + announcements), and the 1:1 paths pin the main business
+   * number, ourPhoneNumbers[0] — `services/sendMessage.ts` for everything that
+   * funnels through the send service, and `routes/voiceApi.ts` for the staff
+   * cell-verification code, which calls this adapter directly. Leaving it unset
+   * means the service may answer from a relay pool number, which is
+   * docs/issues/one-to-one-sender-not-pinned-to-ported-number.md — so a NEW
+   * caller must pass `from`, not inherit the old "1:1 omits it" behavior.
    */
   from?: string;
 }
@@ -588,9 +596,12 @@ export class TwilioMessagingDriver implements MessagingAdapter {
         // The Messaging Service is the sender (A2P sender pool) AND carries the
         // service-level status callback — no per-message statusCallback needed.
         messagingServiceSid: this.deps.messagingServiceSid,
-        // Relay fan-out (M1.7): pin the send to a specific pool number while
-        // staying inside the A2P service (the number is in the service's sender
-        // pool). Omitted for the 1:1 path — the service picks the sender.
+        // Pin the send to a specific number while staying inside the A2P
+        // service (the number is in the service's sender pool): the pool number
+        // for relay, the main business number for 1:1. Callers decide — see the
+        // `from` docs on SendMessageParams. Omitted only when the caller has no
+        // number to pin (unconfigured OUR_PHONE_NUMBERS), where the service
+        // picks as it always did.
         ...(params.from !== undefined && { from: params.from }),
       });
     } catch (err) {

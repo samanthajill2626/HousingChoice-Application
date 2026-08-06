@@ -106,10 +106,53 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(contact.Item).toMatchObject({
       type: 'landlord',
       phone: PHONES.landlord,
-      display_name: 'Marlon Pike',
+      // firstName/lastName, NOT display_name - see the name-fields regression
+      // test above for why that distinction matters.
+      firstName: 'Marlon',
+      lastName: 'Pike',
       status: 'active',
       status_source: 'import',
     });
+  });
+
+  it('writes the name fields the app actually renders from', async () => {
+    // REGRESSION. The import used to write a single `display_name`, which nothing
+    // reads: routes/contacts.ts displayNameOf() joins firstName + lastName and
+    // returns null when both are absent, and a null name renders as the phone
+    // number. Every imported contact would have shown as a bare phone, throwing
+    // away all 539 resolved names including the ~117 reviewed by hand.
+    //
+    // This asserts the STORED SHAPE satisfies that resolver, reproducing its
+    // logic rather than trusting that some field is populated.
+    const displayNameOf = (c: Record<string, unknown>): string | null => {
+      const first = typeof c.firstName === 'string' ? c.firstName.trim() : '';
+      const last = typeof c.lastName === 'string' ? c.lastName.trim() : '';
+      const joined = [first, last].filter((p) => p.length > 0).join(' ');
+      return joined.length > 0 ? joined : null;
+    };
+
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const multiToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.landlord) },
+      }),
+    );
+    expect(multiToken.Item).toMatchObject({ firstName: 'Marlon', lastName: 'Pike' });
+    expect(displayNameOf(multiToken.Item!)).toBe('Marlon Pike');
+    // The dead field is gone, not merely supplemented.
+    expect(multiToken.Item!.display_name).toBeUndefined();
+
+    // A single-token name (122 of the founder's are first-name-only) must render
+    // as just that name, not as "Angela " with a trailing space.
+    const singleToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.roleClash) },
+      }),
+    );
+    expect(displayNameOf(singleToken.Item!)).toBe('Landlord Larry');
   });
 
   it('folds two Quo conversations for one phone into a single thread', async () => {
@@ -212,7 +255,8 @@ describe.skipIf(!reachable)('import:apply', () => {
       }),
     );
     expect(item.Item).toMatchObject({
-      display_name: 'Rey Okonkwo',
+      firstName: 'Rey',
+      lastName: 'Okonkwo',
       voucherSize: 4,
       type: 'tenant',
     });

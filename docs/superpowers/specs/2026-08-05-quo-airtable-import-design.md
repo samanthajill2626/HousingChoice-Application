@@ -377,6 +377,27 @@ already understood and directly testable.
 - Every skipped or flagged row is counted and printed. Silent truncation is the
   one failure mode that would read as success.
 
+### 5.1 Fields the import deliberately does NOT write
+
+`housingAuthority` (the contacts byHousingAuthority GSI) feeds
+`services/audienceResolution.ts` - the broadcast audience filter that picks
+tenants by bedroom size and housing authority. The import leaves it unset, on
+purpose:
+
+- Only **17 of 629** contacts carry anything authority-shaped, and only **12 of
+  478 tenants**.
+- What they carry are PROGRAMS (`Georgia Housing Voucher, GHV`, `HUD VASH`) or
+  caseworker ORGANISATIONS (`Hope Atlanta`, `Claratel`) - not authorities. The
+  authorities (`Atlanta Housing`, `Dekalb Housing`, `Jonesboro Housing`) appear
+  only on the Airtable PROPERTIES table.
+- Writing a program into an authority field would be worse than leaving it empty:
+  it poisons a GSI that drives who receives a broadcast, and the failure would be
+  a wrong audience rather than an empty one.
+
+This is the subject of founder question 9 (are program, authority and caseworker
+org three separate things?). Until she answers, unset is the honest state.
+NOT an import defect - the data simply is not there.
+
 ## 6. Testing
 
 - Unit tests per module against **synthetic fixtures** (no real PII), covering the

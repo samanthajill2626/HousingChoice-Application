@@ -460,8 +460,27 @@ async function upsertContact(
   const names: Record<string, string> = { '#type': 'type' };
 
   if (resolved.name) {
-    sets.push('display_name = :name');
-    values[':name'] = resolved.name;
+    // WRITE THE FIELDS THE APP ACTUALLY READS: firstName + lastName.
+    //
+    // An earlier version wrote a single `display_name`, which nothing in the
+    // codebase reads — `routes/contacts.ts` displayNameOf() joins firstName and
+    // lastName and returns null when both are absent, and a null name renders as
+    // the phone number ("a name is NEVER invented"). So every imported contact
+    // would have shown as a bare phone number, silently discarding all 539
+    // resolved names — including the ~117 the founder reviews by hand. The whole
+    // review would have evaporated at the last step.
+    //
+    // Split on the first token, matching lib/contactName.ts's own convention
+    // (tokens[0] is the first name, the remainder joins as the last name, so
+    // multi-word and hyphenated surnames survive). A single-token name — 122 of
+    // hers are first-name-only — yields an empty lastName, which displayNameOf
+    // filters out before joining, rendering just "Angela".
+    const tokens = resolved.name.trim().split(/\s+/);
+    const firstName = tokens[0] ?? '';
+    const lastName = tokens.slice(1).join(' ');
+    sets.push('firstName = :firstName', 'lastName = :lastName');
+    values[':firstName'] = firstName;
+    values[':lastName'] = lastName;
   }
   if (resolved.voucherBeds !== undefined) {
     sets.push('voucherSize = :beds');

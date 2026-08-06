@@ -6,6 +6,17 @@
 // That is not hypothetical: the contact-timeline site was missed during design and
 // would have 500'd GET /api/contacts/:id/timeline for any tenant with an upcoming
 // tour rung.
+//
+// KNOWN LIMITS - do not mistake a green run here for proof:
+//  1. This match is TEXTUAL. It catches `resolveMessage('tour.x')` and
+//     ``resolveMessage(`tour.${kind}`)``, which is how both missed sites were
+//     actually written, but an id routed through a variable or a helper first
+//     slips past it. Accepted: closing that needs real type-level work, and the
+//     literal forms are the ones people write.
+//  2. It enforces "route through the composer", NOT "contain what the composer
+//     throws" and NOT "the composer can resolve every ReminderKind". The second
+//     is held by the containment tests; the third is currently held by nothing -
+//     see docs/issues/tourcopy-messageid-cast-unguarded.md.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import path, { join } from 'node:path';
 import { fileURLToPath } from 'node:url';

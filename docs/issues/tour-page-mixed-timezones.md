@@ -6,8 +6,31 @@ severity: low
 status: open
 area: dashboard
 created: 2026-08-05
-refs: dashboard/src/routes/tours/TourDetail.tsx:64, dashboard/src/routes/tours/TourDetail.tsx:191
+updated: 2026-08-06
+refs: dashboard/src/routes/tours/TourDetail.tsx:64, dashboard/src/routes/tours/TourDetail.tsx:191, dashboard/src/routes/placements/placementsFormat.ts
 ---
+
+**UPDATE 2026-08-06 - the panel half moved; this issue is now HEADER-ONLY.**
+The description below was written before the S1 follow-up landed on main
+(`79f0fa29`). What changed:
+
+- `dateTime(iso, timeZone?)` now appends a zone marker (`GMT+9`, `EDT`) when a
+  zone is pinned AND it differs from the viewer's own
+  (`Intl.DateTimeFormat().resolvedOptions().timeZone`). So the reminder chips
+  are no longer silently foreign - a Los Angeles staffer sees
+  `Aug 7, 3:00 PM EDT` on the panel.
+- The HEADER is unchanged: `formatScheduledAt` still calls `toLocaleString`
+  with no zone, so it renders browser-local and carries NO marker.
+
+Net effect on the page for an out-of-zone staffer: header `12:00 PM` (their
+zone, unlabelled) above a panel reading `3:00 PM EDT` (org zone, labelled). The
+contradiction is now VISIBLE rather than silent, which is strictly better and
+strictly not fixed. An org-zone staffer - every Housing Choice navigator today -
+sees no marker anywhere and no difference at all.
+
+Consequence for whoever picks this up: the fix is now ONLY to route the header
+through the same zone-aware path, not to build the labelling (it exists). The
+open design question below - whether the ACTIVITY log follows - is unchanged.
 
 **Problem.** `TourDetail.tsx` has TWO time renderers, and after
 feat/tour-reminder-details they can disagree on one page for staff outside the

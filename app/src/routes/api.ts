@@ -542,6 +542,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/settings',
     createSettingsRouter({
+      config,
       logger: deps.logger,
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,

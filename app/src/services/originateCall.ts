@@ -91,9 +91,9 @@ export function createOriginateCallService(deps: OriginateCallServiceDeps): Orig
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const baseUrl = config.publicBaseUrl ?? '';
-  // The masked caller ID for the OUTBOUND leg to the target: ALWAYS the first
+  // The masked caller ID for the OUTBOUND leg to the target: ALWAYS the
   // business number we own, NEVER the navigator's cell (the masking invariant).
-  const businessCallerId = config.ourPhoneNumbers[0];
+  const businessCallerId = config.businessPhoneNumber;
 
   return async function originateCall(input): Promise<OriginateCallResult> {
     // (1) The calling navigator MUST have a verified cell — it is the leg we

@@ -452,7 +452,7 @@ describe('founder whisper leg (M1.9b)', () => {
     '?callerLabel=Tenant%20(Jane%20D.)&conversationId=conv-1&parentCallSid=CAbiz0001&leg=founder';
   const founderGateQuery = '?conversationId=conv-1&parentCallSid=CAbiz0001&leg=founder';
 
-  it('founder whisper announces the caller + press 1 to accept (no press-0 team escape)', async () => {
+  it('founder whisper announces the caller + press 1 to accept', async () => {
     const world = createFakeWorld();
     const { app } = founderHarness(world);
     const res = await signedTwilioPost(
@@ -464,7 +464,6 @@ describe('founder whisper leg (M1.9b)', () => {
     const xml = res.text;
     expect(xml).toContain('<Gather');
     expect(xml).toContain('Press 1 to accept');
-    expect(xml).not.toContain('reach the team'); // founder IS the team
     expect(xml).not.toContain('+1555'); // never a phone
   });
 
@@ -480,7 +479,7 @@ describe('founder whisper leg (M1.9b)', () => {
     expect(res.text).not.toContain('<Hangup');
   });
 
-  it("gate: press-0 on the founder leg → <Hangup> (no team escape — falls through to missed)", async () => {
+  it("gate: Digits='0' on the founder leg -> <Hangup> (falls through to missed)", async () => {
     const world = createFakeWorld();
     const { app } = founderHarness(world);
     const res = await signedTwilioPost(app, `/webhooks/twilio/voice/whisper-gate${founderGateQuery}`, {

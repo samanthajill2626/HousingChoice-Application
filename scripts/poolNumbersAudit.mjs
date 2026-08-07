@@ -12,14 +12,14 @@
 //
 // HOW relay numbers are identified (there is no Twilio-side tag): every pool
 // number is bought AND attached to our Messaging Service by the warm-pool
-// driver (services/poolNumbers.ts), and the business line(s) are the
-// OUR_PHONE_NUMBERS list in .env.<env>. So:
+// driver (services/poolNumbers.ts), and the business line is the single
+// BUSINESS_PHONE_NUMBER value in .env.<env>. So:
 //
 //   relay pool number  =  attached to the Messaging Service
-//                         AND NOT in OUR_PHONE_NUMBERS
+//                         AND is not the BUSINESS_PHONE_NUMBER
 //
 // The report classifies every number the Twilio ACCOUNT owns:
-//   - business        in OUR_PHONE_NUMBERS (never touched)
+//   - business        is the BUSINESS_PHONE_NUMBER (never touched)
 //   - pool, tracked   MS-attached, has a pool_numbers row -> OK
 //   - pool, STRANDED  MS-attached, NO pool_numbers row -> the post-wipe case;
 //                     --reimport fixes exactly these
@@ -39,7 +39,7 @@
 // assignable - acceptable for dev; prod should not be wiped at all).
 // Conditional put (attribute_not_exists) - an existing row is NEVER stomped.
 //
-// Auth: Twilio creds + TWILIO_MESSAGING_SERVICE_SID + OUR_PHONE_NUMBERS come
+// Auth: Twilio creds + TWILIO_MESSAGING_SERVICE_SID + BUSINESS_PHONE_NUMBER come
 // from .env.<env> (template-first, gitignored). AWS goes through the pinned
 // housingchoice profile with the account guard, like every hc script.
 //
@@ -180,12 +180,8 @@ async function main() {
         `relay numbers cannot be told apart from anything else. Nothing was read or written.`,
     );
   }
-  const businessNumbers = new Set(
-    (entries.OUR_PHONE_NUMBERS ?? '')
-      .split(',')
-      .map((s) => s.trim())
-      .filter(Boolean),
-  );
+  const configured = (entries.BUSINESS_PHONE_NUMBER ?? '').trim();
+  const businessNumbers = new Set(configured.length > 0 ? [configured] : []);
   const authHeader = `Basic ${Buffer.from(`${accountSid}:${authToken}`).toString('base64')}`;
 
   // --- AWS side (account guard first, like every hc script) --------------------
@@ -198,7 +194,7 @@ async function main() {
       `  aws account : ${identity.Account} (pinned HousingChoice)\n` +
       `  table       : ${table}\n` +
       `  twilio      : ${accountSid} / messaging service ${messagingServiceSid}\n` +
-      `  business    : ${businessNumbers.size ? [...businessNumbers].join(', ') : '(OUR_PHONE_NUMBERS is empty!)'}\n`,
+      `  business    : ${businessNumbers.size ? [...businessNumbers].join(', ') : '(BUSINESS_PHONE_NUMBER is empty!)'}\n`,
   );
 
   const [accountNumbers, msAttached, poolRows] = await Promise.all([
@@ -223,8 +219,8 @@ async function main() {
   }
 
   process.stdout.write(`\nTwilio account owns ${accountNumbers.length} number(s):\n`);
-  process.stdout.write(`\n  Business (OUR_PHONE_NUMBERS - never pool, never touched):\n`);
-  if (!business.length) process.stdout.write(`    (none of the owned numbers is listed in OUR_PHONE_NUMBERS)\n`);
+  process.stdout.write(`\n  Business (BUSINESS_PHONE_NUMBER - never pool, never touched):\n`);
+  if (!business.length) process.stdout.write(`    (the owned numbers do not include BUSINESS_PHONE_NUMBER)\n`);
   for (const n of business) {
     process.stdout.write(
       `    ${n.phoneNumber}  ${n.sid}` +

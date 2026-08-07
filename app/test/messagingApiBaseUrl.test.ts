@@ -30,7 +30,7 @@ describe('messaging driver honors TWILIO_API_BASE_URL', () => {
       TWILIO_AUTH_TOKEN: 'token',
       TWILIO_MESSAGING_SERVICE_SID: 'MGtest',
       TWILIO_API_BASE_URL: `http://127.0.0.1:${addr.port}`,
-      OUR_PHONE_NUMBERS: '+15550009999',
+      BUSINESS_PHONE_NUMBER: '+15550009999',
       // The A2P kill-switch defaults OFF for the twilio driver; enable it so the
       // send reaches the (redirected) REST call this test is asserting on.
       SMS_SENDING_ENABLED: 'true',

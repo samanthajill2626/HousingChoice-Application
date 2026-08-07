@@ -184,6 +184,57 @@ The 9-table schema (keys/GSIs are contractual) lives in [`app/src/lib/tables.ts`
 | AWS CLI | v2 | `aws --version` |
 | git | current | `git --version` |
 
+## Claude Code settings — permissions live in an UNTRACKED file, on purpose
+
+You must create your own `.claude/settings.local.json` to grant tool
+permissions. The committed `.claude/settings.json` carries only `env` — its
+`permissions` block is intentionally empty, because **permission rules in the
+committed file are NOT honored** (verified by A/B test 2026-08-07: identical
+command, identical restart; allowed with the rules in `settings.local.json`,
+prompted with the same rules in `settings.json` alone).
+
+That is a sensible security boundary rather than a bug: if a committed file
+could self-grant `Bash`, cloning any repository would hand it your machine.
+Permissions must come from a file YOU authored — user settings or the
+gitignored local file.
+
+Consequence for this repo's agent workflow: feature missions run in
+`git worktree` checkouts under `w:\tmp\<feature>`, and a gitignored file does
+NOT follow a worktree. **Copy your local settings into each new worktree**, or
+background agents will stall on permission prompts nobody is present to
+answer:
+
+```
+git worktree add w:\tmp\<feature> -b feat/<feature> main
+copy .claude\settings.local.json w:\tmp\<feature>\.claude\settings.local.json
+```
+
+The feature-mission profile (`.claude/feature-mission.profile.md`) carries this
+as part of its worktree recipe.
+
+Notes on the rules themselves:
+
+- The three files layer user -> project -> local:
+  `~/.claude/settings.json` (you, every project), `.claude/settings.json`
+  (this repo, everyone, committed — `env`/`hooks`/plugin config, NOT
+  permissions), `.claude/settings.local.json` (this repo, your clone only,
+  gitignored — where permissions actually work).
+- Rule syntax has three forms: exact (`Bash(npm run test)`), prefix-wildcard
+  (`Bash(git *)` — a LITERAL prefix then a space-star), and tool-only
+  (`Bash`, no parentheses). A bare `Bash(*)` is none of these and matches
+  NOTHING — it fails silently, which is easy to mistake for a config that
+  simply is not loading.
+- MCP rules take `mcp__<server>` (whole server) or `mcp__<server>__<tool>`.
+  There is no wildcard form; `mcp__server__*` matches nothing.
+- `allow` lists MERGE across files and cannot be subtracted from. To get a
+  prompt back, add the rule to **`ask`** (outranks `allow`); to refuse
+  outright use **`deny`** (outranks both). Both work at any granularity —
+  e.g. `ask` on `Bash(git push *)` while leaving the rest allowed.
+- Both settings files are honored **live** — they are re-read in real time, so
+  an edit takes effect immediately and you can retry a blocked call at once.
+  No restart. If a rule is not working, the cause is one of the two above
+  (wrong file, or a form that matches nothing), never staleness.
+
 ## Binding engineering guidelines
 
 These five are binding for all Phase 0+ code:

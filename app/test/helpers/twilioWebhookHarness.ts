@@ -2831,7 +2831,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     MESSAGING_DRIVER: 'console',
     TWILIO_AUTH_TOKEN: AUTH_TOKEN,
     PUBLIC_BASE_URL: PUBLIC_BASE_URL,
-    OUR_PHONE_NUMBERS: OUR_NUMBER,
+    BUSINESS_PHONE_NUMBER: OUR_NUMBER,
     // M1.3 auth wiring — production fail-fast keys, so tests overriding
     // NODE_ENV to 'production' still boot. SESSION_SECRET deliberately
     // matches the dev placeholder: the sealed cookies minted by

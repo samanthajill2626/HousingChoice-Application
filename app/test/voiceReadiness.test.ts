@@ -1,6 +1,6 @@
 // Boot readiness signal for inbound call-triage (M1.9b / Voice Phase 1). Creating
 // the voice router logs, ONCE at startup, whether the business number used as the
-// founder-leg caller ID (OUR_PHONE_NUMBERS[0]) is configured. The inbound-voice-line
+// founder-leg caller ID (BUSINESS_PHONE_NUMBER) is configured. The inbound-voice-line
 // HOLDER (whose verified cell is dialed) is RUNTIME DATA (a user record), not boot
 // config, so it can't be asserted at startup — only the business number is. Missing
 // it makes every inbound business call degrade to the "text us" fallback, so the
@@ -27,29 +27,27 @@ function readinessLine(env: Record<string, string>) {
 }
 
 describe('voice: inbound call-triage boot readiness log', () => {
-  it('logs the business number as configured when OUR_PHONE_NUMBERS[0] is set', () => {
-    const line = readinessLine({}); // harness sets OUR_PHONE_NUMBERS by default
+  it('logs the business number as configured when BUSINESS_PHONE_NUMBER is set', () => {
+    const line = readinessLine({}); // harness sets BUSINESS_PHONE_NUMBER by default
     expect(line['hasBusinessNumber']).toBe(true);
     expect(String(line['msg'])).toContain('configured');
     // Names where inbound routing gets its target: the holder's verified cell.
     expect(String(line['msg'])).toContain('inbound-voice-line holder');
   });
 
-  it('logs the business number as NOT configured when OUR_PHONE_NUMBERS is empty', () => {
-    const line = readinessLine({ OUR_PHONE_NUMBERS: '' });
+  it('logs the business number as NOT configured when BUSINESS_PHONE_NUMBER is empty', () => {
+    const line = readinessLine({ BUSINESS_PHONE_NUMBER: '' });
     expect(line['hasBusinessNumber']).toBe(false);
     expect(String(line['msg'])).toContain('NOT configured');
   });
 
   it('never logs a phone number (PII) — booleans only', () => {
     const { config } = makeWebhookHarness({ world: createFakeWorld(), env: {} });
-    expect(config.ourPhoneNumbers.length).toBeGreaterThan(0); // the default harness number
+    expect(config.businessPhoneNumber).toBeDefined(); // the default harness number
     const capture = createLogCapture();
     createTwilioVoiceRouter({ config, logger: createLogger({ level: 'info', destination: capture.stream }) });
     // The readiness line reports a BOOLEAN, never the business number itself.
-    for (const num of config.ourPhoneNumbers) {
-      expect(JSON.stringify(capture.lines)).not.toContain(num);
-    }
+    expect(JSON.stringify(capture.lines)).not.toContain(config.businessPhoneNumber!);
   });
 
   it('is correlation-safe inside a boot context — carries a correlationId, not an orphan log', () => {

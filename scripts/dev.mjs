@@ -211,16 +211,12 @@ if (mockRedirect) {
   // above), not only-if-absent - a stray EMAIL_DRIVER must never let a mock run
   // reach real SES.
   childEnv.EMAIL_DRIVER = 'console';
-  // Append the fake's app-number to OUR_PHONE_NUMBERS so the app recognizes it,
-  // preserving any real numbers from .env.dev in live mode (and the fake's number
-  // working). Set it outright when unset.
-  {
-    const existing = childEnv.OUR_PHONE_NUMBERS;
-    childEnv.OUR_PHONE_NUMBERS =
-      existing === undefined || existing === ''
-        ? '+15550009999'
-        : `${existing},+15550009999`;
-  }
+  // FORCE the fake's app-number as the business number in mock mode. Do NOT
+  // preserve a real number from .env.dev: the app pins outbound `from` to the
+  // business number, and fake-twilio treats any `from` that is not its own app
+  // number as a relay POOL leg (fake-twilio/src/engine/engine.ts:294), so a
+  // real number here registers a spurious relay group for every 1:1 send.
+  childEnv.BUSINESS_PHONE_NUMBER = '+15550009999';
 
   // ONLY-IF-ABSENT — respect live .env.dev creds/token; the fake inherits
   // TWILIO_AUTH_TOKEN from childEnv either way, so signatures still match.

@@ -63,7 +63,6 @@ export type MessageId =
   | 'voice.whisper_relay'
   | 'voice.whisper_outbound'
   | 'voice.caller_label_default'
-  | 'voice.team_unreachable'
   | 'voice.greeting_no_holder'
   | 'voice.self_call'
   | 'voice.founder_refuse'
@@ -334,9 +333,12 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     vars: ['callerLabel'],
   },
   'voice.whisper_relay': {
+    // Byte-identical to voice.whisper_founder since the press-0 team escape was
+    // removed (docs/issues/press-0-team-escape-removed.md). KEEP BOTH IDS: they
+    // address different contexts (masked relay leg vs founder bridge) and are
+    // independently editable; collapsing them couples two unrelated surfaces.
     id: 'voice.whisper_relay',
-    default:
-      'You have a Housing Choice call from {callerLabel}. Press 1 to accept, or press 0 to reach the team.',
+    default: 'You have a Housing Choice call from {callerLabel}. Press 1 to accept.',
     class: 'voice',
     editable: false,
     channel: 'voice',
@@ -355,14 +357,6 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     // interpolated into voice.whisper_founder / voice.whisper_relay.
     id: 'voice.caller_label_default',
     default: 'a Housing Choice contact',
-    class: 'voice',
-    editable: false,
-    channel: 'voice',
-    vars: [],
-  },
-  'voice.team_unreachable': {
-    id: 'voice.team_unreachable',
-    default: 'Sorry, the team is not reachable right now. Please try again later.',
     class: 'voice',
     editable: false,
     channel: 'voice',

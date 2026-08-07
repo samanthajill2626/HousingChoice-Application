@@ -11,8 +11,11 @@
 // when AWS is unreachable (local/hermetic) or a CloudWatch read throws — the
 // UI then shows "available in deployed environments." Flags always work.
 //
-// PII (doc §9): log IDs/counts/reasons ONLY. Flags are booleans/enums/strings;
-// the errors projection is message + correlationId (+ timestamp/level) only.
+// PII (doc §9): log IDs/counts/reasons ONLY. Flags are booleans/enums/strings
+// and carry no CONTACT's phone number; the ONE phone number they do carry is
+// deliberate - our OWN business number (BUSINESS_PHONE_NUMBER), which is
+// printed on public flyers, omitted when unconfigured, and never logged here.
+// The errors projection is message + correlationId (+ timestamp/level) only.
 import { Router } from 'express';
 import { loadConfig, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';

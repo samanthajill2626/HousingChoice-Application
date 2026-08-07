@@ -198,14 +198,11 @@ function AuthedApp(): React.JSX.Element {
                   </AdminRoute>
                 }
               />
-              <Route
-                path="numbers"
-                element={
-                  <AdminRoute>
-                    <NumbersSection />
-                  </AdminRoute>
-                }
-              />
+              {/* Phone numbers: OUR one business number is read-only and
+                  reachable by any logged-in user (NOT admin-guarded); the
+                  section's own role gate keeps the pool inventory admin-only,
+                  and GET /api/pool-numbers stays role-guarded on the server. */}
+              <Route path="numbers" element={<NumbersSection />} />
             </Route>
 
             {/* The remaining nav destinations stay placeholders for now. */}

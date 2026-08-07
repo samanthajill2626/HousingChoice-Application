@@ -144,7 +144,7 @@ const childEnv = {
   TWILIO_MESSAGING_SERVICE_SID: 'MGfake000000000000000000000000000',
   TWILIO_AUTH_TOKEN: process.env.TWILIO_AUTH_TOKEN ?? 'hermetic-shared-twilio-token',
   TWILIO_API_BASE_URL: fakeUrl,
-  OUR_PHONE_NUMBERS: '+15550009999',
+  BUSINESS_PHONE_NUMBER: '+15550009999',
   // --- Voice Intelligence (voice-transcription feature) ---
   // The fake-twilio host also impersonates the VI REST API and fires the signed
   // completion webhook. TWILIO_VI_SERVICE_SID turns transcription ON and MUST equal

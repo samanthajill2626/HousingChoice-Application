@@ -138,6 +138,14 @@
   color: var(--c-evt-neutral-text);
 }
 
+/* The honest-scope caveat under the pills: what the "Sending from" pill does
+ * NOT prove. Quieter than the pills, but never hidden - it is load-bearing. */
+.caveat {
+  margin: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-sm);
+}
+
 /* --- AlarmGrid ----------------------------------------------------------- */
 .alarmList {
   list-style: none;

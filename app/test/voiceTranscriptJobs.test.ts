@@ -48,7 +48,7 @@ const RECORDING_SID = 'REbiz0001';
 /** VI enabled + reconcileSeconds 1 by default (tests override for the chain). */
 function testConfig(over: Partial<AppConfig> = {}): AppConfig {
   return {
-    ...loadConfig({ NODE_ENV: 'test', OUR_PHONE_NUMBERS: '+15550009999' } as NodeJS.ProcessEnv),
+    ...loadConfig({ NODE_ENV: 'test', BUSINESS_PHONE_NUMBER: '+15550009999' } as NodeJS.ProcessEnv),
     twilioViServiceSid: 'GAsvc',
     voiceTranscriptReconcileSeconds: 1,
     ...over,

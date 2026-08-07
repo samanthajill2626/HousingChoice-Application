@@ -210,10 +210,10 @@ describe('POST /webhooks/twilio/sms — echo-loop defenses (doc §7.1)', () => {
   });
 
   it('FULL LOOP: outbound send via the service, then its webhook echo (same SID) dedupes to a no-op', async () => {
-    // OUR_PHONE_NUMBERS deliberately unset: the echo slips past defense 1
+    // BUSINESS_PHONE_NUMBER deliberately unset: the echo slips past defense 1
     // (From-match) and must be stopped by defense 2 (SID dedupe against the
     // copy persisted at send time by the send wrapper).
-    const harness = makeWebhookHarness({ env: { OUR_PHONE_NUMBERS: undefined } });
+    const harness = makeWebhookHarness({ env: { BUSINESS_PHONE_NUMBER: undefined } });
     const { app, world } = harness;
 
     // Seed the conversation, then send outbound through the REAL service
@@ -1052,19 +1052,31 @@ describe('POST /webhooks/twilio/sms — malformed requests', () => {
   });
 });
 
-describe('config: OUR_PHONE_NUMBERS / MEDIA_BUCKET parsing', () => {
-  it('parses a comma-separated E.164 list with whitespace tolerance', () => {
+describe('config: BUSINESS_PHONE_NUMBER / MEDIA_BUCKET parsing', () => {
+  it('parses a single E.164 number with surrounding whitespace tolerated', () => {
     const config = loadConfig({
       NODE_ENV: 'test',
-      OUR_PHONE_NUMBERS: ' +15550009999 , +15550008888 ',
+      BUSINESS_PHONE_NUMBER: '  +15550009999  ',
     } as NodeJS.ProcessEnv);
-    expect(config.ourPhoneNumbers).toEqual(['+15550009999', '+15550008888']);
+    expect(config.businessPhoneNumber).toBe('+15550009999');
   });
 
-  it('defaults to an empty list and fails fast on non-E.164 entries', () => {
-    expect(loadConfig({ NODE_ENV: 'test' } as NodeJS.ProcessEnv).ourPhoneNumbers).toEqual([]);
+  it('is undefined when unset', () => {
+    expect(
+      loadConfig({ NODE_ENV: 'test' } as NodeJS.ProcessEnv).businessPhoneNumber,
+    ).toBeUndefined();
+  });
+
+  it('treats a blank value as unconfigured and does NOT throw', () => {
+    expect(
+      loadConfig({ NODE_ENV: 'test', BUSINESS_PHONE_NUMBER: '   ' } as NodeJS.ProcessEnv)
+        .businessPhoneNumber,
+    ).toBeUndefined();
+  });
+
+  it('fails fast on a non-E.164 value', () => {
     expect(() =>
-      loadConfig({ NODE_ENV: 'test', OUR_PHONE_NUMBERS: '555-0100' } as NodeJS.ProcessEnv),
+      loadConfig({ NODE_ENV: 'test', BUSINESS_PHONE_NUMBER: '555-0100' } as NodeJS.ProcessEnv),
     ).toThrow(/E\.164/);
   });
 

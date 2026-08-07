@@ -1,7 +1,7 @@
 // settingsTabs unit tests — the SINGLE source of truth for the Settings tab
 // model. Asserts the role-gating helpers: visibleTabs(isAdmin) and
-// defaultTabPath(isAdmin). Team + System status are admin-only; Templates +
-// Notifications are visible to everyone.
+// defaultTabPath(isAdmin). Team + System status are the ONLY admin-only tabs;
+// Templates, Notifications, Voice and Phone numbers are visible to everyone.
 import { describe, expect, it } from 'vitest';
 import {
   SETTINGS_TABS,
@@ -20,11 +20,10 @@ describe('settingsTabs', () => {
       'system',
       'numbers',
     ]);
-    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual([
-      'team',
-      'system',
-      'numbers',
-    ]);
+    // `numbers` (Phone numbers) is NOT admin-only: OUR one business number is
+    // read-only and visible to everyone; the pool inventory inside the section
+    // carries its own role gate.
+    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system']);
   });
 
   it('visibleTabs(true) returns all tabs (admin sees Team + System)', () => {
@@ -38,8 +37,13 @@ describe('settingsTabs', () => {
     ]);
   });
 
-  it('visibleTabs(false) returns Templates + Notifications + Voice (no Team, no System)', () => {
-    expect(visibleTabs(false).map((t) => t.id)).toEqual(['templates', 'notifications', 'voice']);
+  it('visibleTabs(false) returns Templates + Notifications + Voice + Phone numbers (no Team, no System)', () => {
+    expect(visibleTabs(false).map((t) => t.id)).toEqual([
+      'templates',
+      'notifications',
+      'voice',
+      'numbers',
+    ]);
   });
 
   it('defaultTabPath lands an admin on Team and a VA on Templates', () => {

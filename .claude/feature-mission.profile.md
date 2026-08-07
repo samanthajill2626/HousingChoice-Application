@@ -36,6 +36,14 @@ superpowers:brainstorming; plans via superpowers:writing-plans.
   -b feat/<name> main`. NEVER move HEAD in the shared main checkout
   (concurrent agents). MEMORY.md "In flight" lists other agents' worktrees
   - never touch them.
+- IMMEDIATELY AFTER `git worktree add`, COPY THE LOCAL SETTINGS IN:
+  `copy .claude\settings.local.json w:\tmp\<name>\.claude\settings.local.json`
+  Permission rules are honored ONLY from user settings or the gitignored
+  `.claude/settings.local.json` - NOT from the committed `.claude/settings.json`
+  (A/B verified 2026-08-07). A gitignored file does not follow a worktree, so
+  without this copy a background orchestrator hits permission prompts nobody is
+  present to answer, and stalls silently. A blocked agent looks EXACTLY like a
+  wedged one from the outside: same silent transcript, same quiet worktree.
 
 ## Artifact paths
 

@@ -294,7 +294,7 @@ npm run pool:audit -- dev --reimport   # also re-create rows for stranded number
 ```
 
 - **How relay numbers are identified** (no Twilio-side tag exists): a number the account
-  owns that is **attached to the Messaging Service** and **not in `OUR_PHONE_NUMBERS`**
+  owns that is **attached to the Messaging Service** and **is not the `BUSINESS_PHONE_NUMBER`**
   is a relay pool number. The report classifies every owned number: business / pool
   tracked (row present) / pool **STRANDED** (no row — the post-wipe case) / unattached
   (not in the Messaging Service and not business — half-provisioned or console-created,
@@ -305,7 +305,7 @@ npm run pool:audit -- dev --reimport   # also re-create rows for stranded number
   existing row is never stomped. Empty burn is correct post-wipe (the burned phones
   referenced wiped contacts).
 - Needs `.env.<env>` with `TWILIO_ACCOUNT_SID`, `TWILIO_AUTH_TOKEN`,
-  `TWILIO_MESSAGING_SERVICE_SID`, `OUR_PHONE_NUMBERS`; AWS goes through the pinned
+  `TWILIO_MESSAGING_SERVICE_SID`, `BUSINESS_PHONE_NUMBER`; AWS goes through the pinned
   `housingchoice` profile (account guard first). Script: `scripts/poolNumbersAudit.mjs`.
 
 ### Secrets
@@ -598,7 +598,7 @@ must hold or messages silently stop flowing:
 The env keys that feed the app live in the gitignored `.env.<env>` and reach Parameter Store via
 `npm run secrets:push -- <env>` (then a deploy to go live — see [Secrets](#secrets)):
 `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY_SID`, `TWILIO_API_KEY_SECRET` (REST), `TWILIO_AUTH_TOKEN`
-(webhook signature validation ONLY), `TWILIO_MESSAGING_SERVICE_SID`, and `OUR_PHONE_NUMBERS`.
+(webhook signature validation ONLY), `TWILIO_MESSAGING_SERVICE_SID`, and `BUSINESS_PHONE_NUMBER`.
 
 **Inbound voice routing has NO env var.** An inbound call to a business number bridges to the
 assigned **inbound-voice-line holder's verified cell** — assigned in **Settings ▸ Team** (the holder
@@ -613,32 +613,60 @@ Observed 2026-07-18: cloud dev had no holder despite inbound "working" before - 
 greeting masks it. **If inbound falls back to the text-us greeting, check Settings > Team first**
 and re-assign.
 
-**`OUR_PHONE_NUMBERS` must list EVERY number we own** (comma-separated E.164): it is echo/author
-defense #1 — an inbound webhook whose From matches is our own outbound projected back. A missing
-number degrades that defense to SID-dedupe alone; in production with the twilio driver an EMPTY
-list refuses to boot.
+**`BUSINESS_PHONE_NUMBER` is THE ONE business number for this environment** - a single E.164
+value, not a list. It is what we present (the outbound voice caller ID, the flyer's "text us"
+number, the `from` pinned on every non-relay send, and which side of a thread renders as us) and
+it is echo/author defense #1: an inbound webhook whose From matches is our own outbound projected
+back. Unset degrades that defense to SID-dedupe alone and leaves outbound sends unpinned; in
+production with the twilio driver an EMPTY value refuses to boot.
 
-**ORDER MATTERS — the FIRST entry is "the main business number."** The whole list answers "is this
-one of ours?", but `ourPhoneNumbers[0]` alone drives four outward-facing things:
+**Relay pool numbers must NEVER appear here.** We own them too, but they are bought at runtime and
+live in the `hc-<env>-pool_numbers` table - that table, not this variable, is how the app knows a
+pool number is ours. Putting a pool number in `BUSINESS_PHONE_NUMBER` breaks the pool-audit
+classifier (it would be reported as the business line instead of pool) and can make a pool number
+our outbound caller ID.
 
-- the **outbound voice caller ID** (`services/originateCall.ts`, `routes/webhooks/voice.ts`)
-- the **public flyer's "text us" CTA** (`routes/public.ts`, `app.ts`)
-- the **outbound 1:1 SMS sender** — the `from` pinned on every non-relay send
-  (`services/sendMessage.ts`) and on the staff cell-verification code (`routes/voiceApi.ts`)
-- which side of a thread renders as us (`routes/contactTimeline.ts`)
+**A consequence of the singular design (not a bug): a number we OWN but have not configured is no
+longer recognised as ours anywhere.** Only `BUSINESS_PHONE_NUMBER` and the live relay pool count as
+"us", so if some other owned number ever texts or calls us (a send from the Twilio console, a
+legacy forwarded line, a number kept live during the port), the app treats it as a stranger - the
+SMS pipeline would create a `needs_review` contact for our own number and voice would run founder
+triage on it. Nothing the app itself sends can produce that (every send is pinned to the business
+number or a pool number), so this only bites a human sending from the console.
 
-**At the M1.11 cutover, when the ported number `+16782842537` is added, it must go FIRST** —
-`OUR_PHONE_NUMBERS=+16782842537,+14049824978`, **not** appended to the end. Appending is the
-natural thing to do and it is wrong: calls would keep presenting the old (404) number, the flyer
-would keep advertising it, and the 629 imported contacts would keep receiving texts from a number
-they do not recognize — which is the entire reason for porting. Nothing errors if you get this
-wrong; it just quietly presents the wrong number, so **verify with a test call + a test text after
-the deploy**, not just a green boot.
+**At the M1.11 cutover, each environment keeps its OWN number.** Dev stays on the 404 number
+(`+14049824978`); prod uses the ported `+16782842537`. Each environment has its OWN Messaging
+Service and its OWN A2P campaign, so there is no shared list, no second entry, and no ordering to
+get wrong - a singular variable cannot be "appended to". Nothing errors if the value is wrong; it
+just quietly presents the wrong number to the 629 imported contacts the port exists to serve, so
+**verify with a test call + a test text after the deploy**, not just a green boot.
 
 Separately, the ported number must also be **added to the Messaging Service's sender pool** (and
 covered by the A2P campaign) before it can be sent from — the app pins `from`, but the number has
-to be IN the pool for the service to accept it. Config order and pool membership are two different
-steps; do both.
+to be IN the pool for the service to accept it. Setting `BUSINESS_PHONE_NUMBER` and attaching the
+number to the Messaging Service are two different steps; do both, **and do them in that order**.
+
+**Order matters for `pool:audit`.** `npm run pool:audit -- <env>` classifies an attached number as
+a RELAY POOL number precisely because it is not the `BUSINESS_PHONE_NUMBER` - so between attaching
+the ported number and setting the variable, the audit reports our own business line as `pool,
+STRANDED`, and `--reimport` in that window would write it an `active` `pool_numbers` row and make
+it claimable as a relay number. Set `BUSINESS_PHONE_NUMBER` FIRST (env + `secrets:push` + deploy),
+then attach the number to the Messaging Service, and do not run `pool:audit --reimport` in between.
+See `docs/issues/pool-audit-reimport-strands-business-number.md`.
+
+**Renaming the key (2026-08-06): rename in `.env.<env>` FIRST, then push.** `secrets:push` /
+`secrets:check` diff the real `.env.<env>` key set against the `.example` template, so until the
+real file is renamed they report `missing: BUSINESS_PHONE_NUMBER` / `extra: OUR_PHONE_NUMBERS` -
+and a push done before the rename writes the OLD key while the app reads the new one (unconfigured
+number: unpinned sender, no flyer number, voice not configured). Order: rename the key in
+`.env.<env>`, then `npm run secrets:push -- <env>`, then deploy, then
+`npm run secrets:prune -- <env> --yes` to delete the orphaned `OUR_PHONE_NUMBERS` parameter.
+
+**Go-live flags are env keys, not dashboard toggles.** Flipping `SMS_SENDING_ENABLED` (and
+`RELAY_LIVE_PROVISIONING`) at go-live is an `.env.<env>` edit + `npm run secrets:push -- <env>` +
+a deploy - app-behavior keys, not Terraform-managed. **Settings > System status** shows their state
+(and the configured `BUSINESS_PHONE_NUMBER`, on the "Sending from" pill) READ-ONLY: there is no
+control in the dashboard that can change any of them.
 
 #### Voice Intelligence transcription + platform voicemail
 
@@ -718,7 +746,7 @@ the prod config validator** (three independent guards — see `fake-twilio/src/c
 points the app at it. The app runs the real driver (`MESSAGING_DRIVER=twilio`) redirected via
 `TWILIO_API_BASE_URL=http://localhost:8889`, with a **shared** `TWILIO_AUTH_TOKEN` (the HMAC key both
 sides use), `SMS_SENDING_ENABLED=true` (the A2P kill-switch defaults OFF under the twilio driver, so
-it must be forced on), and `OUR_PHONE_NUMBERS=+15550009999`. The Twilio SID/secret values are
+it must be forced on), and `BUSINESS_PHONE_NUMBER=+15550009999`. The Twilio SID/secret values are
 Twilio-shaped dummies (the fake never authenticates them). `e2e:restart` also bounces the fake so a
 code change to it is picked up.
 
@@ -794,7 +822,7 @@ action>` summary — driving the app's **real** voice webhooks end-to-end. Every
 as the inbound-voice-line holder** with a verified cell (`+15550000001`) — the hermetic scripts
 (`scripts/dev.mjs`, `scripts/e2e-session.mjs`) pass that value in `FOUNDER_CELL` purely as the LOCAL
 seed source (there is NO `FOUNDER_CELL` fallback in the app itself). With that holder plus the
-business number (`OUR_PHONE_NUMBERS=+15550009999`), an inbound call to the business number runs the
+business number (`BUSINESS_PHONE_NUMBER=+15550009999`), an inbound call to the business number runs the
 full founder bridge (whisper → press-1 → answer → record-to-MinIO → transcribe) rather than degrading
 to the "text us" fallback; a no-answer scenario fires the real missed-call push + autotext job.
 
@@ -805,14 +833,16 @@ to the "text us" fallback; a no-answer scenario fires the real missed-call push 
 | `POST /control/place-call` | `{from,to,scenario?}` → `{callSid}` — place a masked (`to` ∈ pool) or founder (`to` ∉ pool) call |
 | `GET  /control/calls` | `{calls: CallState[]}` — every call (sid, status, legs, recording/transcript) |
 | `POST /control/calls/:sid/press` | `{digit}` → `{call}` — inject a DTMF gate digit on a paused call |
-| `POST /control/calls/:sid/answer` | `{leg?}` → `{call}` — mark a leg answered (bare/team dial, no whisper) |
+| `POST /control/calls/:sid/answer` | `{leg?}` → `{call}` — mark a leg with NO whisper gate answered (today that is the outbound-bridge target leg) |
 | `POST /control/calls/:sid/hangup` | `{call}` — caller/callee hangs up before answer → no-answer |
 
 **Scenario knobs** (all optional; the engine fills sensible defaults — first leg answers, digit `'1'`,
 answered): `answerLeg` (`callee`/`founder`/`team` — advisory; the first dialed leg answers today, and
-`team` is reached via the press-0 whisper-gate escape, not leg selection), `digit` (`'0'`/`'1'`/`null`
-— `null` models "no press" → gate timeout → no-answer), `outcome` (`answered`/`no-answer`/`busy` —
-forces the terminal `<Dial action>` status), `ringMs` (auto-run delay on the injected clock),
+`team` is VESTIGIAL: the app's press-0 team escape was removed (2026-08-06), so no TwiML dials a
+team leg), `digit` (`'0'`/`'1'`/`null` - `'1'` accepts the whisper gate; `'0'` is now unremarkable
+and hangs the leg up like any other non-accept key; `null` models "no press" → gate timeout →
+no-answer), `outcome` (`answered`/`no-answer`/`busy` — forces the terminal `<Dial action>`
+status), `ringMs` (auto-run delay on the injected clock),
 `record` (advisory only — see below), `transcript` (the founder-bridge transcription text). These
 drive **masked vs founder** behavior: the **masked relay never records** (the app's TwiML returns
 `record="do-not-record"` with no recordingStatusCallback → recording + transcription skipped); the

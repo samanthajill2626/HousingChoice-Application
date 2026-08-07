@@ -66,7 +66,7 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
-// --- Settings: Group text numbers (admin pool-number inventory) --------------
+// --- Settings > Phone numbers: the group text pool (admin-only inventory) ----
 // Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
 // The dashboard is a separate package and cannot import from app/src, so these
 // are duplicated; keep them in sync with the router when the shape changes.
@@ -138,13 +138,19 @@ export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
   welcomeText?: string | null;
 };
 
-/** GET/PUT /api/settings response. `welcomeTextDefault` rides alongside the
- *  settings (read-only, never patchable): the exact welcome body the backend
- *  sends when `welcomeText` is unset, so the UI can show the admin what "the
- *  default" actually says. */
+/** GET/PUT /api/settings response. `welcomeTextDefault` and
+ *  `businessPhoneNumber` ride alongside the settings (read-only, never
+ *  patchable): the exact welcome body the backend sends when `welcomeText` is
+ *  unset, so the UI can show the admin what "the default" actually says, and
+ *  OUR one business number, so the UI can show what this app sends from. */
 export interface SettingsResponse {
   settings: OrgSettings;
   welcomeTextDefault: string;
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164. OPTIONAL: the
+   *  backend OMITS the key when unconfigured - it is never `null`, so test the
+   *  unset case with `=== undefined`. Carried by BOTH the GET and the PUT (the
+   *  dashboard re-sets this state from the PUT response). */
+  businessPhoneNumber?: string;
 }
 
 // --- Settings: System Status (admin-only) -----------------------------------
@@ -166,6 +172,20 @@ export interface SystemFlags {
   /** Outbound messaging driver as displayed. `mock` = the twilio driver
    *  redirected to a fake host (local `--mock` loop); never appears deployed. */
   messagingDriver: 'twilio' | 'console' | 'mock';
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164 - what this app is
+   *  configured to send FROM. OPTIONAL: the backend OMITS the key when the env
+   *  has no number - it is never `null` (a `null` would also break the
+   *  every-flag-is-a-boolean-or-string assertion in the backend's service
+   *  test), so test the unset case with `=== undefined`.
+   *
+   *  PII: this is the ONLY phone number this payload may ever carry, and it is
+   *  ours - the number on our public flyers - never a contact's or the
+   *  founder's. It does NOT weaken the "never secrets" rule above.
+   *
+   *  HONEST SCOPE: configured here is not proof a send succeeds; the number
+   *  must also be attached to the Messaging Service and covered by the A2P
+   *  campaign, neither of which this payload checks. */
+  businessPhoneNumber?: string;
 }
 
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */

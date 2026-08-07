@@ -159,11 +159,24 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 - **"Group text number"** = the STAFF-FACING name a navigator sees for a relay
   **pool number** (the shared number the relay multiplexes group texts onto).
   Code and data stay `pool_number` / `poolNumber` (`poolNumbersRepo`,
-  `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the admin Settings
-  inventory at `/settings/numbers` is titled **"Group text numbers"** (admin-only,
-  read-only). A number is provisioned with the first group text and can outlive
-  many groups (burn-as-claim multiplexing), so the accurate noun is "group text
-  number", never "the group's number". Tenants and landlords never see this term.
+  `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the Settings tab at
+  `/settings/numbers` is titled **"Phone numbers"** and its pool inventory block
+  is still headed **"Group text numbers"** (admin-only, read-only - the tab
+  itself is visible to every authenticated user, since its other block shows OUR
+  one business number). A number is provisioned with the first group text and
+  can outlive many groups (burn-as-claim multiplexing), so the accurate noun is
+  "group text number", never "the group's number". Tenants and landlords never
+  see this term.
+
+- **"Our number"** / **the business number** (2026-08-06) = the ONE number an
+  environment texts and calls FROM, configured as the env var
+  `BUSINESS_PHONE_NUMBER` and read as `config.businessPhoneNumber` (a scalar; it
+  replaced the positional `OUR_PHONE_NUMBERS` list whose `[0]` was silently
+  special). Staff see it read-only as "Our number" in **Settings > Phone
+  numbers** and as the "Sending from" pill on **Settings > System status**;
+  tenants and landlords know it as the number on the flyer. It is NEVER a relay
+  pool number ("group text number", above): dev and prod each have their own,
+  and there is no in-app edit path.
 
 - **`partner`** (email-channel v1, 2026-07-21) - a FIRST-CLASS `ContactType` (the
   code/data value `partner`, a union member beside `tenant` / `landlord` /

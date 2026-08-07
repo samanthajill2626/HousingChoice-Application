@@ -45,7 +45,7 @@ import { uniqueVoicePhone, callTimeline } from '../../fixtures/voiceSetup.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
-/** The app's own business number in the e2e stack (OUR_PHONE_NUMBERS[0]) -> the
+/** The app's own business number in the e2e stack (BUSINESS_PHONE_NUMBER) -> the
  *  founder-bridge line. An inbound call here runs the whisper/press-1 bridge. */
 const BUSINESS = '+15550009999';
 

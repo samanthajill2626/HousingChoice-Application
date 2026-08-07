@@ -1,7 +1,7 @@
 // fake-twilio/src/engine/registry.ts
 import type { AddAdHocInput, Persona } from './types.js';
 
-/** The app's own business number in the hermetic stack (mirrors OUR_PHONE_NUMBERS). */
+/** The app's own business number in the hermetic stack (mirrors BUSINESS_PHONE_NUMBER). */
 export const APP_NUMBER = '+15550009999';
 
 /**

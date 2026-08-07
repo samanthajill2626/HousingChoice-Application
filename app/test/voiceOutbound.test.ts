@@ -251,8 +251,8 @@ describe('POST /api/contacts/:contactId/call — originate (spec §5)', () => {
   it('503 voice_not_configured when business caller ID is undefined — initiateCall NOT called', async () => {
     const world = createFakeWorld();
     const contactId = seedContact(world);
-    // Build a harness without any OUR_PHONE_NUMBERS so config.ourPhoneNumbers[0] is undefined.
-    const harness = makeWebhookHarness({ world, env: { OUR_PHONE_NUMBERS: '' } });
+    // Build a harness without a BUSINESS_PHONE_NUMBER so config.businessPhoneNumber is undefined.
+    const harness = makeWebhookHarness({ world, env: { BUSINESS_PHONE_NUMBER: '' } });
     seedNavigatorCell(harness);
 
     const res = await request(harness.app)
@@ -738,9 +738,9 @@ describe('self cell verification (spec §7)', () => {
     expect(user.cell_verified_at).toBeDefined();
   });
 
-  it('verify-start still sends with NO `from` when OUR_PHONE_NUMBERS is empty (degrades, never throws)', async () => {
+  it('verify-start still sends with NO `from` when BUSINESS_PHONE_NUMBER is empty (degrades, never throws)', async () => {
     const world = createFakeWorld();
-    const harness = makeWebhookHarness({ world, env: { OUR_PHONE_NUMBERS: '' } });
+    const harness = makeWebhookHarness({ world, env: { BUSINESS_PHONE_NUMBER: '' } });
 
     const start = await request(harness.app)
       .post('/api/users/me/cell/verify-start')

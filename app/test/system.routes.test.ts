@@ -54,6 +54,10 @@ describe('GET /api/system/flags', () => {
       relayLiveProvisioning: true,
       pushConfigured: false,
       messagingDriver: 'console',
+      // The harness DOES configure a business number (BUSINESS_PHONE_NUMBER =
+      // OUR_NUMBER), so the flags payload carries it. Our own published number
+      // is not a contact's phone; see services/systemStatus.ts.
+      businessPhoneNumber: '+15550009999',
     });
   });
 });

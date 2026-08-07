@@ -1,170 +1,83 @@
-## Claude Code
+# Claude Code Project Overlay
 
-## Sub-agent model selection — use Fable SPARINGLY (usage limits)
+Before doing any work, read and follow [`../AGENTS.md`](../AGENTS.md). It is the
+canonical source for HousingChoice product language, engineering constraints,
+verification gates, worktree behavior, issue tracking, and safety rules.
 
-We are hitting usage limits on the Fable model. Sub-agents spawned via the Agent
-tool (and Workflow `agent()` calls) **inherit the parent session's model unless
-overridden** — when the main session runs on Fable, every un-pinned sub-agent
-silently multiplies Fable usage.
+Claude Code does not discover AGENTS.md on its own; it loads only CLAUDE.md and
+.claude/CLAUDE.md. The bare line below is a Claude Code import, which pulls the
+canonical file into context at session start so the shared rules are always
+loaded rather than merely referenced. Keep it unquoted and outside code fences -
+an import inside backticks or a fenced block is ignored.
 
-- **Pass an explicit `model` on every sub-agent.** Default to **`opus`** for
-  the routine fan-outs (Explore sweeps, spec-conformance + adversarial reviewers,
-  audits, searches); use **`sonnet`** for trivial mechanical sweeps.
-- **Reserve Fable** for orchestrator-level work and tasks explicitly deemed
-  high-importance (e.g. a subtle security-critical review or debugging session
-  where the extra capability genuinely earns its cost). Using Fable on a
-  sub-agent must be a deliberate, stated choice — never the silent default.
+@../AGENTS.md
 
-One entity, three labels by audience. The "single dwelling a single household can
-lease and move into" is **always `unit` in code/data**. Human-facing copy uses:
+This file contains Claude Code-specific runtime guidance only. If duplicated guidance
+ever appears here, move the shared rule to `../AGENTS.md` and leave only the
+Claude-specific delta here.
 
-- **Tenant →** "home"
-- **Landlord →** "property"
-- **Staff / navigator (dashboard) →** "property"
-- **Code / data / internal →** "unit" (`unitId`, `unitsRepo`, `UnitItem`)
+## Sub-agent model selection
 
-`unit` is the HUD/Section 8 term and is **structure-agnostic** (a house, townhome,
-or apartment is all a "dwelling unit") — it is not apartment-specific. **`property`
-is the blessed landlord/staff word for this single-`unit` entity** (its everyday,
-no-advertisement-connotation name). If we ever model a multi-unit *parent* layer,
-name it **"building"** or **"parcel"** — never "property" — so the leaf word
-(`property` = one `unit`) and the parent word never collide.
-Keep `listing_link` / "public listing" (the external listing URL) and the
-JS object-property sense of "property" as-is.
+Fable usage is constrained. Sub-agents spawned through the Agent tool or Workflow
+`agent()` inherit the parent model unless explicitly overridden.
 
-Full rationale, the audience→noun table, and the future-AI mapping:
-[documentation/GLOSSARY.md](../documentation/GLOSSARY.md). Update it in the same
-change whenever you add a domain noun or fix drift.
+- Pass an explicit model on every Claude sub-agent dispatch.
+- Use `opus` for routine explores, implementation fan-outs, audits, and independent
+  reviewers.
+- Use `sonnet` for trivial mechanical sweeps.
+- Reserve Fable for the orchestrator or a deliberately identified high-importance
+  child task. Never let a child inherit Fable silently.
 
-## UI testing & verification (self-QA UI changes — don't hand them to the human)
+These are Claude model identifiers. Never copy them into Codex configuration or
+Codex agent prompts.
 
-This repo has a Playwright end-to-end harness so you can drive the real dashboard
-and API yourself. **After changing any UI or user-facing flow, verify it with the
-harness before claiming the work is done** — and add/extend a spec for new behavior.
+## Claude settings and permissions
 
-- **Full suite** (boots a hermetic stack, runs, tears down): `npm run e2e`.
-- **Interactive inner loop:** `npm run e2e:session` (persistent stack) + the
-  Playwright **MCP** to navigate/click/snapshot/screenshot the live UI. After a
-  backend change run `npm run e2e:restart` (app+worker only; the browser keeps its
-  page); `npm run e2e:reseed` for a clean slate; `npm run e2e:stop` to end.
-- **Dev-only, hermetic-LOCAL-only helpers** the harness exposes (gated OFF in every
-  deployed env — never reachable in prod): `POST /auth/dev-login` (log in as seeded
-  `va@example.com`, no Google), `GET /__dev/outbox` (assert what SMS *would* have
-  been sent), `POST /__dev/reseed`, `GET /__dev/ping`.
-- Write specs with accessibility-first selectors (`getByRole`/`getByLabel`) — see
-  [e2e/support/selectors.md](../e2e/support/selectors.md). Requires Docker (DynamoDB Local).
-- Interactive MCP browser: this repo's [.mcp.json](../.mcp.json) uses bundled
-  chromium (no admin) with **`--isolated`** — each session gets its own ephemeral
-  browser profile, so CONCURRENT agent sessions can drive browsers side-by-side
-  (without it, all sessions share ONE locked profile dir and fight: "Browser is
-  already in use" + browsers dying mid-call as sessions clobber each other; never
-  "fix" that by killing mcp-chrome processes — that kills the OTHER agent's
-  browser). Trade-off: an isolated profile starts logged OUT on every browser
-  launch — just `POST /auth/dev-login` (or click the dev-login button) again.
-  If your client's *plugin* Playwright MCP errors with
-  `Chromium distribution 'chrome' is not found`, a one-time **Administrator**
-  `npx playwright install chrome` fixes it (see [e2e/README.md](../e2e/README.md)
-  → Setup). The suite and `--headed`/`--ui` runs need no admin.
-- **MCP artifacts go in `.playwright-mcp/` (gitignored).** Auto-named files —
-  page snapshots and screenshots taken with NO `filename` — land there for both
-  servers: the project server is pinned via `--output-dir` in
-  [.mcp.json](../.mcp.json), and `PLAYWRIGHT_MCP_OUTPUT_DIR` in
-  [settings.json](settings.json) `env` (passed to every spawned MCP) plus the
-  tool's own `<cwd>/.playwright-mcp` default cover the plugin server.
-  **Caveat (verified):** `browser_take_screenshot` with an explicit `filename`
-  resolves it against the repo ROOT, not the output dir — output-dir is bypassed
-  for named files *by design* (a named file means "save into my workspace"). So
-  when you name a screenshot, **prefix it**: `filename: ".playwright-mcp/foo.png"`
-  — or just omit `filename` and let it auto-name into the dir. We deliberately do
-  NOT blanket-ignore root images, so real images can still live at the root.
+Claude permission rules are honored from user settings or the gitignored
+`.claude/settings.local.json`, not from the committed `.claude/settings.json`.
+The committed file remains the home for shared environment variables, hooks, and
+plugin/MCP configuration.
 
-Full workflow, modes, and how to add tests: **[e2e/README.md](../e2e/README.md)**.
+Every manually created Claude feature worktree therefore needs the local settings
+copied in immediately after `git worktree add`:
 
-## Issue, TODO & known-problem tracking (one consistent way)
-
-There is no external issue tracker (the remote is Azure DevOps; `gh` issues are
-unavailable), so issues live in-repo, in **two tiers**. Full reference:
-[docs/issues/README.md](../docs/issues/README.md).
-
-- **Tier 1 — inline markers** for code-local notes: `TODO(area):`, `FIXME(area):`,
-  `HACK(area):`. Reference a registry item with `TODO(<issue-slug>):`.
-- **Tier 2 — the registry** `docs/issues/<slug>.md` (one file per issue, slug = id =
-  filename) for anything **important, cross-cutting, or triage-worthy**. Frontmatter
-  (`type`/`severity`/`status`/…) + prose. Copy `docs/issues/_TEMPLATE.md`.
-- **Graduation rule:** the moment an inline TODO is important/cross-cutting/triage-worthy,
-  give it a registry file. Otherwise leave it inline.
-- **See all issues:** `npm run issues` (writes the gitignored `docs/issues/INDEX.md`), or
-  agents grep directly: `rg -l "^status: open$" docs/issues/ -g '!_*'`. Never hand-maintain a list —
-  it's derived, which is what keeps concurrent issue-filing conflict-free.
-- **RUNBOOK.md is operational only** — bugs/gaps/deferrals go in `docs/issues/`, not there.
-
-## Branch hygiene — sync with `main` before declaring done
-
-`main` moves fast: multiple agents merge in parallel, so a branch cut a day ago is
-often several features behind. A branch that is green on a **stale base** can conflict
-with — or silently revert — work that landed on `main` after you branched (this has
-bitten us at review time more than once).
-
-- **Before declaring a branch done / requesting review or merge:** merge the latest
-  `main` into your branch (`git merge main`, or rebase), resolve any conflicts keeping
-  BOTH sides' intent, then re-run the full gates — **`npm run typecheck` + `npm test` +
-  `npm run e2e`** — green on the updated base. "Green" only counts against current `main`.
-- **`npm run typecheck` is a REQUIRED gate — do not skip it.** `npm test` and `npm run
-  e2e` run through esbuild/tsx, which strips types WITHOUT type-checking, so a red
-  `tsc` (e.g. a strict `noUncheckedIndexedAccess` `ev[0]` nit in a test file) passes the
-  runtime suites and slips onto `main`, breaking every later branch's typecheck. Running
-  the tests green is NOT proof the types check. Always run `npm run typecheck` too.
-- **If that surfaces conflicts, or you're unsure whether to sync mid-build, ASK first** —
-  e.g. "`main` has advanced N commits since I branched; should I merge it in before I
-  continue / before I finish?" Don't silently finish on a stale base.
-- Never merge your branch INTO `main` without explicit human approval.
-
-## Worktrees — ALWAYS copy the local settings in (permissions do not follow)
-
-**Every time you create a worktree, for any reason, copy the local settings
-file into it as the very next step:**
-
-```
-git worktree add w:\tmp\<name> -b feat/<name> main
-copy .claude\settings.local.json w:\tmp\<name>\.claude\settings.local.json
+```powershell
+copy .claude\settings.local.json W:\tmp\<name>\.claude\settings.local.json
 ```
 
-**Why (A/B verified 2026-08-07, not folklore):** tool permission rules are
-honored ONLY from user settings (`~/.claude/settings.json`) or the gitignored
-`.claude/settings.local.json`. They are **NOT honored from the committed
-`.claude/settings.json`** — same command, same restart discipline, allowed with
-the rules local and prompted with the identical rules in the tracked file
-alone. That is a security boundary, not a bug: a committed file that could
-self-grant `Bash` would make cloning any repo dangerous. The committed file is
-still the right home for `env`, hooks and plugin config — just not permissions.
+A missing local settings file can leave a background Claude agent waiting on a
+permission prompt that no one is present to answer.
 
-Because the working file is gitignored, `git worktree add` never delivers it.
-Skip the copy and a background agent in that worktree hits permission prompts
-nobody is present to answer — and **a permission-blocked agent is
-indistinguishable from a wedged one from the outside**: silent transcript,
-quiet worktree, no error. That misdiagnosis has already cost real debugging
-time; do not repeat it.
+Claude rule syntax:
 
-### Permission-rule syntax traps (both fail SILENTLY)
+- Exact command: `Bash(npm run test)`
+- Prefix wildcard: `Bash(git *)`
+- Tool-wide: `Bash`
+- `Bash(*)`, `Read(*)`, and similar parenthesized stars match nothing.
+- MCP rules use `mcp__<server>` or `mcp__<server>__<tool>`; there is no MCP
+  wildcard form.
+- `allow` entries merge across settings layers. `ask` outranks `allow`, and `deny`
+  outranks both, so use those lists when a broader rule needs a narrower prompt or
+  refusal.
 
-- Rules take three forms: exact `Bash(npm run test)`, prefix-wildcard
-  `Bash(git *)` (a LITERAL prefix then a space-star), or tool-only `Bash`
-  (no parentheses). **`Bash(*)` is none of these and matches NOTHING** — same
-  for `Read(*)`, `Write(*)`, `PowerShell(*)`, `WebFetch(*)`.
-- MCP rules take `mcp__<server>` (whole server) or `mcp__<server>__<tool>`.
-  **There is no wildcard form** — `mcp__playwright__*` matches nothing. This is
-  why individual browser tools accumulate in settings one approval at a time.
-- A rule that matches nothing looks exactly like a config that is not loading.
-  Do not diagnose one as the other.
+Claude settings are re-read live. If a rule does not work, check that it is in the
+local file and uses a valid form; do not assume a restart is required.
 
-### Settings are honored LIVE - no restart needed
+The project Playwright MCP in `../.mcp.json` uses bundled Chromium. A separately
+installed Claude Playwright plugin may instead expect the Chrome channel; if it reports
+that the `chrome` distribution is missing, follow `../e2e/README.md` for the one-time
+administrator install. Do not change the shared project MCP to work around that
+client-plugin difference.
 
-Both `.claude/settings.json` and `.claude/settings.local.json` are re-read in
-real time; edit either and the change is in force immediately. You can add a
-permission mid-session and retry the blocked call straight away.
+## Claude worktree shell behavior
 
-So if a rule is not working, DO NOT reach for "it must need a restart" - that
-is not the explanation. Check, in this order: (1) is it in the LOCAL file?
-permissions in the committed file are ignored (above); (2) is the syntax one
-of the three valid forms? `Bash(*)` and `mcp__server__*` match nothing
-(above).
+Claude shell calls can lose the intended working directory between calls. Use an
+explicit worktree path for commands and verify the current directory before trusting
+surprising Git or test output.
+
+## Claude feature missions
+
+Claude feature missions use
+[`feature-mission.profile.md`](feature-mission.profile.md). That file is a thin
+Claude adapter; the shared mission process remains in `../AGENTS.md` and
+`../documentation/FEATURE-DEVELOPMENT-WORKFLOW.md`.

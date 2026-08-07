@@ -1,11 +1,22 @@
 {
   "permissions": {
     "allow": [
-
+      "WebSearch",
+      "WebFetch(*)",
+      "Bash(*)",
+      "PowerShell(*)",
+      "Read(*)",
+      "Write(*)",
+      "mcp__playwright",
+      "mcp__plugin_playwright_playwright"
     ],
     "ask": [
     ]
   },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "playwright"
+  ],
   "env": {
     "PLAYWRIGHT_MCP_OUTPUT_DIR": ".playwright-mcp"
   }

@@ -184,6 +184,45 @@ The 9-table schema (keys/GSIs are contractual) lives in [`app/src/lib/tables.ts`
 | AWS CLI | v2 | `aws --version` |
 | git | current | `git --version` |
 
+## Claude Code settings — read this before you clone
+
+`.claude/settings.json` is **committed**, and it deliberately grants blanket
+approval for shell (`Bash(*)`, `PowerShell(*)`), file reads/writes and both
+Playwright MCP servers. That means an agent working in this repo runs shell
+commands **without prompting you first**.
+
+That is intentional. This repo is developed through long unattended agent
+missions (see the feature-mission pipeline), and the permissions live in the
+COMMITTED file rather than `.claude/settings.local.json` for one specific
+reason: missions run in `git worktree` checkouts under `w:\tmp\<feature>`, and
+`settings.local.json` is gitignored, so a worktree never receives it. Only the
+tracked file follows a worktree.
+
+If that posture is wrong for you:
+
+- **Permission lists MERGE across files; they do not replace.** Adding your own
+  `allow` entries in `.claude/settings.local.json` cannot take a grant away.
+- To get the prompt back, add the rule to **`ask`** in your own
+  `.claude/settings.local.json` — `ask` outranks `allow`, so you are asked
+  again and approve case by case. This is usually what you want:
+  `{"permissions":{"ask":["Bash(*)","PowerShell(*)"]}}`.
+- Use **`deny`** only when you want the call refused outright rather than
+  prompted — `deny` outranks both. Same shape:
+  `{"permissions":{"deny":["Bash(rm -rf *)"]}}`.
+- Both work at any granularity, so you can re-prompt narrowly instead of
+  wholesale — e.g. `ask` on `Bash(git push *)` while leaving the rest allowed.
+- The three files layer user -> project -> local:
+  `~/.claude/settings.json` (you, every project), `.claude/settings.json`
+  (this repo, everyone, committed), `.claude/settings.local.json` (this repo,
+  only your clone, gitignored).
+
+Also note `permissions.additionalDirectories` is NOT set here — worktrees under
+`w:\tmp` are reached via each developer's own user settings.
+
+Changes to settings files only take effect after a restart (or opening `/hooks`
+once): the settings watcher only watches directories that already had a
+settings file when the session started.
+
 ## Binding engineering guidelines
 
 These five are binding for all Phase 0+ code:

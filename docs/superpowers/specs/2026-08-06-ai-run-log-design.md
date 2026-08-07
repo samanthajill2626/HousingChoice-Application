@@ -343,7 +343,12 @@ the fetch.
 
 AMENDED post-approval - a skip records a LIGHT window: `cursor`,
 `newestTsMsgId`, `windowCappedAtLimit`, and the message ids with their
-`type`/`direction`, but NO capping, NO `chars`, and NO `hash`. Capping and
+`type`/`direction`, but NO capping, NO `chars`, and NO `hash`. A `detail`
+discriminator (`light` | `full`) tells the reader which shape it holds, so a
+missing hash is never mistaken for a failed one. On a light window `excluded`
+carries `age_30d` causes ONLY - `char_budget` exclusions are produced by the
+capping pass this amendment deliberately keeps below the freshness gate, so
+they do not exist yet and must not be implied. Capping and
 hashing happen at `extraction.ts:337` onward, AFTER the gate, so recording a
 full window for a skip would mean doing that work on every skipped run purely
 to log it - and `no_new_client` is the common steady-state outcome, so that is
@@ -592,6 +597,21 @@ a `type` decision can never reach `accepted` through surface 1 - it reaches
 (`suggestions.ts:316`) carries no target restriction and handles `type`
 today, so surface 1 can still resolve it to `dismissed`. Instrumenting only
 the PATCH would leave dismissed `type` decisions stranded.
+
+AMENDED post-approval - **for `type` ONLY, the PATCH verdict depends on the
+VALUE**: `accepted` when the patched type equals `suggestedValue`,
+`superseded_by_human_edit` when it differs. An earlier reading recorded any
+`type` PATCH as `accepted`, which inverts the signal in the case that matters
+most: a human triaging a contact to `landlord` after the model suggested
+`tenant` has REJECTED that suggestion, and recording it as an acceptance
+would corrupt the accuracy record this feature exists to produce.
+
+This value comparison is confined to `type`. It must NOT be generalized to
+the other eleven targets: for them the PATCH is a human edit that supersedes
+the suggestion regardless of value, and a general equality rule was
+considered and rejected - it cannot even fire for `voucherSize`, `porting`,
+or `address`, whose stored forms are not string-comparable to
+`suggestedValue`.
 
 The `superseded` stamp is NOT written inside `putSuggestion`, and NOT by
 `apply.ts` - `apply.ts` is `putSuggestion`'s caller, so "the caller does it"

@@ -1,17 +1,19 @@
 # AI Run Log - Design
 
 Date: 2026-08-06
-Status: DRAFT - revised after adversarial review rounds 1-3
+Status: APPROVED by Cameron 2026-08-06 (after adversarial review rounds 1-4)
 Phase: 2 (automations), observability slice
 
-Revision note: three rounds of adversarial review, 52 findings accepted.
-R1 (two blind reviewers) 23 accepted, 6 structural, 3 rejected. R2 (continued
-reviewer, re-review charge) 16 accepted, 5 structural - including two defects
-the R1 revision itself introduced. R3 13 accepted, 3 structural, zero
-BLOCKING. Reviewers won two contests against my adjudications, both of which
-changed the design. Full adjudications, with every rejection and its
-reasoning, are at `.superpowers/design-review/adjudications.md` in the
-feature worktree.
+Revision note: four rounds of adversarial review. 59 findings accepted, 3
+rejected, 14 structural. Findings by round 23 / 16 / 13 / 7; BLOCKING by
+round 3 / 2 / 0 / 0. R1 used two blind reviewers; R2-R4 continued one of them
+under the re-review charge. Two rounds caught defects the PREVIOUS round's
+revision had introduced, and reviewers overturned two of my adjudications on
+contest - both reversals improved the design. Round 4 returned NOT CONVERGED
+and was escalated to Cameron per the four-round cap; his ruling was to fold
+the remaining seven in and proceed. Full adjudications, with every rejection
+and its reasoning, are at `.superpowers/design-review/adjudications.md` in
+the feature worktree.
 
 ## 1. Overview
 
@@ -178,7 +180,8 @@ run#<runId>
             This boundary is a pointer partition and the primary QA scope
             selector, so it is defined here rather than left to the builder.
   skipReason?:  see 6.3
-  error?:   { kind: refusal | driver | complete, message, attempts, parked }
+  error?:   { kind: refusal | parse | driver | complete | repo,
+              message, attempts, parked }        (full definitions in 6.3)
 
   driver:   anthropic | console | fake
   model?:   the model id actually called
@@ -243,6 +246,19 @@ attribute rendered output back to a message:
 Both the request and the hash then come from one function. Any other
 arrangement reconstructs the rendering and reintroduces exactly the drift
 this field exists to detect.
+
+The join is exact and non-negotiable, because this single detail decides
+whether every stored hash matches or every one fails: the message's
+utterances are joined by a single `\n`, in the order `toUtterances` produced
+them (chronological, and for a call transcript, line order), with no trailing
+newline. `tsMsgId` is REQUIRED on `TranscriptUtterance`, not optional - an
+optional id would let a construction site omit it and silently produce
+unhashable messages.
+
+Test fallout for that field addition is larger than either breaking change in
+6.4 and must be planned for, not discovered: roughly twenty `toEqual`
+assertions across the extraction tests construct or compare whole
+`TranscriptUtterance` objects and will all need the new field.
 
 This is DRIFT DETECTION, not a replay guarantee. A change to utterance
 derivation (`toUtterances`), to the capping algorithm (`capUtterances`,
@@ -458,6 +474,13 @@ mistake `6.4` avoids for the window helpers - `schema.ts` exports a
 folding or downgrading. The recorder calls that; it does not hand-roll a
 JSON walk.
 
+`parseExtractionOps` MUST BE TOTAL - it never throws. Its sibling
+`parseExtractionText` throws by design on malformed input, and the recorder's
+`parse` failure kind (6.3) is precisely the case where it will be handed
+unparseable text. A throwing helper would take down the recorder on the one
+failure the recorder exists to capture. On unparseable input it returns an
+empty view, and every target is recorded `not_addressed`.
+
 When `rawText` is absent (the `console` driver, or a driver failure before a
 response arrived) no target may be recorded as `no_finding` - only
 `not_addressed`. The spec does not permit inferring a decline that was never
@@ -567,8 +590,26 @@ It returns `{ outcome, draft }` on every path: success, skip, and failure
 alike. It catches internally at each stage and stamps `draft.error.kind` at
 the throw site (6.3), which is the only place that information exists.
 `runDueExtractions` then performs the single write and derives its
-backoff/park decision from `outcome === 'failed'` instead of from a caught
-exception.
+backoff/park decision from `outcome === 'failed'`.
+
+**The outer try/catch in `runDueExtractions` STAYS, as a backstop.** It is not
+replaced by the returned outcome. Today it provides per-row batch isolation
+(`extraction.ts:401-425`): one row's failure is logged, routed through
+backoff/park, and the loop continues with the next row. `processRow` not
+throwing on KNOWN failures does not mean it can never throw - an unhandled
+defect, an OOM, or a repo path nobody enumerated would otherwise abort the
+entire poll batch. The returned outcome is the primary path; the catch
+remains the safety net and must still call `repo.fail`.
+
+**A skip-path `complete()` throw is a FAILURE, not a skip.** The three skip
+branches each call `repo.complete()` (`extraction.ts:286`, `318`, `328`).
+Reading "it was a skip, so record `skipped`" would be a silent regression:
+`repo.complete()` is what clears the claim, so a throw there leaves the row
+CLAIMED and out of the `byDueAt` index, and recording it as `skipped` means
+no `repo.fail()` - hence no backoff, no attempt increment, and no park. The
+row would never run again and nothing would say so. Any `complete()` throw,
+on any path including skips, is `outcome: 'failed'` with
+`error.kind: 'complete'` and goes through the normal failure handling.
 
 Three defects are closed by that one change, and they are why the obvious
 designs were rejected:
@@ -670,7 +711,8 @@ on both client and server, and TTL bounds the window.
 
 - Unit: the `ai_runs` repo - both row kinds, pointer fan-out, TTL stamping,
   `byEntity` paging, BatchGet re-sorting and `UnprocessedKeys` retry.
-- Unit: decisions assembly from parsed result + apply outcomes, covering
+- Unit: decisions assembly from `rawText` (via `parseExtractionOps`, never
+  the parsed result - see 7.1) joined with apply outcomes, covering
   `no_finding` vs `not_addressed`, `demotedFrom`, and every `dropReason`
   branch. These branches have no test coverage today because they were
   `logger.debug` dead ends.

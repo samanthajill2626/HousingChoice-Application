@@ -31,6 +31,7 @@ import {
   NARROW_360,
   WIDE_RESTORE,
   expectNoHorizontalOverflow,
+  expectNoHorizontalOverflowIn,
 } from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -182,7 +183,9 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     expect(pmRowBox.height, 'the property edit row is the 44px touch target').toBeGreaterThanOrEqual(
       44,
     );
-    // Nothing is clipped off the right edge, and the page itself does not scroll.
+    // Nothing is clipped off the right edge, and the routed <main> - the box
+    // this shell actually scrolls, see support/viewport.ts - does not scroll
+    // sideways either.
     expect(
       pmRemoveBox.x + pmRemoveBox.width,
       'the remove control runs past the 360px viewport',
@@ -206,7 +209,10 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     expect(narrowRemoveBox.width, 'the buttons are full width').toBeGreaterThan(240);
     expect(Math.round(narrowRemoveBox.width)).toBe(Math.round(narrowCancelBox.width));
     expect(Math.round(narrowRemoveBox.x)).toBe(Math.round(narrowCancelBox.x));
-    await expectNoHorizontalOverflow(page, 'the remove-the-primary confirm at 360px');
+    // Scoped to the DIALOG's own box: the Modal backdrop is position:fixed, so a
+    // dialog contributes nothing to the document's or <main>'s scrollable
+    // overflow - a page-level check here would be blind to it (viewport.ts).
+    await expectNoHorizontalOverflowIn(narrowConfirm, 'the remove-the-primary confirm at 360px');
 
     // Cancel out and widen: step 4 walks this same confirm for real.
     await narrowConfirm.getByRole('button', { name: 'Cancel' }).click();

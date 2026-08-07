@@ -62,7 +62,29 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 `e2e/support/viewport.ts` is the ONE definition: `NARROW_360` (the 360x800 phone
 width the spec names), `WIDE_RESTORE` (1280x900 - "widen back past the 860px
 twoPaneShell breakpoint", not a byte-exact restore of the 1280x720 project
-default), and `expectNoHorizontalOverflow(page, where)`.
+default), `expectNoHorizontalOverflow(page, where)` for ROUTE content, and
+`expectNoHorizontalOverflowIn(locator, where)` for ONE element's own box.
+
+**Never hand-roll an overflow check on `document.documentElement` - in this shell
+it is vacuous.** The app clamps the document to the viewport by construction
+(`html, body, #root { height: 100% }`, `.shell { display: flex; height: 100% }`,
+`.main { flex: 1; min-width: 0 }`) and every route renders inside
+`<main class=.content>`, which is `overflow-y: auto` - and per CSS Overflow L3 a
+`visible` other axis computes to `auto` once one axis is not visible/clip, so
+`<main>` is an x-scroll container too. Wide route content therefore scrolls
+INSIDE `<main>` and `documentElement.scrollWidth` never moves off `clientWidth`.
+`expectNoHorizontalOverflow` measures BOTH boxes and asserts on the worse one;
+the documentElement expression on its own can never fail.
+
+**A `position: fixed` surface needs its OWN box measured.** The Modal backdrop is
+`position: fixed; inset: 0`, and an out-of-flow box contributes to the scrollable
+overflow of NEITHER the document NOR `<main>` - so the page-level helper is blind
+to every dialog, whichever box it reads. Assert on the dialog itself:
+`expectNoHorizontalOverflowIn(page.getByRole('dialog', { name }), where)`. It
+reads that element's own scrolling area (an `overflow: visible` box still reports
+its descendants' overflow in `scrollWidth`, which is how a too-wide footer shows
+up), with one blind spot to size the locator against: Modal's `.body` is
+`overflow: auto`, so body content self-contains - pass the innermost box you mean.
 
 Rules every 360px block follows: assert REAL `boundingBox()` geometry, never CSS
 text or computed styles; restore with `WIDE_RESTORE` before the rest of the test

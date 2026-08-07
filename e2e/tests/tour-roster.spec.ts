@@ -44,7 +44,12 @@
 // subject, and this file's subject is the tour card.
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
 import { driveConnectingGroupToOpen } from '../fixtures/relayConnect.js';
-import { NARROW_360, WIDE_RESTORE, expectNoHorizontalOverflow } from '../support/viewport.js';
+import {
+  NARROW_360,
+  WIDE_RESTORE,
+  expectNoHorizontalOverflow,
+  expectNoHorizontalOverflowIn,
+} from '../support/viewport.js';
 // COPY-CHANGE-PROOF EXPECTATIONS. Neither the intro body nor the skip chip is
 // spelled out here: a hand-written literal turns a copy edit into a red test
 // instead of an updated one (the reminder-body helpers made the same move when
@@ -231,10 +236,14 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // WHAT the dialog is previewing, not just that it previews something. The
     // expectation is the server's OWN composition, read back from the very
     // endpoint the dialog rendered from (spec 6.3 / D1: the body is composed
-    // server-side and NEVER rebuilt in the browser), so a `relay.intro` edit -
-    // including a founder override, the entry is `editable: true` - moves the
-    // expectation and the UI together. Fetched BEFORE the confirm is accepted:
-    // preview-open 409s `relay_already_provisioned` once a thread exists.
+    // server-side and NEVER rebuilt in the browser), so an edit to the
+    // `relay.intro` CATALOG DEFAULT moves the expectation and the UI together.
+    // Only the default: this route has no override path to drift from - the
+    // entry is `editable: true`, but composeIntroBody (jobs/relayFanOut.ts:199)
+    // calls resolveMessage with no override map, and the expectation below is
+    // pinned to MESSAGE_CATALOG[...].default rather than to a resolved template.
+    // Fetched BEFORE the confirm is accepted: preview-open 409s
+    // `relay_already_provisioned` once a thread exists.
     const previewRes = await req.get(`${NEXT}/api/tours/${tourId}/roster/preview-open`);
     expect(previewRes.ok(), await previewRes.text()).toBeTruthy();
     const introBody = ((await previewRes.json()) as { body: string }).body;
@@ -243,7 +252,18 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     // around {members} plus who the sentence names - all still copy-sourced.
     const [introHead = '', introTail = ''] =
       MESSAGE_CATALOG['relay.intro'].default.split('{members}');
-    expect(introHead.length, 'the relay.intro default lost its {members} token').toBeGreaterThan(0);
+    // BOTH halves of the shell must be non-empty or the matcher they feed is
+    // itself vacuous: startsWith('') / endsWith('') are true of any string. An
+    // empty tail is also what "the default lost its {members} token entirely"
+    // looks like (split returns the whole string as the head).
+    expect(
+      introHead.length,
+      'the relay.intro default has no copy BEFORE {members} - startsWith below proves nothing',
+    ).toBeGreaterThan(0);
+    expect(
+      introTail.length,
+      'the relay.intro default has no copy AFTER {members} - endsWith below proves nothing',
+    ).toBeGreaterThan(0);
     expect(introBody.startsWith(introHead), introBody).toBeTruthy();
     expect(introBody.endsWith(introTail), introBody).toBeTruthy();
     expect(introBody).toContain(tenant.name);
@@ -316,7 +336,10 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     expect(addBox.width, 'the buttons are full width').toBeGreaterThan(240);
     expect(Math.round(addBox.width)).toBe(Math.round(addCancelBox.width));
     expect(Math.round(addBox.x)).toBe(Math.round(addCancelBox.x));
-    await expectNoHorizontalOverflow(page, 'the add-to-live-group confirm at 360px');
+    // Scoped to the DIALOG's own box: the Modal backdrop is position:fixed, so a
+    // dialog contributes nothing to the document's or <main>'s scrollable
+    // overflow - a page-level check here would be blind to it (viewport.ts).
+    await expectNoHorizontalOverflowIn(addConfirm, 'the add-to-live-group confirm at 360px');
 
     // Cancelling writes NOTHING - the confirm is the only thing that sends.
     await addConfirm.getByRole('button', { name: 'Cancel' }).click();
@@ -459,8 +482,15 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     const remindersCard = page
       .locator('section')
       .filter({ has: page.getByRole('heading', { name: 'Reminders' }) });
+    // `.first()` on the rung is the Scenario.remindersCard idiom too
+    // (steps.ts:3277): it resolves to one node today, but it collapses the whole
+    // chain, so neither a second matching <section> nor a second matching rung
+    // could turn this into a strict-mode violation.
     await expect(
-      remindersCard.getByRole('listitem').filter({ hasText: REMINDER_KIND_LABELS.confirmation }),
+      remindersCard
+        .getByRole('listitem')
+        .filter({ hasText: REMINDER_KIND_LABELS.confirmation })
+        .first(),
     ).toContainText(`Skipped - ${REMINDER_SKIP_REASON_LABELS.tenant_not_on_roster}`, {
       timeout: 20_000,
     });
@@ -549,7 +579,10 @@ test.describe('Tour roster - the People card edits who is on this tour', () => {
     });
     expect(scrolled, 'the rail does not scroll horizontally').toBeGreaterThan(0);
 
-    // ...and it is the RAIL that scrolls, not the page.
+    // ...and it is the RAIL that scrolls, not the surface it sits in: the rail's
+    // own `overflow-x: auto` box self-contains, so the routed <main> around it
+    // must still measure flush (viewport.ts explains why <main>, not the
+    // document, is the box that carries that signal in this shell).
     await expectNoHorizontalOverflow(page, 'the tour hub with an overflowing tab rail at 360px');
     await page.setViewportSize(WIDE_RESTORE);
   });

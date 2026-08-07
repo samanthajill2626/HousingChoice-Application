@@ -40,8 +40,16 @@ feature mission unless the human explicitly changes that workflow.
 
 ## Codex memory contract
 
-Do not create or update persistent Codex memory unless the human explicitly asks for
-a memory change. Put durable project guidance in tracked repository files instead.
+Codex may read and maintain its own local memory during normal work, including
+outside feature missions. When a feature produces durable context worth carrying
+forward, refresh the relevant Codex memory before handback.
+
+Claude memory may be consulted read-only as potentially stale handoff context, but
+do not copy or synchronize Claude memory wholesale into Codex memory. Verify live
+repository, branch, and worktree state before relying on either memory store.
+
+Keep mandatory project guidance in tracked repository files rather than relying on
+memory alone.
 
 ## Codex mission handback
 

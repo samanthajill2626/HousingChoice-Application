@@ -27,6 +27,11 @@
 // minted fresh per test, so NOTHING here reseeds (a reseed mid-suite would wipe
 // other specs' data and log this session out).
 import { test, expect, type APIRequestContext, type Page } from '@playwright/test';
+import {
+  NARROW_360,
+  WIDE_RESTORE,
+  expectNoHorizontalOverflow,
+} from '../../support/viewport.js';
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 
@@ -156,6 +161,57 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     // The owner is NOT on this tour: the default is tenant + the property's
     // primary contact, and the primary contact is the PM now.
     await expect(roster.getByRole('link', { name: owner.name })).toHaveCount(0);
+
+    // --- 3b. The same editor at 360px (spec 6.7) -----------------------------
+    // Reuses the world already built: the PM is the property's primary contact,
+    // and the primary is the ONE row whose Remove opens a confirm - so this is
+    // exactly the state both narrow-viewport claims need, for one extra
+    // navigation and one extra click.
+    await page.setViewportSize(NARROW_360);
+    await page.goto(`${NEXT}/listings/${unitId}`);
+    await page.getByRole('button', { name: 'Edit contacts' }).click();
+    const pmRemove = page.getByRole('button', { name: `Remove ${pm.name} from this property` });
+    await expect(pmRemove).toBeVisible({ timeout: 20_000 });
+
+    // The touch target is the full ROW (min 44px), not the glyph. The Contacts
+    // card has no list semantics (plain divs, no ul/li), so walk up from the
+    // button: .contactEditRow > .contactEditName > button.
+    const pmEditRow = pmRemove.locator('../..');
+    const pmRowBox = (await pmEditRow.boundingBox())!;
+    const pmRemoveBox = (await pmRemove.boundingBox())!;
+    expect(pmRowBox.height, 'the property edit row is the 44px touch target').toBeGreaterThanOrEqual(
+      44,
+    );
+    // Nothing is clipped off the right edge, and the page itself does not scroll.
+    expect(
+      pmRemoveBox.x + pmRemoveBox.width,
+      'the remove control runs past the 360px viewport',
+    ).toBeLessThanOrEqual(NARROW_360.width);
+    await expectNoHorizontalOverflow(page, 'the property Contacts editor at 360px');
+
+    // The confirm STACKS FULL WIDTH with the default on top, in the same order
+    // desktop reads left to right (spec 6.7).
+    await pmRemove.click();
+    const narrowConfirm = page.getByRole('dialog', { name: 'Remove the primary contact?' });
+    await expect(narrowConfirm).toBeVisible();
+    const narrowCancelBox = (await narrowConfirm
+      .getByRole('button', { name: 'Cancel' })
+      .boundingBox())!;
+    const narrowRemoveBox = (await narrowConfirm
+      .getByRole('button', { name: 'Remove contact' })
+      .boundingBox())!;
+    expect(narrowRemoveBox.y, 'the destructive default is the top button').toBeLessThan(
+      narrowCancelBox.y,
+    );
+    expect(narrowRemoveBox.width, 'the buttons are full width').toBeGreaterThan(240);
+    expect(Math.round(narrowRemoveBox.width)).toBe(Math.round(narrowCancelBox.width));
+    expect(Math.round(narrowRemoveBox.x)).toBe(Math.round(narrowCancelBox.x));
+    await expectNoHorizontalOverflow(page, 'the remove-the-primary confirm at 360px');
+
+    // Cancel out and widen: step 4 walks this same confirm for real.
+    await narrowConfirm.getByRole('button', { name: 'Cancel' }).click();
+    await expect(narrowConfirm).toHaveCount(0);
+    await page.setViewportSize(WIDE_RESTORE);
 
     // --- 4. Remove the PM: the confirm NAMES the promotion -------------------
     await page.goto(`${NEXT}/listings/${unitId}`);

@@ -1353,7 +1353,10 @@ export function ListingDetail(): React.JSX.Element {
             }
           }}
           footer={
-            <>
+            /* Authored Cancel -> default: desktop puts the default rightmost,
+               and the narrow rule reverses the column so it lands on TOP
+               (spec 6.7) without either order being re-authored. */
+            <div className={styles.confirmActions}>
               <Button
                 variant="secondary"
                 size="sm"
@@ -1372,7 +1375,7 @@ export function ListingDetail(): React.JSX.Element {
               >
                 Remove contact
               </Button>
-            </>
+            </div>
           }
         >
           <p>{promotionNotice()}</p>

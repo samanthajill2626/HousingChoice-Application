@@ -37,6 +37,7 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Placement nudges card | Send now | `getByRole('button', { name: 'Send <Kind label> nudge now' })` - e.g. `Send Receipt check nudge now` (kind labels: Receipt check, Completion check, Approval check, RTA window closing). Same strict-mode caveat as the reminder button |
 | Tour Reminders panel | quiet-hours deferral note | the rung `listitem` contains `Will wait <U+2014 EM DASH> quiet hours` - quiet hours DEFERS a send, so the lead is "Will wait"; every other suppression reason still reads "Will be skipped". Build the separator with `String.fromCharCode(0x2014)` so the spec source stays ASCII (see quiet-hours.spec.ts) |
 | Tour / placement hub | person 1:1 channel tab | `getByRole('tab', { name: new RegExp('^' + firstName + '\\b') })` - person tabs are labeled by the contact's DISPLAY NAME, never a role word ("Tenant"/"Landlord"/"PM" died with contact-rosters slice 2); anchor on the run-unique firstName. The unread dot appends srOnly ` unread` to the accessible name; `Group text` stays a fixed label |
+| Tour / placement hub | the channel tab RAIL | `getByRole('tablist', { name: 'Conversation channel' })` - the rail itself; the person tabs above are its children. Below 860px it sits in the HIDDEN pane (both hubs open on Details), so its `boundingBox()` is null until `getByRole('group', { name: 'View' })` -> `getByRole('button', { name: 'Conversation' })` reveals it. Prove "one row and it scrolls" BEHAVIOURALLY - every tab shares one `y`, `scrollHeight <= clientHeight + 1`, a large `scrollLeft` sticks - never by reading computed styles |
 | Tour / placement hub | the People card roster | `getByRole('list', { name: 'Roster' })` - the PeopleCard's `<ul>`. SCOPE every member assertion to it: a member's name also appears in the page's 1:1 tab labels and its comms pane, so an unscoped `getByRole('link', { name })` is a strict-mode violation. Members are links only when the row has a live contactId (bare-phone / deleted-contact rows render plain text) |
 | Property page (Contacts card) | edit toggle | `getByRole('button', { name: 'Edit contacts' })` / `getByRole('button', { name: 'Done editing contacts' })` - the CardAction reads "Edit"/"Done" but carries the disambiguating aria-label (the page hosts three other "Edit" card actions) |
 | Property page (Contacts card) | per-row controls | `getByRole('button', { name: 'Remove <Full Name> from this property' })`, `getByRole('button', { name: 'Make <Full Name> the primary contact' })`, `getByRole('combobox', { name: 'Role for <Full Name>' })` (a `<select>`, `selectOption('landlord'\|'pm'\|'owner'\|'other')`). The landlord-of-record row's Remove is DISABLED and the row carries the reason text; the current primary has no make-primary control |
@@ -56,6 +57,19 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Tour / placement hub | [Open group text] while an open is DEFERRED | the Group tab's empty-state button is DISABLED and carries the pending sentence (`Opens at <time> - quiet hours`) in place of the too-thin-roster reason. The kebab's `Open group text` stays available - re-confirming and choosing `Send now anyway` is the second way to force it |
 | Tour / placement hub | [Open group text] on a TOO-THIN roster | BOTH surfaces are `disabled`: the Group tab's empty-state button (visible reason text) AND the kebab's `getByRole('menuitem', { name: 'Open group text' })` (reason in `title`). Pending-open is the one blocked state that deliberately leaves the kebab live (row above) |
 | Dev seam | advance a deferred roster action | `POST ${NEXT}/__dev/roster-actions/tick { now }` - one `runDuePendingRosterActions` pass. Read the row's own `dueAt` from `GET /api/tours/:id/roster` -> `pending[]` and hand the tick `dueAt + 1min`; NEVER wait on a wall clock |
+
+## Narrow viewport (contact-rosters spec 6.7)
+`e2e/support/viewport.ts` is the ONE definition: `NARROW_360` (the 360x800 phone
+width the spec names), `WIDE_RESTORE` (1280x900 - "widen back past the 860px
+twoPaneShell breakpoint", not a byte-exact restore of the 1280x720 project
+default), and `expectNoHorizontalOverflow(page, where)`.
+
+Rules every 360px block follows: assert REAL `boundingBox()` geometry, never CSS
+text or computed styles; restore with `WIDE_RESTORE` before the rest of the test
+continues (`playwright.config.ts` runs `workers: 1` + `fullyParallel: false`, so
+a viewport left narrow mid-test poisons its own later steps); assert the 44px
+touch target on the ROW container, never on a button (the glyph buttons are
+~18-42px wide by design - spec 6.7 says the ROW is the target).
 
 ## Dev-only assertions (not UI)
 - Outbox: `getOutbox(request, { to, since })` → `GET /__dev/outbox`.

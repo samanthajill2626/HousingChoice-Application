@@ -387,6 +387,32 @@ a:hover .contactName {
   align-self: flex-start;
 }
 
+/* The "Remove the primary contact?" confirm's own action row. Desktop: Cancel
+ * then the DEFAULT, rightmost. The wrapper exists so the narrow rule below can
+ * live on THIS class: the shared Modal's .footer is the footer of ~20 dialogs
+ * across broadcasts, contact, conversation, email, placements, settings and
+ * tours, and stacking it would restyle every one of them - well outside this
+ * spec's surfaces. Same shape as shared/RosterConfirmDialog.module.css. */
+.confirmActions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+@media (max-width: 860px) {
+  /* Stack FULL WIDTH with the default on TOP, same order as desktop reads
+   * (spec 6.7). column-reverse gets it without re-authoring the JSX order. */
+  .confirmActions {
+    flex: 1 1 100%;
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .confirmActions > * {
+    width: 100%;
+  }
+}
+
 .match {
   color: var(--c-match-text);
   background: var(--c-match-bg);

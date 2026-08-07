@@ -4,8 +4,9 @@
 // The user content lays out the CURRENT PROFILE (what we already know) then a
 // chronological TRANSCRIPT, so the model can reconcile new facts against known
 // ones per the reconciliation rules below.
+import { createHash } from 'node:crypto';
 import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
-import { HOUSING_AUTHORITY_VOCAB } from './schema.js';
+import { EXTRACTION_SCHEMA, HOUSING_AUTHORITY_VOCAB } from './schema.js';
 
 export function buildExtractionSystemPrompt(): string {
   const vocab = HOUSING_AUTHORITY_VOCAB.join(', ');
@@ -75,6 +76,25 @@ export function buildExtractionSystemPrompt(): string {
     '- Addresses NEVER go in noteLines - the address output is the only place',
     '  for address information.',
   ].join('\n');
+}
+
+/**
+ * sha256 of the assembled system prompt CONCATENATED with the serialized
+ * EXTRACTION_SCHEMA, first 12 hex (design 2026-08-06 section 6). Both are sent
+ * on the same messages.create call and both define the model contract, so
+ * fingerprinting the prompt alone would miss half of it.
+ *
+ * Memoized: both inputs are module constants, and this is read on every run and
+ * on every System Status flags request.
+ */
+let promptFingerprintCache: string | undefined;
+export function extractionPromptFingerprint(): string {
+  promptFingerprintCache ??= createHash('sha256')
+    .update(buildExtractionSystemPrompt(), 'utf8')
+    .update(JSON.stringify(EXTRACTION_SCHEMA), 'utf8')
+    .digest('hex')
+    .slice(0, 12);
+  return promptFingerprintCache;
 }
 
 /**

@@ -16,6 +16,17 @@ const baseInput: ExtractionInput = {
   transcript: [{ tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'hi', at: '2026-07-16T10:00:00.000Z', channel: 'sms' }],
 };
 
+const markerInput: ExtractionInput = {
+  profile: { contactType: 'tenant', phones: [] },
+  transcript: [{
+    tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+    speaker: 'client',
+    text: 'EXTRACT:{"fields":{"pets":{"op":"none","value":"","reason":""}}}',
+    at: '2026-07-16T10:00:00.000Z',
+    channel: 'sms',
+  }],
+};
+
 describe('createExtractionDriver', () => {
   it('selects a driver by kind', () => {
     expect(createExtractionDriver({ driver: 'console', model }).kind).toBe('console');
@@ -31,7 +42,16 @@ describe('createExtractionDriver', () => {
 describe('console driver', () => {
   it('returns EMPTY_EXTRACTION (stays offline)', async () => {
     const driver = createExtractionDriver({ driver: 'console', model });
-    await expect(driver.extract(baseInput)).resolves.toEqual(EMPTY_EXTRACTION);
+    await expect(driver.extract(baseInput)).resolves.toEqual({
+      ok: true, meta: { driver: 'console' }, result: EMPTY_EXTRACTION,
+    });
+  });
+
+  it('reports its identity and no model-specific fields', async () => {
+    // A required precondition for the run log: without meta.driver, three
+    // recorded fields cannot be populated (design 6.4).
+    const call = await createExtractionDriver({ driver: 'console', model }).extract(baseInput);
+    expect(call.meta).toEqual({ driver: 'console' });
   });
 });
 
@@ -64,7 +84,11 @@ describe('fake driver', () => {
         },
       ],
     };
-    await expect(driver.extract(input)).resolves.toEqual({ fields: { pets: { op: 'write', value: 'yes' } } });
+    await expect(driver.extract(input)).resolves.toEqual({
+      ok: true,
+      meta: { driver: 'fake', rawText: '{"fields":{"pets":{"op":"write","value":"yes"}}}' },
+      result: { fields: { pets: { op: 'write', value: 'yes' } } },
+    });
   });
 
   it('merges a marker with no fields over EMPTY_EXTRACTION', async () => {
@@ -81,7 +105,11 @@ describe('fake driver', () => {
         },
       ],
     };
-    await expect(driver.extract(input)).resolves.toEqual({ fields: {}, noteLines: ['stairs are fine'] });
+    await expect(driver.extract(input)).resolves.toEqual({
+      ok: true,
+      meta: { driver: 'fake', rawText: '{"noteLines":["stairs are fine"]}' },
+      result: { fields: {}, noteLines: ['stairs are fine'] },
+    });
   });
 
   it('returns EMPTY_EXTRACTION on malformed marker JSON (never throws)', async () => {
@@ -92,7 +120,9 @@ describe('fake driver', () => {
         { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'EXTRACT:{not valid json', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
     };
-    await expect(driver.extract(input)).resolves.toEqual(EMPTY_EXTRACTION);
+    await expect(driver.extract(input)).resolves.toEqual({
+      ok: true, meta: { driver: 'fake', rawText: '{not valid json' }, result: EMPTY_EXTRACTION,
+    });
   });
 
   it('returns EMPTY_EXTRACTION when no client utterance carries a marker', async () => {
@@ -103,7 +133,37 @@ describe('fake driver', () => {
         { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'just chatting, no marker', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
     };
-    await expect(driver.extract(input)).resolves.toEqual(EMPTY_EXTRACTION);
+    await expect(driver.extract(input)).resolves.toEqual({
+      ok: true, meta: { driver: 'fake' }, result: EMPTY_EXTRACTION,
+    });
+  });
+
+  it('emits rawText that is REAL JSON - the marker payload, never the marker line', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model }).extract(markerInput);
+    expect(call.meta.rawText).toBe('{"fields":{"pets":{"op":"none","value":"","reason":""}}}');
+    expect(call.meta.rawText).not.toContain('EXTRACT:');
+  });
+
+  it.skip("the fake driver's rawText parses through parseExtractionOps - the e2e's whole mechanism", async () => {
+    // TODO(ai-run-log): unskip in Slice 7 (Task 15 Step 5) - parseExtractionOps
+    // does not exist yet. Skipping is deliberate and time-boxed; omitting the
+    // assertion is how the mechanism goes unverified. If the marker prefix ever
+    // leaked into rawText, parseExtractionOps would return the empty view and
+    // EVERY e2e decision would silently record not_addressed.
+    const call = await createExtractionDriver({ driver: 'fake', model }).extract(markerInput);
+    expect(call.meta.rawText).toBeDefined();
+  });
+
+  it('a malformed marker keeps rawText so the run log shows what the driver was handed', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model }).extract({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [{
+        tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+        speaker: 'client', text: 'EXTRACT:{oops', at: '2026-07-16T10:00:00.000Z', channel: 'sms',
+      }],
+    });
+    expect(call.ok).toBe(true);
+    expect(call.meta.rawText).toBe('{oops');
   });
 });
 

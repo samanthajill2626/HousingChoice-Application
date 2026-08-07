@@ -24,6 +24,7 @@ import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import { contactPhones, PHONE_REF_PREFIX } from '../repos/contactsRepo.js';
 import type { MessageItem, MessagesRepo } from '../repos/messagesRepo.js';
+import { ExtractionRefusedError } from '../adapters/extraction.js';
 import type {
   ExtractionDriver,
   ExtractionProfileSnapshot,
@@ -363,7 +364,17 @@ async function processRow(
   // run to suggest-only in apply.
   const hasInferredRoleContent = transcript.some((u) => u.speaker === 'unknown');
 
-  const result = await driver.extract({ transcript, profile: toProfile(contact) });
+  const call = await driver.extract({ transcript, profile: toProfile(contact) });
+  // TODO(ai-run-log): removed by the RunDraft rewrite (Task 19). Until the
+  // recorder exists there is nothing to record a failure ONTO, so an ok:false is
+  // re-thrown here and the outer catch in runDueExtractions routes it through
+  // backoff/park exactly as before the driver widened. Behavior is deliberately
+  // UNCHANGED across this window.
+  if (!call.ok) {
+    if (call.failure === 'refusal') throw new ExtractionRefusedError(call.message);
+    throw new Error(call.message);
+  }
+  const result = call.result;
   await applyExtraction(applyDeps, {
     contact,
     conversationId,

@@ -28,7 +28,6 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { FakeExtractionDriver } from '../src/adapters/extractionFake.js';
 import {
-  ExtractionRefusedError,
   type ExtractionDriver,
   type ExtractionInput,
 } from '../src/adapters/extraction.js';
@@ -189,14 +188,13 @@ function makeHarness(opts: {
   const seen: ExtractionInput[] = [];
   const fake = new FakeExtractionDriver();
   const driver: ExtractionDriver =
-    opts.driver ??
-    ({
+    opts.driver ?? {
       kind: 'fake',
       extract: async (input: ExtractionInput) => {
         seen.push(input);
         return fake.extract(input);
       },
-    } as ExtractionDriver);
+    };
 
   const contactsUpdate = vi.fn(async () => ({}) as ContactItem);
   const contacts = {
@@ -364,19 +362,19 @@ describe('runDueExtractions', () => {
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', client.tsMsgId, NOW);
   });
 
-  it('driver throw: fails with a doubled nextDueAt (exponential backoff)', async () => {
-    const throwing = {
+  it('driver failure: fails with a doubled nextDueAt (exponential backoff)', async () => {
+    const failing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new Error('driver boom');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'driver boom',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow({ attempts: 1 })], // 2^1 = doubled backoff
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
       contact: tenantContact(),
       conversation: convWith('c1'),
-      driver: throwing,
+      driver: failing,
     });
 
     const out = await runDueExtractions(NOW, h.deps);
@@ -389,18 +387,18 @@ describe('runDueExtractions', () => {
   });
 
   it('final failure parks the item (nextDueAt null)', async () => {
-    const throwing = {
+    const failing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new Error('still failing');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'still failing',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow({ attempts: MAX_EXTRACTION_ATTEMPTS - 1 })], // attempts+1 >= MAX -> park
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
       contact: tenantContact(),
       conversation: convWith('c1'),
-      driver: throwing,
+      driver: failing,
     });
 
     const out = await runDueExtractions(NOW, h.deps);
@@ -410,12 +408,12 @@ describe('runDueExtractions', () => {
   });
 
   it('refusal error follows the failure path', async () => {
-    const refusing = {
+    const refusing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new ExtractionRefusedError('declined');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'refusal', message: 'declined',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow()], // attempts undefined -> 2^0 backoff, not parked
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
@@ -693,6 +691,36 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.profile.address).toBeUndefined();
+  });
+
+  it('REGRESSION: a driver failure still burns exactly one attempt and re-arms with backoff', async () => {
+    // The ExtractionCall widening must not move backoff/park/attempts by one
+    // millisecond. Pin the CURRENT numbers so Task 19's rewrite cannot drift
+    // them either.
+    const failing: ExtractionDriver = {
+      kind: 'fake',
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'driver boom',
+      }),
+    };
+    const h = makeHarness({
+      dueRows: [dueRow({ attempts: 2 })],
+      messages: [msg(10, 'inbound', 'hello')],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      driver: failing,
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    const [conversationId, message, nextDueAt] = (h.repo.fail as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(conversationId).toBe('conv1');
+    expect(message).toContain('driver boom');
+    // attempts=2 -> backoff = DEBOUNCE * 2^2, NOT parked (MAX is 5).
+    expect(nextDueAt).toBe(new Date(Date.parse(NOW) + DEBOUNCE * 4).toISOString());
+    expect(h.repo.complete).not.toHaveBeenCalled();
   });
 });
 

@@ -1,4 +1,5 @@
 // T4: JSON output schema + prompt builder for conversation fact extraction.
+import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
 import {
   EXTRACTION_SCHEMA,
@@ -8,6 +9,7 @@ import {
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserContent,
+  extractionPromptFingerprint,
   renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
@@ -286,6 +288,21 @@ describe('address target', () => {
 });
 
 describe('prompt builders', () => {
+  it('extractionPromptFingerprint is 12 hex chars over prompt AND schema together', () => {
+    // Both are sent on the SAME call and both define the model contract, so
+    // fingerprinting the prompt alone would miss half of it (design section 6).
+    const fp = extractionPromptFingerprint();
+    expect(fp).toMatch(/^[0-9a-f]{12}$/);
+    expect(extractionPromptFingerprint()).toBe(fp); // memoized and stable
+    expect(fp).toBe(
+      createHash('sha256')
+        .update(buildExtractionSystemPrompt(), 'utf8')
+        .update(JSON.stringify(EXTRACTION_SCHEMA), 'utf8')
+        .digest('hex')
+        .slice(0, 12),
+    );
+  });
+
   it('renderUtteranceLine is the SINGLE renderer buildExtractionUserContent uses', () => {
     // Design 6.1: the request bytes and the recorded hash MUST come from one
     // function. If the user-content builder ever stops calling this, every

@@ -16,7 +16,7 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { runApply } from '../src/lib/import/apply.js';
+import { housingAuthorityFor, runApply, splitReviewedName } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
@@ -106,10 +106,106 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(contact.Item).toMatchObject({
       type: 'landlord',
       phone: PHONES.landlord,
-      display_name: 'Marlon Pike',
+      // firstName/lastName, NOT display_name - see the name-fields regression
+      // test above for why that distinction matters.
+      firstName: 'Marlon',
+      lastName: 'Pike',
       status: 'active',
       status_source: 'import',
     });
+  });
+
+  it('writes the name fields the app actually renders from', async () => {
+    // REGRESSION. The import used to write a single `display_name`, which nothing
+    // reads: routes/contacts.ts displayNameOf() joins firstName + lastName and
+    // returns null when both are absent, and a null name renders as the phone
+    // number. Every imported contact would have shown as a bare phone, throwing
+    // away all 539 resolved names including the ~117 reviewed by hand.
+    //
+    // This asserts the STORED SHAPE satisfies that resolver, reproducing its
+    // logic rather than trusting that some field is populated.
+    const displayNameOf = (c: Record<string, unknown>): string | null => {
+      const first = typeof c.firstName === 'string' ? c.firstName.trim() : '';
+      const last = typeof c.lastName === 'string' ? c.lastName.trim() : '';
+      const joined = [first, last].filter((p) => p.length > 0).join(' ');
+      return joined.length > 0 ? joined : null;
+    };
+
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const multiToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.landlord) },
+      }),
+    );
+    expect(multiToken.Item).toMatchObject({ firstName: 'Marlon', lastName: 'Pike' });
+    expect(displayNameOf(multiToken.Item!)).toBe('Marlon Pike');
+    // The dead field is gone, not merely supplemented.
+    expect(multiToken.Item!.display_name).toBeUndefined();
+
+    // A single-token name (122 of the founder's are first-name-only) must render
+    // as just that name, not as "Angela " with a trailing space.
+    const singleToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.roleClash) },
+      }),
+    );
+    expect(displayNameOf(singleToken.Item!)).toBe('Landlord Larry');
+  });
+
+  it('keeps an honorific attached so broadcasts do not greet someone "Hi Ms."', () => {
+    // firstName is NOT display-only: lib/mergeFields.ts renderBody substitutes
+    // [TenantName] with firstName ALONE, so a naive first-token split sends a
+    // real tenant a text saying "Hi Ms.,". Ten of the founder's 478 named
+    // tenants are titled (Ms. Cooper, Miss Johnson, Ms Kendrick...).
+    expect(splitReviewedName('Ms. Cooper')).toEqual({ firstName: 'Ms. Cooper', lastName: '' });
+    expect(splitReviewedName('Miss Johnson')).toEqual({ firstName: 'Miss Johnson', lastName: '' });
+    expect(splitReviewedName('Ms Kendrick')).toEqual({ firstName: 'Ms Kendrick', lastName: '' });
+    // An honorific with a full name keeps the remainder as the surname.
+    expect(splitReviewedName('Dr. Maya Fernandez')).toEqual({
+      firstName: 'Dr. Maya',
+      lastName: 'Fernandez',
+    });
+    // Ordinary names are unaffected - first token is the first name.
+    expect(splitReviewedName('Candy Faulk')).toEqual({ firstName: 'Candy', lastName: 'Faulk' });
+    // Multi-word surnames survive intact rather than being dropped.
+    expect(splitReviewedName('Mary-Jo Van Der Berg')).toEqual({
+      firstName: 'Mary-Jo',
+      lastName: 'Van Der Berg',
+    });
+    // Single token: whole name is the first name, empty surname.
+    expect(splitReviewedName('Angela')).toEqual({ firstName: 'Angela', lastName: '' });
+    // A bare honorific has nothing to attach to - treated as the name itself.
+    expect(splitReviewedName('Ms.')).toEqual({ firstName: 'Ms.', lastName: '' });
+  });
+
+  it('maps the Airtable program onto the exact housing-authority vocabulary', async () => {
+    // Broadcast audience resolution queries the byHousingAuthority GSI with an
+    // EXACT hash match, so a near-miss spelling makes the tenant invisible to a
+    // targeted send with nothing reporting that they were skipped. All four of
+    // the founder's values are in HOUSING_AUTHORITY_VOCAB.
+    expect(housingAuthorityFor('Georgia Housing Voucher, GHV')).toBe(
+      'Georgia Housing Voucher (GHV)',
+    );
+    expect(housingAuthorityFor('HUD VASH')).toBe('HUD VASH');
+    expect(housingAuthorityFor('Hope Atlanta')).toBe('Hope Atlanta');
+    expect(housingAuthorityFor('Claratel')).toBe('Claratel');
+    // Unknown values are left unset, never guessed into the GSI.
+    expect(housingAuthorityFor('Some New Authority')).toBeUndefined();
+    expect(housingAuthorityFor('')).toBeUndefined();
+    expect(housingAuthorityFor(undefined)).toBeUndefined();
+
+    // And it lands on the contact: the fixture's caseworker carries Hope Atlanta.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    const item = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.caseworker) },
+      }),
+    );
+    expect(item.Item!.housingAuthority).toBe('Hope Atlanta');
   });
 
   it('folds two Quo conversations for one phone into a single thread', async () => {
@@ -212,7 +308,8 @@ describe.skipIf(!reachable)('import:apply', () => {
       }),
     );
     expect(item.Item).toMatchObject({
-      display_name: 'Rey Okonkwo',
+      firstName: 'Rey',
+      lastName: 'Okonkwo',
       voucherSize: 4,
       type: 'tenant',
     });

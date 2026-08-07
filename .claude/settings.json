@@ -2,11 +2,13 @@
   "permissions": {
     "allow": [
       "WebSearch",
-      "WebFetch(*)",
-      "Bash(*)",
-      "PowerShell(*)",
-      "Read(*)",
-      "Write(*)",
+      "WebFetch",
+      "Bash",
+      "Bash(git *)",
+      "PowerShell",
+      "Read",
+      "Write",
+      "Edit",
       "mcp__playwright",
       "mcp__plugin_playwright_playwright"
     ],

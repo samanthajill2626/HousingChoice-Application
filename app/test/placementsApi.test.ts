@@ -4,7 +4,7 @@
 // (placement-deadline-model). Runs on the shared in-memory world (the harness
 // placementsRepo + placementDeadlinesRepo fakes), authed via the real sealed
 // session cookie next to the origin secret.
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import express, { type Express } from 'express';
 import request from 'supertest';
 import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twilioWebhookHarness.js';
@@ -14,6 +14,26 @@ import { toPlacementUpdatedEvent } from '../src/lib/events.js';
 import type { PlacementItem } from '../src/repos/placementsRepo.js';
 import { createPlacementsRouter } from '../src/routes/placements.js';
 import type { StatusTransitionService } from '../src/services/statusTransition.js';
+import type { PoolNumbersService } from '../src/services/poolNumbers.js';
+import type { PoolNumberItem } from '../src/repos/poolNumbersRepo.js';
+import {
+  InMemorySchedulerAdapter,
+  InProcessOutboundQueueAdapter,
+} from '../src/adapters/scheduler.js';
+import {
+  _resetForTests,
+  configureJobsLogger,
+  configureOutboundQueue,
+  configureScheduler,
+  dispatchJob,
+} from '../src/jobs/jobs.js';
+import {
+  composeIntroBody,
+  composeMemberAddedBody,
+  registerRelayFanOutJobHandler,
+} from '../src/jobs/relayFanOut.js';
+import { createLogger } from '../src/lib/logger.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 describe('placements API (M1.10b)', () => {
   let app: Express;
@@ -514,6 +534,788 @@ describe('placements API — derive-on-create (§7)', () => {
     expect(res.status).toBe(201); // the rejecting derive did NOT fail the create
     expect(res.body.placement.placementId).toMatch(/^placement-/);
     expect(isolated.placements.size).toBe(1); // the row WAS persisted
+  });
+});
+
+// ============================================================================
+// GET /api/placements/:placementId/roster (contact-rosters T5)
+// ============================================================================
+//
+// The placement twin of the tour roster endpoint - SAME serializer
+// (lib/rosterResolution.describeRoster), so the exhaustive derivation cases
+// live in toursApi.test.ts. These pin the placement wiring: the owner shape
+// (group_thread is the pointer), the property default, and the PII rule.
+
+describe('GET /api/placements/:placementId/roster', () => {
+  let app: Express;
+  let world: FakeWorld;
+
+  const TENANT_PHONE = '+15550400011';
+  const PM_PHONE = '+15550400013';
+
+  beforeEach(() => {
+    const h = makeWebhookHarness();
+    app = h.app;
+    world = h.world;
+    world.contacts.push({
+      contactId: 'c-tenant',
+      type: 'tenant',
+      phone: TENANT_PHONE,
+      firstName: 'Tasha',
+      lastName: 'Tenant',
+    });
+    world.contacts.push({
+      contactId: 'c-owner',
+      type: 'landlord',
+      phone: '+15550400012',
+      firstName: 'Ollie',
+      lastName: 'Owner',
+    });
+    world.contacts.push({
+      contactId: 'c-pm',
+      type: 'landlord',
+      phone: PM_PHONE,
+      firstName: 'Pat',
+      lastName: 'Manager',
+    });
+    world.units.set('unit-r', {
+      unitId: 'unit-r',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+  });
+
+  const getRoster = (placementId: string) =>
+    request(app)
+      .get(`/api/placements/${placementId}/roster`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+  it('serves pending[] and skipped[] on the PLAIN GET (S6 regression, placement mirror)', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'send_application',
+    });
+
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'placement',
+      ownerId: p.placementId,
+      action: 'add_member',
+      contactId: 'c-pm',
+      dueAt: '2026-07-10T13:00:00.000Z',
+      createdAt: '2026-07-10T03:00:00.000Z',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body.pending).toMatchObject([
+      {
+        kind: 'add_member',
+        contactId: 'c-pm',
+        name: 'Pat Manager',
+        dueAt: '2026-07-10T13:00:00.000Z',
+      },
+    ]);
+    expect(res.body.skipped).toEqual([]);
+  });
+
+  it('DEFAULT source: the tenant + the property PRIMARY contact (the PM), roles derived', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'default',
+      customized: false,
+      tenantOnRoster: true,
+      canOpenGroup: true,
+      threadExists: false,
+      defaultPrimaryName: 'Pat Manager',
+    });
+    expect(
+      (res.body.members as { memberKey: string; role: string }[]).map((m) => [m.memberKey, m.role]),
+    ).toEqual([
+      ['c-tenant', 'tenant'],
+      ['c-pm', 'pm'],
+    ]);
+  });
+
+  it('PARTICIPANTS source once a group_thread exists - and never leaks a full phone', async () => {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-pr', {
+      conversationId: 'conv-pr',
+      participant_phone: '+15550409000',
+      pool_number: '+15550409000',
+      status: 'open',
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ],
+      created_at: now,
+    });
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+      group_thread: 'conv-pr',
+    });
+
+    const res = await getRoster(p.placementId);
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      source: 'participants',
+      threadExists: true,
+      canOpenGroup: false,
+      tenantOnRoster: true,
+    });
+    const body = JSON.stringify(res.body);
+    expect(body).not.toContain(TENANT_PHONE);
+    expect(body).not.toContain(PM_PHONE);
+    expect(body).toContain('0011'); // last4 only
+  });
+
+  it('a plan override wins while no thread exists, and drops the tenant off the roster', async () => {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+    await world.placementsRepo.setRoster(
+      p.placementId,
+      [{ contactId: 'c-owner' }, { contactId: 'c-pm' }],
+      undefined,
+    );
+
+    const res = await getRoster(p.placementId);
+    expect(res.body).toMatchObject({
+      source: 'plan',
+      customized: true,
+      tenantOnRoster: false,
+      canOpenGroup: true,
+    });
+    expect((res.body.members as { role: string }[]).map((m) => m.role)).toEqual(['owner', 'pm']);
+  });
+
+  it('404s for an unknown placement', async () => {
+    const res = await getRoster('placement-ghost');
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('placement_not_found');
+  });
+});
+
+// ============================================================================
+// Placement roster editing endpoints (contact-rosters Task 10)
+// ============================================================================
+//
+// The placement twin of the tour endpoints - SAME engine (services/rosterEdits
+// + services/relayMembers), so the exhaustive cases live in toursApi.test.ts.
+// These pin the placement WIRING: group_thread is the pointer, and the
+// placement repo's setRoster/clearRoster back the plan writes.
+
+/** A no-network pool-numbers service: the LIVE add burns the new member onto
+ *  the group's number before the roster write (W1), which must not reach AWS. */
+function makeFakePoolNumbers(): PoolNumbersService {
+  const rec = (poolNumber: string): PoolNumberItem => ({
+    poolNumber,
+    lifecycle_state: 'active',
+    quarantine_until: '0000-00-00T00:00:00.000Z',
+    voice_capable: true,
+    sms_capable: true,
+    provisioned_at: '2026-07-01T00:00:00.000Z',
+  });
+  return {
+    async provisionForGroup() {
+      const poolNumber = '+15550409000';
+      return { kind: 'assigned', poolNumber, record: rec(poolNumber), provisioned: true };
+    },
+    async noteGroupClosed() {},
+    async burnMember() {
+      return true;
+    },
+    async burnGroupRoster() {
+      return true;
+    },
+    async retireEligible() {
+      return [];
+    },
+    async onNumberRegistered() {},
+    async warmOneNumber() {},
+    async refillBufferIfNeeded() {},
+    async flagStuckWarming() {},
+    async flagStuckConnecting() {},
+    async getRecord(poolNumber) {
+      return rec(poolNumber);
+    },
+    async clearConnectingEarmarks() {},
+  };
+}
+
+describe('placement roster editing endpoints (contact-rosters Task 10)', () => {
+  let app: Express;
+  let world: FakeWorld;
+  let queueAdapter: InProcessOutboundQueueAdapter;
+
+  const TENANT_PHONE = '+15550400011';
+  const PM_PHONE = '+15550400013';
+  const CASEWORKER_PHONE = '+15550400021';
+
+  beforeEach(async () => {
+    _resetForTests();
+    const logger = createLogger({ destination: createLogCapture().stream });
+    configureJobsLogger(logger);
+    configureScheduler(new InMemorySchedulerAdapter());
+    const h = makeWebhookHarness({ poolNumbersService: makeFakePoolNumbers() });
+    app = h.app;
+    world = h.world;
+    registerRelayFanOutJobHandler({
+      adapter: world.adapter,
+      conversationsRepo: world.conversationsRepo,
+      messagesRepo: world.messagesRepo,
+      contactsRepo: world.contactsRepo,
+      logger,
+    });
+    queueAdapter = new InProcessOutboundQueueAdapter({ dispatch: dispatchJob });
+    configureOutboundQueue(queueAdapter);
+    // Wall-clock router: pin quiet hours OFF so the preview's deferred flag is
+    // deterministic whatever time the suite runs at.
+    await world.settingsRepo.putOrgSettings({ quietHoursEnabled: false });
+
+    world.contacts.push(
+      { contactId: 'c-tenant', type: 'tenant', phone: TENANT_PHONE, firstName: 'Tasha', lastName: 'Tenant' },
+      { contactId: 'c-owner', type: 'landlord', phone: '+15550400012', firstName: 'Ollie', lastName: 'Owner' },
+      { contactId: 'c-pm', type: 'landlord', phone: PM_PHONE, firstName: 'Pat', lastName: 'Manager' },
+      {
+        contactId: 'c-caseworker',
+        type: 'team_member',
+        phone: CASEWORKER_PHONE,
+        firstName: 'Casey',
+        lastName: 'Worker',
+      },
+    );
+    world.units.set('unit-r', {
+      unitId: 'unit-r',
+      landlordId: 'c-owner',
+      status: 'available',
+      contacts: [
+        { contactId: 'c-owner', role: 'owner', primaryContact: false },
+        { contactId: 'c-pm', role: 'pm', primaryContact: true },
+      ],
+      primary_contact: 'c-pm',
+    });
+  });
+
+  afterEach(() => {
+    _resetForTests();
+  });
+
+  const authedReq = {
+    post: (path: string) =>
+      request(app).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    get: (path: string) =>
+      request(app).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    delete: (path: string) =>
+      request(app).delete(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+  };
+
+  async function createPlacement(): Promise<string> {
+    const p = await world.placementsRepo.create({
+      tenantId: 'c-tenant',
+      unitId: 'unit-r',
+      stage: 'awaiting_approval',
+    });
+    return p.placementId;
+  }
+
+  async function seedThread(
+    placementId: string,
+    participants: { contactId?: string; phone: string; name?: string }[],
+    status: 'open' | 'closed' = 'open',
+  ): Promise<void> {
+    const now = '2026-07-10T00:00:00.000Z';
+    world.conversations.set('conv-plive', {
+      conversationId: 'conv-plive',
+      participant_phone: '+15550409000',
+      pool_number: '+15550409000',
+      status,
+      last_activity_at: now,
+      type: 'relay_group',
+      ai_mode: 'manual',
+      // The stored row shape uses '' for "no contact" (nonEmpty() reads it as absent).
+      participants: participants.map((p) => ({ ...p, contactId: p.contactId ?? '' })),
+      created_at: now,
+    });
+    await world.placementsRepo.update(placementId, { group_thread: 'conv-plive' });
+  }
+
+  const keysOf = (body: { members: { memberKey: string }[] }): string[] =>
+    body.members.map((m) => m.memberKey);
+
+  it('PLAN add / remove / reset round-trip on the placement repo', async () => {
+    const placementId = await createPlacement();
+
+    const added = await authedReq
+      .post(`/api/placements/${placementId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(added.status).toBe(200);
+    expect(added.body.source).toBe('plan');
+    expect(keysOf(added.body)).toEqual(['c-tenant', 'c-pm', 'c-caseworker']);
+
+    const removed = await authedReq.delete(`/api/placements/${placementId}/roster/members/c-pm`);
+    expect(removed.status).toBe(200);
+    expect(keysOf(removed.body)).toEqual(['c-tenant', 'c-caseworker']);
+
+    const reset = await authedReq.post(`/api/placements/${placementId}/roster/reset`);
+    expect(reset.status).toBe(200);
+    expect(reset.body.source).toBe('default');
+    expect(keysOf(reset.body)).toEqual(['c-tenant', 'c-pm']);
+    expect((await world.placementsRepo.getById(placementId))!.roster).toBeUndefined();
+  });
+
+  it('RESET answers 404 (not 500) when the placement is deleted mid-write', async () => {
+    // clearRoster is conditional on the placement existing, so a delete between
+    // the route's read and its write throws into the Express error handler.
+    // Every sibling path answers 404 for a gone placement.
+    const placementId = await createPlacement();
+    world.placementsRepo.clearRoster = async (id: string) => {
+      world.placements.delete(id);
+      throw new Error('ConditionalCheckFailedException');
+    };
+
+    const res = await authedReq.post(`/api/placements/${placementId}/roster/reset`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toBe('placement_not_found');
+  });
+
+  it('PLAN remove refuses the last member; PLAN add 400s an invalid entry', async () => {
+    const placementId = await createPlacement();
+    await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-pm' }], undefined);
+
+    const last = await authedReq.delete(`/api/placements/${placementId}/roster/members/c-pm`);
+    expect(last.status).toBe(409);
+    expect(last.body.error).toBe('last_member');
+
+    const bad = await authedReq.post(`/api/placements/${placementId}/roster/members`).send({});
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toBe('invalid_member');
+  });
+
+  it('PLAN endpoints 409 thread_exists once group_thread is set; LIVE endpoints 409 no_thread before it', async () => {
+    const placementId = await createPlacement();
+
+    const noThreadAdd = await authedReq
+      .post(`/api/placements/${placementId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(noThreadAdd.status).toBe(409);
+    expect(noThreadAdd.body.error).toBe('no_thread');
+
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const planAdd = await authedReq
+      .post(`/api/placements/${placementId}/roster/members`)
+      .send({ contactId: 'c-caseworker' });
+    expect(planAdd.status).toBe(409);
+    expect(planAdd.body.error).toBe('thread_exists');
+  });
+
+  it('LIVE add announces on an open thread; LIVE remove follows the STORED participant phone', async () => {
+    const placementId = await createPlacement();
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+    world.sent.length = 0;
+
+    const added = await authedReq
+      .post(`/api/placements/${placementId}/roster/live-members`)
+      .send({ contactId: 'c-caseworker' });
+    await queueAdapter.settle();
+    expect(added.status).toBe(200);
+    expect(added.body.source).toBe('participants');
+    expect(keysOf(added.body)).toEqual(['c-tenant', 'c-pm', 'c-caseworker']);
+    expect(world.sent.map((s) => s.to).sort()).toEqual(
+      [TENANT_PHONE, PM_PHONE, CASEWORKER_PHONE].sort(),
+    );
+
+    // The PM's number is corrected after joining: the remove must follow the ROW.
+    world.contacts.find((c) => c.contactId === 'c-pm')!.phone = '+15550400099';
+    world.sent.length = 0;
+    const removed = await authedReq.delete(
+      `/api/placements/${placementId}/roster/live-members/c-pm`,
+    );
+    await queueAdapter.settle();
+    expect(removed.status).toBe(200);
+    expect(keysOf(removed.body)).toEqual(['c-tenant', 'c-caseworker']);
+    expect(world.sent).toHaveLength(0); // removal never announces
+  });
+
+  it('LIVE remove refuses the LAST participant (409 last_member)', async () => {
+    const placementId = await createPlacement();
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+    ]);
+
+    const res = await authedReq.delete(
+      `/api/placements/${placementId}/roster/live-members/c-tenant`,
+    );
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('last_member');
+    // The participant row survives untouched.
+    expect(world.conversations.get('conv-plive')!.participants).toHaveLength(1);
+  });
+
+  it('previews: server-composed bodies, 409 relay_already_provisioned once provisioned', async () => {
+    const placementId = await createPlacement();
+
+    const open = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+    expect(open.status).toBe(200);
+    expect(open.body.body).toBe(composeIntroBody(['Tasha Tenant', 'Pat Manager']));
+    expect(open.body.recipientCount).toBe(2);
+    expect(open.body.deferred).toBe(false);
+
+    await seedThread(placementId, [
+      { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+      { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+    ]);
+
+    const provisioned = await authedReq.get(`/api/placements/${placementId}/roster/preview-open`);
+    expect(provisioned.status).toBe(409);
+    expect(provisioned.body.error).toBe('relay_already_provisioned');
+
+    const add = await authedReq
+      .post(`/api/placements/${placementId}/roster/preview-add`)
+      .send({ contactId: 'c-caseworker' });
+    expect(add.status).toBe(200);
+    expect(add.body.body).toBe(
+      composeMemberAddedBody('Casey Worker', ['Tasha Tenant', 'Pat Manager', 'Casey Worker']),
+    );
+    expect(add.body.recipientCount).toBe(3);
+  });
+
+  // --- Quiet-hours deferral (contact-rosters Task 13) ----------------------
+  //
+  // The placement mirrors of the tour paths, on the SAME pinned clock:
+  // 2026-08-05T03:00Z = 23:00 ET on Aug 4; the default window ends 12:00Z.
+  describe('quiet-hours deferral', () => {
+    const QUIET_NOW = '2026-08-05T03:00:00.000Z';
+    const QUIET_END = '2026-08-05T12:00:00.000Z';
+    let quietApp: Express;
+
+    beforeEach(async () => {
+      const h = makeWebhookHarness({
+        world,
+        poolNumbersService: makeFakePoolNumbers(),
+        placementsNow: () => QUIET_NOW,
+      });
+      quietApp = h.app;
+      await world.settingsRepo.putOrgSettings({
+        quietHoursEnabled: true,
+        quietHoursStart: '21:00',
+        quietHoursEnd: '08:00',
+        timezone: 'America/New_York',
+      });
+    });
+
+    const quietReq = {
+      post: (path: string) =>
+        request(quietApp).post(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+      get: (path: string) =>
+        request(quietApp).get(path).set('x-origin-verify', ORIGIN_SECRET).set('cookie', TEST_SESSION_COOKIE),
+    };
+
+    it('OPEN during quiet hours DEFERS: 202, a pending row, no thread, no send', async () => {
+      const placementId = await createPlacement();
+      world.sent.length = 0;
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+      await queueAdapter.settle();
+
+      expect(res.status).toBe(202);
+      expect(res.body.pending).toEqual([
+        { actionId: `placement#${placementId}#open`, kind: 'open_group', dueAt: QUIET_END },
+      ]);
+      expect((await world.placementsRepo.getById(placementId))!.group_thread).toBeUndefined();
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('OPEN with ?force=send_now provisions immediately', async () => {
+      const placementId = await createPlacement();
+      world.sent.length = 0;
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay?force=send_now`);
+      await queueAdapter.settle();
+
+      expect(res.status).toBe(201);
+      expect(res.body.conversation.conversationId).toBeDefined();
+      expect(world.sent.length).toBeGreaterThan(0);
+    });
+
+    // --- MF3: the guards run BEFORE the deferral (tours parity) -------------
+
+    it('an ALREADY-OPEN relay answers 409 relay_exists, never a pending row', async () => {
+      const placementId = await createPlacement();
+      await seedThread(placementId, [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ]);
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('relay_exists');
+      // No banner about a group that already exists - and nothing that an
+      // unconditional upsertPending could later resurrect.
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('a TERMINAL placement answers 409 placement_not_active, never a pending row', async () => {
+      const placementId = await createPlacement();
+      await world.placementsRepo.update(placementId, { stage: 'lost' });
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('placement_not_active');
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('a TOO-THIN roster answers 400 relay_member_unresolvable NOW, never a pending row', async () => {
+      // Spec 6.2: "The route keeps its guard regardless." The poller pre-checks
+      // this before it claims ('roster_too_thin'), so a 202 would promise an
+      // open the server already knows it must refuse - and hide the reason
+      // behind an "Opens at 8:00 AM" banner until quiet-end.
+      const placementId = await createPlacement();
+      await world.placementsRepo.setRoster(placementId, [{ contactId: 'c-pm' }], undefined);
+
+      const res = await quietReq.post(`/api/placements/${placementId}/relay`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toBe('relay_member_unresolvable');
+      expect(res.body.detail).toBe('this placement roster has fewer than two reachable members');
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('relay provisioning OFF answers 503 NOW, never a pending row', async () => {
+      // The poller's other pre-claim check ('provisioning_unavailable'): with
+      // the kill-switch off the open cannot complete at quiet-end either.
+      const offApp = makeWebhookHarness({
+        world,
+        poolNumbersService: makeFakePoolNumbers(),
+        placementsNow: () => QUIET_NOW,
+        env: { RELAY_LIVE_PROVISIONING: 'false' },
+      }).app;
+      const placementId = await createPlacement();
+
+      const res = await request(offApp)
+        .post(`/api/placements/${placementId}/relay`)
+        .set('x-origin-verify', ORIGIN_SECRET)
+        .set('cookie', TEST_SESSION_COOKIE);
+
+      expect(res.status).toBe(503);
+      expect(res.body.error).toBe('relay_provisioning_disabled');
+      expect(res.body.message).toMatch(/RELAY_LIVE_PROVISIONING=true/);
+      expect(
+        await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`),
+      ).toBeUndefined();
+    });
+
+    it('a CLOSED-thread pointer passes the guards in BOTH forms, and the deferred one answers visibly', async () => {
+      // Neither form is refused by the guards (a closed relay does not block a
+      // re-open) - that is the parity the reorder buys. The OUTCOMES still
+      // differ downstream: the immediate click re-opens, while the poller
+      // deliberately does not re-open a closed thread and retires the row with
+      // the VISIBLE group_closed notice instead. Reopen semantics are an open
+      // decision (docs/issues/relay-reopen-semantics.md); what matters here is
+      // that the deferred click is answered rather than silently dropped.
+      const deferredId = await createPlacement();
+      world.conversations.set('conv-closed-a', {
+        conversationId: 'conv-closed-a',
+        participant_phone: '+15550409001',
+        pool_number: '+15550409001',
+        status: 'closed',
+        last_activity_at: QUIET_NOW,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: [
+          { contactId: 'c-tenant', phone: TENANT_PHONE },
+          { contactId: 'c-pm', phone: PM_PHONE },
+        ],
+        created_at: QUIET_NOW,
+      });
+      await world.placementsRepo.update(deferredId, { group_thread: 'conv-closed-a' });
+
+      const deferred = await quietReq.post(`/api/placements/${deferredId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${deferredId}#open`;
+      const applied = await quietReq.post(
+        `/api/placements/${deferredId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+      );
+      await queueAdapter.settle();
+      expect(applied.status).toBe(200);
+      expect(applied.body.pending).toEqual([]);
+      expect(applied.body.skipped).toEqual([
+        { actionId, kind: 'open_group', reason: 'group_closed', at: QUIET_NOW },
+      ]);
+
+      // The FORCED form of the same click on the same shape: guards pass too.
+      const forcedId = await createPlacement();
+      world.conversations.set('conv-closed-b', {
+        conversationId: 'conv-closed-b',
+        participant_phone: '+15550409002',
+        pool_number: '+15550409002',
+        status: 'closed',
+        last_activity_at: QUIET_NOW,
+        type: 'relay_group',
+        ai_mode: 'manual',
+        participants: [
+          { contactId: 'c-tenant', phone: TENANT_PHONE },
+          { contactId: 'c-pm', phone: PM_PHONE },
+        ],
+        created_at: QUIET_NOW,
+      });
+      await world.placementsRepo.update(forcedId, { group_thread: 'conv-closed-b' });
+
+      const forced = await quietReq.post(`/api/placements/${forcedId}/relay?force=send_now`);
+      await queueAdapter.settle();
+      expect(forced.status).toBe(201);
+    });
+
+    it('LIVE ADD on an OPEN thread defers; on a CLOSED thread it stays immediate', async () => {
+      const placementId = await createPlacement();
+      await seedThread(placementId, [
+        { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+        { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+      ]);
+      world.sent.length = 0;
+
+      const deferred = await quietReq
+        .post(`/api/placements/${placementId}/roster/live-members`)
+        .send({ contactId: 'c-caseworker' });
+      await queueAdapter.settle();
+
+      expect(deferred.status).toBe(202);
+      expect(deferred.body.pending).toEqual([
+        {
+          actionId: `placement#${placementId}#add#c-caseworker`,
+          kind: 'add_member',
+          contactId: 'c-caseworker',
+          name: 'Casey Worker',
+          dueAt: QUIET_END,
+        },
+      ]);
+      expect(world.sent).toHaveLength(0);
+
+      // Same request against a CLOSED thread: silent AND immediate (spec 7).
+      const closedId = await createPlacement();
+      await seedThread(
+        closedId,
+        [
+          { contactId: 'c-tenant', phone: TENANT_PHONE, name: 'Tasha Tenant' },
+          { contactId: 'c-pm', phone: PM_PHONE, name: 'Pat Manager' },
+        ],
+        'closed',
+      );
+      const immediate = await quietReq
+        .post(`/api/placements/${closedId}/roster/live-members`)
+        .send({ contactId: 'c-caseworker' });
+      await queueAdapter.settle();
+
+      expect(immediate.status).toBe(200);
+      expect(immediate.body.members.map((m: { memberKey: string }) => m.memberKey)).toContain(
+        'c-caseworker',
+      );
+      expect(world.sent).toHaveLength(0);
+    });
+
+    it('APPLY-NOW answers 409 action_not_ready when the applier can only WAIT', async () => {
+      // The tours twin: 'waiting' claimed nothing and did nothing, so a 200
+      // with an unchanged payload would tell the operator their click landed.
+      const placementId = await createPlacement();
+      const deferred = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${placementId}#open`;
+      // A pointer at a conversation nobody can load -> resolver 'unavailable'.
+      await world.placementsRepo.update(placementId, { group_thread: 'conv-gone' });
+
+      const res = await quietReq.post(
+        `/api/placements/${placementId}/roster/pending/${encodeURIComponent(actionId)}/apply-now`,
+      );
+
+      expect(res.status).toBe(409);
+      expect(res.body.error).toBe('action_not_ready');
+      expect(res.body.message).toMatch(/try again/i);
+      expect((await world.pendingRosterActionsRepo.getById(actionId))!.status).toBe('pending');
+    });
+
+    it('cancel / apply-now / dismiss round-trip on the placement mirror', async () => {
+      const placementId = await createPlacement();
+      const deferred = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(deferred.status).toBe(202);
+      const actionId = `placement#${placementId}#open`;
+      const path = (verb: string): string =>
+        `/api/placements/${placementId}/roster/pending/${encodeURIComponent(actionId)}/${verb}`;
+
+      const canceled = await quietReq.post(path('cancel'));
+      expect(canceled.status).toBe(200);
+      expect(canceled.body.skipped).toEqual([
+        { actionId, kind: 'open_group', reason: 'canceled', at: QUIET_NOW },
+      ]);
+
+      const dismissed = await quietReq.post(path('dismiss'));
+      expect(dismissed.status).toBe(200);
+      expect(dismissed.body.skipped).toEqual([]);
+
+      // Re-defer, then apply it NOW.
+      const again = await quietReq.post(`/api/placements/${placementId}/relay`);
+      expect(again.status).toBe(202);
+      world.sent.length = 0;
+      const applied = await quietReq.post(path('apply-now'));
+      await queueAdapter.settle();
+
+      expect(applied.status).toBe(200);
+      expect(applied.body.pending).toEqual([]);
+      expect(applied.body.threadExists).toBe(true);
+      expect(world.sent.map((s) => s.to).sort()).toEqual([TENANT_PHONE, PM_PHONE].sort());
+    });
+  });
+
+  it('404s placement_not_found on every roster-editing path', async () => {
+    const responses = [
+      await authedReq.post('/api/placements/nope/roster/members').send({ contactId: 'c-pm' }),
+      await authedReq.delete('/api/placements/nope/roster/members/c-pm'),
+      await authedReq.post('/api/placements/nope/roster/reset'),
+      await authedReq.post('/api/placements/nope/roster/live-members').send({ contactId: 'c-pm' }),
+      await authedReq.delete('/api/placements/nope/roster/live-members/c-pm'),
+      await authedReq.get('/api/placements/nope/roster/preview-open'),
+      await authedReq.post('/api/placements/nope/roster/preview-add').send({ contactId: 'c-pm' }),
+    ];
+    for (const res of responses) {
+      expect(res.status).toBe(404);
+      expect(res.body.error).toBe('placement_not_found');
+    }
   });
 });
 

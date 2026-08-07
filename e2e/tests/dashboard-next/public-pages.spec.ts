@@ -39,7 +39,7 @@ import { getOutbox } from '../../fixtures/outbox.js';
 // No seeded unit is `available`, so the spec CREATES its own shareable unit via the
 // authenticated API (create -> flip to available via listing-status -> set every
 // public field). Every public submit uses a UNIQUE phone so the per-phone idempotent
-// welcome never collides across cases (or specs). The e2e stack sets OUR_PHONE_NUMBERS
+// welcome never collides across cases (or specs). The e2e stack sets BUSINESS_PHONE_NUMBER
 // (scripts/e2e-session.mjs), so the flyer's contact_number is non-null here.
 
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
@@ -194,7 +194,7 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     await expect(page.getByRole('link', { name: /text us/i })).toHaveCount(0);
 
     // API sanity: the raw public flyer GET carries the full payload upfront, incl.
-    // contact_number (the e2e stack sets OUR_PHONE_NUMBERS). The bare, unauthenticated
+    // contact_number (the e2e stack sets BUSINESS_PHONE_NUMBER). The bare, unauthenticated
     // `request` fixture reaches it with no session.
     const flyerRes = await request.get(`${NEXT}/public/units/${unit.unitId}/flyer`);
     expect(flyerRes.ok()).toBeTruthy();
@@ -252,10 +252,10 @@ test.describe('Public pages - the unauthenticated full-info flyer + /join', () =
     // passed no `from` at all and Twilio's Messaging Service picked from its
     // whole sender pool - which also holds the relay pool numbers - so the
     // flyer's "text us at this number" promise was aspirational. The send
-    // service now pins OUR_PHONE_NUMBERS[0], the same value the flyer reads.
+    // service now pins BUSINESS_PHONE_NUMBER, the same value the flyer reads.
     const flyerForCta = await request.get(`${NEXT}/public/units/${unit.unitId}/flyer`);
     const advertised = (await flyerForCta.json()).flyer.contact_number as string;
-    // Guard against a VACUOUS pass: with an unconfigured OUR_PHONE_NUMBERS the
+    // Guard against a VACUOUS pass: with an unconfigured BUSINESS_PHONE_NUMBER the
     // flyer advertises null AND the send omits `from`, and undefined === null
     // would compare two absences. Pin that `advertised` is a real E.164 number
     // first, so the equality below can only pass by actually matching.

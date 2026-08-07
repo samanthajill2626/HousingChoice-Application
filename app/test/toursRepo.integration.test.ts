@@ -409,4 +409,35 @@ describe.skipIf(!reachable)('toursRepo against DynamoDB Local (throwaway prefix)
     await tours.claimConversion(tour.tourId, 'pending:again');
     expect((await tours.get(tour.tourId))!.convertedPlacementId).toBe('pending:again');
   });
+
+  // -------------------------------------------------------------------------
+  // setRoster MATERIALIZE is guarded by the thread pointer too (contact-rosters
+  // D1): once a thread exists the roster is a FACT, so a plan must never be
+  // (re-)materialized onto that owner - it would be an INERT plan the resolver
+  // ignores, written by a request that answered "saved".
+  // -------------------------------------------------------------------------
+
+  it('setRoster MATERIALIZE refuses once the tour carries a group-thread pointer', async () => {
+    const { RosterPlanConflictError } = await import('../src/lib/rosterResolution.js');
+    const tour = await tours.create({
+      tenantId: 'contact-mat-1',
+      unitId: 'unit-mat-1',
+      tourType: 'landlord_led',
+    });
+
+    // No pointer yet: the materialize lands.
+    const materialized = await tours.setRoster(tour.tourId, [{ contactId: 'c-a' }], undefined);
+    expect(materialized.rosterVersion).toBe(1);
+
+    // The group opens (pointer stamped) and CONSUMES the plan.
+    await tours.claimGroupThread(tour.tourId, 'conv-mat-1');
+    await tours.clearRoster(tour.tourId);
+
+    // attribute_not_exists(roster) is TRUE again - only the pointer guard stops
+    // a plan being written onto a thread-bearing tour.
+    await expect(
+      tours.setRoster(tour.tourId, [{ contactId: 'c-b' }], undefined),
+    ).rejects.toBeInstanceOf(RosterPlanConflictError);
+    expect((await tours.get(tour.tourId))!.roster).toBeUndefined();
+  });
 });

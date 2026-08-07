@@ -29,6 +29,7 @@ import type {
 import type { PlacementItem, PlacementsRepo } from '../src/repos/placementsRepo.js';
 import type { UnitItem, UnitsRepo } from '../src/repos/unitsRepo.js';
 import type { PlacementStage } from '../src/lib/statusModel.js';
+import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type {
   SendMessageInput,
   SendMessageOutcome,
@@ -183,6 +184,11 @@ function makeFakeConversationsRepo(seed: ConversationItem[] = []): Conversations
   return {
     async findByParticipantPhone(phone: string) {
       return [...byId.values()].filter((c) => c.participant_phone === phone);
+    },
+    // Roster resolution (contact-rosters D11) reads a placement's group thread
+    // through getById; an unseeded id is a dangling pointer, exactly as in prod.
+    async getById(conversationId: string) {
+      return byId.get(conversationId);
     },
     async createOrGetByParticipantPhone(phone: string, type: ConversationItem['type']) {
       const existingId = claimByPhone.get(phone);
@@ -407,9 +413,17 @@ describe('armNudgeForStage', () => {
 describe('runDuePlacementNudges', () => {
   const NOW = '2026-07-05T10:00:00.000Z';
 
-  function tenantRig(stage: PlacementStage, kind: NudgeKind) {
+  function tenantRig(
+    stage: PlacementStage,
+    kind: NudgeKind,
+    // contact-rosters D11: an optional roster PLAN / thread pointer on the
+    // placement, so a case can put the tenant ON or OFF the roster. Absent =
+    // the property default (which always includes the tenant), so every
+    // pre-D11 caller behaves exactly as before.
+    ownerOver: Partial<PlacementItem> = {},
+  ) {
     const tenantPhone = '+15550600001';
-    const p = makePlacement({ placementId: 'p-1', tenantId: 'contact-tenant-1', unitId: 'unit-1', stage });
+    const p = makePlacement({ placementId: 'p-1', tenantId: 'contact-tenant-1', unitId: 'unit-1', stage, ...ownerOver });
     const row: PlacementNudgeItem = {
       nudgeId: 'nudge-1',
       placementId: 'p-1',
@@ -500,6 +514,122 @@ describe('runDuePlacementNudges', () => {
     expect(row.skipReason).toBe('stage_moved');
     // Nothing left due — the row leaves listDue exactly once.
     expect(await repo.listDue(NOW)).toHaveLength(0);
+  });
+
+  // D11 (contact-rosters): a tenant REMOVED from the placement roster must not
+  // be texted "your application..." - every tenant-1:1-routed rung is
+  // suppressed with a VISIBLE skipped row. The check binds to the routing
+  // OUTCOME at claim time, so re-adding them lifts it with no re-arm step.
+
+  it('a tenant-routed rung whose tenant is OFF the roster is claim-SKIPPED as tenant_not_on_roster', async () => {
+    // The caseworker-to-PM arrangement: the operator removed the tenant from
+    // this placement's roster plan.
+    const { deps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check', {
+      roster: [{ contactId: 'c-caseworker' }, { contactId: 'c-pm' }],
+    });
+    await runDuePlacementNudges(NOW, deps);
+
+    expect(send.sent).toHaveLength(0);
+    // Visible, never silent: skippedAt + the reason, and never sentAt.
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBe(NOW);
+    expect(row.skipReason).toBe('tenant_not_on_roster');
+    expect(await repo.listDue(NOW)).toHaveLength(0);
+  });
+
+  it('a LANDLORD-routed rung is unaffected by the tenant being off the roster', async () => {
+    const landlordPhone = '+15550700009';
+    const p = makePlacement({
+      placementId: 'p-1',
+      stage: 'awaiting_approval',
+      unitId: 'unit-9',
+      roster: [{ contactId: 'c-pm' }],
+    });
+    const { repo } = makeFakeNudgesRepo([
+      {
+        nudgeId: 'nudge-1',
+        placementId: 'p-1',
+        kind: 'approval_check',
+        dueAt: '2026-07-05T09:00:00.000Z',
+        _nudgePartition: 'nudges',
+        createdAt: FIXED_CREATED,
+      },
+    ]);
+    const send = makeSendSpy();
+    const deps: RunDuePlacementNudgesDeps = {
+      placementNudgesRepo: repo,
+      placementsRepo: makeFakePlacementsRepo([p]),
+      contactsRepo: makeFakeContactsRepo([
+        contact('contact-tenant-1', 'tenant', '+15550600001'),
+        contact('contact-landlord-1', 'landlord', landlordPhone),
+      ]),
+      unitsRepo: makeFakeUnitsRepo([
+        { unitId: 'unit-9', landlordId: 'contact-landlord-1', status: 'available' } as UnitItem,
+      ]),
+      conversationsRepo: makeFakeConversationsRepo([
+        conversation('conv-landlord-1', landlordPhone, 'landlord_1to1'),
+      ]),
+      sendMessageService: send.service,
+      settingsRepo: quietOffSettingsRepo(),
+    };
+    await runDuePlacementNudges(NOW, deps);
+
+    // The rule is about who the TENANT rungs text, not about the placement.
+    expect(send.sent).toHaveLength(1);
+    expect(send.sent[0]!.conversationId).toBe('conv-landlord-1');
+  });
+
+  it('putting the tenant back lifts the suppression for the next rung - no re-arm needed', async () => {
+    const { deps, send } = tenantRig('awaiting_receipt', 'receipt_check', {
+      roster: [{ contactId: 'contact-tenant-1' }, { contactId: 'c-pm' }],
+    });
+    await runDuePlacementNudges(NOW, deps);
+    expect(send.sent).toHaveLength(1);
+  });
+
+  it('an UNREADABLE roster leaves the rung UNCLAIMED - neither sent nor skipped', async () => {
+    // A thread pointer that will not load is 'unavailable', NOT "the tenant is
+    // gone": texting a possibly-removed tenant on a Dynamo blip is exactly what
+    // D11 exists to prevent, and so is burning the rung with a false skip.
+    const { deps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check', {
+      group_thread: 'conv-vanished',
+    });
+    await runDuePlacementNudges(NOW, deps);
+
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
+    // Still live: the next poll tick retries it.
+    expect(await repo.listDue(NOW)).toHaveLength(1);
+  });
+
+  it('an UNREADABLE roster is BOUNDED by time-past-due: unclaimed at the grace boundary, claim-skipped past it', async () => {
+    // The unclaimed wait above is right for a BLIP. A PERMANENT sentinel (a
+    // pointer at a conversation that will never load) used to re-list the rung
+    // every tick forever: never sent, never visibly skipped.
+    const { deps, send, repo, row } = tenantRig('awaiting_receipt', 'receipt_check', {
+      group_thread: 'conv-vanished',
+    });
+
+    // Exactly ONE grace window past due is not PAST it - still a wait. (The
+    // neighbouring test's NOW sits on this very boundary.)
+    const atBoundary = new Date(
+      Date.parse(row.dueAt) + ROSTER_UNAVAILABLE_GRACE_MS,
+    ).toISOString();
+    await runDuePlacementNudges(atBoundary, deps);
+    expect(row.skippedAt).toBeUndefined();
+    expect(await repo.listDue(atBoundary)).toHaveLength(1);
+
+    // One minute past it - retire it VISIBLY rather than wait forever.
+    const pastGrace = new Date(
+      Date.parse(row.dueAt) + ROSTER_UNAVAILABLE_GRACE_MS + 60_000,
+    ).toISOString();
+    await runDuePlacementNudges(pastGrace, deps);
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt, 'a skip is never a send').toBeUndefined();
+    expect(row.skippedAt).toBe(pastGrace);
+    expect(row.skipReason).toBe('roster_unavailable');
+    expect(await repo.listDue(pastGrace), 'it leaves listDue exactly once').toHaveLength(0);
   });
 
   // QUIET-HOURS BACKSTOP (spec 2026-08-03 section 6): the check is PRE-CLAIM -
@@ -772,6 +902,8 @@ describe('forceSendNudge', () => {
       convOver?: Partial<ConversationItem>;
       withConversation?: boolean;
       throwErr?: Error;
+      /** contact-rosters D11: put a roster plan / thread pointer on the owner. */
+      ownerOver?: Partial<PlacementItem>;
     } = {},
   ) {
     const p = makePlacement({
@@ -779,6 +911,7 @@ describe('forceSendNudge', () => {
       tenantId: 'contact-tenant-force',
       unitId: 'unit-force',
       stage: opts.stage ?? 'awaiting_receipt',
+      ...opts.ownerOver,
     });
     const nudges = makeFakeNudgesRepo([nudgeRow(opts.kind ?? 'receipt_check')]);
     const row = nudges.rows[0]!;
@@ -976,6 +1109,22 @@ describe('forceSendNudge', () => {
     expect(created[0]!.type).toBe('landlord_1to1');
     expect(send.sent[0]!.conversationId).toBe(created[0]!.conversationId);
     expect(send.sent[0]!.automated).toBe(false);
+  });
+
+  it('REFUSES a tenant-routed rung whose tenant is off the roster - the row stays pending', async () => {
+    // Mirrors the poll's D11 suppression, but a human failure must never RETIRE
+    // a rung: refuse pre-claim and leave it exactly as found (the operator can
+    // put the tenant back and let the ladder deliver it).
+    const { deps, send, row } = tenantRig({
+      ownerOver: { roster: [{ contactId: 'c-caseworker' }] },
+    });
+
+    const result = await forceSendNudge('nudge-force', 'p-force', NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'tenant_not_on_roster' });
+    expect(send.sent).toHaveLength(0);
+    expect(row.sentAt).toBeUndefined();
+    expect(row.skippedAt).toBeUndefined();
   });
 
   it('a post-claim SendRefusedError returns refused_post_claim and keeps the claim', async () => {

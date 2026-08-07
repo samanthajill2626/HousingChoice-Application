@@ -42,6 +42,13 @@ import {
 import { createPlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
 import { createUnitsRepo } from '../repos/unitsRepo.js';
 import { runDuePlacementNudges, type RunDuePlacementNudgesDeps } from '../jobs/placementNudges.js';
+import {
+  runDuePendingRosterActions,
+  type RunDuePendingRosterActionsDeps,
+} from '../jobs/rosterActions.js';
+import { createPendingRosterActionsRepo } from '../repos/pendingRosterActionsRepo.js';
+import { createActivityEventsRepo } from '../repos/activityEventsRepo.js';
+import { createPoolNumbersService } from '../services/poolNumbers.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
 import { createExtractionRepo } from '../repos/extractionRepo.js';
@@ -80,6 +87,9 @@ export interface DevRouterDeps {
   /** Poll deps for POST /__dev/extraction/tick - injected in tests (the world
    *  fakes); defaults to the worker's construction (worker.ts). */
   extractionTickDeps?: ExtractionJobDeps;
+  /** Poll deps for POST /__dev/roster-actions/tick (contact-rosters Task 13) -
+   *  injected in tests (the world fakes); defaults to the worker's construction. */
+  rosterActionDeps?: RunDuePendingRosterActionsDeps;
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
@@ -247,11 +257,15 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       toursRepo: createToursRepo({ logger: log }),
       contactsRepo: createContactsRepo({ logger: log }),
       conversationsRepo: createConversationsRepo({ logger: log }),
-      messagesRepo: createMessagesRepo({ logger: log }),
-      // The unit's address rides in the reminder copy - THIS is the path every
-      // e2e reminder assertion runs through, so an unwired tick would silently
-      // strip the address from every hermetic body.
+      // ONE unit read, TWO consumers: roster resolution (contact-rosters D11 -
+      // the tenant-1:1 suppression check reads the property's primary contact
+      // for the DEFAULT roster), AND the address that rides in the reminder
+      // copy. THIS is the path every e2e reminder assertion runs through, so an
+      // unwired tick would silently strip the address from every hermetic body.
       unitsRepo: createUnitsRepo({ logger: log }),
+      // D7 (contact-rosters): wait while the tour's group open is deferred.
+      pendingRosterActionsRepo: createPendingRosterActionsRepo({ logger: log }),
+      messagesRepo: createMessagesRepo({ logger: log }),
       sendMessageService: createSendMessageService({ config, logger: log }),
       adapter: createMessagingAdapter({ config, logger: log }),
       // Quiet hours (spec 2026-08-03): the tick runs the SAME pre-claim
@@ -306,6 +320,51 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     };
     return nudgeTickDeps;
   };
+  // POST /__dev/roster-actions/tick { now? } - the deterministic e2e seam for the
+  // worker's 60s pending-roster-action poll (contact-rosters Task 13). One POST
+  // runs ONE runDuePendingRosterActions(now) pass, which is the ONLY way an e2e
+  // can advance a quiet-hours deferral without waiting for real 8 AM. Same
+  // triple-gate/hermetic-LOCAL-only construction as the ticks above; json() is
+  // scoped to this route only.
+  //
+  // `now` (optional) is NORMALIZED via new Date(x).toISOString() - dueAt
+  // comparisons are LEXICOGRAPHIC, so '...00Z' and '...00.000Z' must collapse to
+  // the one canonical form. Defaults to the wall clock.
+  let rosterTickDeps = deps.rosterActionDeps;
+  const rosterActionDeps = (): RunDuePendingRosterActionsDeps => {
+    // Built lazily on the first tick - mirrors worker.ts's construction exactly.
+    rosterTickDeps ??= {
+      actions: createPendingRosterActionsRepo({ logger: log }),
+      tours: createToursRepo({ logger: log }),
+      placements: createPlacementsRepo({ logger: log }),
+      placementDeadlines: createPlacementDeadlinesRepo({ logger: log }),
+      conversations: createConversationsRepo({ logger: log }),
+      contacts: createContactsRepo({ logger: log }),
+      units: createUnitsRepo({ logger: log }),
+      audit: createAuditRepo({ logger: log }),
+      activityEvents: createActivityEventsRepo({ logger: log }),
+      poolNumbers: createPoolNumbersService({ config, logger: log }),
+      events: appEvents,
+      relayLiveProvisioning: config.relayLiveProvisioning,
+      logger: log,
+    };
+    return rosterTickDeps;
+  };
+  router.post('/__dev/roster-actions/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    await runDuePendingRosterActions(nowIso, rosterActionDeps());
+    log.info({ now: nowIso }, 'dev roster-action tick ran');
+    res.status(200).json({ ok: true, now: nowIso });
+  });
+
   router.post('/__dev/placement-nudges/tick', json(), async (req, res) => {
     const body = (req.body ?? {}) as { now?: unknown };
     let nowIso = new Date().toISOString();

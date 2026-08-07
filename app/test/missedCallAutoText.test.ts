@@ -67,7 +67,7 @@ describe('call.missedAutoText (M1.9b)', () => {
       settingsRepo: world.settingsRepo,
       messagesRepo: world.messagesRepo,
       sendMessageService: createSendMessageService({
-        config: loadConfig({ NODE_ENV: 'test', OUR_PHONE_NUMBERS: '+15550009999' } as NodeJS.ProcessEnv),
+        config: loadConfig({ NODE_ENV: 'test', BUSINESS_PHONE_NUMBER: '+15550009999' } as NodeJS.ProcessEnv),
         logger,
         adapter: world.adapter,
         conversationsRepo: world.conversationsRepo,

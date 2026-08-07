@@ -1,8 +1,12 @@
-// NumbersSection tests - the admin "Group text numbers" inventory (pool numbers).
-// Covers the table render (mocked listPoolNumbers), the four retirement-cell
-// variants, the state filter chips (default active+releasing / Released / All),
-// row expansion into group rows that link to the conversation thread, both empty
-// states, the error + Retry path, and the VA bounce via AdminRoute. Rows render
+// NumbersSection tests - the "Phone numbers" section: the "Our number" block
+// (OUR one business number, read-only, for EVERY authenticated user) plus the
+// admin-only "Group text numbers" pool inventory. Covers the table render
+// (mocked listPoolNumbers), the four retirement-cell variants, the state filter
+// chips (default active+releasing / Released / All), row expansion into group
+// rows that link to the conversation thread, both empty states, the error +
+// Retry path, the unset business number, and the in-component role gate (a VA
+// reaches the section - the route is no longer wrapped in AdminRoute - and sees
+// the business number but NEVER the pool inventory or its fetch). Rows render
 // react-router <Link>s, so every render is wrapped in <MemoryRouter>.
 import { render, screen, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
@@ -12,11 +16,13 @@ import { ApiError } from '../../api/index.js';
 import type { PoolNumberGroupRow, PoolNumberRow } from '../../api/index.js';
 
 const listPoolNumbers = vi.fn();
+const getSettings = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
     ...actual,
     listPoolNumbers: (...a: unknown[]) => listPoolNumbers(...a),
+    getSettings: (...a: unknown[]) => getSettings(...a),
   };
 });
 
@@ -32,7 +38,6 @@ vi.mock('../../app/AuthContext.js', () => ({
 }));
 
 import { NumbersSection } from './NumbersSection.js';
-import { AdminRoute } from './AdminRoute.js';
 
 function group(overrides: Partial<PoolNumberGroupRow> = {}): PoolNumberGroupRow {
   return {
@@ -86,6 +91,11 @@ function renderSection(): void {
 beforeEach(() => {
   vi.clearAllMocks();
   viewerIsAdmin = true;
+  // The section now reads GET /api/settings for the ONE business number, so
+  // every test needs a resolved default - an unstubbed mock resolves undefined
+  // and drops useSettings into its error arm. No businessPhoneNumber key here:
+  // unconfigured is an ABSENT key, never null.
+  getSettings.mockResolvedValue({ settings: {}, welcomeTextDefault: '' });
   stubDesktop();
 });
 afterEach(() => vi.unstubAllGlobals());
@@ -348,26 +358,82 @@ describe('NumbersSection - empty + error', () => {
   });
 });
 
-describe('NumbersSection - admin guard', () => {
-  it('bounces a VA who lands on /settings/numbers to Templates (guarded content absent)', () => {
+describe('NumbersSection - our number', () => {
+  it('shows the business number to a NON-admin and never requests the pool inventory', async () => {
     viewerIsAdmin = false;
+    getSettings.mockResolvedValue({
+      settings: {},
+      welcomeTextDefault: '',
+      businessPhoneNumber: '+15550009999',
+    });
+    renderSection();
+
+    expect(await screen.findByRole('heading', { name: 'Our number' })).toBeVisible();
+    expect(screen.getByText('(555) 000-9999')).toBeVisible();
+
+    // The pool inventory is admin-only, and NONE of its arms may leak: no
+    // table, no fetch, no "the pool is empty" claim, no error alert, no counts.
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(listPoolNumbers).not.toHaveBeenCalled();
+    expect(screen.queryByText(/No group text numbers yet/i)).toBeNull();
+    expect(screen.queryByRole('heading', { name: 'Group text numbers' })).toBeNull();
+    expect(screen.queryByRole('alert')).toBeNull();
+    expect(screen.queryByLabelText('Pool number counts')).toBeNull();
+  });
+
+  it('renders an explicit Not set state when no number is configured', async () => {
+    // Unconfigured is an ABSENT key (the backend omits it), never null - so the
+    // default getSettings stub above is already the unconfigured shape.
+    listPoolNumbers.mockResolvedValue([]);
+    renderSection();
+    expect(await screen.findByRole('heading', { name: 'Our number' })).toBeVisible();
+    expect(screen.getByText('Not set')).toBeVisible();
+  });
+
+  it('shows an admin BOTH the business number and the pool inventory', async () => {
+    getSettings.mockResolvedValue({
+      settings: {},
+      welcomeTextDefault: '',
+      businessPhoneNumber: '+15550009999',
+    });
+    listPoolNumbers.mockResolvedValue([numberRow({ number: '+15550190001' })]);
+    renderSection();
+
+    expect(await screen.findByText('(555) 000-9999')).toBeVisible();
+    expect(await screen.findByRole('table')).toBeVisible();
+    expect(screen.getByRole('heading', { name: 'Group text numbers' })).toBeVisible();
+    expect(listPoolNumbers).toHaveBeenCalled();
+  });
+});
+
+describe('NumbersSection - role gating (the route is no longer guarded)', () => {
+  it('lets a VA land on /settings/numbers: Our number renders, the pool inventory does not', async () => {
+    viewerIsAdmin = false;
+    getSettings.mockResolvedValue({
+      settings: {},
+      welcomeTextDefault: '',
+      businessPhoneNumber: '+15550009999',
+    });
     render(
       <MemoryRouter initialEntries={['/settings/numbers']}>
         <Routes>
-          <Route
-            path="/settings/numbers"
-            element={
-              <AdminRoute>
-                <NumbersSection />
-              </AdminRoute>
-            }
-          />
+          {/* MIRRORS App.tsx: the route carries NO <AdminRoute> wrapper any
+              more - the in-component gate is what keeps the pool admin-only. */}
+          <Route path="/settings/numbers" element={<NumbersSection />} />
           <Route path="/settings/templates" element={<div>TEMPLATES PANEL</div>} />
         </Routes>
       </MemoryRouter>,
     );
-    expect(screen.queryByRole('heading', { name: 'Group text numbers' })).not.toBeInTheDocument();
-    expect(screen.getByText('TEMPLATES PANEL')).toBeInTheDocument();
+
+    // Not bounced: the section itself renders for a VA...
+    expect(await screen.findByRole('heading', { name: 'Phone numbers' })).toBeVisible();
+    expect(screen.getByText('(555) 000-9999')).toBeVisible();
+    expect(screen.queryByText('TEMPLATES PANEL')).toBeNull();
+
+    // ...and the pool inventory stays admin-only, the fetch included.
+    expect(screen.queryByRole('heading', { name: 'Group text numbers' })).toBeNull();
+    expect(screen.queryByRole('table')).toBeNull();
+    expect(screen.queryByText(/No group text numbers yet/i)).toBeNull();
     expect(listPoolNumbers).not.toHaveBeenCalled();
   });
 });

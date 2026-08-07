@@ -1,11 +1,14 @@
 {
   "permissions": {
     "allow": [
-
     ],
     "ask": [
     ]
   },
+  "enableAllProjectMcpServers": true,
+  "enabledMcpjsonServers": [
+    "playwright"
+  ],
   "env": {
     "PLAYWRIGHT_MCP_OUTPUT_DIR": ".playwright-mcp"
   }

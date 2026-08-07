@@ -22,6 +22,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'listing_sends',
       'matches',
       'messages',
+      'pendingRosterActions',
       'placementDeadlines',
       'placementNudges',
       'placements',
@@ -177,6 +178,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'byTourDate',
     ]);
     expect(gsiNames('placementDeadlines')).toEqual(['byPlacement', 'byDueAt']);
+    expect(gsiNames('pendingRosterActions')).toEqual(['byOwner', 'byDueAt']);
     expect(gsiNames('invoices')).toEqual(['byLandlord', 'byStatus']);
     expect(gsiNames('users')).toEqual(['byEmail']);
     expect(gsiNames('audit_events')).toEqual(['byActor']);
@@ -196,6 +198,25 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       range_key: { name: 'at', type: 'S' },
     });
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
+  });
+
+  it('pendingRosterActions (contact-rosters 5.3): PK actionId; byOwner (ownerKey) + byDueAt (_actionPartition + dueAt); no stream/TTL', () => {
+    expect(tables['pendingRosterActions']).toEqual({
+      hash_key: { name: 'actionId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byOwner',
+          hash_key: { name: 'ownerKey', type: 'S' },
+        },
+        {
+          index_name: 'byDueAt',
+          hash_key: { name: '_actionPartition', type: 'S' },
+          range_key: { name: 'dueAt', type: 'S' },
+        },
+      ],
+      stream: false,
+      pitr: true,
+    });
   });
 
   it('TTL on messages + matches + unmatched_email (expires_at)', () => {

@@ -541,31 +541,25 @@ describe('sendMessage service', () => {
 // The Messaging Service's sender pool holds the main business number AND every
 // relay pool number, so leaving `from` off let Twilio pick — a tenant could get
 // a 1:1 text from a relay number they have never seen. The service now pins the
-// main business number (OUR_PHONE_NUMBERS[0]) on every unpinned send.
+// business number (BUSINESS_PHONE_NUMBER) on every unpinned send.
 // ---------------------------------------------------------------------------
 describe('outbound sender pinning (1:1)', () => {
   const MAIN = '+15550009999';
 
-  it('pins `from` to the main business number (OUR_PHONE_NUMBERS[0]) on a 1:1 send', async () => {
-    const f = makeFakes({ env: { OUR_PHONE_NUMBERS: MAIN } });
+  it('pins `from` to the business number (BUSINESS_PHONE_NUMBER) on a 1:1 send', async () => {
+    const f = makeFakes({ env: { BUSINESS_PHONE_NUMBER: MAIN } });
     await f.service({ conversationId: 'conv-1', body: 'hello there' });
     expect(f.sent).toEqual([{ to: '+15550100001', body: 'hello there', from: MAIN }]);
   });
 
-  it('pins the FIRST entry when OUR_PHONE_NUMBERS lists several (the ported number goes first)', async () => {
-    const f = makeFakes({ env: { OUR_PHONE_NUMBERS: `${MAIN},+15550008888` } });
-    await f.service({ conversationId: 'conv-1', body: 'hi' });
-    expect(f.sent[0]!.from).toBe(MAIN);
-  });
-
   it('an explicit `from` (the relay pool number) WINS over the configured default', async () => {
-    const f = makeFakes({ env: { OUR_PHONE_NUMBERS: MAIN } });
+    const f = makeFakes({ env: { BUSINESS_PHONE_NUMBER: MAIN } });
     await f.service({ conversationId: 'conv-1', body: 'relayed', from: '+15550109001' });
     expect(f.sent[0]!.from).toBe('+15550109001');
   });
 
-  it('omits `from` when OUR_PHONE_NUMBERS is empty — degrades to the service picking, never throws', async () => {
-    const f = makeFakes({ env: { OUR_PHONE_NUMBERS: '' } });
+  it('omits `from` when BUSINESS_PHONE_NUMBER is empty — degrades to the service picking, never throws', async () => {
+    const f = makeFakes({ env: { BUSINESS_PHONE_NUMBER: '' } });
     await expect(f.service({ conversationId: 'conv-1', body: 'hello' })).resolves.toMatchObject({
       providerSid: 'SMfake-1',
     });

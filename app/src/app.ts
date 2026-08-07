@@ -130,10 +130,10 @@ export function buildApp(deps: BuildAppDeps = {}): Express {
     createPublicRouter({
       logger: log,
       // flyer-full-info: the flyer's "text us" CTA + every opaque 404 carry the
-      // main 1:1 business number (config.ourPhoneNumbers[0]). string | undefined
-      // under noUncheckedIndexedAccess + the dep is optional, so spread it in
-      // only when configured (empty list -> the page degrades to reply-prompt).
-      ...(config.ourPhoneNumbers[0] !== undefined && { contactNumber: config.ourPhoneNumbers[0] }),
+      // main 1:1 business number (config.businessPhoneNumber). string | undefined
+      // and the dep is optional, so spread it in only when configured
+      // (unconfigured -> the page degrades to reply-prompt).
+      ...(config.businessPhoneNumber !== undefined && { contactNumber: config.businessPhoneNumber }),
       ...deps.public,
     }),
   );

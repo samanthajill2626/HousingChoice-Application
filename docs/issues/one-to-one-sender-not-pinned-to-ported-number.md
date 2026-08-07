@@ -3,11 +3,12 @@ id: one-to-one-sender-not-pinned-to-ported-number
 title: 1:1 SMS lets Twilio pick the sender, so tenants may not see the ported number
 type: bug
 severity: high
-status: open
+status: resolved
 confirmed: 2026-08-06
 area: app/messaging
 created: 2026-08-06
-refs: app/src/services/sendMessage.ts:326, app/src/adapters/messaging.ts:590, app/src/lib/config.ts:1130
+resolved: 2026-08-06
+refs: app/src/services/sendMessage.ts:338, app/src/adapters/messaging.ts:50, app/src/adapters/messaging.ts:605, app/src/lib/config.ts:1132
 ---
 
 **Problem.** The whole point of porting `+1 678-284-2537` at the M1.11 cutover is
@@ -118,3 +119,41 @@ the port makes it acute, and makes the flyer's promise ("text us at this number"
 something we can no longer guarantee we send from.
 
 Related: `ported-number-not-on-a2p-campaign`.
+
+**Resolution (2026-08-06).** Fixed in two parts. Everything above this line is
+the record as written on 2026-08-06 and is deliberately left unedited; read it
+as history, not as current behavior.
+
+1. **The pin landed on `main` (`fix/pin-sms-sender`, merged @db54d38d).** Both
+   unpinned callers now pass an explicit `from`: the shared send service
+   (`services/sendMessage.ts:338`) and the staff cell-verification SMS
+   (`routes/voiceApi.ts`). `SendMessageParams.from` documents the new contract -
+   EVERY caller pins, relay its pool number and 1:1 the business number
+   (`adapters/messaging.ts:50-65`, pin site `:605`) - so a new caller cannot
+   silently inherit the old "1:1 omits it" behavior. `from` rides ALONGSIDE
+   `messagingServiceSid`, so A2P registration still applies; this pins WHICH
+   sender, it does not bypass the service.
+
+2. **The config it pins from is now singular** (`feat/business-number-config`).
+   `OUR_PHONE_NUMBERS` and its positional `[0]` are gone; the sender, the voice
+   caller ID, the flyer CTA and the thread "which side is us" all read one
+   scalar, `BUSINESS_PHONE_NUMBER` -> `config.businessPhoneNumber`
+   (`lib/config.ts:1132`). "Is this one of ours?" became a separate named
+   predicate (`services/ourNumberKind.ts`) that pairs that scalar with the
+   pool-number lookup. The issue's "Suggested fix" step 1 asked for exactly
+   this; the ordering hazard it describes no longer exists, because a scalar has
+   no order.
+
+**The topology this issue describes has also changed.** The body assumes ONE
+Messaging Service holding the 404 number, the ported 678 number and every relay
+pool number, with Twilio choosing between them. Per the operator decision of
+2026-08-06 there is now ONE Messaging Service and ONE A2P campaign PER
+ENVIRONMENT: the 404 number serves dev, the ported `+16782842537` serves prod,
+and neither environment's numbers appear in the other's service. The "So the
+ordering matters twice over" section above is obsolete on both counts.
+
+Still open and NOT closed by this: attaching the ported number to the prod
+Messaging Service and campaign is an operator, cutover-day step - tracked by
+`ported-number-not-on-a2p-campaign`. Pinning `from` to a number that is not in
+the service's sender pool is rejected (error 30034), so the pin does not remove
+that requirement.

@@ -10,11 +10,11 @@ const unit = (over: Partial<UnitItem> = {}): UnitItem => ({
 });
 
 describe('listingRoster', () => {
-  it('uses the unit contacts[] roster when present (C3), ordered primaryVoice first', () => {
+  it('uses the unit contacts[] roster when present (C3), ordered primaryContact first', () => {
     const u = unit({
       contacts: [
-        { contactId: 'pm1', role: 'pm', primaryVoice: false, name: 'Maria Gomez', company: 'Porter' },
-        { contactId: 'll1', role: 'landlord', primaryVoice: true, name: 'James Porter', company: 'Porter' },
+        { contactId: 'pm1', role: 'pm', primaryContact: false, name: 'Maria Gomez', company: 'Porter' },
+        { contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter', company: 'Porter' },
       ],
     });
     const rows = listingRoster(u, null);
@@ -23,10 +23,10 @@ describe('listingRoster', () => {
       name: 'James Porter',
       roleLabel: 'Landlord',
       company: 'Porter',
-      primaryVoice: true,
+      primaryContact: true,
       fallback: false,
     });
-    expect(rows[1]).toMatchObject({ roleLabel: 'Property manager', primaryVoice: false });
+    expect(rows[1]).toMatchObject({ roleLabel: 'Property manager', primaryContact: false });
   });
 
   it('falls back to a single landlord row from the resolved contact when contacts[] is absent', () => {
@@ -45,7 +45,7 @@ describe('listingRoster', () => {
       name: 'James Porter',
       roleLabel: 'Landlord',
       company: 'Porter Properties',
-      primaryVoice: true,
+      primaryContact: true,
       fallback: true,
     });
   });
@@ -53,7 +53,7 @@ describe('listingRoster', () => {
   it('falls back with no resolved contact (id-only row, name undefined)', () => {
     const rows = listingRoster(unit({ landlordId: 'll9' }), null);
     expect(rows).toHaveLength(1);
-    expect(rows[0]).toMatchObject({ contactId: 'll9', primaryVoice: true, fallback: true });
+    expect(rows[0]).toMatchObject({ contactId: 'll9', primaryContact: true, fallback: true });
     expect(rows[0]?.name).toBeUndefined();
   });
 

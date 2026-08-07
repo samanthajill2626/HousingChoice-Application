@@ -88,11 +88,12 @@ test('no_show_checkin is not auto-sent; staff send it manually with prefilled co
   await page.getByRole('button', { name: /more actions/i }).click();
   await page.getByRole('menuitem', { name: /send no-show check-in/i }).click();
 
-  // The action selects the Tenant channel and prefills its 1:1 composer with the
-  // editable no_show_checkin template.
-  await expect(page.getByRole('tab', { name: /^Tenant/, selected: true })).toBeVisible({
-    timeout: 10_000,
-  });
+  // The action selects the tenant's channel and prefills its 1:1 composer with
+  // the editable no_show_checkin template. Person tabs are labeled by DISPLAY
+  // NAME (contact-rosters slice 2) - anchor on the run-unique first name.
+  await expect(
+    page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`), selected: true }),
+  ).toBeVisible({ timeout: 10_000 });
   await expect(page.getByRole('textbox', { name: 'Reply message' })).toHaveValue(
     new RegExp(CHECKIN_PHRASE),
   );

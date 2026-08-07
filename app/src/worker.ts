@@ -219,11 +219,12 @@ runWithContext(bootContext, () => {
   const { createToursRepo } = await import('./repos/toursRepo.js');
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
-  const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createUnitsRepo } = await import('./repos/unitsRepo.js');
+  const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createSendMessageService } = await import('./services/sendMessage.js');
   const { createMessagingAdapter } = await import('./adapters/messaging.js');
   const { createSettingsRepo } = await import('./repos/settingsRepo.js');
+  const { createPendingRosterActionsRepo } = await import('./repos/pendingRosterActionsRepo.js');
   const { runDueTourReminders } = await import('./jobs/tourReminders.js');
 
   const tourReminderDeps = {
@@ -231,12 +232,18 @@ runWithContext(bootContext, () => {
     toursRepo: createToursRepo({ logger }),
     contactsRepo: createContactsRepo({ logger }),
     conversationsRepo: createConversationsRepo({ logger }),
+    // ONE unit read, TWO consumers: roster resolution (contact-rosters D11 -
+    // the tenant-1:1 suppression check reads the property's primary contact for
+    // the DEFAULT roster), AND the address that rides in the reminder copy (a
+    // failed read degrades to the no-address variant rather than losing the
+    // reminder).
+    unitsRepo: createUnitsRepo({ logger }),
+    // D7 (contact-rosters): a group-eligible rung WAITS while its tour's group
+    // open is deferred to quiet-end, instead of falling back to the tenant 1:1.
+    pendingRosterActionsRepo: createPendingRosterActionsRepo({ logger }),
     // GROUP-route rungs persist a system announcement row in the relay thread
     // (sendRelayAnnouncement) — messagesRepo backs that persistence.
     messagesRepo: createMessagesRepo({ logger }),
-    // The unit's address rides in the reminder copy; a failed read degrades to
-    // the no-address variant rather than losing the reminder.
-    unitsRepo: createUnitsRepo({ logger }),
     sendMessageService: createSendMessageService({ config, logger }),
     // GROUP-route reminders (landlord_led/pm_team with a group thread) send
     // directly per member from the pool number — same construction the relay
@@ -298,6 +305,59 @@ runWithContext(bootContext, () => {
     const now = new Date().toISOString();
     void runDuePlacementNudges(now, placementNudgeDeps).catch((err: unknown) => {
       logger.error({ err }, 'placement nudge poll error');
+    });
+  }, config.workerPollIntervalMs).unref();
+}
+
+// Pending-roster-action poll (contact-rosters Task 13): the same stateless 60s
+// cadence as the two polls above (state is the DynamoDB pendingRosterActions
+// rows). Applies the roster changes an operator confirmed during quiet hours -
+// opening a group text, adding a member - now that the window has passed, on the
+// same claim-and-skip discipline. Deps are built once, lazily imported like the
+// blocks above; .unref()'d so it never holds the process open on shutdown.
+{
+  const { createPendingRosterActionsRepo } = await import('./repos/pendingRosterActionsRepo.js');
+  const { createToursRepo } = await import('./repos/toursRepo.js');
+  const { createPlacementsRepo } = await import('./repos/placementsRepo.js');
+  const { createPlacementDeadlinesRepo } = await import('./repos/placementDeadlinesRepo.js');
+  const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
+  const { createContactsRepo } = await import('./repos/contactsRepo.js');
+  const { createUnitsRepo } = await import('./repos/unitsRepo.js');
+  const { createAuditRepo } = await import('./repos/auditRepo.js');
+  const { createActivityEventsRepo } = await import('./repos/activityEventsRepo.js');
+  const { createPoolNumbersService } = await import('./services/poolNumbers.js');
+  const { appEvents } = await import('./lib/events.js');
+  const { runDuePendingRosterActions } = await import('./jobs/rosterActions.js');
+
+  const rosterActionDeps = {
+    actions: createPendingRosterActionsRepo({ logger }),
+    tours: createToursRepo({ logger }),
+    placements: createPlacementsRepo({ logger }),
+    // The placement.updated emit carries the recomputed soonest deadline.
+    placementDeadlines: createPlacementDeadlinesRepo({ logger }),
+    conversations: createConversationsRepo({ logger }),
+    contacts: createContactsRepo({ logger }),
+    units: createUnitsRepo({ logger }),
+    audit: createAuditRepo({ logger }),
+    activityEvents: createActivityEventsRepo({ logger }),
+    // A deferred OPEN buys/assigns the group's pool number, and a deferred ADD
+    // burns the new member onto it (W1) - the same service the routes use.
+    poolNumbers: createPoolNumbersService({ config, logger }),
+    // The bridge (lib/eventBridge.ts) forwards conversation/tour/placement pokes
+    // to app SSE clients when EVENT_BRIDGE_URL is set; an unbridged emit is a
+    // no-op. The card refetches when a deferral finally lands.
+    events: appEvents,
+    // With the kill-switch OFF a deferred open cannot be provisioned at all, and
+    // the refusal is raised from inside the open (post-claim, invisible) - so the
+    // poller pre-checks it and retires the row with a VISIBLE notice instead.
+    relayLiveProvisioning: config.relayLiveProvisioning,
+    logger,
+  };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runDuePendingRosterActions(now, rosterActionDeps).catch((err: unknown) => {
+      logger.error({ err }, 'roster action poll error');
     });
   }, config.workerPollIntervalMs).unref();
 }

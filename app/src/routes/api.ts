@@ -121,6 +121,10 @@ import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
 import { createTourRemindersRouter } from './tourReminders.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import {
+  createPendingRosterActionsRepo,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
@@ -230,6 +234,10 @@ export interface ApiRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   /** Injected clock for tour-reminder arm/re-arm dueAt computation (tests only). */
   toursNow?: () => string;
+  /** Injected clock for the placement router's quiet-hours evaluation (tests only). */
+  placementsNow?: () => string;
+  /** Quiet-hours roster deferrals (contact-rosters Task 13) - injected in tests. */
+  pendingRosterActionsRepo?: PendingRosterActionsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -439,6 +447,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  // contact-rosters Task 13: ONE pending-roster-actions repo for both hubs, so a
+  // tour's deferrals and the placement's read/write the same rows.
+  const rosterActions =
+    deps.pendingRosterActionsRepo ?? createPendingRosterActionsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
@@ -530,6 +542,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/settings',
     createSettingsRouter({
+      config,
       logger: deps.logger,
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,
@@ -712,6 +725,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       // tour_took_place milestone on the toured transition (Post-Tour & Application).
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 13: the quiet-hours deferral rows (pending open/add).
+      pendingRosterActionsRepo: rosterActions,
       events,
     }),
   );
@@ -728,6 +743,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // ONE unit read, TWO consumers: D11 (contact-rosters) - send-now resolves
+      // the tour's roster, whose DEFAULT rung is the property's primary contact
+      // - AND the unit address behind the composed reminder copy. Forwarded as
+      // the RESOLVED local (same rationale as the timeline gather above) so
+      // prod/e2e read a real repo while injected fakes still win.
+      unitsRepo: units,
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.
       settingsRepo: settings,
@@ -739,10 +760,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       adapter,
       messagesRepo: messages,
       auditRepo: audit,
-      // The unit address behind the composed reminder copy - forwarded as the
-      // RESOLVED local (same rationale as the timeline gather above) so prod/e2e
-      // read a real repo while injected fakes still win.
-      unitsRepo: units,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -820,6 +837,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 10: the roster previews read the org quiet-hours
+      // window through the SAME settings repo the armers use.
+      settingsRepo: settings,
+      // contact-rosters Task 13: the quiet-hours deferral rows + the clock the
+      // open/live-add paths evaluate the window against.
+      pendingRosterActionsRepo: rosterActions,
+      ...(deps.placementsNow !== undefined && { now: deps.placementsNow }),
       events,
     }),
   );

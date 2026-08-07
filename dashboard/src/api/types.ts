@@ -66,7 +66,7 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
-// --- Settings: Group text numbers (admin pool-number inventory) --------------
+// --- Settings > Phone numbers: the group text pool (admin-only inventory) ----
 // Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
 // The dashboard is a separate package and cannot import from app/src, so these
 // are duplicated; keep them in sync with the router when the shape changes.
@@ -138,13 +138,19 @@ export type SettingsPatch = Partial<Omit<OrgSettings, 'welcomeText'>> & {
   welcomeText?: string | null;
 };
 
-/** GET/PUT /api/settings response. `welcomeTextDefault` rides alongside the
- *  settings (read-only, never patchable): the exact welcome body the backend
- *  sends when `welcomeText` is unset, so the UI can show the admin what "the
- *  default" actually says. */
+/** GET/PUT /api/settings response. `welcomeTextDefault` and
+ *  `businessPhoneNumber` ride alongside the settings (read-only, never
+ *  patchable): the exact welcome body the backend sends when `welcomeText` is
+ *  unset, so the UI can show the admin what "the default" actually says, and
+ *  OUR one business number, so the UI can show what this app sends from. */
 export interface SettingsResponse {
   settings: OrgSettings;
   welcomeTextDefault: string;
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164. OPTIONAL: the
+   *  backend OMITS the key when unconfigured - it is never `null`, so test the
+   *  unset case with `=== undefined`. Carried by BOTH the GET and the PUT (the
+   *  dashboard re-sets this state from the PUT response). */
+  businessPhoneNumber?: string;
 }
 
 // --- Settings: System Status (admin-only) -----------------------------------
@@ -166,6 +172,20 @@ export interface SystemFlags {
   /** Outbound messaging driver as displayed. `mock` = the twilio driver
    *  redirected to a fake host (local `--mock` loop); never appears deployed. */
   messagingDriver: 'twilio' | 'console' | 'mock';
+  /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164 - what this app is
+   *  configured to send FROM. OPTIONAL: the backend OMITS the key when the env
+   *  has no number - it is never `null` (a `null` would also break the
+   *  every-flag-is-a-boolean-or-string assertion in the backend's service
+   *  test), so test the unset case with `=== undefined`.
+   *
+   *  PII: this is the ONLY phone number this payload may ever carry, and it is
+   *  ours - the number on our public flyers - never a contact's or the
+   *  founder's. It does NOT weaken the "never secrets" rule above.
+   *
+   *  HONEST SCOPE: configured here is not proof a send succeeds; the number
+   *  must also be attached to the Messaging Service and covered by the A2P
+   *  campaign, neither of which this payload checks. */
+  businessPhoneNumber?: string;
 }
 
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
@@ -692,6 +712,169 @@ export interface TourActivityEvent {
   conversationId?: string;
 }
 
+// --- Tour / placement contact roster (contact-rosters, spec 2026-08-04) ------
+
+/**
+ * WHERE the roster the client is looking at came from (spec D1, the PLAN vs FACT
+ * split). `participants` = a relay thread exists (ANY status) and its member
+ * rows ARE the roster; `plan` = a stored override waiting to be consumed at
+ * open; `default` = the property's primary contact + the tenant; `unavailable` =
+ * a thread pointer is set but the conversation could NOT be read. An
+ * `unavailable` roster is NEVER silently re-resolved into the default - the card
+ * says so and offers a retry, because being wrong about who is on a live group
+ * text outranks "never show an error".
+ */
+export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
+
+/** A member's role on this roster: the tenant, their row's role on the unit
+ *  roster, an ad-hoc `added` member, or a contact record that is GONE
+ *  (`removed_contact` - dangling id or soft-deleted; it wins over every other
+ *  label so a dead record can never render as an active tenant/PM). */
+export type RosterMemberRole =
+  | 'tenant'
+  | 'landlord'
+  | 'pm'
+  | 'owner'
+  | 'other'
+  | 'added'
+  | 'removed_contact';
+
+/** Whether the GROUP TEXT can reach this member (the send path's own view). */
+export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
+
+export interface RosterMemberView {
+  /** contactId, else `phone:<E164>` - the ONLY key the client ever sends back. */
+  memberKey: string;
+  contactId?: string;
+  /** Display only. The FULL phone never leaves the server (spec 6.2 forbids
+   *  phone numbers on the card; the last 4 is how a bare-phone row is named). */
+  phoneLast4?: string;
+  name?: string;
+  role: RosterMemberRole;
+  reachability: RosterReachability;
+  /** The EARLIER member on this same number, when there is one with a name. */
+  sharesPhoneWithName?: string;
+}
+
+/** What a deferred roster change WAS: opening the group, or adding one person.
+ *  MIRRORS app/src/repos/pendingRosterActionsRepo.ts `RosterActionKind`. */
+export type RosterActionKind = 'open_group' | 'add_member';
+
+/**
+ * Why the poller retired a deferred action WITHOUT doing it - the world moved
+ * between the confirm and quiet-end. MIRRORS the server's
+ * `RosterActionSkipReason` verbatim; the card renders honest copy for every
+ * member (spec 6.5), so widening this union without widening that copy is a
+ * type error, not a silent blank row.
+ */
+export type RosterActionSkipReason =
+  | 'group_closed'
+  /** Tour canceled / placement closed. */
+  | 'owner_canceled'
+  | 'already_member'
+  | 'contact_deleted'
+  /** Removed from the roster WHILE the add was pending. */
+  | 'member_no_longer_on_roster'
+  /** The roster lost its second reachable member. */
+  | 'roster_too_thin'
+  /** Live relay-number provisioning is off in this environment, so no group
+   *  text can be opened (the pre-A2P posture). */
+  | 'provisioning_unavailable'
+  /** Only when migration to the converted placement failed. */
+  | 'converted';
+
+/**
+ * One change confirmed inside QUIET HOURS and waiting for the window to end
+ * (spec 5.3 / 6.5). A pending `add_member` is deliberately NOT in `members`:
+ * membership defers WITH the message (D7), so nobody joins a group text before
+ * the group has been told.
+ */
+export interface RosterPendingAction {
+  /** The deterministic id the pending endpoints take. */
+  actionId: string;
+  kind: RosterActionKind;
+  /** add_member only. */
+  contactId?: string;
+  /** add_member only - best-effort display name. */
+  name?: string;
+  /** ISO 8601 - quiet-end, when the poller applies it. */
+  dueAt: string;
+}
+
+/**
+ * One resolved action that still owes the operator a NOTICE: it was retired
+ * instead of applied, or a human canceled it. Visible until dismissed - APPLIED
+ * actions are absent here because the roster itself is their receipt.
+ */
+export interface RosterSkippedAction {
+  actionId: string;
+  kind: RosterActionKind;
+  contactId?: string;
+  name?: string;
+  /** `'canceled'` is the operator's own cancel - a fact, not a failure. */
+  reason: RosterActionSkipReason | 'canceled';
+  /** ISO 8601 - when it resolved. */
+  at: string;
+}
+
+/** GET /api/tours/:tourId/roster and GET /api/placements/:placementId/roster
+ *  return this AS THE BODY (not wrapped). */
+export interface RosterView {
+  source: RosterSource;
+  members: RosterMemberView[];
+  /** The roster differs from the property's current default (spec 5.2 equality). */
+  customized: boolean;
+  /** The default roster's first non-tenant member - the "the property's default
+   *  is <name>" note. Absent on an `unavailable` roster (never computed there). */
+  defaultPrimaryName?: string;
+  /** false -> tenant 1:1 reminders / nudges are suppressed (D11). */
+  tenantOnRoster: boolean;
+  /** >= 2 DISTINCT reachable numbers AND no thread yet. */
+  canOpenGroup: boolean;
+  threadExists: boolean;
+  /** Quiet-hours deferrals still waiting, due-first. ALWAYS present (`[]` when
+   *  there are none) - the server serves both arrays on GET and on every
+   *  mutating roster endpoint, so ONE decoding rule covers all of them. */
+  pending: RosterPendingAction[];
+  /** Terminal notices NOT yet dismissed, newest-first. ALWAYS present. */
+  skipped: RosterSkippedAction[];
+}
+
+/** One line of a preview's per-member deliverability (spec 6.3): who the send
+ *  touches, receiving or not, and why not. */
+export interface RosterPreviewRecipient {
+  name?: string;
+  reachability: RosterReachability;
+}
+
+/**
+ * What a group send WOULD do, resolved server-side. Returned as the BODY by
+ * `GET .../roster/preview-open` and `POST .../roster/preview-add`.
+ *
+ * `body` is composed from the `relay.intro` / `relay.member_added` catalog
+ * entries BY THE SERVER and is rendered verbatim: the templates are
+ * founder-editable, so a browser-side copy would drift the first time one is
+ * edited (spec 6.3). The client never rebuilds it and never re-derives
+ * `quietEndsAt` (the DST-safe window math is the server's).
+ *
+ * `deferred` drives the dialog's THREE-button quiet-hours layout (spec 6.3):
+ * confirming defers the whole change to `quietEndsAt` (the server answers 202
+ * with a pending row), and only "Send now anyway" (`?force=send_now`) sends
+ * immediately.
+ */
+export interface RosterPreview {
+  /** The exact SMS body the group receives. */
+  body: string;
+  /** Everyone the send touches, in roster order, receiving or not. */
+  recipients: RosterPreviewRecipient[];
+  /** DISTINCT reachable numbers - what "3 recipients" honestly means. */
+  recipientCount: number;
+  /** Quiet hours hold right now. */
+  deferred: boolean;
+  /** ISO instant the quiet window ends; present only when `deferred`. */
+  quietEndsAt?: string;
+}
+
 // --- Tour reminder ladder (scheduled-message-visibility) ---------------------
 
 /**
@@ -768,6 +951,8 @@ export interface TourReminderView {
     | 'tour_missing'
     | 'quiet_hours_superseded'
     | 'past_event'
+    | 'tenant_not_on_roster'
+    | 'roster_unavailable'
     // The tour has no usable scheduledAt, so no body could be composed for the
     // rung - the poll retires it rather than sending a half-written text.
     | 'invalid_schedule';
@@ -824,6 +1009,8 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   tour_missing: 'tour missing',
   quiet_hours_superseded: 'superseded by a later reminder',
   past_event: 'would land after the tour starts',
+  tenant_not_on_roster: "tenant not on this tour's roster",
+  roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
   invalid_schedule: 'schedule unusable',
 };
 
@@ -856,6 +1043,12 @@ const SEND_NOW_ERROR_COPY: Readonly<Record<string, string>> = {
   contact_missing: 'That contact is gone, so nothing was sent.',
   contact_no_phone: 'That contact has no phone number, so nothing was sent.',
   unknown_kind: 'This app does not know how to send that nudge.',
+  // contact-rosters D11: the rung targets the tenant 1:1 but the tenant was
+  // removed from the roster. (`roster_unavailable` - the roster could not be
+  // READ - deliberately has no entry: the generic retry sentence is exactly
+  // right for a transient failure.)
+  tenant_not_on_roster:
+    'That person is not on this roster, so nothing was sent - add them back to send.',
   // Post-claim race (the gate flipped mid-send): the row IS consumed but nothing
   // went out, so these must read as errors, not successes.
   contact_no_consent: 'No SMS consent on file - record consent before sending this by hand.',
@@ -972,7 +1165,9 @@ export type NudgeSkipReason =
   | 'unit_missing'
   | 'no_landlord'
   | 'contact_missing'
-  | 'contact_no_phone';
+  | 'contact_no_phone'
+  | 'tenant_not_on_roster'
+  | 'roster_unavailable';
 
 export interface PlacementNudgeView {
   nudgeId: string;
@@ -1494,7 +1689,7 @@ export interface UnitItem {
   tour_type?: TourType;
   /** Free-text "how to apply" copy (the property page's process card). */
   application_process?: string;
-  primary_voice_contact?: string;
+  primary_contact?: string;
   /** Soft-delete marker (ISO 8601). Present → the property is "deleted": hidden
    *  from the property lists + landlord card but fully retained (restore clears it). */
   deleted_at?: string;
@@ -1668,6 +1863,7 @@ export type TimelineMilestoneType =
   | 'tour_no_show'
   | 'tour_outcome'
   | 'tour_group_opened'
+  | 'placement_group_opened'
   | 'tour_converted'
   | 'stage_changed'
   | 'contact_status_changed'
@@ -1901,16 +2097,16 @@ export interface RelayGroupRow {
 // Copied verbatim from the build plan §C3. The property page's Contacts roster
 // (landlord/PM, each opening their contact page) + Related-properties panel.
 // UnitItem gains an optional `contacts[]` (BE3); legacy `landlordId` stays = the
-// primary landlord, which the page uses as a single-row FALLBACK until BE3 lands.
+// landlord of record, which the page uses as a single-row FALLBACK until BE3 lands.
 
 export interface UnitContact {
   contactId: string;
   role: 'landlord' | 'pm' | 'owner' | 'other';
-  primaryVoice: boolean; // the ☎ primary
+  primaryContact: boolean; // the ☎ primary
   name?: string;
   company?: string; // denormalized for the roster row
 }
-// UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the primary landlord)
+// UnitItem gains: contacts?: UnitContact[]   (legacy landlordId stays = the landlord of record)
 export interface RelatedUnit {
   unitId: string;
   address?: Address | string; // reuse legacy

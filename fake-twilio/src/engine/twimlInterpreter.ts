@@ -59,6 +59,11 @@ export function interpretTwiml(xml: string): TwimlPlan {
       typeof sayNode === 'object' && sayNode !== null
         ? String((sayNode as Record<string, unknown>)['#text'] ?? '')
         : String(sayNode ?? '');
+    // NOTE: the app no longer emits "press 0" copy (the relay team escape was
+    // removed 2026-08-06, docs/issues/press-0-team-escape-removed.md), so
+    // sayContainsPress0 is permanently false for OUR TwiML. Kept: this is a
+    // generic TwiML parser, not an app-specific assertion, and the engine
+    // never branches on the field.
     return { kind: 'gather', ...(g['@_action'] !== undefined && { actionUrl: String(g['@_action']) }), numDigits: Number(g['@_numDigits'] ?? 1), timeoutSec: Number(g['@_timeout'] ?? 5), sayContainsPress0: /press 0/i.test(say) };
   }
   if ('Pause' in r) return { kind: 'pause', lengthSec: Number((r['Pause'] as Record<string, unknown>)['@_length'] ?? 1) };

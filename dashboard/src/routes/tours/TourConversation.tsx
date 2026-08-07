@@ -1,9 +1,13 @@
-// TourConversation - the tour page's LEFT pane: a three-channel switcher (Group
-// text / Tenant 1:1 / Landlord-or-PM 1:1). All three tabs always render; the
-// initial tab is Group when the tour already has a group thread, else Tenant, and
-// it NEVER auto-switches after load (only a user click moves it).
+// TourConversation - the tour page's LEFT pane: a channel switcher over the group
+// text plus ONE 1:1 tab per person the page put on this tour (`channels.people`,
+// keyed by contactId and labelled with that person's DISPLAY NAME - no role
+// words, no PM/Landlord branch: the page owns WHO is on the tour, this component
+// only renders them). The initial tab is Group when the tour already has a group
+// thread, else the tenant's, and it NEVER auto-switches after load (only a user
+// click moves it) - except that a selection pointing at a person who is no longer
+// on the tour falls back to Group (spec 6.6).
 //
-// The two 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
+// The 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
 // ContactCommsPane, the same component the contact page renders), not a
 // single-conversation relay transcript: they show the PERSON's whole feed - every
 // number's thread, email, calls and the lifecycle pins the server writes - and
@@ -21,11 +25,11 @@
 // + a foreground browser tab) - see that file's effect for why.
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
-// never fetch all three up front). Empty states render in place: the group offers
-// [Open group text]; a 1:1 whose contact is unresolved says so (the pane requires
-// a LOADED Contact), and a contact with no thread yet gets a live composer that
-// creates the conversation on the first send.
-import { useEffect, useMemo, useRef, useState } from 'react';
+// never fetch every tab up front). Empty states render in place: the group offers
+// [Open group text]; a 1:1 whose contact record failed to load says so (the pane
+// requires a LOADED Contact), and a contact with no thread yet gets a live
+// composer that creates the conversation on the first send.
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getConversation,
   getConversationMembers,
@@ -39,22 +43,35 @@ import {
 import { Button } from '../../ui/index.js';
 import { Timeline } from '../contact/Timeline.js';
 import { ContactCommsTab } from '../contact/ContactCommsTab.js';
-import { contactDisplayName } from '../contact/format.js';
 import { useRelayThread } from '../conversation/useRelayThread.js';
-import { type TourChannelKey, type TourChannelsState } from './useTourChannels.js';
+import { type TourChannelsState } from './useTourChannels.js';
 import styles from './TourDetail.module.css';
+
+/** The GROUP tab's key. Every other tab keys on a contactId, which can never
+ *  collide with it (contact ids are minted with an id prefix). */
+const GROUP_KEY = 'group';
 
 export interface TourConversationProps {
   tour: Tour;
+  /** The contact RECORDS the page fetched, for whichever people are on the
+   *  channels: the 1:1 pane needs a loaded Contact, not just an id. */
   tenant: Contact | null;
   landlord: Contact | null;
-  /** The unit's landlordId - the landlord/PM 1:1 target (may be unresolved). */
-  landlordId: string | undefined;
+  /** The records for ROSTER members who are neither of those two - the PM on a
+   *  PM-managed property, anyone added by hand (useRosterContacts). Without
+   *  them those tabs would have no Contact to open a pane with (spec D6). */
+  rosterContacts?: Contact[];
   channels: TourChannelsState;
   /** Provision the group thread (shared with the header kebab); errors surface in
    *  the page header banner. */
   onOpenGroup: () => void;
   openGroupBusy: boolean;
+  /** Why [Open group text] is unavailable RIGHT NOW even though the tour could
+   *  otherwise take one - today: the roster has fewer than two reachable
+   *  members (contact-rosters spec 6.2). Present -> the control is disabled and
+   *  carries this sentence, instead of failing at click time with the route's
+   *  400 relay_member_unresolvable. */
+  openGroupDisabledReason?: string;
   /** THIS tour's lifecycle events as shared-Timeline milestone pins (oldest ->
    *  newest), interleaved into the GROUP transcript so it shows tour activity,
    *  not just comms. The 1:1 tabs get their pins from the PERSON feed instead
@@ -82,34 +99,31 @@ function withMilestones(
   return [...items, ...milestones].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
 }
 
-/** A member's first name, or null when unknown. */
-function firstNameOf(c: Contact | null): string | null {
-  const f = c?.firstName?.trim();
-  return f && f.length > 0 ? f : null;
-}
-
 export function TourConversation({
   tour,
   tenant,
   landlord,
-  landlordId,
+  rosterContacts,
   channels,
   onOpenGroup,
   openGroupBusy,
+  openGroupDisabledReason,
   tourMilestones,
   noShowDraft,
   commsVisible,
 }: TourConversationProps): React.JSX.Element {
   // Initial tab decided ONCE from the tour at first render; never re-synced.
-  const [activeKey, setActiveKey] = useState<TourChannelKey>(
-    tour.groupThreadId ? 'group' : 'tenant',
+  // 'group', else a contactId - here the tenant's.
+  const [activeKey, setActiveKey] = useState<string>(
+    tour.groupThreadId ? GROUP_KEY : tour.tenantId,
   );
 
-  // "Send no-show check-in" seed: on a new nonce we (1) select the Tenant tab and
-  // (2) hand seededBody to the tenant pane, bumping seedKey to REMOUNT it so the
-  // Timeline initialDraft initializer picks up the copy. seededBody is cleared
-  // once the pane reports it consumed the seed (onDraftSeeded), so a later manual
-  // switch back to Tenant starts with an empty composer.
+  // "Send no-show check-in" seed: on a new nonce we (1) select the TENANT's tab
+  // (by their contactId - the tab keys are people now) and (2) hand seededBody to
+  // the tenant pane, bumping seedKey to REMOUNT it so the Timeline initialDraft
+  // initializer picks up the copy. seededBody is cleared once the pane reports it
+  // consumed the seed (onDraftSeeded), so a later manual switch back to the
+  // tenant starts with an empty composer.
   const [seededBody, setSeededBody] = useState<string | null>(null);
   const [seedKey, setSeedKey] = useState(0);
   const lastSeedNonce = useRef(0);
@@ -117,70 +131,60 @@ export function TourConversation({
     const nonce = noShowDraft?.nonce ?? 0;
     if (nonce > 0 && nonce !== lastSeedNonce.current) {
       lastSeedNonce.current = nonce;
-      setActiveKey('tenant');
+      setActiveKey(tour.tenantId);
       setSeededBody(noShowDraft?.body ?? '');
       setSeedKey((k) => k + 1);
     }
-  }, [noShowDraft?.nonce, noShowDraft?.body]);
+  }, [noShowDraft?.nonce, noShowDraft?.body, tour.tenantId]);
 
-  // ONE "Comms only" filter per page visit, shared by BOTH 1:1 tabs and held
+  // ONE "Comms only" filter per page visit, shared by EVERY 1:1 tab and held
   // ABOVE their keyed remount. Timeline's own copy is per-mount state, so without
   // this the filter would reset on every tab switch and every seed nonce - and a
   // pin-heavy person feed is exactly where an operator reaches for it (spec A-M2).
   const [commsOnly, setCommsOnly] = useState(false);
 
-  const isPm = tour.tourType === 'pm_team';
-  const tenantFirst = firstNameOf(tenant);
-  const landlordFirst = firstNameOf(landlord);
-  const tabs: { key: TourChannelKey; label: string; unread: number }[] = [
-    { key: 'group', label: 'Group text', unread: channels.group.unread },
-    {
-      key: 'tenant',
-      label: tenantFirst ? `Tenant - ${tenantFirst}` : 'Tenant',
-      unread: channels.tenant.unread,
-    },
-    {
-      key: 'landlord',
-      label: isPm
-        ? landlordFirst
-          ? `PM - ${landlordFirst}`
-          : 'PM'
-        : landlordFirst
-          ? `Landlord - ${landlordFirst}`
-          : 'Landlord',
-      unread: channels.landlord.unread,
-    },
+  // The rail: the group text, then one tab per person - label verbatim from the
+  // channel (the page resolved the display name; no role word is derived here).
+  const people = channels.people;
+  const tabs: ChannelTab[] = [
+    { key: GROUP_KEY, label: 'Group text', unread: channels.group.unread },
+    ...people.map((p) => ({ key: p.contactId, label: p.label, unread: p.unread })),
   ];
 
-  const tenantName = tenant
-    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
-    : 'the tenant';
-  const landlordName = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : isPm
-      ? 'the property manager'
-      : 'the landlord';
+  // Selection-on-remove (spec 6.6): an activeKey that is not one of THIS tour's
+  // people - they were dropped from the roster while their tab was selected -
+  // lands on the GROUP tab, which always exists. Derived, never re-synced state:
+  // activeKey itself is untouched, so nothing has to be undone if they return.
+  const activePerson = people.find((p) => p.contactId === activeKey);
+  const isGroupTab = activePerson === undefined;
+  const effectiveKey = isGroupTab ? GROUP_KEY : activeKey;
 
   const groupDead = tour.status === 'canceled' || tour.status === 'closed';
-  const oneToOneKey: 'tenant' | 'landlord' = activeKey === 'landlord' ? 'landlord' : 'tenant';
-  const oneToOneContactId = activeKey === 'landlord' ? landlordId : tour.tenantId;
-  const oneToOneName = activeKey === 'landlord' ? landlordName : tenantName;
+  const oneToOneContactId = activePerson?.contactId;
+  const oneToOneName = activePerson?.label ?? '';
   // The pane needs a LOADED Contact - it derives the numbers, addresses and the
-  // deleted / opted-out send gates from it, so an id alone is not enough.
-  const oneToOneContact = activeKey === 'landlord' ? landlord : tenant;
-  // Two ways it can be missing, and they are different facts: the unit has no
-  // landlordId at all (nothing to load), or the page's best-effort getContact
-  // failed. Say which - a bare "no messages yet" would be a lie.
-  const oneToOneMissingNote =
-    oneToOneContactId === undefined
-      ? 'The landlord for this property is not resolved yet.'
-      : `We could not load ${oneToOneName}'s contact record.`;
+  // deleted / opted-out send gates from it, so an id alone is not enough. The
+  // page hands us the records it fetched (its tenant/landlord joins) PLUS the
+  // records it fetched for the rest of the roster; match the active person
+  // against all of them - a roster member is never only the tenant or the
+  // unit's landlord-of-record (spec D6: the PM on a PM-managed property).
+  const oneToOneContact =
+    activePerson === undefined
+      ? null
+      : ([tenant, landlord, ...(rosterContacts ?? [])].find(
+          (c) => c !== null && c.contactId === activePerson.contactId,
+        ) ?? null);
+  // Only ONE way a tab can be missing its record now: the best-effort getContact
+  // behind it failed (the page's own join, or the roster-member fetch). A person
+  // with no id gets no tab at all, so the old "landlord not resolved yet"
+  // dead-end tab is gone with the fixed slots.
+  const oneToOneMissingNote = `We could not load ${oneToOneName}'s contact record.`;
 
   // The no-show check-in seed reaches the TENANT 1:1 composer ONLY: guarded by
-  // isTenantChannel so the landlord/PM pane never receives it (its key carries no
-  // seedKey, so a bump cannot remount it), and cleared to undefined once consumed
-  // (seededBody null) so a later Tenant remount is empty.
-  const isTenantChannel = oneToOneKey === 'tenant';
+  // isTenantChannel so no other person's pane can receive it (their key carries
+  // no seedKey, so a bump cannot remount it), and cleared to undefined once
+  // consumed (seededBody null) so a later tenant remount is empty.
+  const isTenantChannel = activePerson !== undefined && activePerson.contactId === tour.tenantId;
   const tenantSeed = isTenantChannel && seededBody !== null ? seededBody : undefined;
 
   // Viewing the GROUP tab marks its SINGLE conversation read + clears the tab dot.
@@ -201,37 +205,18 @@ export function TourConversation({
   // markGroupRead is a single-conversation read that predates the pane, and gating
   // it is out of scope.
   const groupConversationId = channels.group.conversationId;
-  const activeUnread = channels[activeKey].unread;
+  const activeUnread = activePerson === undefined ? channels.group.unread : activePerson.unread;
   useEffect(() => {
-    if (activeKey !== 'group') return;
+    if (!isGroupTab) return;
     channels.markGroupRead(groupConversationId, activeUnread);
-  }, [activeKey, groupConversationId, activeUnread, channels]);
+  }, [isGroupTab, groupConversationId, activeUnread, channels]);
 
   return (
     <div className={styles.convo}>
-      <div className={styles.tabRail} role="tablist" aria-label="Conversation channel">
-        {tabs.map((t) => (
-          <button
-            key={t.key}
-            type="button"
-            role="tab"
-            aria-selected={activeKey === t.key}
-            className={activeKey === t.key ? styles.tabOn : styles.tab}
-            onClick={() => setActiveKey(t.key)}
-          >
-            {t.label}
-            {t.unread > 0 ? (
-              <>
-                <span className={styles.dot} aria-hidden="true" />
-                <span className={styles.srOnly}> unread</span>
-              </>
-            ) : null}
-          </button>
-        ))}
-      </div>
+      <ChannelTabRail tabs={tabs} activeKey={effectiveKey} onSelect={setActiveKey} />
 
       <div className={styles.channelPane}>
-        {activeKey === 'group' ? (
+        {isGroupTab ? (
           groupConversationId !== null ? (
             <GroupChannel
               conversationId={groupConversationId}
@@ -247,10 +232,13 @@ export function TourConversation({
                 size="sm"
                 type="button"
                 onClick={onOpenGroup}
-                disabled={openGroupBusy || groupDead}
+                disabled={openGroupBusy || groupDead || openGroupDisabledReason !== undefined}
               >
                 {openGroupBusy ? 'Opening...' : 'Open group text'}
               </Button>
+              {openGroupDisabledReason !== undefined && !groupDead ? (
+                <p className={styles.emptyNote}>{openGroupDisabledReason}</p>
+              ) : null}
               {groupDead ? (
                 <p className={styles.emptyNote}>
                   This tour is {tour.status} - a group text cannot be opened.
@@ -263,14 +251,15 @@ export function TourConversation({
             <p className={styles.emptyNote}>{oneToOneMissingNote}</p>
           </div>
         ) : (
-          // key so switching the Tenant<->Landlord 1:1 REMOUNTS a fresh pane. Both
-          // tabs render <ContactCommsTab> at the same JSX position; without a key
-          // React reuses the fiber and the composer's in-progress draft survives
-          // the switch, so a Send would post it to the newly-selected party.
+          // key so switching from one person's 1:1 to another's REMOUNTS a fresh
+          // pane. Every tab renders <ContactCommsTab> at the same JSX position;
+          // without a key React reuses the fiber and the composer's in-progress
+          // draft survives the switch, so a Send would post it to the
+          // newly-selected party.
           // The TENANT key also carries seedKey: initialDraft is a MOUNT-ONLY
           // initializer, so a "Send no-show check-in" fired while ALREADY on the
-          // Tenant tab has to remount the pane to land (spec M1). The landlord key
-          // is the contactId alone - no seed ever reaches it.
+          // tenant's tab has to remount the pane to land (spec M1). Every other
+          // key is the contactId alone - no seed ever reaches those.
           <ContactCommsTab
             key={isTenantChannel ? `${tour.tenantId}:${seedKey}` : oneToOneContact.contactId}
             contact={oneToOneContact}
@@ -281,10 +270,139 @@ export function TourConversation({
             onCommsOnlyChange={setCommsOnly}
             commsVisible={commsVisible}
             unread={activeUnread}
-            onMarkRead={(u) => channels.markPersonRead(oneToOneKey, oneToOneContactId, u)}
+            onMarkRead={(u) => channels.markPersonRead(oneToOneContactId, u)}
           />
         )}
       </div>
+    </div>
+  );
+}
+
+/** How wide the overflow fade is. MIRRORED in TourDetail.module.css's
+ *  `.tabRailFaded` mask - change both. */
+const RAIL_FADE_PX = 24;
+
+export interface ChannelTab {
+  /** 'group', or the person's contactId. */
+  key: string;
+  label: string;
+  unread: number;
+}
+
+/** The channel rail, shared by the tour AND placement conversation panes (like
+ *  the CSS module it styles itself from - PlacementConversation imports both from
+ *  here). ONE row that scrolls horizontally when the tabs overflow, with the
+ *  overflow marked by a right-edge fade; if a tab hidden past that edge has
+ *  unread, the edge CARRIES its dot, so a reply can never hide off-screen
+ *  (contact-rosters spec 6.6).
+ *
+ *  Geometry is measured from the DOM (there is no layout information in React)
+ *  on mount, on scroll and on window resize, rAF-throttled because a scroll fires
+ *  far faster than a dot needs repainting. KNOWN LIMIT: only the RIGHT edge
+ *  carries - the rail starts at scroll 0 and an operator who scrolls right can
+ *  see for themselves what they scrolled past. */
+export function ChannelTabRail({
+  tabs,
+  activeKey,
+  onSelect,
+}: {
+  tabs: ChannelTab[];
+  activeKey: string;
+  onSelect: (key: string) => void;
+}): React.JSX.Element {
+  const railRef = useRef<HTMLDivElement | null>(null);
+  const [overflow, setOverflow] = useState({ scrollable: false, carriedUnread: false });
+
+  const measure = useCallback(() => {
+    const rail = railRef.current;
+    if (rail === null) return;
+    // 1px of tolerance: a sub-pixel content width must not read as "there is
+    // more to scroll to" and fade a rail that fits.
+    const scrollable = rail.scrollWidth - rail.clientWidth > 1;
+    const edge = rail.getBoundingClientRect().right - RAIL_FADE_PX;
+    const carriedUnread =
+      scrollable &&
+      Array.from(rail.querySelectorAll<HTMLElement>('[data-unread]')).some(
+        (el) => el.getBoundingClientRect().right > edge,
+      );
+    setOverflow((prev) =>
+      prev.scrollable === scrollable && prev.carriedUnread === carriedUnread
+        ? prev
+        : { scrollable, carriedUnread },
+    );
+  }, []);
+
+  // Re-measured whenever the tabs themselves change (a person joined, left, or
+  // gained unread) as well as on scroll / resize - the DOM it reads changed.
+  const tabsKey = tabs.map((t) => `${t.key}:${t.unread > 0 ? '1' : '0'}`).join(',');
+  useEffect(() => {
+    const rail = railRef.current;
+    if (rail === null) return;
+    let frame = 0;
+    const schedule = (): void => {
+      if (frame !== 0) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        measure();
+      });
+    };
+    measure();
+    rail.addEventListener('scroll', schedule, { passive: true });
+    window.addEventListener('resize', schedule);
+    // The rail's own BOX can change with no window event at all: at phone
+    // widths the hubs mount on the Details pane with this rail display:none
+    // (0x0 - "fits"), and the [Conversation] pane toggle just flips
+    // visibility. Observe the element itself so the fade/carried dot are
+    // right on pane ENTRY, not first-scroll. (jsdom has no ResizeObserver -
+    // the listeners above still cover those tests.)
+    const observer =
+      typeof ResizeObserver !== 'undefined' ? new ResizeObserver(schedule) : null;
+    observer?.observe(rail);
+    return () => {
+      if (frame !== 0) cancelAnimationFrame(frame);
+      rail.removeEventListener('scroll', schedule);
+      window.removeEventListener('resize', schedule);
+      observer?.disconnect();
+    };
+  }, [measure, tabsKey]);
+
+  return (
+    <div className={styles.tabRailWrap}>
+      <div
+        ref={railRef}
+        className={overflow.scrollable ? `${styles.tabRail} ${styles.tabRailFaded}` : styles.tabRail}
+        role="tablist"
+        aria-label="Conversation channel"
+      >
+        {tabs.map((t) => (
+          <button
+            key={t.key}
+            type="button"
+            role="tab"
+            aria-selected={activeKey === t.key}
+            className={activeKey === t.key ? styles.tabOn : styles.tab}
+            onClick={() => onSelect(t.key)}
+            // A LAYOUT marker, not a test hook: measure() asks the DOM which
+            // unread tabs sit past the edge, so it needs to find them without
+            // re-deriving the tab list.
+            {...(t.unread > 0 && { 'data-unread': 'true' })}
+          >
+            {t.label}
+            {t.unread > 0 ? (
+              <>
+                <span className={styles.dot} aria-hidden="true" />
+                <span className={styles.srOnly}> unread</span>
+              </>
+            ) : null}
+          </button>
+        ))}
+      </div>
+      {overflow.carriedUnread ? (
+        <span className={styles.carriedDot}>
+          <span className={styles.dot} aria-hidden="true" />
+          <span className={styles.srOnly}>Unread messages past the edge of the channel list</span>
+        </span>
+      ) : null}
     </div>
   );
 }

@@ -17,7 +17,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
-import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, UnitItem, PlacementStage } from '../../api/index.js';
+import type { PlacementItem, PlacementUpdatedEvent, EventStreamHandlers, HistoryRow, RosterView, UnitItem, PlacementStage } from '../../api/index.js';
 import { STAGE_LABELS } from '../../api/index.js';
 
 const getPlacement = vi.fn();
@@ -34,6 +34,8 @@ const getConversations = vi.fn();
 const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
+// [Open group text] previews the server-composed intro first (spec 6.3).
+const previewPlacementRosterOpen = vi.fn();
 // The 1:1 tabs are contact-keyed panes now: every render mounts
 // useContactTimeline for the active party, and viewing an unread 1:1 tab marks
 // the CONTACT read (the inbox fan-out). Both are mocked in EVERY test - an
@@ -42,6 +44,9 @@ const provisionPlacementRelay = vi.fn();
 // vi.fn() returns undefined -> TypeError).
 const getContactTimeline = vi.fn();
 const markInboxRead = vi.fn();
+// The People card AND the 1:1 tab set both read the resolved roster now
+// (contact-rosters Task 8) - one payload, one source.
+const getPlacementRoster = vi.fn();
 // Deadlines-and-nudges card deps: quiet the nudge fetch so the card renders its
 // empty ladder (this suite exercises the header + right-pane structure; the card
 // has its own tests in DeadlinesNudgesCard.test.tsx).
@@ -67,8 +72,10 @@ vi.mock('../../api/index.js', async () => {
     getConversation: (...a: unknown[]) => getConversation(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     provisionPlacementRelay: (...a: unknown[]) => provisionPlacementRelay(...a),
+    previewPlacementRosterOpen: (...a: unknown[]) => previewPlacementRosterOpen(...a),
     getContactTimeline: (...a: unknown[]) => getContactTimeline(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    getPlacementRoster: (...a: unknown[]) => getPlacementRoster(...a),
     getPlacementNudges: (...a: unknown[]) => getPlacementNudges(...a),
     setPlacementFollowUp: (...a: unknown[]) => setPlacementFollowUp(...a),
     clearPlacementFollowUp: (...a: unknown[]) => clearPlacementFollowUp(...a),
@@ -104,6 +111,37 @@ const TENANT = {
   voucher_expiration_date: '2026-08-02',
 };
 const LANDLORD = { contactId: 'l1', type: 'landlord' as const, firstName: 'Larry', lastName: 'Owens' };
+
+/** The default resolved roster: the same two people the page used to hard-code
+ *  (tenant + the unit's landlord), now served by GET /api/placements/:id/roster. */
+function makeRoster(over: Partial<RosterView> = {}): RosterView {
+  return {
+    source: 'default',
+    members: [
+      {
+        memberKey: 't1',
+        contactId: 't1',
+        name: 'Tasha Nguyen',
+        role: 'tenant',
+        reachability: 'reachable',
+      },
+      {
+        memberKey: 'l1',
+        contactId: 'l1',
+        name: 'Larry Owens',
+        role: 'landlord',
+        reachability: 'reachable',
+      },
+    ],
+    customized: false,
+    tenantOnRoster: true,
+    canOpenGroup: true,
+    threadExists: false,
+    pending: [],
+    skipped: [],
+    ...over,
+  };
+}
 
 /** Resolve tenant vs landlord by id so their links never collide (both would
  *  otherwise show the same mocked name and break a unique getByRole). */
@@ -141,9 +179,19 @@ beforeEach(() => {
     participants: [],
   });
   markConversationRead.mockReset().mockResolvedValue(undefined);
-  provisionPlacementRelay.mockReset().mockResolvedValue({ conversationId: 'g1' });
+  provisionPlacementRelay.mockReset().mockResolvedValue({ deferred: false, conversationId: 'g1' });
+  previewPlacementRosterOpen.mockReset().mockResolvedValue({
+    body: 'Hi - this is Housing Choice connecting you about this placement.',
+    recipients: [
+      { name: 'Ann Tenant', reachability: 'reachable' },
+      { name: 'Lon Landlord', reachability: 'reachable' },
+    ],
+    recipientCount: 2,
+    deferred: false,
+  });
   getContactTimeline.mockReset().mockResolvedValue({ items: [], nextCursor: null });
   markInboxRead.mockReset().mockResolvedValue(undefined);
+  getPlacementRoster.mockReset().mockResolvedValue(makeRoster());
   getPlacementNudges.mockReset().mockResolvedValue([]);
   setPlacementFollowUp.mockReset().mockResolvedValue(undefined);
   clearPlacementFollowUp.mockReset().mockResolvedValue(undefined);
@@ -267,6 +315,92 @@ describe('PlacementDetail - header', () => {
     // The other actions still show.
     expect(screen.getByRole('menuitem', { name: 'Mark lost' })).toBeInTheDocument();
   });
+
+  // contact-rosters Task 11: opening a group is a REAL send, so it confirms.
+  it('previews the intro before provisioning, and provisions only on confirm', async () => {
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    expect(previewPlacementRosterOpen).toHaveBeenCalledWith('c1');
+    expect(
+      within(dialog).getByText('Hi - this is Housing Choice connecting you about this placement.'),
+    ).toBeInTheDocument();
+    expect(provisionPlacementRelay).not.toHaveBeenCalled();
+    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await waitFor(() =>
+      expect(provisionPlacementRelay).toHaveBeenCalledWith('c1', { force: false }),
+    );
+  });
+
+  // Task 14: the placement mirror of the 202 branch. A deferred open answers
+  // with a ROSTER, so `res.conversation.conversationId` is not there to read -
+  // and there is no thread to mount.
+  it('a DEFERRED open (202) shows when it opens and mounts no conversation', async () => {
+    const quietEndsAt = '2026-08-05T12:00:00.000Z';
+    const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
+      hour: 'numeric',
+      minute: '2-digit',
+    });
+    provisionPlacementRelay.mockResolvedValue({
+      deferred: true,
+      roster: makeRoster({
+        pending: [{ actionId: 'placement#c1#open', kind: 'open_group', dueAt: quietEndsAt }],
+      }),
+    });
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+
+    expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
+    expect(getConversation).not.toHaveBeenCalledWith('g1');
+  });
+
+  it("the KEBAB's [Open group text] is disabled by the same too-thin roster", async () => {
+    // Spec 6.2 asks for the reason on a DISABLED control instead of a click-time
+    // 400 relay_member_unresolvable - the kebab is a third way to that click, so
+    // it obeys the same gate as the pane button and the card note.
+    getPlacementRoster.mockResolvedValue(makeRoster({ canOpenGroup: false }));
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    const item = await screen.findByRole('menuitem', { name: 'Open group text' });
+    // Still VISIBLE (an absent control teaches nothing), disabled, with the why.
+    await waitFor(() => expect(item).toBeDisabled());
+    expect(item).toHaveAttribute(
+      'title',
+      'Not enough people to open a group text - two reachable members are needed',
+    );
+    await user.click(item);
+    expect(previewPlacementRosterOpen).not.toHaveBeenCalled();
+  });
+
+  it('the KEBAB stays LIVE while an open is merely deferred (Send now anyway)', async () => {
+    // The pending-open case is deliberately NOT blocked: re-confirming and
+    // choosing "Send now anyway" is the second way to force a deferred open.
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        pending: [
+          { actionId: 'placement#c1#open', kind: 'open_group', dueAt: '2026-08-05T12:00:00.000Z' },
+        ],
+      }),
+    );
+    const user = userEvent.setup();
+    renderAt();
+    await waitLoaded();
+    await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
+    await user.click(screen.getByRole('button', { name: 'More actions' }));
+    expect(await screen.findByRole('menuitem', { name: 'Open group text' })).toBeEnabled();
+  });
 });
 
 describe('PlacementDetail', () => {
@@ -276,8 +410,17 @@ describe('PlacementDetail', () => {
     await waitLoaded();
     // Stage pill (header band - the Now card repeats the stage label).
     expect(within(banner()).getByText('Awaiting inspection')).toBeInTheDocument();
-    // M4: the Tenant link shows the contact NAME, not the raw id.
-    expect(screen.getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute('href', '/contacts/t1');
+    // M4: the People card's roster row shows the contact NAME, not the raw id.
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByRole('link', { name: 'Tasha Nguyen' })).toHaveAttribute(
+      'href',
+      '/contacts/t1',
+    );
+    expect(within(roster).getByRole('link', { name: 'Larry Owens' })).toHaveAttribute(
+      'href',
+      '/contacts/l1',
+    );
+    // The Property row is the PAGE's, below the divider (spec 6.2).
     expect(screen.getByRole('link', { name: '12 Oak St' })).toHaveAttribute('href', '/listings/u1');
     // Scope to the "Placement facts" card - the awaiting_inspection stage also
     // renders the in-place inspection recorder, which has its own Pass control.
@@ -285,11 +428,93 @@ describe('PlacementDetail', () => {
     expect(within(factsCard()).getByText('$1,550/mo')).toBeInTheDocument();
   });
 
-  it('M4: degrades the Tenant link to the raw id when the contact cannot be loaded', async () => {
+  it('M4: degrades the roster row to the raw id when the name cannot be resolved', async () => {
     getContact.mockRejectedValue(new Error('not found'));
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [{ memberKey: 't1', contactId: 't1', role: 'tenant', reachability: 'reachable' }],
+      }),
+    );
     renderAt();
     await waitLoaded();
-    expect(screen.getByRole('link', { name: 't1' })).toHaveAttribute('href', '/contacts/t1');
+    const roster = await screen.findByRole('list', { name: 'Roster' });
+    expect(within(roster).getByRole('link', { name: 't1' })).toHaveAttribute('href', '/contacts/t1');
+  });
+
+  it('the 1:1 tabs FOLLOW the roster payload (a new member grows a tab)', async () => {
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          ...makeRoster().members,
+          {
+            memberKey: 'pm-9',
+            contactId: 'pm-9',
+            name: 'Alicia Grant',
+            role: 'pm',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
+    renderAt();
+    await waitLoaded();
+    expect(await screen.findByRole('tab', { name: /Alicia Grant/ })).toBeInTheDocument();
+    await waitFor(() => expect(screen.getAllByRole('tab')).toHaveLength(4));
+  });
+
+  it('a PM-MANAGED roster: the PM tab opens a real pane, not the failed-load note', async () => {
+    // The motivating case (spec D6 / 6.6): the roster is [tenant, PM] while the
+    // unit's landlordId is the OWNER, so the PM is NEITHER of the two records
+    // this page fetches for itself. Their tab must still resolve a Contact.
+    const user = userEvent.setup();
+    getPlacementRoster.mockResolvedValue(
+      makeRoster({
+        members: [
+          {
+            memberKey: 't1',
+            contactId: 't1',
+            name: 'Tasha Nguyen',
+            role: 'tenant',
+            reachability: 'reachable',
+          },
+          {
+            memberKey: 'pm-9',
+            contactId: 'pm-9',
+            name: 'Alicia Grant',
+            role: 'pm',
+            reachability: 'reachable',
+          },
+        ],
+      }),
+    );
+    getContact.mockImplementation((id: unknown) =>
+      Promise.resolve(
+        id === 'pm-9'
+          ? {
+              contactId: 'pm-9',
+              type: 'landlord' as const,
+              firstName: 'Alicia',
+              lastName: 'Grant',
+              phone: '+14045550333',
+            }
+          : contactById(id),
+      ),
+    );
+    renderAt();
+    await waitLoaded();
+    await user.click(await screen.findByRole('tab', { name: /Alicia Grant/ }));
+    expect(await screen.findByText('No messages with Alicia Grant yet')).toBeInTheDocument();
+    expect(screen.queryByText(/could not load/i)).not.toBeInTheDocument();
+    expect(screen.getByRole('textbox', { name: 'Reply message' })).toBeInTheDocument();
+  });
+
+  it('while the roster payload is in flight the tabs keep the page inputs (no blink)', async () => {
+    getPlacementRoster.mockReturnValue(new Promise(() => {}));
+    renderAt();
+    await waitLoaded();
+    expect(screen.getByRole('tab', { name: /Tasha Nguyen/ })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: /Larry Owens/ })).toBeInTheDocument();
+    expect(screen.getAllByRole('tab')).toHaveLength(3);
   });
 
   it('links the source tour in People + provenance when fromTourId is present', async () => {

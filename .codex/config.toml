@@ -1,0 +1,21 @@
+[shell_environment_policy]
+inherit = "core"
+
+[shell_environment_policy.set]
+PLAYWRIGHT_MCP_OUTPUT_DIR = ".playwright-mcp"
+
+[agents]
+default_subagent_model = "gpt-5.6-terra"
+default_subagent_reasoning_effort = "high"
+
+[mcp_servers.playwright]
+command = "npx"
+args = [
+    "-y",
+    "@playwright/mcp@latest",
+    "--browser",
+    "chromium",
+    "--isolated",
+    "--output-dir",
+    ".playwright-mcp",
+]

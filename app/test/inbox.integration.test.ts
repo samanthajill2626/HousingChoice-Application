@@ -88,7 +88,7 @@ describe.skipIf(!reachable)('Inbox feed integration against DynamoDB Local (thro
       GOOGLE_CLIENT_ID: 'test-client-id.apps.googleusercontent.com',
       GOOGLE_CLIENT_SECRET: 'test-google-client-secret',
       OAUTH_ALLOWED_DOMAINS: 'housingchoice.org,abt-industries.com',
-      OUR_PHONE_NUMBERS: '+15550009999',
+      BUSINESS_PHONE_NUMBER: '+15550009999',
       DYNAMODB_ENDPOINT: endpoint,
       TABLE_PREFIX: prefix,
     } as NodeJS.ProcessEnv);

@@ -42,6 +42,7 @@ import type {
 } from '../repos/placementNudgesRepo.js';
 import type { PlacementItem, PlacementsRepo } from '../repos/placementsRepo.js';
 import type { UnitsRepo } from '../repos/unitsRepo.js';
+import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
   type SendMessageService,
@@ -407,6 +408,47 @@ async function resolveNudgeTarget(
 }
 
 /**
+ * Is the placement's tenant on its CURRENT roster (contact-rosters D11)?
+ * The twin of tourReminders' gate, same three answers:
+ *
+ *   'on'          - deliver as usual.
+ *   'off'         - the operator removed them: suppress every TENANT-routed
+ *                   rung with a visible skipped row.
+ *   'unavailable' - the roster could not be read; neither send nor retire.
+ *
+ * Consults `resolveRoster` (a CLOSED thread's participants are still the FACT,
+ * D1) and reads the placement's own `group_thread` pointer.
+ */
+type TenantRosterGate = 'on' | 'off' | 'unavailable';
+
+async function tenantRosterGate(
+  placement: PlacementItem,
+  deps: RunDuePlacementNudgesDeps,
+  log: Logger,
+): Promise<TenantRosterGate> {
+  const roster = await resolveRoster(
+    {
+      conversations: deps.conversationsRepo,
+      units: deps.unitsRepo,
+      contacts: deps.contactsRepo,
+      log,
+    },
+    {
+      type: 'placement',
+      id: placement.placementId,
+      tenantId: placement.tenantId,
+      unitId: placement.unitId,
+      ...(typeof placement.group_thread === 'string' && {
+        groupThreadId: placement.group_thread,
+      }),
+      ...(placement.roster !== undefined && { roster: placement.roster }),
+    },
+  );
+  if (roster.source === 'unavailable') return 'unavailable';
+  return isOnRoster(roster, placement.tenantId) ? 'on' : 'off';
+}
+
+/**
  * The recipient's existing 1:1 among the phone's conversations. A tenant rung
  * routes to tenant_1to1 (or an unresolved unknown_1to1); a landlord rung to
  * landlord_1to1 (or unknown_1to1). NEVER the masked group (founder 2026-07-02).
@@ -510,6 +552,43 @@ async function processNudgeRow(
   }
   const { rung, contactId, contact, phone } = target;
 
+  // D11 (contact-rosters): a TENANT-routed rung must not text a tenant the
+  // operator removed from this placement's roster. Runs BEFORE the conversation
+  // find/mint so a suppressed rung never leaves a brand-new empty thread behind,
+  // and PRE-CLAIM: an 'unavailable' roster returns WITHOUT claiming (the next
+  // tick retries) rather than texting a possibly-removed tenant or burning the
+  // rung on a false skip. Landlord-routed rungs are unaffected.
+  if (rung.recipient === 'tenant') {
+    const gate = await tenantRosterGate(target.placement, deps, log);
+    if (gate === 'unavailable') {
+      // BOUNDED BY TIME PAST DUE (the tourReminders twin): 'unavailable' can be
+      // PERMANENT - a pointer at a conversation that will never load - and an
+      // unbounded wait re-lists this rung every tick forever, never sent and
+      // never visibly skipped. Past the grace window, retire it VISIBLY.
+      if (rosterWaitExpired(row.dueAt, nowIso)) {
+        log.warn(
+          { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind, dueAt: row.dueAt },
+          'placement nudge: roster STILL unreadable past the grace window - retiring (claim-skipped)',
+        );
+        await claimSkipRow(row, 'roster_unavailable', nowIso, deps, target.placement.tenantId);
+        return;
+      }
+      log.warn(
+        { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
+        'placement nudge: roster unreadable - leaving the rung unclaimed for the next tick',
+      );
+      return;
+    }
+    if (gate === 'off') {
+      log.info(
+        { nudgeId: row.nudgeId, placementId: row.placementId, kind: row.kind },
+        'placement nudge: tenant is not on this placement roster - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'tenant_not_on_roster', nowIso, deps, target.placement.tenantId);
+      return;
+    }
+  }
+
   // Find (or create) the recipient's 1:1 conversation.
   const conv =
     findNudgeConversation(await deps.conversationsRepo.findByParticipantPhone(phone), rung) ??
@@ -579,12 +658,24 @@ async function processNudgeRow(
 // forceSendNudge (Send now - quiet-hours spec section 7)
 // ---------------------------------------------------------------------------
 
-/** Why a human force-send was refused BEFORE the row was claimed. */
+/**
+ * Why a human force-send was refused BEFORE the row was claimed. Every
+ * NudgeSkipReason is also a refusal (including D11's `tenant_not_on_roster`),
+ * plus the gates that only a human path can trip.
+ */
 export type NudgeForceSendRefusal =
   | 'sms_sending_disabled'
   | 'contact_opted_out'
   | 'contact_deleted'
   | 'no_consent'
+  /**
+   * Includes D11's `roster_unavailable` (the roster could not be READ): on the
+   * HUMAN path it is only ever a refusal - the row is left pending and the
+   * operator is told to try again, rather than being allowed to text a tenant
+   * who may have been removed. Deliberately absent from the dashboard's copy
+   * map: `sendNowErrorMessage` falls back to its generic retry sentence, which
+   * is exactly the right thing to say.
+   */
   | NudgeSkipReason;
 
 export type NudgeForceSendResult =
@@ -651,6 +742,14 @@ export async function forceSendNudge(
   // PRE-CLAIM ABSOLUTE GATES, and BEFORE the conversation mint. Manual mode and
   // the breaker are deliberately NOT checked - this is a human send.
   if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
+  // D11 (contact-rosters): the human path honors the roster too - "Send now" on
+  // a rung aimed at a REMOVED tenant is refused, mirroring the poll's
+  // claim-skip. A REFUSAL, never a claim-skip: retiring rungs is the poll's job.
+  if (target.rung.recipient === 'tenant') {
+    const gate = await tenantRosterGate(target.placement, deps, log);
+    if (gate === 'unavailable') return refuse('roster_unavailable');
+    if (gate === 'off') return refuse('tenant_not_on_roster');
+  }
   // Opt-out is absolute; consent is required because `automated: false` is
   // subject to the JIT consent gate (services/sendMessage.ts) - checking it here
   // is what keeps that gate from firing AFTER the claim. A recipient with no

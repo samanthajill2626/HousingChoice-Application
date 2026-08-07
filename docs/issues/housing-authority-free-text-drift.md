@@ -56,8 +56,23 @@ backwards:
    Atlanta'`. Any surface that humanizes a non-slug value invents a string.
 3. **Facet fragmentation.** Lists deriving filter options from distinct values render each spelling
    as its own authority with the counts split between them.
-4. **Import populates only the unit side.** `import/apply.ts` writes `jurisdiction` for units and
-   no contact-side authority at all, so imported tenants arrive with none.
+4. **Import populates only the unit side.** ~~`import/apply.ts` writes `jurisdiction` for units and
+   no contact-side authority at all, so imported tenants arrive with none.~~
+   **ADDRESSED 2026-08-06** (`import-display-name-unread` resolution): `apply.ts`
+   now writes `contact.housingAuthority`, mapped onto the EXACT
+   `HOUSING_AUTHORITY_VOCAB` strings via `housingAuthorityFor`, with unmapped
+   values reported and left unset rather than guessed into the GSI. The import
+   spec had justified the omission by calling her values "programs, not
+   authorities" - wrong, since GHV, HUD VASH, Claratel and Hope Atlanta are all
+   in that vocabulary verbatim.
+
+   THIS ISSUE STAYS OPEN: the import now writes the human-readable vocabulary on
+   BOTH sides, but that does not resolve the two field names
+   (`contact.housingAuthority` vs `unit.jurisdiction`), the slug-vs-readable split
+   in seeds and placeholders, or `humanizeAuthority` corrupting free text
+   (consequences 1-3). Real coverage is also thin for a founder-data reason
+   rather than a code one: only 17 of 629 imported contacts carry any authority
+   value.
 
 **Suggested fix.** Treat human-readable as canonical and normalize toward it:
 

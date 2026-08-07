@@ -87,6 +87,11 @@ export interface TourRemindersRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   contactsRepo?: ContactsRepo;
   conversationsRepo?: ConversationsRepo;
+  /** ONE unit read, TWO consumers (merged at the 2026-08-06 second main sync):
+   *  roster resolution for the send-now path's D11 check (contact-rosters), and
+   *  the unit's address for the composed reminder copy on both the send-now path
+   *  and the previews below (tour-reminder-details). */
+  unitsRepo?: UnitsRepo;
   /** Quiet-hours window source for the suppression estimate (narrow read-only
    *  shape - the `resolveWithSettings` precedent). */
   settingsRepo?: Pick<SettingsRepo, 'getOrgSettings'>;
@@ -101,9 +106,6 @@ export interface TourRemindersRouterDeps {
   adapter?: MessagingAdapter;
   /** GROUP route: persists the rung as a system announcement in the thread. */
   messagesRepo?: MessagesRepo;
-  /** The unit's address for the composed reminder copy (both the send-now path
-   *  and the previews below). */
-  unitsRepo?: UnitsRepo;
   /** Records WHO clicked Send now (`reminder_force_sent` on `tours#<id>`). */
   auditRepo?: AuditRepo;
   /** Live-update bus (defaults to appEvents): a cancel/restore emits
@@ -146,8 +148,8 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
   const reminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const conversations = deps.conversationsRepo ?? createConversationsRepo({ logger: deps.logger });
-  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
 
@@ -160,12 +162,17 @@ export function createTourRemindersRouter(deps: TourRemindersRouterDeps = {}): R
     toursRepo: tours,
     contactsRepo: contacts,
     conversationsRepo: conversations,
+    // D11 (contact-rosters): the send-now path runs the poll's roster check.
+    // Same repo also supplies the address for the composed body.
+    unitsRepo: units,
+    // D7: NOT wired on the send-now path - a human pressing "Send now" has
+    // decided, and a pending group open must not silently refuse them. The
+    // WAIT is a poll-only behavior (the poll re-lists; a human does not).
     sendMessageService:
       deps.sendMessageService ?? createSendMessageService({ config, logger: deps.logger }),
     settingsRepo: settings,
     adapter: deps.adapter ?? createMessagingAdapter({ config, logger: deps.logger }),
     messagesRepo: deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger }),
-    unitsRepo: units,
     events,
     ...(deps.logger !== undefined && { logger: deps.logger }),
   };

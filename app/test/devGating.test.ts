@@ -309,8 +309,9 @@ describe('dev tick — POST /__dev/tour-reminders/tick', () => {
         toursRepo: world.toursRepo,
         contactsRepo: world.contactsRepo,
         conversationsRepo: world.conversationsRepo,
-        messagesRepo: world.messagesRepo,
+        // D11 roster resolution (contact-rosters) + the composed body's address.
         unitsRepo: world.unitsRepo,
+        messagesRepo: world.messagesRepo,
         sendMessageService,
         adapter: world.adapter,
         settingsRepo: quietOffSettingsRepo(),

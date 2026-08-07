@@ -33,6 +33,7 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { RepoDeps } from './conversationsRepo.js';
+import { RosterPlanConflictError, type RosterEntry } from '../lib/rosterResolution.js';
 import type { TourType } from '../lib/toursModel.js';
 
 // ---------------------------------------------------------------------------
@@ -80,6 +81,18 @@ export interface TourItem {
   status: TourStatus;
   /** Optional: the relay group conversationId for the tour thread. */
   groupThreadId?: string;
+  /**
+   * contact-rosters (spec D1): the roster PLAN - who this tour's group text
+   * will open with. ABSENT is the normal state and means "resolve from the
+   * property" (tenant + the unit's primaryContact). It materializes on the
+   * first human edit and is CONSUMED (deleted) when the group is provisioned:
+   * once `groupThreadId` exists, the conversation's participants are the roster
+   * and this attribute is inert (lib/rosterResolution.ts reads participants
+   * first whenever the pointer is set).
+   */
+  roster?: RosterEntry[];
+  /** Optimistic-concurrency guard for `roster` (see setRoster). */
+  rosterVersion?: number;
   /** Post-tour outcome. Absent until the tour resolves. */
   outcome?: TourOutcome;
   /** Navigator decision: move forward toward placement? Absent until exit gate. */
@@ -167,6 +180,26 @@ export interface ToursRepo {
    * written since). Best-effort — a lost condition is a no-op.
    */
   releaseConversionClaim(tourId: string, value: string): Promise<void>;
+  /**
+   * Write the roster PLAN under a conditional guard (contact-rosters section 7).
+   * `expectedVersion === undefined` MATERIALIZES it - the write only lands when
+   * no plan exists yet (`attribute_not_exists(roster)`); otherwise the stored
+   * `rosterVersion` must equal `expectedVersion`. Either failure throws
+   * RosterPlanConflictError so the caller re-reads and continues onto the
+   * EXISTING override rather than clobbering a concurrent operator's edit.
+   * Returns the post-write item (ALL_NEW) with the bumped version.
+   */
+  setRoster(
+    tourId: string,
+    roster: RosterEntry[],
+    expectedVersion: number | undefined,
+  ): Promise<TourItem>;
+  /**
+   * REMOVE the plan (roster + rosterVersion) - "the plan is consumed" at
+   * provision, and "reset to property default" on the edit path. Unconditional
+   * and idempotent: a tour with no plan is a no-op.
+   */
+  clearRoster(tourId: string): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------
@@ -405,6 +438,67 @@ export function createToursRepo(deps: RepoDeps = {}): ToursRepo {
         throw err;
       }
       log.info({ tourId }, 'tour conversion claim released (conversion failed)');
+    },
+
+    async setRoster(tourId, roster, expectedVersion) {
+      const nextVersion = (expectedVersion ?? 0) + 1;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { tourId },
+            UpdateExpression: 'SET #r = :r, #rv = :nv, #updatedAt = :now',
+            // MATERIALIZE (no expectedVersion) vs OPTIMISTIC UPDATE: the first
+            // may only create the plan, the second may only advance the exact
+            // version the caller read.
+            //
+            // The materialize is ALSO guarded by the thread pointer (D1): once a
+            // thread exists the roster is a FACT, and provision CLEARS the plan -
+            // so attribute_not_exists(roster) goes true again and a plan edit
+            // racing a concurrent open would otherwise write a fresh plan onto a
+            // thread-bearing tour. That plan is INERT (the resolver reads
+            // participants whenever the pointer is set), so the request would
+            // answer "saved" for an edit that changes nothing. Refuse instead;
+            // services/rosterEdits re-reads and answers 409 thread_exists.
+            ConditionExpression:
+              expectedVersion === undefined
+                ? 'attribute_exists(tourId) AND attribute_not_exists(#r) AND attribute_not_exists(#gt)'
+                : 'attribute_exists(tourId) AND #rv = :ev',
+            ExpressionAttributeNames: {
+              '#r': 'roster',
+              '#rv': 'rosterVersion',
+              '#updatedAt': 'updatedAt',
+              ...(expectedVersion === undefined && { '#gt': 'groupThreadId' }),
+            },
+            ExpressionAttributeValues: {
+              ':r': roster,
+              ':nv': nextVersion,
+              ':now': new Date().toISOString(),
+              ...(expectedVersion !== undefined && { ':ev': expectedVersion }),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info({ tourId, memberCount: roster.length, rosterVersion: nextVersion }, 'tour roster plan written');
+        return Attributes as TourItem;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) throw new RosterPlanConflictError();
+        throw err;
+      }
+    },
+
+    async clearRoster(tourId) {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { tourId },
+          UpdateExpression: 'REMOVE #r, #rv SET #updatedAt = :now',
+          ConditionExpression: 'attribute_exists(tourId)',
+          ExpressionAttributeNames: { '#r': 'roster', '#rv': 'rosterVersion', '#updatedAt': 'updatedAt' },
+          ExpressionAttributeValues: { ':now': new Date().toISOString() },
+        }),
+      );
+      log.info({ tourId }, 'tour roster plan cleared');
     },
   };
 }

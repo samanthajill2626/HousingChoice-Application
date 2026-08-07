@@ -439,6 +439,33 @@ export const TABLES: readonly TableSpec[] = [
     ],
   },
   {
+    // NEW in contact-rosters (spec 5.3): deferred roster actions - an
+    // "open the group text" or "add this member" the operator confirmed during
+    // QUIET HOURS, held until dueAt (quiet-end) and applied by the poller.
+    //
+    // PK actionId is DETERMINISTIC (`${ownerType}#${ownerId}#open` /
+    // `${ownerType}#${ownerId}#add#${contactId}`) so the KEY ITSELF enforces
+    // spec 5.3's dedupe: at most one action per (owner) open and per (owner,
+    // contact) add, and a duplicate confirm SUPERSEDES rather than queueing a
+    // second. Same deterministic-PK idea as placementDeadlines above.
+    //
+    // byOwner (hash ownerKey = `${ownerType}#${ownerId}`) enumerates a tour's
+    // or placement's actions for the People card and for conversion migration.
+    // byDueAt (fixed 'roster_actions' partition, range=dueAt) is the poller
+    // query - clones the tourReminders/placementNudges shape. NOT sparse: every
+    // row stamps _actionPartition, so no row can fall out of the poll's index.
+    baseName: 'pendingRosterActions',
+    hashKey: { name: 'actionId', type: 'S' },
+    gsis: [
+      { indexName: 'byOwner', hashKey: { name: 'ownerKey', type: 'S' } },
+      {
+        indexName: 'byDueAt',
+        hashKey: { name: '_actionPartition', type: 'S' },
+        rangeKey: { name: 'dueAt', type: 'S' },
+      },
+    ],
+  },
+  {
     // NEW in Tours feature (NOT in the doc §5 9-table model — README deviation):
     // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
     // from placements — a tenant stays `searching`; no touring stage. Four read

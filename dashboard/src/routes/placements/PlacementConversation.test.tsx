@@ -1,26 +1,21 @@
-// PlacementConversation tests - the placement page's three-channel switcher now
-// that both 1:1 tabs are the SHARED person-centric comms pane (ContactCommsTab ->
-// ContactCommsPane). This suite is NEW: before the rewire the placement hub had
-// no component-level coverage at all (PlacementDetail.test mocks the comms deps
-// to keep the pane quiet), so the tour side's guarantees were untested here.
-// It mirrors TourConversation.test.tsx: render the component DIRECTLY with a
-// hand-built `channels` stub (the real usePlacementChannels has its own suite).
+// PlacementConversation tests - the placement page's channel switcher: the group
+// text plus ONE 1:1 tab per person on `channels.people` (keyed by contactId,
+// labelled with the display name), each 1:1 being the SHARED person-centric comms
+// pane (ContactCommsTab -> ContactCommsPane). It mirrors TourConversation.test.tsx:
+// render the component DIRECTLY with a hand-built `channels` stub (the real
+// usePlacementChannels has its own suite).
 //
 // Covered: tab switching + draft isolation (no wrong-party send), the
-// deleted-contact composer lock per pane, both "no contact" empty states, the
-// emptyLabel copy, the GROUP tab rendering its relay thread RAW (the placement
-// page injects no milestones on any tab, before or after the rewire), and the
-// 1:1 mark-read gates (a fan-out only from a pane the operator could see).
+// deleted-contact composer lock per pane, the missing-record empty state, no tab
+// at all for a person the page cannot resolve, the emptyLabel copy, the GROUP tab
+// rendering its relay thread RAW (the placement page injects no milestones on any
+// tab, before or after the rewire), and the 1:1 mark-read gates (a fan-out only
+// from a pane the operator could see).
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import type {
-  Contact,
-  ContactTimelinePage,
-  PlacementItem,
-  UnitItem,
-} from '../../api/index.js';
+import type { Contact, ContactTimelinePage, PlacementItem } from '../../api/index.js';
 
 const getContactTimeline = vi.fn();
 const getConversations = vi.fn();
@@ -51,7 +46,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { PlacementConversation, type PlacementConversationProps } from './PlacementConversation.js';
-import type { PlacementChannelsState } from './usePlacementChannels.js';
+import type { PersonChannel, PlacementChannelsState } from './usePlacementChannels.js';
 
 function makePlacement(over: Partial<PlacementItem> = {}): PlacementItem {
   return {
@@ -61,16 +56,6 @@ function makePlacement(over: Partial<PlacementItem> = {}): PlacementItem {
     stage: 'awaiting_inspection',
     ...over,
   };
-}
-
-function makeUnit(over: Partial<UnitItem> = {}): UnitItem {
-  return {
-    unitId: 'unit-1',
-    landlordId: 'landlord-1',
-    status: 'under_application',
-    address: { line1: '12 Oak St' },
-    ...over,
-  } as UnitItem;
 }
 
 function tenantContact(): Contact {
@@ -94,15 +79,28 @@ function landlordContact(): Contact {
   };
 }
 
-// The 1:1 channels report unread only (they resolve a PERSON, not one
+/** What PlacementDetail resolves today: the tenant + the property's landlord,
+ *  keyed by contactId and labelled with the DISPLAY NAME (never a role word). */
+function people(): PersonChannel[] {
+  return [
+    { contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 },
+    { contactId: 'landlord-1', label: 'Lon Landlord', unread: 0 },
+  ];
+}
+
+/** The same two people with ONE person's unread raised. */
+function peopleWith(contactId: string, unread: number): PersonChannel[] {
+  return people().map((p) => (p.contactId === contactId ? { ...p, unread } : p));
+}
+
+// Person channels report unread only (they resolve a PERSON, not one
 // conversation); the group is left unresolved so the initial Group pane is the
 // empty state unless a test resolves it.
 function makeChannels(over: Partial<PlacementChannelsState> = {}): PlacementChannelsState {
   return {
     status: 'ready',
     group: { conversationId: null, unread: 0 },
-    tenant: { unread: 0 },
-    landlord: { unread: 0 },
+    people: people(),
     setGroupConversationId: vi.fn(),
     markGroupRead: vi.fn(),
     markPersonRead: vi.fn(),
@@ -113,7 +111,6 @@ function makeChannels(over: Partial<PlacementChannelsState> = {}): PlacementChan
 function baseProps(over: Partial<PlacementConversationProps> = {}): PlacementConversationProps {
   return {
     placement: makePlacement(),
-    unit: makeUnit(),
     tenant: tenantContact(),
     landlord: landlordContact(),
     channels: makeChannels(),
@@ -158,14 +155,14 @@ beforeEach(() => {
   ensureContactConversation.mockImplementation((id: string) =>
     Promise.resolve(id === 'landlord-1' ? 'c-landlord' : 'c-tenant'),
   );
-  provisionPlacementRelay.mockResolvedValue({ conversationId: 'g-new' });
+  provisionPlacementRelay.mockResolvedValue({ deferred: false, conversationId: 'g-new' });
 });
 
 describe('PlacementConversation - tabs and 1:1 panes', () => {
-  it('defaults to Tenant with no group thread and lazily loads ONLY that feed', async () => {
+  it('defaults to the tenant with no group thread and lazily loads ONLY that feed', async () => {
     renderConvo(baseProps());
 
-    expect(screen.getByRole('tab', { name: /Tenant - Ann/ })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute(
       'aria-selected',
       'true',
     );
@@ -185,7 +182,7 @@ describe('PlacementConversation - tabs and 1:1 panes', () => {
     expect(await screen.findByText('No messages with Ann Tenant yet')).toBeInTheDocument();
   });
 
-  it('a draft typed on Tenant does NOT carry to Landlord (no wrong-party send)', async () => {
+  it('a draft typed on the tenant tab does NOT carry to the landlord (no wrong-party send)', async () => {
     renderConvo(baseProps());
 
     await screen.findByRole('textbox', { name: 'Reply message' });
@@ -195,9 +192,9 @@ describe('PlacementConversation - tabs and 1:1 panes', () => {
     );
 
     // Switch WITHOUT sending: the pane remounts, so the composer is fresh.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     await waitFor(() =>
-      expect(screen.getByRole('tab', { name: /Landlord - Lon/ })).toHaveAttribute(
+      expect(screen.getByRole('tab', { name: /Lon Landlord/ })).toHaveAttribute(
         'aria-selected',
         'true',
       ),
@@ -221,21 +218,25 @@ describe('PlacementConversation - tabs and 1:1 panes', () => {
     ).toBe(false);
   });
 
-  it('an unresolved landlord (no unit) shows the empty state, never a pane', async () => {
-    renderConvo(baseProps({ unit: null, landlord: null }));
+  it('a landlord the page cannot resolve (no unit) gets NO tab at all', () => {
+    // With no unit there is no landlordId, so the page puts nobody but the tenant
+    // on the channels - and a person with no id can no longer own a dead-end tab.
+    renderConvo(
+      baseProps({
+        landlord: null,
+        channels: makeChannels({ people: [{ contactId: 'tenant-1', label: 'Ann Tenant', unread: 0 }] }),
+      }),
+    );
 
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
-    expect(
-      screen.getByText('The landlord for this property is not resolved yet.'),
-    ).toBeInTheDocument();
-    expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
+    expect(screen.queryByRole('tab', { name: /Landlord/i })).toBeNull();
+    expect(screen.getAllByRole('tab')).toHaveLength(2);
   });
 
   it('a contact whose record failed to load shows the empty state, never a pane', async () => {
     renderConvo(baseProps({ tenant: null }));
 
     expect(
-      await screen.findByText("We could not load the tenant's contact record."),
+      await screen.findByText("We could not load Ann Tenant's contact record."),
     ).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
     // The pane is what fetches a timeline - it never mounted, so nothing did.
@@ -263,7 +264,7 @@ describe('PlacementConversation - tabs and 1:1 panes', () => {
       expect(screen.queryByText('Moved to Awaiting inspection')).not.toBeInTheDocument(),
     );
 
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord - Lon/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(screen.getByRole('button', { name: /Comms only/i })).toHaveAttribute(
       'aria-pressed',
       'true',
@@ -285,7 +286,7 @@ describe('PlacementConversation - deleted-contact composer lock', () => {
   it('a soft-deleted tenant locks the tenant 1:1: note shown, no Reply textbox, no dead Restore', async () => {
     renderConvo(baseProps({ tenant: { ...tenantContact(), deleted_at: DELETED_AT } }));
 
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
     expect(screen.queryByRole('button', { name: 'Restore contact' })).toBeNull();
@@ -295,11 +296,11 @@ describe('PlacementConversation - deleted-contact composer lock', () => {
     renderConvo(baseProps({ landlord: { ...landlordContact(), deleted_at: DELETED_AT } }));
 
     // The (live) tenant pane still composes normally...
-    await userEvent.click(screen.getByRole('tab', { name: /Tenant/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Ann Tenant/ }));
     expect(screen.getByRole('textbox', { name: 'Reply message' })).toBeInTheDocument();
 
     // ...while the deleted landlord's pane is locked.
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(screen.getByText(/restore them to reply/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
   });
@@ -364,14 +365,14 @@ describe('PlacementConversation - group tab', () => {
 // can see the pane's timeline status); these drive it through the page, which is
 // the surface the behavior is claimed on.
 describe('PlacementConversation - 1:1 mark-read gates', () => {
-  const unreadTenant = () => makeChannels({ tenant: { unread: 7 } });
+  const unreadTenant = () => makeChannels({ people: peopleWith('tenant-1', 7) });
 
   it('DESKTOP: the initial 1:1 tab with unread fans out on mount, no click', async () => {
     const channels = unreadTenant();
     renderConvo(baseProps({ channels, commsVisible: true }));
 
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
   });
 
@@ -389,26 +390,22 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
       </MemoryRouter>,
     );
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });
 
   it('a contact whose record FAILED to load never fans out (dead-end tab, unread kept)', async () => {
-    const channels = makeChannels({ landlord: { unread: 4 } });
+    const channels = makeChannels({ people: peopleWith('landlord-1', 4) });
     renderConvo(baseProps({ landlord: null, channels }));
 
-    await userEvent.click(screen.getByRole('tab', { name: /Landlord/ }));
+    await userEvent.click(screen.getByRole('tab', { name: /Lon Landlord/ }));
     expect(await screen.findByText(/could not load/i)).toBeInTheDocument();
     expect(screen.queryByRole('textbox', { name: 'Reply message' })).toBeNull();
-    // Scoped to the LANDLORD: the initial (loaded, unread-0) Tenant tab legitimately
+    // Scoped to the LANDLORD: the initial (loaded, unread-0) tenant tab legitimately
     // calls through and the hook no-ops it, which is not what this pins.
-    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord', 'landlord-1', 4);
-    expect(channels.markPersonRead).not.toHaveBeenCalledWith(
-      'landlord',
-      expect.anything(),
-      expect.anything(),
-    );
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord-1', 4);
+    expect(channels.markPersonRead).not.toHaveBeenCalledWith('landlord-1', expect.anything());
   });
 
   it('the GROUP tab is unaffected by the visibility gate (single-conversation read)', async () => {
@@ -451,7 +448,7 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
     act(() => document.dispatchEvent(new Event('visibilitychange')));
 
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
   });
 
@@ -504,7 +501,7 @@ describe('PlacementConversation - 1:1 mark-read gates', () => {
     });
 
     await waitFor(() =>
-      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant', 'tenant-1', 7),
+      expect(channels.markPersonRead).toHaveBeenCalledWith('tenant-1', 7),
     );
     expect(channels.markPersonRead).toHaveBeenCalledTimes(1);
   });

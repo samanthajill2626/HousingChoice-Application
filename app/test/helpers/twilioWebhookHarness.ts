@@ -56,7 +56,7 @@ import {
   type ParkedEmailEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
-  CannotRemovePrimaryLandlordError,
+  CannotRemoveLandlordOfRecordError,
   isDeleted as isUnitDeleted,
   unitContacts,
   type UnitContact,
@@ -64,6 +64,7 @@ import {
   type UnitsRepo,
 } from '../../src/repos/unitsRepo.js';
 import { UNIT_MEDIA_MAX } from '../../src/lib/unitMedia.js';
+import { RosterPlanConflictError } from '../../src/lib/rosterResolution.js';
 import { type PlacementItem, type PlacementsRepo } from '../../src/repos/placementsRepo.js';
 import {
   deadlineIdFor,
@@ -102,6 +103,15 @@ import {
   type PlacementNudgeItem,
   type PlacementNudgesRepo,
 } from '../../src/repos/placementNudgesRepo.js';
+import {
+  rosterActionIdFor,
+  rosterActionOwnerKey,
+  type PendingRosterActionItem,
+  type PendingRosterActionsRepo,
+  type RosterActionOwnerRef,
+  type RosterActionSkipReason,
+  type UpsertPendingInput,
+} from '../../src/repos/pendingRosterActionsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
 import { type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
 import {
@@ -240,6 +250,9 @@ export interface FakeWorld {
   /** In-memory placement nudges (Post-Tour & Application, Task 3/5), keyed by nudgeId. */
   placementNudgesMap: Map<string, PlacementNudgeItem>;
   placementNudgesRepo: PlacementNudgesRepo;
+  /** In-memory pending roster actions (contact-rosters Task 12/13), keyed by actionId. */
+  pendingRosterActionsMap: Map<string, PendingRosterActionItem>;
+  pendingRosterActionsRepo: PendingRosterActionsRepo;
   /** In-memory AI suggestions (conversation-fact-extraction T8), keyed by itemId. */
   suggestions: Map<string, SuggestionItem>;
   /** scheduleExtraction calls through the world extraction repo, in order (the
@@ -1440,38 +1453,38 @@ export function createFakeWorld(): FakeWorld {
     },
     async addContact(unitId, contact) {
       // Mirror the real repo's invariants: seed from landlordId, upsert by
-      // contactId, exactly-one-primaryVoice, and keep primary_voice_contact
+      // contactId, exactly-one-primaryContact, and keep primary_contact
       // consistent with the roster's ☎ primary.
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`addContact: no unit ${unitId}`);
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const existing = roster.find((c) => c.contactId === contact.contactId);
-      const primaryVoice = contact.primaryVoice === true;
+      const primaryContact = contact.primaryContact === true;
       // FIX C: the owning landlord's role is structural — pinned to 'landlord'.
-      const isPrimaryLandlord =
+      const isLandlordOfRecord =
         typeof unit.landlordId === 'string' && contact.contactId === unit.landlordId;
-      const role: UnitContact['role'] = isPrimaryLandlord ? 'landlord' : contact.role;
+      const role: UnitContact['role'] = isLandlordOfRecord ? 'landlord' : contact.role;
       if (existing) {
         existing.role = role;
-        existing.primaryVoice = primaryVoice;
+        existing.primaryContact = primaryContact;
         if (contact.name !== undefined) existing.name = contact.name;
         if (contact.company !== undefined) existing.company = contact.company;
       } else {
         const entry: UnitContact = {
           contactId: contact.contactId,
           role,
-          primaryVoice,
+          primaryContact,
           ...(contact.name !== undefined ? { name: contact.name } : {}),
           ...(contact.company !== undefined ? { company: contact.company } : {}),
         };
         roster.push(entry);
       }
-      if (primaryVoice) {
-        for (const c of roster) c.primaryVoice = c.contactId === contact.contactId;
+      if (primaryContact) {
+        for (const c of roster) c.primaryContact = c.contactId === contact.contactId;
       }
       unit.contacts = roster;
-      const primary = roster.find((c) => c.primaryVoice);
-      if (primary !== undefined) unit.primary_voice_contact = primary.contactId;
+      const primary = roster.find((c) => c.primaryContact);
+      if (primary !== undefined) unit.primary_contact = primary.contactId;
       unit.updated_at = new Date().toISOString();
       return unit;
     },
@@ -1479,25 +1492,25 @@ export function createFakeWorld(): FakeWorld {
       const unit = units.get(unitId);
       if (!unit) throw conditionalCheckFailed(`removeContact: no unit ${unitId}`);
       if (typeof unit.landlordId === 'string' && unit.landlordId === contactId) {
-        throw new CannotRemovePrimaryLandlordError();
+        throw new CannotRemoveLandlordOfRecordError();
       }
       const roster = unitContacts(unit).map((c) => ({ ...c }));
       const target = roster.find((c) => c.contactId === contactId);
       if (!target) throw conditionalCheckFailed(`removeContact: unit ${unitId} has no contact ${contactId}`);
-      const removedWasPrimaryVoice = target.primaryVoice;
+      const removedWasPrimaryContact = target.primaryContact;
       const next = roster.filter((c) => c.contactId !== contactId);
       unit.contacts = next;
-      // FIX B: keep the roster primaryVoice flag and the primary_voice_contact
+      // FIX B: keep the roster primaryContact flag and the primary_contact
       // scalar in agreement after removing the ☎ primary (lockstep with the real
       // repo).
-      if (removedWasPrimaryVoice) {
+      if (removedWasPrimaryContact) {
         const landlordId = typeof unit.landlordId === 'string' ? unit.landlordId : '';
         if (landlordId.length > 0) {
-          for (const c of next) c.primaryVoice = c.contactId === landlordId;
-          unit.primary_voice_contact = landlordId;
+          for (const c of next) c.primaryContact = c.contactId === landlordId;
+          unit.primary_contact = landlordId;
         } else {
-          for (const c of next) c.primaryVoice = false;
-          delete unit.primary_voice_contact; // null → REMOVE; never dangling
+          for (const c of next) c.primaryContact = false;
+          delete unit.primary_contact; // null → REMOVE; never dangling
         }
       }
       unit.updated_at = new Date().toISOString();
@@ -1625,6 +1638,29 @@ export function createFakeWorld(): FakeWorld {
     async list(opts = {}) {
       const items = [...placements.values()].slice(0, opts.limit ?? 50);
       return { items: items.map((c) => ({ ...c })) };
+    },
+    async setRoster(placementId, roster, expectedVersion) {
+      // Mirror the conditional write: MATERIALIZE only when no plan exists AND
+      // no thread pointer does (D1 - a plan on a thread-bearing placement is
+      // inert), otherwise the stored version must equal the caller's.
+      const c = placements.get(placementId);
+      const conflict =
+        !c ||
+        (expectedVersion === undefined
+          ? c.roster !== undefined || c.group_thread !== undefined
+          : c.rosterVersion !== expectedVersion);
+      if (conflict) throw new RosterPlanConflictError();
+      c.roster = roster;
+      c.rosterVersion = (expectedVersion ?? 0) + 1;
+      c.updated_at = new Date().toISOString();
+      return { ...c };
+    },
+    async clearRoster(placementId) {
+      const c = placements.get(placementId);
+      if (!c) return;
+      delete c.roster;
+      delete c.rosterVersion;
+      c.updated_at = new Date().toISOString();
     },
   };
 
@@ -2048,6 +2084,31 @@ export function createFakeWorld(): FakeWorld {
       t.updatedAt = new Date().toISOString();
       toursMap.set(tourId, t);
     },
+    async setRoster(tourId, roster, expectedVersion) {
+      // Mirror the conditional write: MATERIALIZE only when no plan exists AND
+      // no thread pointer does (D1 - a plan on a thread-bearing tour is inert),
+      // otherwise the stored version must equal the caller's.
+      const t = toursMap.get(tourId);
+      const conflict =
+        !t ||
+        (expectedVersion === undefined
+          ? t.roster !== undefined || t.groupThreadId !== undefined
+          : t.rosterVersion !== expectedVersion);
+      if (conflict) throw new RosterPlanConflictError();
+      t.roster = roster;
+      t.rosterVersion = (expectedVersion ?? 0) + 1;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+      return { ...t };
+    },
+    async clearRoster(tourId) {
+      const t = toursMap.get(tourId);
+      if (!t) return;
+      delete t.roster;
+      delete t.rosterVersion;
+      t.updatedAt = new Date().toISOString();
+      toursMap.set(tourId, t);
+    },
   };
 
   const tourRemindersMap = new Map<string, TourReminderItem>();
@@ -2135,6 +2196,120 @@ export function createFakeWorld(): FakeWorld {
           tourRemindersMap.set(r.reminderId, r);
         }
       }
+    },
+  };
+
+  // In-memory pending roster actions (contact-rosters Task 12/13): the durable
+  // quiet-hours deferral rows. Mirrors pendingRosterActionsRepo EXACTLY - the
+  // deterministic PK is the dedupe (upsertPending is an unconditional replace),
+  // every claim transition is conditional on the row still being 'pending', and
+  // dismiss refuses a pending row. Tests drive the poller/endpoints with NO
+  // DynamoDB.
+  const pendingRosterActionsMap = new Map<string, PendingRosterActionItem>();
+  const pendingRosterActionsRepo: PendingRosterActionsRepo = {
+    async upsertPending(input: UpsertPendingInput) {
+      const key =
+        input.action === 'add_member'
+          ? ({
+              ownerType: input.ownerType,
+              ownerId: input.ownerId,
+              action: 'add_member' as const,
+              contactId: input.contactId ?? '',
+            })
+          : ({ ownerType: input.ownerType, ownerId: input.ownerId, action: 'open_group' as const });
+      if (key.action === 'add_member' && key.contactId === '') {
+        throw new Error('pendingRosterActions: add_member requires a contactId');
+      }
+      const item: PendingRosterActionItem = {
+        actionId: rosterActionIdFor(key),
+        ownerKey: rosterActionOwnerKey(key),
+        ownerType: input.ownerType,
+        ownerId: input.ownerId,
+        action: input.action,
+        ...(input.action === 'add_member' && { contactId: input.contactId }),
+        dueAt: input.dueAt,
+        _actionPartition: 'roster_actions',
+        reason: input.reason ?? 'quiet_hours',
+        status: 'pending',
+        createdAt: input.createdAt ?? new Date().toISOString(),
+      };
+      pendingRosterActionsMap.set(item.actionId, { ...item });
+      return { ...item };
+    },
+    async getById(actionId: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      return row === undefined ? undefined : { ...row };
+    },
+    async listByOwner(owner: RosterActionOwnerRef) {
+      const ownerKey = rosterActionOwnerKey(owner);
+      return [...pendingRosterActionsMap.values()]
+        .filter((r) => r.ownerKey === ownerKey)
+        .map((r) => ({ ...r }));
+    },
+    async listDue(nowIso: string) {
+      return [...pendingRosterActionsMap.values()]
+        .filter((r) => r.status === 'pending' && r.dueAt <= nowIso)
+        .sort((a, b) => (a.dueAt < b.dueAt ? -1 : a.dueAt > b.dueAt ? 1 : 0))
+        .map((r) => ({ ...r }));
+    },
+    async claimApply(actionId: string, appliedAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'applied';
+      row.resolvedAt = appliedAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async claimSkip(actionId: string, skippedAt: string, reason: RosterActionSkipReason) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'skipped';
+      row.resolvedAt = skippedAt;
+      row.skippedReason = reason;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async cancel(actionId: string, canceledAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status !== 'pending') return false;
+      row.status = 'canceled';
+      row.resolvedAt = canceledAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async dismiss(actionId: string, dismissedAt: string) {
+      const row = pendingRosterActionsMap.get(actionId);
+      if (!row || row.status === 'pending' || row.dismissedAt !== undefined) return false;
+      row.dismissedAt = dismissedAt;
+      pendingRosterActionsMap.set(actionId, row);
+      return true;
+    },
+    async migrate(from: RosterActionOwnerRef, to: RosterActionOwnerRef) {
+      const fromKey = rosterActionOwnerKey(from);
+      const moved: PendingRosterActionItem[] = [];
+      for (const row of [...pendingRosterActionsMap.values()]) {
+        if (row.ownerKey !== fromKey || row.status !== 'pending') continue;
+        const key =
+          row.action === 'add_member'
+            ? ({
+                ownerType: to.ownerType,
+                ownerId: to.ownerId,
+                action: 'add_member' as const,
+                contactId: row.contactId ?? '',
+              })
+            : ({ ownerType: to.ownerType, ownerId: to.ownerId, action: 'open_group' as const });
+        const next: PendingRosterActionItem = {
+          ...row,
+          actionId: rosterActionIdFor(key),
+          ownerKey: rosterActionOwnerKey(key),
+          ownerType: to.ownerType,
+          ownerId: to.ownerId,
+        };
+        pendingRosterActionsMap.set(next.actionId, next);
+        pendingRosterActionsMap.delete(row.actionId);
+        moved.push({ ...next });
+      }
+      return moved;
     },
   };
 
@@ -2558,6 +2733,8 @@ export function createFakeWorld(): FakeWorld {
     tourRemindersRepo,
     placementNudgesMap,
     placementNudgesRepo,
+    pendingRosterActionsMap,
+    pendingRosterActionsRepo,
     suggestions,
     extractionSchedules,
     extractionRepo,
@@ -2602,6 +2779,11 @@ export interface HarnessOptions {
    * assert exact dueAt values). Omit to use the wall clock.
    */
   toursNow?: () => string;
+  /**
+   * Injected clock for the PLACEMENT router's quiet-hours evaluation
+   * (contact-rosters Task 13). Omit to use the wall clock.
+   */
+  placementsNow?: () => string;
   /**
    * Pre-built dev-only router (routes/dev.ts) — tests that exercise /__dev
    * endpoints against the world fakes pass one in; mounted exactly like the
@@ -2649,7 +2831,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     MESSAGING_DRIVER: 'console',
     TWILIO_AUTH_TOKEN: AUTH_TOKEN,
     PUBLIC_BASE_URL: PUBLIC_BASE_URL,
-    OUR_PHONE_NUMBERS: OUR_NUMBER,
+    BUSINESS_PHONE_NUMBER: OUR_NUMBER,
     // M1.3 auth wiring — production fail-fast keys, so tests overriding
     // NODE_ENV to 'production' still boot. SESSION_SECRET deliberately
     // matches the dev placeholder: the sealed cookies minted by
@@ -2706,10 +2888,14 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // Post-Tour & Application (Task 5): the choke-point armStageNudge hook runs
       // against this no-network fake instead of the real DynamoDB repo.
       placementNudgesRepo: world.placementNudgesRepo,
+      // contact-rosters Task 13: the quiet-hours deferral rows the open/live-add
+      // routes write and the pending-row endpoints act on (no DynamoDB).
+      pendingRosterActionsRepo: world.pendingRosterActionsRepo,
       // conversation-fact-extraction (T8): the review API (suggestions router) +
       // the contact-PATCH provenance-clear share this in-memory suggestion store.
       extractionRepo: world.extractionRepo,
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
+      ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world
       // contacts the authed API + the broadcast.send job read (no DynamoDB).
       // A test may override the resolver to drive the over-cap/truncated paths.
@@ -2778,8 +2964,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // placement-deadline-model: the escalation emit recomputes the soonest
       // deadline so the pending chip is PRESERVED (not nulled) on attention raise.
       placementDeadlinesRepo: world.placementDeadlinesRepo,
-      // M1.10d masked-call landlord-leg routing reads the unit's primary_voice_contact.
-      unitsRepo: world.unitsRepo,
+      // NOTE: no unitsRepo here. The masked bridge dials the THREAD ROSTER
+      // verbatim (contact-rosters D10), so the voice router reads no unit at
+      // all - and TwilioVoiceWebhookDeps no longer declares the field.
       broadcastsRepo: world.broadcastsRepo,
       // M1.9b founder call-triage: the voice router resolves the founder (admin
       // user(s)) via the SAME fake users repo the auth gate uses, reads the

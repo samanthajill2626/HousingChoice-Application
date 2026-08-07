@@ -26,6 +26,7 @@ import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createEventBus } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
+import { ROSTER_UNAVAILABLE_GRACE_MS } from '../src/lib/rosterResolution.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import { createTourRemindersRepo, type ReminderKind } from '../src/repos/tourRemindersRepo.js';
 import { createToursRepo } from '../src/repos/toursRepo.js';
@@ -124,10 +125,12 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     toursRepo: tours,
     contactsRepo: world.contactsRepo,
     conversationsRepo: world.conversationsRepo,
-    messagesRepo: world.messagesRepo,
-    // Address source for the composed body (empty here - these tours' units are
-    // never seeded, which is exactly the no-address variant).
+    // ONE unit read, TWO consumers: D11 roster resolution (contact-rosters -
+    // the property default rung) AND the address source for the composed body
+    // (empty here - these tours' units are never seeded, which is exactly the
+    // no-address variant).
     unitsRepo: world.unitsRepo,
+    messagesRepo: world.messagesRepo,
     sendMessageService,
     adapter: createAdapterSpy().adapter,
     // Quiet hours OFF: the fire-time backstop is a no-op, so these poller cases
@@ -1282,8 +1285,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: racingWorld.contactsRepo,
       conversationsRepo: racingWorld.conversationsRepo,
-      messagesRepo: racingWorld.messagesRepo,
       unitsRepo: racingWorld.unitsRepo,
+      messagesRepo: racingWorld.messagesRepo,
       sendMessageService: racingSend,
       adapter: createAdapterSpy().adapter,
       settingsRepo: quietOff,
@@ -1366,8 +1369,8 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: cancelWorld.contactsRepo,
       conversationsRepo: cancelWorld.conversationsRepo,
-      messagesRepo: cancelWorld.messagesRepo,
       unitsRepo: cancelWorld.unitsRepo,
+      messagesRepo: cancelWorld.messagesRepo,
       sendMessageService: cancelSend,
       adapter: createAdapterSpy().adapter,
       settingsRepo: quietOff,
@@ -1475,10 +1478,11 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
       toursRepo: tours,
       contactsRepo: world.contactsRepo,
       conversationsRepo: world.conversationsRepo,
+      // D11 roster resolution (contact-rosters): the property default rung.
+      unitsRepo: world.unitsRepo,
       // Group rungs persist a system announcement row in the relay thread
       // (sendRelayAnnouncement) — the world's message store backs it.
       messagesRepo: world.messagesRepo,
-      unitsRepo: world.unitsRepo,
       sendMessageService: send,
       adapter: spy.adapter,
       settingsRepo: quietOff,
@@ -1764,9 +1768,10 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // Test 13 — groupThreadId → missing conversation: 1:1 fallback
+  // Test 13 - groupThreadId -> missing conversation: routing falls back to 1:1,
+  // but D11 holds the rung (the roster is UNREADABLE, not "tenant removed")
   // ---------------------------------------------------------------------------
-  it('landlord_led tour whose groupThreadId points at a missing conversation falls back to 1:1', async () => {
+  it('landlord_led tour whose groupThreadId points at a missing conversation falls back to 1:1 - and D11 holds the rung UNCLAIMED', async () => {
     const rig = createGroupTestRig();
     const now0 = '2026-08-01T14:00:00.000Z';
     const scheduledAt = '2026-08-03T22:00:00.000Z';
@@ -1789,15 +1794,31 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     await runDueTourReminders(now0, rig.deps);
 
+    // Routing still falls back (no group send) - but the SAME dangling pointer
+    // makes the roster 'unavailable', and D11's rule is that an unreadable
+    // roster is not an answer: neither text a possibly-removed tenant nor burn
+    // the rung. The rung stays pending and the next tick retries it, so this is
+    // a DEFERRAL, not a loss (contact-rosters, spec D1's cardinal rule).
     expect(rig.groupSends).toHaveLength(0);
+    expect(rig.world.sent).toHaveLength(0);
+    const held = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.kind === 'confirmation',
+    );
+    expect(held?.sentAt).toBeUndefined();
+    expect(held?.skippedAt).toBeUndefined();
+
+    // Repair the pointer and the very next tick delivers 1:1 as before.
+    await tours.patch(tour.tourId, { groupThreadId: '' });
+    await runDueTourReminders(now0, rig.deps);
     expect(rig.world.sent).toHaveLength(1);
     expect(rig.world.sent[0]!.to).toBe(tenantPhone);
   });
 
   // ---------------------------------------------------------------------------
-  // Test 14 — groupThreadId → a NON-relay_group conversation: 1:1 fallback
+  // Test 14 - groupThreadId -> a NON-relay_group conversation: routing falls
+  // back to 1:1, and that thread's (absent) participants are the roster FACT
   // ---------------------------------------------------------------------------
-  it('landlord_led tour whose groupThreadId points at a non-relay_group conversation falls back to 1:1', async () => {
+  it('landlord_led tour whose groupThreadId points at a non-relay_group conversation falls back to 1:1 - and D11 skips it visibly', async () => {
     const rig = createGroupTestRig();
     const now0 = '2026-08-01T14:30:00.000Z';
     const scheduledAt = '2026-08-03T22:30:00.000Z';
@@ -1821,9 +1842,18 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
 
     await runDueTourReminders(now0, rig.deps);
 
+    // Routing falls back (no group send). The pointer LOADS, so the roster is a
+    // FACT - and that thread carries no participants at all, so the tenant is
+    // not on it. Under D11 that is a visible skipped row, not a send: whether
+    // the pointer is corrupt or the group was emptied, the poll will not text a
+    // tenant it cannot show on any roster, and the row says why.
     expect(rig.groupSends).toHaveLength(0);
-    expect(rig.world.sent).toHaveLength(1);
-    expect(rig.world.sent[0]!.to).toBe(tenantPhone);
+    expect(rig.world.sent).toHaveLength(0);
+    const skipped = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.kind === 'confirmation',
+    );
+    expect(skipped?.sentAt).toBeUndefined();
+    expect(skipped?.skipReason).toBe('tenant_not_on_roster');
   });
 
   // ---------------------------------------------------------------------------
@@ -2499,5 +2529,337 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     const warns = logCapture.atLevel(40).filter((l) => l['reminderId'] === row.reminderId);
     expect(warns).toHaveLength(1);
     expect(warns[0]!['refusal']).toBe('contact_opted_out');
+  });
+
+  // ===========================================================================
+  // D11 (contact-rosters) - a tenant OFF the roster is never texted 1:1
+  // ===========================================================================
+  //
+  // The check binds to the ROUTING OUTCOME at claim time, not the rung kind: a
+  // self_guided rung and a group-routed rung that FALLS BACK to the tenant 1:1
+  // are suppressed by the same rule, with a VISIBLE skipped row. Group sends
+  // that actually reach the group are untouched. Re-adding the tenant lifts the
+  // suppression for unclaimed rungs with no re-arm step.
+  //
+  // Clocks are PINNED (injected `now`), never wall-clock.
+
+  /** now/scheduled pair used by this section: confirmation is due at NOW_D11. */
+  const NOW_D11 = '2026-08-05T10:00:00.000Z';
+  const SCHEDULED_D11 = '2026-08-07T18:00:00.000Z';
+  /** day_before = scheduled - 24h, with quiet hours off (no clamping). */
+  const DAY_BEFORE_D11 = '2026-08-06T18:00:00.000Z';
+
+  async function armD11Tour(opts: {
+    tourId?: string;
+    tenantId: string;
+    unitId: string;
+    tourType?: 'self_guided' | 'landlord_led' | 'pm_team';
+    groupThreadId?: string;
+  }) {
+    const tour = await tours.create({
+      tenantId: opts.tenantId,
+      unitId: opts.unitId,
+      scheduledAt: SCHEDULED_D11,
+      tourType: opts.tourType ?? 'self_guided',
+    });
+    if (opts.groupThreadId !== undefined) {
+      await tours.patch(tour.tourId, { groupThreadId: opts.groupThreadId });
+    }
+    await armTourReminders(tour, NOW_D11, {
+      tourRemindersRepo: tourReminders,
+      settingsRepo: quietOff,
+      logger,
+    });
+    return tour;
+  }
+
+  const rungOf = async (tourId: string, kind: string) =>
+    (await tourReminders.listByTour(tourId)).find((r) => r.kind === kind);
+
+  it('self_guided: a tenant absent from the roster plan is claim-SKIPPED as tenant_not_on_roster', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-a', '+15550800001', 'conv-d11-a', NOW_D11);
+    const tour = await armD11Tour({ tenantId: 'contact-d11-a', unitId: 'unit-d11-a' });
+    // The caseworker-to-PM arrangement: the operator removed the tenant.
+    await tours.setRoster(
+      tour.tourId,
+      [{ contactId: 'c-caseworker-d11' }, { contactId: 'c-pm-d11' }],
+      undefined,
+    );
+
+    await runDueTourReminders(NOW_D11, rig.deps);
+
+    expect(rig.world.sent).toHaveLength(0);
+    const confirmation = await rungOf(tour.tourId, 'confirmation');
+    expect(confirmation?.sentAt).toBeUndefined();
+    expect(confirmation?.skippedAt).toBe(NOW_D11);
+    expect(confirmation?.skipReason).toBe('tenant_not_on_roster');
+  });
+
+  it('THE FALLBACK DOOR: a landlord_led rung with NO usable group is suppressed too', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-b', '+15550800002', 'conv-d11-b', NOW_D11);
+    // landlord_led with no group thread at all - routing falls back to the
+    // tenant 1:1, which is exactly the door D11 has to close.
+    const tour = await armD11Tour({
+      tenantId: 'contact-d11-b',
+      unitId: 'unit-d11-b',
+      tourType: 'landlord_led',
+    });
+    await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
+
+    await runDueTourReminders(NOW_D11, rig.deps);
+
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    const confirmation = await rungOf(tour.tourId, 'confirmation');
+    expect(confirmation?.skipReason).toBe('tenant_not_on_roster');
+  });
+
+  it('a landlord_led rung that REACHES its group still sends, tenant on the roster or not', async () => {
+    const rig = createGroupTestRig();
+    const poolNumber = '+15550190211';
+    seedTenant(rig.world, 'contact-d11-c', '+15550800003', 'conv-d11-c', NOW_D11);
+    // The live thread does NOT carry the tenant (they were removed from it),
+    // but the group route is unaffected: the group is who it texts.
+    seedRelayGroup(rig.world, {
+      convId: 'conv-d11-group-c',
+      poolNumber,
+      participants: [
+        { contactId: 'c-caseworker-d11', phone: '+15550800013', name: 'Casey Worker' },
+        { contactId: 'c-pm-d11', phone: '+15550800014', name: 'Pat Manager' },
+      ],
+      now: NOW_D11,
+    });
+    const tour = await armD11Tour({
+      tenantId: 'contact-d11-c',
+      unitId: 'unit-d11-c',
+      tourType: 'landlord_led',
+      groupThreadId: 'conv-d11-group-c',
+    });
+
+    await runDueTourReminders(NOW_D11, rig.deps);
+
+    expect(rig.groupSends).toHaveLength(2);
+    expect(rig.world.sent).toHaveLength(0); // nothing 1:1
+    const confirmation = await rungOf(tour.tourId, 'confirmation');
+    expect(confirmation?.sentAt).toBe(NOW_D11);
+    expect(confirmation?.skippedAt).toBeUndefined();
+  });
+
+  it('re-adding the tenant lifts the suppression for the NEXT rung - no re-arm step', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-d', '+15550800004', 'conv-d11-d', NOW_D11);
+    const tour = await armD11Tour({ tenantId: 'contact-d11-d', unitId: 'unit-d11-d' });
+    const first = await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
+
+    await runDueTourReminders(NOW_D11, rig.deps);
+    expect((await rungOf(tour.tourId, 'confirmation'))?.skipReason).toBe('tenant_not_on_roster');
+
+    // The operator puts the tenant back (optimistic-concurrency write).
+    await tours.setRoster(
+      tour.tourId,
+      [{ contactId: 'contact-d11-d' }, { contactId: 'c-pm-d11' }],
+      first.rosterVersion,
+    );
+
+    // The very next due rung goes out - the check runs at CLAIM time, so
+    // nothing had to be re-armed.
+    await runDueTourReminders(DAY_BEFORE_D11, rig.deps);
+    expect(rig.world.sent).toHaveLength(1);
+    expect(rig.world.sent[0]!.to).toBe('+15550800004');
+    const dayBefore = await rungOf(tour.tourId, 'day_before');
+    expect(dayBefore?.sentAt).toBe(DAY_BEFORE_D11);
+  });
+
+  it("an UNREADABLE roster leaves the rung UNCLAIMED - neither sent nor skipped", async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-e', '+15550800005', 'conv-d11-e', NOW_D11);
+    // A thread pointer that does not load: the roster is 'unavailable', which is
+    // NOT "the tenant was removed". Texting a possibly-removed tenant on a
+    // Dynamo blip - or burning the rung with a false skip - are both wrong.
+    const tour = await armD11Tour({
+      tenantId: 'contact-d11-e',
+      unitId: 'unit-d11-e',
+      groupThreadId: 'conv-d11-vanished',
+    });
+
+    await runDueTourReminders(NOW_D11, rig.deps);
+
+    expect(rig.world.sent).toHaveLength(0);
+    const before = await rungOf(tour.tourId, 'confirmation');
+    expect(before?.sentAt).toBeUndefined();
+    expect(before?.skippedAt).toBeUndefined();
+
+    // The thread comes back; the very next tick delivers it.
+    seedRelayGroup(rig.world, {
+      convId: 'conv-d11-vanished',
+      poolNumber: '+15550190212',
+      participants: [
+        { contactId: 'contact-d11-e', phone: '+15550800005', name: 'Tina Tenant' },
+        { contactId: 'c-pm-d11', phone: '+15550800014', name: 'Pat Manager' },
+      ],
+      now: NOW_D11,
+    });
+    await runDueTourReminders(NOW_D11, rig.deps);
+    expect(rig.world.sent).toHaveLength(1);
+    expect((await rungOf(tour.tourId, 'confirmation'))?.sentAt).toBe(NOW_D11);
+  });
+
+  it('an UNREADABLE roster is BOUNDED by time-past-due: unclaimed inside the grace, claim-skipped past it', async () => {
+    // The unclaimed wait above is right for a BLIP. A permanent sentinel (a
+    // pointer at a conversation that will never load) used to re-list the rung
+    // every tick forever: never sent, never visibly skipped.
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d11-f', '+15550800006', 'conv-d11-f', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d11-f',
+      unitId: 'unit-d11-f',
+      groupThreadId: 'conv-d11-never-loads',
+    });
+    const dueAt = (await rungOf(tour.tourId, 'confirmation'))!.dueAt;
+
+    // One minute SHORT of the grace window - still a blip, still unclaimed.
+    const withinGrace = new Date(
+      Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS - 60_000,
+    ).toISOString();
+    await runDueTourReminders(withinGrace, rig.deps);
+    const waiting = await rungOf(tour.tourId, 'confirmation');
+    expect(waiting?.sentAt).toBeUndefined();
+    expect(waiting?.skippedAt, 'inside the grace it re-lists next tick').toBeUndefined();
+    expect(
+      (await tourReminders.listDue(withinGrace)).some((r) => r.reminderId === waiting?.reminderId),
+      'still due - the wait is a wait, not a retirement',
+    ).toBe(true);
+
+    // One minute PAST it - retire it VISIBLY rather than wait forever.
+    const pastGrace = new Date(
+      Date.parse(dueAt) + ROSTER_UNAVAILABLE_GRACE_MS + 60_000,
+    ).toISOString();
+    await runDueTourReminders(pastGrace, rig.deps);
+    const retired = await rungOf(tour.tourId, 'confirmation');
+    expect(retired?.sentAt, 'a skip is never a send').toBeUndefined();
+    expect(retired?.skippedAt).toBe(pastGrace);
+    expect(retired?.skipReason).toBe('roster_unavailable');
+    expect(rig.world.sent).toHaveLength(0);
+
+    // Terminal: it leaves listDue exactly once.
+    expect(
+      (await tourReminders.listDue(pastGrace)).some((r) => r.reminderId === retired?.reminderId),
+    ).toBe(false);
+  });
+
+  // -------------------------------------------------------------------------
+  // D7 (contact-rosters Task 13): a group-eligible rung WAITS for a deferred open
+  // -------------------------------------------------------------------------
+
+  /** A pendingRosterActions stub carrying exactly one row, keyed by actionId. */
+  function pendingOpenFor(tourId: string, status: 'pending' | 'applied' = 'pending') {
+    const actionId = `tour#${tourId}#open`;
+    return {
+      async getById(id: string) {
+        return id === actionId
+          ? ({
+              actionId,
+              ownerKey: `tour#${tourId}`,
+              ownerType: 'tour' as const,
+              ownerId: tourId,
+              action: 'open_group' as const,
+              dueAt: '2026-08-05T12:00:00.000Z',
+              _actionPartition: 'roster_actions' as const,
+              reason: 'quiet_hours' as const,
+              status,
+              createdAt: '2026-08-05T03:00:00.000Z',
+            })
+          : undefined;
+      },
+    };
+  }
+
+  it('a group-eligible rung whose tour has a PENDING open WAITS: unclaimed, not 1:1-sent', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-a', '+15550800011', 'conv-d7-a', NOW_D11);
+    // landlord_led with NO group thread yet - today that falls back to the
+    // tenant 1:1, which is exactly what the deferred open makes premature.
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-a',
+      unitId: 'unit-d7-a',
+      tourType: 'landlord_led',
+    });
+
+    await runDueTourReminders(NOW_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
+    });
+
+    expect(rig.world.sent).toHaveLength(0);
+    expect(rig.groupSends).toHaveLength(0);
+    const confirmation = await rungOf(tour.tourId, 'confirmation');
+    expect(confirmation?.sentAt, 'unclaimed - it re-lists next tick').toBeUndefined();
+    expect(confirmation?.skippedAt).toBeUndefined();
+  });
+
+  it('AT/AFTER tour start the wait ENDS: the rung proceeds through the usual fallback', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-b', '+15550800012', 'conv-d7-b', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-b',
+      unitId: 'unit-d7-b',
+      tourType: 'landlord_led',
+    });
+
+    // now == the tour's own start instant: the staleness bound has expired.
+    await runDueTourReminders(SCHEDULED_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId),
+    });
+
+    expect(rig.world.sent.length, 'the tenant 1:1 fallback fires').toBeGreaterThan(0);
+  });
+
+  it('a RESOLVED open imposes no wait at all', async () => {
+    const rig = createGroupTestRig();
+    seedTenant(rig.world, 'contact-d7-c', '+15550800013', 'conv-d7-c', NOW_D11);
+    const tour = await armD11Tour({
+      tenantId: 'contact-d7-c',
+      unitId: 'unit-d7-c',
+      tourType: 'landlord_led',
+    });
+
+    await runDueTourReminders(NOW_D11, {
+      ...rig.deps,
+      pendingRosterActionsRepo: pendingOpenFor(tour.tourId, 'applied'),
+    });
+
+    expect(rig.world.sent.length).toBeGreaterThan(0);
+  });
+
+  it('force-send REFUSES a rung targeting an off-roster tenant and leaves the row pending', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-d11-f',
+      phone: '+15550800006',
+      convId: 'conv-d11-f',
+      now: SEEDED_AT,
+    });
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-d11-f',
+      unitId: 'unit-d11-f',
+      kind: 'confirmation',
+    });
+    await tours.setRoster(tour.tourId, [{ contactId: 'c-pm-d11' }], undefined);
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    // A human failure must never RETIRE a rung: refuse pre-claim, row untouched.
+    expect(result).toEqual({ outcome: 'refused', reason: 'tenant_not_on_roster' });
+    expect(spy.sent).toHaveLength(0);
+    const after = (await tourReminders.listByTour(tour.tourId)).find(
+      (r) => r.reminderId === row.reminderId,
+    );
+    expect(after?.sentAt).toBeUndefined();
+    expect(after?.skippedAt).toBeUndefined();
   });
 });

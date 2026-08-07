@@ -1,6 +1,6 @@
 // BE3/C3 route tests — the unit roster + related-units endpoints:
 //   GET    /api/units/:id            (now includes `contacts`, superset of legacy)
-//   POST   /api/units/:id/contacts   { contactId, role, primaryVoice? }
+//   POST   /api/units/:id/contacts   { contactId, role, primaryContact? }
 //   DELETE /api/units/:id/contacts/:contactId
 //   GET    /api/units/:id/related    → { related: RelatedUnit[] }
 // Plus the back-compat roster for a roster-less unit and the audit trail.
@@ -51,9 +51,9 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     expect(res.status).toBe(200);
     // Legacy fields intact (superset).
     expect(res.body.unit).toMatchObject({ unitId: 'u-1', landlordId: 'c-ll-9', status: 'available', beds: 2 });
-    // Back-compat roster: [{ contactId: landlordId, role: 'landlord', primaryVoice: true }].
+    // Back-compat roster: [{ contactId: landlordId, role: 'landlord', primaryContact: true }].
     expect(res.body.unit.contacts).toEqual([
-      { contactId: 'c-ll-9', role: 'landlord', primaryVoice: true },
+      { contactId: 'c-ll-9', role: 'landlord', primaryContact: true },
     ]);
   });
 
@@ -62,8 +62,8 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     seedUnit(world, 'u-2', {
       landlordId: 'c-ll-1',
       contacts: [
-        { contactId: 'c-ll-1', role: 'landlord', primaryVoice: false },
-        { contactId: 'c-pm-1', role: 'pm', primaryVoice: true },
+        { contactId: 'c-ll-1', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm-1', role: 'pm', primaryContact: true },
       ],
     });
     // The pm contact carries the CURRENT name/company — read-time enrichment.
@@ -77,7 +77,7 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     expect(res.body.unit.contacts).toContainEqual({
       contactId: 'c-pm-1',
       role: 'pm',
-      primaryVoice: true,
+      primaryContact: true,
       name: 'Pat M',
       company: 'Acme PM',
     });
@@ -124,9 +124,9 @@ describe('GET /api/units/:id — includes contacts (BE3/C3)', () => {
     seedUnit(world, 'u-fresh', {
       landlordId: 'c-ll-1',
       contacts: [
-        { contactId: 'c-ll-1', role: 'landlord', primaryVoice: false },
+        { contactId: 'c-ll-1', role: 'landlord', primaryContact: false },
         // Stale denormalized name stored on the row.
-        { contactId: 'c-pm-fresh', role: 'pm', primaryVoice: true, name: 'Old Name' },
+        { contactId: 'c-pm-fresh', role: 'pm', primaryContact: true, name: 'Old Name' },
       ],
     });
     seedContact(world, 'c-pm-fresh', { type: 'landlord', firstName: 'New', lastName: 'Name' });
@@ -179,7 +179,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
     expect(roster.map((c) => c.contactId).sort()).toEqual(['c-ll-1', 'c-pm-3']);
     expect(roster.find((c) => c.contactId === 'c-pm-3')).toMatchObject({
       role: 'pm',
-      primaryVoice: false,
+      primaryContact: false,
       name: 'Pat Manager',
       company: 'Acme PM',
     });
@@ -188,7 +188,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
     );
   });
 
-  it('setting primaryVoice keeps a single ☎ primary and updates the voice-routing field', async () => {
+  it('setting primaryContact keeps a single ☎ primary and updates the primary_contact scalar', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-4', { landlordId: 'c-ll-1' });
     seedContact(world, 'c-pm-4', { type: 'landlord', firstName: 'Pat', lastName: 'M' });
@@ -197,17 +197,17 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
       .post('/api/units/u-4/contacts')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ contactId: 'c-pm-4', role: 'pm', primaryVoice: true });
+      .send({ contactId: 'c-pm-4', role: 'pm', primaryContact: true });
 
     expect(res.status).toBe(200);
     const roster = res.body.unit.contacts as Array<Record<string, unknown>>;
-    expect(roster.filter((c) => c.primaryVoice === true)).toHaveLength(1);
-    expect(roster.find((c) => c.primaryVoice === true)?.contactId).toBe('c-pm-4');
-    // The WIRE response carries the updated voice-routing field (serializer
+    expect(roster.filter((c) => c.primaryContact === true)).toHaveLength(1);
+    expect(roster.find((c) => c.primaryContact === true)?.contactId).toBe('c-pm-4');
+    // The WIRE response carries the updated primary_contact scalar (serializer
     // verified, not just the fake's backing map).
-    expect(res.body.unit.primary_voice_contact).toBe('c-pm-4');
-    // The stored unit's voice-routing field tracks the roster ☎ primary.
-    expect(world.units.get('u-4')?.primary_voice_contact).toBe('c-pm-4');
+    expect(res.body.unit.primary_contact).toBe('c-pm-4');
+    // The stored unit's primary_contact scalar tracks the roster ☎ primary.
+    expect(world.units.get('u-4')?.primary_contact).toBe('c-pm-4');
   });
 
   it('404s an unknown unit', async () => {
@@ -246,7 +246,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
     expect(res.status).toBe(400);
   });
 
-  it('400s a non-boolean primaryVoice', async () => {
+  it('400s a non-boolean primaryContact', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-7', { landlordId: 'c-ll-1' });
     seedContact(world, 'c-pm-7', { type: 'landlord' });
@@ -254,7 +254,7 @@ describe('POST /api/units/:id/contacts (BE3/C3)', () => {
       .post('/api/units/u-7/contacts')
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({ contactId: 'c-pm-7', role: 'pm', primaryVoice: 'yes' });
+      .send({ contactId: 'c-pm-7', role: 'pm', primaryContact: 'yes' });
     expect(res.status).toBe(400);
   });
 });
@@ -286,10 +286,10 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
     // Landlord present; the pm is the current ☎ primary.
     seedUnit(world, 'u-consist', {
       landlordId: 'c-ll-c',
-      primary_voice_contact: 'c-pm-c',
+      primary_contact: 'c-pm-c',
       contacts: [
-        { contactId: 'c-ll-c', role: 'landlord', primaryVoice: false },
-        { contactId: 'c-pm-c', role: 'pm', primaryVoice: true },
+        { contactId: 'c-ll-c', role: 'landlord', primaryContact: false },
+        { contactId: 'c-pm-c', role: 'pm', primaryContact: true },
       ],
     });
     const res = await request(app)
@@ -298,11 +298,11 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
       .set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(200);
     const roster = res.body.unit.contacts as Array<Record<string, unknown>>;
-    // Exactly one primaryVoice — the landlord — and the scalar agrees.
-    expect(roster.filter((c) => c.primaryVoice === true)).toHaveLength(1);
-    expect(roster.find((c) => c.primaryVoice === true)?.contactId).toBe('c-ll-c');
-    expect(res.body.unit.primary_voice_contact).toBe('c-ll-c');
-    expect(world.units.get('u-consist')?.primary_voice_contact).toBe('c-ll-c');
+    // Exactly one primaryContact — the landlord — and the scalar agrees.
+    expect(roster.filter((c) => c.primaryContact === true)).toHaveLength(1);
+    expect(roster.find((c) => c.primaryContact === true)?.contactId).toBe('c-ll-c');
+    expect(res.body.unit.primary_contact).toBe('c-ll-c');
+    expect(world.units.get('u-consist')?.primary_contact).toBe('c-ll-c');
   });
 
   it('removes a non-landlord roster contact + audits unit_contact_removed', async () => {
@@ -310,8 +310,8 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
     seedUnit(world, 'u-8', {
       landlordId: 'c-ll-1',
       contacts: [
-        { contactId: 'c-ll-1', role: 'landlord', primaryVoice: true },
-        { contactId: 'c-pm-8', role: 'pm', primaryVoice: false },
+        { contactId: 'c-ll-1', role: 'landlord', primaryContact: true },
+        { contactId: 'c-pm-8', role: 'pm', primaryContact: false },
       ],
     });
     const res = await request(app)
@@ -327,7 +327,7 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
     );
   });
 
-  it('409s removing the primary landlord', async () => {
+  it('409s removing the landlord of record', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'u-9', { landlordId: 'c-ll-1' });
     const res = await request(app)
@@ -335,7 +335,7 @@ describe('DELETE /api/units/:id/contacts/:contactId (BE3/C3)', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(res.status).toBe(409);
-    expect(res.body.error).toBe('cannot_remove_primary_landlord');
+    expect(res.body.error).toBe('cannot_remove_landlord_of_record');
   });
 
   it('404s a contact not on the roster', async () => {

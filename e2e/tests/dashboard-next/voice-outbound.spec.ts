@@ -114,7 +114,7 @@ const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 test.beforeEach(async ({ request }) => {
   await reseed(request);
 });
-/** The app's own business number in the e2e stack (OUR_PHONE_NUMBERS[0]) — the
+/** The app's own business number in the e2e stack (BUSINESS_PHONE_NUMBER) — the
  *  masked caller ID the target sees, and the from= on the navigator-leg ring. */
 const BUSINESS = '+15550009999';
 /** The cell the local seed stamps on the founder as the inbound-line holder

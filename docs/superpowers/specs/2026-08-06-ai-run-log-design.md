@@ -169,6 +169,15 @@ six orders of magnitude of headroom. A footnote, not a constraint.
 ```
 run#<runId>
   runId, startedAt, finishedAt, durationMs
+            AMENDED post-approval: these are REAL wall-clock times taken from
+            an injected `now()` on the recorder's deps - NOT the poll's
+            `nowIso`. The dev tick calls the job with a SIMULATED future clock
+            (`routes/dev.ts:373` advances by the debounce window), so using
+            the poll clock would stamp dev and e2e runs about one debounce
+            into the future and mis-sort the log against real time. Domain
+            logic (cursor comparisons, due checks) keeps using `nowIso`
+            unchanged; only the record's timestamps are wall clock. Injected
+            so tests can pin it.
   conversationId, contactId?
   trigger:  sms | voice | triage | email        (the due row's channel)
   outcome:  applied | no_op | skipped | failed
@@ -325,12 +334,21 @@ every terminal path.** There is no outcome that discards work already done.
 | `failed`  | when computed | when computed | if the call returned | if returned | yes |
 
 "When computed" is load-bearing, not hedging. A `no_new_client` skip has a
-FULLY computed window - the job assembles `fresh` at `extraction.ts:294-296`
-and only then consults the cursor gate at 316 - and that window is precisely
-the evidence a reviewer needs to answer "why did it decide there was nothing
-new". Discarding it because the outcome is "skipped" would contradict goal 3.
+computed message list - the job assembles `fresh` at `extraction.ts:294-296`
+and only then consults the cursor gate at 316 - and that list is precisely the
+evidence a reviewer needs to answer "why did it decide there was nothing new".
+Discarding it because the outcome is "skipped" would contradict goal 3.
 `no_contact` and `ineligible_type` genuinely have no window; they exit before
 the fetch.
+
+AMENDED post-approval - a skip records a LIGHT window: `cursor`,
+`newestTsMsgId`, `windowCappedAtLimit`, and the message ids with their
+`type`/`direction`, but NO capping, NO `chars`, and NO `hash`. Capping and
+hashing happen at `extraction.ts:337` onward, AFTER the gate, so recording a
+full window for a skip would mean doing that work on every skipped run purely
+to log it - and `no_new_client` is the common steady-state outcome, so that is
+the hot path. The light window answers the question completely: which messages
+existed, and where the cursor sat. Bytes only matter when bytes were sent.
 
 `error.kind` - set AT THE THROW SITE, never inferred afterwards. A writer
 that cannot see which stage failed cannot distinguish these, which was the
@@ -496,7 +514,19 @@ Re-enumerated against every discard branch in `apply.ts`:
 `equal_to_current` (198, 270), `status_not_onboarding_tenant` (338),
 `type_already_classified` (360), `phone_not_canonicalizable` (367),
 `phone_already_owned` (369), `phone_owned_by_other` (379),
-`dismissed_before` and `repo_error` (both in `putSuggestionSafe`).
+`dismissed_before` and `repo_error` (both in `putSuggestionSafe`), and
+`empty_value_at_parse`.
+
+`empty_value_at_parse` (AMENDED post-approval) closes a gap 7.1 left open.
+When `rawText` shows the model proposed `write` or `suggest` but the value was
+empty or whitespace, `schema.ts:215-219` (scalars) or `258-263` (address)
+folds it away before apply ever runs. 7.1 forbids calling that `no_finding` -
+the model did NOT decline - but named no alternative. It is recorded as
+`outcome: dropped` with this reason. It is deliberately DISTINCT from
+`invalid_value`, which is apply's `coerceField` rejecting a well-formed but
+out-of-range value (`apply.ts:175`): one is the model sending nothing usable,
+the other is the model sending something wrong, and QA needs to tell those
+apart.
 
 Two candidates were removed after checking the code rather than the
 docstrings. `note_line_filtered` (409-411) has no decision target to attach
@@ -542,7 +572,13 @@ explicitly because it is the precondition for all of section 7.3.)
 
 Three resolution surfaces write verdicts, not one:
 
-1. `suggestions.ts` accept (152) / dismiss (316) -> `accepted` / `dismissed`.
+1. `suggestions.ts` accept / dismiss -> `accepted` / `dismissed`. AMENDED
+   post-approval: accept is not one call site but FOUR separate
+   `deleteSuggestion` branches - `status` (185), `phone` (235), `address`
+   (270), and the generic field path (304) - plus dismiss (339).
+   Instrumenting only the generic branch would silently miss status, phone,
+   and address accepts, three of the most common targets. All five are
+   explicit tasks with a test each.
 2. `contacts.ts:1321-1327` - a human PATCH edit deletes the pending
    suggestion for every changed field. Without instrumenting this, those
    decisions sit `pending` forever -> `superseded_by_human_edit`.
@@ -674,8 +710,12 @@ extraction is enabled, so an empty log is never mistaken for "the AI reviewed
 everything and found nothing". This extends the existing flags surface -
 `GET /api/system/flags` in `app/src/routes/system.ts` - NOT `routes/settings.ts`,
 which an earlier revision named incorrectly. `SystemFlags` carries no
-extraction fields today, so `aiExtractionEnabled`, `driver`, `model`, and
-`promptFingerprint` are added to it as an explicit task.
+extraction fields today, so `aiExtractionEnabled`, `aiExtractionDriver`,
+`aiExtractionModel`, and `aiExtractionPromptFingerprint` are added to it as an
+explicit task. AMENDED post-approval: the earlier bare `driver` / `model`
+names would have sat ambiguously beside the existing `messagingDriver` on the
+same object; the prefixed names match `aiExtractionEnabled` and cannot be
+misread.
 
 **Scope is a single exclusive selector, not a filter matrix.** One Query has
 one hash key, so `global`, a contact, a conversation, and an outcome cannot

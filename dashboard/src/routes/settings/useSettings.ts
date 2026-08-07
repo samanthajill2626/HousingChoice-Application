@@ -69,8 +69,12 @@ export function useSettings(): SettingsState {
     const res = await putSettings(patch);
     setSettings(res.settings);
     setWelcomeTextDefault(res.welcomeTextDefault);
-    // The PUT carries the read-only siblings too: re-store them, or a save
-    // BLANKS whatever is showing them (the Phone numbers "Our number" block).
+    // The PUT carries the read-only siblings too, so re-store them and keep one
+    // hook shape for both calls. No mounted surface loses the number today: the
+    // only reader (the Phone numbers "Our number" block) never saves, and it is
+    // route-exclusive from the sections that do. This keeps that an accident of
+    // routing rather than a load-bearing assumption - a page that both saved and
+    // showed the number would otherwise blank it on the first save.
     setBusinessPhoneNumber(res.businessPhoneNumber);
     return res.settings;
   }, []);

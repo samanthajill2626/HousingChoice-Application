@@ -628,7 +628,15 @@ just quietly presents the wrong number to the 629 imported contacts the port exi
 Separately, the ported number must also be **added to the Messaging Service's sender pool** (and
 covered by the A2P campaign) before it can be sent from — the app pins `from`, but the number has
 to be IN the pool for the service to accept it. Setting `BUSINESS_PHONE_NUMBER` and attaching the
-number to the Messaging Service are two different steps; do both.
+number to the Messaging Service are two different steps; do both, **and do them in that order**.
+
+**Order matters for `pool:audit`.** `npm run pool:audit -- <env>` classifies an attached number as
+a RELAY POOL number precisely because it is not the `BUSINESS_PHONE_NUMBER` - so between attaching
+the ported number and setting the variable, the audit reports our own business line as `pool,
+STRANDED`, and `--reimport` in that window would write it an `active` `pool_numbers` row and make
+it claimable as a relay number. Set `BUSINESS_PHONE_NUMBER` FIRST (env + `secrets:push` + deploy),
+then attach the number to the Messaging Service, and do not run `pool:audit --reimport` in between.
+See `docs/issues/pool-audit-reimport-strands-business-number.md`.
 
 **Renaming the key (2026-08-06): rename in `.env.<env>` FIRST, then push.** `secrets:push` /
 `secrets:check` diff the real `.env.<env>` key set against the `.example` template, so until the

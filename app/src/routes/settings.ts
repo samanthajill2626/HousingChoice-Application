@@ -223,7 +223,12 @@ export function createSettingsRouter(deps: SettingsRouterDeps): Router {
     );
     // The SAME three keys as the GET: SettingsResponse is shared by both calls
     // and the dashboard re-sets its state from THIS response, so a GET-only
-    // field would blank the block the first time an admin saves.
+    // field would make the shared type lie - the PUT would answer with the key
+    // absent, which the client reads as "unconfigured". No surface loses the
+    // number today (the only reader, the Phone numbers block, never saves), so
+    // this is contract consistency rather than a live bug: keep the two
+    // responses the same shape and a future saver-plus-reader page cannot
+    // regress into one.
     res.json({
       settings: updated,
       welcomeTextDefault: WELCOME_SMS,

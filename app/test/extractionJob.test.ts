@@ -119,6 +119,18 @@ function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
 
+function tenantContactWith(overrides: Partial<ContactItem>): ContactItem {
+  return { ...tenantContact(), ...overrides } as ContactItem;
+}
+
+function landlordContact(): ContactItem {
+  return { contactId: 'c1', type: 'landlord', status: 'interested', phone: '+15551230001' } as ContactItem;
+}
+
+function unknownContact(): ContactItem {
+  return { contactId: 'c1', type: 'unknown', status: 'needs_review', phone: '+15551230001' } as ContactItem;
+}
+
 function convWith(contactId: string): ConversationItem {
   return {
     conversationId: 'conv1',
@@ -230,6 +242,28 @@ function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
 }
 
 describe('runDueExtractions', () => {
+  it('stamps every utterance with the tsMsgId of the message it came from', async () => {
+    // Design 6.1: without this the run log cannot attribute rendered output back
+    // to a message, so no per-message hash is possible. A call transcript
+    // produces MANY utterances - all carry the call row's tsMsgId.
+    const sms = msg(10, 'inbound', 'hello');
+    const call = callMsg(20, 'inbound', 'Staff: how can I help\nClient: I need a 2 bedroom', 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [call, sms], // listByConversation returns NEWEST-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen[0]!.transcript.map((u) => u.tsMsgId)).toEqual([
+      sms.tsMsgId,
+      call.tsMsgId,
+      call.tsMsgId,
+    ]);
+  });
+
   it('happy path: runs the driver on a chronological transcript, writes the field, advances the cursor', async () => {
     const messages = [
       // newest-first, as listByConversation returns
@@ -422,10 +456,10 @@ describe('runDueExtractions', () => {
     expect(h.seen).toHaveLength(1);
     // Every utterance shares the call row's created_at and is channel 'voice'.
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'staff', text: 'how can I help', at: call.created_at, channel: 'voice' },
-      { speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
-      { speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
-      { speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'staff', text: 'how can I help', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
     ]);
   });
 
@@ -444,7 +478,7 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'I have a voucher for a 2 bed', at: mail.created_at, channel: 'email' },
+      { tsMsgId: mail.tsMsgId, speaker: 'client', text: 'I have a voucher for a 2 bed', at: mail.created_at, channel: 'email' },
     ]);
     // BODY only: the subject is metadata, never transcript content.
     const allText = h.seen[0]!.transcript.map((u) => u.text).join(' ');
@@ -465,8 +499,8 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'checking in', at: inboundSms.created_at, channel: 'sms' },
-      { speaker: 'staff', text: 'Sending the listing over now', at: reply.created_at, channel: 'email' },
+      { tsMsgId: inboundSms.tsMsgId, speaker: 'client', text: 'checking in', at: inboundSms.created_at, channel: 'sms' },
+      { tsMsgId: reply.tsMsgId, speaker: 'staff', text: 'Sending the listing over now', at: reply.created_at, channel: 'email' },
     ]);
   });
 
@@ -509,7 +543,7 @@ describe('runDueExtractions', () => {
     expect(h.seen).toHaveLength(1);
     // Only the SMS survives; neither the pending nor the empty-completed call
     // adds anything.
-    expect(h.seen[0]!.transcript).toEqual([{ speaker: 'client', text: 'hello', at: sms.created_at, channel: 'sms' }]);
+    expect(h.seen[0]!.transcript).toEqual([{ tsMsgId: sms.tsMsgId, speaker: 'client', text: 'hello', at: sms.created_at, channel: 'sms' }]);
   });
 
   it('voice due item: runs even when the newest call row is OLDER than the cursor (freshness bypass)', async () => {
@@ -530,7 +564,7 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
     ]);
     expect(h.repo.fail).not.toHaveBeenCalled();
     // Cursor is MONOTONIC: the call's tsMsgId (`...:01...#c1`) is older than the
@@ -558,7 +592,7 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'my voucher is a 3 bedroom', at: sms.created_at, channel: 'sms' },
+      { tsMsgId: sms.tsMsgId, speaker: 'client', text: 'my voucher is a 3 bedroom', at: sms.created_at, channel: 'sms' },
     ]);
     // The profile reflects the POST-triage type, so tenant-only fields apply.
     expect(h.seen[0]!.profile.contactType).toBe('tenant');
@@ -603,9 +637,9 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'hi', at: client.created_at, channel: 'sms' },
-      { speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
-      { speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
+      { tsMsgId: client.tsMsgId, speaker: 'client', text: 'hi', at: client.created_at, channel: 'sms' },
+      { tsMsgId: staff.tsMsgId, speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
     ]);
   });
 

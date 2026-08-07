@@ -19,6 +19,14 @@ import { FakeExtractionDriver } from './extractionFake.js';
 import type { ExtractionAddressParts } from '../services/extraction/address.js';
 
 export interface TranscriptUtterance {
+  /**
+   * The tsMsgId of the stored message this utterance came from. REQUIRED, not
+   * optional: an optional id would let a construction site omit it and silently
+   * produce a message the run log cannot hash (design 2026-08-06 section 6.1).
+   * A call transcript yields many utterances - all share the call row's id.
+   * NEVER rendered into the prompt (services/extraction/prompt.ts).
+   */
+  tsMsgId: string;
   // 'unknown' is a call line labeled `Speaker N:` (legacy/underivable role) -
   // the extraction job assigns it (adapters/extractionFake skips non-client
   // speakers; the prompt renders the label verbatim).

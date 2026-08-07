@@ -4,7 +4,7 @@
 // The user content lays out the CURRENT PROFILE (what we already know) then a
 // chronological TRANSCRIPT, so the model can reconcile new facts against known
 // ones per the reconciliation rules below.
-import type { ExtractionInput } from '../../adapters/extraction.js';
+import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
 import { HOUSING_AUTHORITY_VOCAB } from './schema.js';
 
 export function buildExtractionSystemPrompt(): string {
@@ -90,9 +90,27 @@ function toSingleLine(text: string): string {
   return text.replace(/[\r\n]+/g, ' / ');
 }
 
+/**
+ * Render ONE utterance to its transcript line. THE single renderer: the
+ * extraction request is built from it (below) and the run log hashes its output
+ * (services/extraction/runWindow.ts), so the recorded hash and the sent bytes
+ * can never diverge. Reconstructing this format anywhere else would guarantee a
+ * permanent false hash mismatch (design 2026-08-06 section 6.1).
+ *
+ * Deliberately does NOT render tsMsgId - the wire format is fixed by the system
+ * prompt at line 20 ("<timestamp> [<speaker>/<channel>] <text>").
+ */
+export function renderUtteranceLine(u: TranscriptUtterance): string {
+  return `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`;
+}
+
 export function buildExtractionUserContent(input: ExtractionInput): string {
   const profileJson = JSON.stringify(input.profile, null, 2);
+  // GLOBAL sort by timestamp. All utterances of ONE message share that
+  // message's timestamp (toUtterances stamps a call's lines with the call row's
+  // created_at), and Array.prototype.sort is stable, so per-message order is
+  // preserved - which is what makes the per-message hash in runWindow.ts match.
   const ordered = [...input.transcript].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  const lines = ordered.map((u) => `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`);
+  const lines = ordered.map(renderUtteranceLine);
   return ['CURRENT PROFILE', profileJson, '', 'TRANSCRIPT', ...lines].join('\n');
 }

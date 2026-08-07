@@ -13,7 +13,7 @@ const model = 'claude-opus-4-8';
 
 const baseInput: ExtractionInput = {
   profile: { contactType: 'tenant', phones: [] },
-  transcript: [{ speaker: 'client', text: 'hi', at: '2026-07-16T10:00:00.000Z', channel: 'sms' }],
+  transcript: [{ tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'hi', at: '2026-07-16T10:00:00.000Z', channel: 'sms' }],
 };
 
 describe('createExtractionDriver', () => {
@@ -42,18 +42,21 @@ describe('fake driver', () => {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [
         {
+          tsMsgId: '2026-07-16T10:00:00.000Z#s1',
           speaker: 'client',
           text: 'EXTRACT:{"fields":{"pets":{"op":"write","value":"old"}}}',
           at: '2026-07-16T10:00:00.000Z',
           channel: 'sms',
         },
         {
+          tsMsgId: '2026-07-16T10:01:00.000Z#s2',
           speaker: 'staff',
           text: 'EXTRACT:{"fields":{"pets":{"op":"write","value":"STAFF"}}}',
           at: '2026-07-16T10:01:00.000Z',
           channel: 'sms',
         },
         {
+          tsMsgId: '2026-07-16T10:02:00.000Z#s3',
           speaker: 'client',
           text: 'sure\nEXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}',
           at: '2026-07-16T10:02:00.000Z',
@@ -70,6 +73,7 @@ describe('fake driver', () => {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [
         {
+          tsMsgId: '2026-07-16T10:00:00.000Z#s1',
           speaker: 'client',
           text: 'EXTRACT:{"noteLines":["stairs are fine"]}',
           at: '2026-07-16T10:00:00.000Z',
@@ -85,7 +89,7 @@ describe('fake driver', () => {
     const input: ExtractionInput = {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [
-        { speaker: 'client', text: 'EXTRACT:{not valid json', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
+        { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'EXTRACT:{not valid json', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
     };
     await expect(driver.extract(input)).resolves.toEqual(EMPTY_EXTRACTION);
@@ -96,7 +100,7 @@ describe('fake driver', () => {
     const input: ExtractionInput = {
       profile: { contactType: 'tenant', phones: [] },
       transcript: [
-        { speaker: 'client', text: 'just chatting, no marker', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
+        { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'client', text: 'just chatting, no marker', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
     };
     await expect(driver.extract(input)).resolves.toEqual(EMPTY_EXTRACTION);

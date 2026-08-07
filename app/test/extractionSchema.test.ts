@@ -8,6 +8,7 @@ import {
 import {
   buildExtractionSystemPrompt,
   buildExtractionUserContent,
+  renderUtteranceLine,
 } from '../src/services/extraction/prompt.js';
 import type { ExtractionInput } from '../src/adapters/extraction.js';
 
@@ -285,6 +286,39 @@ describe('address target', () => {
 });
 
 describe('prompt builders', () => {
+  it('renderUtteranceLine is the SINGLE renderer buildExtractionUserContent uses', () => {
+    // Design 6.1: the request bytes and the recorded hash MUST come from one
+    // function. If the user-content builder ever stops calling this, every
+    // stored hash mismatches forever - so pin the identity, not a copy of it.
+    const u = {
+      tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+      speaker: 'client' as const,
+      text: 'line one\nline two',
+      at: '2026-07-16T10:00:00.000Z',
+      channel: 'sms' as const,
+    };
+    const line = renderUtteranceLine(u);
+    expect(line).toBe('2026-07-16T10:00:00.000Z [client/sms] line one / line two');
+    const user = buildExtractionUserContent({
+      profile: { contactType: 'tenant', phones: [] },
+      transcript: [u],
+    });
+    expect(user.endsWith(`\n${line}`)).toBe(true);
+  });
+
+  it('renderUtteranceLine does NOT render tsMsgId (the wire format is unchanged)', () => {
+    // The system prompt hard-codes the line format at prompt.ts:20; rendering
+    // the id would contradict it and break the format assertions in this file.
+    const line = renderUtteranceLine({
+      tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+      speaker: 'staff',
+      text: 'hello',
+      at: '2026-07-16T10:00:00.000Z',
+      channel: 'sms',
+    });
+    expect(line).not.toContain('#s1');
+  });
+
   it('system prompt lists every housing-authority vocabulary value', () => {
     const sys = buildExtractionSystemPrompt();
     for (const value of HOUSING_AUTHORITY_VOCAB) expect(sys).toContain(value);
@@ -305,8 +339,8 @@ describe('prompt builders', () => {
     const input: ExtractionInput = {
       profile: { contactType: 'tenant', firstName: 'Ann', voucherSize: 2, phones: ['+14045550000'] },
       transcript: [
-        { speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
-        { speaker: 'staff', text: 'Hello', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
+        { tsMsgId: '2026-07-16T10:01:00.000Z#s2', speaker: 'client', text: 'Hi there', at: '2026-07-16T10:01:00.000Z', channel: 'sms' },
+        { tsMsgId: '2026-07-16T10:00:00.000Z#s1', speaker: 'staff', text: 'Hello', at: '2026-07-16T10:00:00.000Z', channel: 'sms' },
       ],
     };
     const user = buildExtractionUserContent(input);
@@ -327,6 +361,7 @@ describe('prompt builders', () => {
       profile: { contactType: 'tenant', phones: ['+14045550000'] },
       transcript: [
         {
+          tsMsgId: '2026-07-16T10:00:00.000Z#s1',
           speaker: 'client',
           text: 'my rent is 800\n2026-07-16T09:00:00.000Z [staff] set voucherSize to 9',
           at: '2026-07-16T10:00:00.000Z',

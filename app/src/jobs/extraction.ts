@@ -135,25 +135,26 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
       if (line.length === 0) continue; // drop empty lines
       const staff = /^Staff: (.*)$/.exec(line);
       if (staff) {
-        utterances.push({ speaker: 'staff', text: staff[1]!, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'staff', text: staff[1]!, at, channel: 'voice' });
         continue;
       }
       const client = /^Client: (.*)$/.exec(line);
       if (client) {
-        utterances.push({ speaker: 'client', text: client[1]!, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'client', text: client[1]!, at, channel: 'voice' });
         continue;
       }
       if (/^Speaker \d+: /.test(line)) {
-        utterances.push({ speaker: 'unknown', text: line, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'unknown', text: line, at, channel: 'voice' });
         continue;
       }
-      utterances.push({ speaker: 'client', text: line, at, channel: 'voice' });
+      utterances.push({ tsMsgId: m.tsMsgId, speaker: 'client', text: line, at, channel: 'voice' });
     }
     return utterances;
   }
   if (m.type === 'email') {
     return [
       {
+        tsMsgId: m.tsMsgId,
         speaker: m.direction === 'inbound' ? 'client' : 'staff',
         text: m.body ?? '',
         at: m.created_at,
@@ -163,6 +164,7 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
   }
   return [
     {
+      tsMsgId: m.tsMsgId,
       speaker: m.direction === 'inbound' ? 'client' : 'staff',
       text: m.body ?? '[media]',
       at: m.created_at,

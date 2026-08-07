@@ -118,3 +118,53 @@ bitten us at review time more than once).
   e.g. "`main` has advanced N commits since I branched; should I merge it in before I
   continue / before I finish?" Don't silently finish on a stale base.
 - Never merge your branch INTO `main` without explicit human approval.
+
+## Worktrees — ALWAYS copy the local settings in (permissions do not follow)
+
+**Every time you create a worktree, for any reason, copy the local settings
+file into it as the very next step:**
+
+```
+git worktree add w:\tmp\<name> -b feat/<name> main
+copy .claude\settings.local.json w:\tmp\<name>\.claude\settings.local.json
+```
+
+**Why (A/B verified 2026-08-07, not folklore):** tool permission rules are
+honored ONLY from user settings (`~/.claude/settings.json`) or the gitignored
+`.claude/settings.local.json`. They are **NOT honored from the committed
+`.claude/settings.json`** — same command, same restart discipline, allowed with
+the rules local and prompted with the identical rules in the tracked file
+alone. That is a security boundary, not a bug: a committed file that could
+self-grant `Bash` would make cloning any repo dangerous. The committed file is
+still the right home for `env`, hooks and plugin config — just not permissions.
+
+Because the working file is gitignored, `git worktree add` never delivers it.
+Skip the copy and a background agent in that worktree hits permission prompts
+nobody is present to answer — and **a permission-blocked agent is
+indistinguishable from a wedged one from the outside**: silent transcript,
+quiet worktree, no error. That misdiagnosis has already cost real debugging
+time; do not repeat it.
+
+### Permission-rule syntax traps (both fail SILENTLY)
+
+- Rules take three forms: exact `Bash(npm run test)`, prefix-wildcard
+  `Bash(git *)` (a LITERAL prefix then a space-star), or tool-only `Bash`
+  (no parentheses). **`Bash(*)` is none of these and matches NOTHING** — same
+  for `Read(*)`, `Write(*)`, `PowerShell(*)`, `WebFetch(*)`.
+- MCP rules take `mcp__<server>` (whole server) or `mcp__<server>__<tool>`.
+  **There is no wildcard form** — `mcp__playwright__*` matches nothing. This is
+  why individual browser tools accumulate in settings one approval at a time.
+- A rule that matches nothing looks exactly like a config that is not loading.
+  Do not diagnose one as the other.
+
+### Settings are honored LIVE - no restart needed
+
+Both `.claude/settings.json` and `.claude/settings.local.json` are re-read in
+real time; edit either and the change is in force immediately. You can add a
+permission mid-session and retry the blocked call straight away.
+
+So if a rule is not working, DO NOT reach for "it must need a restart" - that
+is not the explanation. Check, in this order: (1) is it in the LOCAL file?
+permissions in the committed file are ignored (above); (2) is the syntax one
+of the three valid forms? `Bash(*)` and `mcp__server__*` match nothing
+(above).

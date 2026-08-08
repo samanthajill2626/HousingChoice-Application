@@ -218,6 +218,15 @@ describe('GET /api/ai-runs/:runId', () => {
     expect(res.body.window.messages[0].hashStatus).toBe('mismatch');
   });
 
+  it('marks a full row without stored hash evidence unavailable', async () => {
+    const { app } = makeWorld({
+      runs: [fullRun({ windowMessages: [{ tsMsgId: 'a#1', capChars: 30_000, hash: undefined }] })],
+      storedMessages: { 'a#1': { type: 'sms', direction: 'inbound', created_at: '2026-08-06T10:00:00.000Z', body: 'text' } },
+    });
+    const res = await admin(app, '/api/ai-runs/run-1').expect(200);
+    expect(res.body.window.messages[0].hashStatus).toBe('unavailable');
+  });
+
   it('degrades the whole window when the batch read throws', async () => {
     const { app, messages } = makeWorld();
     messages.mockRejectedValueOnce(new Error('ddb down'));

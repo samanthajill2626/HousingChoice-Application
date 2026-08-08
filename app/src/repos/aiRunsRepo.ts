@@ -8,7 +8,7 @@ import {
   UpdateCommand,
   type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
@@ -212,7 +212,9 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           log.debug({ runId: input.runId, conversationId: input.conversationId, outcome: input.outcome }, 'ai run recorded');
           return merged;
         } catch (err) {
-          if (!(err instanceof ConditionalCheckFailedException) || marker === undefined || attempt === 2) throw err;
+          const reasons = err instanceof TransactionCanceledException ? err.CancellationReasons : undefined;
+          const markerConflict = marker !== undefined && reasons?.some((reason) => reason.Code === 'ConditionalCheckFailed');
+          if (!markerConflict || attempt === 2) throw err;
         }
       }
       throw new Error('unreachable');

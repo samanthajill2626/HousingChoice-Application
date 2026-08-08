@@ -62,7 +62,7 @@ function conditionHolds(
 ): boolean {
   return expr.split(/\s+AND\s+/i).every((clauseRaw) => {
     const clause = clauseRaw.trim();
-    const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w]+)\s*\)$/.exec(clause);
+    const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w.]+)\s*\)$/.exec(clause);
     if (fn) {
       const attr = attrOf(fn[2]!, names);
       const exists = row !== undefined && valueAt(row, attr) !== undefined;
@@ -172,13 +172,19 @@ function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number
         return { Item: row ? { ...row } : undefined };
       }
       if (cmd instanceof TransactWriteCommand) {
-        const items = (cmd.input.TransactItems ?? []) as Array<{ Put?: { Item: Row } }>;
+        const items = (cmd.input.TransactItems ?? []) as Array<{ Put?: { Item: Row }; Delete?: { Key: { itemId: string }; ConditionExpression?: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown> } }>;
         if (failTransactAfter !== undefined && items.length > failTransactAfter) {
           throw new TransactionCanceledException({ message: 'cancelled', $metadata: {} });
         }
         for (const it of items) {
+          if (it.Delete !== undefined && it.Delete.ConditionExpression && !conditionHolds(it.Delete.ConditionExpression, it.Delete.ExpressionAttributeNames ?? {}, it.Delete.ExpressionAttributeValues ?? {}, store.get(it.Delete.Key.itemId))) {
+            throw new TransactionCanceledException({ message: 'cancelled', $metadata: {}, CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] });
+          }
+        }
+        for (const it of items) {
           const item = it.Put?.Item;
-          if (item === undefined) throw new Error('fake doc: only Put is modelled in transactions');
+          if (it.Delete !== undefined) { store.delete(it.Delete.Key.itemId); continue; }
+          if (item === undefined) throw new Error('fake doc: transaction item missing action');
           const stored: Row = {};
           for (const [k, v] of Object.entries(item)) if (v !== undefined) stored[k] = v;
           store.set(item['itemId'] as string, stored);
@@ -448,6 +454,26 @@ describe('aiRunsRepo - listByEntity', () => {
 });
 
 describe('aiRunsRepo - setVerdict', () => {
+  it('carries a marker verdict into the one final envelope transaction', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.beginFinalization('run-1', '2026-08-06T10:00:00.000Z');
+    expect(await repo.setVerdict('run-1', 'pets', 'accepted', { at: '2026-08-06T10:01:00.000Z', expectedVerdict: 'pending' })).toBe(true);
+    await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
+    expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
+  });
+
+  it('uses the final row after marker finalization and never creates intent for a missing run', async () => {
+    const { doc, store } = makeFakeDoc();
+    const repo = repoWith(doc);
+    expect(await repo.setVerdict('gone', 'pets', 'accepted', { expectedVerdict: 'pending' })).toBe(false);
+    expect([...store.keys()]).toEqual([]);
+    await repo.beginFinalization('run-1', '2026-08-06T10:00:00.000Z');
+    await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
+    expect(await repo.setVerdict('run-1', 'pets', 'accepted', { expectedVerdict: 'pending' })).toBe(true);
+    expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
+  });
+
   it('stamps verdict, verdictAt and verdictBy on ONE decision, leaving siblings untouched', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);

@@ -166,9 +166,9 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
         ownerContactId: 'c1', target: 'pets', suggestedValue: 'old value', conversationId: 'conv-1', runId: 'run-old', createdAt: '2026-08-08T00:00:00.000Z',
       });
       const originalDelete = world.extractionRepo.deleteSuggestionIfCurrent;
-      world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt) => {
-        await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt: '2026-08-08T00:00:01.000Z' });
-        return originalDelete(contactId, target, createdAt);
+      world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt, runId) => {
+        await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt });
+        return originalDelete(contactId, target, createdAt, runId);
       };
 
       await action(app).expect(409);
@@ -261,9 +261,9 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
       ownerContactId: 'c1', target: 'pets', suggestedValue: 'old value', conversationId: 'conv-1', runId: 'run-old', createdAt: '2026-08-08T00:00:00.000Z',
     });
     const originalDelete = world.extractionRepo.deleteSuggestionIfCurrent;
-    world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt) => {
-      await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt: '2026-08-08T00:00:01.000Z' });
-      return originalDelete(contactId, target, createdAt);
+    world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt, runId) => {
+      await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt });
+      return originalDelete(contactId, target, createdAt, runId);
     };
 
     await patch(app, 'c1', { pets: 'human edit' }).expect(200);

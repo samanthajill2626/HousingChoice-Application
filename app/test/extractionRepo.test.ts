@@ -526,12 +526,12 @@ describe('extractionRepo suggestions', () => {
   it('conditionally deletes only the exact suggestion version read by a resolver', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1 });
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2 });
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-old' });
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2, runId: 'run-new' });
 
-    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1)).toBe(false);
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-old')).toBe(false);
     expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
-    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2)).toBe(true);
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2, 'run-new')).toBe(true);
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
   });
 

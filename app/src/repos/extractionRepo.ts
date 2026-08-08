@@ -137,7 +137,7 @@ export interface ExtractionRepo {
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
   deleteSuggestion(contactId: string, target: string): Promise<void>;
   /** Delete only the exact version a resolver read; false means it was replaced. */
-  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string): Promise<boolean>;
+  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string, runId?: string): Promise<boolean>;
   /** Restore a claimed suggestion only if a newer writer has not replaced it. */
   restoreSuggestionIfAbsent(suggestion: SuggestionItem): Promise<boolean>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
@@ -417,19 +417,17 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       log.debug({ contactId, target }, 'suggestion deleted');
     },
 
-    async deleteSuggestionIfCurrent(contactId, target, createdAt) {
-      const existing = await doc.send(new GetCommand({ TableName: table, Key: { itemId: suggId(contactId, target) } }));
-      const runCondition = (existing.Item as SuggestionItem | undefined)?.runId;
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId) {
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { itemId: suggId(contactId, target) },
-            ConditionExpression: runCondition === undefined
+            ConditionExpression: runId === undefined
               ? '#createdAt = :createdAt AND attribute_not_exists(#runId)'
               : '#createdAt = :createdAt AND #runId = :runId',
             ExpressionAttributeNames: { '#createdAt': 'createdAt', '#runId': 'runId' },
-            ExpressionAttributeValues: { ':createdAt': createdAt, ...(runCondition !== undefined && { ':runId': runCondition }) },
+            ExpressionAttributeValues: { ':createdAt': createdAt, ...(runId !== undefined && { ':runId': runId }) },
           }),
         );
         log.debug({ contactId, target }, 'suggestion conditionally deleted');

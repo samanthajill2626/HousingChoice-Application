@@ -142,7 +142,7 @@ async function stampVerdict(
 }
 
 async function claimSuggestion(extraction: ExtractionRepo, suggestion: SuggestionItem): Promise<boolean> {
-  return extraction.deleteSuggestionIfCurrent(suggestion.ownerContactId, suggestion.target, suggestion.createdAt);
+  return extraction.deleteSuggestionIfCurrent(suggestion.ownerContactId, suggestion.target, suggestion.createdAt, suggestion.runId);
 }
 
 async function restoreClaim(extraction: ExtractionRepo, log: Logger, suggestion: SuggestionItem): Promise<void> {
@@ -236,16 +236,25 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         log.info({ contactId, target, actor }, 'ai suggestion accepted (status)');
         res.json({ contact: serializeContact(updated), suggestions: remaining });
       } catch (err) {
-        if (!transitioned) await restoreClaim(extraction, log, suggestion);
         // Stale suggestion: the service/allowlist governs validity. Surface the
         // service error and KEEP the suggestion (never a silent delete on refuse).
         if (err instanceof EntityNotFoundError) {
+          await restoreClaim(extraction, log, suggestion);
           res.status(404).json({ error: `${err.entity}_not_found` });
           return;
         }
         if (err instanceof TransitionRefusedError) {
+          await restoreClaim(extraction, log, suggestion);
           res.status(409).json({ error: err.code });
           return;
+        }
+        if (!transitioned) {
+          const current = await contacts.getById(contactId);
+          if (current?.status === suggestion.suggestedValue) {
+            await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
+          } else {
+            await restoreClaim(extraction, log, suggestion);
+          }
         }
         throw err;
       }

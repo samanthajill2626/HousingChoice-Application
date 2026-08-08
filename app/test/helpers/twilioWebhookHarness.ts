@@ -2485,10 +2485,10 @@ export function createFakeWorld(): FakeWorld {
     async deleteSuggestion(contactId, target) {
       suggestions.delete(`sugg#${contactId}#${target}`);
     },
-    async deleteSuggestionIfCurrent(contactId, target, createdAt) {
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId) {
       const itemId = `sugg#${contactId}#${target}`;
       const current = suggestions.get(itemId);
-      if (current?.createdAt !== createdAt) return false;
+      if (current?.createdAt !== createdAt || current.runId !== runId) return false;
       suggestions.delete(itemId);
       return true;
     },

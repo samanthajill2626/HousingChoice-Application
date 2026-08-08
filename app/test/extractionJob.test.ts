@@ -1025,6 +1025,18 @@ describe('runDueExtractions - the run log envelope', () => {
 });
 
 describe('runDueExtractions - run log backstop and isolation', () => {
+  it('keeps extraction successful and omits suggestion runId when finalization marker creation fails', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+      aiRuns: { beginFinalization: vi.fn(async () => { throw new Error('marker down'); }), putRun: vi.fn(async (record) => ({ ...record, itemId: 'x', expires_at: 0 })), setVerdict: vi.fn(async () => true) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+    expect((h.repo.putSuggestion as ReturnType<typeof vi.fn>).mock.calls[0]![0].runId).toBeUndefined();
+  });
+
   it('stamps superseded on the earlier run whose suggestion this run displaced', async () => {
     const h = makeHarness({
       dueRows: [dueRow()],

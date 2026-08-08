@@ -1337,7 +1337,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       if (pending === undefined) continue;
       let deleted = false;
       try {
-        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt);
+        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId);
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
       }

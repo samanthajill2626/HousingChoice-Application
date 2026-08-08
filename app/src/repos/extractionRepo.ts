@@ -422,22 +422,25 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
     },
 
     async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
+      const conditionExpression = revision !== undefined
+        ? '#revision = :revision'
+        : runId === undefined
+          ? 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)'
+          : 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId';
+      const expressionAttributeNames: Record<string, string> = revision !== undefined
+        ? { '#revision': 'revision' }
+        : { '#createdAt': 'createdAt', '#runId': 'runId', '#revision': 'revision' };
+      const expressionAttributeValues: Record<string, unknown> = revision !== undefined
+        ? { ':revision': revision }
+        : { ':createdAt': createdAt, ...(runId !== undefined && { ':runId': runId }) };
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { itemId: suggId(contactId, target) },
-            ConditionExpression: revision !== undefined
-              ? '#revision = :revision'
-              : runId === undefined
-                ? 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)'
-                : 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId',
-            ExpressionAttributeNames: { '#createdAt': 'createdAt', '#runId': 'runId', '#revision': 'revision' },
-            ExpressionAttributeValues: {
-              ':createdAt': createdAt,
-              ...(runId !== undefined && { ':runId': runId }),
-              ...(revision !== undefined && { ':revision': revision }),
-            },
+            ConditionExpression: conditionExpression,
+            ExpressionAttributeNames: expressionAttributeNames,
+            ExpressionAttributeValues: expressionAttributeValues,
           }),
         );
         log.debug({ contactId, target }, 'suggestion conditionally deleted');

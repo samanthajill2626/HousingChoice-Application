@@ -5,6 +5,7 @@ import {
   TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
+  type QueryCommandInput,
 } from '@aws-sdk/lib-dynamodb';
 import {
   ConditionalCheckFailedException,
@@ -148,11 +149,13 @@ interface FakeDoc {
   doc: DynamoDBDocumentClient;
   store: Map<string, Row>;
   batchGetCalls: () => number;
+  queryInputs: () => QueryCommandInput[];
 }
 
 function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number } = {}): FakeDoc {
   const store = new Map<string, Row>();
   let batchGetCalls = 0;
+  const queryInputs: QueryCommandInput[] = [];
   const throttleFirstN = opts.throttleFirstN ?? 0;
   const failTransactAfter = opts.failTransactAfter;
   const doc = {
@@ -208,6 +211,7 @@ function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number
         return {};
       }
       if (cmd instanceof QueryCommand) {
+        queryInputs.push(cmd.input);
         const names = cmd.input.ExpressionAttributeNames ?? {};
         const values = cmd.input.ExpressionAttributeValues ?? {};
         const rangeAttr = INDEX_RANGE[cmd.input.IndexName!];
@@ -235,7 +239,7 @@ function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number
       throw new Error(`fake doc: unexpected command ${String(cmd)}`);
     },
   } as unknown as DynamoDBDocumentClient;
-  return { doc, store, batchGetCalls: () => batchGetCalls };
+  return { doc, store, batchGetCalls: () => batchGetCalls, queryInputs: () => queryInputs };
 }
 
 function repoWith(doc: DynamoDBDocumentClient) {
@@ -347,6 +351,22 @@ describe('aiRunsRepo - listByEntity', () => {
     await seed(repo, 5);
     const { entries } = await repo.listByEntity('global');
     expect(entries.map((e) => e.runId)).toEqual(['run-04', 'run-03', 'run-02', 'run-01', 'run-00']);
+  });
+
+  it('declares the sortKey alias only when its query condition uses sortKey', async () => {
+    const { doc, queryInputs } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 2);
+
+    await repo.listByEntity('global');
+    await repo.listByEntity('global', { before: '2026-08-06T10:01:00.000Z#run-01' });
+    await repo.listByEntity('global', { from: '2026-08-06T10:00:00.000Z' });
+    await repo.listByEntity('global', { to: '2026-08-06T10:01:00.000Z' });
+
+    expect(queryInputs()[0]!.ExpressionAttributeNames).toEqual({ '#ek': 'entityKey' });
+    for (const input of queryInputs().slice(1)) {
+      expect(input.ExpressionAttributeNames).toEqual({ '#ek': 'entityKey', '#sk': 'sortKey' });
+    }
   });
 
   it('pages at 25 by default and hands back a nextBefore cursor', async () => {

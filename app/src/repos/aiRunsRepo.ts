@@ -185,6 +185,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           : opts.to !== undefined
             ? { expr: '#sk <= :upper', value: `${opts.to}${SORT_KEY_CEILING}` }
             : undefined;
+      const usesSortKey = upper !== undefined || opts.from !== undefined;
       const input: QueryCommandInput = {
         TableName: table,
         IndexName: 'byEntity',
@@ -193,7 +194,10 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           ...(upper !== undefined ? [upper.expr] : []),
           ...(opts.from !== undefined ? ['#sk >= :lower'] : []),
         ].join(' AND '),
-        ExpressionAttributeNames: { '#ek': 'entityKey', '#sk': 'sortKey' },
+        ExpressionAttributeNames: {
+          '#ek': 'entityKey',
+          ...(usesSortKey ? { '#sk': 'sortKey' } : {}),
+        },
         ExpressionAttributeValues: {
           ':ek': entityKey,
           ...(upper !== undefined && { ':upper': upper.value }),

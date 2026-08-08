@@ -126,5 +126,5 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     // in all future states too.
     const fullCount = await seedAll(endpoint, 'full');
     expect(fullCount).toBeGreaterThanOrEqual(LEAN_TOTAL);
-  });
+  }, 120_000);
 });

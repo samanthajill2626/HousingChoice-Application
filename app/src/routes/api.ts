@@ -117,6 +117,7 @@ import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
+import { createAiRunsRouter } from './aiRuns.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
@@ -601,6 +602,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.systemStatusService !== undefined && {
         systemStatusService: deps.systemStatusService,
       }),
+    }),
+  );
+  // AI run log (design 2026-08-06 section 9). The router applies its own
+  // server-side admin guard and uses the shared repositories above.
+  router.use(
+    '/ai-runs',
+    createAiRunsRouter({
+      logger: deps.logger,
+      messagesRepo: messages,
+      aiRunsRepo: aiRuns,
     }),
   );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation

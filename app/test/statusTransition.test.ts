@@ -15,6 +15,7 @@ import { createLogCapture } from './helpers/logCapture.js';
 import {
   createStatusTransitionService,
   EntityNotFoundError,
+  StatusTransitionCommittedError,
   TransitionRefusedError,
   type StatusTransitionDeps,
   type StatusTransitionService,
@@ -383,6 +384,23 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
     expect(updated.status).toBe('inactive');
     // porting lives on the contact, never appears as a placement stage.
     expect(updated).not.toHaveProperty('stage');
+  });
+
+  it('marks a required audit failure as committed after persisting the status update', async () => {
+    await world.contactsRepo.create({ contactId: 't-audit-failure', type: 'tenant', status: 'onboarding' });
+    const cause = new Error('required audit append failed');
+    world.auditRepo.append = async () => { throw cause; };
+
+    let thrown: unknown;
+    try {
+      await svc.setTenantStatus('t-audit-failure', { toStatus: 'searching', source: 'manual' });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(StatusTransitionCommittedError);
+    expect((thrown as StatusTransitionCommittedError).cause).toBe(cause);
+    expect((await world.contactsRepo.getById('t-audit-failure'))?.status).toBe('searching');
   });
 });
 

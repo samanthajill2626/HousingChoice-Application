@@ -3,7 +3,10 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { createExpressErrorHandler } from '../src/lib/errors.js';
 import { createSuggestionsRouter } from '../src/routes/suggestions.js';
-import type { StatusTransitionService } from '../src/services/statusTransition.js';
+import {
+  StatusTransitionCommittedError,
+  type StatusTransitionService,
+} from '../src/services/statusTransition.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
@@ -49,13 +52,14 @@ function makePostWriteStatusFailureApp(
   world: ReturnType<typeof makeWebhookHarness>['world'],
   contactsRepo = world.contactsRepo,
   commitStatus = true,
+  failure = new Error('post-write audit failure'),
 ) {
   const statusService: StatusTransitionService = {
     async setTenantStatus(contactId, input) {
       const contact = world.contacts.find((item) => item.contactId === contactId);
       if (!contact) throw new Error('missing contact');
       if (commitStatus) contact.status = input.toStatus;
-      throw new Error('post-write audit failure');
+      throw failure;
     },
     async transitionPlacement() { throw new Error('not used'); },
     async setListingStatus() { throw new Error('not used'); },
@@ -175,6 +179,28 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('onboarding');
     expect(await world.extractionRepo.getSuggestion('c1', 'status')).toEqual(expect.objectContaining({ runId: 'run-status' }));
     expect(setVerdict).not.toHaveBeenCalled();
+  });
+
+  it('keeps a committed status suggestion consumed without a recovery read when the service marks its post-write failure', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const getById = vi.fn(async (contactId: string, opts?: { consistentRead?: boolean }) => {
+      if (opts?.consistentRead) throw new Error('recovery read must not run');
+      return world.contactsRepo.getById(contactId);
+    });
+    const contactsRepo = { ...world.contactsRepo, getById };
+    const committedFailure = new StatusTransitionCommittedError(new Error('required audit append failed'));
+
+    await accept(makePostWriteStatusFailureApp(world, contactsRepo, true, committedFailure), 'c1', 'status').expect(500);
+
+    expect(getById).toHaveBeenCalledTimes(1);
+    expect(getById).toHaveBeenCalledWith('c1');
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
+    expect(await world.extractionRepo.getSuggestion('c1', 'status')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());
   });
 
   it('stamps accepted on the phone accept branch', async () => {

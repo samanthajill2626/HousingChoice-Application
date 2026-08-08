@@ -170,10 +170,28 @@ export class EntityNotFoundError extends Error {
   }
 }
 
+/**
+ * The contact status write committed, but a required follow-up failed afterward.
+ * Callers may safely treat the status as changed while preserving `cause` for
+ * the original operational failure. This wrapper carries no contact data.
+ */
+export class StatusTransitionCommittedError extends Error {
+  constructor(cause: unknown) {
+    super('contact status update committed but required follow-up failed', { cause });
+    this.name = 'StatusTransitionCommittedError';
+  }
+}
+
 export interface StatusTransitionService {
   /** Move a placement to `toStage` (denormalize + provenance + derivation + nudge). */
   transitionPlacement(placementId: string, input: TransitionPlacementInput): Promise<PlacementItem>;
   /** Explicit tenant-status write (incl. manual drop-out; no RTA-in-hand gate — 2026-06-19). */
+  /**
+   * If the contact update committed but a required later side effect fails, this
+   * rejects with StatusTransitionCommittedError. Injected implementations that
+   * throw after committing must use that error; callers resolve arbitrary errors
+   * with a strongly consistent read.
+   */
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
   /** Explicit property-status write. */
   setListingStatus(unitId: string, input: SetListingStatusInput): Promise<UnitItem>;
@@ -529,13 +547,17 @@ export function createStatusTransitionService(
       if (toStatus === 'parked') patch.park_reason = reason !== undefined ? reason : null;
       const updated = await contactsRepo.update(contactId, patch);
 
-      await auditRepo.append(`contacts#${contactId}`, 'tenant_status_changed', {
-        ...(actor !== undefined && { actor }),
-        from,
-        to: toStatus,
-        source,
-        ...(reason !== undefined && { reason }),
-      });
+      try {
+        await auditRepo.append(`contacts#${contactId}`, 'tenant_status_changed', {
+          ...(actor !== undefined && { actor }),
+          from,
+          to: toStatus,
+          source,
+          ...(reason !== undefined && { reason }),
+        });
+      } catch (err) {
+        throw new StatusTransitionCommittedError(err);
+      }
       // Contact-timeline milestone on a REAL status change (explicit path). The
       // type-keyed label map picks LANDLORD_STATUS_LABELS vs TENANT_STATUS_LABELS.
       if (from !== toStatus) await recordStatusMilestone(contactId, contact.type, toStatus);

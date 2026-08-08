@@ -59,6 +59,7 @@ import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
 import {
   createStatusTransitionService,
   EntityNotFoundError,
+  StatusTransitionCommittedError,
   TransitionRefusedError,
   type StatusTransitionDeps,
   type StatusTransitionService,
@@ -248,6 +249,10 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           await restoreClaim(extraction, log, suggestion);
           res.status(409).json({ error: err.code });
           return;
+        }
+        if (err instanceof StatusTransitionCommittedError) {
+          await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
+          throw err;
         }
         if (!transitioned) {
           try {

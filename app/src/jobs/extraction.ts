@@ -78,7 +78,7 @@ function str(v: unknown): string | undefined {
 }
 
 /** Build the ExtractionProfileSnapshot the model reconciles against. */
-function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
+export function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   const profile: ExtractionProfileSnapshot = {
     contactType: contact.type,
     phones: contactPhones(contact).map((p) => p.phone),
@@ -108,6 +108,9 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   return profile;
 }
 
+/** EXPORTED for the run log + run-detail view. Reimplementing any of
+ *  toUtterances / capUtterances / clampHeadTail / toProfile would guarantee the
+ *  hash mismatch the window hash exists to detect (design 6.4). */
 /**
  * Map a stored message to zero or more channel-tagged transcript utterances.
  *
@@ -127,7 +130,7 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
  *       caller is the client by construction).
  * - call WITHOUT a completed transcript, or with an empty one: nothing.
  */
-function toUtterances(m: MessageItem): TranscriptUtterance[] {
+export function toUtterances(m: MessageItem): TranscriptUtterance[] {
   if (m.type === 'call') {
     if (m.transcript_status !== 'completed' || !m.transcript) return [];
     const at = m.created_at;
@@ -175,7 +178,7 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
 }
 
 /** `head [marker] tail` with total length <= cap (facts cluster at the edges). */
-function clampHeadTail(text: string, cap: number): string {
+export function clampHeadTail(text: string, cap: number): string {
   if (text.length <= cap) return text;
   const usable = cap - TRUNCATION_MARKER.length - 2; // two joining spaces
   const head = Math.floor(usable * 0.7);
@@ -191,7 +194,7 @@ function clampHeadTail(text: string, cap: number): string {
  * per-line speaker attribution (Layer 1) is never orphaned mid-line. The
  * marker is appended to the last kept head utterance.
  */
-function capUtterances(utterances: TranscriptUtterance[], cap: number): TranscriptUtterance[] {
+export function capUtterances(utterances: TranscriptUtterance[], cap: number): TranscriptUtterance[] {
   const total = utterances.reduce((n, u) => n + u.text.length, 0);
   if (total <= cap) return utterances;
   if (utterances.length === 1) {

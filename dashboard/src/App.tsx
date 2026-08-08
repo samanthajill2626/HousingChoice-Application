@@ -32,6 +32,7 @@ import { VoiceSection } from './routes/settings/VoiceSection.js';
 import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { QuietHoursSection } from './routes/settings/QuietHoursSection.js';
 import { NumbersSection } from './routes/settings/NumbersSection.js';
+import { AiRunsSection } from './routes/settings/aiRuns/AiRunsSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
@@ -195,6 +196,14 @@ function AuthedApp(): React.JSX.Element {
                       <QuietHoursSection />
                       <SystemStatusSection />
                     </>
+                  </AdminRoute>
+                }
+              />
+              <Route
+                path="ai-runs"
+                element={
+                  <AdminRoute>
+                    <AiRunsSection />
                   </AdminRoute>
                 }
               />

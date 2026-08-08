@@ -63,6 +63,7 @@ describe('SettingsPage — role gating (desktop tabs)', () => {
       'Notifications',
       'Voice',
       'System status',
+      'AI run log',
       'Phone numbers',
     ]);
   });
@@ -76,6 +77,7 @@ describe('SettingsPage — role gating (desktop tabs)', () => {
     expect(tabNames).toEqual(['Templates', 'Notifications', 'Voice', 'Phone numbers']);
     expect(screen.queryByRole('tab', { name: 'Team' })).not.toBeInTheDocument();
     expect(screen.queryByRole('tab', { name: 'System status' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'AI run log' })).not.toBeInTheDocument();
   });
 });
 

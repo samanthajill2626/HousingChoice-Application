@@ -196,6 +196,116 @@ export interface SystemFlags {
   businessPhoneNumber?: string;
 }
 
+// --- AI run log (/api/ai-runs) ---------------------------------------------
+// Mirrors app/src/routes/aiRuns.ts and the stored AiRunRecord shape. This package
+// cannot import server types, so keep this duplicated wire contract in sync.
+
+export type AiRunOutcome = 'applied' | 'no_op' | 'skipped' | 'failed';
+export type AiRunScope =
+  | 'global'
+  | `outcome#${AiRunOutcome}`
+  | `conversations#${string}`
+  | `contacts#${string}`;
+
+export type AiRunTrigger = 'sms' | 'voice' | 'triage' | 'email';
+export type AiRunDriver = 'anthropic' | 'console' | 'fake';
+export type AiRunDecisionOutcome = 'wrote' | 'suggested' | 'dropped' | 'no_finding' | 'not_addressed';
+export type AiRunVerdict =
+  | 'auto_applied' | 'pending' | 'accepted' | 'dismissed' | 'superseded'
+  | 'superseded_by_human_edit' | 'not_presented';
+
+export interface AiRunListRowLive {
+  runId: string;
+  sortKey: string;
+  expired: false;
+  startedAt: string;
+  durationMs: number;
+  conversationId: string;
+  contactId?: string;
+  trigger: AiRunTrigger;
+  outcome: AiRunOutcome;
+  skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
+  errorKind?: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo';
+  driver: AiRunDriver;
+  model?: string;
+  decisionCounts: Record<string, number>;
+  notedLines: number;
+}
+
+export type AiRunListRow = AiRunListRowLive | { runId: string; sortKey: string; expired: true };
+
+export interface AiRunListPage {
+  runs: AiRunListRow[];
+  nextBefore?: string;
+}
+
+export interface AiRunDecision {
+  proposedOp: 'write' | 'suggest' | 'none' | 'absent';
+  proposedValue?: string;
+  coercedValue?: unknown;
+  previousValue?: string;
+  reason?: string;
+  demotedFrom?: 'write';
+  outcome: AiRunDecisionOutcome;
+  dropReason?: string;
+  verdict: AiRunVerdict;
+  verdictAt?: string;
+  verdictBy?: string;
+}
+
+/** One window message as the DETAIL endpoint returns it. */
+export interface AiRunWindowMessage {
+  tsMsgId: string;
+  type: string;
+  direction: string;
+  tier: 'new' | 'seen';
+  capChars?: number;
+  truncated?: boolean;
+  chars?: number;
+  hash?: string;
+  available: boolean;
+  text?: string;
+}
+
+/** The stored run, exactly as the server holds it. */
+export interface AiRunRecordView {
+  itemId?: string;
+  runId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  conversationId: string;
+  contactId?: string;
+  trigger: AiRunTrigger;
+  outcome: AiRunOutcome;
+  skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
+  error?: { kind: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo'; message: string; attempts: number; parked: boolean };
+  driver: AiRunDriver;
+  model?: string;
+  promptFingerprint?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+  window?: {
+    detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
+    totalChars?: number; windowCappedAtLimit: boolean;
+    windowParams?: { newMessageCharCap: number; seenMessageCharCap: number; windowCharBudget: number; maxTranscriptMessages: number; maxTranscriptAgeDays: number; truncationMarker: string };
+    messages: Array<Omit<AiRunWindowMessage, 'available' | 'text'>>;
+    excluded: Array<{ tsMsgId: string; cause: 'age_30d' | 'char_budget' }>;
+    noContent?: string[];
+  };
+  profileFieldsPopulated?: string[];
+  rawText?: string;
+  rawResult?: unknown;
+  decisions: Partial<Record<string, AiRunDecision>>;
+  notedLines: number;
+  expires_at?: number;
+}
+
+/** GET /api/ai-runs/:runId - the rehydrated window rides alongside the stored run. */
+export interface AiRunDetailResponse {
+  run: AiRunRecordView;
+  window: { messages: AiRunWindowMessage[] };
+}
+
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
 export type SystemAlarmState = 'OK' | 'ALARM' | 'INSUFFICIENT_DATA';
 

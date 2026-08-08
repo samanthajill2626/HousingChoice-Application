@@ -45,7 +45,10 @@ function makeWorld(setVerdictImpl?: SetVerdict) {
   return { app, world, setVerdict };
 }
 
-function makePostWriteStatusFailureApp(world: ReturnType<typeof makeWebhookHarness>['world']) {
+function makePostWriteStatusFailureApp(
+  world: ReturnType<typeof makeWebhookHarness>['world'],
+  contactsRepo = world.contactsRepo,
+) {
   const statusService: StatusTransitionService = {
     async setTenantStatus(contactId, input) {
       const contact = world.contacts.find((item) => item.contactId === contactId);
@@ -59,7 +62,7 @@ function makePostWriteStatusFailureApp(world: ReturnType<typeof makeWebhookHarne
   };
   const app = express();
   app.use('/api', createSuggestionsRouter({
-    contactsRepo: world.contactsRepo,
+    contactsRepo,
     extractionRepo: world.extractionRepo,
     aiRunsRepo: world.aiRuns,
     auditRepo: world.auditRepo,
@@ -127,6 +130,26 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
 
     await accept(makePostWriteStatusFailureApp(world), 'c1', 'status').expect(500);
 
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
+    expect(await world.extractionRepo.getSuggestion('c1', 'status')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());
+  });
+
+  it('uses a strongly consistent recovery read after a status service writes then throws', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const staleBeforeWrite = { ...world.contacts.find((contact) => contact.contactId === 'c1')! };
+    const getById = vi.fn(async (contactId: string, opts?: { consistentRead?: boolean }) =>
+      opts?.consistentRead ? world.contactsRepo.getById(contactId) : { ...staleBeforeWrite },
+    );
+    const contactsRepo = { ...world.contactsRepo, getById };
+
+    await accept(makePostWriteStatusFailureApp(world, contactsRepo), 'c1', 'status').expect(500);
+
+    expect(getById).toHaveBeenCalledWith('c1', { consistentRead: true });
     expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
     expect(await world.extractionRepo.getSuggestion('c1', 'status')).toBeUndefined();
     expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());

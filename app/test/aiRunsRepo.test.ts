@@ -11,10 +11,11 @@ import {
   ConditionalCheckFailedException,
   TransactionCanceledException,
 } from '@aws-sdk/client-dynamodb';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
 import {
   createAiRunsRepo,
+  runExpiresAt,
   type AiRunRecordInput,
   type AiRunsRepo,
 } from '../src/repos/aiRunsRepo.js';
@@ -563,16 +564,22 @@ describe('aiRunsRepo - setVerdict', () => {
   });
 
   it('creates a fresh fallback marker so a pre-envelope resolution merges after marker creation failed', async () => {
-    const { doc, store } = makeFakeDoc();
-    const repo = repoWith(doc);
-    expect(await repo.setVerdict('run-1', 'pets', 'accepted', {
-      at: '2026-08-06T10:01:00.000Z', expectedVerdict: 'pending', freshSuggestionCreatedAt: STARTED,
-    })).toBe(true);
-    expect([...store.keys()]).toEqual(['inflight#run-1']);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-08T00:00:00.000Z'));
+    try {
+      const { doc, store } = makeFakeDoc();
+      const repo = repoWith(doc);
+      expect(await repo.setVerdict('run-1', 'pets', 'accepted', {
+        at: '2026-08-06T10:01:00.000Z', expectedVerdict: 'pending', freshSuggestionCreatedAt: STARTED,
+      })).toBe(true);
+      expect([...store.keys()]).toEqual(['inflight#run-1']);
 
-    await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
-    expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
-    expect(store.has('inflight#run-1')).toBe(false);
+      await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
+      expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
+      expect(store.has('inflight#run-1')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('does not create a fallback marker for an expired suggestion', async () => {
@@ -581,6 +588,24 @@ describe('aiRunsRepo - setVerdict', () => {
       expectedVerdict: 'pending', freshSuggestionCreatedAt: '2000-01-01T00:00:00.000Z',
     })).toBe(false);
     expect([...store.keys()]).toEqual([]);
+  });
+
+  it('does not create a fallback marker at the integer TTL boundary or its final fractional second', async () => {
+    const freshSuggestionCreatedAt = '2026-08-06T10:00:00.500Z';
+    const expiresAt = runExpiresAt(freshSuggestionCreatedAt);
+    vi.useFakeTimers();
+    try {
+      for (const nowMs of [expiresAt * 1000, expiresAt * 1000 + 999]) {
+        vi.setSystemTime(nowMs);
+        const { doc, store } = makeFakeDoc();
+        expect(await repoWith(doc).setVerdict('run-gone', 'pets', 'accepted', {
+          expectedVerdict: 'pending', freshSuggestionCreatedAt,
+        })).toBe(false);
+        expect([...store.keys()]).toEqual([]);
+      }
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('stamps verdict, verdictAt and verdictBy on ONE decision, leaving siblings untouched', async () => {

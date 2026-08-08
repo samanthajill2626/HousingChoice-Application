@@ -352,13 +352,15 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
 
       const freshAt = opts.freshSuggestionCreatedAt;
       const freshAtMs = freshAt === undefined ? Number.NaN : Date.parse(freshAt);
-      if (!Number.isFinite(freshAtMs) || Date.now() - freshAtMs > RUN_TTL_DAYS * 24 * 60 * 60 * 1000) return false;
+      if (!Number.isFinite(freshAtMs)) return false;
+      const expiresAt = runExpiresAt(freshAt!);
+      if (expiresAt <= Math.floor(Date.now() / 1000)) return false;
       const fallbackMarker: FinalizationMarker = {
         itemId: inflightItemId(runId),
         runId,
         version: 0,
         verdicts: { [target]: { verdict, at, ...(opts.by !== undefined && { by: opts.by }) } },
-        expires_at: runExpiresAt(freshAt!),
+        expires_at: expiresAt,
       };
       try {
         await doc.send(new TransactWriteCommand({

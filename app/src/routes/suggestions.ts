@@ -250,7 +250,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           return;
         }
         if (!transitioned) {
-          const current = await contacts.getById(contactId);
+          const current = await contacts.getById(contactId, { consistentRead: true });
           if (current?.status === suggestion.suggestedValue) {
             await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
           } else {

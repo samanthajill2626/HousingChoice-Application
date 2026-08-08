@@ -357,7 +357,7 @@ export interface ListContactsOpts {
 export interface ContactsRepo {
   /** Phone (E.164) → contact via the byPhone GSI; undefined when unknown. */
   findByPhone(phone: string): Promise<ContactItem | undefined>;
-  getById(contactId: string): Promise<ContactItem | undefined>;
+  getById(contactId: string, opts?: { consistentRead?: boolean }): Promise<ContactItem | undefined>;
   /**
    * List/filter via the byTypeStatus GSI (M1.5): all contacts of a type,
    * optionally narrowed by status (the (type=unknown, status=needs_review)
@@ -500,8 +500,12 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
   const log = deps.logger ?? defaultLogger;
 
   // --- BE1/C1 internal helpers (closures; NOT part of the public interface) -
-  const getByIdImpl = async (contactId: string): Promise<ContactItem | undefined> => {
-    const { Item } = await doc.send(new GetCommand({ TableName: table, Key: { contactId } }));
+  const getByIdImpl = async (contactId: string, consistentRead = false): Promise<ContactItem | undefined> => {
+    const { Item } = await doc.send(new GetCommand({
+      TableName: table,
+      Key: { contactId },
+      ...(consistentRead && { ConsistentRead: true }),
+    }));
     return Item as ContactItem | undefined;
   };
 
@@ -718,8 +722,8 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       return hit;
     },
 
-    async getById(contactId) {
-      return getByIdImpl(contactId);
+    async getById(contactId, opts) {
+      return getByIdImpl(contactId, opts?.consistentRead);
     },
 
     async listByType(type, opts = {}) {

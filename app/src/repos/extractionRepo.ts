@@ -136,6 +136,10 @@ export interface ExtractionRepo {
   /** All pending suggestions for one contact (byOwner GSI). */
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
   deleteSuggestion(contactId: string, target: string): Promise<void>;
+  /** Delete only the exact version a resolver read; false means it was replaced. */
+  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string): Promise<boolean>;
+  /** Restore a claimed suggestion only if a newer writer has not replaced it. */
+  restoreSuggestionIfAbsent(suggestion: SuggestionItem): Promise<boolean>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
   listPending(opts?: { limit?: number }): Promise<SuggestionItem[]>;
   /**
@@ -411,6 +415,39 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         new DeleteCommand({ TableName: table, Key: { itemId: suggId(contactId, target) } }),
       );
       log.debug({ contactId, target }, 'suggestion deleted');
+    },
+
+    async deleteSuggestionIfCurrent(contactId, target, createdAt) {
+      try {
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { itemId: suggId(contactId, target) },
+            ConditionExpression: '#createdAt = :createdAt',
+            ExpressionAttributeNames: { '#createdAt': 'createdAt' },
+            ExpressionAttributeValues: { ':createdAt': createdAt },
+          }),
+        );
+        log.debug({ contactId, target }, 'suggestion conditionally deleted');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async restoreSuggestionIfAbsent(suggestion) {
+      try {
+        await doc.send(new PutCommand({
+          TableName: table,
+          Item: suggestion,
+          ConditionExpression: 'attribute_not_exists(itemId)',
+        }));
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
     },
 
     async listPending(opts) {

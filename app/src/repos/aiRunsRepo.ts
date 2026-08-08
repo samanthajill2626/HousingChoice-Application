@@ -94,7 +94,7 @@ export interface AiRunsRepo {
     runId: string,
     target: DecisionTarget,
     verdict: Verdict,
-    opts?: { at?: string; by?: string },
+    opts?: { at?: string; by?: string; expectedVerdict?: Verdict },
   ): Promise<boolean>;
 }
 
@@ -244,12 +244,18 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         values[':by'] = opts.by;
         names['#vb'] = 'verdictBy';
       }
+      if (opts.expectedVerdict !== undefined) {
+        names['#expectedVerdict'] = 'verdict';
+        values[':expectedVerdict'] = opts.expectedVerdict;
+      }
       try {
         await doc.send(new UpdateCommand({
           TableName: table,
           Key: { itemId: runItemId(runId) },
           UpdateExpression: `SET ${sets.join(', ')}`,
-          ConditionExpression: 'attribute_exists(itemId)',
+          ConditionExpression: opts.expectedVerdict === undefined
+            ? 'attribute_exists(itemId)'
+            : 'attribute_exists(itemId) AND #d.#t.#expectedVerdict = :expectedVerdict',
           ExpressionAttributeNames: names,
           ExpressionAttributeValues: values,
         }));

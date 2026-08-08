@@ -29,7 +29,7 @@ function seedTenant(world: ReturnType<typeof makeWebhookHarness>['world'], over:
 
 async function seedSuggestion(
   world: ReturnType<typeof makeWebhookHarness>['world'],
-  suggestion: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'>,
+  suggestion: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
 ): Promise<void> {
   await world.extractionRepo.putSuggestion(suggestion);
 }
@@ -154,6 +154,47 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     await accept(failed.app, 'c1', 'pets').expect(200);
     expect(failed.setVerdict).toHaveBeenCalled();
   });
+
+  it('retries a resolution while the run envelope is still being written, then resolves pending', async () => {
+    let envelopeWritten = false;
+    let verdict: Verdict = 'pending';
+    const { app, world, setVerdict } = makeWorld(async (_runId, _target, next) => {
+      if (!envelopeWritten) return false;
+      verdict = next;
+      return true;
+    });
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
+    });
+    const resolving = accept(app, 'c1', 'pets').expect(200);
+    setTimeout(() => { envelopeWritten = true; }, 5);
+    await resolving;
+    expect(setVerdict).toHaveBeenCalledTimes(2);
+    expect(verdict).toBe('accepted');
+  });
+
+  it('does not let a stale accept or dismiss claim a replacement suggestion', async () => {
+    for (const action of [
+      (app: import('express').Express) => accept(app, 'c1', 'pets'),
+      (app: import('express').Express) => dismiss(app, 'c1', 'pets'),
+    ]) {
+      const { app, world, setVerdict } = makeWorld();
+      seedTenant(world);
+      await seedSuggestion(world, {
+        ownerContactId: 'c1', target: 'pets', suggestedValue: 'old value', conversationId: 'conv-1', runId: 'run-old', createdAt: '2026-08-08T00:00:00.000Z',
+      });
+      const originalDelete = world.extractionRepo.deleteSuggestionIfCurrent;
+      world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt) => {
+        await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt: '2026-08-08T00:00:01.000Z' });
+        return originalDelete(contactId, target, createdAt);
+      };
+
+      await action(app).expect(409);
+      expect((await world.extractionRepo.getSuggestion('c1', 'pets'))?.runId).toBe('run-new');
+      expect(setVerdict).not.toHaveBeenCalled();
+    }
+  });
 });
 
 describe('verdict write-back - surface 2: the contacts PATCH', () => {
@@ -220,7 +261,9 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     const getSuggestion = vi.spyOn(readFailure.world.extractionRepo, 'getSuggestion').mockRejectedValueOnce(new Error('read boom'));
     await patch(readFailure.app, 'c1', { pets: 'a dog' }).expect(200);
     expect(getSuggestion).toHaveBeenCalledWith('c1', 'pets');
-    expect(await readFailure.world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    // Without an identity-bearing read, the PATCH cannot safely delete: another
+    // extraction could have replaced the row between the failed read and delete.
+    expect(await readFailure.world.extractionRepo.getSuggestion('c1', 'pets')).toBeDefined();
 
     const verdictFailure = makeWorld(async () => { throw new Error('ai_runs down'); });
     seedTenant(verdictFailure.world);
@@ -228,5 +271,22 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
       ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
     });
     await patch(verdictFailure.app, 'c1', { pets: 'a dog' }).expect(200);
+  });
+
+  it('keeps a replacement suggestion and does not stamp it when PATCH races after its contact update', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'old value', conversationId: 'conv-1', runId: 'run-old', createdAt: '2026-08-08T00:00:00.000Z',
+    });
+    const originalDelete = world.extractionRepo.deleteSuggestionIfCurrent;
+    world.extractionRepo.deleteSuggestionIfCurrent = async (contactId, target, createdAt) => {
+      await world.extractionRepo.putSuggestion({ ownerContactId: contactId, target, suggestedValue: 'new value', conversationId: 'conv-2', runId: 'run-new', createdAt: '2026-08-08T00:00:01.000Z' });
+      return originalDelete(contactId, target, createdAt);
+    };
+
+    await patch(app, 'c1', { pets: 'human edit' }).expect(200);
+    expect((await world.extractionRepo.getSuggestion('c1', 'pets'))?.runId).toBe('run-new');
+    expect(setVerdict).not.toHaveBeenCalled();
   });
 });

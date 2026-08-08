@@ -368,14 +368,15 @@ async function processRow(
     const failure = await completeOrFail(cursor);
     return failure ?? { record: true, outcome: 'skipped' };
   }
+  // A resolved contact is still useful audit context when its type is ineligible.
+  // Set this before the eligibility exit so the run gets its contacts# pointer.
+  draft.contactId = contact.contactId;
   if (contact.type === 'landlord' || contact.type === 'partner' || contact.type === 'team_member') {
     logger.debug({ conversationId, contactType: contact.type }, 'extraction: ineligible contact type - completing');
     draft.skipReason = 'ineligible_type';
     const failure = await completeOrFail(cursor);
     return failure ?? { record: true, outcome: 'skipped' };
   }
-  draft.contactId = contact.contactId;
-
   let newestFirst: MessageItem[];
   try {
     newestFirst = await messages.listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES });
@@ -520,7 +521,7 @@ async function stampSuperseded(deps: ExtractionJobDeps, draft: RunDraft): Promis
   for (const { target, runId } of draft.displaced) {
     if (!isDecisionTarget(target)) continue;
     try {
-      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at });
+      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at, expectedVerdict: 'pending' });
     } catch (err) {
       deps.logger.warn(
         { conversationId: draft.conversationId, runId, target, err },

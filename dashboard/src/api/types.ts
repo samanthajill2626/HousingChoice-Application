@@ -263,6 +263,8 @@ export interface AiRunWindowMessage {
   truncated?: boolean;
   chars?: number;
   hash?: string;
+  /** Hash of the current canonical rendering against the immutable stored evidence. */
+  hashStatus?: 'match' | 'mismatch' | 'unavailable';
   available: boolean;
   text?: string;
 }

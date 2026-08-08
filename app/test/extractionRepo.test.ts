@@ -177,6 +177,11 @@ function makeFakeDoc(): FakeDoc {
       if (cmd instanceof PutCommand) {
         const item = cmd.input.Item as Row;
         const previous = store.get(item['itemId'] as string);
+        const names = cmd.input.ExpressionAttributeNames ?? {};
+        const values = cmd.input.ExpressionAttributeValues ?? {};
+        if (cmd.input.ConditionExpression && !conditionHolds(cmd.input.ConditionExpression, names, values, previous)) {
+          throw new ConditionalCheckFailedException({ message: 'put cond', $metadata: {} });
+        }
         // Model removeUndefinedValues: undefined attrs are never stored (keeps
         // sparse GSIs sparse), exactly like the real document client.
         const stored: Row = {};
@@ -193,6 +198,12 @@ function makeFakeDoc(): FakeDoc {
       }
       if (cmd instanceof DeleteCommand) {
         const key = cmd.input.Key as { itemId: string };
+        const existing = store.get(key.itemId);
+        const names = cmd.input.ExpressionAttributeNames ?? {};
+        const values = cmd.input.ExpressionAttributeValues ?? {};
+        if (cmd.input.ConditionExpression && !conditionHolds(cmd.input.ConditionExpression, names, values, existing)) {
+          throw new ConditionalCheckFailedException({ message: 'delete cond', $metadata: {} });
+        }
         store.delete(key.itemId);
         return {};
       }
@@ -510,6 +521,29 @@ describe('extractionRepo suggestions', () => {
 
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
     expect(await repo.listSuggestionsByContact('c1')).toHaveLength(0);
+  });
+
+  it('conditionally deletes only the exact suggestion version read by a resolver', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1 });
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2 });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2)).toBe(true);
+    expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
+  });
+
+  it('restores a claimed suggestion without overwriting a newer replacement', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const { item } = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1 });
+    await repo.deleteSuggestionIfCurrent('c1', 'pets', T1);
+    expect(await repo.restoreSuggestionIfAbsent(item)).toBe(true);
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2 });
+    expect(await repo.restoreSuggestionIfAbsent(item)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
   });
 
   it('round-trips suggestedAddress parts for the compound address target', async () => {

@@ -1113,6 +1113,8 @@ describe('POST /webhooks/twilio/sms - conversation-fact-extraction scheduling (T
       getSuggestion: notImpl('getSuggestion') as ExtractionRepo['getSuggestion'],
       listSuggestionsByContact: notImpl('listSuggestionsByContact') as ExtractionRepo['listSuggestionsByContact'],
       deleteSuggestion: notImpl('deleteSuggestion') as ExtractionRepo['deleteSuggestion'],
+      deleteSuggestionIfCurrent: notImpl('deleteSuggestionIfCurrent') as ExtractionRepo['deleteSuggestionIfCurrent'],
+      restoreSuggestionIfAbsent: notImpl('restoreSuggestionIfAbsent') as ExtractionRepo['restoreSuggestionIfAbsent'],
       listPending: notImpl('listPending') as ExtractionRepo['listPending'],
       ...overrides,
     };

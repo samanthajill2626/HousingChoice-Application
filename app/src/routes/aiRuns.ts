@@ -11,6 +11,8 @@ import {
 } from '../repos/aiRunsRepo.js';
 import { createMessagesRepo, type MessageItem, type MessagesRepo } from '../repos/messagesRepo.js';
 import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
+import { capUtterances, toUtterances } from '../jobs/extraction.js';
+import { hashRenderedMessage } from '../services/extraction/runWindow.js';
 
 export interface AiRunsRouterDeps {
   logger?: Logger;
@@ -106,7 +108,20 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
     const rehydrated = stored.map((message) => {
       const row = byId.get(message.tsMsgId);
       const text = row === undefined ? undefined : row.type === 'call' ? row.transcript : row.body;
-      return { ...message, available: row !== undefined, ...(text !== undefined && { text }) };
+      const hashStatus =
+        run.window?.detail === 'full' && message.capChars !== undefined && row !== undefined
+          ? hashRenderedMessage(capUtterances(toUtterances(row), message.capChars)) === message.hash
+            ? 'match' as const
+            : 'mismatch' as const
+          : run.window?.detail === 'full'
+            ? 'unavailable' as const
+            : undefined;
+      return {
+        ...message,
+        available: row !== undefined,
+        ...(text !== undefined && { text }),
+        ...(hashStatus !== undefined && { hashStatus }),
+      };
     });
     res.json({ run, window: { messages: rehydrated } });
   });

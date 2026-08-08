@@ -12,8 +12,8 @@ export function humanizeEnum(value: string): string {
 }
 
 function WindowMessages({ messages, full }: { messages: AiRunWindowMessage[]; full: boolean }): React.JSX.Element {
-  return <div className={styles.tableWrap}><table className={styles.table} aria-label="Window messages"><thead><tr><th>Message</th><th>Tier</th><th>Text</th>{full ? <><th>Truncated</th><th>Chars</th><th>Hash</th></> : null}</tr></thead><tbody>
-    {messages.map((message) => <tr key={message.tsMsgId}><td>{message.tsMsgId}</td><td>{message.tier}</td><td>{message.available ? message.text ?? 'No text available' : 'Unavailable'}</td>{full ? <><td>{message.truncated ? 'yes' : 'no'}</td><td>{message.chars ?? '-'}</td><td>{message.hash ?? '-'}</td></> : null}</tr>)}
+  return <div className={styles.tableWrap}><table className={styles.table} aria-label="Window messages"><thead><tr><th>Message</th><th>Tier</th><th>Text</th>{full ? <><th>Truncated</th><th>Chars</th><th>Hash</th><th>Hash status</th></> : null}</tr></thead><tbody>
+    {messages.map((message) => <tr key={message.tsMsgId}><td>{message.tsMsgId}</td><td>{message.tier}</td><td>{message.available ? message.text ?? 'No text available' : 'Unavailable'}</td>{full ? <><td>{message.truncated ? 'yes' : 'no'}</td><td>{message.chars ?? '-'}</td><td>{message.hash ?? '-'}</td><td>{message.hashStatus ?? 'unavailable'}</td></> : null}</tr>)}
   </tbody></table></div>;
 }
 

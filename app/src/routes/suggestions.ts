@@ -93,6 +93,7 @@ export interface SuggestionsRouterDeps {
 }
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
+const VERDICT_RETRY_DELAYS_MS = [25, 50, 100, 150] as const;
 
 type Coerced = { ok: true; value: unknown } | { ok: false };
 
@@ -130,15 +131,35 @@ async function stampVerdict(
 ): Promise<void> {
   if (suggestion.runId === undefined || !isDecisionTarget(suggestion.target)) return;
   try {
-    await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
-      at,
-      ...(actor !== undefined && { by: actor }),
-    });
+    // A resolution can arrive between suggestion persistence and the job's
+    // single envelope write. Retry briefly so that narrow ordering gap does not
+    // strand the decision pending; an expired/missing record remains harmless.
+    for (let attempt = 0; attempt <= VERDICT_RETRY_DELAYS_MS.length; attempt += 1) {
+      const stamped = await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
+        at,
+        expectedVerdict: 'pending',
+        ...(actor !== undefined && { by: actor }),
+      });
+      if (stamped || attempt === VERDICT_RETRY_DELAYS_MS.length) return;
+      await new Promise<void>((resolve) => setTimeout(resolve, VERDICT_RETRY_DELAYS_MS[attempt]!));
+    }
   } catch (err) {
     log.warn(
       { contactId: suggestion.ownerContactId, target: suggestion.target, err },
       'ai run verdict stamp failed (best-effort)',
     );
+  }
+}
+
+async function claimSuggestion(extraction: ExtractionRepo, suggestion: SuggestionItem): Promise<boolean> {
+  return extraction.deleteSuggestionIfCurrent(suggestion.ownerContactId, suggestion.target, suggestion.createdAt);
+}
+
+async function restoreClaim(extraction: ExtractionRepo, log: Logger, suggestion: SuggestionItem): Promise<void> {
+  try {
+    await extraction.restoreSuggestionIfAbsent(suggestion);
+  } catch (err) {
+    log.warn({ contactId: suggestion.ownerContactId, target: suggestion.target, err }, 'suggestion restore failed (best-effort)');
   }
 }
 
@@ -207,19 +228,23 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
 
     // --- 'status' -> the ONE transition service (source 'ai') -----------------
     if (target === 'status') {
+      if (!await claimSuggestion(extraction, suggestion)) {
+        res.status(409).json({ error: 'suggestion_replaced' });
+        return;
+      }
       try {
         const updated = await statusService.setTenantStatus(contactId, {
           toStatus: suggestion.suggestedValue as TenantStatus,
           source: 'ai',
           ...(actor !== undefined && { actor }),
         });
-        await extraction.deleteSuggestion(contactId, 'status');
         await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
         events.emit('suggestion.updated', { contactId });
         const remaining = await extraction.listSuggestionsByContact(contactId);
         log.info({ contactId, target, actor }, 'ai suggestion accepted (status)');
         res.json({ contact: serializeContact(updated), suggestions: remaining });
       } catch (err) {
+        await restoreClaim(extraction, log, suggestion);
         // Stale suggestion: the service/allowlist governs validity. Surface the
         // service error and KEEP the suggestion (never a silent delete on refuse).
         if (err instanceof EntityNotFoundError) {
@@ -250,7 +275,17 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         return;
       }
       const alreadyAttached = owner?.contactId === contactId;
-      const updated = await contacts.addPhone(contactId, { phone: normalized });
+      if (!await claimSuggestion(extraction, suggestion)) {
+        res.status(409).json({ error: 'suggestion_replaced' });
+        return;
+      }
+      let updated: ContactItem;
+      try {
+        updated = await contacts.addPhone(contactId, { phone: normalized });
+      } catch (err) {
+        await restoreClaim(extraction, log, suggestion);
+        throw err;
+      }
       await audit.append(`contacts#${contactId}`, 'contact_phone_added', {
         ...(actor !== undefined && { actor }),
         phone: normalized,
@@ -264,7 +299,6 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           log.error({ err, contactId }, 'ai suggestion accept (phone): number_added milestone failed');
         }
       }
-      await extraction.deleteSuggestion(contactId, 'phone');
       await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
@@ -293,14 +327,23 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           ...(actor !== undefined && { accepted_by: actor }),
         },
       };
-      const updated = await contacts.update(contactId, patch);
+      if (!await claimSuggestion(extraction, suggestion)) {
+        res.status(409).json({ error: 'suggestion_replaced' });
+        return;
+      }
+      let updated: ContactItem;
+      try {
+        updated = await contacts.update(contactId, patch);
+      } catch (err) {
+        await restoreClaim(extraction, log, suggestion);
+        throw err;
+      }
       await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
         ...(actor !== undefined && { actor }),
         target,
         ...(from.length > 0 && { from }),
         to: formatted,
       });
-      await extraction.deleteSuggestion(contactId, 'address');
       await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
@@ -328,14 +371,23 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           ...(actor !== undefined && { accepted_by: actor }),
         },
       };
-      const updated = await contacts.update(contactId, patch);
+      if (!await claimSuggestion(extraction, suggestion)) {
+        res.status(409).json({ error: 'suggestion_replaced' });
+        return;
+      }
+      let updated: ContactItem;
+      try {
+        updated = await contacts.update(contactId, patch);
+      } catch (err) {
+        await restoreClaim(extraction, log, suggestion);
+        throw err;
+      }
       await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
         ...(actor !== undefined && { actor }),
         target,
         from,
         to: coerced.value,
       });
-      await extraction.deleteSuggestion(contactId, target);
       await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
@@ -360,19 +412,27 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       res.status(404).json({ error: 'no_pending_suggestion' });
       return;
     }
-    await audit.append(`contacts#${contactId}`, 'ai_suggestion_dismissed', {
-      ...(actor !== undefined && { actor }),
-      target,
-    });
+    if (!await claimSuggestion(extraction, suggestion)) {
+      res.status(409).json({ error: 'suggestion_replaced' });
+      return;
+    }
+    try {
+      await audit.append(`contacts#${contactId}`, 'ai_suggestion_dismissed', {
+        ...(actor !== undefined && { actor }),
+        target,
+      });
     // Tombstone the rejected value PERMANENTLY (ruling 2026-07-21): the same
     // normalized value is never re-suggested for this target; a different
     // value still comes through. A human field edit does NOT clear it.
-    await extraction.putDismissal(
-      contactId,
-      target,
-      normalizeSuggestionValue(target, suggestion.suggestedValue),
-    );
-    await extraction.deleteSuggestion(contactId, target);
+      await extraction.putDismissal(
+        contactId,
+        target,
+        normalizeSuggestionValue(target, suggestion.suggestedValue),
+      );
+    } catch (err) {
+      await restoreClaim(extraction, log, suggestion);
+      throw err;
+    }
     await stampVerdict(aiRuns, log, suggestion, 'dismissed', now, actor);
     events.emit('suggestion.updated', { contactId });
     const remaining = await extraction.listSuggestionsByContact(contactId);

@@ -1323,9 +1323,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       throw err;
     }
 
-    // A human edit resolves a pending AI suggestion for the same field. Read,
-    // delete, and verdict are deliberately separate best-effort operations so a
-    // new read failure cannot suppress the existing deletion behavior.
+    // A human edit resolves the exact pending suggestion it read. A later
+    // extraction may replace that row while this request is in flight, so a
+    // conditional delete protects the newer suggestion and its run verdict.
     const verdictAt = new Date().toISOString();
     for (const f of parsed.changedFields) {
       let pending: SuggestionItem | undefined;
@@ -1334,22 +1334,30 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'extraction getSuggestion (human edit) failed (best-effort)');
       }
+      if (pending === undefined) continue;
+      let deleted = false;
       try {
-        await extraction.deleteSuggestion(contactId, f);
+        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt);
       } catch (err) {
-        log.warn({ err, contactId, field: f }, 'extraction deleteSuggestion (human edit) failed (best-effort)');
+        log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
       }
-      if (pending?.runId === undefined || !isDecisionTarget(f)) continue;
+      if (!deleted || pending.runId === undefined || !isDecisionTarget(f)) continue;
       const patchedValue = parsed.patch[f];
       const verdict =
         f === 'type' && typeof patchedValue === 'string' && patchedValue === pending.suggestedValue
           ? 'accepted'
           : 'superseded_by_human_edit';
       try {
-        await aiRuns.setVerdict(pending.runId, f, verdict, {
-          at: verdictAt,
-          ...(req.user?.userId !== undefined && { by: req.user.userId }),
-        });
+        const retryDelaysMs = [25, 50, 100, 150] as const;
+        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
+          const stamped = await aiRuns.setVerdict(pending.runId, f, verdict, {
+            at: verdictAt,
+            expectedVerdict: 'pending',
+            ...(req.user?.userId !== undefined && { by: req.user.userId }),
+          });
+          if (stamped || attempt === retryDelaysMs.length) break;
+          await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[attempt]!));
+        }
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
       }

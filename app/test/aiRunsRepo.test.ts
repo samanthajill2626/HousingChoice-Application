@@ -45,7 +45,13 @@ function splitTopLevel(s: string): string[] {
 }
 
 function attrOf(token: string, names: Record<string, string>): string {
-  return names[token] ?? token;
+  return token.split('.').map((part) => names[part] ?? part).join('.');
+}
+
+function valueAt(row: Row, path: string): unknown {
+  return path.split('.').reduce<unknown>((value, key) =>
+    value !== null && typeof value === 'object' ? (value as Record<string, unknown>)[key] : undefined,
+  row);
 }
 
 function conditionHolds(
@@ -59,13 +65,13 @@ function conditionHolds(
     const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w]+)\s*\)$/.exec(clause);
     if (fn) {
       const attr = attrOf(fn[2]!, names);
-      const exists = row !== undefined && row[attr] !== undefined;
+      const exists = row !== undefined && valueAt(row, attr) !== undefined;
       return fn[1] === 'attribute_exists' ? exists : !exists;
     }
-    const cmp = /^([#\w]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/.exec(clause);
+    const cmp = /^([#\w.]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/.exec(clause);
     if (cmp) {
       if (row === undefined) return false;
-      const left = row[attrOf(cmp[1]!, names)];
+      const left = valueAt(row, attrOf(cmp[1]!, names));
       if (left === undefined) return false;
       const l = left as string;
       const r = values[cmp[3]!] as string;
@@ -486,5 +492,14 @@ describe('aiRunsRepo - setVerdict', () => {
     const run = await repo.getRun('run-1');
     expect(run?.decisions['pets']?.verdict).toBe('superseded');
     expect(run?.decisions['pets']?.verdictBy).toBeUndefined();
+  });
+
+  it('does not overwrite a terminal verdict when another resolver won first', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
+    expect(await repo.setVerdict('run-1', 'pets', 'accepted', { expectedVerdict: 'pending' })).toBe(true);
+    expect(await repo.setVerdict('run-1', 'pets', 'dismissed', { expectedVerdict: 'pending' })).toBe(false);
+    expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
   });
 });

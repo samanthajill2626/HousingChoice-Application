@@ -170,6 +170,8 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
     getSuggestion: vi.fn(async () => undefined),
     listSuggestionsByContact: vi.fn(async () => []),
     deleteSuggestion: vi.fn(async () => {}),
+    deleteSuggestionIfCurrent: vi.fn(async () => true),
+    restoreSuggestionIfAbsent: vi.fn(async () => true),
     listPending: vi.fn(async () => []),
     putDismissal: vi.fn(async () => {}),
     hasDismissal: vi.fn(async () => false),
@@ -934,6 +936,7 @@ describe('runDueExtractions - the run log envelope', () => {
     const landlord = makeHarness({ dueRows: [dueRow()], conversation: convWith('c1'), contact: landlordContact() });
     await runDueExtractions(NOW, landlord.deps);
     expect(landlord.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'ineligible_type' });
+    expect(landlord.runs[0]!.contactId).toBe('c1');
     expect(landlord.runs[0]!.window).toBeUndefined();
   });
 

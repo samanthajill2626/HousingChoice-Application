@@ -2485,6 +2485,18 @@ export function createFakeWorld(): FakeWorld {
     async deleteSuggestion(contactId, target) {
       suggestions.delete(`sugg#${contactId}#${target}`);
     },
+    async deleteSuggestionIfCurrent(contactId, target, createdAt) {
+      const itemId = `sugg#${contactId}#${target}`;
+      const current = suggestions.get(itemId);
+      if (current?.createdAt !== createdAt) return false;
+      suggestions.delete(itemId);
+      return true;
+    },
+    async restoreSuggestionIfAbsent(suggestion) {
+      if (suggestions.has(suggestion.itemId)) return false;
+      suggestions.set(suggestion.itemId, { ...suggestion });
+      return true;
+    },
     async listPending(opts = {}) {
       return [...suggestions.values()]
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))

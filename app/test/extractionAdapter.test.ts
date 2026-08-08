@@ -8,6 +8,7 @@ import {
   ExtractionRefusedError,
   type ExtractionInput,
 } from '../src/adapters/extraction.js';
+import { parseExtractionOps } from '../src/services/extraction/schema.js';
 
 const model = 'claude-opus-4-8';
 
@@ -144,14 +145,10 @@ describe('fake driver', () => {
     expect(call.meta.rawText).not.toContain('EXTRACT:');
   });
 
-  it.skip("the fake driver's rawText parses through parseExtractionOps - the e2e's whole mechanism", async () => {
-    // TODO(ai-run-log): unskip in Slice 7 (Task 15 Step 5) - parseExtractionOps
-    // does not exist yet. Skipping is deliberate and time-boxed; omitting the
-    // assertion is how the mechanism goes unverified. If the marker prefix ever
-    // leaked into rawText, parseExtractionOps would return the empty view and
-    // EVERY e2e decision would silently record not_addressed.
+  it("the fake driver's rawText parses through parseExtractionOps - the e2e's whole mechanism", async () => {
     const call = await createExtractionDriver({ driver: 'fake', model }).extract(markerInput);
     expect(call.meta.rawText).toBeDefined();
+    expect(parseExtractionOps(call.meta.rawText).pets).toEqual({ op: 'none' });
   });
 
   it('a malformed marker keeps rawText so the run log shows what the driver was handed', async () => {

@@ -34,7 +34,7 @@ test.describe('Settings — admin path', () => {
     // /auth/me probe resolves, so wait for the navigation rather than asserting
     // the URL synchronously.)
     await page.waitForURL(/\/settings\/team$/, { timeout: 15_000 });
-    for (const label of ['Team', 'Templates', 'Notifications', 'System status']) {
+    for (const label of ['Team', 'Templates', 'Notifications', 'System status', 'AI run log']) {
       await expect(page.getByRole('tab', { name: label })).toBeVisible();
     }
     await expect(page.getByRole('heading', { name: 'Team', level: 2 })).toBeVisible();
@@ -194,11 +194,12 @@ test.describe('Settings — VA path', () => {
     // /settings redirects a VA to Templates (the first tab they can see).
     await page.waitForURL(/\/settings\/templates$/, { timeout: 15_000 });
 
-    // The limited tab set: Templates + Notifications only.
+    // The limited tab set excludes all admin-only sections.
     await expect(page.getByRole('tab', { name: 'Templates' })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Notifications' })).toBeVisible();
     await expect(page.getByRole('tab', { name: 'Team' })).toHaveCount(0);
     await expect(page.getByRole('tab', { name: 'System status' })).toHaveCount(0);
+    await expect(page.getByRole('tab', { name: 'AI run log' })).toHaveCount(0);
 
     // Templates is read-only for a VA: the inputs are disabled and there's no Save.
     await expect(page.getByText(/Read-only — admins can edit/i)).toBeVisible();

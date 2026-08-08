@@ -839,6 +839,17 @@ export function createFakeWorld(): FakeWorld {
         .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1))
         .slice(0, opts.limit ?? 50);
     },
+    async getByTsMsgId(conversationId, tsMsgId) {
+      return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+    },
+    async getManyByTsMsgIds(conversationId, tsMsgIds) {
+      const wanted = new Set(tsMsgIds);
+      return new Map(
+        messages
+          .filter((m) => m.conversationId === conversationId && wanted.has(m.tsMsgId))
+          .map((m) => [m.tsMsgId, m]),
+      );
+    },
     async annotateMessage(conversationId, tsMsgId, annotations) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`annotateMessage: no message ${conversationId}/${tsMsgId}`);

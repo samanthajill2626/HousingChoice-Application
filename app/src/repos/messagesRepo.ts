@@ -17,6 +17,7 @@
 // PII: message bodies must NEVER be logged (doc §9) — IDs and lengths only.
 import { ConditionalCheckFailedException, TransactionCanceledException } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   DeleteCommand,
   GetCommand,
   PutCommand,
@@ -669,6 +670,20 @@ export interface MessagesRepo {
   upgradeCallOutcomeToVoicemail(callSid: string): Promise<boolean>;
   /** Newest-first page of a conversation's log. */
   listByConversation(conversationId: string, opts?: ListByConversationOptions): Promise<MessageItem[]>;
+  /**
+   * Point-get ONE message by its exact key. Added for the AI run log's window
+   * rehydration (design 2026-08-06 section 9): the run stores message IDs, not
+   * text, so the detail view reads them back on demand. Returns undefined for a
+   * deleted message - the view renders that as unavailable, and the stored hash
+   * and char count still prove what was sent.
+   */
+  getByTsMsgId(conversationId: string, tsMsgId: string): Promise<MessageItem | undefined>;
+  /**
+   * BATCH point-get for a whole window (up to MAX_TRANSCRIPT_MESSAGES ids),
+   * keyed by tsMsgId. Chunked at the BatchGetItem 100-key limit, with an
+   * UnprocessedKeys retry. Missing ids are simply absent from the map.
+   */
+  getManyByTsMsgIds(conversationId: string, tsMsgIds: string[]): Promise<Map<string, MessageItem>>;
   /** Stamp operational metadata (media S3 keys / retry lineage) onto a message. */
   annotateMessage(conversationId: string, tsMsgId: string, annotations: MessageAnnotations): Promise<void>;
   /**
@@ -1508,6 +1523,30 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         }),
       );
       return (Items ?? []) as MessageItem[];
+    },
+
+    async getByTsMsgId(conversationId, tsMsgId) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { conversationId, tsMsgId } }),
+      );
+      return Item as MessageItem | undefined;
+    },
+
+    async getManyByTsMsgIds(conversationId, tsMsgIds) {
+      const out = new Map<string, MessageItem>();
+      if (tsMsgIds.length === 0) return out;
+
+      // BatchGetItem caps at 100 keys per request.
+      for (let i = 0; i < tsMsgIds.length; i += 100) {
+        let keys = tsMsgIds.slice(i, i + 100).map((tsMsgId) => ({ conversationId, tsMsgId }));
+        for (let attempt = 0; attempt < 4 && keys.length > 0; attempt += 1) {
+          if (attempt > 0) await new Promise((resolve) => setTimeout(resolve, 25 * 2 ** (attempt - 1)));
+          const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
+          for (const item of (res.Responses?.[table] ?? []) as MessageItem[]) out.set(item.tsMsgId, item);
+          keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ conversationId: string; tsMsgId: string }>;
+        }
+      }
+      return out;
     },
 
     // --- Relay groups (M1.7) -----------------------------------------------

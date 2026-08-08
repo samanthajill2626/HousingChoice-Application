@@ -116,7 +116,7 @@ describe('applyExtraction - run-log plumbing', () => {
       'ts-9',
       'run-7',
     );
-    expect(out.displaced).toEqual([{ target: 'pets', runId: 'run-earlier' }]);
+    expect(out.displaced).toEqual([{ target: 'pets', runId: 'run-earlier', createdAt: 'before' }]);
   });
 
   it('emits no displaced entry when the displaced row predates the run log', async () => {

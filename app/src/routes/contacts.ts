@@ -1337,7 +1337,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       if (pending === undefined) continue;
       let deleted = false;
       try {
-        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId);
+        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId, pending.revision);
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
       }
@@ -1350,6 +1350,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       try {
         await aiRuns.setVerdict(pending.runId, f, verdict, {
           at: verdictAt, expectedVerdict: 'pending',
+          freshSuggestionCreatedAt: pending.createdAt,
           ...(req.user?.userId !== undefined && { by: req.user.userId }),
         });
       } catch (err) {

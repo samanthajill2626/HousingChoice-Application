@@ -104,7 +104,7 @@ export interface AiRunsRepo {
     runId: string,
     target: DecisionTarget,
     verdict: Verdict,
-    opts?: { at?: string; by?: string; expectedVerdict?: Verdict },
+    opts?: { at?: string; by?: string; expectedVerdict?: Verdict; freshSuggestionCreatedAt?: string },
   ): Promise<boolean>;
 }
 
@@ -185,7 +185,11 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         expires_at,
       }));
       for (let attempt = 0; attempt < 3; attempt += 1) {
-        const marker = (await doc.send(new GetCommand({ TableName: table, Key: { itemId: inflightItemId(input.runId) } }))).Item as FinalizationMarker | undefined;
+        const marker = (await doc.send(new GetCommand({
+          TableName: table,
+          Key: { itemId: inflightItemId(input.runId) },
+          ConsistentRead: true,
+        }))).Item as FinalizationMarker | undefined;
         const merged: AiRunRecord = marker === undefined ? record : {
           ...record,
           decisions: Object.fromEntries(Object.entries(record.decisions).map(([target, decision]) => {
@@ -200,7 +204,11 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
             TransactItems: [
               { Put: { TableName: table, Item: merged } },
               ...pointers.map((Item) => ({ Put: { TableName: table, Item } })),
-              ...(marker === undefined ? [] : [{ Delete: {
+              ...(marker === undefined ? [{ ConditionCheck: {
+                TableName: table,
+                Key: { itemId: inflightItemId(input.runId) },
+                ConditionExpression: 'attribute_not_exists(itemId)',
+              } }] : [{ Delete: {
                 TableName: table,
                 Key: { itemId: inflightItemId(input.runId) },
                 ConditionExpression: '#version = :version',
@@ -212,12 +220,10 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           log.debug({ runId: input.runId, conversationId: input.conversationId, outcome: input.outcome }, 'ai run recorded');
           return merged;
         } catch (err) {
-          // CancellationReasons are optional in some service/SDK paths. A
-          // transaction with a marker can only safely retry the bounded write
-          // path: it re-reads the marker and either merges its terminal
-          // verdicts or propagates the final cancellation.
-          const markerConflict = marker !== undefined && err instanceof TransactionCanceledException;
-          if (!markerConflict || attempt === 2) throw err;
+          // The marker can appear after an absent read or change after a present
+          // read. CancellationReasons are optional, so retry either bounded
+          // marker race and re-read before the next all-or-nothing transaction.
+          if (!(err instanceof TransactionCanceledException) || attempt === 2) throw err;
         }
       }
       throw new Error('unreachable');
@@ -301,51 +307,80 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         names['#expectedVerdict'] = 'verdict';
         values[':expectedVerdict'] = opts.expectedVerdict;
       }
-      try {
-        await doc.send(new UpdateCommand({
-          TableName: table,
-          Key: { itemId: runItemId(runId) },
-          UpdateExpression: `SET ${sets.join(', ')}`,
-          ConditionExpression: opts.expectedVerdict === undefined
-            ? 'attribute_exists(itemId)'
-            : 'attribute_exists(itemId) AND #d.#t.#expectedVerdict = :expectedVerdict',
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-        }));
-        log.debug({ runId, target, verdict }, 'ai run verdict stamped');
-        return true;
-      } catch (err) {
-        if (!(err instanceof ConditionalCheckFailedException)) throw err;
-      }
       const markerNames = { '#verdicts': 'verdicts', '#target': target, '#version': 'version' };
       const markerValues = { ':verdict': { verdict, at, ...(opts.by !== undefined && { by: opts.by }) }, ':one': 1 };
+      const writeRunVerdict = async (): Promise<boolean> => {
+        try {
+          await doc.send(new UpdateCommand({
+            TableName: table,
+            Key: { itemId: runItemId(runId) },
+            UpdateExpression: `SET ${sets.join(', ')}`,
+            ConditionExpression: opts.expectedVerdict === undefined
+              ? 'attribute_exists(itemId)'
+              : 'attribute_exists(itemId) AND #d.#t.#expectedVerdict = :expectedVerdict',
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
+          }));
+          return true;
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) return false;
+          throw err;
+        }
+      };
+      const writeMarkerVerdict = async (): Promise<boolean> => {
+        try {
+          await doc.send(new UpdateCommand({
+            TableName: table,
+            Key: { itemId: inflightItemId(runId) },
+            UpdateExpression: 'SET #verdicts.#target = :verdict ADD #version :one',
+            ConditionExpression: 'attribute_exists(itemId) AND attribute_not_exists(#verdicts.#target)',
+            ExpressionAttributeNames: markerNames,
+            ExpressionAttributeValues: markerValues,
+          }));
+          return true;
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) return false;
+          throw err;
+        }
+      };
+      if (await writeRunVerdict()) {
+        log.debug({ runId, target, verdict }, 'ai run verdict stamped');
+        return true;
+      }
+      if (await writeMarkerVerdict()) return true;
+      if (await writeRunVerdict()) return true;
+
+      const freshAt = opts.freshSuggestionCreatedAt;
+      const freshAtMs = freshAt === undefined ? Number.NaN : Date.parse(freshAt);
+      if (!Number.isFinite(freshAtMs) || Date.now() - freshAtMs > RUN_TTL_DAYS * 24 * 60 * 60 * 1000) return false;
+      const fallbackMarker: FinalizationMarker = {
+        itemId: inflightItemId(runId),
+        runId,
+        version: 0,
+        verdicts: { [target]: { verdict, at, ...(opts.by !== undefined && { by: opts.by }) } },
+        expires_at: runExpiresAt(freshAt!),
+      };
       try {
-        await doc.send(new UpdateCommand({
-          TableName: table,
-          Key: { itemId: inflightItemId(runId) },
-          UpdateExpression: 'SET #verdicts.#target = :verdict ADD #version :one',
-          ConditionExpression: 'attribute_exists(itemId) AND attribute_not_exists(#verdicts.#target)',
-          ExpressionAttributeNames: markerNames,
-          ExpressionAttributeValues: markerValues,
+        await doc.send(new TransactWriteCommand({
+          TransactItems: [
+            { ConditionCheck: {
+              TableName: table,
+              Key: { itemId: runItemId(runId) },
+              ConditionExpression: 'attribute_not_exists(itemId)',
+            } },
+            { Put: {
+              TableName: table,
+              Item: fallbackMarker,
+              ConditionExpression: 'attribute_not_exists(itemId)',
+            } },
+          ],
         }));
         return true;
       } catch (err) {
-        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        if (!(err instanceof TransactionCanceledException)) throw err;
       }
-      try {
-        await doc.send(new UpdateCommand({
-          TableName: table,
-          Key: { itemId: runItemId(runId) },
-          UpdateExpression: `SET ${sets.join(', ')}`,
-          ConditionExpression: opts.expectedVerdict === undefined ? 'attribute_exists(itemId)' : 'attribute_exists(itemId) AND #d.#t.#expectedVerdict = :expectedVerdict',
-          ExpressionAttributeNames: names,
-          ExpressionAttributeValues: values,
-        }));
-        return true;
-      } catch (err) {
-        if (err instanceof ConditionalCheckFailedException) return false;
-        throw err;
-      }
+      if (await writeRunVerdict()) return true;
+      return writeMarkerVerdict();
     },
   };
 }

@@ -156,6 +156,7 @@ interface FakeDoc {
   store: Map<string, Row>;
   batchGetCalls: () => number;
   queryInputs: () => QueryCommandInput[];
+  getInputs: () => GetCommand[];
   rejectedTransactionKeys: () => string[][];
 }
 
@@ -163,23 +164,34 @@ function makeFakeDoc(opts: {
   throttleFirstN?: number;
   failTransactAfter?: number;
   beforeFirstMarkerTransaction?: (store: Map<string, Row>) => void;
+  hideFirstMarkerGet?: boolean;
 } = {}): FakeDoc {
   const store = new Map<string, Row>();
   let batchGetCalls = 0;
   const queryInputs: QueryCommandInput[] = [];
+  const getInputs: GetCommand[] = [];
   const rejectedTransactionKeys: string[][] = [];
   const throttleFirstN = opts.throttleFirstN ?? 0;
   const failTransactAfter = opts.failTransactAfter;
   let markerTransactionIntercepted = false;
+  let markerGets = 0;
   const doc = {
     send: async (cmd: unknown) => {
       if (cmd instanceof GetCommand) {
+        getInputs.push(cmd);
         const key = cmd.input.Key as { itemId: string };
+        if (key.itemId.startsWith('inflight#') && opts.hideFirstMarkerGet && markerGets++ === 0) {
+          return { Item: undefined };
+        }
         const row = store.get(key.itemId);
         return { Item: row ? { ...row } : undefined };
       }
       if (cmd instanceof TransactWriteCommand) {
-        const items = (cmd.input.TransactItems ?? []) as Array<{ Put?: { Item: Row }; Delete?: { Key: { itemId: string }; ConditionExpression?: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown> } }>;
+        const items = (cmd.input.TransactItems ?? []) as Array<{
+          Put?: { Item: Row; ConditionExpression?: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown> };
+          Delete?: { Key: { itemId: string }; ConditionExpression?: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown> };
+          ConditionCheck?: { Key: { itemId: string }; ConditionExpression: string; ExpressionAttributeNames?: Record<string, string>; ExpressionAttributeValues?: Record<string, unknown> };
+        }>;
         if (failTransactAfter !== undefined && items.length > failTransactAfter) {
           throw new TransactionCanceledException({ message: 'cancelled', $metadata: {} });
         }
@@ -188,7 +200,9 @@ function makeFakeDoc(opts: {
           opts.beforeFirstMarkerTransaction?.(store);
         }
         for (const it of items) {
-          if (it.Delete !== undefined && it.Delete.ConditionExpression && !conditionHolds(it.Delete.ConditionExpression, it.Delete.ExpressionAttributeNames ?? {}, it.Delete.ExpressionAttributeValues ?? {}, store.get(it.Delete.Key.itemId))) {
+          const conditional = it.ConditionCheck ?? it.Delete ?? it.Put;
+          const conditionKey = it.ConditionCheck?.Key ?? it.Delete?.Key ?? { itemId: it.Put?.Item['itemId'] as string };
+          if (conditional !== undefined && conditional.ConditionExpression && !conditionHolds(conditional.ConditionExpression, conditional.ExpressionAttributeNames ?? {}, conditional.ExpressionAttributeValues ?? {}, store.get(conditionKey.itemId))) {
             rejectedTransactionKeys.push([...store.keys()].sort());
             // Do not provide CancellationReasons: the SDK does not always expose
             // them, and putRun must still retry a marker-backed cancellation.
@@ -198,6 +212,7 @@ function makeFakeDoc(opts: {
         for (const it of items) {
           const item = it.Put?.Item;
           if (it.Delete !== undefined) { store.delete(it.Delete.Key.itemId); continue; }
+          if (it.ConditionCheck !== undefined) continue;
           if (item === undefined) throw new Error('fake doc: transaction item missing action');
           const stored: Row = {};
           for (const [k, v] of Object.entries(item)) if (v !== undefined) stored[k] = v;
@@ -270,6 +285,7 @@ function makeFakeDoc(opts: {
     store,
     batchGetCalls: () => batchGetCalls,
     queryInputs: () => queryInputs,
+    getInputs: () => getInputs,
     rejectedTransactionKeys: () => rejectedTransactionKeys,
   };
 }
@@ -354,6 +370,28 @@ describe('aiRunsRepo - putRun', () => {
       'run#run-1',
     ]);
     expect((store.get('run#run-1')!['decisions'] as Record<string, Row>)['pets']).toEqual(saved.decisions['pets']);
+  });
+
+  it('retries a stale marker read after a late marker atomically blocks the first envelope write', async () => {
+    const { doc, store, getInputs, rejectedTransactionKeys } = makeFakeDoc({ hideFirstMarkerGet: true });
+    const repo = repoWith(doc);
+    await repo.beginFinalization('run-1', STARTED);
+    await repo.setVerdict('run-1', 'pets', 'accepted', { at: '2026-08-06T10:01:00.000Z', expectedVerdict: 'pending' });
+
+    const saved = await repo.putRun(draftRecord({
+      decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } },
+    }));
+
+    expect(getInputs()[0]!.input.ConsistentRead).toBe(true);
+    expect(rejectedTransactionKeys()).toEqual([['inflight#run-1']]);
+    expect(saved.decisions['pets']?.verdict).toBe('accepted');
+    expect([...store.keys()].sort()).toEqual([
+      'ptr#contacts#contact-1#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#conversations#conv-1#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#global#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#outcome#applied#2026-08-06T10:00:00.000Z#run-1',
+      'run#run-1',
+    ]);
   });
 
   it('the run# row carries NO entityKey/sortKey, so it never enters byEntity', async () => {
@@ -522,6 +560,27 @@ describe('aiRunsRepo - setVerdict', () => {
     await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
     expect(await repo.setVerdict('run-1', 'pets', 'accepted', { expectedVerdict: 'pending' })).toBe(true);
     expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
+  });
+
+  it('creates a fresh fallback marker so a pre-envelope resolution merges after marker creation failed', async () => {
+    const { doc, store } = makeFakeDoc();
+    const repo = repoWith(doc);
+    expect(await repo.setVerdict('run-1', 'pets', 'accepted', {
+      at: '2026-08-06T10:01:00.000Z', expectedVerdict: 'pending', freshSuggestionCreatedAt: STARTED,
+    })).toBe(true);
+    expect([...store.keys()]).toEqual(['inflight#run-1']);
+
+    await repo.putRun(draftRecord({ decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } } }));
+    expect((await repo.getRun('run-1'))?.decisions['pets']?.verdict).toBe('accepted');
+    expect(store.has('inflight#run-1')).toBe(false);
+  });
+
+  it('does not create a fallback marker for an expired suggestion', async () => {
+    const { doc, store } = makeFakeDoc();
+    expect(await repoWith(doc).setVerdict('run-gone', 'pets', 'accepted', {
+      expectedVerdict: 'pending', freshSuggestionCreatedAt: '2000-01-01T00:00:00.000Z',
+    })).toBe(false);
+    expect([...store.keys()]).toEqual([]);
   });
 
   it('stamps verdict, verdictAt and verdictBy on ONE decision, leaving siblings untouched', async () => {

@@ -3,7 +3,7 @@
 // signed-form-POST builder that computes REAL HMAC-SHA1 X-Twilio-Signature
 // values with the twilio package — signature verification is exercised for
 // real, never mocked out.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
@@ -2463,6 +2463,7 @@ export function createFakeWorld(): FakeWorld {
         ...(s.runId !== undefined && { runId: s.runId }),
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
+        revision: randomUUID(),
       };
       suggestions.set(itemId, item);
       return { item: { ...item }, ...(prior !== undefined && { displaced: prior }) };
@@ -2485,10 +2486,15 @@ export function createFakeWorld(): FakeWorld {
     async deleteSuggestion(contactId, target) {
       suggestions.delete(`sugg#${contactId}#${target}`);
     },
-    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId) {
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
       const itemId = `sugg#${contactId}#${target}`;
       const current = suggestions.get(itemId);
-      if (current?.createdAt !== createdAt || current.runId !== runId) return false;
+      if (
+        current === undefined ||
+        (revision !== undefined
+          ? current.revision !== revision
+          : current.revision !== undefined || current.createdAt !== createdAt || current.runId !== runId)
+      ) return false;
       suggestions.delete(itemId);
       return true;
     },

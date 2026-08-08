@@ -18,6 +18,7 @@
 // present only while a suggestion is pending).
 //
 // PII: never log message bodies or phone numbers. Log only ids/counts.
+import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
@@ -82,6 +83,8 @@ export interface SuggestionItem {
   tsMsgId?: string;
   /** Opaque ai_runs id of the extraction that created this suggestion. */
   runId?: string;
+  /** Immutable identity stamped on production writes; absent only on legacy rows. */
+  revision?: string;
   /** byPending GSI hash key (fixed 'pending'); present while pending (sparse). */
   _pendingPartition?: 'pending';
   /** ISO - byPending GSI range key (newest-first). */
@@ -137,7 +140,7 @@ export interface ExtractionRepo {
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
   deleteSuggestion(contactId: string, target: string): Promise<void>;
   /** Delete only the exact version a resolver read; false means it was replaced. */
-  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string, runId?: string): Promise<boolean>;
+  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string, runId?: string, revision?: string): Promise<boolean>;
   /** Restore a claimed suggestion only if a newer writer has not replaced it. */
   restoreSuggestionIfAbsent(suggestion: SuggestionItem): Promise<boolean>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
@@ -349,6 +352,7 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         conversationId: s.conversationId,
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
+        revision: randomUUID(),
         // Optional fields - undefined is dropped by the document client's
         // removeUndefinedValues, keeping the item clean.
         ...(s.currentValue !== undefined && { currentValue: s.currentValue }),
@@ -417,17 +421,23 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
       log.debug({ contactId, target }, 'suggestion deleted');
     },
 
-    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId) {
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { itemId: suggId(contactId, target) },
-            ConditionExpression: runId === undefined
-              ? '#createdAt = :createdAt AND attribute_not_exists(#runId)'
-              : '#createdAt = :createdAt AND #runId = :runId',
-            ExpressionAttributeNames: { '#createdAt': 'createdAt', '#runId': 'runId' },
-            ExpressionAttributeValues: { ':createdAt': createdAt, ...(runId !== undefined && { ':runId': runId }) },
+            ConditionExpression: revision !== undefined
+              ? '#revision = :revision'
+              : runId === undefined
+                ? 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)'
+                : 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId',
+            ExpressionAttributeNames: { '#createdAt': 'createdAt', '#runId': 'runId', '#revision': 'revision' },
+            ExpressionAttributeValues: {
+              ':createdAt': createdAt,
+              ...(runId !== undefined && { ':runId': runId }),
+              ...(revision !== undefined && { ':revision': revision }),
+            },
           }),
         );
         log.debug({ contactId, target }, 'suggestion conditionally deleted');

@@ -526,31 +526,45 @@ describe('extractionRepo suggestions', () => {
   it('conditionally deletes only the exact suggestion version read by a resolver', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-old' });
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2, runId: 'run-new' });
+    const old = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-old' });
+    const latest = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2, runId: 'run-new' });
 
-    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-old')).toBe(false);
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-old', old.item.revision)).toBe(false);
     expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
-    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2, 'run-new')).toBe(true);
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2, 'run-new', latest.item.revision)).toBe(true);
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
   });
 
   it('does not delete a replacement that shares the resolver timestamp but has a different run', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-s1' });
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1, runId: 'run-s2' });
+    const s1 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-s1' });
+    const s2 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1, runId: 'run-s2' });
 
-    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-s1')).toBe(false);
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-s1', s1.item.revision)).toBe(false);
     expect((await repo.getSuggestion('c1', 'pets'))?.runId).toBe('run-s2');
     expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
+    expect((await repo.getSuggestion('c1', 'pets'))?.revision).toBe(s2.item.revision);
+  });
+
+  it('does not let a legacy timestamp identity delete a revisioned replacement', async () => {
+    const { doc, store } = makeFakeDoc();
+    const repo = repoWith(doc);
+    store.set('sugg#c1#pets', {
+      itemId: 'sugg#c1#pets', ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x',
+      _pendingPartition: 'pending', createdAt: T1,
+    });
+    const s2 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1 });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.revision).toBe(s2.item.revision);
   });
 
   it('restores a claimed suggestion without overwriting a newer replacement', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
     const { item } = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1 });
-    await repo.deleteSuggestionIfCurrent('c1', 'pets', T1);
+    await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, undefined, item.revision);
     expect(await repo.restoreSuggestionIfAbsent(item)).toBe(true);
     await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2 });
     expect(await repo.restoreSuggestionIfAbsent(item)).toBe(false);

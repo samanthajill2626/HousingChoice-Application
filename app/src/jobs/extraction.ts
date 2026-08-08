@@ -290,7 +290,7 @@ export interface RunDraft {
   rawResult?: ExtractionResult;
   decisions?: Partial<Record<DecisionTarget, RunDecision>>;
   notedLines?: number;
-  displaced: Array<{ target: string; runId: string }>;
+  displaced: Array<{ target: string; runId: string; createdAt: string }>;
 }
 
 /** Allocate a draft before processing so the outer backstop retains all evidence. */
@@ -455,16 +455,15 @@ async function processRow(
 
   // applyExtraction guards its known effects. An unexpected throw is intentionally
   // left to runDueExtractions' per-row backstop, which keeps the same draft.
-  let suggestionRunId: string | undefined;
   try {
-    if (await deps.aiRuns.beginFinalization(draft.runId, draft.startedAt)) suggestionRunId = draft.runId;
+    await deps.aiRuns.beginFinalization(draft.runId, draft.startedAt);
   } catch (err) {
     // The marker only protects optional observability linkage; extraction must continue.
     logger.warn({ conversationId, runId: draft.runId, err }, 'ai run finalization marker failed (best-effort)');
   }
   const applyOutcome = await applyExtraction(applyDeps, {
     contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent,
-    ...(suggestionRunId !== undefined && { runId: suggestionRunId }),
+    runId: draft.runId,
   });
   draft.decisions = buildDecisions({
     ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,
@@ -526,10 +525,10 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
  */
 async function stampSuperseded(deps: ExtractionJobDeps, draft: RunDraft): Promise<void> {
   const at = deps.now();
-  for (const { target, runId } of draft.displaced) {
+  for (const { target, runId, createdAt } of draft.displaced) {
     if (!isDecisionTarget(target)) continue;
     try {
-      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at, expectedVerdict: 'pending' });
+      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at, expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAt });
     } catch (err) {
       deps.logger.warn(
         { conversationId: draft.conversationId, runId, target, err },

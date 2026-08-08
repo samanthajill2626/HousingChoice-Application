@@ -49,7 +49,7 @@ export interface ApplyOutcome {
   /** Count of note lines appended. */
   notedLines: number;
   /** Earlier run suggestions this apply pass replaced. */
-  displaced: Array<{ target: string; runId: string }>;
+  displaced: Array<{ target: string; runId: string; createdAt: string }>;
   /** One entry per target written, suggested, or discarded. Note lines are not targets. */
   decisions: ApplyDecision[];
 }
@@ -170,7 +170,7 @@ export async function applyExtraction(
     decisions.push(decision);
   };
   const noteDisplaced = (target: string, prior: SuggestionItem | undefined): void => {
-    if (prior?.runId !== undefined) displaced.push({ target, runId: prior.runId });
+    if (prior?.runId !== undefined) displaced.push({ target, runId: prior.runId, createdAt: prior.createdAt });
   };
   const noteStrings: string[] = [];
 

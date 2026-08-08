@@ -131,7 +131,8 @@ async function stampVerdict(
   if (suggestion.runId === undefined || !isDecisionTarget(suggestion.target)) return;
   try {
     await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
-      at, expectedVerdict: 'pending', ...(actor !== undefined && { by: actor }),
+      at, expectedVerdict: 'pending', freshSuggestionCreatedAt: suggestion.createdAt,
+      ...(actor !== undefined && { by: actor }),
     });
   } catch (err) {
     log.warn(
@@ -142,7 +143,7 @@ async function stampVerdict(
 }
 
 async function claimSuggestion(extraction: ExtractionRepo, suggestion: SuggestionItem): Promise<boolean> {
-  return extraction.deleteSuggestionIfCurrent(suggestion.ownerContactId, suggestion.target, suggestion.createdAt, suggestion.runId);
+  return extraction.deleteSuggestionIfCurrent(suggestion.ownerContactId, suggestion.target, suggestion.createdAt, suggestion.runId, suggestion.revision);
 }
 
 async function restoreClaim(extraction: ExtractionRepo, log: Logger, suggestion: SuggestionItem): Promise<void> {

@@ -27,6 +27,7 @@ import {
   normalizeAddressForCompare,
 } from './address.js';
 import type { Logger } from '../../lib/logger.js';
+import type { DropReason } from './runTypes.js';
 
 export interface ApplyDeps {
   contacts: Pick<ReturnType<typeof createContactsRepo>, 'update' | 'addPhone' | 'findByPhone'>;
@@ -49,6 +50,20 @@ export interface ApplyOutcome {
   notedLines: number;
   /** Earlier run suggestions this apply pass replaced. */
   displaced: Array<{ target: string; runId: string }>;
+  /** One entry per target written, suggested, or discarded. Note lines are not targets. */
+  decisions: ApplyDecision[];
+}
+
+/** What apply did with one target, and why. Values are contact PII by design. */
+export interface ApplyDecision {
+  target: string;
+  outcome: 'wrote' | 'suggested' | 'dropped';
+  proposedValue?: string;
+  coercedValue?: unknown;
+  previousValue?: string;
+  reason?: string;
+  demotedFrom?: 'write';
+  dropReason?: DropReason;
 }
 
 /** firstName/lastName apply for tenant AND unknown contacts. */
@@ -149,6 +164,11 @@ export async function applyExtraction(
   const wrote: string[] = [];
   const suggested: string[] = [];
   const displaced: ApplyOutcome['displaced'] = [];
+  const decisions: ApplyDecision[] = [];
+  const pendingDecisions: ApplyDecision[] = [];
+  const decide = (decision: ApplyDecision): void => {
+    decisions.push(decision);
+  };
   const noteDisplaced = (target: string, prior: SuggestionItem | undefined): void => {
     if (prior?.runId !== undefined) displaced.push({ target, runId: prior.runId });
   };
@@ -175,12 +195,26 @@ export async function applyExtraction(
 
     if (!fieldApplies(field, contact.type)) {
       logger.debug({ contactId, field, contactType: contact.type }, 'extraction field op ignored for contact type');
+      decide({
+        target: field,
+        outcome: 'dropped',
+        dropReason: 'wrong_contact_type',
+        ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+        ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+      });
       continue;
     }
 
     const coerced = coerceField(field, fieldOp.value);
     if (!coerced.ok) {
       logger.debug({ contactId, field, reason: coerced.reason }, 'extraction field op skipped (invalid value)');
+      decide({
+        target: field,
+        outcome: 'dropped',
+        dropReason: 'invalid_value',
+        ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+        ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+      });
       continue;
     }
 
@@ -194,6 +228,14 @@ export async function applyExtraction(
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
       });
       pendingWrites.push(field);
+      pendingDecisions.push({
+        target: field,
+        outcome: 'wrote',
+        ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+        coercedValue: coerced.value,
+        ...(contact[field] !== undefined && { previousValue: String(contact[field]) }),
+        ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+      });
     } else {
       // op === 'suggest', OR a demoted op:'write' (inferred-role content, spec
       // Layer 3): route the write through the SAME suggest path - no direct write,
@@ -204,6 +246,14 @@ export async function applyExtraction(
       const suggestedValue = String(coerced.value);
       if (currentValue !== undefined && currentValue === suggestedValue) {
         logger.debug({ contactId, field }, 'extraction suggestion skipped (equal to current)');
+        decide({
+          target: field,
+          outcome: 'dropped',
+          dropReason: 'equal_to_current',
+          ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+          ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+          ...(fieldOp.op === 'write' && { demotedFrom: 'write' as const }),
+        });
         continue;
       }
       const put = await putSuggestionSafe(deps, {
@@ -219,6 +269,23 @@ export async function applyExtraction(
       if (put.ok) {
         suggested.push(field);
         noteDisplaced(field, put.displaced);
+        decide({
+          target: field,
+          outcome: 'suggested',
+          ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+          coercedValue: coerced.value,
+          ...(currentValue !== undefined && { previousValue: currentValue }),
+          ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
+          ...(fieldOp.op === 'write' && { demotedFrom: 'write' as const }),
+        });
+      } else {
+        decide({
+          target: field,
+          outcome: 'dropped',
+          dropReason: put.dropReason,
+          ...(fieldOp.value !== undefined && { proposedValue: fieldOp.value }),
+          ...(fieldOp.op === 'write' && { demotedFrom: 'write' as const }),
+        });
       }
     }
   }
@@ -231,6 +298,13 @@ export async function applyExtraction(
   if (result.address !== undefined) {
     if (contact.type !== 'tenant') {
       logger.debug({ contactId, contactType: contact.type }, 'extraction address ignored for contact type');
+      decide({
+        target: 'address',
+        outcome: 'dropped',
+        dropReason: 'wrong_contact_type',
+        proposedValue: formatAddressParts(cleanAddressParts(result.address.parts)),
+        ...(result.address.reason !== undefined && { reason: result.address.reason }),
+      });
     } else {
       const parts = cleanAddressParts(result.address.parts);
       const formattedNew = formatAddressParts(parts);
@@ -265,6 +339,14 @@ export async function applyExtraction(
             ...(result.address.reason !== undefined && { reason: result.address.reason }),
           });
           pendingWrites.push('address');
+          pendingDecisions.push({
+            target: 'address',
+            outcome: 'wrote',
+            proposedValue: formattedNew,
+            coercedValue: parts,
+            ...(hasCurrent && { previousValue: formattedCurrent }),
+            ...(result.address.reason !== undefined && { reason: result.address.reason }),
+          });
         } else {
           // A write reaches this suggest branch for one of two reasons. Only the
           // Layer-3 inferred-role demotion feeds demotedFields (the
@@ -280,6 +362,14 @@ export async function applyExtraction(
             normalizeAddressForCompare(formattedCurrent) === normalizeAddressForCompare(formattedNew)
           ) {
             logger.debug({ contactId }, 'extraction address suggestion skipped (equal to current)');
+            decide({
+              target: 'address',
+              outcome: 'dropped',
+              dropReason: 'equal_to_current',
+              proposedValue: formattedNew,
+              ...(result.address.reason !== undefined && { reason: result.address.reason }),
+              ...(result.address.op === 'write' && { demotedFrom: 'write' as const }),
+            });
           } else {
             const put = await putSuggestionSafe(deps, {
               ownerContactId: contactId,
@@ -295,6 +385,23 @@ export async function applyExtraction(
             if (put.ok) {
               suggested.push('address');
               noteDisplaced('address', put.displaced);
+              decide({
+                target: 'address',
+                outcome: 'suggested',
+                proposedValue: formattedNew,
+                coercedValue: parts,
+                ...(hasCurrent && { previousValue: formattedCurrent }),
+                ...(result.address.reason !== undefined && { reason: result.address.reason }),
+                ...(result.address.op === 'write' && { demotedFrom: 'write' as const }),
+              });
+            } else {
+              decide({
+                target: 'address',
+                outcome: 'dropped',
+                dropReason: put.dropReason,
+                proposedValue: formattedNew,
+                ...(result.address.op === 'write' && { demotedFrom: 'write' as const }),
+              });
             }
           }
         }
@@ -308,6 +415,7 @@ export async function applyExtraction(
     try {
       await deps.contacts.update(contactId, writePatch);
       wrote.push(...pendingWrites);
+      decisions.push(...pendingDecisions);
       // Audit the batch (best-effort; a failed audit never un-does the write).
       try {
         await deps.audit.append(`contacts#${contactId}`, 'ai_extraction_applied', {
@@ -354,12 +462,30 @@ export async function applyExtraction(
       if (put.ok) {
         suggested.push('status');
         noteDisplaced('status', put.displaced);
+        decide({
+          target: 'status',
+          outcome: 'suggested',
+          coercedValue: 'searching',
+          previousValue: contact.status,
+          ...(result.statusAdvance.reason !== undefined && { reason: result.statusAdvance.reason }),
+        });
+      } else {
+        decide({
+          target: 'status',
+          outcome: 'dropped',
+          dropReason: put.dropReason,
+        });
       }
     } else {
       logger.debug(
         { contactId, contactType: contact.type, status: contact.status },
         'statusAdvance ignored (not an onboarding tenant)',
       );
+      decide({
+        target: 'status',
+        outcome: 'dropped',
+        dropReason: 'status_not_onboarding_tenant',
+      });
     }
   }
 
@@ -379,9 +505,31 @@ export async function applyExtraction(
       if (put.ok) {
         suggested.push('type');
         noteDisplaced('type', put.displaced);
+        decide({
+          target: 'type',
+          outcome: 'suggested',
+          proposedValue: result.typeSuggestion.value,
+          coercedValue: result.typeSuggestion.value,
+          previousValue: contact.type,
+          ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
+        });
+      } else {
+        decide({
+          target: 'type',
+          outcome: 'dropped',
+          dropReason: put.dropReason,
+          proposedValue: result.typeSuggestion.value,
+        });
       }
     } else {
       logger.debug({ contactId, contactType: contact.type }, 'typeSuggestion ignored (contact already classified)');
+      decide({
+        target: 'type',
+        outcome: 'dropped',
+        dropReason: 'type_already_classified',
+        proposedValue: result.typeSuggestion.value,
+        ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
+      });
     }
   }
 
@@ -390,8 +538,23 @@ export async function applyExtraction(
     const e164 = normalizeToE164(result.phoneAddition.phone);
     if (e164 === undefined) {
       logger.debug({ contactId }, 'phoneAddition ignored (not canonicalizable)');
+      decide({
+        target: 'phone',
+        outcome: 'dropped',
+        dropReason: 'phone_not_canonicalizable',
+        proposedValue: result.phoneAddition.phone,
+        ...(result.phoneAddition.reason !== undefined && { reason: result.phoneAddition.reason }),
+      });
     } else if (contactPhones(contact).some((p) => p.phone === e164)) {
       logger.debug({ contactId }, 'phoneAddition ignored (already owned by contact)');
+      decide({
+        target: 'phone',
+        outcome: 'dropped',
+        dropReason: 'phone_already_owned',
+        proposedValue: result.phoneAddition.phone,
+        coercedValue: e164,
+        ...(result.phoneAddition.reason !== undefined && { reason: result.phoneAddition.reason }),
+      });
     } else {
       let ownedByOther = false;
       try {
@@ -403,6 +566,14 @@ export async function applyExtraction(
       if (ownedByOther) {
         // Do NOT suggest a number that belongs to someone else; leave a note.
         noteStrings.push(`Mentioned number ${e164} which belongs to another contact`);
+        decide({
+          target: 'phone',
+          outcome: 'dropped',
+          dropReason: 'phone_owned_by_other',
+          proposedValue: result.phoneAddition.phone,
+          coercedValue: e164,
+          ...(result.phoneAddition.reason !== undefined && { reason: result.phoneAddition.reason }),
+        });
       } else {
         const label = result.phoneAddition.label;
         const reason = result.phoneAddition.reason;
@@ -422,6 +593,20 @@ export async function applyExtraction(
         if (put.ok) {
           suggested.push('phone');
           noteDisplaced('phone', put.displaced);
+          decide({
+            target: 'phone',
+            outcome: 'suggested',
+            proposedValue: result.phoneAddition.phone,
+            coercedValue: e164,
+            ...(combinedReason !== undefined && { reason: combinedReason }),
+          });
+        } else {
+          decide({
+            target: 'phone',
+            outcome: 'dropped',
+            dropReason: put.dropReason,
+            proposedValue: result.phoneAddition.phone,
+          });
         }
       }
     }
@@ -472,7 +657,7 @@ export async function applyExtraction(
     deps.events.emit('suggestion.updated', { contactId });
   }
 
-  return { wrote, suggested, notedLines, displaced };
+  return { wrote, suggested, notedLines, displaced, decisions };
 }
 
 /**

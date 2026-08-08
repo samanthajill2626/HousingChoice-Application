@@ -176,7 +176,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [] });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [], decisions: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -237,7 +237,17 @@ describe('applyExtraction - type gating (item 1)', () => {
         voucherSize: { op: 'suggest', value: '3' },
       },
     });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [] });
+    expect(outcome).toEqual({
+      wrote: [],
+      suggested: [],
+      notedLines: 0,
+      displaced: [],
+      decisions: [
+        { target: 'firstName', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'Pat' },
+        { target: 'voucherSize', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: '3' },
+        { target: 'pets', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: 'yes' },
+      ],
+    });
     expect(records.updates).toHaveLength(0);
     expect(records.suggestions).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
@@ -879,5 +889,170 @@ describe('applyExtraction - dismissal tombstones', () => {
     });
     expect(outcome.suggested).toEqual(['firstName']);
     expect(records.suggestions).toHaveLength(1);
+  });
+});
+
+describe('applyExtraction - per-target decisions for the run log', () => {
+  it('records a direct write with its previous and coerced values', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: { pets: { op: 'write', value: 'two cats', reason: 'said so' } },
+    });
+    expect(out.decisions).toEqual([
+      {
+        target: 'pets', outcome: 'wrote',
+        proposedValue: 'two cats', coercedValue: 'two cats',
+        previousValue: 'a dog', reason: 'said so',
+      },
+    ]);
+  });
+
+  it('records wrong_contact_type when the field does not apply to this contact', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'unknown' }), {
+      fields: { voucherSize: { op: 'write', value: '2' } },
+    });
+    expect(out.decisions).toEqual([
+      { target: 'voucherSize', outcome: 'dropped', dropReason: 'wrong_contact_type', proposedValue: '2' },
+    ]);
+  });
+
+  it('records invalid_value when coercion refuses a well-formed but wrong value', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { voucherSize: { op: 'write', value: '99' } }, // outside 0..12
+    });
+    expect(out.decisions[0]).toMatchObject({
+      target: 'voucherSize', outcome: 'dropped', dropReason: 'invalid_value',
+    });
+  });
+
+  it('records equal_to_current for a suggestion matching the stored value', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: { pets: { op: 'suggest', value: 'a dog' } },
+    });
+    expect(out.decisions[0]).toMatchObject({ target: 'pets', outcome: 'dropped', dropReason: 'equal_to_current' });
+  });
+
+  it('records dismissed_before when the tombstone suppresses the suggestion', async () => {
+    const { deps } = makeDeps({ dismissedValues: ['pets#two cats'] });
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: { pets: { op: 'suggest', value: 'two cats' } },
+    });
+    expect(out.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'dismissed_before' });
+    expect(out.suggested).toEqual([]);
+  });
+
+  it('records repo_error when the suggestion upsert throws', async () => {
+    const { deps } = makeDeps({ putSuggestionImpl: async () => { throw new Error('ddb down'); } });
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: { pets: { op: 'suggest', value: 'two cats' } },
+    });
+    expect(out.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'repo_error' });
+  });
+
+  it('records demotedFrom write - NOT a drop - for an inferred-role demotion', async () => {
+    const { deps } = makeDeps();
+    const out = await applyExtraction(deps, {
+      contact: makeContact({ type: 'tenant', pets: 'a dog' }),
+      conversationId: CONV,
+      hasInferredRoleContent: true,
+      result: { fields: { pets: { op: 'write', value: 'two cats' } } },
+    });
+    expect(out.decisions[0]).toMatchObject({ target: 'pets', outcome: 'suggested', demotedFrom: 'write' });
+    expect(out.decisions[0]?.dropReason).toBeUndefined();
+  });
+
+  it('records demotedFrom write for a LOSSY address write routed to review', async () => {
+    const { deps } = makeDeps();
+    const out = await run(
+      deps,
+      makeContact({ type: 'tenant', address: { line1: '1 Main St', city: 'Atlanta', zip: '30303' } }),
+      { fields: {}, address: { op: 'write', parts: { line1: '2 Oak Ave' } } },
+    );
+    expect(out.decisions.find((d) => d.target === 'address')).toMatchObject({
+      outcome: 'suggested', demotedFrom: 'write',
+    });
+  });
+
+  it('records status_not_onboarding_tenant', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant', status: 'searching' }), {
+      fields: {}, statusAdvance: { suggest: true },
+    });
+    expect(out.decisions).toEqual([
+      { target: 'status', outcome: 'dropped', dropReason: 'status_not_onboarding_tenant' },
+    ]);
+  });
+
+  it('records type_already_classified', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, typeSuggestion: { value: 'tenant' },
+    });
+    expect(out.decisions).toEqual([
+      { target: 'type', outcome: 'dropped', dropReason: 'type_already_classified', proposedValue: 'tenant' },
+    ]);
+  });
+
+  it('records the three phone drop reasons', async () => {
+    const bad = await run(makeDeps().deps, makeContact({ type: 'tenant' }), {
+      fields: {}, phoneAddition: { phone: 'not a number' },
+    });
+    expect(bad.decisions[0]).toMatchObject({ dropReason: 'phone_not_canonicalizable' });
+
+    const owned = await run(makeDeps().deps, makeContact({ type: 'tenant', phone: '+14045550000' }), {
+      fields: {}, phoneAddition: { phone: '404-555-0000' },
+    });
+    expect(owned.decisions[0]).toMatchObject({ dropReason: 'phone_already_owned' });
+
+    const otherDeps = makeDeps({
+      findByPhone: async () => ({ contactId: 'someone-else', type: 'tenant' }) as ContactItem,
+    });
+    const other = await run(otherDeps.deps, makeContact({ type: 'tenant' }), {
+      fields: {}, phoneAddition: { phone: '404-555-9999' },
+    });
+    expect(other.decisions[0]).toMatchObject({ dropReason: 'phone_owned_by_other' });
+    // Two different mutations, both recorded: the drop AND a note line.
+    expect(other.notedLines).toBe(1);
+  });
+
+  it('does NOT record a decision when the batched write FAILS', async () => {
+    const { deps } = makeDeps({ updateImpl: async () => { throw new Error('ddb down'); } });
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: { pets: { op: 'write', value: 'two cats' } },
+    });
+    expect(out.wrote).toEqual([]);
+    expect(out.decisions).toEqual([]);
+  });
+
+  it('does NOT record a decision for a filtered note line (note lines are not targets)', async () => {
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant' }), {
+      fields: {}, noteLines: ['Current address is 1 Main St 30303', 'stairs are fine'],
+    });
+    expect(out.decisions).toEqual([]);
+    expect(out.notedLines).toBe(1);
+  });
+
+  it('EXHAUSTIVENESS: every branch that mutates or discards emits exactly one decision', async () => {
+    // Guards the Task 17 join: a target apply forgets to report is recorded as a
+    // REASONLESS drop and warns, rather than silently reading as something else.
+    // If this test ever fails, apply gained a branch and the table in the plan's
+    // Task 14 is stale.
+    const { deps } = makeDeps();
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: {
+        pets: { op: 'suggest', value: 'two cats' },
+        voucherSize: { op: 'write', value: '99' },
+        tenure: { op: 'none' },
+      },
+      statusAdvance: { suggest: false },
+    });
+    expect(out.decisions.map((d) => d.target).sort()).toEqual(['pets', 'voucherSize']);
+    for (const d of out.decisions) {
+      if (d.outcome === 'dropped') expect(d.dropReason).toBeDefined();
+    }
   });
 });

@@ -68,6 +68,7 @@ function makeWorld(options: {
   const runs = options.runs ?? [fullRun()];
   const expired = new Set(options.expiredRunIds ?? []);
   const repo = {
+    beginFinalization: vi.fn<AiRunsRepo['beginFinalization']>(),
     putRun: vi.fn<AiRunsRepo['putRun']>(),
     getRun: vi.fn<AiRunsRepo['getRun']>(async (runId) => runs.find((run) => run.runId === runId)),
     listByEntity: vi.fn<AiRunsRepo['listByEntity']>(async () => ({

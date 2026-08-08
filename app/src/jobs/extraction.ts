@@ -91,7 +91,7 @@ export interface ExtractionJobDeps {
    * empty in e2e and local development - the exact place this feature is first
    * exercised (design 8).
    */
-  aiRuns: Pick<AiRunsRepo, 'putRun' | 'setVerdict'>;
+  aiRuns: Pick<AiRunsRepo, 'beginFinalization' | 'putRun' | 'setVerdict'>;
   /**
    * REAL WALL-CLOCK now, for the run record's timestamps ONLY (design section 6,
    * as amended). NOT the poll's nowIso: the dev tick runs a SIMULATED FUTURE
@@ -455,8 +455,16 @@ async function processRow(
 
   // applyExtraction guards its known effects. An unexpected throw is intentionally
   // left to runDueExtractions' per-row backstop, which keeps the same draft.
+  let suggestionRunId: string | undefined;
+  try {
+    if (await deps.aiRuns.beginFinalization(draft.runId, draft.startedAt)) suggestionRunId = draft.runId;
+  } catch (err) {
+    // The marker only protects optional observability linkage; extraction must continue.
+    logger.warn({ conversationId, runId: draft.runId, err }, 'ai run finalization marker failed (best-effort)');
+  }
   const applyOutcome = await applyExtraction(applyDeps, {
-    contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent, runId: draft.runId,
+    contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent,
+    ...(suggestionRunId !== undefined && { runId: suggestionRunId }),
   });
   draft.decisions = buildDecisions({
     ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,

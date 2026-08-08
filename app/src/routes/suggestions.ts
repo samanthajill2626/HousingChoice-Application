@@ -93,7 +93,6 @@ export interface SuggestionsRouterDeps {
 }
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
-const VERDICT_RETRY_DELAYS_MS = [25, 50, 100, 150] as const;
 
 type Coerced = { ok: true; value: unknown } | { ok: false };
 
@@ -131,18 +130,9 @@ async function stampVerdict(
 ): Promise<void> {
   if (suggestion.runId === undefined || !isDecisionTarget(suggestion.target)) return;
   try {
-    // A resolution can arrive between suggestion persistence and the job's
-    // single envelope write. Retry briefly so that narrow ordering gap does not
-    // strand the decision pending; an expired/missing record remains harmless.
-    for (let attempt = 0; attempt <= VERDICT_RETRY_DELAYS_MS.length; attempt += 1) {
-      const stamped = await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
-        at,
-        expectedVerdict: 'pending',
-        ...(actor !== undefined && { by: actor }),
-      });
-      if (stamped || attempt === VERDICT_RETRY_DELAYS_MS.length) return;
-      await new Promise<void>((resolve) => setTimeout(resolve, VERDICT_RETRY_DELAYS_MS[attempt]!));
-    }
+    await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
+      at, expectedVerdict: 'pending', ...(actor !== undefined && { by: actor }),
+    });
   } catch (err) {
     log.warn(
       { contactId: suggestion.ownerContactId, target: suggestion.target, err },
@@ -232,19 +222,21 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         res.status(409).json({ error: 'suggestion_replaced' });
         return;
       }
+      let transitioned = false;
       try {
         const updated = await statusService.setTenantStatus(contactId, {
           toStatus: suggestion.suggestedValue as TenantStatus,
           source: 'ai',
           ...(actor !== undefined && { actor }),
         });
+        transitioned = true;
         await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
         events.emit('suggestion.updated', { contactId });
         const remaining = await extraction.listSuggestionsByContact(contactId);
         log.info({ contactId, target, actor }, 'ai suggestion accepted (status)');
         res.json({ contact: serializeContact(updated), suggestions: remaining });
       } catch (err) {
-        await restoreClaim(extraction, log, suggestion);
+        if (!transitioned) await restoreClaim(extraction, log, suggestion);
         // Stale suggestion: the service/allowlist governs validity. Surface the
         // service error and KEEP the suggestion (never a silent delete on refuse).
         if (err instanceof EntityNotFoundError) {
@@ -286,6 +278,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         await restoreClaim(extraction, log, suggestion);
         throw err;
       }
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       await audit.append(`contacts#${contactId}`, 'contact_phone_added', {
         ...(actor !== undefined && { actor }),
         phone: normalized,
@@ -299,7 +292,6 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           log.error({ err, contactId }, 'ai suggestion accept (phone): number_added milestone failed');
         }
       }
-      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (phone)');
@@ -338,13 +330,13 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         await restoreClaim(extraction, log, suggestion);
         throw err;
       }
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
         ...(actor !== undefined && { actor }),
         target,
         ...(from.length > 0 && { from }),
         to: formatted,
       });
-      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (address)');
@@ -382,13 +374,13 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         await restoreClaim(extraction, log, suggestion);
         throw err;
       }
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
         ...(actor !== undefined && { actor }),
         target,
         from,
         to: coerced.value,
       });
-      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (field)');

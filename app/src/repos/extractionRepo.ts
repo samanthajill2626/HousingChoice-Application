@@ -418,14 +418,18 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
     },
 
     async deleteSuggestionIfCurrent(contactId, target, createdAt) {
+      const existing = await doc.send(new GetCommand({ TableName: table, Key: { itemId: suggId(contactId, target) } }));
+      const runCondition = (existing.Item as SuggestionItem | undefined)?.runId;
       try {
         await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { itemId: suggId(contactId, target) },
-            ConditionExpression: '#createdAt = :createdAt',
-            ExpressionAttributeNames: { '#createdAt': 'createdAt' },
-            ExpressionAttributeValues: { ':createdAt': createdAt },
+            ConditionExpression: runCondition === undefined
+              ? '#createdAt = :createdAt AND attribute_not_exists(#runId)'
+              : '#createdAt = :createdAt AND #runId = :runId',
+            ExpressionAttributeNames: { '#createdAt': 'createdAt', '#runId': 'runId' },
+            ExpressionAttributeValues: { ':createdAt': createdAt, ...(runCondition !== undefined && { ':runId': runCondition }) },
           }),
         );
         log.debug({ contactId, target }, 'suggestion conditionally deleted');

@@ -109,7 +109,7 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
       const row = byId.get(message.tsMsgId);
       const text = row === undefined ? undefined : row.type === 'call' ? row.transcript : row.body;
       const hashStatus =
-        run.window?.detail === 'full' && message.capChars !== undefined && row !== undefined
+        run.window?.detail === 'full' && message.hash !== undefined && message.capChars !== undefined && row !== undefined
           ? hashRenderedMessage(capUtterances(toUtterances(row), message.capChars)) === message.hash
             ? 'match' as const
             : 'mismatch' as const

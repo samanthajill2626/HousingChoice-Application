@@ -2505,6 +2505,7 @@ export function createFakeWorld(): FakeWorld {
     },
   };
   const aiRuns: AiRunsRepo = {
+    async beginFinalization() { return true; },
     async putRun(input) {
       return { ...input, itemId: `run#${input.runId}`, expires_at: 0 };
     },

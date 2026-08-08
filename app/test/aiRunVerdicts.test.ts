@@ -155,25 +155,6 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(failed.setVerdict).toHaveBeenCalled();
   });
 
-  it('retries a resolution while the run envelope is still being written, then resolves pending', async () => {
-    let envelopeWritten = false;
-    let verdict: Verdict = 'pending';
-    const { app, world, setVerdict } = makeWorld(async (_runId, _target, next) => {
-      if (!envelopeWritten) return false;
-      verdict = next;
-      return true;
-    });
-    seedTenant(world);
-    await seedSuggestion(world, {
-      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
-    });
-    const resolving = accept(app, 'c1', 'pets').expect(200);
-    setTimeout(() => { envelopeWritten = true; }, 5);
-    await resolving;
-    expect(setVerdict).toHaveBeenCalledTimes(2);
-    expect(verdict).toBe('accepted');
-  });
-
   it('does not let a stale accept or dismiss claim a replacement suggestion', async () => {
     for (const action of [
       (app: import('express').Express) => accept(app, 'c1', 'pets'),

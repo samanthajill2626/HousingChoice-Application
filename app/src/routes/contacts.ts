@@ -1348,16 +1348,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
           ? 'accepted'
           : 'superseded_by_human_edit';
       try {
-        const retryDelaysMs = [25, 50, 100, 150] as const;
-        for (let attempt = 0; attempt <= retryDelaysMs.length; attempt += 1) {
-          const stamped = await aiRuns.setVerdict(pending.runId, f, verdict, {
-            at: verdictAt,
-            expectedVerdict: 'pending',
-            ...(req.user?.userId !== undefined && { by: req.user.userId }),
-          });
-          if (stamped || attempt === retryDelaysMs.length) break;
-          await new Promise<void>((resolve) => setTimeout(resolve, retryDelaysMs[attempt]!));
-        }
+        await aiRuns.setVerdict(pending.runId, f, verdict, {
+          at: verdictAt, expectedVerdict: 'pending',
+          ...(req.user?.userId !== undefined && { by: req.user.userId }),
+        });
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
       }

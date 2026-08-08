@@ -72,6 +72,15 @@ export interface AiRunPointer {
   expires_at: number;
 }
 
+interface FinalizationVerdict { verdict: Verdict; at: string; by?: string }
+interface FinalizationMarker {
+  itemId: string;
+  runId: string;
+  version: number;
+  verdicts: Partial<Record<DecisionTarget, FinalizationVerdict>>;
+  expires_at: number;
+}
+
 export type AiRunListEntry =
   | { runId: string; sortKey: string; expired: false; run: AiRunRecord }
   | { runId: string; sortKey: string; expired: true };
@@ -84,6 +93,7 @@ export interface ListByEntityOptions {
 }
 
 export interface AiRunsRepo {
+  beginFinalization(runId: string, startedAt: string): Promise<boolean>;
   putRun(input: AiRunRecordInput): Promise<AiRunRecord>;
   getRun(runId: string): Promise<AiRunRecord | undefined>;
   listByEntity(
@@ -107,6 +117,7 @@ const BATCH_BACKOFF_MS = 25;
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const runItemId = (runId: string): string => `run#${runId}`;
+export const inflightItemId = (runId: string): string => `inflight#${runId}`;
 export const runSortKey = (startedAt: string, runId: string): string => `${startedAt}#${runId}`;
 export const pointerItemId = (entityKey: string, startedAt: string, runId: string): string =>
   `ptr#${entityKey}#${runSortKey(startedAt, runId)}`;
@@ -147,6 +158,22 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
   }
 
   return {
+    async beginFinalization(runId, startedAt) {
+      try {
+        await doc.send(new UpdateCommand({
+          TableName: table,
+          Key: { itemId: inflightItemId(runId) },
+          UpdateExpression: 'SET #runId = :runId, #version = :zero, #verdicts = :verdicts, #expiresAt = :expiresAt',
+          ConditionExpression: 'attribute_not_exists(itemId)',
+          ExpressionAttributeNames: { '#runId': 'runId', '#version': 'version', '#verdicts': 'verdicts', '#expiresAt': 'expires_at' },
+          ExpressionAttributeValues: { ':runId': runId, ':zero': 0, ':verdicts': {}, ':expiresAt': runExpiresAt(startedAt) },
+        }));
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
     async putRun(input) {
       const expires_at = runExpiresAt(input.startedAt);
       const record: AiRunRecord = { ...input, itemId: runItemId(input.runId), expires_at };
@@ -157,17 +184,38 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         runId: input.runId,
         expires_at,
       }));
-      await doc.send(new TransactWriteCommand({
-        TransactItems: [
-          { Put: { TableName: table, Item: record } },
-          ...pointers.map((Item) => ({ Put: { TableName: table, Item } })),
-        ],
-      }));
-      log.debug(
-        { runId: input.runId, conversationId: input.conversationId, outcome: input.outcome },
-        'ai run recorded',
-      );
-      return record;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const marker = (await doc.send(new GetCommand({ TableName: table, Key: { itemId: inflightItemId(input.runId) } }))).Item as FinalizationMarker | undefined;
+        const merged: AiRunRecord = marker === undefined ? record : {
+          ...record,
+          decisions: Object.fromEntries(Object.entries(record.decisions).map(([target, decision]) => {
+            const terminal = marker.verdicts[target as DecisionTarget];
+            return [target, decision?.verdict === 'pending' && terminal !== undefined
+              ? { ...decision, verdict: terminal.verdict, verdictAt: terminal.at, ...(terminal.by !== undefined && { verdictBy: terminal.by }) }
+              : decision];
+          })),
+        };
+        try {
+          await doc.send(new TransactWriteCommand({
+            TransactItems: [
+              { Put: { TableName: table, Item: merged } },
+              ...pointers.map((Item) => ({ Put: { TableName: table, Item } })),
+              ...(marker === undefined ? [] : [{ Delete: {
+                TableName: table,
+                Key: { itemId: inflightItemId(input.runId) },
+                ConditionExpression: '#version = :version',
+                ExpressionAttributeNames: { '#version': 'version' },
+                ExpressionAttributeValues: { ':version': marker.version },
+              } }]),
+            ],
+          }));
+          log.debug({ runId: input.runId, conversationId: input.conversationId, outcome: input.outcome }, 'ai run recorded');
+          return merged;
+        } catch (err) {
+          if (!(err instanceof ConditionalCheckFailedException) || marker === undefined || attempt === 2) throw err;
+        }
+      }
+      throw new Error('unreachable');
     },
 
     async getRun(runId) {
@@ -262,10 +310,35 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         log.debug({ runId, target, verdict }, 'ai run verdict stamped');
         return true;
       } catch (err) {
-        if (err instanceof ConditionalCheckFailedException) {
-          log.debug({ runId, target }, 'ai run verdict skipped (run row expired)');
-          return false;
-        }
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      const markerNames = { '#verdicts': 'verdicts', '#target': target, '#version': 'version' };
+      const markerValues = { ':verdict': { verdict, at, ...(opts.by !== undefined && { by: opts.by }) }, ':one': 1 };
+      try {
+        await doc.send(new UpdateCommand({
+          TableName: table,
+          Key: { itemId: inflightItemId(runId) },
+          UpdateExpression: 'SET #verdicts.#target = :verdict ADD #version :one',
+          ConditionExpression: 'attribute_exists(itemId) AND attribute_not_exists(#verdicts.#target)',
+          ExpressionAttributeNames: markerNames,
+          ExpressionAttributeValues: markerValues,
+        }));
+        return true;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      try {
+        await doc.send(new UpdateCommand({
+          TableName: table,
+          Key: { itemId: runItemId(runId) },
+          UpdateExpression: `SET ${sets.join(', ')}`,
+          ConditionExpression: opts.expectedVerdict === undefined ? 'attribute_exists(itemId)' : 'attribute_exists(itemId) AND #d.#t.#expectedVerdict = :expectedVerdict',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+        }));
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
         throw err;
       }
     },

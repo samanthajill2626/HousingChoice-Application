@@ -184,7 +184,7 @@ interface Harness {
   seen: ExtractionInput[];
   contactsUpdate: ReturnType<typeof vi.fn>;
   runs: AiRunRecordInput[];
-  aiRuns: { putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
+  aiRuns: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   applyEvents: { emit: ReturnType<typeof vi.fn> };
 }
 
@@ -195,7 +195,7 @@ function makeHarness(opts: {
   conversation?: ConversationItem | undefined;
   claimResult?: boolean;
   driver?: ExtractionDriver;
-  aiRuns?: { putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
+  aiRuns?: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
   logger?: Logger;
 }): Harness {
   const repo = makeRepo(opts.dueRows, opts.claimResult ?? true);
@@ -213,6 +213,7 @@ function makeHarness(opts: {
   const contactsUpdate = vi.fn(async () => ({}) as ContactItem);
   const runs: AiRunRecordInput[] = [];
   const aiRuns = opts.aiRuns ?? {
+    beginFinalization: vi.fn(async () => true),
     putRun: vi.fn(async (r: AiRunRecordInput) => {
       runs.push(r);
       return { ...r, itemId: `run#${r.runId}`, expires_at: 0 };
@@ -1048,6 +1049,7 @@ describe('runDueExtractions - run log backstop and isolation', () => {
       contact: tenantContactWith({ pets: 'a dog' }),
       conversation: convWith('c1'),
       aiRuns: {
+        beginFinalization: vi.fn(async () => true),
         putRun: vi.fn(async (record) => ({ ...record, itemId: 'x', expires_at: 0 })),
         setVerdict: vi.fn(async () => { throw new Error('ai_runs down'); }),
       },
@@ -1102,7 +1104,7 @@ describe('runDueExtractions - run log backstop and isolation', () => {
       dueRows: [dueRow()],
       messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats"}}}')],
       contact: tenantContact(), conversation: convWith('c1'),
-      aiRuns: { putRun: vi.fn(async () => { throw new Error('ai_runs is on fire'); }), setVerdict: vi.fn(async () => true) },
+      aiRuns: { beginFinalization: vi.fn(async () => true), putRun: vi.fn(async () => { throw new Error('ai_runs is on fire'); }), setVerdict: vi.fn(async () => true) },
     });
     const out = await runDueExtractions(NOW, h.deps);
     expect(out).toEqual({ processed: 1, failed: 0 });

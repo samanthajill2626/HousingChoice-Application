@@ -2435,6 +2435,7 @@ export function createFakeWorld(): FakeWorld {
     },
     async putSuggestion(s) {
       const itemId = `sugg#${s.ownerContactId}#${s.target}`;
+      const prior = suggestions.get(itemId);
       const item: SuggestionItem = {
         itemId,
         ownerContactId: s.ownerContactId,
@@ -2445,11 +2446,12 @@ export function createFakeWorld(): FakeWorld {
         ...(s.reason !== undefined && { reason: s.reason }),
         conversationId: s.conversationId,
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
+        ...(s.runId !== undefined && { runId: s.runId }),
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
       };
       suggestions.set(itemId, item);
-      return { ...item };
+      return { item: { ...item }, ...(prior !== undefined && { displaced: prior }) };
     },
     async getSuggestion(contactId, target) {
       const hit = suggestions.get(`sugg#${contactId}#${target}`);

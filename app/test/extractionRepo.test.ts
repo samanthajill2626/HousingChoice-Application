@@ -176,12 +176,15 @@ function makeFakeDoc(): FakeDoc {
     send: async (cmd: unknown) => {
       if (cmd instanceof PutCommand) {
         const item = cmd.input.Item as Row;
+        const previous = store.get(item['itemId'] as string);
         // Model removeUndefinedValues: undefined attrs are never stored (keeps
         // sparse GSIs sparse), exactly like the real document client.
         const stored: Row = {};
         for (const [k, v] of Object.entries(item)) if (v !== undefined) stored[k] = v;
         store.set(item['itemId'] as string, stored);
-        return {};
+        return cmd.input.ReturnValues === 'ALL_OLD' && previous !== undefined
+          ? { Attributes: { ...previous } }
+          : {};
       }
       if (cmd instanceof GetCommand) {
         const key = cmd.input.Key as { itemId: string };
@@ -428,11 +431,11 @@ describe('extractionRepo.fail', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractionRepo suggestions', () => {
-  it('putSuggestion stamps itemId, pending partition and createdAt; get round-trips', async () => {
+  it('putSuggestion stamps itemId, pending partition, createdAt and runId; get round-trips', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    const s = await repo.putSuggestion({
+    const { item, displaced } = await repo.putSuggestion({
       ownerContactId: 'contact-1',
       target: 'voucherSize',
       currentValue: '2',
@@ -440,37 +443,49 @@ describe('extractionRepo suggestions', () => {
       reason: 'said needs a 3-bedroom',
       conversationId: 'conv-1',
       tsMsgId: 'msg-1',
+      runId: 'run-1',
       createdAt: T1,
     });
 
-    expect(s.itemId).toBe('sugg#contact-1#voucherSize');
-    expect(s._pendingPartition).toBe('pending');
-    expect(s.createdAt).toBe(T1);
+    expect(item.itemId).toBe('sugg#contact-1#voucherSize');
+    expect(item._pendingPartition).toBe('pending');
+    expect(item.createdAt).toBe(T1);
+    expect(item.runId).toBe('run-1');
+    expect(displaced).toBeUndefined();
 
     const got = await repo.getSuggestion('contact-1', 'voucherSize');
     expect(got!.suggestedValue).toBe('3');
     expect(got!.ownerContactId).toBe('contact-1');
+    expect(got!.runId).toBe('run-1');
   });
 
-  it('a re-put on the same target REPLACES (latest wins)', async () => {
+  it('a re-put on the same target REPLACES and RETURNS the displaced row', async () => {
     const { doc, store } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'conv-1' });
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-2' });
+    await repo.putSuggestion({
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat',
+      conversationId: 'conv-1', runId: 'run-old', createdAt: T1,
+    });
+    const second = await repo.putSuggestion({
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog',
+      conversationId: 'conv-2', runId: 'run-new', createdAt: T2,
+    });
 
     const rows = [...store.values()].filter((r) => r['itemId'] === 'sugg#c1#pets');
     expect(rows).toHaveLength(1);
     expect((await repo.getSuggestion('c1', 'pets'))!.suggestedValue).toBe('dog');
+    expect(second.displaced?.runId).toBe('run-old');
+    expect(second.displaced?.suggestedValue).toBe('cat');
   });
 
   it('defaults createdAt to now when omitted', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    const s = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-1' });
-    expect(s.createdAt).toBeDefined();
-    expect(Number.isFinite(Date.parse(s.createdAt))).toBe(true);
+    const { item } = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-1' });
+    expect(item.createdAt).toBeDefined();
+    expect(Number.isFinite(Date.parse(item.createdAt))).toBe(true);
   });
 
   it('listSuggestionsByContact returns all of one contact via the byOwner GSI', async () => {

@@ -15,7 +15,7 @@
 // PII: never log message bodies or phone numbers - only ids/field names/counts.
 import type { ContactItem, ContactType, createContactsRepo } from '../../repos/contactsRepo.js';
 import { contactPhones } from '../../repos/contactsRepo.js';
-import type { createExtractionRepo } from '../../repos/extractionRepo.js';
+import type { createExtractionRepo, SuggestionItem } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
 import { EXTRACTABLE_FIELDS, HOUSING_AUTHORITY_VOCAB, normalizeSuggestionValue } from './schema.js';
@@ -47,6 +47,8 @@ export interface ApplyOutcome {
   suggested: string[];
   /** Count of note lines appended. */
   notedLines: number;
+  /** Earlier run suggestions this apply pass replaced. */
+  displaced: Array<{ target: string; runId: string }>;
 }
 
 /** firstName/lastName apply for tenant AND unknown contacts. */
@@ -135,6 +137,8 @@ export async function applyExtraction(
     // (unknown-speaker) utterance, the whole run is demoted to suggest-only.
     // OPTIONAL/defaulted-false so slice-1 callers/tests are unaffected.
     hasInferredRoleContent?: boolean;
+    /** Opaque ai_runs id stamped on every suggestion produced by this apply. */
+    runId?: string;
   },
 ): Promise<ApplyOutcome> {
   const { contact, conversationId, cursorTsMsgId, result } = ctx;
@@ -144,6 +148,10 @@ export async function applyExtraction(
 
   const wrote: string[] = [];
   const suggested: string[] = [];
+  const displaced: ApplyOutcome['displaced'] = [];
+  const noteDisplaced = (target: string, prior: SuggestionItem | undefined): void => {
+    if (prior?.runId !== undefined) displaced.push({ target, runId: prior.runId });
+  };
   const noteStrings: string[] = [];
 
   // Per-field provenance stamp (generalizes status_source; A1 adjudication).
@@ -198,7 +206,7 @@ export async function applyExtraction(
         logger.debug({ contactId, field }, 'extraction suggestion skipped (equal to current)');
         continue;
       }
-      const ok = await putSuggestionSafe(deps, {
+      const put = await putSuggestionSafe(deps, {
         ownerContactId: contactId,
         target: field,
         ...(currentValue !== undefined && { currentValue }),
@@ -206,8 +214,12 @@ export async function applyExtraction(
         ...(fieldOp.reason !== undefined && { reason: fieldOp.reason }),
         conversationId,
         ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+        ...(ctx.runId !== undefined && { runId: ctx.runId }),
       });
-      if (ok) suggested.push(field);
+      if (put.ok) {
+        suggested.push(field);
+        noteDisplaced(field, put.displaced);
+      }
     }
   }
 
@@ -269,7 +281,7 @@ export async function applyExtraction(
           ) {
             logger.debug({ contactId }, 'extraction address suggestion skipped (equal to current)');
           } else {
-            const ok = await putSuggestionSafe(deps, {
+            const put = await putSuggestionSafe(deps, {
               ownerContactId: contactId,
               target: 'address',
               ...(hasCurrent && { currentValue: formattedCurrent }),
@@ -278,8 +290,12 @@ export async function applyExtraction(
               ...(result.address.reason !== undefined && { reason: result.address.reason }),
               conversationId,
               ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+              ...(ctx.runId !== undefined && { runId: ctx.runId }),
             });
-            if (ok) suggested.push('address');
+            if (put.ok) {
+              suggested.push('address');
+              noteDisplaced('address', put.displaced);
+            }
           }
         }
       }
@@ -325,7 +341,7 @@ export async function applyExtraction(
   // --- 5. statusAdvance ----------------------------------------------------
   if (result.statusAdvance?.suggest === true) {
     if (contact.type === 'tenant' && contact.status === 'onboarding') {
-      const ok = await putSuggestionSafe(deps, {
+      const put = await putSuggestionSafe(deps, {
         ownerContactId: contactId,
         target: 'status',
         currentValue: contact.status,
@@ -333,8 +349,12 @@ export async function applyExtraction(
         ...(result.statusAdvance.reason !== undefined && { reason: result.statusAdvance.reason }),
         conversationId,
         ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+        ...(ctx.runId !== undefined && { runId: ctx.runId }),
       });
-      if (ok) suggested.push('status');
+      if (put.ok) {
+        suggested.push('status');
+        noteDisplaced('status', put.displaced);
+      }
     } else {
       logger.debug(
         { contactId, contactType: contact.type, status: contact.status },
@@ -346,7 +366,7 @@ export async function applyExtraction(
   // --- 6. typeSuggestion ---------------------------------------------------
   if (result.typeSuggestion) {
     if (contact.type === 'unknown') {
-      const ok = await putSuggestionSafe(deps, {
+      const put = await putSuggestionSafe(deps, {
         ownerContactId: contactId,
         target: 'type',
         currentValue: contact.type,
@@ -354,8 +374,12 @@ export async function applyExtraction(
         ...(result.typeSuggestion.reason !== undefined && { reason: result.typeSuggestion.reason }),
         conversationId,
         ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+        ...(ctx.runId !== undefined && { runId: ctx.runId }),
       });
-      if (ok) suggested.push('type');
+      if (put.ok) {
+        suggested.push('type');
+        noteDisplaced('type', put.displaced);
+      }
     } else {
       logger.debug({ contactId, contactType: contact.type }, 'typeSuggestion ignored (contact already classified)');
     }
@@ -386,15 +410,19 @@ export async function applyExtraction(
           label !== undefined && reason !== undefined
             ? `${label}: ${reason}`
             : (label ?? reason);
-        const ok = await putSuggestionSafe(deps, {
+        const put = await putSuggestionSafe(deps, {
           ownerContactId: contactId,
           target: 'phone',
           suggestedValue: e164,
           ...(combinedReason !== undefined && { reason: combinedReason }),
           conversationId,
           ...(cursorTsMsgId !== undefined && { tsMsgId: cursorTsMsgId }),
+          ...(ctx.runId !== undefined && { runId: ctx.runId }),
         });
-        if (ok) suggested.push('phone');
+        if (put.ok) {
+          suggested.push('phone');
+          noteDisplaced('phone', put.displaced);
+        }
       }
     }
   }
@@ -444,18 +472,21 @@ export async function applyExtraction(
     deps.events.emit('suggestion.updated', { contactId });
   }
 
-  return { wrote, suggested, notedLines };
+  return { wrote, suggested, notedLines, displaced };
 }
 
 /**
- * Best-effort putSuggestion: returns true when the upsert succeeded, false (and
- * logs) when it threw - so a single suggestion failure never aborts the rest of
- * the apply pass or gets counted as a success.
+ * Best-effort putSuggestion. The displaced row remains available to the job,
+ * while a failure remains isolated from the rest of the apply pass.
  */
+type SafePutResult =
+  | { ok: true; displaced?: SuggestionItem }
+  | { ok: false; dropReason: 'dismissed_before' | 'repo_error' };
+
 async function putSuggestionSafe(
   deps: ApplyDeps,
   s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0],
-): Promise<boolean> {
+): Promise<SafePutResult> {
   try {
     // Dismissal tombstone check (single choke point for EVERY suggest path):
     // a value a human already rejected for this target is never re-suggested
@@ -466,12 +497,12 @@ async function putSuggestionSafe(
         { contactId: s.ownerContactId, target: s.target },
         'suggestion suppressed (previously dismissed value)',
       );
-      return false;
+      return { ok: false, dropReason: 'dismissed_before' };
     }
-    await deps.extraction.putSuggestion(s);
-    return true;
+    const { displaced } = await deps.extraction.putSuggestion(s);
+    return { ok: true, ...(displaced !== undefined && { displaced }) };
   } catch (err) {
     deps.logger.warn({ contactId: s.ownerContactId, target: s.target, err }, 'putSuggestion failed');
-    return false;
+    return { ok: false, dropReason: 'repo_error' };
   }
 }

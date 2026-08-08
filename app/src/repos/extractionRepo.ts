@@ -80,10 +80,18 @@ export interface SuggestionItem {
   reason?: string;
   conversationId: string;
   tsMsgId?: string;
+  /** Opaque ai_runs id of the extraction that created this suggestion. */
+  runId?: string;
   /** byPending GSI hash key (fixed 'pending'); present while pending (sparse). */
   _pendingPartition?: 'pending';
   /** ISO - byPending GSI range key (newest-first). */
   createdAt: string;
+}
+
+/** What putSuggestion hands back: the row it wrote, plus the row it replaced. */
+export interface PutSuggestionResult {
+  item: SuggestionItem;
+  displaced?: SuggestionItem;
 }
 
 export interface ExtractionRepo {
@@ -123,7 +131,7 @@ export interface ExtractionRepo {
    */
   putSuggestion(
     s: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
-  ): Promise<SuggestionItem>;
+  ): Promise<PutSuggestionResult>;
   getSuggestion(contactId: string, target: string): Promise<SuggestionItem | undefined>;
   /** All pending suggestions for one contact (byOwner GSI). */
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
@@ -343,12 +351,16 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         ...(s.suggestedAddress !== undefined && { suggestedAddress: s.suggestedAddress }),
         ...(s.reason !== undefined && { reason: s.reason }),
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
+        ...(s.runId !== undefined && { runId: s.runId }),
       };
       // No ConditionExpression: a re-put on the same (contact, target) REPLACES
-      // (latest wins).
-      await doc.send(new PutCommand({ TableName: table, Item: item }));
+      // (latest wins). ALL_OLD returns the displaced row for the job to use.
+      const { Attributes } = await doc.send(
+        new PutCommand({ TableName: table, Item: item, ReturnValues: 'ALL_OLD' }),
+      );
       log.debug({ contactId: s.ownerContactId, target: s.target }, 'suggestion upserted');
-      return item;
+      const displaced = Attributes as SuggestionItem | undefined;
+      return { item, ...(displaced !== undefined && { displaced }) };
     },
 
     async getSuggestion(contactId, target) {

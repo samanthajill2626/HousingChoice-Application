@@ -4,6 +4,7 @@
 // items 1-11 is pinned by at least one test.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
+import type { PutSuggestionResult } from '../src/repos/extractionRepo.js';
 import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -25,7 +26,7 @@ interface StubRecords {
 
 function makeDeps(opts: {
   findByPhone?: (phone: string) => Promise<ContactItem | undefined>;
-  putSuggestionImpl?: (s: unknown) => Promise<unknown>;
+  putSuggestionImpl?: (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]) => Promise<PutSuggestionResult>;
   updateImpl?: (id: string, patch: Record<string, unknown>) => Promise<ContactItem>;
   /** Tombstoned values as `target#normValue` pairs (hasDismissal stub). */
   dismissedValues?: string[];
@@ -46,10 +47,12 @@ function makeDeps(opts: {
   };
 
   const extraction: ApplyDeps['extraction'] = {
-    putSuggestion: vi.fn(async (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]) => {
-      if (opts.putSuggestionImpl) return (await opts.putSuggestionImpl(s)) as never;
+    putSuggestion: vi.fn(async (s: Parameters<ApplyDeps['extraction']['putSuggestion']>[0]): Promise<PutSuggestionResult> => {
+      if (opts.putSuggestionImpl) return opts.putSuggestionImpl(s);
       records.suggestions.push(s);
-      return s as never;
+      return {
+        item: { ...s, itemId: `sugg#${s.ownerContactId}#${s.target}`, _pendingPartition: 'pending', createdAt: NOW },
+      };
     }),
     deleteSuggestion: vi.fn(async () => {}),
     hasDismissal: vi.fn(async (_contactId: string, target: string, normValue: string) =>
@@ -73,9 +76,69 @@ function makeDeps(opts: {
   return { deps, records, logger };
 }
 
-function run(deps: ApplyDeps, contact: ContactItem, result: ExtractionResult, cursorTsMsgId = 'ts-9') {
-  return applyExtraction(deps, { contact, conversationId: CONV, cursorTsMsgId, result });
+function run(
+  deps: ApplyDeps,
+  contact: ContactItem,
+  result: ExtractionResult,
+  cursorTsMsgId = 'ts-9',
+  runId?: string,
+) {
+  return applyExtraction(deps, {
+    contact, conversationId: CONV, cursorTsMsgId, result,
+    ...(runId !== undefined && { runId }),
+  });
 }
+
+describe('applyExtraction - run-log plumbing', () => {
+  it('stamps the runId on every suggestion it writes', async () => {
+    const { deps, records } = makeDeps();
+    await run(
+      deps,
+      makeContact({ type: 'tenant', pets: 'a dog' }),
+      { fields: { pets: { op: 'suggest', value: 'two cats', reason: 'said so' } } },
+      'ts-9',
+      'run-7',
+    );
+    expect((records.suggestions[0] as { runId?: string }).runId).toBe('run-7');
+  });
+
+  it('surfaces the displaced runId on ApplyOutcome without ever touching ai_runs', async () => {
+    const { deps } = makeDeps({
+      putSuggestionImpl: async (s) => ({
+        item: { ...s, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+        displaced: { ...s, itemId: 'x', createdAt: 'before', suggestedValue: 'older', runId: 'run-earlier' },
+      }),
+    });
+    const out = await run(
+      deps,
+      makeContact({ type: 'tenant', pets: 'a dog' }),
+      { fields: { pets: { op: 'suggest', value: 'two cats', reason: 'said so' } } },
+      'ts-9',
+      'run-7',
+    );
+    expect(out.displaced).toEqual([{ target: 'pets', runId: 'run-earlier' }]);
+  });
+
+  it('emits no displaced entry when the displaced row predates the run log', async () => {
+    const { deps } = makeDeps({
+      putSuggestionImpl: async (s) => {
+        const { runId: _runId, ...prior } = s;
+        return {
+          item: { ...s, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+          displaced: { ...prior, itemId: 'x', createdAt: 'before', suggestedValue: 'older' },
+        };
+      },
+    });
+    const out = await run(
+      deps,
+      makeContact({ type: 'tenant', pets: 'a dog' }),
+      { fields: { pets: { op: 'suggest', value: 'two cats' } } },
+      'ts-9',
+      'run-7',
+    );
+    expect(out.displaced).toEqual([]);
+  });
+});
 
 describe('applyExtraction - field writes (items 1-3)', () => {
   it('writes an empty field and stamps <field>_source with ai provenance', async () => {
@@ -113,7 +176,7 @@ describe('applyExtraction - field writes (items 1-3)', () => {
   it('op:none does nothing', async () => {
     const { deps, records } = makeDeps();
     const outcome = await run(deps, makeContact(), { fields: { pets: { op: 'none' } } });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0 });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.emits).toHaveLength(0);
   });
@@ -174,7 +237,7 @@ describe('applyExtraction - type gating (item 1)', () => {
         voucherSize: { op: 'suggest', value: '3' },
       },
     });
-    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0 });
+    expect(outcome).toEqual({ wrote: [], suggested: [], notedLines: 0, displaced: [] });
     expect(records.updates).toHaveLength(0);
     expect(records.suggestions).toHaveLength(0);
     expect(records.emits).toHaveLength(0);

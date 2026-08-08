@@ -22,7 +22,7 @@ import {
   runDueExtractions,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
-import type { DueExtractionItem, ExtractionRepo, SuggestionItem } from '../src/repos/extractionRepo.js';
+import type { DueExtractionItem, ExtractionRepo, PutSuggestionResult } from '../src/repos/extractionRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
@@ -145,11 +145,13 @@ function convWith(contactId: string): ConversationItem {
 
 function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionRepo {
   const put = vi.fn(
-    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<SuggestionItem> => ({
-      ...s,
-      itemId: `sugg#${s.ownerContactId}#${s.target}`,
-      _pendingPartition: 'pending',
-      createdAt: NOW,
+    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<PutSuggestionResult> => ({
+      item: {
+        ...s,
+        itemId: `sugg#${s.ownerContactId}#${s.target}`,
+        _pendingPartition: 'pending',
+        createdAt: NOW,
+      },
     }),
   );
   return {

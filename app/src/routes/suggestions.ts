@@ -250,10 +250,15 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           return;
         }
         if (!transitioned) {
-          const current = await contacts.getById(contactId, { consistentRead: true });
-          if (current?.status === suggestion.suggestedValue) {
-            await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
-          } else {
+          try {
+            const current = await contacts.getById(contactId, { consistentRead: true });
+            if (current?.status === suggestion.suggestedValue) {
+              await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
+            } else {
+              await restoreClaim(extraction, log, suggestion);
+            }
+          } catch {
+            log.warn({ target }, 'status recovery read failed; restoring claimed ai suggestion');
             await restoreClaim(extraction, log, suggestion);
           }
         }

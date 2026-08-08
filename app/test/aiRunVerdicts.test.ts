@@ -48,12 +48,13 @@ function makeWorld(setVerdictImpl?: SetVerdict) {
 function makePostWriteStatusFailureApp(
   world: ReturnType<typeof makeWebhookHarness>['world'],
   contactsRepo = world.contactsRepo,
+  commitStatus = true,
 ) {
   const statusService: StatusTransitionService = {
     async setTenantStatus(contactId, input) {
       const contact = world.contacts.find((item) => item.contactId === contactId);
       if (!contact) throw new Error('missing contact');
-      contact.status = input.toStatus;
+      if (commitStatus) contact.status = input.toStatus;
       throw new Error('post-write audit failure');
     },
     async transitionPlacement() { throw new Error('not used'); },
@@ -153,6 +154,27 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
     expect(await world.extractionRepo.getSuggestion('c1', 'status')).toBeUndefined();
     expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());
+  });
+
+  it('restores a status suggestion when a non-committing service failure has an unavailable recovery read', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const getById = vi.fn(async (contactId: string, opts?: { consistentRead?: boolean }) => {
+      if (opts?.consistentRead) throw new Error('transient recovery read failure');
+      return world.contactsRepo.getById(contactId);
+    });
+    const contactsRepo = { ...world.contactsRepo, getById };
+
+    await accept(makePostWriteStatusFailureApp(world, contactsRepo, false), 'c1', 'status').expect(500);
+
+    expect(getById).toHaveBeenNthCalledWith(1, 'c1');
+    expect(getById).toHaveBeenNthCalledWith(2, 'c1', { consistentRead: true });
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('onboarding');
+    expect(await world.extractionRepo.getSuggestion('c1', 'status')).toEqual(expect.objectContaining({ runId: 'run-status' }));
+    expect(setVerdict).not.toHaveBeenCalled();
   });
 
   it('stamps accepted on the phone accept branch', async () => {

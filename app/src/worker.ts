@@ -375,6 +375,7 @@ runWithContext(bootContext, () => {
 // Bare unset-URL runs keep the old visible-on-next-fetch behavior.
 if (config.aiExtractionEnabled) {
   const { createExtractionRepo } = await import('./repos/extractionRepo.js');
+  const { createAiRunsRepo } = await import('./repos/aiRunsRepo.js');
   const { createConversationsRepo } = await import('./repos/conversationsRepo.js');
   const { createMessagesRepo } = await import('./repos/messagesRepo.js');
   const { createContactsRepo } = await import('./repos/contactsRepo.js');
@@ -387,6 +388,12 @@ if (config.aiExtractionEnabled) {
   const contactsRepo = createContactsRepo({ logger });
   const extractionDeps = {
     repo: extractionRepo,
+    // AI run log (design 2026-08-06). Best-effort: a failed run-log write must
+    // never fail an extraction run, re-arm a due row, or burn a retry attempt.
+    aiRuns: createAiRunsRepo({ logger }),
+    // REAL wall clock for the record's timestamps (the poll's nowIso is the
+    // domain clock and the dev tick simulates it forward).
+    now: () => new Date().toISOString(),
     conversations: createConversationsRepo({ logger }),
     messages: createMessagesRepo({ logger }),
     contacts: contactsRepo,

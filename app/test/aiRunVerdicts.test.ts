@@ -1,5 +1,9 @@
+import express from 'express';
 import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
+import { createExpressErrorHandler } from '../src/lib/errors.js';
+import { createSuggestionsRouter } from '../src/routes/suggestions.js';
+import type { StatusTransitionService } from '../src/services/statusTransition.js';
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
@@ -39,6 +43,32 @@ function makeWorld(setVerdictImpl?: SetVerdict) {
   const setVerdict = vi.fn<SetVerdict>(setVerdictImpl ?? (async () => true));
   world.aiRuns.setVerdict = setVerdict;
   return { app, world, setVerdict };
+}
+
+function makePostWriteStatusFailureApp(world: ReturnType<typeof makeWebhookHarness>['world']) {
+  const statusService: StatusTransitionService = {
+    async setTenantStatus(contactId, input) {
+      const contact = world.contacts.find((item) => item.contactId === contactId);
+      if (!contact) throw new Error('missing contact');
+      contact.status = input.toStatus;
+      throw new Error('post-write audit failure');
+    },
+    async transitionPlacement() { throw new Error('not used'); },
+    async setListingStatus() { throw new Error('not used'); },
+    async deriveForStage() { throw new Error('not used'); },
+  };
+  const app = express();
+  app.use('/api', createSuggestionsRouter({
+    contactsRepo: world.contactsRepo,
+    extractionRepo: world.extractionRepo,
+    aiRunsRepo: world.aiRuns,
+    auditRepo: world.auditRepo,
+    activityEventsRepo: world.activityEventsRepo,
+    events: world.events,
+    statusService,
+  }));
+  app.use(createExpressErrorHandler());
+  return app;
 }
 
 function accept(app: import('express').Express, contactId: string, target: string) {
@@ -88,6 +118,20 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());
   });
 
+  it('keeps a post-write status transition consumed and stamps its accepted verdict on a 500', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+
+    await accept(makePostWriteStatusFailureApp(world), 'c1', 'status').expect(500);
+
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
+    expect(await world.extractionRepo.getSuggestion('c1', 'status')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-status', 'status', 'accepted', expect.anything());
+  });
+
   it('stamps accepted on the phone accept branch', async () => {
     const { app, world, setVerdict } = makeWorld();
     seedTenant(world);
@@ -111,6 +155,21 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     await accept(app, 'c1', 'address').expect(200);
 
     expect(setVerdict).toHaveBeenCalledWith('run-address', 'address', 'accepted', expect.anything());
+  });
+
+  it('keeps a scalar accept consumed and stamped when its audit append rejects', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    world.auditRepo.append = async () => { throw new Error('audit unavailable'); };
+
+    await accept(app, 'c1', 'pets').expect(500);
+
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('two cats');
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-pets', 'pets', 'accepted', expect.anything());
   });
 
   it('stamps dismissed, including for type which accept refuses', async () => {

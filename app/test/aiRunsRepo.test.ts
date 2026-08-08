@@ -156,14 +156,21 @@ interface FakeDoc {
   store: Map<string, Row>;
   batchGetCalls: () => number;
   queryInputs: () => QueryCommandInput[];
+  rejectedTransactionKeys: () => string[][];
 }
 
-function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number } = {}): FakeDoc {
+function makeFakeDoc(opts: {
+  throttleFirstN?: number;
+  failTransactAfter?: number;
+  beforeFirstMarkerTransaction?: (store: Map<string, Row>) => void;
+} = {}): FakeDoc {
   const store = new Map<string, Row>();
   let batchGetCalls = 0;
   const queryInputs: QueryCommandInput[] = [];
+  const rejectedTransactionKeys: string[][] = [];
   const throttleFirstN = opts.throttleFirstN ?? 0;
   const failTransactAfter = opts.failTransactAfter;
+  let markerTransactionIntercepted = false;
   const doc = {
     send: async (cmd: unknown) => {
       if (cmd instanceof GetCommand) {
@@ -176,9 +183,16 @@ function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number
         if (failTransactAfter !== undefined && items.length > failTransactAfter) {
           throw new TransactionCanceledException({ message: 'cancelled', $metadata: {} });
         }
+        if (!markerTransactionIntercepted && items.some((item) => item.Delete?.Key.itemId.startsWith('inflight#'))) {
+          markerTransactionIntercepted = true;
+          opts.beforeFirstMarkerTransaction?.(store);
+        }
         for (const it of items) {
           if (it.Delete !== undefined && it.Delete.ConditionExpression && !conditionHolds(it.Delete.ConditionExpression, it.Delete.ExpressionAttributeNames ?? {}, it.Delete.ExpressionAttributeValues ?? {}, store.get(it.Delete.Key.itemId))) {
-            throw new TransactionCanceledException({ message: 'cancelled', $metadata: {}, CancellationReasons: [{ Code: 'ConditionalCheckFailed' }] });
+            rejectedTransactionKeys.push([...store.keys()].sort());
+            // Do not provide CancellationReasons: the SDK does not always expose
+            // them, and putRun must still retry a marker-backed cancellation.
+            throw new TransactionCanceledException({ message: 'cancelled', $metadata: {} });
           }
         }
         for (const it of items) {
@@ -251,7 +265,13 @@ function makeFakeDoc(opts: { throttleFirstN?: number; failTransactAfter?: number
       throw new Error(`fake doc: unexpected command ${String(cmd)}`);
     },
   } as unknown as DynamoDBDocumentClient;
-  return { doc, store, batchGetCalls: () => batchGetCalls, queryInputs: () => queryInputs };
+  return {
+    doc,
+    store,
+    batchGetCalls: () => batchGetCalls,
+    queryInputs: () => queryInputs,
+    rejectedTransactionKeys: () => rejectedTransactionKeys,
+  };
 }
 
 function repoWith(doc: DynamoDBDocumentClient) {
@@ -304,6 +324,36 @@ describe('aiRunsRepo - putRun', () => {
     const { doc, store } = makeFakeDoc({ failTransactAfter: 2 });
     await expect(repoWith(doc).putRun(draftRecord())).rejects.toThrow();
     expect([...store.keys()]).toEqual([]);
+  });
+
+  it('retries a marker version race without cancellation reasons and commits only the merged envelope', async () => {
+    const { doc, store, rejectedTransactionKeys } = makeFakeDoc({
+      beforeFirstMarkerTransaction: (rows) => {
+        const marker = rows.get('inflight#run-1')!;
+        marker['verdicts'] = { pets: { verdict: 'accepted', at: '2026-08-06T10:01:00.000Z', by: 'usr_1' } };
+        marker['version'] = 1;
+      },
+    });
+    const repo = repoWith(doc);
+    await repo.beginFinalization('run-1', STARTED);
+
+    const saved = await repo.putRun(draftRecord({
+      decisions: { pets: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } },
+    }));
+
+    expect(rejectedTransactionKeys()).toEqual([['inflight#run-1']]);
+    expect(saved.decisions['pets']).toEqual({
+      proposedOp: 'suggest', outcome: 'suggested', verdict: 'accepted',
+      verdictAt: '2026-08-06T10:01:00.000Z', verdictBy: 'usr_1',
+    });
+    expect([...store.keys()].sort()).toEqual([
+      'ptr#contacts#contact-1#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#conversations#conv-1#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#global#2026-08-06T10:00:00.000Z#run-1',
+      'ptr#outcome#applied#2026-08-06T10:00:00.000Z#run-1',
+      'run#run-1',
+    ]);
+    expect((store.get('run#run-1')!['decisions'] as Record<string, Row>)['pets']).toEqual(saved.decisions['pets']);
   });
 
   it('the run# row carries NO entityKey/sortKey, so it never enters byEntity', async () => {

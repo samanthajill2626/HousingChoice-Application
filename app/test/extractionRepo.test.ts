@@ -535,6 +535,17 @@ describe('extractionRepo suggestions', () => {
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
   });
 
+  it('does not delete a replacement that shares the resolver timestamp but has a different run', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-s1' });
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1, runId: 'run-s2' });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-s1')).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.runId).toBe('run-s2');
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
+  });
+
   it('restores a claimed suggestion without overwriting a newer replacement', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);

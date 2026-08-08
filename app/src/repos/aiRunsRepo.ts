@@ -212,8 +212,11 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           log.debug({ runId: input.runId, conversationId: input.conversationId, outcome: input.outcome }, 'ai run recorded');
           return merged;
         } catch (err) {
-          const reasons = err instanceof TransactionCanceledException ? err.CancellationReasons : undefined;
-          const markerConflict = marker !== undefined && reasons?.some((reason) => reason.Code === 'ConditionalCheckFailed');
+          // CancellationReasons are optional in some service/SDK paths. A
+          // transaction with a marker can only safely retry the bounded write
+          // path: it re-reads the marker and either merges its terminal
+          // verdicts or propagates the final cancellation.
+          const markerConflict = marker !== undefined && err instanceof TransactionCanceledException;
           if (!markerConflict || attempt === 2) throw err;
         }
       }

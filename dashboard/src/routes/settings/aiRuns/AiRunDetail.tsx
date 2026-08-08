@@ -7,6 +7,10 @@ function value(value: unknown): string {
   return typeof value === 'string' ? value : JSON.stringify(value);
 }
 
+export function humanizeEnum(value: string): string {
+  return value.replaceAll('_', ' ');
+}
+
 function WindowMessages({ messages, full }: { messages: AiRunWindowMessage[]; full: boolean }): React.JSX.Element {
   return <div className={styles.tableWrap}><table className={styles.table} aria-label="Window messages"><thead><tr><th>Message</th><th>Tier</th><th>Text</th>{full ? <><th>Truncated</th><th>Chars</th><th>Hash</th></> : null}</tr></thead><tbody>
     {messages.map((message) => <tr key={message.tsMsgId}><td>{message.tsMsgId}</td><td>{message.tier}</td><td>{message.available ? message.text ?? 'No text available' : 'Unavailable'}</td>{full ? <><td>{message.truncated ? 'yes' : 'no'}</td><td>{message.chars ?? '-'}</td><td>{message.hash ?? '-'}</td></> : null}</tr>)}
@@ -30,7 +34,7 @@ export function AiRunDetail({ detail, status, onRetry }: { detail: AiRunDetailRe
       {storedWindow.noContent?.length ? <div role="region" aria-label="No content" className={styles.auditList}><h4>No content</h4><ul>{storedWindow.noContent.map((id) => <li key={id}>{id}</li>)}</ul></div> : null}
       {storedWindow.excluded.length ? <div role="region" aria-label="Excluded messages" className={styles.auditList}><h4>Excluded messages</h4><ul>{storedWindow.excluded.map((excluded) => <li key={excluded.tsMsgId}>{excluded.tsMsgId}: {excluded.cause}</li>)}</ul></div> : null}
     </section> : null}
-    {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{decision.proposedValue ?? decision.proposedOp}</td><td>{value(decision.previousValue)}</td><td>{decision.outcome}</td><td>{decision.verdict}</td><td>{decision.reason ?? decision.dropReason ?? (decision.outcome === 'dropped' ? 'unexplained' : '-')}</td></tr>)}</tbody></table></div></section> : null}
+    {decisions.length ? <section className={styles.block}><h4>Decision ledger</h4><div className={styles.tableWrap}><table className={styles.table} aria-label="Decisions"><thead><tr><th>Target</th><th>Proposed</th><th>Was</th><th>Outcome</th><th>Verdict</th><th>Reason</th></tr></thead><tbody>{decisions.map(([target, decision]) => <tr key={target}><td>{target}</td><td>{decision.proposedValue ?? decision.proposedOp}</td><td>{value(decision.previousValue)}</td><td>{humanizeEnum(decision.outcome)}</td><td>{humanizeEnum(decision.verdict)}</td><td>{decision.reason ?? (decision.dropReason ? humanizeEnum(decision.dropReason) : decision.outcome === 'dropped' ? 'unexplained' : '-')}</td></tr>)}</tbody></table></div></section> : null}
     {run.rawText !== undefined ? <details className={styles.raw}><summary>Raw model response</summary><pre>{run.rawText}</pre></details> : null}
     {run.rawResult !== undefined ? <details className={styles.raw}><summary>Parsed result</summary><pre>{JSON.stringify(run.rawResult, null, 2)}</pre></details> : null}
   </section>;

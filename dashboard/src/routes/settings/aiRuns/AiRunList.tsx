@@ -1,5 +1,6 @@
 import type { AiRunListRow, AiRunScope } from '../../../api/index.js';
 import { Spinner } from '../../../ui/index.js';
+import { humanizeEnum } from './AiRunDetail.js';
 import styles from './AiRunsSection.module.css';
 
 const SCOPES: Array<{ value: AiRunScope; label: string }> = [
@@ -45,7 +46,7 @@ export function AiRunList({
         {rows.map((row) => row.expired ? <li key={row.runId} className={styles.expired}>Expired run {row.runId}</li> : <li key={row.runId}>
           <button type="button" className={styles.runRow} onClick={() => onOpen(row.runId)} aria-label={`Run ${row.runId}`}>
             <span className={styles.runTime}>{new Date(row.startedAt).toLocaleString()}</span>
-            <span className={styles.outcome}>{row.outcome}</span>
+            <span className={styles.outcome}>{humanizeEnum(row.outcome)}</span>
             <span>{row.trigger} via {row.driver}</span>
             <span>{row.contactId ?? row.conversationId}</span>
             <span>{Object.values(row.decisionCounts).reduce((sum, count) => sum + count, 0)} decisions</span>

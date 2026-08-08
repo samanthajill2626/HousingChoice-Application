@@ -49,7 +49,17 @@ describe('AiRunsSection', () => {
     expect(screen.queryAllByRole('checkbox')).toHaveLength(0);
   });
   it('shows the window with excluded causes and the no-content list', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toBeInTheDocument(); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('age_30d'); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('char_budget'); expect(screen.getByRole('region', { name: 'No content' })).toHaveTextContent('empty-call'); });
-  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto_applied'); });
+  it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
+  it('renders decision outcome, verdict, and drop-reason labels without enum underscores', () => {
+    useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
+      pets: { proposedOp: 'write', outcome: 'no_finding', verdict: 'not_addressed' },
+      phone: { proposedOp: 'write', outcome: 'dropped', verdict: 'superseded_by_human_edit', dropReason: 'superseded_by_human_edit' },
+    } } }, status: 'ready', retry: vi.fn() });
+    renderSection();
+    expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('no finding');
+    expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('not addressed');
+    expect(screen.getByRole('row', { name: /^phone/ })).toHaveTextContent('superseded by human edit');
+  });
   it('shows model fingerprint and token usage in the detail header', () => { renderSection(); const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement; expect(header).toHaveTextContent('abcdef123456'); expect(header).toHaveTextContent('12 input tokens'); expect(header).toHaveTextContent('4 output tokens'); });
   it('shows truncation plus chars and hash evidence for a FULL window', () => { renderSection(); const table = screen.getByRole('table', { name: 'Window messages' }); expect(within(table).getByRole('columnheader', { name: 'Truncated' })).toBeInTheDocument(); expect(within(table).getByRole('columnheader', { name: 'Chars' })).toBeInTheDocument(); expect(within(table).getByRole('columnheader', { name: 'Hash' })).toBeInTheDocument(); expect(table).toHaveTextContent('yes'); });
   it('labels a LIGHT window as a skip window and shows no hash column', () => {

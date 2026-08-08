@@ -5,6 +5,10 @@
 .scope { margin: 0; padding: var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-md); color: var(--c-text); font-size: var(--fs-sm); }
 .scopeOptions { display: flex; flex-wrap: wrap; gap: var(--sp-2); }
 .radioLabel { display: inline-flex; align-items: center; gap: var(--sp-1); color: var(--c-text-muted); }
+.dateRange { display: flex; flex-wrap: wrap; gap: var(--sp-2); margin-top: var(--sp-2); }
+.dateLabel { display: flex; flex-direction: column; gap: var(--sp-1); color: var(--c-text-muted); font-size: var(--fs-xs); }
+.dateInput { min-height: var(--sp-6); padding: var(--sp-1) var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text); font: inherit; }
+.dateInput:focus-visible { outline: 2px solid var(--c-focus-ring); outline-offset: 2px; }
 .rows { list-style: none; display: flex; flex-direction: column; gap: var(--sp-2); margin: 0; padding: 0; }
 .runRow { display: grid; width: 100%; gap: var(--sp-1); padding: var(--sp-3); border: 1px solid var(--c-border); border-radius: var(--radius-md); background: var(--c-surface); color: var(--c-text); text-align: left; cursor: pointer; font: inherit; font-size: var(--fs-sm); }
 .runRow:hover { border-color: var(--c-border-strong); background: var(--c-surface-2); }

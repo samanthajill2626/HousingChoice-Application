@@ -10,21 +10,31 @@ const SCOPES: Array<{ value: AiRunScope; label: string }> = [
   { value: 'outcome#failed', label: 'Failed' },
 ];
 
+function scopedOption(scope: AiRunScope): { value: AiRunScope; label: string } | undefined {
+  if (scope.startsWith('contacts#')) return { value: scope, label: `Contact: ${scope.slice('contacts#'.length)}` };
+  if (scope.startsWith('conversations#')) return { value: scope, label: `Conversation: ${scope.slice('conversations#'.length)}` };
+  return undefined;
+}
+
 export function AiRunList({
-  rows, status, scope, onScopeChange, onOpen, hasMore, loadingMore, onLoadMore, onRetry,
+  rows, status, scope, from, to, onScopeChange, onFromChange, onToChange, onOpen, hasMore, loadingMore, onLoadMore, onRetry,
 }: {
   rows: AiRunListRow[]; status: 'loading' | 'ready' | 'error'; scope: AiRunScope;
-  onScopeChange: (scope: AiRunScope) => void; onOpen: (runId: string) => void;
+  from: string; to: string; onScopeChange: (scope: AiRunScope) => void; onFromChange: (value: string) => void; onToChange: (value: string) => void; onOpen: (runId: string) => void;
   hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onRetry: () => void;
 }): React.JSX.Element {
   return <section className={styles.listPane} aria-label="AI run list">
     <fieldset className={styles.scope}>
       <legend>Scope</legend>
       <div role="radiogroup" aria-label="AI run scope" className={styles.scopeOptions}>
-        {SCOPES.map((option) => <label key={option.value} className={styles.radioLabel}>
+        {[...SCOPES, ...(scopedOption(scope) ? [scopedOption(scope)!] : [])].map((option) => <label key={option.value} className={styles.radioLabel}>
           <input type="radio" name="ai-run-scope" value={option.value} checked={scope === option.value} onChange={() => onScopeChange(option.value)} />
           {option.label}
         </label>)}
+      </div>
+      <div className={styles.dateRange}>
+        <label className={styles.dateLabel}>From<input className={styles.dateInput} type="date" value={from} onChange={(event) => onFromChange(event.target.value)} /></label>
+        <label className={styles.dateLabel}>To<input className={styles.dateInput} type="date" value={to} onChange={(event) => onToChange(event.target.value)} /></label>
       </div>
     </fieldset>
     {status === 'loading' ? <Spinner center /> : null}

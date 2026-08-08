@@ -41,7 +41,7 @@ import type {
   RunTrigger,
   SkipReason,
 } from '../repos/aiRunsRepo.js';
-import type { DecisionTarget, RunDecision, RunWindow } from '../services/extraction/runTypes.js';
+import { isDecisionTarget, type DecisionTarget, type RunDecision, type RunWindow } from '../services/extraction/runTypes.js';
 import { buildFullRunWindow, buildLightRunWindow, type WindowMessagePieces } from '../services/extraction/runWindow.js';
 import { buildDecisions } from '../services/extraction/decisions.js';
 import { parseExtractionOps } from '../services/extraction/schema.js';
@@ -511,6 +511,26 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
 }
 
 /**
+ * Stamp superseded on every earlier run whose pending suggestion this run
+ * displaced. This belongs in the job, not apply.ts, so a run-log failure cannot
+ * turn a successful suggestion replacement into a suggestion failure.
+ */
+async function stampSuperseded(deps: ExtractionJobDeps, draft: RunDraft): Promise<void> {
+  const at = deps.now();
+  for (const { target, runId } of draft.displaced) {
+    if (!isDecisionTarget(target)) continue;
+    try {
+      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at });
+    } catch (err) {
+      deps.logger.warn(
+        { conversationId: draft.conversationId, runId, target, err },
+        'ai run superseded stamp failed (best-effort)',
+      );
+    }
+  }
+}
+
+/**
  * The stateless poll handler. Queries all due rows at/before `nowIso` and
  * processes each in isolation (a per-row error is logged + routed through the
  * backoff/park failure path, never blocking the rest of the batch).
@@ -559,6 +579,7 @@ export async function runDueExtractions(
       }
     }
     await recordRun(deps, outcome, draft);
+    await stampSuperseded(deps, draft);
   }
 
   return { processed, failed };

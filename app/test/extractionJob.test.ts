@@ -1021,6 +1021,45 @@ describe('runDueExtractions - the run log envelope', () => {
 });
 
 describe('runDueExtractions - run log backstop and isolation', () => {
+  it('stamps superseded on the earlier run whose suggestion this run displaced', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }),
+      conversation: convWith('c1'),
+    });
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => ({
+      item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+      displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+    }));
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.aiRuns.setVerdict).toHaveBeenCalledWith('run-earlier', 'pets', 'superseded', expect.anything());
+  });
+
+  it('keeps extraction successful when a superseded stamp fails', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }),
+      conversation: convWith('c1'),
+      aiRuns: {
+        putRun: vi.fn(async (record) => ({ ...record, itemId: 'x', expires_at: 0 })),
+        setVerdict: vi.fn(async () => { throw new Error('ai_runs down'); }),
+      },
+    });
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => ({
+      item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+      displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+    }));
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.repo.complete).toHaveBeenCalledTimes(1);
+  });
+
   it('the BACKSTOP genuinely executes and writes the SAME draft, never a fresh one', async () => {
     const h = makeHarness({
       dueRows: [dueRow()],

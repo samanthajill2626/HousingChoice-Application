@@ -85,8 +85,14 @@ import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
 } from '../repos/contactVocabularyRepo.js';
-import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import {
+  createExtractionRepo,
+  type ExtractionRepo,
+  type SuggestionItem,
+} from '../repos/extractionRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import { PROVENANCE_FIELDS } from '../services/extraction/schema.js';
+import { isDecisionTarget } from '../services/extraction/runTypes.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -120,6 +126,7 @@ export interface ContactsRouterDeps {
    * in tests (a no-network fake); defaults to the real repo.
    */
   extractionRepo?: ExtractionRepo;
+  aiRunsRepo?: AiRunsRepo;
   /**
    * Kill switch for the triage re-extraction hook (config.aiExtractionEnabled):
    * a triage flip to tenant schedules an immediate 'triage' extraction run so
@@ -816,6 +823,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
   const aiExtractionEnabled = deps.aiExtractionEnabled ?? loadConfig().aiExtractionEnabled;
   const events = deps.events ?? appEvents;
 
@@ -1315,14 +1323,35 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       throw err;
     }
 
-    // conversation-fact-extraction (T8): a human edit supersedes any pending AI
-    // suggestion for the same field (and a `type` change supersedes the type
-    // recommendation). Best-effort - a suggestion-store hiccup never fails the PATCH.
+    // A human edit resolves a pending AI suggestion for the same field. Read,
+    // delete, and verdict are deliberately separate best-effort operations so a
+    // new read failure cannot suppress the existing deletion behavior.
+    const verdictAt = new Date().toISOString();
     for (const f of parsed.changedFields) {
+      let pending: SuggestionItem | undefined;
+      try {
+        pending = await extraction.getSuggestion(contactId, f);
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'extraction getSuggestion (human edit) failed (best-effort)');
+      }
       try {
         await extraction.deleteSuggestion(contactId, f);
       } catch (err) {
         log.warn({ err, contactId, field: f }, 'extraction deleteSuggestion (human edit) failed (best-effort)');
+      }
+      if (pending?.runId === undefined || !isDecisionTarget(f)) continue;
+      const patchedValue = parsed.patch[f];
+      const verdict =
+        f === 'type' && typeof patchedValue === 'string' && patchedValue === pending.suggestedValue
+          ? 'accepted'
+          : 'superseded_by_human_edit';
+      try {
+        await aiRuns.setVerdict(pending.runId, f, verdict, {
+          at: verdictAt,
+          ...(req.user?.userId !== undefined && { by: req.user.userId }),
+        });
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
       }
     }
 

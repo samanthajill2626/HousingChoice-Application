@@ -36,6 +36,7 @@ import {
   type ContactsRepo,
 } from '../../src/repos/contactsRepo.js';
 import type { ExtractionRepo, SuggestionItem } from '../../src/repos/extractionRepo.js';
+import type { AiRunsRepo } from '../../src/repos/aiRunsRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -260,6 +261,8 @@ export interface FakeWorld {
    *  schedule path keeps asserting via opts.extractionRepo. */
   extractionSchedules: { conversationId: string; channel: string; dueAt: string }[];
   extractionRepo: ExtractionRepo;
+  /** In-memory AI run-log seam shared by suggestion resolution routes. */
+  aiRuns: AiRunsRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -2478,6 +2481,20 @@ export function createFakeWorld(): FakeWorld {
         .map((s) => ({ ...s }));
     },
   };
+  const aiRuns: AiRunsRepo = {
+    async putRun(input) {
+      return { ...input, itemId: `run#${input.runId}`, expires_at: 0 };
+    },
+    async getRun() {
+      return undefined;
+    },
+    async listByEntity() {
+      return { entries: [] };
+    },
+    async setVerdict() {
+      return true;
+    },
+  };
 
   const adapter: MessagingAdapter = {
     async sendMessage(params): Promise<SendMessageResult> {
@@ -2740,6 +2757,7 @@ export function createFakeWorld(): FakeWorld {
     suggestions,
     extractionSchedules,
     extractionRepo,
+    aiRuns,
   };
 }
 
@@ -2896,6 +2914,7 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // conversation-fact-extraction (T8): the review API (suggestions router) +
       // the contact-PATCH provenance-clear share this in-memory suggestion store.
       extractionRepo: world.extractionRepo,
+      aiRunsRepo: world.aiRuns,
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world

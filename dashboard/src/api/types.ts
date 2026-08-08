@@ -1392,6 +1392,8 @@ export interface SuggestionItem {
   reason?: string;
   conversationId: string;
   tsMsgId?: string;
+  /** The ai_runs runId that produced this suggestion (admin run log). */
+  runId?: string;
   createdAt: string;
 }
 

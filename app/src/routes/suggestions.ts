@@ -42,7 +42,12 @@ import {
   type ContactItem,
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
-import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import {
+  createExtractionRepo,
+  type ExtractionRepo,
+  type SuggestionItem,
+} from '../repos/extractionRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
@@ -66,11 +71,13 @@ import {
 } from '../services/extraction/address.js';
 import type { ExtractableField } from '../adapters/extraction.js';
 import type { TenantStatus } from '../lib/statusModel.js';
+import { isDecisionTarget } from '../services/extraction/runTypes.js';
 
 export interface SuggestionsRouterDeps {
   logger?: Logger;
   contactsRepo?: ContactsRepo;
   extractionRepo?: ExtractionRepo;
+  aiRunsRepo?: AiRunsRepo;
   auditRepo?: AuditRepo;
   activityEventsRepo?: ActivityEventsRepo;
   events?: EventBus;
@@ -112,10 +119,34 @@ function serializeContact(contact: ContactItem): ContactItem & { phones: ReturnT
   return { ...contact, phones: contactPhones(contact) };
 }
 
+/** Stamp a resolved suggestion verdict without changing the human action outcome. */
+async function stampVerdict(
+  aiRuns: AiRunsRepo,
+  log: Logger,
+  suggestion: SuggestionItem,
+  verdict: 'accepted' | 'dismissed',
+  at: string,
+  actor: string | undefined,
+): Promise<void> {
+  if (suggestion.runId === undefined || !isDecisionTarget(suggestion.target)) return;
+  try {
+    await aiRuns.setVerdict(suggestion.runId, suggestion.target, verdict, {
+      at,
+      ...(actor !== undefined && { by: actor }),
+    });
+  } catch (err) {
+    log.warn(
+      { contactId: suggestion.ownerContactId, target: suggestion.target, err },
+      'ai run verdict stamp failed (best-effort)',
+    );
+  }
+}
+
 export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
@@ -183,6 +214,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
           ...(actor !== undefined && { actor }),
         });
         await extraction.deleteSuggestion(contactId, 'status');
+        await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
         events.emit('suggestion.updated', { contactId });
         const remaining = await extraction.listSuggestionsByContact(contactId);
         log.info({ contactId, target, actor }, 'ai suggestion accepted (status)');
@@ -233,6 +265,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         }
       }
       await extraction.deleteSuggestion(contactId, 'phone');
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (phone)');
@@ -268,6 +301,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         to: formatted,
       });
       await extraction.deleteSuggestion(contactId, 'address');
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (address)');
@@ -302,6 +336,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         to: coerced.value,
       });
       await extraction.deleteSuggestion(contactId, target);
+      await stampVerdict(aiRuns, log, suggestion, 'accepted', now, actor);
       events.emit('suggestion.updated', { contactId });
       const remaining = await extraction.listSuggestionsByContact(contactId);
       log.info({ contactId, target, actor }, 'ai suggestion accepted (field)');
@@ -318,6 +353,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
     const target = String(req.params['target'] ?? '');
     mergeContext({ contactId });
     const actor = req.user?.userId;
+    const now = new Date().toISOString();
 
     const suggestion = await extraction.getSuggestion(contactId, target);
     if (!suggestion) {
@@ -337,6 +373,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       normalizeSuggestionValue(target, suggestion.suggestedValue),
     );
     await extraction.deleteSuggestion(contactId, target);
+    await stampVerdict(aiRuns, log, suggestion, 'dismissed', now, actor);
     events.emit('suggestion.updated', { contactId });
     const remaining = await extraction.listSuggestionsByContact(contactId);
     log.info({ contactId, target, actor }, 'ai suggestion dismissed');

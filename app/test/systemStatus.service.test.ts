@@ -65,6 +65,10 @@ describe('systemStatus.getFlags', () => {
       relayLiveProvisioning: false,
       pushConfigured: false,
       messagingDriver: 'twilio',
+      aiExtractionEnabled: true,
+      aiExtractionDriver: 'console',
+      aiExtractionModel: 'claude-opus-4-8',
+      aiExtractionPromptFingerprint: expect.stringMatching(/^[0-9a-f]{12}$/),
     });
     // Every value is a primitive (boolean/string) — no nested objects/secrets.
     for (const v of Object.values(flags)) {
@@ -87,6 +91,26 @@ describe('systemStatus.getFlags', () => {
   it('OMITS the business number when unconfigured (absent key, NEVER null)', () => {
     const flags = makeService({ config: deployedConfig(), cloudwatch: fakeSeam() }).getFlags();
     expect('businessPhoneNumber' in flags).toBe(false);
+  });
+
+  it('reports the extraction configuration so an empty run log is never misread', () => {
+    const flags = makeService({
+      config: localConfig({
+        aiExtractionEnabled: false,
+        extractionDriver: 'console',
+        aiExtractionModel: 'claude-opus-4-8',
+      }),
+      cloudwatch: fakeSeam(),
+    }).getFlags();
+
+    expect(flags.aiExtractionEnabled).toBe(false);
+    expect(flags.aiExtractionDriver).toBe('console');
+    expect(flags.aiExtractionModel).toBe('claude-opus-4-8');
+    expect(flags.aiExtractionPromptFingerprint).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it('getFlags stays AWS-free - the fingerprint is pure', () => {
+    expect(() => makeService({ config: localConfig(), cloudwatch: fakeSeam() }).getFlags()).not.toThrow();
   });
 
   it('messagingDriver shows "mock" when the twilio driver is redirected to a fake host', () => {

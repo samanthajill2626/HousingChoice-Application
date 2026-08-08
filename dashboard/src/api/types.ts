@@ -172,6 +172,14 @@ export interface SystemFlags {
   /** Outbound messaging driver as displayed. `mock` = the twilio driver
    *  redirected to a fake host (local `--mock` loop); never appears deployed. */
   messagingDriver: 'twilio' | 'console' | 'mock';
+  /** Whether the conversation-fact-extraction poll runs in this env. */
+  aiExtractionEnabled: boolean;
+  /** The extraction driver in use, distinct from the messaging driver above. */
+  aiExtractionDriver: 'anthropic' | 'console' | 'fake';
+  /** The model id the Anthropic driver would call. */
+  aiExtractionModel: string;
+  /** sha256(system prompt + EXTRACTION_SCHEMA), first 12 hex. */
+  aiExtractionPromptFingerprint: string;
   /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164 - what this app is
    *  configured to send FROM. OPTIONAL: the backend OMITS the key when the env
    *  has no number - it is never `null` (a `null` would also break the

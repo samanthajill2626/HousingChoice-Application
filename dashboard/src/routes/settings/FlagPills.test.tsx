@@ -25,6 +25,10 @@ function flags(overrides: Partial<SystemFlags> = {}): SystemFlags {
     relayLiveProvisioning: true,
     pushConfigured: true,
     messagingDriver: 'twilio',
+    aiExtractionEnabled: true,
+    aiExtractionDriver: 'anthropic',
+    aiExtractionModel: 'claude-opus-4-8',
+    aiExtractionPromptFingerprint: '0123456789ab',
     ...overrides,
   };
 }
@@ -47,7 +51,8 @@ describe('FlagPills', () => {
   it('renders the A2P kill-switches as "On" when enabled', async () => {
     getSystemFlags.mockResolvedValue(flags({ smsSendingEnabled: true, relayLiveProvisioning: true }));
     render(<FlagPills />);
-    await waitFor(() => expect(screen.getAllByText('On')).toHaveLength(2));
+    expect(await screen.findByLabelText('SMS sending: On')).toBeVisible();
+    expect(screen.getByLabelText('Relay provisioning: On')).toBeVisible();
     expect(screen.queryByText('Off - pre-A2P')).not.toBeInTheDocument();
   });
 
@@ -73,6 +78,16 @@ describe('FlagPills', () => {
     await waitFor(() => expect(screen.getByText('Messaging driver')).toBeInTheDocument());
     expect(screen.getByText('mock')).toBeInTheDocument();
     expect(screen.queryByText('twilio')).not.toBeInTheDocument();
+  });
+
+  it('renders the extraction configuration as accessible pills', async () => {
+    getSystemFlags.mockResolvedValue(flags({ aiExtractionEnabled: false, aiExtractionDriver: 'fake' }));
+    render(<FlagPills />);
+
+    expect(await screen.findByLabelText('AI extraction: Off')).toBeVisible();
+    expect(screen.getByLabelText('Extraction driver: fake')).toBeVisible();
+    expect(screen.getByLabelText('Extraction model: claude-opus-4-8')).toBeVisible();
+    expect(screen.getByLabelText('Prompt fingerprint: 0123456789ab')).toBeVisible();
   });
 
   it('shows the configured sending number and says plainly what it does not prove', async () => {

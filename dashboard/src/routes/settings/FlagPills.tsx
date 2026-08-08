@@ -30,7 +30,7 @@ const TONE_CLASS: Record<PillTone, string> = {
 /** One labeled status pill. The state text makes the tone legible without colour. */
 function Pill({ label, state, tone }: { label: string; state: string; tone: PillTone }): React.JSX.Element {
   return (
-    <li className={styles.pill}>
+    <li className={styles.pill} aria-label={`${label}: ${state}`}>
       <span className={styles.pillLabel}>{label}</span>
       <span className={`${styles.pillState} ${TONE_CLASS[tone]}`}>{state}</span>
     </li>
@@ -93,6 +93,14 @@ export function FlagPills(): React.JSX.Element {
               }
               tone={flags.businessPhoneNumber === undefined ? 'off' : 'info'}
             />
+            <Pill
+              label="AI extraction"
+              state={flags.aiExtractionEnabled ? 'On' : 'Off'}
+              tone={flags.aiExtractionEnabled ? 'on' : 'off'}
+            />
+            <Pill label="Extraction driver" state={flags.aiExtractionDriver} tone="info" />
+            <Pill label="Extraction model" state={flags.aiExtractionModel} tone="info" />
+            <Pill label="Prompt fingerprint" state={flags.aiExtractionPromptFingerprint} tone="info" />
           </ul>
           {/* REQUIRED by the spec (HONEST SCOPE, G4): a readiness row that implies
               more than it checks is worse than no row. This row proves only what

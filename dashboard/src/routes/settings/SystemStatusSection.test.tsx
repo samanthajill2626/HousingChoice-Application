@@ -27,6 +27,10 @@ const flags: SystemFlags = {
   relayLiveProvisioning: true,
   pushConfigured: false,
   messagingDriver: 'console',
+  aiExtractionEnabled: true,
+  aiExtractionDriver: 'console',
+  aiExtractionModel: 'claude-opus-4-8',
+  aiExtractionPromptFingerprint: '0123456789ab',
 };
 const degradedAlarms: SystemAlarmsResult = { available: false, reason: 'unavailable_local' };
 const degradedErrors: SystemErrorsResult = { available: false, reason: 'unavailable_local' };

@@ -1183,6 +1183,49 @@ export function sendNowErrorMessage(code: string): string {
   return SEND_NOW_ERROR_COPY[code] ?? "Couldn't send that just now - please try again.";
 }
 
+/**
+ * Every `{ error }` code the AI-suggestion accept/dismiss routes can answer with
+ * (400, 404 and 409 alike), mapped to copy a navigator can act on. `ApiError
+ * .message` is the RAW machine code, so it must never be rendered - route every
+ * accept or dismiss failure through `suggestionResolutionErrorMessage()`.
+ * Unknown codes fall back to the generic retry sentence, so a newer server can
+ * never put a snake_case token in front of staff.
+ *
+ * The three codes the server flags `retryable` (in progress / lost / retry
+ * exhausted) read as transient, because they are: nothing was written under this
+ * request, and the same click usually works a moment later.
+ */
+const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
+  // The identity this page sent is unusable - its copy of the suggestion is
+  // stale or malformed, and a reload rebuilds it.
+  invalid_suggestion_identity: 'This page is out of date - reload it and review the suggestion again.',
+  // Contact type is set by triage, never by accepting a chip.
+  accept_type_via_triage: 'Set the contact type with the triage buttons instead.',
+  invalid_suggestion_value:
+    'That value could not be used, so nothing changed - set the field by hand instead.',
+  // Not a snake_case code: the phone route answers with this whole sentence.
+  'phone is not a valid phone number': 'That is not a usable phone number, so nothing changed.',
+  unknown_target: 'This app does not know how to apply that suggestion.',
+  no_pending_suggestion: 'That suggestion is no longer pending - the list now shows its real state.',
+  contact_not_found: 'That contact is gone, so nothing changed.',
+  // Word for word the copy this surface has always shown for a phone conflict.
+  phone_in_use: 'That number already belongs to another contact.',
+  suggestion_resolution_in_progress:
+    'That suggestion is being resolved right now - try again in a moment.',
+  suggestion_already_resolved:
+    'That suggestion was already accepted or dismissed - the list now shows its real state.',
+  suggestion_replaced:
+    'That suggestion changed since this page loaded - refresh and review the new one.',
+  suggestion_resolution_lost: 'That did not go through and nothing changed - try again in a moment.',
+  suggestion_resolution_retry_exhausted:
+    'That suggestion was too busy to resolve - try again in a moment.',
+};
+
+/** Staff-facing copy for a failed suggestion accept/dismiss, given its code. */
+export function suggestionResolutionErrorMessage(code: string): string {
+  return SUGGESTION_RESOLUTION_ERROR_COPY[code] ?? 'Something went wrong - please try again.';
+}
+
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
 export interface PlacementAttention {
   reason: string;

@@ -26,7 +26,7 @@ function renderSection(path = '/settings/ai-runs'): void { render(<MemoryRouter 
 
 beforeEach(() => {
   useSystemFlags.mockReturnValue({ status: 'ready', flags, retry: vi.fn() });
-  useAiRunList.mockReturnValue({ rows: [row], status: 'ready', hasMore: false, loadingMore: false, loadMore: vi.fn(), retry: vi.fn() });
+  useAiRunList.mockReturnValue({ rows: [row], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
   useAiRun.mockReturnValue({ detail, status: 'ready', retry: vi.fn() });
 });
 
@@ -71,6 +71,16 @@ describe('AiRunsSection', () => {
     expect(screen.queryByRole('columnheader', { name: 'Chars' })).not.toBeInTheDocument();
     expect(screen.queryByRole('columnheader', { name: 'Hash' })).not.toBeInTheDocument();
   });
-  it('renders an expired row as expired rather than crashing', () => { useAiRunList.mockReturnValueOnce({ rows: [{ runId: 'gone', sortKey: 's0', expired: true }], status: 'ready', hasMore: false, loadingMore: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByText(/expired/i)).toBeInTheDocument(); });
-  it('shows a retryable error block when the fetch fails', () => { useAiRunList.mockReturnValueOnce({ rows: [], status: 'error', hasMore: false, loadingMore: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByRole('alert')).toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument(); });
+  it('renders an expired row as expired rather than crashing', () => { useAiRunList.mockReturnValueOnce({ rows: [{ runId: 'gone', sortKey: 's0', expired: true }], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByText(/expired/i)).toBeInTheDocument(); });
+  it('shows a retryable error block when the fetch fails', () => { useAiRunList.mockReturnValueOnce({ rows: [], status: 'error', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() }); renderSection(); expect(screen.getByRole('alert')).toBeInTheDocument(); expect(screen.getByRole('button', { name: 'Retry' })).toBeInTheDocument(); });
+  it('tells the operator when a load more failed and retries the SAME page, keeping Load more', async () => {
+    const loadMore = vi.fn();
+    useAiRunList.mockReturnValueOnce({ rows: [row], status: 'ready', hasMore: true, loadingMore: false, loadMoreFailed: true, loadMore, retry: vi.fn() });
+    renderSection();
+    const alert = screen.getByRole('alert');
+    expect(alert).toHaveTextContent('We could not load more runs.');
+    await userEvent.click(within(alert).getByRole('button', { name: 'Retry' }));
+    expect(loadMore).toHaveBeenCalledTimes(1);
+    expect(screen.getByRole('button', { name: 'Load more' })).toBeInTheDocument();
+  });
 });

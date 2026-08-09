@@ -29,6 +29,7 @@ import {
   setContactOptOut,
   setContactVoiceOptOut,
   setTenantStatus,
+  suggestionResolutionErrorMessage,
   updateContact,
   LANDLORD_STATUSES,
   LANDLORD_STATUS_LABELS,
@@ -62,7 +63,7 @@ import { useMe } from '../../app/useMe.js';
 import { VOICE_TAB_PATH } from '../settings/settingsTabs.js';
 import { commsMedia } from './media.js';
 import { useContact } from './useContact.js';
-import { useSuggestions } from './useSuggestions.js';
+import { SUGGESTION_NOT_PENDING, useSuggestions } from './useSuggestions.js';
 import { SuggestionChip } from './SuggestionChip.js';
 import { SUGGESTION_TARGET_LABEL, suggestionFor } from './suggestionTargets.js';
 import { useContactTimeline } from './useContactTimeline.js';
@@ -259,10 +260,34 @@ export function ContactDetail(): React.JSX.Element {
       .finally(() => setTriaging(false));
   };
 
+  // Every accept/dismiss failure lands on the chip the navigator clicked. The
+  // resolution routes answer with a whole vocabulary of codes across 400/404/409
+  // and `ApiError.message` is the RAW code, so the copy always comes from the
+  // resolver; an unrecognised failure gets its generic retry sentence rather than
+  // silence (a chip that just re-enables reads as "nothing happened").
+  const failSuggestion = (target: string, err: unknown): void => {
+    if (err instanceof ApiError) {
+      setSuggestionError({ target, message: suggestionResolutionErrorMessage(err.code) });
+      return;
+    }
+    if (err instanceof Error && err.message === SUGGESTION_NOT_PENDING) {
+      // Our own list is stale - the same answer the server's 404 gives, plus a
+      // refetch so the chip that can no longer be acted on corrects itself.
+      setSuggestionError({
+        target,
+        message: suggestionResolutionErrorMessage('no_pending_suggestion'),
+      });
+      suggestions.refetch();
+      return;
+    }
+    // Not from the API at all (a network drop, a bug): generic, never silent.
+    setSuggestionError({ target, message: suggestionResolutionErrorMessage('') });
+  };
+
   // Accept an AI suggestion. The route RETURNS the updated contact (with the value
   // written + `<field>_source` provenance) plus the remaining suggestions, so we
   // apply the contact in place (setContact) - the badge appears and the chip drops.
-  // A 409 phone_in_use surfaces as an inline error on that chip (suggestion kept).
+  // On failure the chip stays put, carrying the reason.
   const onAcceptSuggestion = (target: string): void => {
     if (suggestionBusy !== null) return;
     setSuggestionBusy(target);
@@ -274,15 +299,7 @@ export function ContactDetail(): React.JSX.Element {
         // Accepting status writes a milestone with no SSE - pull the timeline.
         if (target === 'status') timeline.refetch();
       })
-      .catch((err: unknown) => {
-        if (err instanceof ApiError && err.status === 409) {
-          setSuggestionError({
-            target,
-            message: 'That number already belongs to another contact.',
-          });
-        }
-        /* other failures: leave the chip in place; it re-enables for a retry */
-      })
+      .catch((err: unknown) => failSuggestion(target, err))
       .finally(() => setSuggestionBusy(null));
   };
   const onDismissSuggestion = (target: string): void => {
@@ -291,9 +308,7 @@ export function ContactDetail(): React.JSX.Element {
     setSuggestionError(null);
     void suggestions
       .dismiss(target)
-      .catch(() => {
-        /* leave the chip; it re-enables for a retry */
-      })
+      .catch((err: unknown) => failSuggestion(target, err))
       .finally(() => setSuggestionBusy(null));
   };
 

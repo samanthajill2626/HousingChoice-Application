@@ -18,11 +18,11 @@ function scopedOption(scope: AiRunScope): { value: AiRunScope; label: string } |
 }
 
 export function AiRunList({
-  rows, status, scope, from, to, onScopeChange, onFromChange, onToChange, onOpen, hasMore, loadingMore, onLoadMore, onRetry,
+  rows, status, scope, from, to, onScopeChange, onFromChange, onToChange, onOpen, hasMore, loadingMore, loadMoreFailed, onLoadMore, onRetry,
 }: {
   rows: AiRunListRow[]; status: 'loading' | 'ready' | 'error'; scope: AiRunScope;
   from: string; to: string; onScopeChange: (scope: AiRunScope) => void; onFromChange: (value: string) => void; onToChange: (value: string) => void; onOpen: (runId: string) => void;
-  hasMore: boolean; loadingMore: boolean; onLoadMore: () => void; onRetry: () => void;
+  hasMore: boolean; loadingMore: boolean; loadMoreFailed: boolean; onLoadMore: () => void; onRetry: () => void;
 }): React.JSX.Element {
   return <section className={styles.listPane} aria-label="AI run list">
     <fieldset className={styles.scope}>
@@ -53,6 +53,9 @@ export function AiRunList({
           </button>
         </li>)}
       </ul>
+      {/* The next page failed, not the log: the same Load more is still there and
+          this retry asks for the very same page again. */}
+      {loadMoreFailed ? <div className={styles.error} role="alert"><p>We could not load more runs.</p><button type="button" onClick={onLoadMore}>Retry</button></div> : null}
       {hasMore ? <button type="button" className={styles.loadMore} disabled={loadingMore} onClick={onLoadMore}>{loadingMore ? 'Loading...' : 'Load more'}</button> : null}
     </> : null}
   </section>;

@@ -16,6 +16,14 @@ import {
   type SuggestionItem,
 } from '../../api/index.js';
 
+/**
+ * The rejection this hook raises when the caller names a target that is not in
+ * its committed list (our copy went stale). A plain `Error`, never an
+ * `ApiError` - ContactDetail matches this exact message to show its own honest
+ * copy and refetch, so the wording is a contract between the two modules.
+ */
+export const SUGGESTION_NOT_PENDING = 'Suggestion is no longer pending';
+
 export interface SuggestionsState {
   suggestions: SuggestionItem[];
   refetch: () => void;
@@ -72,7 +80,7 @@ export function useSuggestions(contactId: string): SuggestionsState {
       const suggestion = state.forId === contactId
         ? state.suggestions.find((item) => item.target === target)
         : undefined;
-      if (suggestion === undefined) throw new Error('Suggestion is no longer pending');
+      if (suggestion === undefined) throw new Error(SUGGESTION_NOT_PENDING);
       const res = await acceptSuggestion(contactId, target, {
         revision: suggestion.revision,
         createdAt: suggestion.createdAt,
@@ -89,7 +97,7 @@ export function useSuggestions(contactId: string): SuggestionsState {
       const suggestion = state.forId === contactId
         ? state.suggestions.find((item) => item.target === target)
         : undefined;
-      if (suggestion === undefined) throw new Error('Suggestion is no longer pending');
+      if (suggestion === undefined) throw new Error(SUGGESTION_NOT_PENDING);
       const remaining = await dismissSuggestion(contactId, target, {
         revision: suggestion.revision,
         createdAt: suggestion.createdAt,

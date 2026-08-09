@@ -14,6 +14,13 @@ export interface AiRunListState {
   status: AiRunFetchStatus;
   hasMore: boolean;
   loadingMore: boolean;
+  /**
+   * The last `loadMore` failed. The rows already on screen are still good and the
+   * cursor is still valid, so this is an error ABOUT the next page, not about the
+   * list - the pane keeps "Load more" and offers a retry. Cleared when the next
+   * attempt starts.
+   */
+  loadMoreFailed: boolean;
   loadMore: () => void;
   retry: () => void;
 }
@@ -27,7 +34,7 @@ export interface AiRunState {
 export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: string }): AiRunListState {
   const { scope, from, to } = params;
   const [state, setState] = useState<Omit<AiRunListState, 'loadMore' | 'retry'>>({
-    rows: [], status: 'loading', hasMore: false, loadingMore: false,
+    rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false,
   });
   const abortRef = useRef<AbortController | null>(null);
   const nextBeforeRef = useRef<string | undefined>(undefined);
@@ -40,18 +47,20 @@ export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: st
       const page = await listAiRuns({ scope, from, to }, controller.signal);
       if (controller.signal.aborted) return;
       nextBeforeRef.current = page.nextBefore;
-      setState({ rows: page.runs, status: 'ready', hasMore: page.nextBefore !== undefined, loadingMore: false });
+      setState({
+        rows: page.runs, status: 'ready', hasMore: page.nextBefore !== undefined, loadingMore: false, loadMoreFailed: false,
+      });
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
       nextBeforeRef.current = undefined;
-      setState({ rows: [], status: 'error', hasMore: false, loadingMore: false });
+      setState({ rows: [], status: 'error', hasMore: false, loadingMore: false, loadMoreFailed: false });
     }
   }, [from, scope, to]);
 
   useEffect(() => {
     nextBeforeRef.current = undefined;
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false });
+    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
     void loadFirst();
     return () => abortRef.current?.abort();
   }, [loadFirst]);
@@ -62,24 +71,27 @@ export function useAiRunList(params: { scope: AiRunScope; from?: string; to?: st
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    setState((previous) => ({ ...previous, loadingMore: true }));
+    setState((previous) => ({ ...previous, loadingMore: true, loadMoreFailed: false }));
     void (async () => {
       try {
         const page = await listAiRuns({ scope, from, to, before }, controller.signal);
         if (controller.signal.aborted) return;
         nextBeforeRef.current = page.nextBefore;
         setState((previous) => ({
-          ...previous, rows: [...previous.rows, ...page.runs], hasMore: page.nextBefore !== undefined, loadingMore: false,
+          ...previous, rows: [...previous.rows, ...page.runs], hasMore: page.nextBefore !== undefined, loadingMore: false, loadMoreFailed: false,
         }));
       } catch (err) {
         if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) return;
-        setState((previous) => ({ ...previous, loadingMore: false, hasMore: false }));
+        // `hasMore` STAYS true and `nextBeforeRef` keeps the cursor: the next page
+        // still exists, this attempt just failed. Dropping the affordance here
+        // silently truncated a forensic log.
+        setState((previous) => ({ ...previous, loadingMore: false, loadMoreFailed: true }));
       }
     })();
   }, [from, scope, state.loadingMore, state.status, to]);
 
   const retry = useCallback(() => {
-    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false });
+    setState({ rows: [], status: 'loading', hasMore: false, loadingMore: false, loadMoreFailed: false });
     void loadFirst();
   }, [loadFirst]);
 

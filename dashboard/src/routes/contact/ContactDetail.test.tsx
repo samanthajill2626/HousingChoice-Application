@@ -115,6 +115,18 @@ const UNITS: UnitsPage = {
   units: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
 };
 
+// One pending suggestion - the fixture the accept/dismiss FAILURE tests drive.
+const PETS_SUGGESTION = {
+  itemId: 'sugg#k1#pets',
+  ownerContactId: 'k1',
+  target: 'pets',
+  suggestedValue: 'two cats',
+  conversationId: 'conv-1',
+  revision: 'rev-pets',
+  runId: 'run-pets',
+  createdAt: '2026-07-16T11:00:00.000Z',
+};
+
 // A second contact used in relationship-candidate tests.
 const OTHER: Contact = {
   contactId: 'z99',
@@ -400,6 +412,80 @@ describe('ContactDetail', () => {
       runId: 'run-pets',
     });
     await waitFor(() => expect(screen.queryByRole('group', { name: 'AI suggestion for pets' })).not.toBeInTheDocument());
+  });
+
+  // The resolution routes answer with a whole vocabulary of codes (400/404/409),
+  // and ApiError.message is the RAW code - every failure must reach the chip the
+  // navigator clicked as its own honest sentence, never the phone-conflict copy
+  // and never silence.
+  describe('suggestion accept/dismiss failures', () => {
+    async function clickChip(action: 'Accept' | 'Dismiss'): Promise<HTMLElement> {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getSuggestions.mockResolvedValue([PETS_SUGGESTION]);
+      renderAt('k1');
+      const chip = await screen.findByRole('group', { name: 'AI suggestion for pets' });
+      await user.click(within(chip).getByRole('button', { name: action }));
+      return chip;
+    }
+
+    it('shows the replaced-suggestion copy on a 409 suggestion_replaced accept, not the phone sentence', async () => {
+      acceptSuggestion.mockRejectedValue(new ApiError(409, 'suggestion_replaced', 'suggestion_replaced'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent(
+        'That suggestion changed since this page loaded - refresh and review the new one.',
+      );
+      expect(alert).not.toHaveTextContent('That number already belongs to another contact.');
+      // The chip stays put and re-enables for a retry.
+      expect(within(chip).getByRole('button', { name: 'Accept' })).toBeEnabled();
+    });
+
+    it('surfaces a failed DISMISS instead of swallowing it', async () => {
+      dismissSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_already_resolved', 'suggestion_already_resolved'),
+      );
+      const chip = await clickChip('Dismiss');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('That suggestion was already accepted or dismissed');
+      expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+    });
+
+    it('surfaces a 400 accept refusal instead of re-enabling the chip in silence', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(400, 'invalid_suggestion_value', 'invalid_suggestion_value'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('could not be used');
+      expect(alert.textContent ?? '').not.toContain('invalid_suggestion_value');
+    });
+
+    it('falls back to the generic sentence for a code this build has never heard of', async () => {
+      acceptSuggestion.mockRejectedValue(new ApiError(409, 'a_brand_new_server_code', 'a_brand_new_server_code'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('Something went wrong - please try again.');
+      expect(alert.textContent ?? '').not.toContain('a_brand_new_server_code');
+    });
+
+    it('answers the not-pending rejection with copy AND refetches so the stale chip corrects itself', async () => {
+      // useSuggestions rejects with this exact plain Error (not an ApiError) when
+      // the target is no longer in its list; the value reaching this catch is the
+      // same whether the hook or the request produced it.
+      acceptSuggestion.mockRejectedValue(new Error('Suggestion is no longer pending'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('That suggestion is no longer pending');
+      // One fetch on mount, one from the refetch this failure triggers.
+      await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+    });
   });
 
   it('shows the Auto badge on the Current address row when address_source is ai', async () => {

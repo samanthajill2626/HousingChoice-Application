@@ -44,6 +44,8 @@ function ListProbe({ scope }: { scope: 'global' | 'outcome#applied' }): React.JS
   return createElement('div', undefined,
     createElement('span', { 'data-testid': 'status' }, state.status),
     createElement('span', { 'data-testid': 'rows' }, state.rows.length),
+    createElement('span', { 'data-testid': 'hasMore' }, String(state.hasMore)),
+    createElement('span', { 'data-testid': 'loadMoreFailed' }, String(state.loadMoreFailed)),
     createElement('button', { type: 'button', onClick: state.loadMore }, 'more'),
     createElement('button', { type: 'button', onClick: state.retry }, 'retry'),
   );
@@ -77,6 +79,28 @@ describe('AI run data hooks', () => {
     act(() => screen.getByRole('button', { name: 'more' }).click());
     await waitFor(() => expect(screen.getByTestId('rows')).toHaveTextContent('2'));
     expect(listAiRuns.mock.calls[1]?.[0]).toMatchObject({ scope: 'global', before: 'opaque-before' });
+  });
+
+  it('reports a failed load more and KEEPS the cursor, then clears the flag on a retry', async () => {
+    listAiRuns
+      .mockResolvedValueOnce(page('opaque-before'))
+      .mockRejectedValueOnce(new Error('no'))
+      .mockResolvedValueOnce(page());
+    render(createElement(ListProbe, { scope: 'global' }));
+    await waitFor(() => expect(screen.getByTestId('rows')).toHaveTextContent('1'));
+
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('loadMoreFailed')).toHaveTextContent('true'));
+    // A forensic log must never truncate itself in silence: the page the operator
+    // asked for is still there to be fetched, so the affordance stays.
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('true');
+    expect(screen.getByTestId('rows')).toHaveTextContent('1');
+
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    await waitFor(() => expect(screen.getByTestId('rows')).toHaveTextContent('2'));
+    expect(screen.getByTestId('loadMoreFailed')).toHaveTextContent('false');
+    // The retry reused the SAME cursor - a failed page is not skipped.
+    expect(listAiRuns.mock.calls[2]?.[0]).toMatchObject({ scope: 'global', before: 'opaque-before' });
   });
 
   it('aborts an in-flight request on unmount', () => {

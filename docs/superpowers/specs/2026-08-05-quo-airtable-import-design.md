@@ -444,3 +444,59 @@ time we have done this rather than the first.
 ## 9. Open questions for the founder
 
 Tracked in `docs/superpowers/specs/2026-08-05-founder-call-questions.md`.
+
+---
+
+## 10. Addendum - the 2026-08-09 full export and the founder's answers
+
+The 2026-08-05 Airtable export was taken from a FILTERED VIEW. The full
+2026-08-09 export changes two section-2 findings materially:
+
+- **Properties: 70 rows (not 10), only 5 of 38 columns empty (not 26).** Airtable
+  IS her property book after all; "her outbox is the property book" is retired.
+  App Fee (17), Application (16), Washer/Dryer (14), utilities (12) etc. are
+  genuinely populated. Exact duplicate rows exist (732 Neal St x2) - the
+  per-property fold already dedupes them.
+- **Tenants: 666 rows, 45 columns** - typed integer Voucher Size (538), voucher
+  program (533), household size (563), Quo ID join (518, of which 491 resolve),
+  and 18 rows TYPED `Landlord` (she keeps landlords inside the tenants table).
+  92 tenant phones are not in Quo at all.
+
+**Quo id stability is PROVEN** (tier-1 question 3): across the two exports,
+17,854/17,854 message ids and 1,571/1,571 call ids survived with ZERO content
+drift on shared ids. The idempotent re-run design holds with no fallback needed.
+
+**Founder decisions folded into the pipeline (email via Cameron, 2026-08-09):**
+
+- Active window is **180 days** ("searching until truly dormant ~6 months") -
+  DEFAULT_ACTIVE_WINDOW_DAYS. Under it effectively every contact with traffic
+  imports as `searching`, which is her stated intent.
+- **Airtable overrules voucher size** (Cameron). A -Nbed conflict with an
+  Airtable value present is resolved, not flagged. On the 12 conflict rows her
+  hand answers agreed with Airtable on 8 of the 11 it could check.
+- **The `*` marker means nothing** - flag retired.
+- **The handshake means landlord but its absence means NOTHING** (a
+  personal-phone habit; new Quo landlords are saved plain). The tenants table's
+  typed `Landlord` rows are the stronger signal and classify as landlords.
+- **housingAuthority is a free field** with canonical spellings (section 5.1
+  posture revised); DeKalb passes through verbatim.
+- **-3bed is the APPROVED voucher size**, and accuracy matters (a 3-bed holder
+  may hunt a 4).
+
+**Review round-trip mechanics added for the replan:**
+
+- Contact carry-forward joins on **phone**, not the position-derived row_key
+  (the re-export reshuffled nearly every row).
+- `--baseline-contacts` diffs her file against the workbook she started from, so
+  pre-filled suggestions cannot fossilise as fake edits (caught when 185 stale
+  `on_hold` rows survived into a 180-day-window replan - impossible, the export
+  spans ~155 days).
+- `--interpret-notes` translates her notes-column answers (all 84 of her edits
+  were notes) into the real columns, Airtable-adjudicated where numeric, with
+  unmatched notes kept verbatim and reported.
+
+**Landlord coverage caveat (her email):** before March everything - and STILL
+most landlords - lives on her PERSONAL phone number. Quo holds the tenant book;
+the landlord book is only partially present (22 classified landlords vs 37
+distinct landlord names on properties). Post-cutover, landlord texts will keep
+arriving on her personal phone until those relationships migrate.

@@ -181,19 +181,24 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(splitReviewedName('Ms.')).toEqual({ firstName: 'Ms.', lastName: '' });
   });
 
-  it('maps the Airtable program onto the exact housing-authority vocabulary', async () => {
-    // Broadcast audience resolution queries the byHousingAuthority GSI with an
-    // EXACT hash match, so a near-miss spelling makes the tenant invisible to a
-    // targeted send with nothing reporting that they were skipped. All four of
-    // the founder's values are in HOUSING_AUTHORITY_VOCAB.
+  it('normalizes the Airtable program to one canonical spelling per authority', async () => {
+    // FREE FIELD (Cameron 2026-08-09), but consistently spelled: broadcast
+    // audience resolution does an exact hash match on the byHousingAuthority
+    // GSI, so two spellings of one authority are two audiences invisible to
+    // each other. Known variants collapse to one form; unknown values pass
+    // through verbatim instead of being dropped.
+    expect(housingAuthorityFor('Atlanta, aha, Atlanta housing')).toBe('Atlanta (AHA)');
+    expect(housingAuthorityFor('Jonesboro, JHA, Jonesboro housing')).toBe('Jonesboro (JHA)');
+    expect(housingAuthorityFor('Dekalb County Housing')).toBe('Dekalb County Housing');
+    expect(housingAuthorityFor('DCA, Department of Community Affairs')).toBe('DCA');
     expect(housingAuthorityFor('Georgia Housing Voucher, GHV')).toBe(
       'Georgia Housing Voucher (GHV)',
     );
     expect(housingAuthorityFor('HUD VASH')).toBe('HUD VASH');
     expect(housingAuthorityFor('Hope Atlanta')).toBe('Hope Atlanta');
-    expect(housingAuthorityFor('Claratel')).toBe('Claratel');
-    // Unknown values are left unset, never guessed into the GSI.
-    expect(housingAuthorityFor('Some New Authority')).toBeUndefined();
+    // Free field: an unknown value is WRITTEN (whitespace-collapsed), not lost.
+    expect(housingAuthorityFor('Some New Authority')).toBe('Some New Authority');
+    expect(housingAuthorityFor('  odd   spacing ')).toBe('odd spacing');
     expect(housingAuthorityFor('')).toBeUndefined();
     expect(housingAuthorityFor(undefined)).toBeUndefined();
 

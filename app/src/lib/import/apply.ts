@@ -38,7 +38,6 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
 import type { TransitionSource } from '../statusModel.js';
-import { HOUSING_AUTHORITY_VOCAB } from '../../services/extraction/schema.js';
 import type { ContactType } from '../../repos/contactsRepo.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
 import { normalizeAddress } from './addresses.js';
@@ -119,6 +118,8 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const droppedPhones = new Set<string>();
 
   const people = plan.merge.people;
+  /** Free-field authority values written verbatim (no canonical spelling). */
+  const authorityPassthroughs = new Map<string, number>();
   let i = 0;
   for (const person of people) {
     options.onProgress?.('contacts', ++i, people.length);
@@ -142,9 +143,27 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       continue;
     }
 
+    if (resolved.housingAuthority && !KNOWN_AUTHORITIES.has(resolved.housingAuthority)) {
+      authorityPassthroughs.set(
+        resolved.housingAuthority,
+        (authorityPassthroughs.get(resolved.housingAuthority) ?? 0) + 1,
+      );
+    }
+
     const preserved = await upsertContact(doc, contactsTable, person, resolved, importedAt);
     if (preserved) report.contacts.statusPreserved += 1;
     report.contacts.written += 1;
+  }
+
+  // Free-field posture (2026-08-09): unknown authority spellings are WRITTEN,
+  // not dropped - but say so once per distinct value, because each new spelling
+  // is its own broadcast audience and a typo here quietly splits one.
+  for (const [value, n] of authorityPassthroughs) {
+    warnings.push(
+      `housingAuthority ${JSON.stringify(value)} (x${n}) has no canonical spelling - written ` +
+        `verbatim. Fine if intentional; a variant spelling of an existing authority would ` +
+        `split the broadcast audience.`,
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -272,35 +291,65 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 }
 
 /**
- * The founder's Airtable "voucher program" spellings -> the EXACT strings in
- * `HOUSING_AUTHORITY_VOCAB` (services/extraction/schema.ts).
+ * The founder's Airtable "voucher program" spellings -> ONE canonical spelling
+ * each. FREE FIELD, not a closed vocabulary (Cameron, 2026-08-09): the field is
+ * a flexible document attribute and nothing requires membership in the AI
+ * extractor's list. What DOES matter is spelling CONSISTENCY - broadcast
+ * audience resolution does an exact hash match on the byHousingAuthority GSI, so
+ * "Dekalb Housing" and "Dekalb County Housing" would be two audiences invisible
+ * to each other. Known variants therefore normalize to one spelling (aligned
+ * with `HOUSING_AUTHORITY_VOCAB` where an entry exists, so AI-extracted and
+ * imported values agree); UNKNOWN values pass through verbatim rather than being
+ * dropped.
  *
- * Exactness is the whole point: `audienceResolution` queries the
- * byHousingAuthority GSI with an exact hash match, so a near-miss spelling makes
- * the tenant invisible to a targeted broadcast — and nothing reports that anyone
- * was skipped. A person simply never hears about a property.
- *
- * Only her four observed values are mapped. Anything else is REPORTED and left
- * unset rather than guessed into the GSI, because a wrong authority sends a
- * property to the wrong audience, which is worse than an empty one.
+ * The full 2026-08-09 tenants table (666 rows) is where most of these spellings
+ * come from - e.g. "Atlanta, aha, Atlanta housing" x450. Note the founder's
+ * taxonomy (email 2026-08-09): agencies/non-profits (HUD VASH, Hope Atlanta,
+ * Claratel, Step Up) are DIFFERENT things from housing authorities (AHA, JHA,
+ * DCA, ...) and one person can hold both. The single field cannot represent
+ * the pair; that model gap is docs/issues/housing-authority-free-text-drift.md,
+ * not this importer's to solve.
  */
-const AIRTABLE_PROGRAM_TO_AUTHORITY: Readonly<Record<string, string>> = {
+const CANONICAL_AUTHORITY: Readonly<Record<string, string>> = {
+  'atlanta, aha, atlanta housing': 'Atlanta (AHA)',
+  'atlanta housing': 'Atlanta (AHA)',
+  'jonesboro, jha, jonesboro housing': 'Jonesboro (JHA)',
+  'jonesboro housing': 'Jonesboro (JHA)',
+  'dekalb county housing': 'Dekalb County Housing',
+  'dekalb housing': 'Dekalb County Housing',
   'georgia housing voucher, ghv': 'Georgia Housing Voucher (GHV)',
   'georgia housing voucher (ghv)': 'Georgia Housing Voucher (GHV)',
   ghv: 'Georgia Housing Voucher (GHV)',
+  'dca, department of community affairs': 'DCA',
+  dca: 'DCA',
+  'fulton, fulton county': 'Fulton County',
+  'fulton county': 'Fulton County',
+  clayton: 'Clayton County',
+  'clayton county': 'Clayton County',
+  'eastpoint housing authority': 'East Point',
+  'east point': 'East Point',
+  'mcdonough housing authority': 'McDonough',
+  mcdonough: 'McDonough',
   'hud vash': 'HUD VASH',
   claratel: 'Claratel',
   'hope atlanta': 'Hope Atlanta',
+  'step up': 'Step Up',
 };
 
-/** Map an Airtable program value to the app's controlled vocabulary, or undefined. */
+/** The canonical spellings this importer emits (for the passthrough report). */
+export const KNOWN_AUTHORITIES: ReadonlySet<string> = new Set(
+  Object.values(CANONICAL_AUTHORITY),
+);
+
+/**
+ * Normalize an Airtable program value: canonical spelling when known, verbatim
+ * (whitespace-collapsed) when not, undefined only when empty.
+ */
 export function housingAuthorityFor(rawProgram: string | undefined): string | undefined {
   if (!rawProgram) return undefined;
-  const key = rawProgram.trim().toLowerCase().replace(/\s+/g, ' ');
-  const mapped = AIRTABLE_PROGRAM_TO_AUTHORITY[key];
-  if (mapped === undefined) return undefined;
-  // Belt-and-braces: never write a value the app's own vocabulary does not know.
-  return HOUSING_AUTHORITY_VOCAB.includes(mapped) ? mapped : undefined;
+  const cleaned = rawProgram.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return undefined;
+  return CANONICAL_AUTHORITY[cleaned.toLowerCase()] ?? cleaned;
 }
 
 /** Honorifics that must not become someone's first name (spelt with or without a dot). */
@@ -455,15 +504,7 @@ function resolvePerson(
   const status = (row?.status ?? '').trim() || person.suggestedStatus;
   const notes = (row?.notes ?? '').trim();
 
-  const rawProgram = person.airtableTenant?.voucherProgram;
-  const housingAuthority = housingAuthorityFor(rawProgram);
-  if (rawProgram && rawProgram.trim() && housingAuthority === undefined) {
-    warnings.push(
-      `${person.rowKey}: Airtable program ${JSON.stringify(rawProgram)} is not in the app's ` +
-        `housing-authority vocabulary - left unset rather than guessed (it would decide who ` +
-        `receives a broadcast).`,
-    );
-  }
+  const housingAuthority = housingAuthorityFor(person.airtableTenant?.voucherProgram);
 
   return {
     name,

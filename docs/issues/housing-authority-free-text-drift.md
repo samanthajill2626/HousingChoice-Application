@@ -101,3 +101,28 @@ the import, so nothing reads it. The Airtable source carries a real `voucherProg
 as read-only evidence and then drops. Note the extraction vocabulary above already mixes PHAs and
 program sponsors into one field, which is evidence the distinction has never been drawn. Whether
 program is a second dimension is outstanding with the founder.
+
+---
+
+**Founder clarification (email via Cameron, 2026-08-09).** The taxonomy is now
+authoritative, from the person who runs the book:
+
+- **Housing authorities**: Atlanta (AHA), Jonesboro (JHA), DeKalb, Fulton,
+  Clayton, East Point, McDonough - and **DCA**, "a unique one for Georgia which
+  is a 'housing authority' that governs 120+ counties/larger area of Georgia."
+- **Agencies / non-profits** (NOT authorities): Hope Atlanta, HUD VASH, Claratel,
+  Step Up.
+- **They coexist**: "Someone can be HUD VASH (veteran org) AND AHA. But someone
+  can also be just AHA. Then someone could be HUD VASH AND DCA."
+
+So the single `housingAuthority` field genuinely cannot represent her world - a
+person can hold one from EACH column. The AI-extraction vocabulary
+(`HOUSING_AUTHORITY_VOCAB`) mixes both kinds in one list, and is also missing
+**DeKalb** entirely - 19 tenants in the full Airtable export carry
+"Dekalb County Housing" and the extractor could never emit it.
+
+**Import posture (2026-08-09, Cameron):** free field. The importer normalizes
+known variant spellings to one canonical form each (consistency is what the
+exact-match byHousingAuthority GSI actually needs) and passes unknown values
+through verbatim with a once-per-value warning. The two-field/two-kind modelling
+decision stays open here.

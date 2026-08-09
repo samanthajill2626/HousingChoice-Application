@@ -380,23 +380,33 @@ export function createSuggestionResolutionFake(deps: {
       const mapKey = key(input.token.contactId, input.token.target);
       const current = items.get(mapKey);
       const phaseInput = { token: input.token, expectedPhase: input.expectedPhase, nextPhase: input.expectedPhase };
-      if (!sameToken(current, phaseInput) || current.phase !== input.expectedPhase) {
-        // repo:1047-1053 - the IDEMPOTENT arm: the journal is already gone and
-        // our own snapshot holds the pending slot, so a previous attempt
-        // released and only its acknowledgement was lost.
-        const restored = await deps.extractionRepo.getSuggestion(
-          input.token.contactId,
-          input.token.target,
-        );
-        if (
-          current === undefined
-          && restored !== undefined
-          && suggestionIdentityKey(restored) === input.token.identityKey
-        ) {
-          return 'released';
-        }
-        return 'stale';
+      const held = sameToken(current, phaseInput) && current.phase === input.expectedPhase;
+      const restored = await deps.extractionRepo.getSuggestion(
+        input.token.contactId,
+        input.token.target,
+      );
+      // repo:1047-1053 - the IDEMPOTENT arm: the journal is already gone and
+      // our own snapshot holds the pending slot, so a previous attempt
+      // released and only its acknowledgement was lost.
+      if (
+        current === undefined
+        && restored !== undefined
+        && suggestionIdentityKey(restored) === input.token.identityKey
+      ) {
+        return 'released';
       }
+      // TENTH fake/repo divergence (conf P2-1). The real release() decides its
+      // ANSWER in the catch arm, and there `pending !== undefined` -> 'unsafe'
+      // (repo:1054) is tested BEFORE `!sameToken(...)` -> 'stale' (repo:1055).
+      // The lease can be lost DURING the transaction - requireActive (repo:1017)
+      // passes, then a helper takes the journal over while the TransactWrite is
+      // in flight - so a caller that no longer holds the token still hears
+      // 'unsafe' whenever a pending row occupies the slot. This fake decides
+      // everything atomically, so answering 'stale' first for a lost token made
+      // that interleaving inexpressible and hid the false `superseded` stamp it
+      // produced. Pending row outranks lost token, exactly as repo:1054-1055.
+      if (restored !== undefined) return 'unsafe';
+      if (!held) return 'stale';
       // repo:1021-1040 is ONE transaction: Put the snapshot under
       // `attribute_not_exists(itemId)` AND Delete the journal under the exact
       // guard. Both conditions are decided before either mutation, so a slot

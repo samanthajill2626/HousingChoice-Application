@@ -268,14 +268,27 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
    * again for a journal this request only HELPS. Advisory: `findByPhone` reads
    * an eventually consistent GSI, so a `false` is not proof the number is free -
    * it narrows the reachable window, it does not close it
-   * (TODO(suggestion-phone-ownership-pointer-only-arbitration)). Best-effort by
-   * construction: a failed read proceeds to the fenced transaction exactly as
+   * (TODO(suggestion-phone-ownership-pointer-only-arbitration)). A `true` IS
+   * confirmed, by a strongly consistent read of the named owner, because on the
+   * help path it drives an irreversible outcome. Best-effort by construction: an
+   * unreadable or disproved answer proceeds to the fenced transaction exactly as
    * before.
    */
   async function phoneOwnedElsewhere(contactId: string, phone: string): Promise<boolean> {
     try {
       const owner = await deps.contactsRepo.findByPhone(phone);
-      return owner !== undefined && owner.contactId !== contactId;
+      if (owner === undefined || owner.contactId === contactId) return false;
+      // conf P2-2: on the HELP path this answer is PERMANENT - it finalizes the
+      // journal, stamps a verdict and scrubs the snapshot, and the operator's
+      // retry is then told a newer suggestion replaced theirs. An eventually
+      // consistent index must not decide that alone, so confirm the foreign
+      // owner with one strongly consistent point read. Disproved (the contact
+      // no longer holds the number) or unreadable -> fall through to the fenced
+      // transaction, the real guard, exactly as if this check had not fired.
+      const confirmed = await deps.contactsRepo.getById(owner.contactId, { consistentRead: true });
+      if (confirmed === undefined) return false;
+      return confirmed.phone === phone
+        || contactPhones(confirmed).some((entry) => entry.phone === phone);
     } catch (err) {
       // `err`, not `error`: pino serializes an Error only under `err`.
       deps.logger.warn(
@@ -355,7 +368,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             // disposition only, never the newer `sugg#` row); otherwise every
             // later resolution of the replacement replays this same conflict and
             // the newer suggestion is deadlocked forever.
-            await deps.resolutionRepo.complete({
+            const finalized = await deps.resolutionRepo.complete({
               token,
               expectedPhase: 'claimed',
               completedAt: now(),
@@ -370,12 +383,27 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             // operator explicitly accepted. `superseded` is exactly what the
             // job would have written had the replacement displaced the row
             // normally. Best-effort: it must never fail the human action.
-            await stampVerdict(journal, 'superseded');
-            // Helping somebody else's journal: hand control back so the caller
-            // can go on to its OWN identity. Only the requester's own claim
-            // turns this conflict into its answer.
-            if (opts.helping) return { domainCommitted };
+            //
+            // conf P2-1: stamp ONLY when THIS caller performed the terminal
+            // finalization. release() answers 'unsafe' from its catch arm
+            // (repo:1054) BEFORE it tests whether we still hold the token
+            // (repo:1055), so a helper that lost its lease mid-conflict lands
+            // here with a journal somebody else now owns. Its complete()
+            // correctly no-ops ('stale' / 'already_completed'), and the stamp
+            // must no-op with it: setVerdict is fenced on the CURRENT verdict,
+            // so a `superseded` written by a helper that finalized nothing is
+            // permanent and blocks the true owner's `accepted`.
+            if (finalized === 'completed') await stampVerdict(journal, 'superseded');
           }
+          // Helping somebody else's journal: hand control back so the caller
+          // can go on to its OWN identity. Only the requester's own claim turns
+          // this conflict into its answer. Both settled answers qualify - the
+          // journal was finalized terminally ('unsafe') or its snapshot went
+          // back into the pending slot ('released'), where the identity fence
+          // gives the requester an answer about their OWN chip (adv P2-5).
+          // 'stale' alone still throws: nothing is settled and the caller
+          // should retry.
+          if (opts.helping && released !== 'stale') return { domainCommitted };
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
         // `stale` means this token can no longer prove its domain transaction

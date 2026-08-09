@@ -26,13 +26,6 @@ import {
   type SuggestionResolutionHooks,
   type SuggestionResolutionService,
 } from '../services/suggestionResolution.js';
-import type { StatusTransitionService } from '../services/statusTransition.js';
-import type { AuditRepo } from '../repos/auditRepo.js';
-import type { ActivityEventsRepo } from '../repos/activityEventsRepo.js';
-import type { PlacementsRepo } from '../repos/placementsRepo.js';
-import type { PlacementDeadlinesRepo } from '../repos/placementDeadlinesRepo.js';
-import type { UnitsRepo } from '../repos/unitsRepo.js';
-import type { StatusTransitionDeps } from '../services/statusTransition.js';
 
 export interface SuggestionsRouterDeps {
   logger?: Logger;
@@ -46,19 +39,21 @@ export interface SuggestionsRouterDeps {
   resolutionLeaseId?: () => string;
   resolutionLeaseMs?: number;
   events?: EventBus;
-  // Retained compatibility seams for callers that assemble all route deps.
-  auditRepo?: AuditRepo;
-  activityEventsRepo?: ActivityEventsRepo;
-  placementsRepo?: PlacementsRepo;
-  placementDeadlinesRepo?: PlacementDeadlinesRepo;
-  unitsRepo?: UnitsRepo;
-  armStageNudge?: StatusTransitionDeps['armStageNudge'];
-  conversationsRepo?: StatusTransitionDeps['conversationsRepo'];
-  statusService?: StatusTransitionService;
 }
 
 function serializeContact(contact: ContactItem): ContactItem & { phones: ReturnType<typeof contactPhones> } {
   return { ...contact, phones: contactPhones(contact) };
+}
+
+/**
+ * True when the client sent no identity at all. Express hands a body-less POST
+ * to the route as `{}`, so absent, null and empty-object are one case; an array
+ * or a populated object is a MODERN request that must still pass the fence.
+ */
+function isBodyAbsent(body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  if (typeof body !== 'object' || Array.isArray(body)) return false;
+  return Object.keys(body).length === 0;
 }
 
 function parseIdentity(body: unknown): SuggestionRequestIdentity | undefined {
@@ -119,10 +114,27 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
     const contactId = String(req.params['contactId'] ?? '');
     const target = String(req.params['target'] ?? '');
     mergeContext({ contactId });
-    const identity = parseIdentity(req.body);
+    let identity = parseIdentity(req.body);
     if (identity === undefined) {
-      res.status(400).json({ error: 'invalid_suggestion_identity' });
-      return;
+      if (!isBodyAbsent(req.body)) {
+        res.status(400).json({ error: 'invalid_suggestion_identity' });
+        return;
+      }
+      // Legacy body-less callers (the documented pre-identity contract) resolve
+      // whatever is pending now. This read is eventually consistent, so for
+      // THOSE callers it reopens the last-writer-wins TOCTOU the identity fence
+      // closes - accepted deliberately to grandfather the published contract;
+      // every modern caller still sends and is fenced by its own identity.
+      const pending = await extraction.getSuggestion(contactId, target);
+      if (pending === undefined) {
+        res.status(404).json({ error: 'no_pending_suggestion' });
+        return;
+      }
+      identity = {
+        createdAt: pending.createdAt,
+        ...(pending.revision !== undefined && { revision: pending.revision }),
+        ...(pending.runId !== undefined && { runId: pending.runId }),
+      };
     }
     try {
       const outcome = await service.resolve({
@@ -143,7 +155,10 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         'ai suggestion resolution completed',
       );
       if (action === 'accept') {
-        const contact = await contacts.getById(contactId);
+        // Consistent: this re-read serves the response for a write that just
+        // committed, and an eventually consistent GetItem can still answer with
+        // the pre-write item (F9d).
+        const contact = await contacts.getById(contactId, { consistentRead: true });
         if (!contact) {
           res.status(404).json({ error: 'contact_not_found' });
           return;

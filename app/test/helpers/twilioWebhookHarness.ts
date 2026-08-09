@@ -1119,11 +1119,11 @@ export function createFakeWorld(): FakeWorld {
     async addPhone(contactId, { phone, label }) {
       const contact = fakeRequireContact(contactId);
       const phones = fakeSeededPhones(contact);
-      const existing = phones.find((entry) => entry.phone === phone);
-      if (existing !== undefined) {
+      // The REAL addPhone's already-attached early return does NO pointer work
+      // (contactsRepo.ts) - the double must not either, or a fake that repairs
+      // pointers hides a repo that does not (F6).
+      if (phones.some((p) => p.phone === phone)) {
         if (!Array.isArray(contact.phones)) contact.phones = phones;
-        if (existing.primary) fakeDeletePointer(phone);
-        else fakePutPointer(phone, contactId);
         return contact;
       }
       const now = new Date().toISOString();
@@ -2734,6 +2734,7 @@ export function createFakeWorld(): FakeWorld {
     extractionRepo,
     auditRepo,
     activityEventsRepo,
+    phonePointers: { put: fakePutPointer, remove: fakeDeletePointer },
   });
 
   return {

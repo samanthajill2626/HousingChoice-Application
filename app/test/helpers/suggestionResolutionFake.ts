@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { ActivityEventsRepo } from '../../src/repos/activityEventsRepo.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
-import type { ContactsRepo } from '../../src/repos/contactsRepo.js';
+import { seedPhonesForWrite, type ContactsRepo } from '../../src/repos/contactsRepo.js';
 import type { ExtractionRepo } from '../../src/repos/extractionRepo.js';
 import {
   makeCompletedResolution,
@@ -36,6 +36,16 @@ export function createSuggestionResolutionFake(deps: {
   extractionRepo: ExtractionRepo;
   auditRepo: AuditRepo;
   activityEventsRepo: ActivityEventsRepo;
+  /**
+   * The world's phone-pointer primitives. The real commitPhoneEffect owns the
+   * phoneref# row inside its fenced transaction (establish-or-verify, and a
+   * retry repairs a missing one); ContactsRepo exposes no such primitive, so
+   * the fake needs them directly to mirror that (F6).
+   */
+  phonePointers: {
+    put(phone: string, ownerContactId: string): void;
+    remove(phone: string): void;
+  };
 }): SuggestionResolutionFake {
   const items = new Map<string, SuggestionResolutionItem>();
   const key = (contactId: string, target: string): string => `${contactId}\u0000${target}`;
@@ -53,7 +63,7 @@ export function createSuggestionResolutionFake(deps: {
     input: PhaseInput,
     apply: (
       journal: ActiveSuggestionResolution,
-    ) => Promise<'committed' | 'phone_conflict' | 'superseded_by_human_edit'>,
+    ) => Promise<'committed' | 'phone_conflict' | 'superseded_by_human_edit' | 'stale'>,
   ): Promise<ResolutionEffectResult> {
     const current = items.get(key(input.token.contactId, input.token.target));
     if (current?.state === 'active' && sameToken(current, input) && current.phase === input.nextPhase) {
@@ -62,7 +72,7 @@ export function createSuggestionResolutionFake(deps: {
     const journal = activeFor(input);
     if (journal === undefined) return 'stale';
     const result = await apply(journal);
-    if (result === 'phone_conflict') return result;
+    if (result === 'phone_conflict' || result === 'stale') return result;
     if (result === 'superseded_by_human_edit') {
       items.set(key(journal.contactId, journal.target), {
         ...journal,
@@ -169,12 +179,30 @@ export function createSuggestionResolutionFake(deps: {
     commitPhoneEffect(input) {
       return effect(input, async (journal) => {
         if (journal.plan.kind !== 'phone') return 'committed';
-        const owner = await deps.contactsRepo.findByPhone(journal.plan.phone);
+        const plan = journal.plan;
+        const owner = await deps.contactsRepo.findByPhone(plan.phone);
         if (owner !== undefined && owner.contactId !== journal.contactId) return 'phone_conflict';
-        await deps.contactsRepo.addPhone(journal.contactId, {
-          phone: journal.plan.phone,
-          ...(journal.plan.label !== undefined && { label: journal.plan.label }),
-        });
+        // F6: mirror the REAL commitPhoneEffect (itself addPhone-shaped, under
+        // the journal fence): materialize phones[] with the primary's
+        // timestamps, attach the number as NON-primary, never write the phone
+        // scalar, and establish-or-repair the pointer on every attempt.
+        const contact = await deps.contactsRepo.getById(journal.contactId);
+        if (contact === undefined) return 'stale';
+        const phones = seedPhonesForWrite(contact, journal.claimedAt);
+        let target = phones.find((entry) => entry.phone === plan.phone);
+        if (target === undefined) {
+          target = {
+            phone: plan.phone,
+            primary: false,
+            firstSeenAt: journal.claimedAt,
+            lastSeenAt: journal.claimedAt,
+            ...(plan.label !== undefined && { label: plan.label }),
+          };
+          phones.push(target);
+        }
+        await deps.contactsRepo.update(journal.contactId, { phones });
+        if (target.primary === true) deps.phonePointers.remove(plan.phone);
+        else deps.phonePointers.put(plan.phone, journal.contactId);
         await deps.auditRepo.append(
           `contacts#${journal.contactId}`,
           journal.plan.audit.eventType,

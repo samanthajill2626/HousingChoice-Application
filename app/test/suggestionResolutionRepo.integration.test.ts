@@ -12,6 +12,7 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import { createContactsRepo, type ContactPhone } from '../src/repos/contactsRepo.js';
 import { createExtractionRepo, type SuggestionItem } from '../src/repos/extractionRepo.js';
 import {
   createSuggestionResolutionRepo,
@@ -541,6 +542,127 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     }));
     expect(audit.Items).toHaveLength(1);
     expect((await resolutions.get(contactId, 'phone'))).toMatchObject({ phase: 'domain_applied' });
+  });
+
+  // F6: commitPhoneEffect must mirror contactsRepo.addPhone. It used to
+  // materialize phones[] through the READ serializer contactPhones(), which
+  // carries no timestamps, and then PERSIST that array - permanently destroying
+  // the primary number's firstSeenAt (created_at) and lastSeenAt.
+  it('materializes the legacy phone scalar with its addPhone timestamps', async () => {
+    const contactId = 'phone-seed';
+    await putContact(contactId, { phone: '+14045550000', created_at: '2026-01-02T03:04:05.000Z' });
+    const suggestion = await putSuggestion(contactId, 'phone', '+14045556666');
+    const claimed = await resolutions.claim(claimInput(suggestion, {
+      plan: {
+        kind: 'phone',
+        phone: '+14045556666',
+        audit: { eventType: 'suggestion_accepted', payload: { target: 'phone' } },
+      },
+    }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    expect(await resolutions.commitPhoneEffect({
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed',
+      nextPhase: 'domain_applied',
+    })).toBe('committed');
+    const stored = await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId } }));
+    const phones = stored.Item?.['phones'] as ContactPhone[];
+    const primary = phones.find((entry) => entry.primary === true);
+    expect(primary).toEqual({
+      phone: '+14045550000',
+      primary: true,
+      firstSeenAt: '2026-01-02T03:04:05.000Z',
+      // journal.claimedAt is the deterministic clock: a replay writes the same bytes.
+      lastSeenAt: '2026-08-08T12:01:00.000Z',
+    });
+  });
+
+  // F6: addPhone ALWAYS attaches a number as non-primary and never touches the
+  // byPhone-indexed `phone` scalar. The pre-F6 code promoted a first number to
+  // primary and wrote the scalar (setPhone semantics, not addPhone semantics).
+  it('adds a first-ever number as non-primary and leaves the phone scalar untouched', async () => {
+    const contactId = 'phone-first';
+    await putContact(contactId, { created_at: '2026-02-03T04:05:06.000Z' });
+    const suggestion = await putSuggestion(contactId, 'phone', '+14045557777');
+    const claimed = await resolutions.claim(claimInput(suggestion, {
+      plan: {
+        kind: 'phone',
+        phone: '+14045557777',
+        label: 'cell',
+        audit: { eventType: 'suggestion_accepted', payload: { target: 'phone' } },
+      },
+    }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    expect(await resolutions.commitPhoneEffect({
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed',
+      nextPhase: 'domain_applied',
+    })).toBe('committed');
+    const stored = await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId } }));
+    expect(stored.Item?.['phone']).toBeUndefined();
+    expect(stored.Item?.['phones']).toEqual([{
+      phone: '+14045557777',
+      primary: false,
+      firstSeenAt: '2026-08-08T12:01:00.000Z',
+      lastSeenAt: '2026-08-08T12:01:00.000Z',
+      label: 'cell',
+    }]);
+    const pointer = await doc.send(new GetCommand({
+      TableName: contactsTable,
+      Key: { contactId: 'phoneref#+14045557777' },
+    }));
+    expect(pointer.Item?.['phone_ref_owner']).toBe(contactId);
+  });
+
+  // F6 parity: the same seeded contact, one number attached by the REAL
+  // contactsRepo.addPhone and one by a phone-accept resolution, must persist the
+  // same phones[] structure. Timestamps differ by clock source (addPhone uses
+  // the wall clock, the journal uses claimedAt), so compare presence plus the
+  // created_at-sourced value.
+  it('persists the same phones[] structure as contactsRepo.addPhone', async () => {
+    const contacts = createContactsRepo({ doc, env: testEnv, logger });
+    const created = '2026-03-04T05:06:07.000Z';
+    await putContact('parity-add', { phone: '+14045558000', created_at: created });
+    await putContact('parity-accept', { phone: '+14045558000', created_at: created });
+
+    await contacts.addPhone('parity-add', { phone: '+14045558111', label: 'cell' });
+
+    const suggestion = await putSuggestion('parity-accept', 'phone', '+14045558222');
+    const claimed = await resolutions.claim(claimInput(suggestion, {
+      plan: {
+        kind: 'phone',
+        phone: '+14045558222',
+        label: 'cell',
+        audit: { eventType: 'suggestion_accepted', payload: { target: 'phone' } },
+      },
+    }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    expect(await resolutions.commitPhoneEffect({
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed',
+      nextPhase: 'domain_applied',
+    })).toBe('committed');
+
+    const load = async (contactId: string): Promise<Record<string, unknown>> => (
+      (await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId } }))).Item ?? {}
+    );
+    const shape = (phones: ContactPhone[], added: string): unknown[] => phones.map((entry) => ({
+      phone: entry.phone === added ? '<added>' : entry.phone,
+      primary: entry.primary,
+      label: entry.label,
+      hasFirstSeenAt: typeof entry.firstSeenAt === 'string',
+      hasLastSeenAt: typeof entry.lastSeenAt === 'string',
+    }));
+    const addedItem = await load('parity-add');
+    const acceptedItem = await load('parity-accept');
+    const addedPhones = addedItem['phones'] as ContactPhone[];
+    const acceptedPhones = acceptedItem['phones'] as ContactPhone[];
+
+    expect(shape(acceptedPhones, '+14045558222')).toEqual(shape(addedPhones, '+14045558111'));
+    expect(addedPhones.find((entry) => entry.primary === true)?.firstSeenAt).toBe(created);
+    expect(acceptedPhones.find((entry) => entry.primary === true)?.firstSeenAt).toBe(created);
+    expect(addedItem['phone']).toBe('+14045558000');
+    expect(acceptedItem['phone']).toBe('+14045558000');
   });
 
   it('detects another contact phone pointer before mutation', async () => {

@@ -126,23 +126,84 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(setVerdict).not.toHaveBeenCalled();
   });
 
-  it('rejects a missing immutable identity before claiming or mutating', async () => {
+  // F9a: the identity fence stays for MODERN callers - a body that is present
+  // but malformed is still a 400. (An ABSENT/EMPTY body is the legacy contract;
+  // see the body-less tests below.)
+  it('rejects a malformed immutable identity before claiming or mutating', async () => {
     const { app, world, setVerdict } = makeWorld();
     seedTenant(world);
     await seedSuggestion(world, {
       ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
     });
 
-    await request(app)
+    const res = await request(app)
       .post('/api/contacts/c1/suggestions/pets/accept')
       .set('x-origin-verify', ORIGIN_SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
-      .send({})
+      .send({ createdAt: 42 })
       .expect(400);
 
+    expect(res.body.error).toBe('invalid_suggestion_identity');
     expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeDefined();
     expect(world.suggestionResolutions.size).toBe(0);
     expect(setVerdict).not.toHaveBeenCalled();
+  });
+
+  // F9a: the documented pre-identity contract was "(no body)". Express hands a
+  // body-less POST to the route as {}, which the identity fence 400'd - the
+  // route rejected a request shape it published. Body-less now falls back to
+  // the CURRENT pending row.
+  it('resolves the current pending row for a legacy body-less accept', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-legacy',
+    });
+
+    const res = await request(app)
+      .post('/api/contacts/c1/suggestions/pets/accept')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+
+    expect(res.body.contact.pets).toBe('two cats');
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith('run-legacy', 'pets', 'accepted', expect.objectContaining({ by: ACTOR }));
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+  });
+
+  it('404s a legacy body-less accept when nothing is pending for that target', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+
+    const res = await request(app)
+      .post('/api/contacts/c1/suggestions/pets/accept')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(404);
+
+    expect(res.body.error).toBe('no_pending_suggestion');
+    expect(world.suggestionResolutions.size).toBe(0);
+    expect(setVerdict).not.toHaveBeenCalled();
+  });
+
+  it('dismisses the current pending row for a legacy body-less dismiss', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'tenure', suggestedValue: 'three years', conversationId: 'conv-1', runId: 'run-legacy-dismiss',
+    });
+
+    await request(app)
+      .post('/api/contacts/c1/suggestions/tenure/dismiss')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'tenure')).toBeUndefined();
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-legacy-dismiss', 'tenure', 'dismissed', expect.objectContaining({ by: ACTOR }),
+    );
   });
 
   it('runs status, phone, address, scalar, and dismiss through the shared phase executor', async () => {
@@ -963,6 +1024,47 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     await accept(app, 'c1', 'status').expect(200);
     expect(setVerdict).toHaveBeenCalledWith('winning-run', 'status', 'accepted', expect.anything());
     expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+  });
+
+  // F9c: pino applies its standard error serializer ONLY to the `err` key. The
+  // same Error under `error` has non-enumerable message/stack and serializes to
+  // {}, so the best-effort failure was logged blind.
+  it('serializes a best-effort verdict-stamp failure under a readable err', async () => {
+    const { app, world, capture } = makeWebhookHarness();
+    world.aiRuns.setVerdict = async () => {
+      throw new Error('ai run store unavailable');
+    };
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-log',
+    });
+
+    await accept(app, 'c1', 'pets').expect(200);
+
+    const line = capture.lines.find(
+      (entry) => entry['msg'] === 'ai run verdict stamp failed (best-effort)',
+    );
+    expect(line).toBeDefined();
+    expect(line?.['err']).toMatchObject({ message: 'ai run store unavailable' });
+    // Ids only - a journal carries the suggestion's values.
+    expect(line?.['contactId']).toBe('c1');
+    expect(line?.['target']).toBe('pets');
+  });
+
+  // F9d: the accept response re-reads the contact the transaction just wrote.
+  // An eventually consistent GetItem can serve the pre-write item, so the
+  // operator's own accept can render as if nothing changed.
+  it('re-reads the accepted contact with a consistent read', async () => {
+    const { app, world } = makeWorld();
+    seedTenant(world);
+    const getById = vi.spyOn(world.contactsRepo, 'getById');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-consistent',
+    });
+
+    await accept(app, 'c1', 'pets').expect(200);
+
+    expect(getById).toHaveBeenCalledWith('c1', { consistentRead: true });
   });
 
   it('stamps accepted on the scalar accept branch', async () => {

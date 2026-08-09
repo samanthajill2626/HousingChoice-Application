@@ -332,9 +332,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
               expectedPhase: 'domain_applied',
               nextPhase: 'activity_recorded',
             });
-          } catch (error) {
+          } catch (err) {
+            // `err`, not `error`: pino serializes an Error only under `err`.
             deps.logger.error(
-              { error, contactId: journal.contactId, target: journal.target },
+              { err, contactId: journal.contactId, target: journal.target },
               'suggestion resolution activity failed (best-effort)',
             );
             result = await deps.resolutionRepo.advancePhase({
@@ -375,9 +376,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
                 ...(journal.actorId !== undefined && { by: journal.actorId }),
               },
             );
-          } catch (error) {
+          } catch (err) {
+            // `err`, not `error`: pino serializes an Error only under `err`.
             deps.logger.warn(
-              { error, contactId: journal.contactId, target: journal.target },
+              { err, contactId: journal.contactId, target: journal.target },
               'ai run verdict stamp failed (best-effort)',
             );
           }

@@ -960,12 +960,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.suggestionResolutionLeaseMs !== undefined && {
         resolutionLeaseMs: deps.suggestionResolutionLeaseMs,
       }),
-      auditRepo: audit,
-      activityEventsRepo: activityEvents,
       events,
-      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
-      placementDeadlinesRepo: placementDeadlines,
-      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only

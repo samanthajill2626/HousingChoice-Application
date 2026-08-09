@@ -27,7 +27,7 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
 import type { ContactItem, ContactPhone } from './contactsRepo.js';
-import { contactPhones, phoneRefId } from './contactsRepo.js';
+import { phoneRefId, seedPhonesForWrite } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
 import type { SuggestionItem } from './extractionRepo.js';
 
@@ -804,13 +804,18 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         const beforePhones = Array.isArray(contact.phones)
           ? contact.phones.map((phone) => ({ ...phone }))
           : undefined;
-        const phones: ContactPhone[] = contactPhones(contact).map((phone) => ({ ...phone }));
+        // F6: this is contactsRepo.addPhone, replayed under the journal's fence.
+        // Materialize through the WRITER seeder (keeps the primary's firstSeenAt
+        // from created_at and stamps lastSeenAt), attach the accepted number as
+        // NON-primary, and never write the `phone` scalar - addPhone promotes
+        // nothing. journal.claimedAt is the clock so every replay writes the
+        // same bytes.
+        const phones: ContactPhone[] = seedPhonesForWrite(contact, journal.claimedAt);
         let targetPhone = phones.find((entry) => entry.phone === plan.phone);
         if (targetPhone === undefined) {
-          const becomesPrimary = phones.length === 0;
           phones.push({
             phone: plan.phone,
-            primary: becomesPrimary,
+            primary: false,
             firstSeenAt: journal.claimedAt,
             lastSeenAt: journal.claimedAt,
             ...(plan.label !== undefined && { label: plan.label }),
@@ -821,11 +826,6 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         const contactNames: Record<string, string> = { '#phones': 'phones' };
         const contactValues: Record<string, unknown> = { ':phones': phones };
         const sets = ['#phones = :phones'];
-        if (targetPhone?.primary === true && contact.phone !== plan.phone) {
-          contactNames['#phone'] = 'phone';
-          sets.push('#phone = :phone');
-          contactValues[':phone'] = plan.phone;
-        }
         let contactCondition: string;
         if (beforePhones === undefined) {
           if (contact.phone === undefined) {
@@ -842,6 +842,11 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
           contactCondition = 'attribute_exists(contactId) AND #phones = :beforePhones';
           contactValues[':beforePhones'] = beforePhones;
         }
+        // Pointer, inside the SAME fenced transaction: a non-primary number is
+        // established or verified (a retry with a missing pointer repairs it),
+        // while an accepted number that is ALREADY this contact's primary keeps
+        // the "primary has no pointer" invariant - the delete only ever removes
+        // our own dangling row.
         const needsPointer = targetPhone?.primary !== true;
         const effects: NonNullable<TransactWriteCommandInput['TransactItems']> = [
           {

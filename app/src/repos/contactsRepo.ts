@@ -298,6 +298,36 @@ export function contactPhones(contact: Pick<ContactItem, 'phone' | 'phones'>): C
 }
 
 /**
+ * The phones[] a WRITER must persist (BE1/C1): the stored array (copied) when
+ * present and non-empty, else the legacy scalar materialized as the primary
+ * entry, keeping its firstSeenAt (created_at) and stamping lastSeenAt.
+ *
+ * Pure, and the clock is a parameter: addPhone/setPhone pass the wall clock,
+ * while the phase-fenced suggestion resolver passes the journal's claimedAt so
+ * a replayed write produces identical bytes. Never persist contactPhones() -
+ * that read serializer carries no timestamps and would destroy them.
+ */
+export function seedPhonesForWrite(
+  contact: Pick<ContactItem, 'phone' | 'phones' | 'created_at'>,
+  nowIso: string,
+): ContactPhone[] {
+  if (Array.isArray(contact.phones) && contact.phones.length > 0) {
+    return contact.phones.map((p) => ({ ...p }));
+  }
+  if (typeof contact.phone === 'string' && contact.phone.length > 0) {
+    return [
+      {
+        phone: contact.phone,
+        primary: true,
+        ...(typeof contact.created_at === 'string' && { firstSeenAt: contact.created_at }),
+        lastSeenAt: nowIso,
+      },
+    ];
+  }
+  return [];
+}
+
+/**
  * Back-compat read serializer (email-channel A1 - the contactPhones() analog).
  * Returns the contact's emails[] when present & non-empty, else
  * `[{ email, primary: true }]` when only the scalar exists, else []. Pure -
@@ -522,22 +552,8 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
   };
 
   /** The phones[] in canonical form: seed (copy) from the scalar when absent. */
-  const seededPhones = (contact: ContactItem): ContactPhone[] => {
-    if (Array.isArray(contact.phones) && contact.phones.length > 0) {
-      return contact.phones.map((p) => ({ ...p }));
-    }
-    if (typeof contact.phone === 'string' && contact.phone.length > 0) {
-      return [
-        {
-          phone: contact.phone,
-          primary: true,
-          ...(typeof contact.created_at === 'string' && { firstSeenAt: contact.created_at }),
-          lastSeenAt: new Date().toISOString(),
-        },
-      ];
-    }
-    return [];
-  };
+  const seededPhones = (contact: ContactItem): ContactPhone[] =>
+    seedPhonesForWrite(contact, new Date().toISOString());
 
   /** Write a phone-pointer item for a non-primary number (idempotent). */
   const putPointer = async (phone: string, ownerContactId: string): Promise<void> => {

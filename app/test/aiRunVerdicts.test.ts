@@ -1224,7 +1224,12 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     expect(setVerdict).toHaveBeenCalledWith('run-1', 'type', 'superseded_by_human_edit', expect.anything());
   });
 
-  it('stamps accepted when the retained suggestion value matches the applied human value', async () => {
+  // F10: the value-match is CONFINED to `type` (frozen spec 7.3, lines 609-616:
+  // "This value comparison is confined to `type`. It must NOT be generalized to
+  // the other eleven targets: for them the PATCH is a human edit that supersedes
+  // the suggestion regardless of value"). This test used to assert the opposite
+  // - a matching `pets` PATCH stamping `accepted` - and is now the confinement pin.
+  it('CONFINEMENT: a non-type PATCH supersedes even when the value matches the suggestion', async () => {
     const { app, world, setVerdict } = makeWorld();
     seedTenant(world);
     await seedSuggestion(world, {
@@ -1233,7 +1238,8 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
 
     await patch(app, 'c1', { pets: 'two cats' }).expect(200);
 
-    expect(setVerdict).toHaveBeenCalledWith('run-1', 'pets', 'accepted', expect.anything());
+    expect(setVerdict).toHaveBeenCalledWith('run-1', 'pets', 'superseded_by_human_edit', expect.anything());
+    expect(setVerdict).not.toHaveBeenCalledWith('run-1', 'pets', 'accepted', expect.anything());
   });
 
   it('snapshots before update so a replacement created inside contacts.update remains pending and unstamped', async () => {

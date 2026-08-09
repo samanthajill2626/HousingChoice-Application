@@ -1,13 +1,24 @@
 // T3: extraction driver seam (factory + console + fake). The Anthropic driver's
 // network path is deliberately NOT exercised here (request-shaping is covered by
-// the schema/prompt tests in extractionSchema.test.ts).
-import { describe, expect, it } from 'vitest';
-import {
+// the schema/prompt tests in extractionSchema.test.ts) - EXCEPT for the
+// malformed-response guards (F9), where the SDK is stubbed to return a shape the
+// driver's types promise but a runtime response might not carry.
+import { describe, expect, it, vi } from 'vitest';
+
+const sdk = vi.hoisted(() => ({ reply: {} as unknown }));
+
+vi.mock('@anthropic-ai/sdk', () => ({
+  default: class StubAnthropic {
+    readonly messages = { create: async (): Promise<unknown> => sdk.reply };
+  },
+}));
+
+const {
   createExtractionDriver,
   EMPTY_EXTRACTION,
   ExtractionRefusedError,
-  type ExtractionInput,
-} from '../src/adapters/extraction.js';
+} = await import('../src/adapters/extraction.js');
+import type { ExtractionInput } from '../src/adapters/extraction.js';
 import { parseExtractionOps } from '../src/services/extraction/schema.js';
 
 const model = 'claude-opus-4-8';
@@ -161,6 +172,55 @@ describe('fake driver', () => {
     });
     expect(call.ok).toBe(true);
     expect(call.meta.rawText).toBe('{oops');
+  });
+});
+
+describe('anthropic driver - malformed SDK responses (F9)', () => {
+  // extract()'s ONLY caller (jobs/extraction.ts) does not wrap it, so a throw
+  // unwinds to the job's per-row backstop and is mislabeled errorKind 'repo'.
+  // The discriminated return exists precisely so the caller learns WHICH STAGE
+  // failed - and so a thrown error never carries rawText (contact PII on the one
+  // object type this codebase's loggers serialize wholesale).
+  const anthropic = () => createExtractionDriver({ driver: 'anthropic', model, apiKey: 'sk-test' });
+
+  it('reports a response with no usage as a driver failure instead of throwing', async () => {
+    sdk.reply = { stop_reason: 'end_turn', content: [{ type: 'text', text: '{"fields":{}}' }] };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('driver');
+    expect(call.meta.driver).toBe('anthropic');
+  });
+
+  it('reports a response with no content array as a driver failure instead of throwing', async () => {
+    sdk.reply = { stop_reason: 'end_turn', usage: { input_tokens: 10, output_tokens: 4 } };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('driver');
+    expect(call.meta.usage).toEqual({ inputTokens: 10, outputTokens: 4 });
+  });
+
+  it('keeps a well-formed response on the normal path', async () => {
+    sdk.reply = {
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 5 },
+      content: [{ type: 'text', text: '{"fields":{"pets":{"op":"none","value":"","reason":""}}}' }],
+    };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(true);
+    expect(call.meta.usage).toEqual({ inputTokens: 12, outputTokens: 5 });
+    expect(call.meta.rawText).toBe('{"fields":{"pets":{"op":"none","value":"","reason":""}}}');
+  });
+
+  it('rawText SURVIVES a parse failure - the one case where the text is the whole answer', async () => {
+    sdk.reply = {
+      stop_reason: 'end_turn',
+      usage: { input_tokens: 12, output_tokens: 5 },
+      content: [{ type: 'text', text: 'not json at all' }],
+    };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('parse');
+    expect(call.meta.rawText).toBe('not json at all');
   });
 });
 

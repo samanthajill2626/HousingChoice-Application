@@ -116,6 +116,15 @@ const BATCH_BACKOFF_MS = 25;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
+/**
+ * DynamoDB's ValidationException is NOT a modeled exception class in
+ * @aws-sdk/client-dynamodb - it arrives as a DynamoDBServiceException whose
+ * `name` is 'ValidationException'. Same detection as suggestionResolutionRepo.
+ */
+function isValidationFailure(err: unknown): boolean {
+  return err instanceof Error && err.name === 'ValidationException';
+}
+
 export const runItemId = (runId: string): string => `run#${runId}`;
 export const inflightItemId = (runId: string): string => `inflight#${runId}`;
 export const runSortKey = (startedAt: string, runId: string): string => `${startedAt}#${runId}`;
@@ -238,21 +247,37 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
 
     async listByEntity(entityKey, opts = {}) {
       const limit = opts.limit ?? DEFAULT_PAGE_SIZE;
+      // A KeyConditionExpression may carry AT MOST ONE condition on the sort
+      // key - two is a ValidationException, not a conjunction (design 5.3: date
+      // ranges are a BETWEEN on sortKey). `before` (the exclusive paging cursor)
+      // and `to` (the inclusive day ceiling) both constrain that one key, so the
+      // upper bound is their LEXICOGRAPHIC MIN: a caller-supplied `before` past
+      // the `to` ceiling must not silently drop the ceiling and over-return.
+      const toCeiling = opts.to !== undefined ? `${opts.to}${SORT_KEY_CEILING}` : undefined;
       const upper =
-        opts.before !== undefined
-          ? { expr: '#sk < :upper', value: opts.before }
-          : opts.to !== undefined
-            ? { expr: '#sk <= :upper', value: `${opts.to}${SORT_KEY_CEILING}` }
+        opts.before !== undefined && (toCeiling === undefined || opts.before <= toCeiling)
+          ? { value: opts.before, exclusive: true }
+          : toCeiling !== undefined
+            ? { value: toCeiling, exclusive: false }
             : undefined;
       const usesSortKey = upper !== undefined || opts.from !== undefined;
+      const sortCondition =
+        upper !== undefined && opts.from !== undefined
+          ? '#sk BETWEEN :lower AND :upper'
+          : upper !== undefined
+            ? (upper.exclusive ? '#sk < :upper' : '#sk <= :upper')
+            : opts.from !== undefined
+              ? '#sk >= :lower'
+              : undefined;
+      // BETWEEN is inclusive on BOTH ends, but `before` is the last sortKey
+      // ALREADY returned. When it becomes the BETWEEN upper, over-fetch by one
+      // and drop the boundary row here - sortKeys are unique (`<ISO>#<uuid>`),
+      // so that is at most one row.
+      const trimsBoundary = sortCondition === '#sk BETWEEN :lower AND :upper' && upper!.exclusive;
       const input: QueryCommandInput = {
         TableName: table,
         IndexName: 'byEntity',
-        KeyConditionExpression: [
-          '#ek = :ek',
-          ...(upper !== undefined ? [upper.expr] : []),
-          ...(opts.from !== undefined ? ['#sk >= :lower'] : []),
-        ].join(' AND '),
+        KeyConditionExpression: ['#ek = :ek', ...(sortCondition !== undefined ? [sortCondition] : [])].join(' AND '),
         ExpressionAttributeNames: {
           '#ek': 'entityKey',
           ...(usesSortKey ? { '#sk': 'sortKey' } : {}),
@@ -263,10 +288,13 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           ...(opts.from !== undefined && { ':lower': opts.from }),
         },
         ScanIndexForward: false,
-        Limit: limit,
+        Limit: trimsBoundary ? limit + 1 : limit,
       };
       const page = await doc.send(new QueryCommand(input));
-      const pointers = ((page.Items as AiRunPointer[] | undefined) ?? []).map((p) => ({
+      const items = (page.Items as AiRunPointer[] | undefined) ?? [];
+      const kept = trimsBoundary ? items.filter((p) => p.sortKey < upper!.value) : items;
+      const hasMore = kept.length > limit || page.LastEvaluatedKey !== undefined;
+      const pointers = kept.slice(0, limit).map((p) => ({
         runId: p.runId,
         sortKey: p.sortKey,
       }));
@@ -280,16 +308,18 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           : { runId: p.runId, sortKey: p.sortKey, expired: true };
       });
       const nextBefore =
-        entries.length === limit && page.LastEvaluatedKey !== undefined
-          ? entries[entries.length - 1]!.sortKey
-          : undefined;
+        entries.length === limit && hasMore ? entries[entries.length - 1]!.sortKey : undefined;
       return { entries, ...(nextBefore !== undefined && { nextBefore }) };
     },
 
     /**
      * PRECONDITION: decisions.<target> must already exist. The conditional
      * guard intentionally protects only the run row, preserving the frozen
-     * best-effort boundary for a missing parent decision map.
+     * best-effort boundary for a missing parent decision map. When that
+     * precondition is violated the SET targets an invalid document path, which
+     * DynamoDB rejects with a ValidationException - caught below and reported as
+     * `false`, because this method's contract is a boolean and every caller
+     * treats it as best-effort observability.
      */
     async setVerdict(runId, target, verdict, opts = {}) {
       const at = opts.at ?? new Date().toISOString();
@@ -323,7 +353,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           }));
           return true;
         } catch (err) {
-          if (err instanceof ConditionalCheckFailedException) return false;
+          if (err instanceof ConditionalCheckFailedException || isValidationFailure(err)) return false;
           throw err;
         }
       };
@@ -339,7 +369,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           }));
           return true;
         } catch (err) {
-          if (err instanceof ConditionalCheckFailedException) return false;
+          if (err instanceof ConditionalCheckFailedException || isValidationFailure(err)) return false;
           throw err;
         }
       };
@@ -379,6 +409,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         }));
         return true;
       } catch (err) {
+        if (isValidationFailure(err)) return false;
         if (!(err instanceof TransactionCanceledException)) throw err;
       }
       if (await writeRunVerdict()) return true;

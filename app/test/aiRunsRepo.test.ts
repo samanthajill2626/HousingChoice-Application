@@ -9,6 +9,7 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import {
   ConditionalCheckFailedException,
+  DynamoDBServiceException,
   TransactionCanceledException,
 } from '@aws-sdk/client-dynamodb';
 import { describe, expect, it, vi } from 'vitest';
@@ -55,21 +56,78 @@ function valueAt(row: Row, path: string): unknown {
   row);
 }
 
+/**
+ * The DynamoDB error the SDK raises for an invalid expression. It is NOT a
+ * modeled exception class in @aws-sdk/client-dynamodb - it arrives as a
+ * DynamoDBServiceException whose `name` is 'ValidationException', which is what
+ * src detects (suggestionResolutionRepo.ts's isValidationFailure).
+ */
+function validationException(message: string): DynamoDBServiceException {
+  return new DynamoDBServiceException({
+    name: 'ValidationException',
+    $fault: 'client',
+    $metadata: { httpStatusCode: 400 },
+    message,
+  });
+}
+
+/**
+ * Split on top-level AND while keeping `BETWEEN :a AND :b` whole. A naive
+ * split shatters a BETWEEN clause into two unparseable fragments.
+ */
+function splitConditions(expr: string): string[] {
+  const parts = expr.split(/\s+AND\s+/i);
+  const out: string[] = [];
+  for (let i = 0; i < parts.length; i += 1) {
+    const part = parts[i]!.trim();
+    if (/\sBETWEEN\s/i.test(` ${part} `) && i + 1 < parts.length) {
+      out.push(`${part} AND ${parts[i + 1]!.trim()}`);
+      i += 1;
+      continue;
+    }
+    out.push(part);
+  }
+  return out;
+}
+
+const BETWEEN_CLAUSE = /^([#\w.]+)\s+BETWEEN\s+(:[\w]+)\s+AND\s+(:[\w]+)$/i;
+const COMPARE_CLAUSE = /^([#\w.]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/;
+const FUNCTION_CLAUSE = /^(attribute_exists|attribute_not_exists)\(\s*([#\w.]+)\s*\)$/;
+
+/** The attribute one clause constrains, resolved through the name aliases. */
+function clauseAttribute(clause: string, names: Record<string, string>): string | undefined {
+  const fn = FUNCTION_CLAUSE.exec(clause);
+  if (fn) return attrOf(fn[2]!, names);
+  const btw = BETWEEN_CLAUSE.exec(clause);
+  if (btw) return attrOf(btw[1]!, names);
+  const cmp = COMPARE_CLAUSE.exec(clause);
+  return cmp ? attrOf(cmp[1]!, names) : undefined;
+}
+
 function conditionHolds(
   expr: string,
   names: Record<string, string>,
   values: Record<string, unknown>,
   row: Row | undefined,
 ): boolean {
-  return expr.split(/\s+AND\s+/i).every((clauseRaw) => {
+  return splitConditions(expr).every((clauseRaw) => {
     const clause = clauseRaw.trim();
-    const fn = /^(attribute_exists|attribute_not_exists)\(\s*([#\w.]+)\s*\)$/.exec(clause);
+    const fn = FUNCTION_CLAUSE.exec(clause);
     if (fn) {
       const attr = attrOf(fn[2]!, names);
       const exists = row !== undefined && valueAt(row, attr) !== undefined;
       return fn[1] === 'attribute_exists' ? exists : !exists;
     }
-    const cmp = /^([#\w.]+)\s*(<=|>=|<|>|=)\s*(:[\w]+)$/.exec(clause);
+    const btw = BETWEEN_CLAUSE.exec(clause);
+    if (btw) {
+      if (row === undefined) return false;
+      const left = valueAt(row, attrOf(btw[1]!, names));
+      if (left === undefined) return false;
+      const l = left as string;
+      // DynamoDB BETWEEN is inclusive on BOTH bounds.
+      return l >= (values[btw[2]!] as string) && l <= (values[btw[3]!] as string);
+    }
+    const cmp = COMPARE_CLAUSE.exec(clause);
     if (cmp) {
       if (row === undefined) return false;
       const left = valueAt(row, attrOf(cmp[1]!, names));
@@ -123,7 +181,11 @@ function applyUpdate(
         for (const seg of path.slice(0, -1)) {
           const next = target[seg];
           if (next === undefined || typeof next !== 'object') {
-            throw new Error(`fake doc: nested SET into a missing path segment ${seg}`);
+            // Real DynamoDB rejects a SET into a missing document path with a
+            // ValidationException, NOT a ConditionalCheckFailedException.
+            throw validationException(
+              `The document path provided in the update expression is invalid for update: ${seg}`,
+            );
           }
           target = next as Record<string, unknown>;
         }
@@ -257,6 +319,19 @@ function makeFakeDoc(opts: {
         const names = cmd.input.ExpressionAttributeNames ?? {};
         const values = cmd.input.ExpressionAttributeValues ?? {};
         const rangeAttr = INDEX_RANGE[cmd.input.IndexName!];
+        // A KeyConditionExpression may carry AT MOST ONE condition on the range
+        // key. Real DynamoDB raises a ValidationException for a second one; the
+        // fake used to evaluate them as an ordinary JS conjunction, which is why
+        // an invalid from+to query passed its own unit test.
+        if (rangeAttr !== undefined) {
+          const rangeClauses = splitConditions(cmd.input.KeyConditionExpression!)
+            .filter((clause) => clauseAttribute(clause, names) === rangeAttr);
+          if (rangeClauses.length > 1) {
+            throw validationException(
+              'Invalid KeyConditionExpression: The expression can only contain one condition on the range key',
+            );
+          }
+        }
         const matched = [...store.values()].filter((row) =>
           conditionHolds(cmd.input.KeyConditionExpression!, names, values, row),
         );
@@ -463,11 +538,25 @@ describe('aiRunsRepo - listByEntity', () => {
     await repo.listByEntity('global', { before: '2026-08-06T10:01:00.000Z#run-01' });
     await repo.listByEntity('global', { from: '2026-08-06T10:00:00.000Z' });
     await repo.listByEntity('global', { to: '2026-08-06T10:01:00.000Z' });
+    await repo.listByEntity('global', { from: '2026-08-06T10:00:00.000Z', to: '2026-08-06T10:01:00.000Z' });
 
     expect(queryInputs()[0]!.ExpressionAttributeNames).toEqual({ '#ek': 'entityKey' });
     for (const input of queryInputs().slice(1)) {
       expect(input.ExpressionAttributeNames).toEqual({ '#ek': 'entityKey', '#sk': 'sortKey' });
     }
+    // One emitted form per bound combination, and never an unbound alias/value.
+    expect(queryInputs().map((i) => i.KeyConditionExpression)).toEqual([
+      '#ek = :ek',
+      '#ek = :ek AND #sk < :upper',
+      '#ek = :ek AND #sk >= :lower',
+      '#ek = :ek AND #sk <= :upper',
+      '#ek = :ek AND #sk BETWEEN :lower AND :upper',
+    ]);
+    expect(Object.keys(queryInputs()[0]!.ExpressionAttributeValues!).sort()).toEqual([':ek']);
+    expect(Object.keys(queryInputs()[1]!.ExpressionAttributeValues!).sort()).toEqual([':ek', ':upper']);
+    expect(Object.keys(queryInputs()[2]!.ExpressionAttributeValues!).sort()).toEqual([':ek', ':lower']);
+    expect(Object.keys(queryInputs()[3]!.ExpressionAttributeValues!).sort()).toEqual([':ek', ':upper']);
+    expect(Object.keys(queryInputs()[4]!.ExpressionAttributeValues!).sort()).toEqual([':ek', ':lower', ':upper']);
   });
 
   it('pages at 25 by default and hands back a nextBefore cursor', async () => {
@@ -532,6 +621,74 @@ describe('aiRunsRepo - listByEntity', () => {
       to: '2026-08-06T10:03:00.000Z',
     });
     expect(entries.map((e) => e.runId)).toEqual(['run-03', 'run-02', 'run-01']);
+  });
+
+  // F4: two sort-key conditions in one KeyConditionExpression is a real
+  // ValidationException. Both bounds must arrive as a single BETWEEN.
+  it('emits exactly ONE sort-key condition - a BETWEEN - when both bounds are present', async () => {
+    const { doc, queryInputs } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+
+    await repo.listByEntity('global', {
+      from: '2026-08-06T10:01:00.000Z',
+      to: '2026-08-06T10:03:00.000Z',
+    });
+    await repo.listByEntity('global', {
+      from: '2026-08-06T10:01:00.000Z',
+      before: '2026-08-06T10:04:00.000Z#run-04',
+    });
+
+    expect(queryInputs()[0]!.KeyConditionExpression).toBe('#ek = :ek AND #sk BETWEEN :lower AND :upper');
+    expect(queryInputs()[1]!.KeyConditionExpression).toBe('#ek = :ek AND #sk BETWEEN :lower AND :upper');
+  });
+
+  // F4: the paged path. `before` is the LAST sortKey already returned, so it
+  // must stay EXCLUSIVE even though BETWEEN is inclusive on both bounds.
+  it('keeps the before cursor exclusive under BETWEEN when a from filter is active', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+    const { entries } = await repo.listByEntity('global', {
+      from: '2026-08-06T10:01:00.000Z',
+      before: '2026-08-06T10:03:00.000Z#run-03',
+    });
+    expect(entries.map((e) => e.runId)).toEqual(['run-02', 'run-01']);
+  });
+
+  // F4: the boundary this bug hides behind - a from-filtered list walked page by
+  // page must lose no row and repeat no row across the cursor seam.
+  it('pages a from-filtered list with no duplicate and no skipped row', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 10);
+    const from = '2026-08-06T10:02:00.000Z';
+
+    const seenIds: string[] = [];
+    let before: string | undefined;
+    for (let page = 0; page < 10; page += 1) {
+      const out: { entries: Array<{ runId: string }>; nextBefore?: string } =
+        await repo.listByEntity('global', { from, limit: 3, ...(before !== undefined && { before }) });
+      seenIds.push(...out.entries.map((e) => e.runId));
+      if (out.nextBefore === undefined) break;
+      before = out.nextBefore;
+    }
+
+    expect(seenIds).toEqual(['run-09', 'run-08', 'run-07', 'run-06', 'run-05', 'run-04', 'run-03', 'run-02']);
+    expect(new Set(seenIds).size).toBe(seenIds.length);
+  });
+
+  // F4: a caller-supplied `before` beyond the `to` ceiling must NOT over-return.
+  // Today `before` silently shadows `to` (the ternary), dropping the ceiling.
+  it('applies the TIGHTER of before and the to ceiling when both are supplied', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+    const { entries } = await repo.listByEntity('global', {
+      to: '2026-08-06T10:02:00.000Z',
+      before: '2026-08-06T10:04:00.000Z#run-04',
+    });
+    expect(entries.map((e) => e.runId)).toEqual(['run-02', 'run-01', 'run-00']);
   });
 
   it('returns an empty page for an unknown scope without erroring', async () => {
@@ -652,6 +809,26 @@ describe('aiRunsRepo - setVerdict', () => {
     const run = await repo.getRun('run-1');
     expect(run?.decisions['pets']?.verdict).toBe('superseded');
     expect(run?.decisions['pets']?.verdictBy).toBeUndefined();
+  });
+
+  // F9: setVerdict's contract is Promise<boolean> and every caller treats it as
+  // best-effort. A run row whose decisions map lacks the target makes the
+  // document-path SET invalid - a ValidationException, not a condition failure -
+  // and that must not escape as a throw. (With expectedVerdict the guard on the
+  // same absent path fails first; without one the SET is reached, which is the
+  // rethrow point this pins.)
+  it('returns false without throwing when the run has no decision for the target', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putRun(draftRecord({
+      decisions: { tenure: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } },
+    }));
+
+    await expect(repo.setVerdict('run-1', 'pets', 'accepted', {
+      at: '2026-08-06T11:00:00.000Z',
+    })).resolves.toBe(false);
+    expect((await repo.getRun('run-1'))?.decisions['tenure']?.verdict).toBe('pending');
+    expect((await repo.getRun('run-1'))?.decisions['pets']).toBeUndefined();
   });
 
   it('does not overwrite a terminal verdict when another resolver won first', async () => {

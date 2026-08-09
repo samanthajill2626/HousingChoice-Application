@@ -203,13 +203,28 @@ class AnthropicExtractionDriver implements ExtractionDriver {
     } catch (err) {
       return { ok: false, meta, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
     }
-    meta.usage = { inputTokens: message.usage.input_tokens, outputTokens: message.usage.output_tokens };
+    // Everything below dereferences the RESPONSE. The types promise `usage` and
+    // `content`, but a stubbed/proxied client, a future SDK version or a
+    // streaming variant can hand back a shape that lacks them - and a TypeError
+    // escaping extract() would defeat the discriminated return entirely: its one
+    // caller (jobs/extraction.ts) does not wrap it, so the job's backstop would
+    // record errorKind 'repo' for a driver fault, and a thrown Error is the one
+    // object type this codebase's loggers serialize wholesale (rawText is PII).
+    // A malformed response is therefore a 'driver' FAILURE, never a throw.
+    const usage: typeof message.usage | undefined = message?.usage;
+    if (typeof usage?.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') {
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response carried no usage counts',
+      };
+    }
+    meta.usage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
     // Per-run token spend (cost observability for the input caps). Counts
     // only - never transcript text (PII).
     this.log.info(
       {
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
+        inputTokens: usage.input_tokens,
+        outputTokens: usage.output_tokens,
         transcriptUtterances: input.transcript.length,
       },
       'anthropic extraction usage',
@@ -220,7 +235,14 @@ class AnthropicExtractionDriver implements ExtractionDriver {
         message: 'Anthropic declined to extract (stop_reason: refusal)',
       };
     }
-    const textBlock = message.content.find(
+    const content: typeof message.content | undefined = message.content;
+    if (!Array.isArray(content)) {
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response contained no content blocks',
+      };
+    }
+    const textBlock = content.find(
       (block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text',
     );
     if (!textBlock) {

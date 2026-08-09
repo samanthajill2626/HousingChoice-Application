@@ -310,6 +310,33 @@ function profileFieldNames(profile: ExtractionProfileSnapshot): string[] {
   return names.sort();
 }
 
+/**
+ * Build ONE piece of the run-log draft, best-effort (design section 8: "The
+ * recorder is strictly best-effort ... It must never fail an extraction run,
+ * re-arm a due row, or burn a retry attempt.").
+ *
+ * The builders below (window, decisions) are pure assembly for the run RECORD -
+ * nothing downstream of extraction reads them. A throw from one used to unwind
+ * into runDueExtractions' per-row backstop, which stamped outcome 'failed',
+ * called repo.fail(), burned an attempt and re-armed the row - so observability
+ * broke what it observed. On a throw this logs ids-only and returns undefined;
+ * the caller leaves its draft field as it was and continues on the exact same
+ * path (same gates, same outcome, same cursor advance, same complete/fail
+ * routing). Fields are optional on RunDraft and recordRun already defaults the
+ * absent shapes, so no degraded record is malformed.
+ */
+function draftPiece<T>(logger: Logger, draft: RunDraft, build: () => T): T | undefined {
+  try {
+    return build();
+  } catch (err) {
+    logger.warn(
+      { conversationId: draft.conversationId, runId: draft.runId, err },
+      'ai run draft assembly failed (best-effort)',
+    );
+    return undefined;
+  }
+}
+
 /** Process one due row, filling the caller-owned draft on every known path. */
 async function processRow(
   row: DueExtractionItem,
@@ -388,13 +415,16 @@ async function processRow(
   const fresh = chronological.filter((m) => m.created_at >= cutoff);
   const agedOutTsMsgIds = chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
   const newestTsMsgId = fresh[fresh.length - 1]?.tsMsgId;
-  draft.window = buildLightRunWindow({
+  const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
     cursor,
     fetchedCount: newestFirst.length,
     agedOutTsMsgIds,
     messages: fresh.map((m) => ({ tsMsgId: m.tsMsgId, type: m.type, direction: m.direction })),
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
-  });
+  }));
+  // A partial RunWindow is not expressible, so a failed build omits the window
+  // entirely rather than storing half of one.
+  if (lightWindow !== undefined) draft.window = lightWindow;
 
   const hasNewClient = row.channel === 'voice' || row.channel === 'triage' || fresh.some(
     (m) => m.tsMsgId > cursor && (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
@@ -427,13 +457,17 @@ async function processRow(
   }
   const transcript = perMessage.filter((p) => included.has(p.tsMsgId)).flatMap((p) => p.capped);
   const hasInferredRoleContent = transcript.some((u) => u.speaker === 'unknown');
-  draft.window = buildFullRunWindow({
+  // A failed upgrade keeps the LIGHT window already assembled above: it built
+  // successfully from the same data, so retaining it degrades nothing.
+  const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
     cursor, fetchedCount: newestFirst.length, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
-  });
+  }));
+  if (fullWindow !== undefined) draft.window = fullWindow;
 
   const profile = toProfile(contact);
-  draft.profileFieldsPopulated = profileFieldNames(profile);
+  const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
+  if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
   const call = await driver.extract({ transcript, profile });
   draft.driver = call.meta.driver;
   if (call.meta.model !== undefined) draft.model = call.meta.model;
@@ -444,10 +478,11 @@ async function processRow(
     logger.warn({ conversationId, target }, 'ai run log: unexplained dropped decision');
   };
   if (!call.ok) {
-    draft.decisions = buildDecisions({
+    const failureDecisions = draftPiece(logger, draft, () => buildDecisions({
       ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,
       applyDecisions: [], onUnexplained: warnUnexplained,
-    });
+    }));
+    if (failureDecisions !== undefined) draft.decisions = failureDecisions;
     draft.notedLines = 0;
     return failed(call.failure, new Error(call.message));
   }
@@ -465,10 +500,15 @@ async function processRow(
     contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent,
     runId: draft.runId,
   });
-  draft.decisions = buildDecisions({
+  // The most damaging site: applyExtraction has ALREADY committed the contact
+  // write. A throw here used to skip completeOrFail below, so the cursor never
+  // advanced, the backstop burned an attempt, and the next poll re-billed the
+  // model for the same window. recordRun defaults absent decisions to {}.
+  const appliedDecisions = draftPiece(logger, draft, () => buildDecisions({
     ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,
     applyDecisions: applyOutcome.decisions, onUnexplained: warnUnexplained,
-  });
+  }));
+  if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
   draft.notedLines = applyOutcome.notedLines;
   draft.displaced = applyOutcome.displaced;
   const nextCursor = newestTsMsgId !== undefined && newestTsMsgId > cursor ? newestTsMsgId : cursor;

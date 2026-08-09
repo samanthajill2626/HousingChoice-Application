@@ -15,6 +15,7 @@
 // PII: never log message bodies or phone numbers - only ids/field names/counts.
 import type { ContactItem, ContactType, createContactsRepo } from '../../repos/contactsRepo.js';
 import { contactPhones } from '../../repos/contactsRepo.js';
+import { SuggestionDismissedError } from '../../repos/extractionRepo.js';
 import type { createExtractionRepo, SuggestionItem } from '../../repos/extractionRepo.js';
 import type { ExtractableField, ExtractionResult } from '../../adapters/extraction.js';
 import { normalizeToE164 } from '../../lib/phone.js';
@@ -687,6 +688,13 @@ async function putSuggestionSafe(
     const { displaced } = await deps.extraction.putSuggestion(s);
     return { ok: true, ...(displaced !== undefined && { displaced }) };
   } catch (err) {
+    if (err instanceof SuggestionDismissedError) {
+      deps.logger.debug(
+        { contactId: s.ownerContactId, target: s.target },
+        'suggestion suppressed (dismissal won writer fence)',
+      );
+      return { ok: false, dropReason: 'dismissed_before' };
+    }
     deps.logger.warn({ contactId: s.ownerContactId, target: s.target, err }, 'putSuggestion failed');
     return { ok: false, dropReason: 'repo_error' };
   }

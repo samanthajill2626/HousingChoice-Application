@@ -69,4 +69,50 @@ describe.skipIf(!reachable)('extractionRepo against DynamoDB Local (throwaway pr
     )).resolves.toBe(true);
     await expect(repo.getSuggestion(item.ownerContactId, item.target)).resolves.toBeUndefined();
   });
+
+  it('atomically suppresses a dismissed normalized value while allowing a different value', async () => {
+    await repo.putDismissal('contact-dismissed', 'pets', 'two cats');
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'contact-dismissed',
+      target: 'pets',
+      suggestedValue: 'two cats',
+      conversationId: 'conversation-1',
+    })).rejects.toMatchObject({ name: 'SuggestionDismissedError' });
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'contact-dismissed',
+      target: 'pets',
+      suggestedValue: 'one dog',
+      conversationId: 'conversation-2',
+    })).resolves.toMatchObject({ item: { suggestedValue: 'one dog' } });
+  });
+
+  it('reports the exact displaced row after concurrent CAS writers contend', async () => {
+    const base = await repo.putSuggestion({
+      ownerContactId: 'contact-writers',
+      target: 'pets',
+      suggestedValue: 'base',
+      conversationId: 'conversation-base',
+    });
+    const [left, right] = await Promise.all([
+      repo.putSuggestion({
+        ownerContactId: 'contact-writers',
+        target: 'pets',
+        suggestedValue: 'left',
+        conversationId: 'conversation-left',
+      }),
+      repo.putSuggestion({
+        ownerContactId: 'contact-writers',
+        target: 'pets',
+        suggestedValue: 'right',
+        conversationId: 'conversation-right',
+      }),
+    ]);
+    const live = await repo.getSuggestion('contact-writers', 'pets');
+    const winner = live?.revision === left.item.revision ? left : right;
+    const earlier = winner === left ? right : left;
+    expect(winner.displaced?.revision).toBe(earlier.item.revision);
+    expect(earlier.displaced?.revision).toBe(base.item.revision);
+  });
 });

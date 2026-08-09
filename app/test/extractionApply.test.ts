@@ -4,7 +4,7 @@
 // items 1-11 is pinned by at least one test.
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
-import type { PutSuggestionResult } from '../src/repos/extractionRepo.js';
+import { SuggestionDismissedError, type PutSuggestionResult } from '../src/repos/extractionRepo.js';
 import type { ExtractionResult } from '../src/adapters/extraction.js';
 import { createLogger, type Logger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -941,6 +941,24 @@ describe('applyExtraction - per-target decisions for the run log', () => {
       fields: { pets: { op: 'suggest', value: 'two cats' } },
     });
     expect(out.decisions[0]).toMatchObject({ outcome: 'dropped', dropReason: 'dismissed_before' });
+    expect(out.suggested).toEqual([]);
+  });
+
+  it('records dismissed_before when the atomic writer fence loses after the preflight read', async () => {
+    const { deps } = makeDeps({
+      // hasDismissal returns false, then the transaction observes the dismissal
+      // that won in between. This is the race the old read-plus-Put path missed.
+      putSuggestionImpl: async () => {
+        throw new SuggestionDismissedError();
+      },
+    });
+    const out = await run(deps, makeContact({ type: 'tenant', pets: 'a dog' }), {
+      fields: { pets: { op: 'suggest', value: 'two cats' } },
+    });
+    expect(out.decisions[0]).toMatchObject({
+      outcome: 'dropped',
+      dropReason: 'dismissed_before',
+    });
     expect(out.suggested).toEqual([]);
   });
 

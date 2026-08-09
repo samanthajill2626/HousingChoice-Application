@@ -18,10 +18,14 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import {
+  ConditionalCheckFailedException,
+  TransactionCanceledException,
+} from '@aws-sdk/client-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
@@ -195,6 +199,56 @@ function makeFakeDoc(): FakeDoc {
         const key = cmd.input.Key as { itemId: string };
         const row = store.get(key.itemId);
         return { Item: row ? { ...row } : undefined };
+      }
+      if (cmd instanceof TransactWriteCommand) {
+        const items = cmd.input.TransactItems ?? [];
+        // Evaluate every condition against the same pre-transaction snapshot.
+        for (const item of items) {
+          const operation = item.ConditionCheck ?? item.Put ?? item.Delete ?? item.Update;
+          if (operation === undefined) throw new Error('fake doc: empty transaction operation');
+          const key = 'Key' in operation && operation.Key !== undefined
+            ? operation.Key as { itemId: string }
+            : 'Item' in operation && operation.Item !== undefined
+              ? { itemId: operation.Item['itemId'] as string }
+              : undefined;
+          if (key === undefined) throw new Error('fake doc: transaction operation has no key');
+          const condition = operation.ConditionExpression;
+          if (
+            condition !== undefined &&
+            !conditionHolds(
+              condition,
+              operation.ExpressionAttributeNames ?? {},
+              operation.ExpressionAttributeValues ?? {},
+              store.get(key.itemId),
+            )
+          ) {
+            throw new TransactionCanceledException({ message: 'transaction condition', $metadata: {} });
+          }
+        }
+        for (const item of items) {
+          if (item.Put !== undefined) {
+            const itemRow = item.Put.Item;
+            if (itemRow === undefined) throw new Error('fake doc: transaction Put has no item');
+            const stored: Row = {};
+            for (const [key, value] of Object.entries(itemRow)) {
+              if (value !== undefined) stored[key] = value;
+            }
+            store.set(itemRow['itemId'] as string, stored);
+          } else if (item.Delete !== undefined) {
+            store.delete((item.Delete.Key as { itemId: string }).itemId);
+          } else if (item.Update !== undefined) {
+            const key = item.Update.Key as { itemId: string };
+            const row = store.get(key.itemId) ?? { ...key };
+            applyUpdate(
+              item.Update.UpdateExpression!,
+              item.Update.ExpressionAttributeNames ?? {},
+              item.Update.ExpressionAttributeValues ?? {},
+              row,
+            );
+            store.set(key.itemId, row);
+          }
+        }
+        return {};
       }
       if (cmd instanceof DeleteCommand) {
         const key = cmd.input.Key as { itemId: string };
@@ -657,5 +711,27 @@ describe('dismissal tombstones', () => {
     await repo.putDismissal('c1', 'firstName', 'cameron');
     expect(await repo.listSuggestionsByContact('c1')).toEqual([]);
     expect(await repo.listPending()).toEqual([]);
+  });
+
+  it('the atomic writer fence suppresses the same normalized value and preserves a different one', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putDismissal('c1', 'pets', 'two cats');
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'c1',
+      target: 'pets',
+      suggestedValue: '  TWO   CATS  ',
+      conversationId: 'x',
+    })).rejects.toMatchObject({ name: 'SuggestionDismissedError' });
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'c1',
+      target: 'pets',
+      suggestedValue: 'one dog',
+      conversationId: 'x',
+    })).resolves.toMatchObject({
+      item: { suggestedValue: 'one dog', _normalizedValue: 'one dog' },
+    });
   });
 });

@@ -695,6 +695,42 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(JSON.stringify(contact.Item)).not.toContain('+14045553333');
   });
 
+  // CHARACTERIZATION of a REPORTED GAP, not an endorsement. The conflict check
+  // reads the phoneref# pointer ONLY (suggestionResolutionRepo.ts:797-803), and
+  // a contact's PRIMARY number deliberately has no pointer (repo:845-849), so a
+  // number held as somebody else's primary is invisible here. The service's
+  // findByPhone pre-check (suggestionResolution.ts:489-494) covers the ordinary
+  // accept, but the expired-journal HELP path replays commitPhoneEffect without
+  // it. Pinned so the fake can mirror a KNOWN behavior rather than a guess: when
+  // the gap is closed this goes red and both sides get updated together.
+  it('does NOT detect a number held as another contact primary (reported gap)', async () => {
+    const contactId = 'phone-primary-gap';
+    await putContact(contactId, { phone: '+14045550000' });
+    await putContact('phone-primary-owner', { phone: '+14045554444' });
+    const suggestion = await putSuggestion(contactId, 'phone', '+14045554444');
+    const claimed = await resolutions.claim(claimInput(suggestion, {
+      plan: {
+        kind: 'phone',
+        phone: '+14045554444',
+        audit: { eventType: 'suggestion_accepted' },
+      },
+    }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    expect(await resolutions.commitPhoneEffect({
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed',
+      nextPhase: 'domain_applied',
+    })).toBe('committed');
+    const pointer = await doc.send(new GetCommand({
+      TableName: contactsTable,
+      Key: { contactId: 'phoneref#+14045554444' },
+      ConsistentRead: true,
+    }));
+    // The number now resolves to TWO owners: the other contact primary scalar
+    // and this contact fresh pointer row.
+    expect(pointer.Item).toMatchObject({ phone_ref_owner: contactId });
+  });
+
   it('makes activity deterministic and phase-idempotent', async () => {
     const contactId = 'activity';
     await putContact(contactId);

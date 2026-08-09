@@ -130,6 +130,18 @@ type MarkerOverrides = { fields?: Record<string, unknown> } & Record<
 
 // The fake driver returns marker JSON as rawText. Keep every marker schema-shaped
 // so parseExtractionOps sees explicit declines rather than absent fields.
+//
+// `fields` MERGES over the eight schema-shaped declines. A trailing
+// `...overrides` spread used to REPLACE the merged map wholesale, so any call
+// that touched `fields` silently dropped the other seven declines and made
+// those targets ABSENT - which is how the not-addressed assertion below passed
+// for the wrong reason (conf P3-15).
+//
+// A `null` override OMITS its key, at either level. That is the ONLY way to
+// make a target genuinely not_addressed from a schema-shaped marker: a full
+// marker addresses all twelve (the eight `fields` plus address, statusAdvance,
+// typeSuggestion, phoneAddition), and buildDecisions maps op 'none' to
+// no_finding and an absent key to not_addressed.
 function marker(overrides: MarkerOverrides = {}): Record<string, unknown> {
   const baseFields = Object.fromEntries(
     [
@@ -143,8 +155,12 @@ function marker(overrides: MarkerOverrides = {}): Record<string, unknown> {
       "porting",
     ].map((field) => [field, { op: "none", value: "", reason: "" }]),
   );
-  return {
-    fields: { ...baseFields, ...overrides.fields },
+  const { fields: fieldOverrides, ...rest } = overrides;
+  const dropNulls = (source: Record<string, unknown>): Record<string, unknown> =>
+    Object.fromEntries(
+      Object.entries(source).filter(([, value]) => value !== null),
+    );
+  return dropNulls({
     statusAdvance: { suggest: false, reason: "" },
     typeSuggestion: { value: "none", reason: "" },
     phoneAddition: { phone: "", label: "", reason: "" },
@@ -159,8 +175,9 @@ function marker(overrides: MarkerOverrides = {}): Record<string, unknown> {
       zip: "",
       reason: "",
     },
-    ...overrides,
-  };
+    ...rest,
+    fields: dropNulls({ ...baseFields, ...fieldOverrides }),
+  });
 }
 
 async function openRunFor(
@@ -204,6 +221,9 @@ test("an applied run shows rehydrated text and every decision state", async ({
       fields: {
         pets: { op: "write", value: "two cats", reason: "said so" },
         tenure: { op: "none", value: "", reason: "" },
+        // Deliberately OMITTED from the marker, so the model never mentioned
+        // it. This is the only honest source of a not_addressed decision.
+        evictions: null,
       },
     }),
   );
@@ -211,6 +231,9 @@ test("an applied run shows rehydrated text and every decision state", async ({
 
   await openRunFor(page, contactId, /applied/i);
   await expect(page.getByLabel("Extraction driver: fake")).toBeVisible();
+  await expect(
+    page.getByRole("region", { name: "AI run detail" }),
+  ).toContainText(/Prompt fingerprint: [0-9a-f]{12}/);
   const window = page.getByRole("table", { name: "Window messages" });
   await expect(window).toContainText("new");
   await expect(window).toContainText("EXTRACT:");
@@ -218,7 +241,13 @@ test("an applied run shows rehydrated text and every decision state", async ({
   await expect(decisionRow(page, "tenure")).toContainText(
     /no finding/i,
   );
+  // housingAuthority is one of the eight schema-shaped declines the helper
+  // merges in. It reads "no finding" ONLY while that merge survives the
+  // overrides spread; a regression there makes it "not addressed" again.
   await expect(decisionRow(page, "housingAuthority")).toContainText(
+    /no finding/i,
+  );
+  await expect(decisionRow(page, "evictions")).toContainText(
     /not addressed/i,
   );
 });
@@ -290,6 +319,65 @@ test("an empty conversation triage records a light skip with no decisions", asyn
   await expect(page.getByRole("heading", { name: "Skip window" })).toBeVisible();
   await expect(page.getByText(/no byte-level message evidence/i)).toBeVisible();
   await expect(page.getByRole("table", { name: "Decisions" })).toHaveCount(0);
+});
+
+test("a driver failure records a failed run with its error kind and attempts", async ({
+  page,
+  request,
+}) => {
+  await devLoginAs(page, "founder@example.com");
+  const { contactId, phone } = await createTenant(page.request, "Failing");
+  // The fake driver's dev-only failure marker (app/src/adapters/extractionFake.ts).
+  // Without it the ok:false arm - outcome failed, the error block, burned
+  // attempts, parking - has no hermetic reachability at all.
+  await sendExtractSms(
+    request,
+    phone,
+    marker({ __fail: "parse", __failMessage: "simulated schema violation" }),
+  );
+  const tick = await extractionTick(request);
+  expect(tick.failed).toBeGreaterThan(0);
+
+  await openRunFor(page, contactId, /failed/i);
+  const detail = page.getByRole("region", { name: "AI run detail" });
+  await expect(detail).toContainText(/failed/i);
+
+  // The pane does not render the error block today, so the kind, message,
+  // attempts and park state are asserted on the admin API that does expose
+  // them. No UI feature is invented here.
+  const list = await page.request.get(
+    `${NEXT}/api/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`,
+  );
+  expect(list.ok(), "list failed run").toBeTruthy();
+  const rows = (await list.json()).runs as Array<{
+    runId: string;
+    outcome: string;
+    errorKind?: string;
+  }>;
+  expect(rows).toHaveLength(1);
+  expect(rows[0]).toMatchObject({ outcome: "failed", errorKind: "parse" });
+
+  const detailResponse = await page.request.get(
+    `${NEXT}/api/ai-runs/${rows[0]!.runId}`,
+  );
+  expect(detailResponse.ok(), "read failed run detail").toBeTruthy();
+  const run = (await detailResponse.json()).run as {
+    outcome: string;
+    driver: string;
+    promptFingerprint?: string;
+    error?: { kind: string; message: string; attempts: number; parked: boolean };
+  };
+  expect(run.outcome).toBe("failed");
+  expect(run.driver).toBe("fake");
+  expect(run.promptFingerprint).toMatch(/^[0-9a-f]{12}$/);
+  // attempts counts the attempts BEFORE this one, so a first failure re-arms
+  // with backoff rather than parking (jobs/extraction.ts:616-621).
+  expect(run.error).toMatchObject({
+    kind: "parse",
+    message: "simulated schema violation",
+    attempts: 0,
+    parked: false,
+  });
 });
 
 test("accepting a suggestion stamps accepted on its run", async ({

@@ -19,6 +19,7 @@ const {
   ExtractionRefusedError,
 } = await import('../src/adapters/extraction.js');
 import type { ExtractionInput } from '../src/adapters/extraction.js';
+import { extractionPromptFingerprint } from '../src/services/extraction/prompt.js';
 import { parseExtractionOps } from '../src/services/extraction/schema.js';
 
 const model = 'claude-opus-4-8';
@@ -68,6 +69,11 @@ describe('console driver', () => {
 });
 
 describe('fake driver', () => {
+  // The real driver stamps promptFingerprint on the meta it assembles first, on
+  // EVERY exit (adapters/extraction.ts:189-193). The fake now mirrors that, so
+  // the run log's fingerprint plumbing is reachable hermetically (F7c).
+  const fingerprint = expect.stringMatching(/^[0-9a-f]{12}$/) as unknown as string;
+
   it('parses the EXTRACT marker from the NEWEST client utterance, ignoring staff and older markers', async () => {
     const driver = createExtractionDriver({ driver: 'fake', model });
     const input: ExtractionInput = {
@@ -98,7 +104,7 @@ describe('fake driver', () => {
     };
     await expect(driver.extract(input)).resolves.toEqual({
       ok: true,
-      meta: { driver: 'fake', rawText: '{"fields":{"pets":{"op":"write","value":"yes"}}}' },
+      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: '{"fields":{"pets":{"op":"write","value":"yes"}}}' },
       result: { fields: { pets: { op: 'write', value: 'yes' } } },
     });
   });
@@ -119,7 +125,7 @@ describe('fake driver', () => {
     };
     await expect(driver.extract(input)).resolves.toEqual({
       ok: true,
-      meta: { driver: 'fake', rawText: '{"noteLines":["stairs are fine"]}' },
+      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: '{"noteLines":["stairs are fine"]}' },
       result: { fields: {}, noteLines: ['stairs are fine'] },
     });
   });
@@ -133,7 +139,9 @@ describe('fake driver', () => {
       ],
     };
     await expect(driver.extract(input)).resolves.toEqual({
-      ok: true, meta: { driver: 'fake', rawText: '{not valid json' }, result: EMPTY_EXTRACTION,
+      ok: true,
+      meta: { driver: 'fake', promptFingerprint: fingerprint, rawText: '{not valid json' },
+      result: EMPTY_EXTRACTION,
     });
   });
 
@@ -146,7 +154,9 @@ describe('fake driver', () => {
       ],
     };
     await expect(driver.extract(input)).resolves.toEqual({
-      ok: true, meta: { driver: 'fake' }, result: EMPTY_EXTRACTION,
+      ok: true,
+      meta: { driver: 'fake', promptFingerprint: fingerprint },
+      result: EMPTY_EXTRACTION,
     });
   });
 
@@ -172,6 +182,75 @@ describe('fake driver', () => {
     });
     expect(call.ok).toBe(true);
     expect(call.meta.rawText).toBe('{oops');
+  });
+
+  it('stamps promptFingerprint on every exit, matching the real prompt fingerprint', async () => {
+    const driver = createExtractionDriver({ driver: 'fake', model });
+    const [parsed, noMarker] = await Promise.all([
+      driver.extract(markerInput),
+      driver.extract(baseInput),
+    ]);
+    expect(parsed.meta.promptFingerprint).toBe(extractionPromptFingerprint());
+    expect(noMarker.meta.promptFingerprint).toBe(extractionPromptFingerprint());
+  });
+
+  // F7c: without these arms the fake could not produce ok:false, so outcome
+  // 'failed', the error block, burned attempts and parking had ZERO hermetic
+  // coverage. `__fail` is dev-only (EXTRACTION_DRIVER=fake is refused in
+  // production, config.ts:811-814).
+  const failMarker = (payload: Record<string, unknown>): ExtractionInput => ({
+    profile: { contactType: 'tenant', phones: [] },
+    transcript: [{
+      tsMsgId: '2026-07-16T10:00:00.000Z#s1',
+      speaker: 'client',
+      text: `EXTRACT:${JSON.stringify(payload)}`,
+      at: '2026-07-16T10:00:00.000Z',
+      channel: 'sms',
+    }],
+  });
+
+  it('drives a parse failure and keeps rawText, like the real parse arm', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model })
+      .extract(failMarker({ __fail: 'parse' }));
+    expect(call.ok).toBe(false);
+    if (call.ok) throw new Error('expected a failure');
+    expect(call.failure).toBe('parse');
+    expect(call.message).toContain('simulated parse failure');
+    // adapters/extraction.ts:255-260 stamps rawText BEFORE the parse, so a
+    // malformed response still carries the text that explains it.
+    expect(call.meta.rawText).toBe('{"__fail":"parse"}');
+    expect(call.meta.promptFingerprint).toBe(extractionPromptFingerprint());
+  });
+
+  it('drives a driver failure with no rawText and an overridable message', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model })
+      .extract(failMarker({ __fail: 'driver', __failMessage: 'connect ECONNREFUSED' }));
+    expect(call.ok).toBe(false);
+    if (call.ok) throw new Error('expected a failure');
+    expect(call.failure).toBe('driver');
+    expect(call.message).toBe('connect ECONNREFUSED');
+    // The real driver's SDK-throw arm returns before any response text exists
+    // (adapters/extraction.ts:203-205).
+    expect(call.meta.rawText).toBeUndefined();
+    expect(call.meta.promptFingerprint).toBe(extractionPromptFingerprint());
+  });
+
+  it('drives a refusal with no rawText, like the real stop_reason arm', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model })
+      .extract(failMarker({ __fail: 'refusal' }));
+    expect(call.ok).toBe(false);
+    if (call.ok) throw new Error('expected a failure');
+    expect(call.failure).toBe('refusal');
+    expect(call.message).toContain('simulated refusal');
+    expect(call.meta.rawText).toBeUndefined();
+  });
+
+  it('ignores an unknown __fail value and extracts the payload normally', async () => {
+    const call = await createExtractionDriver({ driver: 'fake', model })
+      .extract(failMarker({ __fail: 'kaboom', fields: { pets: { op: 'write', value: 'cat' } } }));
+    expect(call.ok).toBe(true);
+    if (!call.ok) throw new Error('expected success');
+    expect(call.result.fields?.pets).toEqual({ op: 'write', value: 'cat' });
   });
 });
 

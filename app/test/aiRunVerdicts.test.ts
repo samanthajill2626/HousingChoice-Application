@@ -2,7 +2,7 @@ import request from 'supertest';
 import { describe, expect, it, vi } from 'vitest';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
-import type { SuggestionItem } from '../src/repos/extractionRepo.js';
+import { SuggestionDismissedError, type SuggestionItem } from '../src/repos/extractionRepo.js';
 import { makeCompletedResolution } from '../src/repos/suggestionResolutionRepo.js';
 import type { DecisionTarget, Verdict } from '../src/services/extraction/runTypes.js';
 
@@ -28,6 +28,35 @@ function seedTenant(world: ReturnType<typeof makeWebhookHarness>['world'], over:
     ...over,
   });
   return contactId;
+}
+
+/**
+ * A second contact that owns `phone` the way the PRODUCT can detect it.
+ *
+ * commitPhoneEffect arbitrates ownership on the `phoneref#` pointer row ALONE
+ * (suggestionResolutionRepo.ts:797-803), and a contact's PRIMARY number
+ * deliberately has no pointer (repo:845-849). These tests used to push a bare
+ * contact carrying the number as its primary scalar - a state the real
+ * conflict check cannot see - and passed only because the fake asked
+ * findByPhone instead. Owning the number as a SECONDARY creates the pointer the
+ * real transaction actually reads.
+ *
+ * The gap that fixture was hiding is REPORTED, not fixed here: a number held as
+ * another contact's primary is invisible to commitPhoneEffect, so the
+ * expired-journal HELP path (which skips the service's findByPhone pre-check at
+ * suggestionResolution.ts:489-494) can still attach it.
+ */
+async function seedPhoneOwner(
+  world: ReturnType<typeof makeWebhookHarness>['world'],
+  phone: string,
+): Promise<void> {
+  world.contacts.push({
+    contactId: 'c-other',
+    type: 'tenant',
+    phone: '+15550109090',
+    created_at: '2026-01-01T00:00:00.000Z',
+  });
+  await world.contactsRepo.addPhone('c-other', { phone, label: 'Other' });
 }
 
 async function seedSuggestion(
@@ -702,9 +731,7 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
       },
     }).app;
     await accept(conflictCrash, 'c1', 'phone').expect(500);
-    conflict.world.contacts.push({
-      contactId: 'c-other', type: 'tenant', phone: '+15550104040', created_at: '2026-01-01T00:00:00.000Z',
-    });
+    await seedPhoneOwner(conflict.world, '+15550104040');
     expireActiveResolution(conflict.world, 'c1', 'phone');
     await accept(makeWebhookHarness({ world: conflict.world }).app, 'c1', 'phone').expect(409);
     expect(await conflict.world.extractionRepo.getSuggestion('c1', 'phone')).toBeDefined();
@@ -730,9 +757,7 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
       },
     }).app;
     await accept(crashing, 'c1', 'phone').expect(500);
-    world.contacts.push({
-      contactId: 'c-other', type: 'tenant', phone: '+15550104040', created_at: '2026-01-01T00:00:00.000Z',
-    });
+    await seedPhoneOwner(world, '+15550104040');
     expireActiveResolution(world, 'c1', 'phone');
     await seedSuggestion(world, {
       ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
@@ -768,9 +793,7 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     }).app;
     await accept(crashing, 'c1', 'phone').expect(500);
     const abandoned = [...world.suggestionResolutions.values()][0];
-    world.contacts.push({
-      contactId: 'c-other', type: 'tenant', phone: '+15550104040', created_at: '2026-01-01T00:00:00.000Z',
-    });
+    await seedPhoneOwner(world, '+15550104040');
     expireActiveResolution(world, 'c1', 'phone');
     await seedSuggestion(world, {
       ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
@@ -1126,8 +1149,19 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     await dismiss(app, 'c1', 'type').expect(200);
     expect(setVerdict).toHaveBeenCalledWith('run-1', 'type', 'dismissed', expect.anything());
 
-    await seedSuggestion(world, {
+    // The dismissal is PERMANENT and the writer enforces it
+    // (extractionRepo.ts:437-445): re-suggesting the SAME value is refused at
+    // the repository, not merely ignored downstream. This used to be seeded
+    // straight back in because the harness double ignored its own dismissals -
+    // so the "accept refuses type" assertion below ran against a pending row
+    // the real system can never produce.
+    await expect(seedSuggestion(world, {
       ownerContactId: 'c1', target: 'type', suggestedValue: 'tenant', conversationId: 'conv-1', runId: 'run-2',
+    })).rejects.toBeInstanceOf(SuggestionDismissedError);
+
+    // A DIFFERENT value is still suggestible, and accept still refuses `type`.
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'type', suggestedValue: 'landlord', conversationId: 'conv-1', runId: 'run-2',
     });
     await accept(app, 'c1', 'type').expect(400);
     expect(setVerdict).not.toHaveBeenCalledWith('run-2', 'type', 'accepted', expect.anything());

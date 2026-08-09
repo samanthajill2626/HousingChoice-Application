@@ -4,6 +4,7 @@ import {
   makeCompletedResolution,
   resolutionItemId,
   suggestionIdentityKey,
+  type ActiveSuggestionResolution,
 } from '../src/repos/suggestionResolutionRepo.js';
 
 function suggestion(over: Partial<SuggestionItem> = {}): SuggestionItem {
@@ -42,29 +43,33 @@ describe('suggestion resolution identity', () => {
   });
 });
 
+function active(): ActiveSuggestionResolution {
+  return {
+    itemId: resolutionItemId('contact-1', 'pets'),
+    state: 'active',
+    contactId: 'contact-1',
+    target: 'pets',
+    identityKey: 'revision#revision-7',
+    action: 'accept',
+    actorId: 'user-1',
+    snapshot: suggestion({ revision: 'revision-7' }),
+    plan: {
+      kind: 'contact',
+      patch: { pets: 'two cats' },
+      guard: { pets: { exists: false } },
+      audit: { eventType: 'suggestion_accepted', payload: { value: 'two cats' } },
+    },
+    phase: 'claimed',
+    leaseId: 'lease-1',
+    leaseExpiresAt: '2026-08-08T12:01:00.000Z',
+    fence: 1,
+    claimedAt: '2026-08-08T12:00:00.000Z',
+  };
+}
+
 describe('completed suggestion resolution rows', () => {
   it('scrubs the snapshot, replay plan, actor, lease, and phase', () => {
-    const completed = makeCompletedResolution({
-      itemId: resolutionItemId('contact-1', 'pets'),
-      state: 'active',
-      contactId: 'contact-1',
-      target: 'pets',
-      identityKey: 'revision#revision-7',
-      action: 'accept',
-      actorId: 'user-1',
-      snapshot: suggestion({ revision: 'revision-7' }),
-      plan: {
-        kind: 'contact',
-        patch: { pets: 'two cats' },
-        guard: { pets: { exists: false } },
-        audit: { eventType: 'suggestion_accepted', payload: { value: 'two cats' } },
-      },
-      phase: 'claimed',
-      leaseId: 'lease-1',
-      leaseExpiresAt: '2026-08-08T12:01:00.000Z',
-      fence: 1,
-      claimedAt: '2026-08-08T12:00:00.000Z',
-    }, '2026-08-08T12:02:00.000Z');
+    const completed = makeCompletedResolution(active(), '2026-08-08T12:02:00.000Z');
 
     expect(completed).toEqual({
       itemId: 'resolve#contact-1#pets',
@@ -74,6 +79,25 @@ describe('completed suggestion resolution rows', () => {
       identityKey: 'revision#revision-7',
       action: 'accept',
       completedAt: '2026-08-08T12:02:00.000Z',
+    });
+    expect(JSON.stringify(completed)).not.toContain('two cats');
+    expect(JSON.stringify(completed)).not.toContain('user-1');
+  });
+
+  // F8: a journal finalized because restoring its suggestion was unsafe records
+  // WHY it ended, and nothing else - the row stays as PII-free as an ordinary one.
+  it('records a released-unsafe disposition without carrying any suggestion detail', () => {
+    const completed = makeCompletedResolution(active(), '2026-08-08T12:02:00.000Z', 'released_unsafe');
+
+    expect(completed).toEqual({
+      itemId: 'resolve#contact-1#pets',
+      state: 'completed',
+      contactId: 'contact-1',
+      target: 'pets',
+      identityKey: 'revision#revision-7',
+      action: 'accept',
+      completedAt: '2026-08-08T12:02:00.000Z',
+      disposition: 'released_unsafe',
     });
     expect(JSON.stringify(completed)).not.toContain('two cats');
     expect(JSON.stringify(completed)).not.toContain('user-1');

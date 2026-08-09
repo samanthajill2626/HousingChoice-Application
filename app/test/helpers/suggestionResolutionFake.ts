@@ -80,6 +80,10 @@ export function createSuggestionResolutionFake(deps: {
       return items.get(key(contactId, target));
     },
 
+    async listJournals(contactId) {
+      return [...items.values()].filter((item) => item.contactId === contactId);
+    },
+
     async claim(input) {
       const mapKey = key(input.suggestion.ownerContactId, input.suggestion.target);
       const identityKey = suggestionIdentityKey(input.suggestion);
@@ -251,7 +255,7 @@ export function createSuggestionResolutionFake(deps: {
       }
       const phaseInput = { token: input.token, expectedPhase: input.expectedPhase, nextPhase: input.expectedPhase };
       if (!sameToken(current, phaseInput) || current.phase !== input.expectedPhase) return 'stale';
-      items.set(mapKey, makeCompletedResolution(current, input.completedAt));
+      items.set(mapKey, makeCompletedResolution(current, input.completedAt, input.disposition));
       return 'completed';
     },
   };

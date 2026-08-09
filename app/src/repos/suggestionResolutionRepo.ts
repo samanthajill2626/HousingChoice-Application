@@ -14,6 +14,7 @@ import {
   TransactionCanceledException,
 } from '@aws-sdk/client-dynamodb';
 import {
+  BatchGetCommand,
   GetCommand,
   PutCommand,
   TransactWriteCommand,
@@ -23,6 +24,8 @@ import {
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
+import { logger as defaultLogger } from '../lib/logger.js';
+import { DECISION_TARGETS } from '../services/extraction/runTypes.js';
 import type { ContactItem, ContactPhone } from './contactsRepo.js';
 import { contactPhones, phoneRefId } from './contactsRepo.js';
 import type { RepoDeps } from './conversationsRepo.js';
@@ -57,6 +60,14 @@ export type ResolutionAttributeGuard = Record<string,
 >;
 
 export type ResolutionOutcome = 'superseded_by_human_edit';
+
+/**
+ * Why a journal ended, when that is not simply "the action was applied".
+ * `released_unsafe`: a known pre-mutation refusal could NOT restore its
+ * suggestion because a newer one already held the pending slot, so the journal
+ * was finalized in place instead of being deleted. PII-free by construction.
+ */
+export type ResolutionDisposition = 'released_unsafe';
 
 export type ResolutionReplayPlan =
   | {
@@ -105,6 +116,7 @@ export interface CompletedSuggestionResolution {
   identityKey: string;
   action: ResolutionAction;
   completedAt: string;
+  disposition?: ResolutionDisposition;
 }
 
 export type SuggestionResolutionItem =
@@ -156,6 +168,15 @@ export interface PhaseInput {
 
 export interface SuggestionResolutionRepo {
   get(contactId: string, target: string): Promise<SuggestionResolutionItem | undefined>;
+  /**
+   * Every journal row this contact can have, in one BatchGet of the twelve
+   * fixed `resolve#<contactId>#<target>` keys. The key set is closed: a journal
+   * is only ever created from a stored `sugg#` row, and those rows only ever
+   * carry a DECISION_TARGETS target. Best-effort: keys DynamoDB leaves
+   * unprocessed after the short retry are reported as absent, because the next
+   * ordinary read repeats the enumeration.
+   */
+  listJournals(contactId: string): Promise<SuggestionResolutionItem[]>;
   claim(input: ClaimResolutionInput): Promise<ResolutionClaimResult>;
   takeover(input: {
     contactId: string;
@@ -170,11 +191,20 @@ export interface SuggestionResolutionRepo {
   commitDismissalEffect(input: PhaseInput): Promise<ResolutionEffectResult>;
   advancePhase(input: PhaseInput): Promise<ResolutionEffectResult>;
   release(input: { token: ResolutionToken; expectedPhase: ResolutionPhase }): Promise<'released' | 'stale' | 'unsafe'>;
-  complete(input: { token: ResolutionToken; expectedPhase: ResolutionPhase; completedAt: string }): Promise<'completed' | 'already_completed' | 'stale'>;
+  complete(input: {
+    token: ResolutionToken;
+    expectedPhase: ResolutionPhase;
+    completedAt: string;
+    disposition?: ResolutionDisposition;
+  }): Promise<'completed' | 'already_completed' | 'stale'>;
 }
 
 const DEFAULT_LEASE_MS = 30_000;
 const MAX_CONTENTION_ATTEMPTS = 4;
+const MAX_BATCH_ATTEMPTS = 4;
+const BATCH_BACKOFF_MS = 25;
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 export const resolutionItemId = (contactId: string, target: string): string =>
   `resolve#${contactId}#${target}`;
@@ -212,6 +242,7 @@ export function tokenFor(journal: ActiveSuggestionResolution): ResolutionToken {
 export function makeCompletedResolution(
   active: ActiveSuggestionResolution,
   completedAt: string,
+  disposition?: ResolutionDisposition,
 ): CompletedSuggestionResolution {
   return {
     itemId: active.itemId,
@@ -221,6 +252,7 @@ export function makeCompletedResolution(
     identityKey: active.identityKey,
     action: active.action,
     completedAt,
+    ...(disposition !== undefined && { disposition }),
   };
 }
 
@@ -423,6 +455,7 @@ function phaseAdvanced(current: ResolutionPhase, expected: ResolutionPhase): boo
 export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionResolutionRepo {
   const doc = deps.doc ?? getDocumentClient();
   const env = deps.env;
+  const log = deps.logger ?? defaultLogger;
   const extractionTable = tableName('ai_extraction', env);
   const contactsTable = tableName('contacts', env);
   const auditTable = tableName('audit_events', env);
@@ -490,6 +523,30 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
 
   return {
     get: getJournal,
+
+    async listJournals(contactId) {
+      const found: SuggestionResolutionItem[] = [];
+      let keys: Array<{ itemId: string }> = DECISION_TARGETS.map((target) => ({
+        itemId: resolutionItemId(contactId, target),
+      }));
+      for (let attempt = 0; attempt < MAX_BATCH_ATTEMPTS && keys.length > 0; attempt += 1) {
+        if (attempt > 0) await sleep(BATCH_BACKOFF_MS * 2 ** (attempt - 1));
+        const res = await doc.send(new BatchGetCommand({
+          RequestItems: { [extractionTable]: { Keys: keys, ConsistentRead: true } },
+        }));
+        for (const item of (res.Responses?.[extractionTable] ?? []) as SuggestionResolutionItem[]) {
+          found.push(item);
+        }
+        keys = (res.UnprocessedKeys?.[extractionTable]?.Keys ?? []) as Array<{ itemId: string }>;
+      }
+      if (keys.length > 0) {
+        log.warn(
+          { contactId, unprocessed: keys.length },
+          'suggestion resolution: BatchGet left journal keys unprocessed after retries',
+        );
+      }
+      return found;
+    },
 
     async claim(input) {
       const contactId = input.suggestion.ownerContactId;
@@ -1005,7 +1062,7 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         return 'already_completed';
       }
       if (!sameToken(journal, input.token) || journal.phase !== input.expectedPhase) return 'stale';
-      const completed = makeCompletedResolution(journal, input.completedAt);
+      const completed = makeCompletedResolution(journal, input.completedAt, input.disposition);
       const guard = exactGuard(input.token, input.expectedPhase);
       for (let attempt = 0; attempt < MAX_CONTENTION_ATTEMPTS; attempt += 1) {
         try {

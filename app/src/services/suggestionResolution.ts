@@ -40,6 +40,17 @@ export interface SuggestionResolutionHooks {
   afterBoundary?: (boundary: ResolutionBoundary, journal: ActiveSuggestionResolution) => Promise<void> | void;
 }
 
+export interface ResolutionOutcomeSummary {
+  /** This request claimed and drove its own requested identity to completion. */
+  completedNow: boolean;
+  /**
+   * This request helped somebody else's abandoned journal commit its domain
+   * effect. The caller emits `suggestion.updated` for it even when the
+   * request's own identity resolved to nothing (adv P3-25).
+   */
+  helpedCommitted: boolean;
+}
+
 export interface SuggestionResolutionService {
   resolve(input: {
     contactId: string;
@@ -47,10 +58,24 @@ export interface SuggestionResolutionService {
     action: ResolutionAction;
     identity: SuggestionRequestIdentity;
     actorId?: string;
-  }): Promise<{ completedNow: boolean }>;
+  }): Promise<ResolutionOutcomeSummary>;
+  /**
+   * F1 lazy recovery. A crash between claim and commit deletes the `sugg#` row,
+   * so no suggestion card can offer the identity needed to resume. Any ordinary
+   * read of the contact's suggestions therefore helps every expired journal of
+   * that contact to completion first. Best-effort per journal: one journal's
+   * failure never blocks the others, and the next read retries.
+   */
+  recoverAbandoned(contactId: string): Promise<{ recovered: number; domainCommitted: boolean }>;
 }
 
 export class SuggestionResolutionError extends Error {
+  /**
+   * Set when a foreign journal's domain effect committed during this request
+   * before it failed on its own identity, so the route still emits.
+   */
+  helpedCommitted = false;
+
   constructor(
     readonly status: number,
     readonly code: string,
@@ -238,8 +263,15 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
     await deps.hooks?.afterBoundary?.(name, journal);
   }
 
-  async function applyJournal(initial: ActiveSuggestionResolution): Promise<void> {
+  async function applyJournal(
+    initial: ActiveSuggestionResolution,
+    opts: { helping: boolean },
+  ): Promise<{ domainCommitted: boolean }> {
     let journal = initial;
+    // Entering above `claimed` means the domain effect is already durable (a
+    // previous process committed it), so carrying the journal forward is still
+    // a state change the dashboard has never been told about.
+    let domainCommitted = initial.phase !== 'claimed';
     for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
       const token = tokenFor(journal);
       if (journal.phase === 'claimed') {
@@ -254,12 +286,35 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           throw error;
         }
         if (result === 'phone_conflict') {
-          await deps.resolutionRepo.release({ token, expectedPhase: 'claimed' });
+          const released = await deps.resolutionRepo.release({ token, expectedPhase: 'claimed' });
+          if (released === 'unsafe') {
+            // F8: a REPLACEMENT suggestion already occupies the pending slot, so
+            // restoring the snapshot would overwrite it. Finalize this journal
+            // terminally instead (identity + action + the released-unsafe
+            // disposition only, never the newer `sugg#` row); otherwise every
+            // later resolution of the replacement replays this same conflict and
+            // the newer suggestion is deadlocked forever.
+            await deps.resolutionRepo.complete({
+              token,
+              expectedPhase: 'claimed',
+              completedAt: now(),
+              disposition: 'released_unsafe',
+            });
+            // Helping somebody else's journal: hand control back so the caller
+            // can go on to its OWN identity. Only the requester's own claim
+            // turns this conflict into its answer.
+            if (opts.helping) return { domainCommitted };
+          }
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
+        // Pre-commit: `stale` here proves the domain transaction did not commit
+        // under this token, so a retry is honest.
         if (result === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        domainCommitted = true;
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        // Post-commit: the effect + audit + phase advance landed atomically and
+        // somebody else now owns the journal. The human's action took effect.
+        if (refreshed?.state !== 'active') return { domainCommitted };
         journal = refreshed;
         await boundary('domain_applied', journal);
         continue;
@@ -295,9 +350,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             nextPhase: 'activity_skipped',
           });
         }
-        if (result === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        // Post-commit from here on: the domain effect and its audit are durable,
+        // so losing the journal to another helper is not the human's problem.
+        if (result === 'stale') return { domainCommitted };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        if (refreshed?.state !== 'active') return { domainCommitted };
         journal = refreshed;
         await boundary('activity_applied', journal);
         continue;
@@ -330,98 +387,143 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           expectedPhase: journal.phase,
           nextPhase: 'verdict_attempted',
         });
-        if (result === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        if (result === 'stale') return { domainCommitted };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
+        if (refreshed?.state !== 'active') return { domainCommitted };
         journal = refreshed;
         await boundary('verdict_attempted', journal);
         continue;
       }
-      const completed = await deps.resolutionRepo.complete({
+      // The only non-success answer left is `stale`, i.e. another helper took the
+      // journal before this final PII scrub. Every durable effect committed and
+      // that helper finishes the scrub, so the human's action still succeeded.
+      await deps.resolutionRepo.complete({
         token,
         expectedPhase: 'verdict_attempted',
         completedAt: now(),
       });
-      if (completed === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
-      return;
+      return { domainCommitted };
     }
     throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
   }
 
   return {
-    async resolve(input) {
-      const identityKey = requestedIdentityKey(input.contactId, input.target, input.identity);
-      for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
-        const current = await deps.resolutionRepo.get(input.contactId, input.target);
-        if (current?.state === 'active') {
-          const at = now();
-          if (Date.parse(current.leaseExpiresAt) > Date.parse(at)) {
-            throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
-          }
+    async recoverAbandoned(contactId) {
+      const at = now();
+      let recovered = 0;
+      let domainCommitted = false;
+      for (const journal of await deps.resolutionRepo.listJournals(contactId)) {
+        if (journal.state !== 'active') continue;
+        if (Date.parse(journal.leaseExpiresAt) > Date.parse(at)) continue;
+        try {
           const takeover = await deps.resolutionRepo.takeover({
-            contactId: input.contactId,
-            target: input.target,
+            contactId,
+            target: journal.target,
             now: at,
             leaseId: nextLeaseId(),
             ...(deps.leaseMs !== undefined && { leaseMs: deps.leaseMs }),
           });
-          if (takeover.status === 'blocked') {
+          if (takeover.status !== 'taken_over') continue;
+          const applied = await applyJournal(takeover.journal, { helping: true });
+          recovered += 1;
+          if (applied.domainCommitted) domainCommitted = true;
+        } catch (err) {
+          // Ids only - a journal carries the suggestion's values.
+          deps.logger.warn(
+            { err, contactId, target: journal.target },
+            'abandoned suggestion resolution recovery failed (best-effort)',
+          );
+        }
+      }
+      return { recovered, domainCommitted };
+    },
+
+    async resolve(input) {
+      const identityKey = requestedIdentityKey(input.contactId, input.target, input.identity);
+      // A help that commits somebody else's domain effect must still reach the
+      // SSE, even when this request then fails on its own identity (adv P3-25).
+      let helpedCommitted = false;
+      try {
+        for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
+          const current = await deps.resolutionRepo.get(input.contactId, input.target);
+          if (current?.state === 'active') {
+            const at = now();
+            if (Date.parse(current.leaseExpiresAt) > Date.parse(at)) {
+              throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
+            }
+            const takeover = await deps.resolutionRepo.takeover({
+              contactId: input.contactId,
+              target: input.target,
+              now: at,
+              leaseId: nextLeaseId(),
+              ...(deps.leaseMs !== undefined && { leaseMs: deps.leaseMs }),
+            });
+            if (takeover.status === 'blocked') {
+              throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
+            }
+            if (takeover.status === 'taken_over') {
+              const helped = await applyJournal(takeover.journal, { helping: true });
+              if (helped.domainCommitted) helpedCommitted = true;
+            }
+            continue;
+          }
+          if (current?.state === 'completed' && current.identityKey === identityKey) {
+            if (current.action !== input.action) {
+              throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
+            }
+            return { completedNow: false, helpedCommitted };
+          }
+
+          const suggestion = await deps.extractionRepo.getSuggestion(input.contactId, input.target);
+          if (!suggestion) throw new SuggestionResolutionError(404, 'no_pending_suggestion');
+          if (!matchesIdentity(suggestion, input.identity)) {
+            throw new SuggestionResolutionError(409, 'suggestion_replaced');
+          }
+          const contact = await deps.contactsRepo.getById(input.contactId);
+          if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
+          const claimedAt = now();
+          const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt);
+
+          if (plan.kind === 'phone') {
+            const owner = await deps.contactsRepo.findByPhone(plan.phone);
+            if (owner !== undefined && owner.contactId !== input.contactId) {
+              throw new SuggestionResolutionError(409, 'phone_in_use');
+            }
+          }
+
+          const claim = await deps.resolutionRepo.claim({
+            suggestion,
+            action: input.action,
+            plan,
+            now: claimedAt,
+            leaseId: nextLeaseId(),
+            ...(input.actorId !== undefined && { actorId: input.actorId }),
+            ...(deps.leaseMs !== undefined && { leaseMs: deps.leaseMs }),
+          });
+          if (claim.status === 'suggestion_replaced') {
+            throw new SuggestionResolutionError(409, 'suggestion_replaced');
+          }
+          if (claim.status === 'blocked') {
+            if (Date.parse(claim.journal.leaseExpiresAt) <= Date.parse(now())) continue;
             throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
           }
-          if (takeover.status === 'taken_over') await applyJournal(takeover.journal);
-          continue;
-        }
-        if (current?.state === 'completed' && current.identityKey === identityKey) {
-          if (current.action !== input.action) {
+          if (claim.status === 'completed') {
+            if (claim.journal.identityKey === identityKey && claim.journal.action === input.action) {
+              return { completedNow: false, helpedCommitted };
+            }
             throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
           }
-          return { completedNow: false };
+          await boundary('claimed', claim.journal);
+          await applyJournal(claim.journal, { helping: false });
+          return { completedNow: true, helpedCommitted };
         }
-
-        const suggestion = await deps.extractionRepo.getSuggestion(input.contactId, input.target);
-        if (!suggestion) throw new SuggestionResolutionError(404, 'no_pending_suggestion');
-        if (!matchesIdentity(suggestion, input.identity)) {
-          throw new SuggestionResolutionError(409, 'suggestion_replaced');
+        throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
+      } catch (error) {
+        if (helpedCommitted && error instanceof SuggestionResolutionError) {
+          error.helpedCommitted = true;
         }
-        const contact = await deps.contactsRepo.getById(input.contactId);
-        if (!contact) throw new SuggestionResolutionError(404, 'contact_not_found');
-        const claimedAt = now();
-        const plan = buildPlan(contact, suggestion, input.action, input.actorId, claimedAt);
-
-        if (plan.kind === 'phone') {
-          const owner = await deps.contactsRepo.findByPhone(plan.phone);
-          if (owner !== undefined && owner.contactId !== input.contactId) {
-            throw new SuggestionResolutionError(409, 'phone_in_use');
-          }
-        }
-
-        const claim = await deps.resolutionRepo.claim({
-          suggestion,
-          action: input.action,
-          plan,
-          now: claimedAt,
-          leaseId: nextLeaseId(),
-          ...(input.actorId !== undefined && { actorId: input.actorId }),
-          ...(deps.leaseMs !== undefined && { leaseMs: deps.leaseMs }),
-        });
-        if (claim.status === 'suggestion_replaced') {
-          throw new SuggestionResolutionError(409, 'suggestion_replaced');
-        }
-        if (claim.status === 'blocked') {
-          if (Date.parse(claim.journal.leaseExpiresAt) <= Date.parse(now())) continue;
-          throw new SuggestionResolutionError(409, 'suggestion_resolution_in_progress', true);
-        }
-        if (claim.status === 'completed') {
-          if (claim.journal.identityKey === identityKey && claim.journal.action === input.action) {
-            return { completedNow: false };
-          }
-          throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
-        }
-        await boundary('claimed', claim.journal);
-        await applyJournal(claim.journal);
-        return { completedNow: true };
+        throw error;
       }
-      throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
     },
   };
 }

@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { TEST_ADMIN_COOKIE, TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { makeWebhookHarness, ORIGIN_SECRET } from './helpers/twilioWebhookHarness.js';
 import type { SuggestionItem } from '../src/repos/extractionRepo.js';
+import { makeCompletedResolution } from '../src/repos/suggestionResolutionRepo.js';
 import type { DecisionTarget, Verdict } from '../src/services/extraction/runTypes.js';
 
 const ACTOR = 'usr_testva00000000000000000';
@@ -71,6 +72,13 @@ function dismiss(app: import('express').Express, contactId: string, target: stri
     .set('x-origin-verify', ORIGIN_SECRET)
     .set('cookie', TEST_SESSION_COOKIE)
     .send(suggestionIdentities.get(`${contactId}\u0000${target}`));
+}
+
+function list(app: import('express').Express, contactId: string) {
+  return request(app)
+    .get(`/api/contacts/${contactId}/suggestions`)
+    .set('x-origin-verify', ORIGIN_SECRET)
+    .set('cookie', TEST_SESSION_COOKIE);
 }
 
 function patch(app: import('express').Express, contactId: string, body: Record<string, unknown>) {
@@ -246,6 +254,144 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
       expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
     });
   }
+
+  // F1: a crash between claim and commit deletes the sugg# row, so the card the
+  // UI would resume from is gone. Recovery must therefore be reachable from an
+  // ORDINARY read of the contact's suggestions, not only from a second accept.
+  it('completes and scrubs an abandoned claimed journal on an ordinary suggestions read', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const update = vi.spyOn(world.contactsRepo, 'update');
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'pets').expect(500);
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBeUndefined();
+    expireActiveResolution(world, 'c1', 'pets');
+    const emittedBefore = world.emitted.filter((event) => event.event === 'suggestion.updated').length;
+
+    const readApp = makeWebhookHarness({ world }).app;
+    const res = await list(readApp, 'c1').expect(200);
+
+    expect(res.body).toEqual({ suggestions: [] });
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('two cats');
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_accepted')).toHaveLength(1);
+    expect(setVerdict).toHaveBeenCalledTimes(1);
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal?.state).toBe('completed');
+    expect(JSON.stringify(journal)).not.toContain('two cats');
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(emittedBefore + 1);
+
+    // Terminal after one pass: the refetch the SSE triggers finds nothing active,
+    // so it neither replays an effect nor emits again (no event loop).
+    await list(readApp, 'c1').expect(200);
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(emittedBefore + 1);
+  });
+
+  it('recovers an abandoned journal crashed after its domain effect on a read, without duplicating effects', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const update = vi.spyOn(world.contactsRepo, 'update');
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'domain_applied') throw new Error('simulated termination after domain effect');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'status').expect(500);
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('searching');
+    expireActiveResolution(world, 'c1', 'status');
+
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    expect(update).toHaveBeenCalledTimes(1);
+    expect(world.auditEvents.filter((event) => event.event_type === 'tenant_status_changed')).toHaveLength(1);
+    expect(world.activityEvents.filter((event) => event.type === 'contact_status_changed')).toHaveLength(1);
+    expect(setVerdict).toHaveBeenCalledTimes(1);
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+    expect(world.emitted.some((event) => event.event === 'suggestion.updated')).toBe(true);
+  });
+
+  // Recovery is a passenger on the read the dashboard cannot live without, so a
+  // failed enumeration must degrade to "serve the list" rather than 500.
+  it('never fails a suggestions read when journal enumeration throws', async () => {
+    const { world } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'pets').expect(500);
+    expireActiveResolution(world, 'c1', 'pets');
+    world.suggestionResolutionRepo.listJournals = async () => {
+      throw new Error('journal enumeration unavailable');
+    };
+
+    const res = await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    expect(res.body).toEqual({ suggestions: [] });
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('active');
+  });
+
+  it('keeps recovering a contact other journals when one journal help throws', async () => {
+    const { world } = makeWorld();
+    seedTenant(world);
+    const crashing = (): import('express').Express => makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    await accept(crashing(), 'c1', 'pets').expect(500);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    await accept(crashing(), 'c1', 'status').expect(500);
+    expireActiveResolution(world, 'c1', 'pets');
+    expireActiveResolution(world, 'c1', 'status');
+    const takeover = world.suggestionResolutionRepo.takeover.bind(world.suggestionResolutionRepo);
+    world.suggestionResolutionRepo.takeover = async (input) => {
+      if (input.target === 'pets') throw new Error('journal takeover unavailable');
+      return takeover(input);
+    };
+
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    const contact = world.contacts.find((entry) => entry.contactId === 'c1');
+    expect(contact?.status).toBe('searching');
+    expect(contact?.pets).toBeUndefined();
+    expect([...world.suggestionResolutions.values()].map((item) => [item.target, item.state])).toEqual([
+      ['pets', 'active'],
+      ['status', 'completed'],
+    ]);
+  });
 
   it('lets a scalar PATCH supersede an expired claimed accept without replaying AI effects', async () => {
     const { world, setVerdict } = makeWorld();
@@ -504,6 +650,95 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(conflict.world.suggestionResolutions.size).toBe(0);
   });
 
+  // F8: when the crashed action can no longer be restored (a REPLACEMENT
+  // suggestion holds the pending slot), the old journal must end terminally.
+  // Otherwise every attempt at the replacement re-helps the old journal, hits
+  // the same ownership conflict, and the newer suggestion is deadlocked.
+  it('resolves a replacement phone suggestion on the first attempt after an unsafe release', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    world.contacts.push({
+      contactId: 'c-other', type: 'tenant', phone: '+15550104040', created_at: '2026-01-01T00:00:00.000Z',
+    });
+    expireActiveResolution(world, 'c1', 'phone');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+
+    await accept(makeWebhookHarness({ world }).app, 'c1', 'phone').expect(200);
+
+    const contact = await world.contactsRepo.getById('c1');
+    expect(contact?.phones?.map((phone) => phone.phone)).toEqual(
+      expect.arrayContaining(['+15550105050']),
+    );
+    expect(contact?.phones?.some((phone) => phone.phone === '+15550104040')).toBe(false);
+    expect(await world.extractionRepo.getSuggestion('c1', 'phone')).toBeUndefined();
+    expect(world.auditEvents.filter((event) => event.event_type === 'contact_phone_added')).toHaveLength(1);
+    expect(setVerdict.mock.calls.map((call) => call[0])).toEqual(['run-b']);
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal?.state).toBe('completed');
+  });
+
+  it('terminally finalizes an unsafe-released journal on a read without touching the replacement row', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    const abandoned = [...world.suggestionResolutions.values()][0];
+    world.contacts.push({
+      contactId: 'c-other', type: 'tenant', phone: '+15550104040', created_at: '2026-01-01T00:00:00.000Z',
+    });
+    expireActiveResolution(world, 'c1', 'phone');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+    const replacement = await world.extractionRepo.getSuggestion('c1', 'phone');
+
+    const res = await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    // The replacement is untouched: still pending, byte for byte.
+    expect(res.body.suggestions).toHaveLength(1);
+    expect(await world.extractionRepo.getSuggestion('c1', 'phone')).toEqual(replacement);
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal).toEqual({
+      itemId: abandoned?.itemId,
+      state: 'completed',
+      contactId: 'c1',
+      target: 'phone',
+      identityKey: abandoned?.identityKey,
+      action: 'accept',
+      completedAt: expect.any(String),
+      disposition: 'released_unsafe',
+    });
+    expect(JSON.stringify(journal)).not.toContain('+15550104040');
+    // A refused pre-mutation conflict never wrote the phone, its audit, or a verdict.
+    expect((await world.contactsRepo.getById('c1'))?.phones ?? []).toHaveLength(0);
+    expect(world.auditEvents.filter((event) => event.event_type === 'contact_phone_added')).toHaveLength(0);
+    expect(setVerdict).not.toHaveBeenCalled();
+  });
+
   it('dismiss recovery suppresses only the same normalized replacement value', async () => {
     for (const [replacementValue, preserved] of [
       [' TWO   CATS ', false],
@@ -546,6 +781,56 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     }
   });
 
+  // adv P3-25: a helped journal writes the contact and the pending list for
+  // somebody else's suggestion. Whether this request then succeeds on its own
+  // identity or fails on it, every open dashboard has just gone stale.
+  it('emits suggestion.updated for a helped journal whether the request then succeeds or fails', async () => {
+    const succeeding = makeWorld();
+    seedTenant(succeeding.world);
+    await seedSuggestion(succeeding.world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-a', runId: 'run-a',
+    });
+    await accept(makeWebhookHarness({
+      world: succeeding.world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app, 'c1', 'pets').expect(500);
+    expireActiveResolution(succeeding.world, 'c1', 'pets');
+
+    await accept(makeWebhookHarness({ world: succeeding.world }).app, 'c1', 'pets').expect(200);
+
+    expect(succeeding.world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('two cats');
+    expect(succeeding.world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
+
+    const failing = makeWorld();
+    seedTenant(failing.world);
+    await seedSuggestion(failing.world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-a', runId: 'run-a',
+    });
+    await dismiss(makeWebhookHarness({
+      world: failing.world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after dismiss claim');
+        },
+      },
+    }).app, 'c1', 'pets').expect(500);
+    expireActiveResolution(failing.world, 'c1', 'pets');
+    // Same normalized value, so helping the abandoned dismiss consumes it and the
+    // request has no identity of its own left to resolve.
+    await seedSuggestion(failing.world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: ' TWO   CATS ', conversationId: 'conv-b', runId: 'run-b',
+    });
+
+    await dismiss(makeWebhookHarness({ world: failing.world }).app, 'c1', 'pets').expect(404);
+
+    expect(await failing.world.extractionRepo.hasDismissal('c1', 'pets', 'two cats')).toBe(true);
+    expect(failing.world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
+  });
+
   it('resumes a committed dismissal without duplicating its audit or tombstone effect', async () => {
     const { world, setVerdict } = makeWorld();
     seedTenant(world);
@@ -567,6 +852,71 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_dismissed')).toHaveLength(1);
     expect(setVerdict).toHaveBeenCalledTimes(1);
     expect(await world.extractionRepo.hasDismissal('c1', 'pets', 'two cats')).toBe(true);
+  });
+
+  // F2: every one of these sites fires AFTER the single atomic transaction that
+  // wrote the contact, its audit, and the phase advance. Losing the journal to
+  // another helper afterwards is not the operator's problem - their action took
+  // effect, so the answer is the success answer.
+  it('answers 200 when a competing helper finishes the journal after the domain effect commits', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const repo = world.suggestionResolutionRepo;
+    const commitContactEffect = repo.commitContactEffect.bind(repo);
+    repo.commitContactEffect = async (input) => {
+      const result = await commitContactEffect(input);
+      // Another helper scrubs the journal in the window between our committed
+      // effect and our re-read of it.
+      for (const [mapKey, item] of world.suggestionResolutions) {
+        if (item.state === 'active' && item.contactId === input.token.contactId && item.target === input.token.target) {
+          world.suggestionResolutions.set(mapKey, makeCompletedResolution(item, '2026-08-08T00:00:00.000Z'));
+        }
+      }
+      return result;
+    };
+
+    const res = await accept(app, 'c1', 'pets').expect(200);
+
+    expect(res.body.contact.pets).toBe('two cats');
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('two cats');
+    expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_accepted')).toHaveLength(1);
+    expect(setVerdict).not.toHaveBeenCalled();
+    expect(world.emitted.some((event) => event.event === 'suggestion.updated')).toBe(true);
+  });
+
+  it('answers 200 when only the final scrub is lost to a competing lease takeover', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const app = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary, journal) => {
+          if (boundary !== 'verdict_attempted') return;
+          for (const [mapKey, item] of world.suggestionResolutions) {
+            if (item.state === 'active' && item.contactId === journal.contactId && item.target === journal.target) {
+              world.suggestionResolutions.set(mapKey, { ...item, leaseId: 'competing-lease', fence: item.fence + 1 });
+            }
+          }
+        },
+      },
+    }).app;
+
+    const res = await accept(app, 'c1', 'pets').expect(200);
+
+    expect(res.body.contact.pets).toBe('two cats');
+    expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_accepted')).toHaveLength(1);
+    expect(setVerdict).toHaveBeenCalledTimes(1);
+    // We must not scrub a journal we no longer own - the new lease holder finishes it.
+    expect([...world.suggestionResolutions.values()][0]).toMatchObject({
+      state: 'active', leaseId: 'competing-lease',
+    });
+    expect(world.emitted.some((event) => event.event === 'suggestion.updated')).toBe(true);
   });
 
   it('makes a completed same-action retry idempotent and fences the opposite action', async () => {

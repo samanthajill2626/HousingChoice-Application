@@ -245,6 +245,87 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(await resolutions.get('release-safe', 'pets')).toBeUndefined();
   });
 
+  // F1: recovery has to find abandoned work WITHOUT the suggestion row that a
+  // claim already deleted. The journal key set for one contact is closed (the
+  // twelve DECISION_TARGETS), so one BatchGet enumerates it.
+  it('enumerates a contact bounded journals from the twelve fixed keys', async () => {
+    const contactId = 'enumerate';
+    const finished = await putSuggestion(contactId, 'pets');
+    const finishedClaim = await resolutions.claim(claimInput(finished));
+    if (finishedClaim.status !== 'claimed') throw new Error('claim failed');
+    const finishedToken = tokenFor(finishedClaim.journal);
+    expect(await resolutions.advancePhase({
+      token: finishedToken, expectedPhase: 'claimed', nextPhase: 'verdict_attempted',
+    })).toBe('committed');
+    expect(await resolutions.complete({
+      token: finishedToken, expectedPhase: 'verdict_attempted', completedAt: '2026-08-08T12:05:00.000Z',
+    })).toBe('completed');
+
+    const live = await putSuggestion(contactId, 'phone', '+15550104040');
+    expect((await resolutions.claim(claimInput(live, { leaseId: 'lease-phone' }))).status).toBe('claimed');
+
+    const foreign = await putSuggestion('enumerate-other', 'pets');
+    expect((await resolutions.claim(claimInput(foreign))).status).toBe('claimed');
+
+    const journals = await resolutions.listJournals(contactId);
+    expect(journals.map((journal) => journal.target).sort()).toEqual(['pets', 'phone']);
+    // Only the still-active journal is recoverable work; the completed row is inert.
+    expect(journals.filter((journal) => journal.state === 'active').map((journal) => journal.target))
+      .toEqual(['phone']);
+    expect(journals.find((journal) => journal.target === 'pets')?.state).toBe('completed');
+    expect(await resolutions.listJournals('enumerate-empty')).toEqual([]);
+  });
+
+  // F8: the newer suggestion owns the pending slot, so the refused journal ends
+  // in place. Anything that touched `sugg#` here would destroy live work.
+  it('finalizes an unsafe-released journal terminally without touching the replacement row', async () => {
+    const contactId = 'release-unsafe';
+    const original = await putSuggestion(contactId, 'pets', 'two cats');
+    const claimed = await resolutions.claim(claimInput(original));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    const replacement = await putSuggestion(contactId, 'pets', 'one dog', {
+      createdAt: '2026-08-08T12:00:02.000Z',
+      runId: 'run-replacement',
+    });
+    const token = tokenFor(claimed.journal);
+
+    expect(await resolutions.release({ token, expectedPhase: 'claimed' })).toBe('unsafe');
+    expect(await resolutions.complete({
+      token,
+      expectedPhase: 'claimed',
+      completedAt: '2026-08-08T12:05:00.000Z',
+      disposition: 'released_unsafe',
+    })).toBe('completed');
+
+    const journal = await doc.send(new GetCommand({
+      TableName: extractionTable,
+      Key: { itemId: resolutionItemId(contactId, 'pets') },
+      ConsistentRead: true,
+    }));
+    expect(journal.Item).toEqual({
+      itemId: resolutionItemId(contactId, 'pets'),
+      state: 'completed',
+      contactId,
+      target: 'pets',
+      identityKey: claimed.journal.identityKey,
+      action: 'accept',
+      completedAt: '2026-08-08T12:05:00.000Z',
+      disposition: 'released_unsafe',
+    });
+    expect(JSON.stringify(journal.Item)).not.toContain('two cats');
+    expect(JSON.stringify(journal.Item)).not.toContain('user-1');
+
+    const pending = await doc.send(new GetCommand({
+      TableName: extractionTable,
+      Key: { itemId: `sugg#${contactId}#pets` },
+      ConsistentRead: true,
+    }));
+    expect(pending.Item).toEqual(replacement);
+    // And the replacement is claimable on its FIRST attempt - no deadlock.
+    expect((await resolutions.claim(claimInput(replacement, { leaseId: 'lease-replacement' }))).status)
+      .toBe('claimed');
+  });
+
   it('commits contact plus deterministic audit plus phase atomically and recovers by phase', async () => {
     const contactId = 'contact-effect';
     await putContact(contactId);

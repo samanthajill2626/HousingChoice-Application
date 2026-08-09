@@ -98,6 +98,16 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
   router.get('/contacts/:contactId/suggestions', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
+    // F1: a crash between claim and commit removed the suggestion card, so this
+    // ordinary read is the recovery surface - it helps any expired journal of
+    // this contact to completion before listing. Strictly best-effort: recovery
+    // must never fail or delay-fail the read the dashboard depends on.
+    try {
+      const recovery = await service.recoverAbandoned(contactId);
+      if (recovery.domainCommitted) events.emit('suggestion.updated', { contactId });
+    } catch (err) {
+      log.warn({ err, contactId }, 'abandoned suggestion resolution recovery failed (best-effort)');
+    }
     res.json({ suggestions: await extraction.listSuggestionsByContact(contactId) });
   });
 
@@ -123,7 +133,11 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         ...(req.user?.userId !== undefined && { actorId: req.user.userId }),
       });
       const suggestions = await extraction.listSuggestionsByContact(contactId);
-      if (outcome.completedNow) events.emit('suggestion.updated', { contactId });
+      // A helped journal commits a domain effect for somebody else's suggestion,
+      // so it needs the same SSE as this request's own completion (adv P3-25).
+      if (outcome.completedNow || outcome.helpedCommitted) {
+        events.emit('suggestion.updated', { contactId });
+      }
       log.info(
         { contactId, target, action, actor: req.user?.userId, replay: !outcome.completedNow },
         'ai suggestion resolution completed',
@@ -140,6 +154,9 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       }
     } catch (error) {
       if (error instanceof SuggestionResolutionError) {
+        // The request failed on its OWN identity, but a journal it helped along
+        // the way did commit - the contact and the pending list really changed.
+        if (error.helpedCommitted) events.emit('suggestion.updated', { contactId });
         res.status(error.status).json({
           error: error.code,
           ...(error.retryable && { retryable: true }),

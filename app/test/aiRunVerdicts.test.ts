@@ -12,7 +12,7 @@ type SetVerdict = (
   runId: string,
   target: DecisionTarget,
   verdict: Verdict,
-  opts?: { at?: string; by?: string },
+  opts?: { at?: string; by?: string; expectedVerdict?: Verdict; freshSuggestionCreatedAt?: string },
 ) => Promise<boolean>;
 
 const suggestionIdentities = new Map<string, { revision?: string; createdAt: string; runId?: string }>();
@@ -41,10 +41,12 @@ function seedTenant(world: ReturnType<typeof makeWebhookHarness>['world'], over:
  * findByPhone instead. Owning the number as a SECONDARY creates the pointer the
  * real transaction actually reads.
  *
- * The gap that fixture was hiding is REPORTED, not fixed here: a number held as
- * another contact's primary is invisible to commitPhoneEffect, so the
- * expired-journal HELP path (which skips the service's findByPhone pre-check at
- * suggestionResolution.ts:489-494) can still attach it.
+ * The gap that fixture was hiding is FILED, not fixed here
+ * (TODO(suggestion-phone-ownership-pointer-only-arbitration)): a number held as
+ * another contact's primary is still invisible to commitPhoneEffect. The
+ * expired-journal HELP path now runs the same advisory findByPhone pre-check the
+ * ordinary accept does, which closes the common case; the eventually consistent
+ * GSI read means the race itself remains.
  */
 async function seedPhoneOwner(
   world: ReturnType<typeof makeWebhookHarness>['world'],
@@ -772,7 +774,16 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(contact?.phones?.some((phone) => phone.phone === '+15550104040')).toBe(false);
     expect(await world.extractionRepo.getSuggestion('c1', 'phone')).toBeUndefined();
     expect(world.auditEvents.filter((event) => event.event_type === 'contact_phone_added')).toHaveLength(1);
-    expect(setVerdict.mock.calls.map((call) => call[0])).toEqual(['run-b']);
+    // adv P1-1 / conf P2-2: the OLD run must not be left `pending` - spec 7.3
+    // reads that as "nobody has looked yet" for a decision a named operator
+    // explicitly accepted. `superseded` is exactly what the extraction job
+    // would have stamped had the replacement displaced the row normally; claim()
+    // had already deleted the `sugg#` row, so nothing else can ever say it.
+    expect(setVerdict.mock.calls.map((call) => [call[0], call[2]])).toEqual([
+      ['run-a', 'superseded'],
+      ['run-b', 'accepted'],
+    ]);
+    expect(setVerdict.mock.calls[0]?.[3]).toMatchObject({ expectedVerdict: 'pending' });
     const journal = [...world.suggestionResolutions.values()][0];
     expect(journal?.state).toBe('completed');
   });
@@ -793,6 +804,12 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     }).app;
     await accept(crashing, 'c1', 'phone').expect(500);
     const abandoned = [...world.suggestionResolutions.values()][0];
+    const originalSnapshot = abandoned?.state === 'active' ? abandoned.snapshot : undefined;
+    const originalIdentity = originalSnapshot === undefined ? undefined : {
+      createdAt: originalSnapshot.createdAt,
+      ...(originalSnapshot.revision !== undefined && { revision: originalSnapshot.revision }),
+      ...(originalSnapshot.runId !== undefined && { runId: originalSnapshot.runId }),
+    };
     await seedPhoneOwner(world, '+15550104040');
     expireActiveResolution(world, 'c1', 'phone');
     await seedSuggestion(world, {
@@ -817,10 +834,73 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
       disposition: 'released_unsafe',
     });
     expect(JSON.stringify(journal)).not.toContain('+15550104040');
-    // A refused pre-mutation conflict never wrote the phone, its audit, or a verdict.
+    // A refused pre-mutation conflict never wrote the phone or its audit.
     expect((await world.contactsRepo.getById('c1'))?.phones ?? []).toHaveLength(0);
     expect(world.auditEvents.filter((event) => event.event_type === 'contact_phone_added')).toHaveLength(0);
-    expect(setVerdict).not.toHaveBeenCalled();
+    // adv P1-1 / conf P2-2: it DOES record the verdict, best-effort. The run log
+    // is the whole point of the feature and `pending` would claim nobody looked.
+    expect(setVerdict.mock.calls).toHaveLength(1);
+    expect(setVerdict.mock.calls[0]?.slice(0, 3)).toEqual(['run-a', 'phone', 'superseded']);
+    expect(setVerdict.mock.calls[0]?.[3]).toMatchObject({ expectedVerdict: 'pending' });
+
+    // adv P1-1b: the original tab retries the identity it still has on screen.
+    // The completed row carries `released_unsafe`, so the honest answer is that
+    // a newer suggestion replaced it - NOT the 200 "accepted" the plain
+    // identity-match branch used to return for an action that never applied.
+    const retry = await accept(makeWebhookHarness({ world }).app, 'c1', 'phone', originalIdentity);
+    expect(retry.status).toBe(409);
+    expect(retry.body.error).toBe('suggestion_replaced');
+    expect((await world.contactsRepo.getById('c1'))?.phones ?? []).toHaveLength(0);
+  });
+
+  // FIX-4 / conf P2-3 mitigation. A number held as another contact's PRIMARY has
+  // no `phoneref#` pointer row by design, so commitPhoneEffect - which arbitrates
+  // on the pointer alone - cannot see its owner and would attach it anyway. The
+  // ordinary accept path is fenced by the service's findByPhone pre-check; the
+  // HELP path (takeover from resolve(), or recoverAbandoned on this read) used to
+  // skip it entirely. Advisory only: findByPhone reads an eventually consistent
+  // GSI, so this narrows reachability rather than proving ownership.
+  it('does NOT attach a number that became another contact PRIMARY while a journal was abandoned', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    // The number becomes somebody else's PRIMARY - a bare contact scalar, with
+    // NO pointer row (that is the invariant addPhone maintains for primaries).
+    world.contacts.push({
+      contactId: 'c-primary-owner',
+      type: 'tenant',
+      phone: '+15550104040',
+      created_at: '2026-01-01T00:00:00.000Z',
+    });
+    expireActiveResolution(world, 'c1', 'phone');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    // Nothing was attached and no pointer was minted, so the number still
+    // resolves to exactly one owner.
+    expect((await world.contactsRepo.getById('c1'))?.phones ?? []).toHaveLength(0);
+    expect(world.auditEvents.filter((event) => event.event_type === 'contact_phone_added')).toHaveLength(0);
+    expect((await world.contactsRepo.findByPhone('+15550104040'))?.contactId).toBe('c-primary-owner');
+    expect(world.contacts.some((contact) => contact.phone_ref === true)).toBe(false);
+    // The journal still ends terminally, with its verdict recorded.
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal?.state).toBe('completed');
+    expect(journal).toMatchObject({ disposition: 'released_unsafe' });
+    expect(setVerdict.mock.calls.map((call) => [call[0], call[2]])).toEqual([['run-a', 'superseded']]);
   });
 
   it('dismiss recovery suppresses only the same normalized replacement value', async () => {

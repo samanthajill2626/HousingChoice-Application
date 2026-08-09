@@ -20,7 +20,7 @@ import {
   type AiRunRecordInput,
   type AiRunsRepo,
 } from '../src/repos/aiRunsRepo.js';
-import { createLogCapture } from './helpers/logCapture.js';
+import { createLogCapture, type LogCapture } from './helpers/logCapture.js';
 
 type Row = Record<string, unknown>;
 
@@ -366,11 +366,11 @@ function makeFakeDoc(opts: {
   };
 }
 
-function repoWith(doc: DynamoDBDocumentClient) {
+function repoWith(doc: DynamoDBDocumentClient, capture: LogCapture = createLogCapture()) {
   return createAiRunsRepo({
     doc,
     env: { TABLE_PREFIX: 'hc-fake-' } as NodeJS.ProcessEnv,
-    logger: createLogger({ destination: createLogCapture().stream }),
+    logger: createLogger({ destination: capture.stream }),
   });
 }
 
@@ -697,6 +697,54 @@ describe('aiRunsRepo - listByEntity', () => {
     expect(out.entries).toEqual([]);
     expect(out.nextBefore).toBeUndefined();
   });
+
+  // conf P2-1: the two shipped date inputs are independent <input type="date">
+  // controls, so From LATER than To is one click away. DynamoDB rejects a
+  // BETWEEN whose upper bound is below its lower bound ("the BETWEEN operator
+  // requires upper bound to be greater than or equal to lower bound"), which
+  // reached the route as a 500. An inverted range truthfully matches nothing,
+  // so the repository must answer the empty page WITHOUT querying. The emulator
+  // models BETWEEN as an inclusive JS comparison and cannot reproduce the
+  // engine's rejection, so the load-bearing assertion here is that no Query is
+  // sent at all (the engine's own refusal is pinned in the integration suite).
+  it('returns an empty page for an inverted range WITHOUT sending a query', async () => {
+    const { doc, queryInputs } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+    const queriesAfterSeed = queryInputs().length;
+
+    const inverted = await repo.listByEntity('global', {
+      from: '2026-08-06T10:04:00.000Z',
+      to: '2026-08-06T10:01:00.000Z',
+    });
+    const invertedCursor = await repo.listByEntity('global', {
+      from: '2026-08-06T10:04:00.000Z',
+      before: '2026-08-06T10:01:00.000Z#run-01',
+    });
+
+    expect(inverted.entries).toEqual([]);
+    expect(inverted.nextBefore).toBeUndefined();
+    expect(invertedCursor.entries).toEqual([]);
+    expect(invertedCursor.nextBefore).toBeUndefined();
+    expect(queryInputs().length).toBe(queriesAfterSeed);
+  });
+
+  // The boundary next to it: `from` EQUAL to the upper bound is a legal BETWEEN
+  // and must still be queried, so the guard cannot be widened to `>=`.
+  it('still queries when from EQUALS the to ceiling', async () => {
+    const { doc, queryInputs } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seed(repo, 5);
+    const queriesAfterSeed = queryInputs().length;
+
+    const { entries } = await repo.listByEntity('global', {
+      from: '2026-08-06T10:02:00.000Z',
+      to: '2026-08-06T10:02:00.000Z',
+    });
+
+    expect(entries.map((e) => e.runId)).toEqual(['run-02']);
+    expect(queryInputs().length).toBe(queriesAfterSeed + 1);
+  });
 });
 
 describe('aiRunsRepo - setVerdict', () => {
@@ -819,7 +867,8 @@ describe('aiRunsRepo - setVerdict', () => {
   // rethrow point this pins.)
   it('returns false without throwing when the run has no decision for the target', async () => {
     const { doc } = makeFakeDoc();
-    const repo = repoWith(doc);
+    const capture = createLogCapture();
+    const repo = repoWith(doc, capture);
     await repo.putRun(draftRecord({
       decisions: { tenure: { proposedOp: 'suggest', outcome: 'suggested', verdict: 'pending' } },
     }));
@@ -829,6 +878,23 @@ describe('aiRunsRepo - setVerdict', () => {
     })).resolves.toBe(false);
     expect((await repo.getRun('run-1'))?.decisions['tenure']?.verdict).toBe('pending');
     expect((await repo.getRun('run-1'))?.decisions['pets']).toBeUndefined();
+
+    // adv P2-6: ValidationException is DynamoDB's catch-all for EVERY malformed
+    // expression, so swallowing it as a silent `false` would let a future
+    // expression bug stop all verdict stamping with no signal anywhere. The
+    // return value stays best-effort; the warn is the signal. Ids only - a
+    // verdict line never carries a suggested value.
+    const rejected = capture.atLevel(40).filter(
+      (line) => line['msg'] === 'ai run verdict stamp rejected (ValidationException)',
+    );
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(rejected[0]).toMatchObject({ runId: 'run-1', target: 'pets' });
+    expect((rejected[0]!['err'] as { message?: string } | undefined)?.message)
+      .toMatch(/document path/i);
+    const payloadKeys = Object.keys(rejected[0]!)
+      .filter((k) => !['level', 'time', 'pid', 'hostname', 'msg'].includes(k))
+      .sort();
+    expect(payloadKeys).toEqual(['err', 'runId', 'target']);
   });
 
   it('does not overwrite a terminal verdict when another resolver won first', async () => {

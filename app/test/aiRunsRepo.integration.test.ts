@@ -336,6 +336,41 @@ describe.skipIf(!reachable)('ai run log repository against DynamoDB Local', () =
       expect(err.message).toMatch(/only contain one condition per key/i);
     });
 
+    it('proves a real engine rejects an INVERTED BETWEEN', async () => {
+      // conf P2-1. The sibling of the two-condition defect: one condition, but
+      // its bounds are the wrong way round. The unit emulator models BETWEEN as
+      // an inclusive JS comparison and quietly returns nothing; the engine
+      // refuses the query, which reached the route as a 500.
+      const input: QueryCommandInput = {
+        TableName: runsTable,
+        IndexName: 'byEntity',
+        KeyConditionExpression: '#ek = :ek AND #sk BETWEEN :lower AND :upper',
+        ExpressionAttributeNames: { '#ek': 'entityKey', '#sk': 'sortKey' },
+        ExpressionAttributeValues: {
+          ':ek': entity,
+          ':lower': minute(4),
+          ':upper': minute(2),
+        },
+        ScanIndexForward: false,
+      };
+      const err = await rejection(doc.send(new QueryCommand(input)));
+      expect(err.name).toBe('ValidationException');
+      expect(err.message).toMatch(/upper bound/i);
+    });
+
+    it('answers an inverted from/to range with an empty page instead of throwing', async () => {
+      await expect(runs.listByEntity(entity, { from: minute(4), to: minute(2) }))
+        .resolves.toEqual({ entries: [] });
+      await expect(runs.listByEntity(entity, {
+        from: minute(4),
+        before: runSortKey(minute(2), listRunId(2)),
+      })).resolves.toEqual({ entries: [] });
+      // The same bounds the right way round still return rows, so the guard
+      // cannot have swallowed the ordinary range.
+      const ordered = await runs.listByEntity(entity, { from: minute(2), to: minute(4) });
+      expect(ordered.entries.map((e) => e.runId)).toEqual([listRunId(4), listRunId(3), listRunId(2)]);
+    });
+
     it('never returns a run row from the sparse byEntity index', async () => {
       const page = await doc.send(new QueryCommand({
         TableName: runsTable,

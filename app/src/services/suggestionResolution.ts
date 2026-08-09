@@ -263,6 +263,55 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
     await deps.hooks?.afterBoundary?.(name, journal);
   }
 
+  /**
+   * The same ownership question `resolve()` asks before its own claim, asked
+   * again for a journal this request only HELPS. Advisory: `findByPhone` reads
+   * an eventually consistent GSI, so a `false` is not proof the number is free -
+   * it narrows the reachable window, it does not close it
+   * (TODO(suggestion-phone-ownership-pointer-only-arbitration)). Best-effort by
+   * construction: a failed read proceeds to the fenced transaction exactly as
+   * before.
+   */
+  async function phoneOwnedElsewhere(contactId: string, phone: string): Promise<boolean> {
+    try {
+      const owner = await deps.contactsRepo.findByPhone(phone);
+      return owner !== undefined && owner.contactId !== contactId;
+    } catch (err) {
+      // `err`, not `error`: pino serializes an Error only under `err`.
+      deps.logger.warn(
+        { err, contactId },
+        'phone ownership pre-check failed (advisory, proceeding)',
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Best-effort verdict stamp, in the shape the ordinary verdict phase uses.
+   * Never fails the human action - the run log is observability.
+   */
+  async function stampVerdict(
+    journal: ActiveSuggestionResolution,
+    verdict: 'accepted' | 'dismissed' | 'superseded' | 'superseded_by_human_edit',
+  ): Promise<void> {
+    const snapshot = journal.snapshot;
+    if (snapshot.runId === undefined || !isDecisionTarget(snapshot.target)) return;
+    try {
+      await deps.aiRunsRepo.setVerdict(snapshot.runId, snapshot.target, verdict, {
+        at: now(),
+        expectedVerdict: 'pending',
+        freshSuggestionCreatedAt: snapshot.createdAt,
+        ...(journal.actorId !== undefined && { by: journal.actorId }),
+      });
+    } catch (err) {
+      // `err`, not `error`: pino serializes an Error only under `err`.
+      deps.logger.warn(
+        { err, contactId: journal.contactId, target: journal.target },
+        'ai run verdict stamp failed (best-effort)',
+      );
+    }
+  }
+
   async function applyJournal(
     initial: ActiveSuggestionResolution,
     opts: { helping: boolean },
@@ -275,13 +324,25 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
     for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
       const token = tokenFor(journal);
       if (journal.phase === 'claimed') {
+        const plan = journal.plan;
+        // commitPhoneEffect arbitrates ownership on the `phoneref#` POINTER row
+        // alone, and a contact's PRIMARY number deliberately has none - so a
+        // number that became somebody else's primary while this journal was
+        // abandoned is invisible to the fenced transaction. `resolve()` fences
+        // its OWN claim with this same question below; a journal reached by
+        // HELPING (takeover, or recoverAbandoned on a read) never asked it.
+        const helpedPhoneConflict = opts.helping
+          && plan.kind === 'phone'
+          && await phoneOwnedElsewhere(journal.contactId, plan.phone);
         let result;
         try {
-          result = journal.plan.kind === 'phone'
-            ? await deps.resolutionRepo.commitPhoneEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
-            : journal.plan.kind === 'dismiss'
-              ? await deps.resolutionRepo.commitDismissalEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
-              : await deps.resolutionRepo.commitContactEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' });
+          result = helpedPhoneConflict
+            ? ('phone_conflict' as const)
+            : plan.kind === 'phone'
+              ? await deps.resolutionRepo.commitPhoneEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
+              : plan.kind === 'dismiss'
+                ? await deps.resolutionRepo.commitDismissalEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
+                : await deps.resolutionRepo.commitContactEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' });
         } catch (error) {
           throw error;
         }
@@ -300,6 +361,16 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
               completedAt: now(),
               disposition: 'released_unsafe',
             });
+            // The journal is terminal, so the ordinary verdict phase below can
+            // never run for it - and nothing else can stamp this run either:
+            // claim() deleted the `sugg#` row, so the replacement's
+            // putSuggestion reported no displaced row and the extraction job's
+            // own `superseded` stamp never fired. Leaving it `pending` would
+            // tell the run log nobody ever looked at a decision a named
+            // operator explicitly accepted. `superseded` is exactly what the
+            // job would have written had the replacement displaced the row
+            // normally. Best-effort: it must never fail the human action.
+            await stampVerdict(journal, 'superseded');
             // Helping somebody else's journal: hand control back so the caller
             // can go on to its OWN identity. Only the requester's own claim
             // turns this conflict into its answer.
@@ -307,8 +378,12 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           }
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
-        // Pre-commit: `stale` here proves the domain transaction did not commit
-        // under this token, so a retry is honest.
+        // `stale` means this token can no longer prove its domain transaction
+        // committed - the common reading is pre-commit contention, but a
+        // committed-then-lost acknowledgement whose journal was taken over
+        // before the re-read lands here too. With lazy recovery in place the
+        // journal is finished by whoever holds it, so a retry is honest and
+        // safe either way.
         if (result === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
         domainCommitted = true;
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
@@ -361,29 +436,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         continue;
       }
       if (journal.phase === 'activity_recorded' || journal.phase === 'activity_skipped') {
-        const snapshot = journal.snapshot;
-        if (snapshot.runId !== undefined && isDecisionTarget(snapshot.target)) {
-          try {
-            await deps.aiRunsRepo.setVerdict(
-              snapshot.runId,
-              snapshot.target,
-              journal.outcome
-                ?? (journal.action === 'accept' ? 'accepted' : 'dismissed'),
-              {
-                at: now(),
-                expectedVerdict: 'pending',
-                freshSuggestionCreatedAt: snapshot.createdAt,
-                ...(journal.actorId !== undefined && { by: journal.actorId }),
-              },
-            );
-          } catch (err) {
-            // `err`, not `error`: pino serializes an Error only under `err`.
-            deps.logger.warn(
-              { err, contactId: journal.contactId, target: journal.target },
-              'ai run verdict stamp failed (best-effort)',
-            );
-          }
-        }
+        await stampVerdict(
+          journal,
+          journal.outcome ?? (journal.action === 'accept' ? 'accepted' : 'dismissed'),
+        );
         const result = await deps.resolutionRepo.advancePhase({
           token,
           expectedPhase: journal.phase,
@@ -473,6 +529,16 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             if (current.action !== input.action) {
               throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
             }
+            // An identity match is normally proof the action already applied,
+            // and this immediate retry is idempotent. `released_unsafe` is the
+            // one completed state where it did NOT: the effect was refused
+            // pre-mutation and the snapshot could not be restored because a
+            // NEWER suggestion already held the pending slot. Answering 200
+            // would tell the operator their accept succeeded when nothing was
+            // written, so say what is true - a newer suggestion replaced it.
+            if (current.disposition === 'released_unsafe') {
+              throw new SuggestionResolutionError(409, 'suggestion_replaced');
+            }
             return { completedNow: false, helpedCommitted };
           }
 
@@ -511,6 +577,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           }
           if (claim.status === 'completed') {
             if (claim.journal.identityKey === identityKey && claim.journal.action === input.action) {
+              // Same reading as the completed-row branch above: this is the
+              // race where the journal finished between our read and our claim.
+              if (claim.journal.disposition === 'released_unsafe') {
+                throw new SuggestionResolutionError(409, 'suggestion_replaced');
+              }
               return { completedNow: false, helpedCommitted };
             }
             throw new SuggestionResolutionError(409, 'suggestion_already_resolved');

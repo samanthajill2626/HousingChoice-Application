@@ -260,6 +260,15 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           : toCeiling !== undefined
             ? { value: toCeiling, exclusive: false }
             : undefined;
+      // An INVERTED range matches nothing, and DynamoDB says so by rejecting the
+      // query: "the BETWEEN operator requires upper bound to be greater than or
+      // equal to lower bound" (a ValidationException, i.e. a 500 on the route).
+      // The dashboard's From and To are independent date inputs, so From later
+      // than To is one click away; a hand-supplied `before` below `from` is the
+      // same shape. Answer the empty page truthfully instead of querying.
+      if (opts.from !== undefined && upper !== undefined && opts.from > upper.value) {
+        return { entries: [] };
+      }
       const usesSortKey = upper !== undefined || opts.from !== undefined;
       const sortCondition =
         upper !== undefined && opts.from !== undefined
@@ -337,6 +346,20 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         names['#expectedVerdict'] = 'verdict';
         values[':expectedVerdict'] = opts.expectedVerdict;
       }
+      /**
+       * A ValidationException is reported as `false` because this method's
+       * contract is a boolean and the missing-`decisions.<target>` path is a
+       * legitimate best-effort miss. But it is also DynamoDB's catch-all for
+       * EVERY malformed expression (a reserved word, an unreferenced alias, a
+       * type mismatch), and no caller inspects the boolean - so without this
+       * line a future expression bug would silently stop stamping every verdict
+       * in production with the run log showing `pending` and no error anywhere.
+       * Ids only: never the value under review.
+       */
+      const rejected = (err: unknown): false => {
+        log.warn({ runId, target, err }, 'ai run verdict stamp rejected (ValidationException)');
+        return false;
+      };
       const markerNames = { '#verdicts': 'verdicts', '#target': target, '#version': 'version' };
       const markerValues = { ':verdict': { verdict, at, ...(opts.by !== undefined && { by: opts.by }) }, ':one': 1 };
       const writeRunVerdict = async (): Promise<boolean> => {
@@ -353,7 +376,8 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           }));
           return true;
         } catch (err) {
-          if (err instanceof ConditionalCheckFailedException || isValidationFailure(err)) return false;
+          if (err instanceof ConditionalCheckFailedException) return false;
+          if (isValidationFailure(err)) return rejected(err);
           throw err;
         }
       };
@@ -369,7 +393,8 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
           }));
           return true;
         } catch (err) {
-          if (err instanceof ConditionalCheckFailedException || isValidationFailure(err)) return false;
+          if (err instanceof ConditionalCheckFailedException) return false;
+          if (isValidationFailure(err)) return rejected(err);
           throw err;
         }
       };
@@ -409,7 +434,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
         }));
         return true;
       } catch (err) {
-        if (isValidationFailure(err)) return false;
+        if (isValidationFailure(err)) return rejected(err);
         if (!(err instanceof TransactionCanceledException)) throw err;
       }
       if (await writeRunVerdict()) return true;

@@ -741,14 +741,18 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect(JSON.stringify(contact.Item)).not.toContain('+14045553333');
   });
 
-  // CHARACTERIZATION of a REPORTED GAP, not an endorsement. The conflict check
-  // reads the phoneref# pointer ONLY (suggestionResolutionRepo.ts:797-803), and
-  // a contact's PRIMARY number deliberately has no pointer (repo:845-849), so a
-  // number held as somebody else's primary is invisible here. The service's
-  // findByPhone pre-check (suggestionResolution.ts:489-494) covers the ordinary
-  // accept, but the expired-journal HELP path replays commitPhoneEffect without
-  // it. Pinned so the fake can mirror a KNOWN behavior rather than a guess: when
-  // the gap is closed this goes red and both sides get updated together.
+  // CHARACTERIZATION of a FILED GAP, not an endorsement -
+  // TODO(suggestion-phone-ownership-pointer-only-arbitration). The conflict
+  // check reads the phoneref# pointer ONLY (suggestionResolutionRepo.ts:797-803),
+  // and a contact's PRIMARY number deliberately has no pointer (repo:845-849),
+  // so a number held as somebody else's primary is invisible HERE, at the
+  // repository. That is unchanged and is what this test pins. The SERVICE now
+  // runs an advisory findByPhone pre-check on the help path as well as the
+  // ordinary accept, so the gap is much harder to reach in practice - but
+  // findByPhone reads an eventually consistent GSI and cannot be a transaction
+  // condition, so the arbitration itself is still pointer-only. Pinned so the
+  // fake can mirror a KNOWN behavior rather than a guess: when the gap is
+  // closed this goes red and both sides get updated together.
   it('does NOT detect a number held as another contact primary (reported gap)', async () => {
     const contactId = 'phone-primary-gap';
     await putContact(contactId, { phone: '+14045550000' });

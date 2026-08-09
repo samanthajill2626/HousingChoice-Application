@@ -441,6 +441,52 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     });
   });
 
+  // The two rules the crash-suite fake mirrors but nothing pinned on the real
+  // side (F7b). Both are decided in the repository's catch paths, so only a real
+  // cancellation exercises them.
+  it('reports already_committed for a journal that advanced PAST the expected phase', async () => {
+    const contactId = 'phase-rank';
+    await putContact(contactId);
+    const suggestion = await putSuggestion(contactId);
+    const claimed = await resolutions.claim(claimInput(suggestion));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    const token = tokenFor(claimed.journal);
+    expect(await resolutions.commitContactEffect({
+      token, expectedPhase: 'claimed', nextPhase: 'domain_applied',
+    })).toBe('committed');
+    expect(await resolutions.advancePhase({
+      token, expectedPhase: 'domain_applied', nextPhase: 'activity_skipped',
+    })).toBe('committed');
+
+    // A replay of the FIRST phase call, arriving late. The journal is two
+    // phases on, so this is a duplicate, not a lost race: `stale` here would
+    // abandon a resolution whose effects are already durable.
+    expect(await resolutions.advancePhase({
+      token, expectedPhase: 'claimed', nextPhase: 'domain_applied',
+    })).toBe('already_committed');
+    expect(await resolutions.get(contactId, 'pets')).toMatchObject({ phase: 'activity_skipped' });
+  });
+
+  it('re-claims its own lost acknowledgement and blocks a different lease', async () => {
+    const contactId = 'lost-ack';
+    await putContact(contactId);
+    const suggestion = await putSuggestion(contactId);
+    const first = await resolutions.claim(claimInput(suggestion, { leaseId: 'lease-mine' }));
+    expect(first.status).toBe('claimed');
+
+    // Same suggestion, same lease: the claim already landed and only its
+    // response was lost, so the retry must resume rather than deadlock.
+    const retry = await resolutions.claim(claimInput(suggestion, { leaseId: 'lease-mine' }));
+    expect(retry.status).toBe('claimed');
+    if (retry.status !== 'claimed') throw new Error('re-claim failed');
+    expect(retry.journal.leaseId).toBe('lease-mine');
+    expect(retry.journal.fence).toBe(1);
+
+    // A DIFFERENT lease is somebody else and stays blocked.
+    const other = await resolutions.claim(claimInput(suggestion, { leaseId: 'lease-theirs' }));
+    expect(other.status).toBe('blocked');
+  });
+
   it('classifies unknown claim and effect outcomes through consistent journal reads', async () => {
     const contactId = 'unknown-outcome';
     await putContact(contactId);

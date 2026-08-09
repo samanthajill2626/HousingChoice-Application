@@ -104,6 +104,13 @@ Do not run these automatically. After this feature merges, run `npm run plan -- 
 to create the `ai_runs` table before the dev deploy. Run the corresponding production Terraform apply at the
 M1.11 cutover before the prod deploy. Separately, and only when production rollout is approved, set
 `AI_EXTRACTION_ENABLED=true` for production; that flag flip is independent of the Terraform applies.
+Until the dev apply lands, `/settings/ai-runs` and `GET /api/ai-runs` 500 on dev deploys (local/hermetic
+lanes are unaffected - they bootstrap their own tables). The schema it adds, in the same shape as the
+table below:
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| AI run log (2026-08) - **NOT YET APPLIED anywhere** | `ai_runs` | **new table** - PK `itemId`, GSI `byEntity` (`entityKey` + `sortKey`), TTL `expires_at` | `/settings/ai-runs` forensic log |
 
 **New-dashboard backend-slice schema — APPLIED TO DEV (2026-07-01); PROD applies at the M1.11 go-live cutover.**
 

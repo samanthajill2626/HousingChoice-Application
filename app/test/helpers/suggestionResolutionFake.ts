@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import type { ActivityEventsRepo } from '../../src/repos/activityEventsRepo.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import type { ContactsRepo } from '../../src/repos/contactsRepo.js';
@@ -50,7 +51,9 @@ export function createSuggestionResolutionFake(deps: {
 
   async function effect(
     input: PhaseInput,
-    apply: (journal: ActiveSuggestionResolution) => Promise<'committed' | 'phone_conflict'>,
+    apply: (
+      journal: ActiveSuggestionResolution,
+    ) => Promise<'committed' | 'phone_conflict' | 'superseded_by_human_edit'>,
   ): Promise<ResolutionEffectResult> {
     const current = items.get(key(input.token.contactId, input.token.target));
     if (current?.state === 'active' && sameToken(current, input) && current.phase === input.nextPhase) {
@@ -60,6 +63,14 @@ export function createSuggestionResolutionFake(deps: {
     if (journal === undefined) return 'stale';
     const result = await apply(journal);
     if (result === 'phone_conflict') return result;
+    if (result === 'superseded_by_human_edit') {
+      items.set(key(journal.contactId, journal.target), {
+        ...journal,
+        phase: input.nextPhase,
+        outcome: result,
+      });
+      return result;
+    }
     advance(journal, input.nextPhase);
     return 'committed';
   }
@@ -132,6 +143,15 @@ export function createSuggestionResolutionFake(deps: {
     commitContactEffect(input) {
       return effect(input, async (journal) => {
         if (journal.plan.kind !== 'contact' && journal.plan.kind !== 'status') return 'committed';
+        const contact = await deps.contactsRepo.getById(journal.contactId);
+        const matches = contact !== undefined
+          && Object.entries(journal.plan.guard).every(([field, expected]) => {
+            const value = contact[field];
+            return expected.exists
+              ? value !== undefined && isDeepStrictEqual(value, expected.value)
+              : value === undefined;
+          });
+        if (!matches) return 'superseded_by_human_edit';
         await deps.contactsRepo.update(journal.contactId, journal.plan.patch);
         await deps.auditRepo.append(
           `contacts#${journal.contactId}`,

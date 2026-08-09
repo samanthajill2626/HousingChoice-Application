@@ -67,6 +67,7 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
   const contactPlan = (value: string): ResolutionReplayPlan => ({
     kind: 'contact',
     patch: { pets: value },
+    guard: { pets: { exists: false } },
     audit: { eventType: 'suggestion_accepted', payload: { target: 'pets' } },
   });
 
@@ -268,6 +269,96 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
     expect((await resolutions.get(contactId, 'pets'))?.state).toBe('active');
   });
 
+  it('applies a matching contact guard once and keeps the accepted audit atomic', async () => {
+    const contactId = 'contact-guard-match';
+    await putContact(contactId, {
+      pets: 'one dog',
+      pets_source: { source: 'manual', at: '2026-08-08T11:00:00.000Z' },
+    });
+    const suggestion = await putSuggestion(contactId);
+    const plan: ResolutionReplayPlan = {
+      kind: 'contact',
+      patch: {
+        pets: 'two cats',
+        pets_source: { source: 'ai', at: '2026-08-08T12:01:00.000Z' },
+      },
+      guard: {
+        pets: { exists: true, value: 'one dog' },
+        pets_source: { exists: true, value: { source: 'manual', at: '2026-08-08T11:00:00.000Z' } },
+      },
+      audit: { eventType: 'suggestion_accepted', payload: { target: 'pets' } },
+    };
+    const claimed = await resolutions.claim(claimInput(suggestion, { plan }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    const phase = {
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed' as const,
+      nextPhase: 'domain_applied' as const,
+    };
+
+    expect(await resolutions.commitContactEffect(phase)).toBe('committed');
+    expect(await resolutions.commitContactEffect(phase)).toBe('already_committed');
+
+    const contact = await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId }, ConsistentRead: true }));
+    expect(contact.Item).toMatchObject({ pets: 'two cats', pets_source: { source: 'ai' } });
+    const audit = await doc.send(new QueryCommand({
+      TableName: auditTable,
+      KeyConditionExpression: 'entityKey = :entity',
+      ExpressionAttributeValues: { ':entity': `contacts#${contactId}` },
+    }));
+    expect(audit.Items).toHaveLength(1);
+  });
+
+  it('durably supersedes a mismatching contact guard without contact or audit mutation', async () => {
+    const contactId = 'contact-guard-mismatch';
+    await putContact(contactId, {
+      pets: 'one dog',
+      pets_source: { source: 'manual', at: '2026-08-08T11:00:00.000Z' },
+    });
+    const suggestion = await putSuggestion(contactId);
+    const plan: ResolutionReplayPlan = {
+      kind: 'contact',
+      patch: {
+        pets: 'two cats',
+        pets_source: { source: 'ai', at: '2026-08-08T12:01:00.000Z' },
+      },
+      guard: {
+        pets: { exists: true, value: 'one dog' },
+        pets_source: { exists: true, value: { source: 'manual', at: '2026-08-08T11:00:00.000Z' } },
+      },
+      audit: { eventType: 'suggestion_accepted', payload: { target: 'pets' } },
+    };
+    const claimed = await resolutions.claim(claimInput(suggestion, { plan }));
+    if (claimed.status !== 'claimed') throw new Error('claim failed');
+    await doc.send(new PutCommand({
+      TableName: contactsTable,
+      Item: {
+        contactId,
+        type: 'tenant',
+        status: 'onboarding',
+        pets: 'human edit',
+      },
+    }));
+
+    expect(await resolutions.commitContactEffect({
+      token: tokenFor(claimed.journal),
+      expectedPhase: 'claimed',
+      nextPhase: 'domain_applied',
+    })).toBe('superseded_by_human_edit');
+
+    const contact = await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId }, ConsistentRead: true }));
+    expect(contact.Item?.['pets']).toBe('human edit');
+    const audit = await doc.send(new QueryCommand({
+      TableName: auditTable,
+      KeyConditionExpression: 'entityKey = :entity',
+      ExpressionAttributeValues: { ':entity': `contacts#${contactId}` },
+    }));
+    expect(audit.Items).toEqual([]);
+    expect(await resolutions.get(contactId, 'pets')).toMatchObject({
+      state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
+    });
+  });
+
   it('classifies unknown claim and effect outcomes through consistent journal reads', async () => {
     const contactId = 'unknown-outcome';
     await putContact(contactId);
@@ -409,6 +500,7 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
       plan: {
         kind: 'status',
         patch: { status: 'searching' },
+        guard: { status: { exists: true, value: 'onboarding' } },
         audit: { eventType: 'suggestion_accepted' },
         activity: { type: 'contact_status_changed', label: 'Status changed to Searching' },
       },

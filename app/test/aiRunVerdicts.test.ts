@@ -247,6 +247,148 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     });
   }
 
+  it('lets a scalar PATCH supersede an expired claimed accept without replaying AI effects', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+
+    await accept(crashing, 'c1', 'pets').expect(500);
+    await patch(makeWebhookHarness({ world }).app, 'c1', { pets: 'one dog' }).expect(200);
+    const auditCount = world.auditEvents.length;
+    const activityCount = world.activityEvents.length;
+    expireActiveResolution(world, 'c1', 'pets');
+
+    await accept(makeWebhookHarness({ world }).app, 'c1', 'pets').expect(200);
+
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('one dog');
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(world.auditEvents).toHaveLength(auditCount);
+    expect(world.activityEvents).toHaveLength(activityCount);
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-pets', 'pets', 'superseded_by_human_edit', expect.objectContaining({ by: ACTOR }),
+    );
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+  });
+
+  it('lets a status PATCH supersede an expired claimed accept without replaying status effects', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'status', suggestedValue: 'searching', conversationId: 'conv-1', runId: 'run-status',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+
+    await accept(crashing, 'c1', 'status').expect(500);
+    await patch(makeWebhookHarness({ world }).app, 'c1', { status: 'on_hold' }).expect(200);
+    const auditCount = world.auditEvents.length;
+    const activityCount = world.activityEvents.length;
+    expireActiveResolution(world, 'c1', 'status');
+
+    await accept(makeWebhookHarness({ world }).app, 'c1', 'status').expect(200);
+
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.status).toBe('on_hold');
+    expect(world.auditEvents).toHaveLength(auditCount);
+    expect(world.activityEvents).toHaveLength(activityCount);
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-status', 'status', 'superseded_by_human_edit', expect.objectContaining({ by: ACTOR }),
+    );
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+  });
+
+  it('treats cleared provenance as a human edit even when the apparent value is unchanged', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world, {
+      pets: 'two cats',
+      pets_source: { source: 'ai', at: '2026-08-01T00:00:00.000Z', conversationId: 'conv-old' },
+    });
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+
+    await accept(crashing, 'c1', 'pets').expect(500);
+    await patch(makeWebhookHarness({ world }).app, 'c1', { pets: 'two cats' }).expect(200);
+    expireActiveResolution(world, 'c1', 'pets');
+    await accept(makeWebhookHarness({ world }).app, 'c1', 'pets').expect(200);
+
+    const contact = world.contacts.find((entry) => entry.contactId === 'c1');
+    expect(contact?.pets).toBe('two cats');
+    expect(contact?.pets_source).toBeUndefined();
+    expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_accepted')).toEqual([]);
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-pets', 'pets', 'superseded_by_human_edit', expect.anything(),
+    );
+  });
+
+  it('recovers a durable superseded phase after a second crash without replaying or duplicating effects', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    const claimCrash = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+    await accept(claimCrash, 'c1', 'pets').expect(500);
+    await patch(makeWebhookHarness({ world }).app, 'c1', { pets: 'one dog' }).expect(200);
+    const auditCount = world.auditEvents.length;
+    const activityCount = world.activityEvents.length;
+    expireActiveResolution(world, 'c1', 'pets');
+    const supersededCrash = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'domain_applied') throw new Error('simulated termination after superseded phase');
+        },
+      },
+    }).app;
+
+    await accept(supersededCrash, 'c1', 'pets').expect(500);
+    expect([...world.suggestionResolutions.values()][0]).toMatchObject({
+      state: 'active', phase: 'domain_applied', outcome: 'superseded_by_human_edit',
+    });
+    expireActiveResolution(world, 'c1', 'pets');
+    await accept(makeWebhookHarness({ world }).app, 'c1', 'pets').expect(200);
+
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('one dog');
+    expect(world.auditEvents).toHaveLength(auditCount);
+    expect(world.activityEvents).toHaveLength(activityCount);
+    expect(setVerdict).toHaveBeenCalledTimes(1);
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-pets', 'pets', 'superseded_by_human_edit', expect.anything(),
+    );
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+  });
+
   it('helps an expired original actor and action before claiming the reloaded revision', async () => {
     const { world, setVerdict } = makeWorld();
     seedTenant(world);

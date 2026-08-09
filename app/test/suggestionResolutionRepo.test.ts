@@ -56,6 +56,7 @@ describe('completed suggestion resolution rows', () => {
       plan: {
         kind: 'contact',
         patch: { pets: 'two cats' },
+        guard: { pets: { exists: false } },
         audit: { eventType: 'suggestion_accepted', payload: { value: 'two cats' } },
       },
       phase: 'claimed',

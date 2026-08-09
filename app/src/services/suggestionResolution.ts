@@ -8,6 +8,7 @@ import {
   suggestionIdentityKey,
   tokenFor,
   type ActiveSuggestionResolution,
+  type ResolutionAttributeGuard,
   type ResolutionAction,
   type ResolutionReplayPlan,
   type SuggestionResolutionRepo,
@@ -111,6 +112,21 @@ function provenance(suggestion: SuggestionItem, at: string, actorId: string | un
   };
 }
 
+function guardForPatch(
+  contact: ContactItem,
+  patch: Record<string, unknown>,
+): ResolutionAttributeGuard {
+  const guard: ResolutionAttributeGuard = {};
+  for (const [key, patchValue] of Object.entries(patch)) {
+    if (patchValue === undefined) continue;
+    const value = contact[key];
+    guard[key] = value === undefined
+      ? { exists: false }
+      : { exists: true, value };
+  }
+  return guard;
+}
+
 function buildPlan(
   contact: ContactItem,
   suggestion: SuggestionItem,
@@ -142,6 +158,7 @@ function buildPlan(
     return {
       kind: 'status',
       patch: status.patch,
+      guard: guardForPatch(contact, status.patch),
       audit: status.audit,
       ...(status.activity !== undefined && { activity: status.activity }),
     };
@@ -172,6 +189,10 @@ function buildPlan(
     return {
       kind: 'contact',
       patch: { address: parts, address_source: provenance(suggestion, at, actorId) },
+      guard: guardForPatch(contact, {
+        address: parts,
+        address_source: provenance(suggestion, at, actorId),
+      }),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {
@@ -187,12 +208,14 @@ function buildPlan(
     const field = target as ExtractableField;
     const coerced = coerceAccept(field, suggestion.suggestedValue);
     if (!coerced.ok) throw new SuggestionResolutionError(400, 'invalid_suggestion_value');
+    const patch = {
+      [field]: coerced.value,
+      [`${field}_source`]: provenance(suggestion, at, actorId),
+    };
     return {
       kind: 'contact',
-      patch: {
-        [field]: coerced.value,
-        [`${field}_source`]: provenance(suggestion, at, actorId),
-      },
+      patch,
+      guard: guardForPatch(contact, patch),
       audit: {
         eventType: 'ai_suggestion_accepted',
         payload: {
@@ -243,7 +266,11 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
       }
       if (journal.phase === 'domain_applied') {
         let result;
-        if (journal.plan.kind !== 'dismiss' && journal.plan.activity !== undefined) {
+        if (
+          journal.outcome !== 'superseded_by_human_edit'
+          && journal.plan.kind !== 'dismiss'
+          && journal.plan.activity !== undefined
+        ) {
           try {
             result = await deps.resolutionRepo.commitActivityEffect({
               token,
@@ -282,7 +309,8 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             await deps.aiRunsRepo.setVerdict(
               snapshot.runId,
               snapshot.target,
-              journal.action === 'accept' ? 'accepted' : 'dismissed',
+              journal.outcome
+                ?? (journal.action === 'accept' ? 'accepted' : 'dismissed'),
               {
                 at: now(),
                 expectedVerdict: 'pending',

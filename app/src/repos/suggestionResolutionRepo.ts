@@ -8,6 +8,7 @@
 // rows deliberately omit ownerContactId and _pendingPartition, so neither
 // suggestion GSI can expose protocol state.
 import { createHash, randomUUID } from 'node:crypto';
+import { isDeepStrictEqual } from 'node:util';
 import {
   ConditionalCheckFailedException,
   TransactionCanceledException,
@@ -50,10 +51,18 @@ export interface ResolutionActivityPlan {
   refId?: string;
 }
 
+export type ResolutionAttributeGuard = Record<string,
+  | { exists: false }
+  | { exists: true; value: unknown }
+>;
+
+export type ResolutionOutcome = 'superseded_by_human_edit';
+
 export type ResolutionReplayPlan =
   | {
       kind: 'contact' | 'status';
       patch: Record<string, unknown>;
+      guard: ResolutionAttributeGuard;
       audit: ResolutionAuditPlan;
       activity?: ResolutionActivityPlan;
     }
@@ -81,6 +90,7 @@ export interface ActiveSuggestionResolution {
   snapshot: SuggestionItem;
   plan: ResolutionReplayPlan;
   phase: ResolutionPhase;
+  outcome?: ResolutionOutcome;
   leaseId: string;
   leaseExpiresAt: string;
   fence: number;
@@ -125,7 +135,8 @@ export type ResolutionEffectResult =
   | 'committed'
   | 'already_committed'
   | 'stale'
-  | 'phone_conflict';
+  | 'phone_conflict'
+  | 'superseded_by_human_edit';
 
 export interface ClaimResolutionInput {
   suggestion: SuggestionItem;
@@ -283,6 +294,64 @@ function journalAdvance(
     ExpressionAttributeNames: guard.names,
     ExpressionAttributeValues: { ...guard.values, ':nextPhase': input.nextPhase },
   };
+}
+
+function journalSuperseded(
+  table: string,
+  input: PhaseInput,
+): NonNullable<NonNullable<TransactWriteCommandInput['TransactItems']>[number]['Update']> {
+  const guard = exactGuard(input.token, input.expectedPhase);
+  return {
+    TableName: table,
+    Key: { itemId: resolutionItemId(input.token.contactId, input.token.target) },
+    UpdateExpression: 'SET #phase = :nextPhase, #outcome = :outcome',
+    ConditionExpression: guard.expression,
+    ExpressionAttributeNames: { ...guard.names, '#outcome': 'outcome' },
+    ExpressionAttributeValues: {
+      ...guard.values,
+      ':nextPhase': input.nextPhase,
+      ':outcome': 'superseded_by_human_edit',
+    },
+  };
+}
+
+function contactGuardCondition(
+  guard: ResolutionAttributeGuard,
+  expectedMatch: boolean,
+): {
+  expression: string;
+  names: Record<string, string>;
+  values: Record<string, unknown>;
+} {
+  const names: Record<string, string> = {};
+  const values: Record<string, unknown> = {};
+  const attributes = Object.entries(guard).map(([key, expected], index) => {
+    const name = `#g${index}`;
+    names[name] = key;
+    if (!expected.exists) return `attribute_not_exists(${name})`;
+    const value = `:g${index}`;
+    values[value] = expected.value;
+    return `${name} = ${value}`;
+  });
+  const exact = ['attribute_exists(contactId)', ...attributes].join(' AND ');
+  return {
+    expression: expectedMatch ? exact : `NOT (${exact})`,
+    names,
+    values,
+  };
+}
+
+function contactMatchesGuard(
+  contact: ContactItem | undefined,
+  guard: ResolutionAttributeGuard,
+): boolean {
+  if (contact === undefined) return false;
+  return Object.entries(guard).every(([key, expected]) => {
+    const exists = Object.prototype.hasOwnProperty.call(contact, key) && contact[key] !== undefined;
+    return expected.exists
+      ? exists && isDeepStrictEqual(contact[key], expected.value)
+      : !exists;
+  });
 }
 
 function deterministicSuffix(journal: ActiveSuggestionResolution, purpose: string): string {
@@ -581,15 +650,16 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
         ...(removes.length > 0 ? [`REMOVE ${removes.join(', ')}`] : []),
       ];
       const audit = auditItem(journal);
-      return transactPhase(input, [
+      const contactGuard = contactGuardCondition(journal.plan.guard, true);
+      const result = await transactPhase(input, [
         {
           Update: {
             TableName: contactsTable,
             Key: { contactId: journal.contactId },
             UpdateExpression: clauses.join(' '),
-            ConditionExpression: 'attribute_exists(contactId)',
-            ExpressionAttributeNames: names,
-            ...(Object.keys(values).length > 0 && { ExpressionAttributeValues: values }),
+            ConditionExpression: contactGuard.expression,
+            ExpressionAttributeNames: { ...names, ...contactGuard.names },
+            ExpressionAttributeValues: { ...values, ...contactGuard.values },
           },
         },
         {
@@ -600,6 +670,52 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
           },
         },
       ]);
+      if (result !== 'stale') return result;
+
+      const current = await getJournal(input.token.contactId, input.token.target);
+      if (!sameToken(current, input.token) || current.phase !== input.expectedPhase) return 'stale';
+      const { Item } = await doc.send(new GetCommand({
+        TableName: contactsTable,
+        Key: { contactId: journal.contactId },
+        ConsistentRead: true,
+      }));
+      if (contactMatchesGuard(Item as ContactItem | undefined, journal.plan.guard)) {
+        return 'stale';
+      }
+
+      const mismatchGuard = contactGuardCondition(journal.plan.guard, false);
+      try {
+        await doc.send(new TransactWriteCommand({
+          TransactItems: [
+            {
+              ConditionCheck: {
+                TableName: contactsTable,
+                Key: { contactId: journal.contactId },
+                ConditionExpression: mismatchGuard.expression,
+                ...(Object.keys(mismatchGuard.names).length > 0 && {
+                  ExpressionAttributeNames: mismatchGuard.names,
+                }),
+                ...(Object.keys(mismatchGuard.values).length > 0 && {
+                  ExpressionAttributeValues: mismatchGuard.values,
+                }),
+              },
+            },
+            { Update: journalSuperseded(extractionTable, input) },
+          ],
+        }));
+        return 'superseded_by_human_edit';
+      } catch (error) {
+        if (isValidationFailure(error)) throw error;
+        const after = await getJournal(input.token.contactId, input.token.target);
+        if (
+          sameToken(after, input.token)
+          && after.phase === input.nextPhase
+          && after.outcome === 'superseded_by_human_edit'
+        ) {
+          return 'superseded_by_human_edit';
+        }
+        return 'stale';
+      }
     },
 
     async commitPhoneEffect(input) {

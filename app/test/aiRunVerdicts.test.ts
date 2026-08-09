@@ -630,7 +630,7 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
     expect(setVerdict).toHaveBeenCalledWith('run-1', 'type', 'superseded_by_human_edit', expect.anything());
   });
 
-  it('confines value equality to type, so matching pets still supersedes', async () => {
+  it('stamps accepted when the retained suggestion value matches the applied human value', async () => {
     const { app, world, setVerdict } = makeWorld();
     seedTenant(world);
     await seedSuggestion(world, {
@@ -639,7 +639,96 @@ describe('verdict write-back - surface 2: the contacts PATCH', () => {
 
     await patch(app, 'c1', { pets: 'two cats' }).expect(200);
 
-    expect(setVerdict).toHaveBeenCalledWith('run-1', 'pets', 'superseded_by_human_edit', expect.anything());
+    expect(setVerdict).toHaveBeenCalledWith('run-1', 'pets', 'accepted', expect.anything());
+  });
+
+  it('snapshots before update so a replacement created inside contacts.update remains pending and unstamped', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'old value', conversationId: 'conv-old', runId: 'run-old',
+    });
+    const originalUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (contactId, body) => {
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: contactId,
+        target: 'pets',
+        suggestedValue: 'new value',
+        conversationId: 'conv-new',
+        runId: 'run-new',
+      });
+      return originalUpdate(contactId, body);
+    };
+
+    await patch(app, 'c1', { pets: 'human edit' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toMatchObject({
+      suggestedValue: 'new value', runId: 'run-new',
+    });
+    expect(setVerdict).not.toHaveBeenCalledWith('run-new', 'pets', expect.anything(), expect.anything());
+    expect(setVerdict).not.toHaveBeenCalledWith('run-old', 'pets', expect.anything(), expect.anything());
+  });
+
+  it('does not delete a suggestion first created inside contacts.update after an empty snapshot', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    const originalUpdate = world.contactsRepo.update.bind(world.contactsRepo);
+    world.contactsRepo.update = async (contactId, body) => {
+      await world.extractionRepo.putSuggestion({
+        ownerContactId: contactId,
+        target: 'pets',
+        suggestedValue: 'new value',
+        conversationId: 'conv-new',
+        runId: 'run-new',
+      });
+      return originalUpdate(contactId, body);
+    };
+
+    await patch(app, 'c1', { pets: 'human edit' }).expect(200);
+
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toMatchObject({ runId: 'run-new' });
+    expect(setVerdict).not.toHaveBeenCalled();
+  });
+
+  it('reads before update, then exact-deletes and stamps the retained run on ordinary PATCH', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
+    });
+    const pending = await world.extractionRepo.getSuggestion('c1', 'pets');
+    if (pending === undefined) throw new Error('expected pending suggestion');
+    const getSuggestion = vi.spyOn(world.extractionRepo, 'getSuggestion');
+    const update = vi.spyOn(world.contactsRepo, 'update');
+    const conditionalDelete = vi.spyOn(world.extractionRepo, 'deleteSuggestionIfCurrent');
+
+    await patch(app, 'c1', { pets: 'a dog' }).expect(200);
+
+    expect(getSuggestion).toHaveBeenCalledTimes(1);
+    expect(getSuggestion.mock.invocationCallOrder[0]).toBeLessThan(update.mock.invocationCallOrder[0]!);
+    expect(update.mock.invocationCallOrder[0]).toBeLessThan(conditionalDelete.mock.invocationCallOrder[0]!);
+    expect(conditionalDelete).toHaveBeenCalledWith(
+      'c1', 'pets', pending.createdAt, pending.runId, pending.revision,
+    );
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-1', 'pets', 'superseded_by_human_edit', expect.anything(),
+    );
+  });
+
+  it('snapshots before a failed contacts.update and leaves the original suggestion and verdict untouched', async () => {
+    const { app, world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-1',
+    });
+    const getSuggestion = vi.spyOn(world.extractionRepo, 'getSuggestion');
+    world.contactsRepo.update = vi.fn(async () => { throw new Error('contact update failed'); });
+
+    await patch(app, 'c1', { pets: 'a dog' }).expect(500);
+
+    expect(getSuggestion).toHaveBeenCalledWith('c1', 'pets');
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toMatchObject({ runId: 'run-1' });
+    expect(setVerdict).not.toHaveBeenCalled();
   });
 
   it('never lets a suggestion read or verdict failure skip deletion or fail PATCH', async () => {

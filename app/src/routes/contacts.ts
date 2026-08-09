@@ -91,7 +91,11 @@ import {
   type SuggestionItem,
 } from '../repos/extractionRepo.js';
 import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
-import { PROVENANCE_FIELDS } from '../services/extraction/schema.js';
+import { PROVENANCE_FIELDS, normalizeSuggestionValue } from '../services/extraction/schema.js';
+import {
+  contactAddressToParts,
+  formatAddressParts,
+} from '../services/extraction/address.js';
 import { isDecisionTarget } from '../services/extraction/runTypes.js';
 
 export interface ContactsRouterDeps {
@@ -152,6 +156,17 @@ interface ContactMediaItem {
   /** ISO 8601 — the source message's provider_ts (the sort key). */
   at: string;
   conversationId: string;
+}
+
+function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown): boolean {
+  const comparable = pending.target === 'address'
+    ? formatAddressParts(contactAddressToParts(applied))
+    : typeof applied === 'string' || typeof applied === 'number' || typeof applied === 'boolean'
+      ? String(applied)
+      : undefined;
+  return comparable !== undefined
+    && normalizeSuggestionValue(pending.target, comparable)
+      === normalizeSuggestionValue(pending.target, pending.suggestedValue);
 }
 
 /**
@@ -1312,6 +1327,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // Snapshot exact pending identities before the contact write. A failed read
+    // means this request has no safe identity to delete after the write.
+    const pendingByField = new Map<string, SuggestionItem>();
+    for (const f of parsed.changedFields) {
+      try {
+        const pending = await extraction.getSuggestion(contactId, f);
+        if (pending !== undefined) pendingByField.set(f, pending);
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'extraction getSuggestion (human edit) failed (best-effort)');
+      }
+    }
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -1323,18 +1350,10 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       throw err;
     }
 
-    // A human edit resolves the exact pending suggestion it read. A later
-    // extraction may replace that row while this request is in flight, so a
-    // conditional delete protects the newer suggestion and its run verdict.
+    // Resolve only identities retained before contacts.update. A suggestion
+    // created or replaced during the update remains pending and unstamped.
     const verdictAt = new Date().toISOString();
-    for (const f of parsed.changedFields) {
-      let pending: SuggestionItem | undefined;
-      try {
-        pending = await extraction.getSuggestion(contactId, f);
-      } catch (err) {
-        log.warn({ err, contactId, field: f }, 'extraction getSuggestion (human edit) failed (best-effort)');
-      }
-      if (pending === undefined) continue;
+    for (const [f, pending] of pendingByField) {
       let deleted = false;
       try {
         deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId, pending.revision);
@@ -1342,11 +1361,9 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
         log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
       }
       if (!deleted || pending.runId === undefined || !isDecisionTarget(f)) continue;
-      const patchedValue = parsed.patch[f];
-      const verdict =
-        f === 'type' && typeof patchedValue === 'string' && patchedValue === pending.suggestedValue
-          ? 'accepted'
-          : 'superseded_by_human_edit';
+      const verdict = suggestionMatchesAppliedValue(pending, parsed.patch[f])
+        ? 'accepted'
+        : 'superseded_by_human_edit';
       try {
         await aiRuns.setVerdict(pending.runId, f, verdict, {
           at: verdictAt, expectedVerdict: 'pending',

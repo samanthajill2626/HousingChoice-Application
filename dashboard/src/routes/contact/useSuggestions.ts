@@ -69,19 +69,35 @@ export function useSuggestions(contactId: string): SuggestionsState {
 
   const accept = useCallback(
     async (target: string) => {
-      const res = await acceptSuggestion(contactId, target);
+      const suggestion = state.forId === contactId
+        ? state.suggestions.find((item) => item.target === target)
+        : undefined;
+      if (suggestion === undefined) throw new Error('Suggestion is no longer pending');
+      const res = await acceptSuggestion(contactId, target, {
+        revision: suggestion.revision,
+        createdAt: suggestion.createdAt,
+        runId: suggestion.runId,
+      });
       setState({ suggestions: res.suggestions, forId: contactId });
       return res;
     },
-    [contactId],
+    [contactId, state],
   );
 
   const dismiss = useCallback(
     async (target: string) => {
-      const remaining = await dismissSuggestion(contactId, target);
+      const suggestion = state.forId === contactId
+        ? state.suggestions.find((item) => item.target === target)
+        : undefined;
+      if (suggestion === undefined) throw new Error('Suggestion is no longer pending');
+      const remaining = await dismissSuggestion(contactId, target, {
+        revision: suggestion.revision,
+        createdAt: suggestion.createdAt,
+        runId: suggestion.runId,
+      });
       setState({ suggestions: remaining, forId: contactId });
     },
-    [contactId],
+    [contactId, state],
   );
 
   // The committed state is for the previous id -> the new fetch is in flight.

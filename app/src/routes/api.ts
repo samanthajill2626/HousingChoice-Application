@@ -89,7 +89,12 @@ import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumber
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
 import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
+import {
+  createSuggestionResolutionRepo,
+  type SuggestionResolutionRepo,
+} from '../repos/suggestionResolutionRepo.js';
 import { createSuggestionsRouter } from './suggestions.js';
+import type { SuggestionResolutionHooks } from '../services/suggestionResolution.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import {
@@ -213,6 +218,13 @@ export interface ApiRouterDeps {
   contactsRepo?: ContactsRepo;
   /** AI run-log repo shared by suggestion resolution surfaces. */
   aiRunsRepo?: AiRunsRepo;
+  /** Durable phase journal shared by all suggestion resolution routes. */
+  suggestionResolutionRepo?: SuggestionResolutionRepo;
+  /** Process-boundary fault/clock seams used by focused recovery tests. */
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  suggestionResolutionNow?: () => string;
+  suggestionResolutionLeaseId?: () => string;
+  suggestionResolutionLeaseMs?: number;
   settingsRepo?: SettingsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   contactVocabularyRepo?: ContactVocabularyRepo;
@@ -440,6 +452,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // review API (suggestions router) and the contacts-router PATCH provenance-clear.
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
+  const suggestionResolutions = deps.suggestionResolutionRepo
+    ?? createSuggestionResolutionRepo({ logger: deps.logger });
   // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
   // gather walks these five scheduled-send repos. Default-construct them here (the
   // same `?? create…` pattern as conversations/messages above) so the gather is
@@ -933,6 +947,19 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       extractionRepo: extraction,
       aiRunsRepo: aiRuns,
+      suggestionResolutionRepo: suggestionResolutions,
+      ...(deps.suggestionResolutionHooks !== undefined && {
+        suggestionResolutionHooks: deps.suggestionResolutionHooks,
+      }),
+      ...(deps.suggestionResolutionNow !== undefined && {
+        resolutionNow: deps.suggestionResolutionNow,
+      }),
+      ...(deps.suggestionResolutionLeaseId !== undefined && {
+        resolutionLeaseId: deps.suggestionResolutionLeaseId,
+      }),
+      ...(deps.suggestionResolutionLeaseMs !== undefined && {
+        resolutionLeaseMs: deps.suggestionResolutionLeaseMs,
+      }),
       auditRepo: audit,
       activityEventsRepo: activityEvents,
       events,

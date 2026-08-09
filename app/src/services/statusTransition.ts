@@ -140,6 +140,46 @@ export interface SetTenantStatusInput {
   actor?: string;
 }
 
+export interface ContactStatusTransitionPlan {
+  patch: Record<string, unknown>;
+  audit: { eventType: 'tenant_status_changed'; payload: Record<string, unknown> };
+  activity?: { type: 'contact_status_changed'; label: string };
+}
+
+function contactStatusLabel(contactType: string | undefined, status: string): string {
+  return (contactType === 'landlord'
+    ? (LANDLORD_STATUS_LABELS as Record<string, string>)[status]
+    : (TENANT_STATUS_LABELS as Record<string, string>)[status]) ?? status;
+}
+
+/** Pure semantic plan shared by ordinary status changes and suggestion recovery. */
+export function buildContactStatusTransitionPlan(
+  contact: ContactItem,
+  input: SetTenantStatusInput,
+): ContactStatusTransitionPlan {
+  const { toStatus, source, reason, porting, actor } = input;
+  const patch: Record<string, unknown> = { status: toStatus, status_source: source };
+  if (porting !== undefined) patch.porting = porting === true;
+  if (toStatus === 'parked') patch.park_reason = reason !== undefined ? reason : null;
+  const payload: Record<string, unknown> = {
+    ...(actor !== undefined && { actor }),
+    from: contact.status,
+    to: toStatus,
+    source,
+    ...(reason !== undefined && { reason }),
+  };
+  return {
+    patch,
+    audit: { eventType: 'tenant_status_changed', payload },
+    ...(contact.status !== toStatus && {
+      activity: {
+        type: 'contact_status_changed' as const,
+        label: `Status \u2192 ${contactStatusLabel(contact.type, toStatus)}`,
+      },
+    }),
+  };
+}
+
 export interface SetListingStatusInput {
   toStatus: ListingStatus;
   source: TransitionSource;
@@ -209,20 +249,25 @@ export function createStatusTransitionService(
   const { armStageNudge, activityEventsRepo, conversationsRepo } = deps;
   const log = deps.logger ?? defaultLogger;
 
-  const statusLabel = (contactType: string | undefined, status: string): string =>
-    (contactType === 'landlord'
-      ? (LANDLORD_STATUS_LABELS as Record<string, string>)[status]
-      : (TENANT_STATUS_LABELS as Record<string, string>)[status]) ?? status;
-
   // Best-effort contact-timeline milestone on a REAL status change. Never throws
   // out of the operator action; PII-safe log (ids/type only, never the label).
-  async function recordStatusMilestone(contactId: string, contactType: string | undefined, to: string): Promise<void> {
+  async function recordStatusActivity(
+    contactId: string,
+    activity: { type: 'contact_status_changed'; label: string },
+  ): Promise<void> {
     if (!activityEventsRepo || typeof contactId !== 'string' || contactId.length === 0) return;
     try {
-      await activityEventsRepo.record({ contactId, type: 'contact_status_changed', label: `Status → ${statusLabel(contactType, to)}` });
+      await activityEventsRepo.record({ contactId, ...activity });
     } catch (err) {
       log.error({ err, contactId }, 'contact_status_changed milestone record failed (best-effort)');
     }
+  }
+
+  async function recordStatusMilestone(contactId: string, contactType: string | undefined, to: string): Promise<void> {
+    await recordStatusActivity(contactId, {
+      type: 'contact_status_changed',
+      label: `Status \u2192 ${contactStatusLabel(contactType, to)}`,
+    });
   }
 
   // Best-effort placement stage milestone on a REAL stage move, recorded for the
@@ -522,7 +567,7 @@ export function createStatusTransitionService(
     },
 
     async setTenantStatus(contactId, input) {
-      const { toStatus, source, reason, porting, actor } = input;
+      const { toStatus, source, actor } = input;
       const contact = await contactsRepo.getById(contactId);
       if (!contact) throw new EntityNotFoundError('contact', contactId);
       // The tenant lifecycle lives on the unified `status` field (§5).
@@ -533,34 +578,17 @@ export function createStatusTransitionService(
       // `searching` once it's satisfied, or moves them to `on_hold` if not. So
       // `setTenantStatus` always applies (subject only to the entity existing);
       // `porting` is an informational flag set in the same write, never a gate.
-      const patch: Record<string, unknown> = {
-        status: toStatus,
-        status_source: source,
-      };
-      if (porting !== undefined) patch.porting = porting === true;
-      // park_reason (docs/issues/landlord-lead-status-and-park.md): the move to
-      // the terminal `parked` (a landlord decline/not-a-fit/never-signed) captures
-      // the supplied reason as a first-class field on the contact. The park move
-      // OWNS the field: no reason supplied → CLEAR any stale park_reason from a
-      // prior park (null = REMOVE) so a re-park never silently inherits an old,
-      // possibly wrong, explanation. Other statuses leave it untouched.
-      if (toStatus === 'parked') patch.park_reason = reason !== undefined ? reason : null;
-      const updated = await contactsRepo.update(contactId, patch);
+      const plan = buildContactStatusTransitionPlan(contact, input);
+      const updated = await contactsRepo.update(contactId, plan.patch);
 
       try {
-        await auditRepo.append(`contacts#${contactId}`, 'tenant_status_changed', {
-          ...(actor !== undefined && { actor }),
-          from,
-          to: toStatus,
-          source,
-          ...(reason !== undefined && { reason }),
-        });
+        await auditRepo.append(`contacts#${contactId}`, plan.audit.eventType, plan.audit.payload);
       } catch (err) {
         throw new StatusTransitionCommittedError(err);
       }
       // Contact-timeline milestone on a REAL status change (explicit path). The
       // type-keyed label map picks LANDLORD_STATUS_LABELS vs TENANT_STATUS_LABELS.
-      if (from !== toStatus) await recordStatusMilestone(contactId, contact.type, toStatus);
+      if (plan.activity !== undefined) await recordStatusActivity(contactId, plan.activity);
       mergeContext({ contactId });
       log.info({ contactId, from, to: toStatus, source, ...(actor !== undefined && { actor }) }, 'tenant status set');
       return updated;

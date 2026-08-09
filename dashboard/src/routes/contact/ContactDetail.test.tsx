@@ -344,6 +344,8 @@ describe('ContactDetail', () => {
         suggestedValue: '3',
         reason: 'said a 3BR',
         conversationId: 'conv-1',
+        revision: 'rev-voucher',
+        runId: 'run-voucher',
         createdAt: '2026-07-16T10:00:00.000Z',
       },
     ]);
@@ -359,13 +361,45 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "3"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'voucherSize');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'voucherSize', {
+      revision: 'rev-voucher',
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: 'run-voucher',
+    });
     // The returned contact is applied in place: value shows 3 with the Auto badge; chip gone.
     await waitFor(() => expect(screen.getByText('3 BR')).toBeInTheDocument());
     expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole('group', { name: 'AI suggestion for voucher size' })).not.toBeInTheDocument(),
     );
+  });
+
+  it('dismisses using the current suggestion immutable identity', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getSuggestions.mockResolvedValue([{
+      itemId: 'sugg#k1#pets',
+      ownerContactId: 'k1',
+      target: 'pets',
+      suggestedValue: 'two cats',
+      conversationId: 'conv-1',
+      revision: 'rev-pets',
+      runId: 'run-pets',
+      createdAt: '2026-07-16T11:00:00.000Z',
+    }]);
+    dismissSuggestion.mockResolvedValue([]);
+    renderAt('k1');
+
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for pets' });
+    await user.click(within(chip).getByRole('button', { name: 'Dismiss' }));
+
+    expect(dismissSuggestion).toHaveBeenCalledWith('k1', 'pets', {
+      revision: 'rev-pets',
+      createdAt: '2026-07-16T11:00:00.000Z',
+      runId: 'run-pets',
+    });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'AI suggestion for pets' })).not.toBeInTheDocument());
   });
 
   it('shows the Auto badge on the Current address row when address_source is ai', async () => {
@@ -412,7 +446,11 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "1 Main St, Atlanta"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'address');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'address', {
+      revision: undefined,
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: undefined,
+    });
     // The returned contact applies in place: the row shows the new address + Auto badge; chip gone.
     await waitFor(() => expect(screen.getByText('1 Main St, Atlanta')).toBeInTheDocument());
     expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
@@ -448,7 +486,11 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "Tasha"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName', {
+      revision: undefined,
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: undefined,
+    });
     // The returned contact applies in place: the chip drops.
     await waitFor(() =>
       expect(screen.queryByRole('group', { name: 'AI suggestion for first name' })).not.toBeInTheDocument(),

@@ -311,8 +311,23 @@ test("accepting a suggestion stamps accepted on its run", async ({
 
   await openRunFor(page, contactId, /applied/i);
   await expect(decisionRow(page, "pets")).toContainText(/pending/i);
+  const pendingResponse = await page.request.get(
+    `${NEXT}/api/contacts/${contactId}/suggestions`,
+  );
+  const pending = await pendingResponse.json() as {
+    suggestions: { target: string; revision?: string; createdAt: string; runId?: string }[];
+  };
+  const pets = pending.suggestions.find((suggestion) => suggestion.target === "pets");
+  expect(pets, "pending pets suggestion identity").toBeDefined();
   const accept = await page.request.post(
     `${NEXT}/api/contacts/${contactId}/suggestions/pets/accept`,
+    {
+      data: {
+        revision: pets?.revision,
+        createdAt: pets?.createdAt,
+        runId: pets?.runId,
+      },
+    },
   );
   expect(accept.ok(), "accept pets suggestion").toBeTruthy();
   await openRunFor(page, contactId, /applied/i);

@@ -1502,6 +1502,8 @@ export interface FieldSource {
 export interface SuggestionItem {
   itemId: string;
   ownerContactId: string;
+  /** Immutable server-minted identity for resolution fencing. */
+  revision?: string;
   /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
   target: string;
   currentValue?: string;
@@ -1515,6 +1517,12 @@ export interface SuggestionItem {
   /** The ai_runs runId that produced this suggestion (admin run log). */
   runId?: string;
   createdAt: string;
+}
+
+export interface SuggestionRequestIdentity {
+  revision?: string;
+  createdAt: string;
+  runId?: string;
 }
 
 // --- Contact creation / vocabulary (extensible create flow) ------------------

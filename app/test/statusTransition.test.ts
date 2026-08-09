@@ -13,6 +13,7 @@ import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
+  buildContactStatusTransitionPlan,
   createStatusTransitionService,
   EntityNotFoundError,
   StatusTransitionCommittedError,
@@ -401,6 +402,26 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
     expect(thrown).toBeInstanceOf(StatusTransitionCommittedError);
     expect((thrown as StatusTransitionCommittedError).cause).toBe(cause);
     expect((await world.contactsRepo.getById('t-audit-failure'))?.status).toBe('searching');
+  });
+});
+
+describe('contact status semantic plan', () => {
+  it('owns the exact patch, audit, and milestone used by journal replay', () => {
+    const plan = buildContactStatusTransitionPlan(
+      { contactId: 't-plan', type: 'tenant', status: 'onboarding', created_at: '2026-01-01T00:00:00.000Z' },
+      { toStatus: 'searching', source: 'ai', actor: 'usr-ai-reviewer', porting: false },
+    );
+
+    expect(plan).toEqual({
+      patch: { status: 'searching', status_source: 'ai', porting: false },
+      audit: {
+        eventType: 'tenant_status_changed',
+        payload: {
+          actor: 'usr-ai-reviewer', from: 'onboarding', to: 'searching', source: 'ai',
+        },
+      },
+      activity: { type: 'contact_status_changed', label: 'Status \u2192 Searching' },
+    });
   });
 });
 

@@ -19,6 +19,7 @@ const SECRET = ORIGIN_SECRET;
 const ACTOR = 'usr_testva00000000000000000';
 
 type World = ReturnType<typeof createFakeWorld>;
+const suggestionIdentities = new Map<string, { revision?: string; createdAt: string; runId?: string }>();
 
 function seedTenant(world: World, over: Record<string, unknown> = {}): string {
   const contactId = (over['contactId'] as string) ?? 'c-sugg-1';
@@ -38,6 +39,14 @@ async function seedSuggestion(
   s: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
 ): Promise<void> {
   await world.extractionRepo.putSuggestion(s);
+  const stored = await world.extractionRepo.getSuggestion(s.ownerContactId, s.target);
+  if (stored !== undefined) {
+    suggestionIdentities.set(`${stored.ownerContactId}\u0000${stored.target}`, {
+      revision: stored.revision,
+      createdAt: stored.createdAt,
+      runId: stored.runId,
+    });
+  }
 }
 
 function get(app: import('express').Express, contactId: string) {
@@ -46,17 +55,24 @@ function get(app: import('express').Express, contactId: string) {
     .set('x-origin-verify', SECRET)
     .set('cookie', TEST_SESSION_COOKIE);
 }
-function accept(app: import('express').Express, contactId: string, target: string) {
+function accept(
+  app: import('express').Express,
+  contactId: string,
+  target: string,
+  identity = suggestionIdentities.get(`${contactId}\u0000${target}`),
+) {
   return request(app)
     .post(`/api/contacts/${contactId}/suggestions/${target}/accept`)
     .set('x-origin-verify', SECRET)
-    .set('cookie', TEST_SESSION_COOKIE);
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(identity);
 }
 function dismiss(app: import('express').Express, contactId: string, target: string) {
   return request(app)
     .post(`/api/contacts/${contactId}/suggestions/${target}/dismiss`)
     .set('x-origin-verify', SECRET)
-    .set('cookie', TEST_SESSION_COOKIE);
+    .set('cookie', TEST_SESSION_COOKIE)
+    .send(suggestionIdentities.get(`${contactId}\u0000${target}`));
 }
 
 describe('GET /api/contacts/:contactId/suggestions', () => {
@@ -229,7 +245,9 @@ describe('POST /api/contacts/:contactId/suggestions/:target/accept', () => {
 
   it('404s an accept for an unknown contact', async () => {
     const { app } = makeWebhookHarness();
-    const res = await accept(app, 'nope', 'pets');
+    const res = await accept(app, 'nope', 'pets', {
+      revision: 'missing', createdAt: '2026-07-01T00:00:00.000Z',
+    });
     expect(res.status).toBe(404);
   });
 

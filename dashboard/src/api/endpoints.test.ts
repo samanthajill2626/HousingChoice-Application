@@ -10,6 +10,7 @@ vi.mock('./client.js', () => ({
 import { request, requestWithStatus } from './client.js';
 import {
   applyTourRosterActionNow,
+  acceptSuggestion,
   buildTransitionBody,
   cancelTourRosterAction,
   createContact,
@@ -18,6 +19,7 @@ import {
   createTourRelay,
   dismissPlacementRosterAction,
   dismissTourRosterAction,
+  dismissSuggestion,
   getTours,
   getPlacement,
   getContactVocabulary,
@@ -52,6 +54,27 @@ function rosterWithPendingOpen(): RosterView {
 beforeEach(() => {
   vi.mocked(request).mockReset();
   vi.mocked(requestWithStatus).mockReset();
+});
+
+it('suggestion resolution posts the exact immutable identity', async () => {
+  const identity = {
+    revision: 'rev-1',
+    createdAt: '2026-08-08T12:00:00.000Z',
+    runId: 'run-1',
+  };
+  vi.mocked(request).mockResolvedValueOnce({ contact: { contactId: 'c1' }, suggestions: [] });
+  await acceptSuggestion('c1', 'pets', identity);
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/suggestions/pets/accept', {
+    method: 'POST',
+    body: identity,
+  });
+
+  vi.mocked(request).mockResolvedValueOnce({ suggestions: [] });
+  await dismissSuggestion('c1', 'pets', identity);
+  expect(request).toHaveBeenLastCalledWith('/api/contacts/c1/suggestions/pets/dismiss', {
+    method: 'POST',
+    body: identity,
+  });
 });
 
 it('createContact posts and unwraps', async () => {

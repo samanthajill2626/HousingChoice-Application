@@ -56,6 +56,7 @@ import type {
   SendMessageResult,
   SimilarUnit,
   SuggestionItem,
+  SuggestionRequestIdentity,
   SystemAlarmsResult,
   SystemErrorsResult,
   SystemFlags,
@@ -1227,10 +1228,11 @@ export async function getSuggestions(
 export async function acceptSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<{ contact: Contact; suggestions: SuggestionItem[] }> {
   return request<{ contact: Contact; suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/accept`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
 }
 
@@ -1239,10 +1241,11 @@ export async function acceptSuggestion(
 export async function dismissSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<SuggestionItem[]> {
   const res = await request<{ suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/dismiss`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
   return res.suggestions;
 }

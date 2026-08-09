@@ -37,6 +37,10 @@ import {
 } from '../../src/repos/contactsRepo.js';
 import type { ExtractionRepo, SuggestionItem } from '../../src/repos/extractionRepo.js';
 import type { AiRunsRepo } from '../../src/repos/aiRunsRepo.js';
+import type {
+  SuggestionResolutionItem,
+  SuggestionResolutionRepo,
+} from '../../src/repos/suggestionResolutionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -136,6 +140,8 @@ import {
   type FakeUsersRepo,
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
+import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
 export const AUTH_TOKEN = 'test-twilio-auth-token';
@@ -263,6 +269,9 @@ export interface FakeWorld {
   extractionRepo: ExtractionRepo;
   /** In-memory AI run-log seam shared by suggestion resolution routes. */
   aiRuns: AiRunsRepo;
+  /** Durable suggestion-resolution protocol rows, absent from pending lists. */
+  suggestionResolutions: Map<string, SuggestionResolutionItem>;
+  suggestionResolutionRepo: SuggestionResolutionRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1110,8 +1119,11 @@ export function createFakeWorld(): FakeWorld {
     async addPhone(contactId, { phone, label }) {
       const contact = fakeRequireContact(contactId);
       const phones = fakeSeededPhones(contact);
-      if (phones.some((p) => p.phone === phone)) {
+      const existing = phones.find((entry) => entry.phone === phone);
+      if (existing !== undefined) {
         if (!Array.isArray(contact.phones)) contact.phones = phones;
+        if (existing.primary) fakeDeletePointer(phone);
+        else fakePutPointer(phone, contactId);
         return contact;
       }
       const now = new Date().toISOString();
@@ -2717,6 +2729,13 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  const suggestionResolutionFake = createSuggestionResolutionFake({
+    contactsRepo,
+    extractionRepo,
+    auditRepo,
+    activityEventsRepo,
+  });
+
   return {
     conversations,
     messages,
@@ -2788,6 +2807,8 @@ export function createFakeWorld(): FakeWorld {
     extractionSchedules,
     extractionRepo,
     aiRuns,
+    suggestionResolutions: suggestionResolutionFake.items,
+    suggestionResolutionRepo: suggestionResolutionFake.repo,
   };
 }
 
@@ -2799,6 +2820,10 @@ export interface HarnessOptions {
   /** Env overrides merged into the default test env (set a key to '' to unset… use delete semantics below). */
   env?: Record<string, string | undefined>;
   world?: FakeWorld;
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  suggestionResolutionNow?: () => string;
+  suggestionResolutionLeaseId?: () => string;
+  suggestionResolutionLeaseMs?: number;
   /** Omit the media store (simulates MEDIA_BUCKET unset). */
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
@@ -2945,6 +2970,19 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // the contact-PATCH provenance-clear share this in-memory suggestion store.
       extractionRepo: world.extractionRepo,
       aiRunsRepo: world.aiRuns,
+      suggestionResolutionRepo: world.suggestionResolutionRepo,
+      ...(opts.suggestionResolutionHooks !== undefined && {
+        suggestionResolutionHooks: opts.suggestionResolutionHooks,
+      }),
+      ...(opts.suggestionResolutionNow !== undefined && {
+        suggestionResolutionNow: opts.suggestionResolutionNow,
+      }),
+      ...(opts.suggestionResolutionLeaseId !== undefined && {
+        suggestionResolutionLeaseId: opts.suggestionResolutionLeaseId,
+      }),
+      ...(opts.suggestionResolutionLeaseMs !== undefined && {
+        suggestionResolutionLeaseMs: opts.suggestionResolutionLeaseMs,
+      }),
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world

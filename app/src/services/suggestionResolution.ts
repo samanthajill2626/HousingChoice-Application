@@ -27,6 +27,14 @@ import { statusAllowlistFor } from '../lib/statusModel.js';
 
 const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
 const MAX_RESOLUTION_LOOPS = 6;
+/**
+ * Journals one ordinary suggestions read will drive. This read is on the contact
+ * page's open path and each journal costs its own takeover plus a bounded phase
+ * ladder, so an unbounded pass makes a contact carrying several abandoned
+ * journals pay for all of them before any suggestion renders. The remainder is
+ * picked up by the next read (docs/issues/ai-run-log-recovery-hook-unbounded).
+ */
+const MAX_RECOVERIES_PER_READ = 2;
 
 export interface SuggestionRequestIdentity {
   revision?: string;
@@ -544,9 +552,17 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
       const at = now();
       let recovered = 0;
       let stateChanged = false;
+      let attempted = 0;
       for (const journal of await deps.resolutionRepo.listJournals(contactId)) {
         if (journal.state !== 'active') continue;
         if (Date.parse(journal.leaseExpiresAt) > Date.parse(at)) continue;
+        // After the two free in-memory filters and before the first round trip,
+        // so cheap skips never consume the budget and every journal that costs
+        // IO does. ATTEMPTS, not successes: `recovered` only counts wins, so a
+        // contact whose journals keep failing would still walk all twelve keys
+        // per read - the cost the cap exists to bound.
+        if (attempted >= MAX_RECOVERIES_PER_READ) break;
+        attempted += 1;
         try {
           const takeover = await deps.resolutionRepo.takeover({
             contactId,
@@ -678,8 +694,15 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         }
         throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
       } catch (error) {
-        if (helpedCommitted && error instanceof SuggestionResolutionError) {
-          error.helpedCommitted = true;
+        // A help that committed must reach the SSE whatever this request then
+        // failed on - a raw repo/SDK throw (claim() rethrowing its stored
+        // lastError, a ValidationException, a network fault in getSuggestion or
+        // getById) is not less of a state change than a
+        // SuggestionResolutionError (adv P3-25 / item 28). The declared field on
+        // SuggestionResolutionError keeps its type; this only adds the same
+        // property to other Error instances.
+        if (helpedCommitted && error instanceof Error) {
+          (error as { helpedCommitted?: boolean }).helpedCommitted = true;
         }
         throw error;
       }

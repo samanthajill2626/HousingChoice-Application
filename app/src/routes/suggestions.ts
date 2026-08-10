@@ -168,19 +168,22 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         res.json({ suggestions });
       }
     } catch (error) {
+      // Two independent reasons a FAILED request still has to notify, and never
+      // twice for one request:
+      //  - `helpedCommitted`: the request failed on its OWN identity, but a
+      //    journal it helped along the way did commit - the contact and the
+      //    pending list really changed (adv P3-25). Read BEFORE the instanceof
+      //    branch: a raw repo/SDK throw strands the flag otherwise, and that
+      //    failure is not less of a state change (item 28);
+      //  - `suggestion_field_edited`: the request's own accept was refused, yet
+      //    claim() had already consumed the `sugg#` row and the journal was
+      //    scrubbed, so every open dashboard is showing a chip that no longer
+      //    exists (H1).
+      const helped = (error as { helpedCommitted?: boolean } | null)?.helpedCommitted === true;
+      const refused = error instanceof SuggestionResolutionError
+        && error.code === 'suggestion_field_edited';
+      if (helped || refused) events.emit('suggestion.updated', { contactId });
       if (error instanceof SuggestionResolutionError) {
-        // Two independent reasons a FAILED request still has to notify, and
-        // never twice for one request:
-        //  - `helpedCommitted`: the request failed on its OWN identity, but a
-        //    journal it helped along the way did commit - the contact and the
-        //    pending list really changed (adv P3-25);
-        //  - `suggestion_field_edited`: the request's own accept was refused,
-        //    yet claim() had already consumed the `sugg#` row and the journal
-        //    was scrubbed, so every open dashboard is showing a chip that no
-        //    longer exists (H1).
-        if (error.helpedCommitted || error.code === 'suggestion_field_edited') {
-          events.emit('suggestion.updated', { contactId });
-        }
         res.status(error.status).json({
           error: error.code,
           ...(error.retryable && { retryable: true }),

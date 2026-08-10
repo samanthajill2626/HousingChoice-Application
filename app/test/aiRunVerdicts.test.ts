@@ -485,6 +485,55 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     ]);
   });
 
+  // R5 (docs/issues/ai-run-log-recovery-hook-unbounded). Recovery rides the read
+  // the contact page makes on every open, and each journal costs its own
+  // takeover plus a bounded phase ladder, so an unbounded pass makes a contact
+  // carrying several abandoned journals pay for all of them before any
+  // suggestion renders. Bounded WORK, not wall clock: the clock is injectable
+  // and pinned by this suite, so a deadline would be untestable or flaky.
+  it('caps how many abandoned journals one read recovers and finishes the rest on the next', async () => {
+    const { world } = makeWorld();
+    seedTenant(world);
+    const crashing = (): import('express').Express => makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after claim');
+        },
+      },
+    }).app;
+    const targets = [
+      ['pets', 'two cats'],
+      ['tenure', '2 years'],
+      ['housingAuthority', 'Metro HA'],
+    ] as const;
+    for (const [target, suggestedValue] of targets) {
+      await seedSuggestion(world, {
+        ownerContactId: 'c1', target, suggestedValue, conversationId: 'conv-1', runId: `run-${target}`,
+      });
+      await accept(crashing(), 'c1', target).expect(500);
+      expireActiveResolution(world, 'c1', target);
+    }
+    const states = (): string[] => [...world.suggestionResolutions.values()].map((item) => item.state);
+    // Counts, never identities: listJournals is a Map in the fake but an
+    // unordered BatchGet in the repo.
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+    expect(states().filter((state) => state === 'completed')).toHaveLength(2);
+    expect(states().filter((state) => state === 'active')).toHaveLength(1);
+
+    // The remainder is picked up by the next ordinary read - starvation-free,
+    // because a completed journal stops being a candidate.
+    for (const [target] of targets) {
+      if ([...world.suggestionResolutions.values()].some(
+        (item) => item.state === 'active' && item.target === target,
+      )) {
+        expireActiveResolution(world, 'c1', target);
+      }
+    }
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+    expect(states().filter((state) => state === 'completed')).toHaveLength(3);
+  });
+
   it('lets a scalar PATCH supersede an expired claimed accept without replaying AI effects', async () => {
     const { world, setVerdict } = makeWorld();
     seedTenant(world);
@@ -1301,6 +1350,46 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
 
     expect(await failing.world.extractionRepo.hasDismissal('c1', 'pets', 'two cats')).toBe(true);
     expect(failing.world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
+  });
+
+  // H6 / item 28: the same helped commit, but this request then fails on a RAW
+  // store error rather than a SuggestionResolutionError. Both gates used to test
+  // `instanceof SuggestionResolutionError`, so the contact and the pending list
+  // changed and no dashboard was told. A repo/SDK throw is not less of a state
+  // change than a typed refusal.
+  it('emits suggestion.updated for a helped journal when the request then throws a raw store error', async () => {
+    const { world } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-a', runId: 'run-a',
+    });
+    await dismiss(makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after dismiss claim');
+        },
+      },
+    }).app, 'c1', 'pets').expect(500);
+    expireActiveResolution(world, 'c1', 'pets');
+    // Same normalized value, so helping the abandoned dismiss consumes it.
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: ' TWO   CATS ', conversationId: 'conv-b', runId: 'run-b',
+    });
+    const repo = world.suggestionResolutionRepo;
+    const realGet = repo.get.bind(repo);
+    repo.get = async (contactId, target) => {
+      const item = await realGet(contactId, target);
+      // The help has finished and scrubbed the journal; the store then fails on
+      // the loop's next read, with an error that is not a resolution error.
+      if (item?.state === 'completed') throw new Error('journal store unavailable');
+      return item;
+    };
+
+    await dismiss(makeWebhookHarness({ world }).app, 'c1', 'pets').expect(500);
+
+    expect(await world.extractionRepo.hasDismissal('c1', 'pets', 'two cats')).toBe(true);
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
   });
 
   it('resumes a committed dismissal without duplicating its audit or tombstone effect', async () => {

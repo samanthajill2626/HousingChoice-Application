@@ -45,11 +45,12 @@ So you know exactly what happened:
 
 Two notes I couldn't act on, because I wasn't sure what you meant:
 
-1. **Raj** - you wrote "Glitching". He's recorded as a **landlord** now. If
-   something still looks wrong about him, tell me what you're seeing.
-2. **James (Hope Atlanta caseworker)** - you wrote "Not showing on my end".
-   He's in the system as a caseworker contact with 204 messages. What wasn't
-   showing - him, his messages, something else?
+1. **Raj / Natraj (row HC-0006)** - you wrote "Glitching". He's recorded as a
+   **landlord** now. If something still looks wrong about him, tell me what
+   you're seeing.
+2. **James, the Hope Atlanta caseworker (row HC-0009)** - you wrote "Not showing
+   on my end". He's in the system as a caseworker contact with 204 messages.
+   What wasn't showing - him, his messages, something else?
 
 ---
 
@@ -122,6 +123,83 @@ go in `notes` - I read every one.
 - **Statuses**: per your rule, everyone you've been in contact with comes across
   as **Searching** - nobody gets parked unless they've been quiet for about six
   months. 587 people arrive as actively searching.
+
+---
+
+### Appendix - every answer, and what I did with it
+
+The 19 rows where you wrote "N/a" are all noted - nothing needed recording,
+and the star question they mostly answered is settled (it means nothing).
+Everything else is below, with the row number from the NEW contacts sheet so
+you can jump straight to it.
+
+| Row | Who | You wrote | What I did |
+| --- | --- | --- | --- |
+| HC-0001 | Muhammad Khateeb | Caseworker | recorded as a caseworker |
+| HC-0002 | Lolita | Landlord | recorded as a landlord |
+| HC-0003 | Ravi | landlord | recorded as a landlord |
+| HC-0005 | Trent Parrish | This is glitchng- it's a landlord- Trent Parrish | recorded as a landlord |
+| HC-0006 | Natraj Subramaniam | Glitching | **still open - see my question above** |
+| HC-0007 | Jazaria scott | Glitching- landlord Raj | recorded as a landlord |
+| HC-0008 | Chris | Tenant Teresa | recorded as a tenant |
+| HC-0009 | James-backup- -Hope Atlanta-Caseworker-Hope Atlanta | Not showing on my end | **still open - see my question above** |
+| HC-0010 | Semya White | Tenant 2 bed | recorded as a tenant |
+| HC-0011 | Shasunda Spencer | Tenant | recorded as a tenant |
+| HC-0013 | Renee | Tenant | recorded as a tenant |
+| HC-0014 | Gyntonne Cross | Tenent | recorded as a tenant |
+| HC-0015 | Cheryl | Caseworker | recorded as a caseworker |
+| HC-0016 | Helen Williamson | Caseworker | recorded as a caseworker |
+| HC-0017 | Janee | Caseworker | recorded as a caseworker |
+| HC-0018 | Stephanie James | Caseworker | recorded as a caseworker |
+| HC-0019 | Gante | Tenant | recorded as a tenant |
+| HC-0020 | Haroon | N/a don't add | removed (you said do not add) |
+| HC-0021 | Venneisa Day | Tenant 4 bed | recorded as a tenant |
+| HC-0022 | Jennifer Willis | Caseworker | recorded as a caseworker |
+| HC-0023 | Shawan Deberry | Caseworker | recorded as a caseworker |
+| HC-0024 | Jarious Taylor | Caseworker | recorded as a caseworker |
+| HC-0025 | Felicia | Caseworker | recorded as a caseworker |
+| HC-0027 | test kelvin | yes | removed (you answered yes to "drop it?") |
+| HC-0028 | test jAKE | yes | removed (you answered yes to "drop it?") |
+| HC-0042 | Stacy- Market Rent | You can delete | removed |
+| HC-0043 | Ladrina Johnson- Market | You can delete | removed |
+| HC-0048 | Sherry | Tenant | recorded as a tenant |
+| HC-0055 | Laqueta Hill | Tenant- got a new number- Laqueta 4 bed | recorded as a tenant |
+| HC-0056 | LaQueta | PM- Kym | recorded as a landlord |
+| HC-0057 | (unnamed) | Tenant- got a new number- Tina 3 bed | recorded as a tenant |
+| HC-0058 | Quantina | Tenant- got a new number Quintina- 3bed | recorded as a tenant |
+| HC-0070 | Arielle Anderson | Tenant | recorded as a tenant |
+| HC-0134 | Davontae Mcleroy | Please add to system | kept in the system |
+| HC-0135 | Shaniqua Stevens | Please add to system | kept in the system |
+| HC-0136 | Ella Kesler | Delete | removed |
+| HC-0137 | Regina Banks | Please add to system | kept in the system |
+| HC-0138 | Dimanche Crutcher | Please add to system | kept in the system |
+| HC-0139 | Yundaz Carrectr | Please add to system | kept in the system |
+| HC-0140 | Ganiu | Delete | removed |
+| HC-0141 | Farrah | Delete | removed |
+| HC-0156 | Angela | 1 | voucher size set to 1 |
+| HC-0173 | Henry Venson | tenant | recorded as a tenant |
+| HC-0202 | Smith | 1 | voucher size set to 1 |
+| HC-0216 | Candy Faulk | 4 | voucher size set to 4 |
+| HC-0277 | Patricia Wingo | 1 | voucher size set to 1 |
+| HC-0284 | Devontrae | 4 | voucher size set to 4 |
+| HC-0295 | Jasmine Maddox | 2 | voucher size set to 3 (your Airtable; your note said 2) |
+| HC-0321 | Tempest Davis | 4 | voucher size set to 4 |
+| HC-0323 | Jazaria- Mlk-backup-backup-backup | tenant | recorded as a tenant |
+| HC-0325 | Bianca Barnes Correct | tenant | recorded as a tenant |
+| HC-0328 | Alexandrea Woodruff | You can delete | removed |
+| HC-0352 | Maliko Hawkins | 2 | voucher size set to 3 (your Airtable; your note said 2) |
+| HC-0363 | Candice Jenkins- Market | You can delete | removed |
+| HC-0412 | Kenyatta Smith- Market | You can delete | removed |
+| HC-0437 | Roshanda Campbell | 3 | voucher size set to 3 |
+| HC-0525 | Market | You can delete | removed |
+| HC-0555 | Star-backup | Tenant | recorded as a tenant |
+| HC-0560 | Doriyah Jordan | 4 | voucher size set to 4 |
+| HC-0578 | Lawrence | There are QUO messages, please don't delete | kept in the system |
+| HC-0632 | Star Crawford | Tenant | recorded as a tenant |
+| HC-0645 | Sean | Tenant | recorded as a tenant |
+| HC-0651 | Latoya Matthews | Tenant | recorded as a tenant |
+| HC-0654 | Crowley | Tennat | recorded as a tenant |
+| HC-0663 | Betty Kaye | Tenant | recorded as a tenant |
 
 ---
 

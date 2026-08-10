@@ -6,7 +6,7 @@ severity: low
 status: open
 area: dashboard
 created: 2026-08-09
-refs: dashboard/src/routes/settings/AiRunList.tsx, app/src/routes/aiRuns.ts, app/src/services/extraction/decisions.ts
+refs: dashboard/src/routes/settings/aiRuns/AiRunList.tsx, app/src/routes/aiRuns.ts, app/src/services/extraction/decisions.ts
 ---
 
 **Problem.** The run list's summary cell sums the outcome buckets AND an

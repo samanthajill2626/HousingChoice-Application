@@ -49,14 +49,24 @@ than fixed, so nothing is lost at merge. Two got their own files:
     added on the same branch does chunk. (`aiRunsRepo.ts:154-167`)
 11. `setVerdict`'s fallback can mint an unconsumable `inflight#` marker for a
     TTL-reaped run. (`aiRunsRepo.ts:413-435`)
+    Trigger: literally cannot occur until 90 days of runs exist, since nothing
+    has been TTL-reaped before then. Revisit when the first runs approach the
+    TTL horizon.
 12. The lease fence is re-adopted rather than enforced (`journal = refreshed`
     with no same-token check); benign only because every effect is
     independently idempotent. (`suggestionResolution.ts:421,462,479`)
+    Trigger: the moment anyone adds a NON-idempotent effect to the resolution
+    protocol, the fence must be enforced (compare tokens and bail). An in-code
+    warning now sits above the first re-adoption site in
+    `suggestionResolution.ts` so the constraint is visible where it bites.
 13. A persistent journal-table error after the domain commit surfaces as a 500
     where main answered 200.
+    Trigger: first sighting in any environment - it needs a real failure to
+    characterize before choosing a remedy.
 14. `putSuggestion` retries 4x with no backoff and its catch issues two
     consistent reads before the retryability check, which can mask the original
     error.
+    Trigger: first observed contention in production.
 
 **Cost**
 
@@ -64,8 +74,11 @@ than fixed, so nothing is lost at merge. Two got their own files:
     (5-6 items) where main wrote zero. Skips are the steady-state outcome. This
     is the design's deliberate "why did it not fire" evidence, but the volume
     was not costed.
+    Trigger: 30 days of production run data - costing needs real volume, and
+    guessing now would be premature optimization on a staff tool.
 16. Contact PATCH adds N sequential `getSuggestion` reads ahead of the write,
     including for non-extractable fields.
+    Trigger: 30 days of production run data, same reasoning as item 15.
 
 **Accessibility and UI**
 
@@ -77,11 +90,15 @@ than fixed, so nothing is lost at merge. Two got their own files:
 19. No affordance anywhere navigates to a CONTACT-SCOPED run log; the scope
     deep-link is reachable only by hand-editing the URL. (The Settings tab
     itself is present and correctly admin-gated - verified live.)
+    Trigger: a product decision, not a bug - build it when the humans decide
+    the contact page should link to its runs.
 20. The decision ledger iterates DynamoDB map order while `DECISION_TARGETS` is
     declared to be the display order.
 21. Detail pane omits the run time that spec section 9 lists in the header.
 22. A second chip click is silently swallowed while another is in flight
     (pre-existing).
+    Trigger: pre-existing on main, not this feature's regression - pick it up
+    with any general suggestion-chip UX pass.
 
 **Hygiene**
 
@@ -95,6 +112,8 @@ than fixed, so nothing is lost at merge. Two got their own files:
     row for the new surface.
 27. Fault-injection hooks (`afterBoundary`) ship inside the production request
     path.
+    Trigger: the next time the crash suite is touched - removing them now means
+    rewriting that suite for no behavioral gain.
 28. A helped commit loses its `suggestion.updated` SSE when the request then
     fails with a non-`SuggestionResolutionError`.
 

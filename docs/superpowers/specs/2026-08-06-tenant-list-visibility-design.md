@@ -1,10 +1,16 @@
 # Tenant list visibility: voucher size + housing authority
 
-**Date:** 2026-08-06 (revised 2026-08-10 after review round 2 + the founder taxonomy)
-**Status:** approved design, not yet built
+**Date:** 2026-08-06 (revised through 2026-08-10: four adversarial review rounds, the founder
+taxonomy, and Cameron's spec-gate rulings - the agency field, the unit consolidation, the
+humanize retirement)
+**Status:** at the human spec gate
 **Origin:** founder feature request - "Visibility things missing: want to see all tenants by
-voucher size and housing authority/voucher program. Some of the eligibility criteria too"
-**Review:** spec rounds 1-2; adjudications at `.superpowers/design-review/adjudications.md`
+voucher size and housing authority/voucher program. Some of the eligibility criteria too" -
+since widened at the gate into delivering the decided authority/agency data shape on tenants
+AND units
+**Review:** spec rounds 1-4 (capped); adjudications at
+`.superpowers/design-review/adjudications.md`; the gate-ruling sections (agency field, section
+8) postdate the capped loop and get one targeted round
 **Base:** branch synced with `main` on 2026-08-10 (post quo-airtable-import merge - the import
 now writes `contact.housingAuthority`; earlier revisions predate that and are superseded here)
 
@@ -34,17 +40,25 @@ This section is authoritative for every naming decision below. Recorded in full 
   2026-08-10): the future unit build tracks only the accepted-authorities list, never a separate
   jurisdiction field beside it. Landlords themselves have no authority.
 
-**What this feature does with that model (Cameron, 2026-08-10 gate ruling).** The feature
-DELIVERS the two-field shape: when it ships, a tenant has `housingAuthority` (the voucher
-issuer) AND a new `agency` field (the helper org they may work with). Historical mixed values -
-agency spellings the importer wrote into `housingAuthority` - are a DATA-CLEANUP job on the
-operations side, explicitly not this feature's: the UI does not disclose, flag, or work around
-them ("we don't need to build the feature to support out-of-date data that isn't even
-production data today"). The facet shows current data as it is. The agency field here is the
-FIELD only - editable and visible on the tenant file; an agency facet, the caseworker-to-agency
-link, unit multi-authority acceptance, and the extraction-vocabulary split stay with the drift
-issue. The build DOES add the taxonomy to `documentation/GLOSSARY.md` (housing authority +
-agency), per the glossary rule.
+**What this feature does with that model (Cameron, 2026-08-10 gate rulings).** The feature
+DELIVERS the decided data shape on BOTH entities:
+
+- **Tenants** get the two-field shape: `housingAuthority` (the voucher issuer) AND a new
+  `agency` field (the helper org they may work with).
+- **Units** get the one-field shape: a new `accepted_authorities` string list replaces BOTH
+  `unit.jurisdiction` (single string) and `unit.accepted_programs` (the dissolved "program"
+  concept - its `HCV` / `Section 8` / `VASH` values are program-type labels from the old
+  vocabulary, deliberately NOT folded into the new field). Section 8 specifies the
+  consolidation surface-by-surface.
+
+Historical mixed values - agency spellings the importer wrote into `housingAuthority` - are a
+DATA-CLEANUP job on the operations side, explicitly not this feature's: the UI does not
+disclose, flag, or work around them ("we don't need to build the feature to support out-of-date
+data that isn't even production data today"). The facet shows current data as it is. The agency
+field here is the FIELD only - editable and visible on the tenant file; an agency facet, the
+caseworker-to-agency link, and the extraction-vocabulary split stay with the drift issue. The
+build DOES add the taxonomy to `documentation/GLOSSARY.md` (housing authority + agency +
+accepted authorities), per the glossary rule.
 
 **The live vocabulary.** The merged import (`app/src/lib/import/apply.ts:327-366`) normalizes
 the founder's tenant-side "voucher program" column onto canonical spellings
@@ -86,25 +100,33 @@ untouched until the retire issue removes it).
   form input with a datalist of the four known agencies (`HUD VASH`, `Claratel`, `Hope Atlanta`,
   `Step Up`; free text accepted, same idiom as the authority input), and an "Agency" row in the
   tenant file's Details card. No GSI, no facet, no row chip - the FIELD, not a filter.
-- All three authority placeholders drop their slug examples, but to KIND-APPROPRIATE values:
-  the contact form gets `e.g. Atlanta (AHA)` (an issuer name - the field is the voucher issuer),
-  while the two unit forms (`UnitCreateForm`, `ListingEditForm`) get `e.g. DeKalb County` (a
-  place name - `unit.jurisdiction` is the AREA question, and `listingFormat.ts:53` joins it into
-  an address phrase where "123 Main St, Atlanta (AHA)" would read wrong).
-- GLOSSARY entries: housing authority, agency.
+- **The unit `accepted_authorities` consolidation** (section 8): one list field replaces
+  `jurisdiction` + `accepted_programs` across the PATCH allowlist, both unit forms, the
+  properties-list facet, the property detail, the public flyer's "Accepts:" line, similar-unit
+  matching, the import's unit writer, seeds, and the e2e steps - with read-time synthesis from
+  legacy `jurisdiction` so no backfill is needed, and removal of the caller-less
+  `?jurisdiction=` API param + repo method.
+- The contact authority placeholder drops its slug example for `e.g. Atlanta (AHA)` (an issuer
+  name - the field is the voucher issuer). The unit forms' single-authority input is replaced
+  wholesale by section 8's list input, so their old placeholders go with it.
+- GLOSSARY entries: housing authority, agency, accepted authorities.
 
-**Out, by founder/Cameron decision.** Agency modelling (field, entity, caseworker link); the
-free-text eligibility fields (`pets`/`evictions`/`tenure` - later filtered-columns view);
-GHV-into-DCA data decision.
+**Out, by founder/Cameron decision.** Agency modelling BEYOND the plain contact field (the
+entity, the caseworker-to-agency link); the free-text eligibility fields
+(`pets`/`evictions`/`tenure` - later filtered-columns view); GHV-into-DCA data decision.
 
 **Out, by build-side judgment.** "Voucher expiring soon" chip (no soon-window policy exists
 anywhere - `deadlineRelative` has no threshold; inventing urgency policy does not belong here);
 LIF filter (zero records anywhere); grouped-sections rendering; the extraction-vocabulary split
-(the vocab mixes both kinds and is missing DeKalb entirely - drift issue); unit-side multi-
-authority acceptance (drift issue); seed normalization and deleting `humanizeAuthority`
-(`docs/issues/retire-humanize-authority.md` - filed at the gate on Cameron's ruling); an agency
-FACET or row chip (the field ships, the filter does not - ask-first if she wants it); historical
-mixed-value cleanup in `housingAuthority` (operations-side data work, not feature work).
+(the vocab mixes both kinds and is missing DeKalb entirely - drift issue); seed SPELLING
+normalization and deleting `humanizeAuthority` (`docs/issues/retire-humanize-authority.md` -
+filed at the gate on Cameron's ruling; section 8's seed change switches the FIELD, that issue
+fixes the VALUES); an agency FACET or row chip (the field ships, the filter does not -
+ask-first if she wants it); historical mixed-value cleanup in `housingAuthority`
+(operations-side data work, not feature work); tenant-to-unit authority MATCHING (the new unit
+field enables it; building it is its own feature); dropping the dead `byJurisdiction` GSI from
+the table schema (infrastructure - recorded as owed tf cleanup in the drift issue, done only on
+an explicit ask).
 
 ## 4. Data - one small backend addition
 
@@ -281,7 +303,43 @@ directly below it in the same idiom:
   mechanical drift guard (cross-workspace imports are not available to either test suite) -
   accepted and recorded in the drift issue.
 
-## 8. Components
+## 8. Unit data change: `accepted_authorities` replaces `jurisdiction` + `accepted_programs`
+
+The decided model: a unit accepts vouchers from ONE OR MORE authorities (at least one, chosen by
+the landlord), stored as ONE field. `accepted_authorities: string[]` is that field. The single
+`jurisdiction` string cannot hold the plural, and `accepted_programs` records the dissolved
+"program" concept - its values (`HCV`, `Section 8`, `VASH`) are old-vocabulary program-type
+labels, NOT authorities, so they are retired with the field, never folded into the new one.
+
+**Read-time synthesis, no backfill.** `authoritiesOf(unit)` returns `accepted_authorities` when
+present, else `[jurisdiction]` when the legacy string exists, else `[]`. One tiny helper on each
+side (app lib for the flyer/matching, dashboard for the views - the same hand-mirror pattern as
+the vocabulary list, 3 lines each). Every stored legacy unit keeps working; new writes use only
+the new field.
+
+**Every surface, enumerated (writers then readers - the invariant rule):**
+
+| Surface | Change |
+| --- | --- |
+| `unitFields.ts` allowlist (the unit PATCH) | Add `accepted_authorities: 'string[]'`; REMOVE `jurisdiction` and `accepted_programs` from the writable set. Unknown keys already no-op for stale clients (the established field-move pattern, `contacts.ts:307`) |
+| `UnitCreateForm` / `ListingEditForm` | The single "Housing authority" input AND the "Accepted programs" comma input are replaced by ONE "Housing authorities" comma-separated input (the exact idiom `accepted_programs` uses today: split on comma, trim, drop empties), placeholder `e.g. Atlanta (AHA), DCA` |
+| Import unit writer (`apply.ts:790-793`) | `jurisdiction = value` becomes `accepted_authorities = [canonical]`, routed through the same `housingAuthorityFor` canonicalizer the contact side uses (the workbook column comes from the founder's authority-named "Voucher Type" data) |
+| Seeds (`cast.ts` x5, `lean.ts` x2, `live.ts` x3, `matrix.ts` x8) | `jurisdiction: X` becomes `accepted_authorities: [X]` - FIELD switch only; the slug VALUES are normalized by `retire-humanize-authority`, not here |
+| e2e `steps.ts:816-828` (`seedAvailableUnit`) + `:1440-1458` (the create-form step) + the ~14 specs seeding `jurisdiction` | Mechanical follow: the dev seam takes `accepted_authorities`, the form step fills the new list input |
+| `GET /api/units?jurisdiction=` + `listByJurisdiction` (`units.ts:400-408`, `unitsRepo.ts:313,545`) | REMOVED - verified zero callers (the dashboard never passes it and walks pages client-side; no app-internal caller). The `byJurisdiction` GSI stays in `tables.ts` untouched (schema change = infrastructure; it simply goes sparse as the attribute stops being written; owed tf cleanup recorded in the drift issue) |
+| `ListingsList` authority facet | Derives from `authoritiesOf(unit)` - a unit now appears under EACH authority it accepts. Grouping reuses section 5's normalized-key rule |
+| `ListingDetail` | The `Jurisdiction` KV and the programs display become one "Housing authorities" row (the synthesized list, joined) |
+| `listingFormat.ts:53` (`buildListingFacts`) | `jurisdiction` DROPS out of the address/area phrase - it was an issuer name in an area slot; `unit.area` alone carries the area |
+| `toUnitFlyer` (`unitFields.ts:252`) + the PUBLIC flyer "Accepts:" line (`FlyerPage.tsx:253-254`) + `publicApi.ts:36` | The flyer projects `accepted_authorities` (synthesized) instead of `accepted_programs`. USER-VISIBLE on a public page: "Accepts: HCV, VASH" becomes "Accepts: Atlanta (AHA), DCA" - a deliberate improvement (it now answers the tenant's actual question: will this unit take MY voucher) |
+| `similarUnits.ts:94-120` (the programs-overlap score) | Same overlap logic over `authoritiesOf()` instead of `accepted_programs` - authority overlap is the truer similarity signal under the model |
+| Types (`unitsRepo.ts` `UnitItem` + the dashboard mirror) | Add `accepted_authorities?: string[]`; `jurisdiction` stays typed as a LEGACY read-only field with a comment pointing here |
+| `units.ts:5` route doc comment | Drop `jurisdiction=` from the query-param list |
+
+**Stored `accepted_programs` data** (no seeds write it; only hand-entered units carry it) stays
+on the documents untouched and simply stops rendering - consistent with the gate ruling that
+historical values are operations-side cleanup.
+
+## 9. Components
 
 | Unit | Responsibility |
 | --- | --- |
@@ -292,7 +350,7 @@ directly below it in the same idiom:
 | `ContactEditForm` (edited) | Section 7 input. |
 | `TenantFile` (edited) | The "Agency" Details-card row. All existing authority readers stay untouched - values display as stored (section 2's display rule). |
 
-## 9. URL state
+## 10. URL state
 
 Params, absent when unset - **repeated params, not comma-joined** (no CANONICAL value contains
 a comma, but passthrough values can - the founder's raw cells demonstrably do, e.g.
@@ -320,7 +378,7 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   leaving the view drops it. Cross-navigation persistence would need session storage, which is
   out of scope.
 
-## 10. Testing and verification
+## 11. Testing and verification
 
 - **Unit** (`tenantFacets`): bucketing incl. `min(v,4)` and Studio=0 pinned; the explicit
   bucket-key table both directions (`4 -> '4plus'`, never `String()`); key normalization (slug +
@@ -331,6 +389,16 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   rule); unknown URL values; sentinel round-trip; `voucher=0` string-matched (never coerced).
 - **Unit** (app, `contacts.ts`): the `agency` PATCH allowlist - string accepted, non-string
   rejected, `changedFields` tracked.
+- **Unit** (app, unit side): `unitFields` allowlist accepts `accepted_authorities` and rejects
+  writes to `jurisdiction`/`accepted_programs`; `authoritiesOf` synthesis (new field wins;
+  legacy `jurisdiction` synthesizes to a one-item list; neither yields `[]`); `toUnitFlyer`
+  projects the synthesized list; `similarUnits` scores authority overlap incl. a legacy-vs-new
+  pair; the import unit writer canonicalizes into the list (`importApply` integration test
+  extended).
+- **Component** (unit side): both unit forms round-trip the comma-separated authorities input;
+  `ListingDetail` renders the "Housing authorities" row from synthesis; `ListingsList`'s facet
+  lists a legacy-jurisdiction unit under its synthesized authority; `FlyerPage` renders
+  "Accepts:" from the new projection.
 - **Component**: controls on Tenants only; facts on tenant rows only (not landlord, not
   deleted); kind/phone/status retained; URL round-trip INCLUDING `?voucher=0`; active-tab
   preservation; other tabs bare; zero-count chips are `aria-disabled` yet focusable; the
@@ -353,7 +421,7 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   blame, both runs reported: `tour-reminders-panel-e2e-flake`,
   `conversationdetail-members-mock-suite-flake`.
 
-## 11. Open questions for the founder
+## 12. Open questions for the founder
 
 1. ~~Voucher program vs housing authority~~ **RESOLVED 2026-08-10** (section 2). Remaining data
    decision, not blocking: do stored `Georgia Housing Voucher (GHV)` values merge into `DCA`?

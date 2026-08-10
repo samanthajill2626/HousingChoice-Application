@@ -1,8 +1,9 @@
-# Native group texting - implementation plan (v2, post plan-review r1)
+# Native group texting - implementation plan (v4, post plan-review r1-r3)
 
 Spec: `../specs/2026-08-10-group-texting-design.md` (v6). Branch
 `feat/group-texting`, worktree `W:\tmp\group-texting`. Cutover 2026-08-17.
-Adjudications: `.superpowers/design-review/adjudications.md` (plan r1 section).
+Adjudications: `.superpowers/design-review/adjudications.md` (plan r1-r3
+sections).
 
 RULES OF THE BUILD (AGENTS.md + spec; for a zero-context builder):
 
@@ -74,13 +75,21 @@ CHECKPOINT: typecheck + npm test + FULL npm run e2e. Commit.
 T2.1 app/src/repos/conversationsRepo.ts: `'group_text'` in ConversationType
   (:39); fields `twilio_conversation_sid?`, `twilio_participant_map?`
   (MBxx->memberKey record); `touchLastActivity` REPO-LEVEL PARTITION GUARD
-  (plan-r2): the status write carries ConditionExpression
-  `#type <> :group_text`; on ConditionalCheckFailedException retry WITHOUT
-  the status clause (last_activity/preview only). Every call site -
-  including the outbound send path app/src/routes/api.ts:1501 - is safe
-  automatically; no statusValue parameter. Red-first test: a group
-  thread's status survives touchLastActivity; 1:1 test: expression
-  unchanged apart from the always-passing condition. New methods:
+  (plan-r2/r3): the status write carries ConditionExpression
+  `attribute_exists(conversationId) AND (attribute_not_exists(#type) OR
+  #type <> :groupText)` (r3: the bare `<>` form is FALSE on a type-less
+  legacy row, and dropping the existence check on retry would upsert a
+  phantom row); on ConditionalCheckFailedException retry WITHOUT the
+  status clause but WITH `attribute_exists(conversationId)` and the same
+  `ReturnValues: 'ALL_NEW'`. Every call site - including the outbound send
+  path app/src/routes/api.ts:1501 - is safe automatically. Red-first test:
+  a group thread's status survives touchLastActivity; 1:1 tests: typed and
+  legacy type-less rows keep today's reopen semantics; missing-row CCFE
+  still surfaces (no phantom upsert).
+  WRITER SWEEP RESULT (r3, verified by review): touchLastActivity is the
+  ONLY conversation-status writer reachable by a group thread; the other
+  three status writers are self-guarded by preconditions a group_open row
+  cannot meet - record this in the T2.6 ruling table. New methods:
   `createGroupTextThread(...)` (conditional create; status 'group_open'),
   `listGroupTexts({cursor,limit})` (byLastActivity Query, partition
   'group_open', newest-first; query error -> ERROR log + THROW, never
@@ -98,7 +107,12 @@ T2.6 STATUS-LITERAL SWEEP (plan-r2: `status` is a bare string in both
   per-site ruling table in the slice report; add tests where a ruling
   changes behavior. Known intended effects to confirm: inboundEmail
   not1to1 (group excluded), api.ts:1562 'open' page (group excluded),
-  today.ts:514 (excluded), relay status displays (unaffected).
+  today.ts:514 (excluded), relay status displays (unaffected). Include
+  the WRITER sweep result from T2.1 in the same table. Also the silent
+  filter site app/src/routes/inbox.ts:355-366 `passesFilter`: its
+  `default` arm swallows unknown filters - add an explicit 'groups' case
+  and rulings for group rows under 'unknown'/needsTriage (groups are
+  EXCLUDED from the unknown-triage filter; they have no needsTriage).
 T2.3 app/src/services/groupIdentity.ts: `groupIdentity(from, others)` ->
   { roster, conversationId } - normalizes EVERY input via the importer's
   `normalizeToE164`, applies the exclusion set (business number + cached
@@ -130,9 +144,10 @@ T7.1 app/src/lib/import/apply.ts `upsertConversation` group path:
   on protected fields.
 T7.2 `retractImported` (apply.ts:425-470): contact delete refuses when the
   contact carries the detection origin marker OR appears on any group_text
-  roster - the roster check walks the ENTIRE group_open partition with
-  full pagination (plan-r2: correctness over bound; migration-time cost
-  acceptable); reports skip reason. Tests: both refusal paths +
+  roster - the roster check walks the ENTIRE group_open partition ONCE
+  with full pagination, building a Set of roster contactIds consulted per
+  retract candidate (plan-r3: never O(contacts x partition)); reports skip
+  reason. Tests: both refusal paths +
   clean-delete case.
 T7.3 app/src/services/groupConvert.ts
   `convertConnectingRelayGroupToGroupText(conversationId, opts)` per spec 9:
@@ -140,8 +155,7 @@ T7.3 app/src/services/groupConvert.ts
   refuse), rewrite (type, status 'group_open', roster contactId backfill
   via contactIdForPhone, relay-only fields removed), idempotent,
   result reports import_connect_requested when present. Rail creation is
-  NOT here (S6 job; the bulk runner enqueues rails in T7.4 once S6 lands -
-  see S6 note). Tests: unit matrix (converts / already-converted /
+  NOT here (the bulk runner's named injection point, wired by T6.6(c)). Tests: unit matrix (converts / already-converted /
   refuses open relay / refuses pool_number / flag reported / backfill).
 T7.4 Bulk entry point (script per import-mission convention): receives
   ownNumbers, performs the EITHER-DIRECTION set-equality parity check
@@ -166,8 +180,8 @@ T3.3 Group filing: groupIdentity() (T2.3; WARN+metric when a POOL number
   (c) auto-convert via T7.3 called inline WITHOUT ownNumbers, then file as
   group, WARN metric / corrupt-shape -> file to sender 1:1 + ERROR +
   extraction marker. Persist with relay_sender_key = sender memberKey;
-  sid-pointer dedupe; unread; touchLastActivity(conv, {statusValue:
-  'group_open'}); SSE.
+  sid-pointer dedupe; unread; touchLastActivity (the repo guard keeps the
+  partition; no special parameters); SSE.
 T3.4 Contact stubs: contactIdForPhone ids + origin marker + NO consent
   fields; sender resolved (existing-by-phone else stub); participants
   written once conditional, race-loser re-reads. Tests incl. no-consent
@@ -202,10 +216,12 @@ T4.1 Server inbox third source: app/src/routes/inbox.ts - merge top-50 from
   :73), derived title from roster, unread count; `filter=groups` in
   InboxFilter (:69) + allowlist (:127-134, :702-712); groups filter pages
   ONLY the group partition (contact pager off), namespaced cursor tag,
-  server 400 on tag/filter mismatch. UNREAD RULING (plan-r2): under
-  `filter=unread` the group source returns ALL unread group threads
-  (partition walk, no 50-cap), and the dashboard nav unread badge
-  (UnreadContext) includes group unread - tests for both. Unit tests: row
+  server 400 on tag/filter mismatch. UNREAD RULING (plan-r2/r3): under
+  `filter=unread` the group source returns ALL unread group threads (paged
+  partition walk); the dashboard nav unread badge (UnreadContext) includes
+  group unread BOUNDED by the same existing BADGE_LIMIT convention the 1:1
+  badge uses (bounded read + saturation display; per-SSE-event refetch
+  stays O(BADGE_LIMIT), never an unbounded walk) - tests for both. Unit tests: row
   shape, filters, cursor 400, truncation flag.
 T4.2 Dashboard inbox: dashboard/src/api/types.ts:2548 InboxFilter union;
   dashboard/src/routes/inbox/inboxFilters.ts:12-16 INBOX_FILTERS tab
@@ -332,9 +348,9 @@ Gates; commit.
 
 ## S6 - Guardrail jobs + rail creation (spec 8, 6.1)
 
-T6.1 Rail-create job defineJobHandler('groupRail.create') called from T3.3
-  thread creation (enqueue) + T7.4 bulk + T5.2 backstop; idempotent;
-  failure -> rail-less + WARN + report. Unit tests.
+T6.1 Rail-create job defineJobHandler('groupRail.create'); callers are
+  wired in T6.6 (detection enqueue, send backstop direct, bulk sync);
+  idempotent; failure -> rail-less + WARN + report. Unit tests.
 T6.2 Cross-check endpoint POST /webhooks/twilio/conversations/events:
   signature; ack-then-enqueue compare job (conversation+author+window);
   miss -> ERROR; updates settings `group_crosscheck_last_event_at`;
@@ -342,9 +358,12 @@ T6.2 Cross-check endpoint POST /webhooks/twilio/conversations/events:
   directions.
 T6.3 Periodic jobs, wired like the four existing worker pollers
   (app/src/worker.ts:263-418 pattern) EACH WITH a `__dev` tick endpoint
-  (app/src/routes/dev.ts pattern): daily liveness sweep ("cross-check
-  channel quiet" WARN) + 7-day heartbeat WARN. Unit tests with fake clock
-  + tick-endpoint tests.
+  (app/src/routes/dev.ts pattern). CADENCE MECHANISM (r3: the 60s poller
+  interval is not the cadence - due state is): each job keeps a
+  last-run-at settings record and the poller invocation returns
+  immediately unless 24h (liveness sweep) / the heartbeat's evaluation
+  interval has elapsed - one WARN per elapsed period, never per poll.
+  Unit tests with fake clock assert exactly-once-per-period + tick tests.
 T6.4 Per-send staleness check: jobs.enqueue runAt +600s (verified within
   JOBS_SQS_MAX_DELAY_SECONDS = 720, jobs.ts:47) -> ERROR if
   delivery_recipients still empty. The `__dev` seam INVOKES THE CHECK
@@ -417,6 +436,9 @@ ticket, MMS campaign gate. All Cameron-executed. No schema ops.
 
 - S5-PRE outcomes can STOP the line (scope-precedence failure) - do not
   proceed past them unresolved; they need Cameron's handset (~10 min).
+- Task numbering within S2/S4 reflects insertion history, not execution
+  order - execute in dependency order (T2.6's sweep after T2.1/T2.2 land
+  the type; T4.0 before T4.3).
 - apply.ts merge coordination: the unmerged import branch also edits it;
   keep S7 changes tightly scoped; Cameron sequences merges.
 - Two known flakes (tour-reminders-panel, conversationdetail-members):

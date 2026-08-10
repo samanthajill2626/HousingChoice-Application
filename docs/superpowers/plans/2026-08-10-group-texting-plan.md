@@ -1,4 +1,4 @@
-# Native group texting - implementation plan (v4, post plan-review r1-r3)
+# Native group texting - implementation plan (v5, post plan-review r1-r3 + external design review)
 
 Spec: `../specs/2026-08-10-group-texting-design.md` (v6). Branch
 `feat/group-texting`, worktree `W:\tmp\group-texting`. Cutover 2026-08-17.
@@ -160,11 +160,14 @@ T7.3 app/src/services/groupConvert.ts
 T7.4 Bulk entry point (script per import-mission convention): receives
   ownNumbers, performs the EITHER-DIRECTION set-equality parity check
   against the runtime exclusion set BEFORE any conversion (refuse all on
-  mismatch), converts each, and creates rails SYNCHRONOUSLY per converted
-  row (plan-r2: per-row 50407-class outcomes must land in the migration
-  report). The rail step depends on S5's adapter, so T7.4 lands the
-  conversion+parity+reporting skeleton with the rail step as a NAMED
-  INJECTION POINT, wired by S6 task T6.6(c); per-row results. Unit test over fixtures.
+  mismatch), converts each (stamping member consent bases per spec 9),
+  and creates rails SYNCHRONOUSLY per converted row (plan-r2: per-row
+  50407-class outcomes must land in the migration report). The rail step
+  depends on S5's adapter, so T7.4 lands the conversion+parity+reporting
+  skeleton with the rail step as a NAMED INJECTION POINT, wired by S6 task
+  T6.6(c); per-row results feed the HARDENED CUTOVER INVARIANT (spec 14:
+  converted + rail ACTIVE + MB map VERIFIED per retained group, or
+  explicitly adjudicated; zero unresolved rail failures is a hard gate). Unit test over fixtures.
 Gates; commit.
 
 ## S3 - Inbound detection (spec 5, 4.4)
@@ -182,10 +185,15 @@ T3.3 Group filing: groupIdentity() (T2.3; WARN+metric when a POOL number
   extraction marker. Persist with relay_sender_key = sender memberKey;
   sid-pointer dedupe; unread; touchLastActivity (the repo guard keeps the
   partition; no special parameters); SSE.
-T3.4 Contact stubs: contactIdForPhone ids + origin marker + NO consent
-  fields; sender resolved (existing-by-phone else stub); participants
-  written once conditional, race-loser re-reads. Tests incl. no-consent
-  + race.
+T3.4 Contact stubs: contactIdForPhone ids + origin marker +
+  `consent_method: 'group_participation'` (Cameron's option-(a) ruling,
+  spec 5 - NEVER inbound_text; an existing contact WITHOUT any basis also
+  gains group_participation, never overwriting an existing basis); sender
+  resolved (existing-by-phone else stub). The proactive 1:1 send gate
+  (sendMessage.ts:284 area) is taught that group_participation does NOT
+  satisfy proactive 1:1 sends - explicit tests both directions.
+  participants written once conditional, race-loser re-reads. Tests incl.
+  basis stamping + race.
 T3.5 Consent/keywords (spec 4.4): shared seam refactor - contact-level
   plain-inbound stamp callable without a conversation; sender's 1:1
   materialized ONLY on opt-out/opt-in keywords (NOT HELP); reply usage
@@ -319,8 +327,10 @@ T5.0 Run addendum items (a) scope precedence and (b) classic status
 
 T5.1 app/src/adapters/groupConversations.ts implementing
   groupConversationsPort: createConversationWithParticipants (pinned
-  MessagingServiceSid, unattached projected biz number, member addresses;
-  ConversationWithParticipants for 3-10 total, individual-add fallback),
+  MessagingServiceSid, unattached projected biz number, member addresses,
+  deterministic non-PII `UniqueName` = our conversationId - the
+  idempotency key; ConversationWithParticipants for 3-10 total,
+  individual-add fallback), fetchByUniqueName (crash recovery),
   postGroupMessage (Author=biz), fetchParticipants. Wiring: the SAME
   `createRedirectingHttpClient` + `config.twilioApiBaseUrl` seam the
   messaging adapter uses (app/src/adapters/messaging.ts:561-569) so
@@ -329,12 +339,20 @@ T5.1 app/src/adapters/groupConversations.ts implementing
   kill-switch enforced inside the adapter. Unit tests incl. kill-switch +
   console behavior.
 T5.2 app/src/services/groupSend.ts: thread checks (>9 -> refuse with the
-  banner error; rail missing -> create-on-send backstop), persist with
-  IMxx provider sid + delivery_recipients parent map seeded, audit. Unit
-  matrix.
+  banner error; ANY member without a recorded consent basis -> refuse
+  naming the blocking member (group_participation qualifies; spec 6.2);
+  rail missing -> create-on-send backstop through the T6.1 claimed
+  sequence), persist with IMxx provider sid + delivery_recipients parent
+  map seeded via setRecipientDelivery ('queued' slots - the unconditional
+  seeder's ONLY permitted use), audit. Unit matrix incl. consent-blocked.
 T5.3 Receipts endpoint POST /webhooks/twilio/conversations/receipts:
   X-Twilio-Signature; IMxx->row; MBxx->memberKey (map; refresh on
-  recreate; known-IM/unknown-MB = WARN+counter); setRecipientDelivery;
+  recreate; known-IM/unknown-MB = WARN+counter);
+  `updateRecipientDeliveryStatus` (forward-only guarded, messagesRepo.ts:
+  1577; slot extended to record the per-member channel SMxx + error code;
+  NEVER the unconditional setRecipientDelivery for receipts - external
+  review finding 1, code-verified; required tests: delivered->sent
+  rejected, failed->sent rejected, duplicate receipts idempotent);
   first-receipt syssid marker WITH expires_at (~30d;
   app/src/repos/messagesRepo.ts putSystemSidMarker gains optional
   expiresAt; update the tables.ts:184-189 TTL comment) - subject to
@@ -349,11 +367,24 @@ Gates; commit.
 ## S6 - Guardrail jobs + rail creation (spec 8, 6.1)
 
 T6.1 Rail-create job defineJobHandler('groupRail.create'); callers are
-  wired in T6.6 (detection enqueue, send backstop direct, bulk sync);
-  idempotent; failure -> rail-less + WARN + report. Unit tests.
+  wired in T6.6 (detection enqueue, send backstop direct, bulk sync).
+  LIFECYCLE (spec 6.1, external review finding 2): conditional local
+  `rail_creating` claim before any Twilio call (loser re-reads);
+  deterministic UniqueName; fetch-by-UniqueName recovery on
+  retry-after-crash; post-active MB-map validation against the roster
+  before compose enables; failed/closed attach -> rail-failed record;
+  failure otherwise -> rail-less + WARN + report. Tests: concurrent
+  double-create, crash-retry recovery, closed-rail, recreation race,
+  MB-map mismatch.
 T6.2 Cross-check endpoint POST /webhooks/twilio/conversations/events:
-  signature; ack-then-enqueue compare job (conversation+author+window);
-  miss -> ERROR; updates settings `group_crosscheck_last_event_at`;
+  signature; PERSIST + DEDUPE by IM SID; a GRACE-DEADLINE reconciliation
+  sweep (not an immediate compare - external review finding 5:
+  event-first delivery and redelivery must not false-alarm) matches
+  events to classic-filed messages and alarms ONCE per still-unmatched
+  event past the deadline; documented as a liveness HEURISTIC (no
+  deterministic SM/MM join exists in the payload). Tests: both delivery
+  orders, duplicate redelivery, rapid same-author messages, genuine miss.
+  Updates settings `group_crosscheck_last_event_at`;
   ingestion (T3.3) updates `group_railed_inbound_last_at`. Unit tests both
   directions.
 T6.3 Periodic jobs, wired like the four existing worker pollers
@@ -420,8 +451,12 @@ Commit.
 T9.1 Live self-QA on dev: detected group + reply-all on real handsets;
   group STOP counted to EXACTLY ONE confirmation; 3-outside-member group
   (OtherRecipients1+) + media-bearing group inbound (third US handset).
-T9.2 Docs: RUNBOOK finalized; `npm run issues`; GLOSSARY verified; memory +
-  handback per the profile.
+T9.2 Docs: RUNBOOK finalized (incl. the rollback/forward-only conversion
+  contract, production preflight + signed webhook canary steps, MAU cost
+  note); A2P compliance docs gain the group_participation basis paragraph;
+  `npm run issues`; GLOSSARY verified; memory + handback per the profile.
+T9.3 Editorial pass: version labels consistent; no stale lazy-send or
+  Option-B remnants anywhere in spec/plan (external review cleanup).
 Final: ONE main sync (merge main into branch), full gates, handback report.
 
 ## Post-merge / cutover obligations (NOT built; spec 14)

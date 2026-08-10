@@ -1,6 +1,8 @@
 # Native group texting - design spec
 
-Status: v6 - APPROVED AT THE HUMAN GATE (Cameron, 2026-08-10; v5) with his
+Status: v7 - APPROVED AT THE HUMAN GATE (external design review
+2026-08-10 adjudicated: 8 findings + ops items ALL ACCEPTED; Cameron ruled
+consent option (a) - the group_participation basis). (Cameron, 2026-08-10; v5) with his
 rulings folded: label Option A; auto-convert backstop; EAGER rail creation;
 run-to-completion migration guarantee. v6 folds the PLAN review round-1
 amendments, all within the ratified rulings: status='group_open' replaces
@@ -184,7 +186,12 @@ per-member suppression (4.4).
   `GET /api/conversations?status=open` (api.ts:1562 - the 50-row page four
   dashboard hooks consume) never see group threads by construction; and
   inboundEmail's `status !== 'open'` not-1:1 check excludes groups for
-  free. PARTITION SAFETY IS A REPO-LEVEL GUARANTEE (plan-r2): every writer
+  free. Unread contract (external review finding 7): unread state is not
+  in the partition key, so group unread reads are an ACCEPTED FULL
+  PARTITION WALK at the known scale (132 threads, ~one query page) - the
+  explicit contract replacing any bounded-work claim; a growth threshold
+  (>500 threads) files a follow-up for an unread materialization.
+  PARTITION SAFETY IS A REPO-LEVEL GUARANTEE (plan-r2): every writer
   that would set `status='open'` blindly (touchLastActivity - called from
   inbound AND the outbound send path api.ts:1501 - and any future caller)
   is guarded IN THE REPO: the status write carries ConditionExpression
@@ -219,11 +226,18 @@ Group messages persist under the group conversationId with existing shapes:
   `phone#<E164>`) - documented as the generic multi-party sender key. No
   relay consumer reads it on non-relay threads (plan verifies). Renderers
   resolve the key against the roster for sender chips.
-- outbound: per-member delivery uses the EXISTING `delivery_recipients` map +
-  `setRecipientDelivery` (conditional, out-of-order-safe) keyed by
-  relayMemberKey - NOT a new map. The parent map is seeded at send time
-  (the documented DynamoDB parent-must-exist rule, api.ts:1447). Existing
-  per-member chip renderers light up unchanged.
+- outbound: per-member delivery uses the EXISTING `delivery_recipients`
+  map keyed by relayMemberKey - NOT a new map. CORRECTED MECHANISM
+  (external review finding 1, code-verified): `setRecipientDelivery`
+  (messagesRepo.ts:1554) is an UNCONDITIONAL child SET - it is used ONLY to
+  seed the parent map with 'queued' slots at send time (the documented
+  parent-must-exist rule, api.ts:1447). Every RECEIPT applies through the
+  forward-only guarded method `updateRecipientDeliveryStatus`
+  (messagesRepo.ts:1577: allowedPriorStatuses + optimistic condition),
+  extended so the slot also records the per-member channel SMxx and error
+  code. Required tests: delivered->sent rejected, failed->sent rejected,
+  duplicate receipts idempotent. Existing per-member chip renderers light
+  up unchanged.
 - The aggregate `delivery_status` derives as relay/broadcast conventions do.
 
 ### 4.4 Suppression and consent scope (group STOP)
@@ -274,7 +288,12 @@ today's relay behavior with the envelope dropped -
 `docs/issues/group-mms-including-pool-numbers.md`):
 
 1. Collect `OtherRecipients{N}` (N=0.., tolerate gaps; parser also accepts a
-   single unindexed `OtherRecipients` should the shape vary).
+   single unindexed `OtherRecipients` should the shape vary). MINIMUM
+   ROSTER (external review finding 8): after exclusions, a group_text
+   thread requires >= 2 outside members; a roster that collapses to one
+   (e.g. the other recipient was a pool/org number) files into the
+   sender's 1:1 + WARN metric - which is also semantically correct, since
+   a carrier group of us-plus-one-person IS a 1:1.
 2. NONE present -> the existing 1:1 pipeline, unchanged. (Invariant: no new
    I/O and no new persisted side effects on this path; the only addition is
    param inspection.)
@@ -305,9 +324,18 @@ today's relay behavior with the envelope dropped -
          Any OTHER shape at the id (open/connected relay_group with a pool
          number - not creatable by the importer, indicates corruption) ->
          file to the sender's 1:1 + ERROR; never guess.
-   - Creation: resolve-or-create a contact per member by phone - STUBS
-     WITHOUT any consent stamp (they never texted us; stamping inbound_text
-     would fabricate A2P consent - adjudication #8). Group stubs are minted
+   - Creation: resolve-or-create a contact per member by phone. CONSENT
+     BASIS (Cameron's ruling, external review finding 4, option (a)):
+     member stubs are stamped `consent_method: 'group_participation'` - a
+     DISTINCT recorded basis (they joined or were added to a carrier group
+     including our number), never `inbound_text` (which would fabricate a
+     texted-us-first claim - adjudication #8 still holds). The same stamp
+     is applied to imported-group members at conversion (9). GATING RULE:
+     group sends require every member to hold SOME recorded basis
+     (group_participation qualifies); proactive 1:1 sends do NOT accept
+     group_participation - a silent group member cannot be individually
+     messaged without their own basis. The A2P compliance docs gain a
+     paragraph documenting this basis. Group stubs are minted
      with the IMPORTER'S id scheme `contactIdForPhone(e164)` (uuidv5) so the
      import's later contact upsert converges on the same row (r2 finding
      11), AND carry an origin marker (`origin: 'group_detection'`-style
@@ -376,8 +404,19 @@ Rail creation mechanics:
 - No timers (account default null - spike snapshot
   conversations-global-config.json; assert, do not set).
 - Store CHxx + the MBxx->member-key mapping (receipts need it).
-- Idempotent/recreate-on-404; identity conflicts resolve through the
-  sorted-set key.
+- LIFECYCLE + IDEMPOTENCY (external review finding 2): creation sets a
+  deterministic, non-PII `UniqueName` = our conversationId. Before any
+  Twilio call the creator takes a conditional local claim
+  (`rail_creating` attribute, conditional write; loser re-reads) so
+  detection-job, migration, and send-backstop can never double-create. A
+  crash between Twilio create and local persist is recovered by
+  fetch-by-UniqueName on retry. After `active`, participants are fetched
+  and the MB map VALIDATED against the roster before compose enables; a
+  conversation that fails/closes during attach is recorded rail-failed.
+  Recreate-on-404 re-runs the same claimed sequence. Tests: concurrent
+  double-create, crash-retry recovery, closed-rail, recreation race.
+- The inline (5.3c) and bulk conversions use one conditional type
+  transition with loser-reread (same discipline).
 - Cap: 10 participants per group conversation is doc-derived (research
   report 4); that our projected address consumes one of the 10 (-> max 9
   outside members) is the research report's [INF], not doc text - the
@@ -391,8 +430,11 @@ Rail creation mechanics:
 - Composer on group_text threads sends TEXT ONLY in v1 (outbound group media
   is a filed follow-up; inbound media handled per 5).
 - A dedicated group send service (NOT `sendMessage`, which is structurally
-  1:1: single participantPhone, whole-send opt-out refusal). Shared seams,
-  named exactly: the SMS kill-switch predicate (`smsSendingEnabled` -
+  1:1: single participantPhone, whole-send opt-out refusal). CONSENT GATE
+  (Cameron's option-(a) ruling): the service refuses when any member lacks
+  a recorded consent basis (group_participation qualifies; the UI surfaces
+  which member blocks). Shared seams, named exactly: the SMS kill-switch
+  predicate (`smsSendingEnabled` -
   enforced INSIDE the groupConversationsPort adapter, same
   SmsSendingDisabledError), the message catalog for any automated copy, and
   audit logging. Suppressed members are not excluded app-side (4.4).
@@ -418,8 +460,8 @@ events reliably).
   default service's webhook to this URL, filter onDeliveryUpdated only.
   RUNBOOK'd; Cameron-applied.
 - Handler: IMxx -> message row; ParticipantSid -> member key via the stored
-  mapping; `setRecipientDelivery` (existing conditional guard handles dups +
-  out-of-order). Handler budget: Conversations webhooks time out at 5s
+  mapping; `updateRecipientDeliveryStatus` (forward-only guarded; 4.3 -
+  never the unconditional seeder). Handler budget: Conversations webhooks time out at 5s
   (research 8d) - the receipts handler's work is two bounded writes and
   stays inline; anything heavier moves behind `jobs.enqueue()`.
 - Status-callback interplay (r2 finding 5 replaced v2's sid-pointer design,
@@ -439,10 +481,11 @@ events reliably).
   "group delivery receipts silent - check Conversations service webhook
   config". Whether classic callbacks fire at all for Conversations sends is
   spike-addendum item (b): if not, the marker write is dropped from the
-  plan; if so, the residual race (callback before first receipt; receipts at
-  ~1-5s vs the status route's single 2.5s retry) is measured in e2e/live-QA
-  and the plan adds a bounded second retry or documents the rare alarm
-  string. e2e asserts no unknown-SID ERROR from a group send either way.
+  plan; if so, unknown group-send SIDs get DURABLE PARKING (external
+  review finding 6: a longer sleep is not sufficient) - a short-TTL parked
+  record written by the status route's unknown-SID path, reconciled when
+  the receipt writes the marker; a parked record that expires unreconciled
+  alarms. e2e asserts no unknown-SID ERROR from a group send either way.
 - Recreate-on-404 staleness (r2 finding 10): recreating a Conversation mints
   new ParticipantSids - the stored MBxx map is refreshed from a Participants
   read on every recreate, and a KNOWN IMxx with an UNKNOWN ParticipantSid is
@@ -463,16 +506,22 @@ A2P sink and are not touched):
    OtherRecipients -> file as 1:1 (fail open) + structured WARN
    `group-envelope-missing` + counter metric. Known blind spot: media-bearing
    group MMS (NumMedia>0) - covered by mechanism 2.
-2. CONVERSATION CROSS-CHECK (authoritative for the suppression failure
-   mode): the ACCOUNT-GLOBAL Conversations webhook (config empty today;
+2. CONVERSATION CROSS-CHECK (a LIVENESS HEURISTIC for the suppression
+   failure mode - external review finding 5: onMessageAdded carries no
+   SM/MM identifier, so no deterministic join exists unless the addendum
+   finds one): the ACCOUNT-GLOBAL Conversations webhook (config empty today;
    spike F5 proved carrier-sourced `onMessageAdded` arrives there) points at
    a new endpoint `POST /webhooks/twilio/conversations/events`
    (signature-validated; ack fast, compare async behind `jobs.enqueue()` -
    the 5s webhook budget). It reconciles BOTH DIRECTIONS (r2 finding 3 - a
    miss-only alarm cannot tell healthy from dead):
-   - Event without a matching classic-filed message (conversation + author +
-     time window) -> ERROR "conversation-bound inbound missing from classic
-     webhook" - the suppression alarm.
+   - Events are PERSISTED and DEDUPED by IM SID; matching runs at a
+     GRACE DEADLINE (single reconciliation sweep, not immediate compare -
+     event-first delivery and redelivery must not false-alarm), and an
+     event still unmatched at the deadline alarms ONCE: ERROR
+     "conversation-bound inbound missing from classic webhook". Tests:
+     both delivery orders, duplicates, rapid same-author messages, genuine
+     miss.
    - Liveness (the monitor-is-dead signal), as a SINGLE SCHEDULED SWEEP, not
      per-message state (r3 finding 7: absence of an event is not computable
      inline at ingestion; a per-inbound delayed job would be a permanent tax):
@@ -488,8 +537,8 @@ A2P sink and are not touched):
    only the brief pre-rail window and rail-ineligible threads fall back to
    mechanisms 1 and 3. Scope precedence
    (does configuring the service-scoped receipts webhook silence the global
-   scope?) is spike-addendum item (a) and MUST pass before this mechanism is
-   called authoritative. The endpoint is also the DORMANT STANDBY ingestion
+   scope?) is spike-addendum item (a) and MUST pass before this mechanism
+   counts as coverage. The endpoint is also the DORMANT STANDBY ingestion
    rail: the runbook procedure for the suppression world switches group
    ingestion to it (payload carries author/body; roster via one
    Participants read).
@@ -533,7 +582,9 @@ mainline; import mission owns the RUN). This feature ships:
     auto-convert ruling governs): the flag is included in the result for
     reporting.
   - Rewrites to the 4.2 shape: type group_text, status 'group_open',
-    participants preserved WITH contactId BACKFILL (imported rosters carry
+    members stamped `consent_method: 'group_participation'` where no basis
+    exists (Cameron's option-(a) ruling; never overwrites an existing
+    basis), participants preserved WITH contactId BACKFILL (imported rosters carry
     `contactId: ''` - apply.ts:216-220; conversion fills each empty
     contactId with `contactIdForPhone(phone)`, converging with both the
     import's and detection's contact id schemes so member keying and
@@ -691,10 +742,20 @@ mainline; import mission owns the RUN). This feature ships:
   partition.)
 - Migration run (import mission) invokes the conversion bulk entry point
   (converts + creates rails + reports; connect_day_one-flagged rows
-  surfaced in the report). MIGRATION GUARANTEE (Cameron): every imported
-  group is converted-or-deleted before go-live - the runbook's cutover
-  checklist verifies zero remaining `relay_group#connecting` rows from the
-  import.
+  surfaced in the report). CUTOVER INVARIANT (hardened per external review
+  finding 3): every retained imported group is converted AND has an ACTIVE
+  Twilio rail with a VERIFIED full participant/MB map - or is explicitly
+  deleted/adjudicated (documented inbound-only with founder awareness).
+  Zero UNRESOLVED rail failures is a hard gate; the runbook checklist also
+  verifies zero remaining `relay_group#connecting` rows. PREFLIGHT: before
+  the migration window, a production capability check (create+delete one
+  test group conversation on the prod account) and a SIGNED WEBHOOK CANARY
+  against the exact configured receipts + cross-check URLs. COST NOTE:
+  Twilio counts users assigned to conversations as active - the imported
+  rosters plausibly exceed the 200-user free tier (order $10-20/month;
+  budgeted, not discovered). ROLLBACK CONTRACT (RUNBOOK): conversion is
+  forward-only; a code rollback leaves group_text rows UI-orphaned until
+  redeploy - remedy is roll-forward, documented.
 - Cutover continuity: imported groups continue on the ported number because
   identity is the shared roster + exclusion set; handset threads merge by
   participant set (spike, odds-and-ends). First outbound per group lazily

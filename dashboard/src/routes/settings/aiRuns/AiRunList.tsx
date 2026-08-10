@@ -52,7 +52,12 @@ export function AiRunList({
             <span className={styles.outcome}>{humanizeEnum(row.outcome)}</span>
             <span>{row.trigger} via {row.driver}</span>
             <span>{row.contactId ?? row.conversationId}</span>
-            <span>{Object.values(row.decisionCounts).reduce((sum, count) => sum + count, 0)} decisions</span>
+            {/* NOT a total of `decisionCounts`: `pending` is a VERDICT cross-tab
+                over the same targets the five outcome buckets already partition
+                (app/src/routes/aiRuns.ts:27-36), so summing them double-counts
+                every pending decision. Show the two buckets an operator scanning
+                the log is actually looking for. */}
+            <span>{row.decisionCounts['wrote'] ?? 0} wrote, {row.decisionCounts['suggested'] ?? 0} suggested</span>
           </button>
         </li>)}
       </ul>

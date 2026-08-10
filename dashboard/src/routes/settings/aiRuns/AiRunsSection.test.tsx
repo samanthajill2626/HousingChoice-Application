@@ -18,7 +18,11 @@ const flags: SystemFlags = {
   aiExtractionEnabled: true, aiExtractionDriver: 'fake', aiExtractionModel: 'fake-v1', aiExtractionPromptFingerprint: '123456789abc',
 };
 const row: AiRunListRow = { runId: 'run-1', sortKey: 's1', expired: false, startedAt: '2026-08-07T10:00:00.000Z', durationMs: 4, conversationId: 'c1', contactId: 'contact-1', trigger: 'sms', outcome: 'applied', driver: 'fake', decisionCounts: { wrote: 1 }, notedLines: 0 };
-const decisions: Record<string, AiRunDecision> = Object.fromEntries(['firstName','lastName','voucherSize','housingAuthority','pets','evictions','tenure','porting','address','status','type','phone'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
+// Deliberately ALPHABETICAL, which is the order the decisions map comes back in:
+// it round-trips through an unordered DynamoDB map attribute, so the writer's
+// DECISION_TARGETS order is gone by the time the dashboard sees it. Building the
+// fixture in display order would make the ordering test unable to fail.
+const decisions: Record<string, AiRunDecision> = Object.fromEntries(['address','evictions','firstName','housingAuthority','lastName','pets','phone','porting','status','tenure','type','voucherSize'].map((target) => [target, { proposedOp: 'write', proposedValue: 'yes', outcome: 'wrote', verdict: 'auto_applied' }]));
 const detail: AiRunDetailResponse = { run: { runId: 'run-1', startedAt: '2026-08-07T10:00:00.000Z', finishedAt: '2026-08-07T10:00:01.000Z', durationMs: 4, conversationId: 'c1', trigger: 'sms', outcome: 'applied', driver: 'fake', model: 'fake-v1', promptFingerprint: 'abcdef123456', usage: { inputTokens: 12, outputTokens: 4 }, decisions, notedLines: 0, window: { detail: 'full', cursor: 'x', windowCappedAtLimit: false, messages: [], excluded: [{ tsMsgId: 'old', cause: 'age_30d' }, { tsMsgId: 'budget', cause: 'char_budget' }], noContent: ['empty-call'] } }, window: { messages: [{ tsMsgId: 'm1', type: 'sms', direction: 'inbound', tier: 'new', truncated: true, chars: 12, hash: 'abc', hashStatus: 'mismatch', available: true, text: 'hello' }] } };
 
 function Location(): React.JSX.Element { return <output data-testid="location">{useLocation().search}</output>; }
@@ -63,6 +67,34 @@ describe('AiRunsSection', () => {
   });
   it('shows the window with excluded causes and the no-content list', () => { renderSection(); expect(screen.getByRole('table', { name: 'Window messages' })).toBeInTheDocument(); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('age_30d'); expect(screen.getByRole('region', { name: 'Excluded messages' })).toHaveTextContent('char_budget'); expect(screen.getByRole('region', { name: 'No content' })).toHaveTextContent('empty-call'); });
   it('shows every decision with its verdict', () => { renderSection(); const table = screen.getByRole('table', { name: 'Decisions' }); expect(within(table).getAllByRole('row')).toHaveLength(13); expect(screen.getByRole('row', { name: /^pets/ })).toHaveTextContent('auto applied'); });
+  it('renders the ledger in the declared display order, not the map order the API returns', () => {
+    renderSection();
+    const body = within(screen.getByRole('table', { name: 'Decisions' })).getAllByRole('row').slice(1);
+    expect(body.map((tr) => within(tr).getAllByRole('cell')[0]?.textContent)).toEqual([
+      'firstName', 'lastName', 'voucherSize', 'housingAuthority', 'pets', 'evictions',
+      'tenure', 'porting', 'address', 'status', 'type', 'phone',
+    ]);
+  });
+  it('shows WHEN the run happened in the detail header (spec section 9)', () => {
+    renderSection();
+    const header = screen.getByRole('heading', { name: /run run-1/i }).parentElement as HTMLElement;
+    // Computed the same way the pane renders it, so the assertion is host-timezone-safe.
+    expect(header).toHaveTextContent(new Date('2026-08-07T10:00:00.000Z').toLocaleString());
+  });
+  it('counts what an operator scanning the log cares about, not a pending cross-tab', () => {
+    // `pending` is a VERDICT cross-tab over the same twelve targets the five
+    // outcome buckets already partition, so the old total double-counted every
+    // pending decision. Both of these rows summed to 12 under it - the column
+    // could not tell "wrote a field" apart from "changed nothing".
+    const wroteOne: AiRunListRow = { ...row, runId: 'run-wrote', decisionCounts: { wrote: 1, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 11, pending: 0 } };
+    const changedNothing: AiRunListRow = { ...row, runId: 'run-noop', outcome: 'no_op', decisionCounts: { wrote: 0, suggested: 0, dropped: 0, no_finding: 0, not_addressed: 12, pending: 0 } };
+    useAiRunList.mockReturnValueOnce({ rows: [wroteOne, changedNothing], status: 'ready', hasMore: false, loadingMore: false, loadMoreFailed: false, loadMore: vi.fn(), retry: vi.fn() });
+    renderSection();
+    const runs = within(screen.getByRole('list', { name: 'AI runs' })).getAllByRole('listitem');
+    expect(runs[0]).toHaveTextContent('1 wrote, 0 suggested');
+    expect(runs[1]).toHaveTextContent('0 wrote, 0 suggested');
+    expect(runs[0]?.textContent).not.toEqual(runs[1]?.textContent);
+  });
   it('renders decision outcome, verdict, and drop-reason labels without enum underscores', () => {
     useAiRun.mockReturnValueOnce({ detail: { ...detail, run: { ...detail.run, decisions: {
       pets: { proposedOp: 'write', outcome: 'no_finding', verdict: 'not_addressed' },

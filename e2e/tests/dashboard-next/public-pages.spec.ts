@@ -104,7 +104,7 @@ async function createShareableUnit(
   const createRes = await request.post(`${NEXT}/api/units`, {
     data: {
       landlordId: SEEDED_LANDLORD,
-      jurisdiction: 'atlanta_housing',
+      accepted_authorities: ['atlanta_housing'],
       beds: u.beds,
       rent_min: u.rent,
       rent_max: u.rent,

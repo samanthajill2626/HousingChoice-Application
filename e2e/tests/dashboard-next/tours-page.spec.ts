@@ -304,7 +304,7 @@ test.describe('Tours page', () => {
     const created = await page.request.post(`${NEXT}/api/units`, {
       data: {
         landlordId: 'contact-landlord-0001',
-        jurisdiction: 'atlanta_housing',
+        accepted_authorities: ['atlanta_housing'],
         beds: 2,
         rent_min: 1500,
         rent_max: 1600,

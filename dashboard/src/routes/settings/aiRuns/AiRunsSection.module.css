@@ -1,5 +1,5 @@
 .headerLede { margin: var(--sp-1) 0 0; color: var(--c-header-facts); font-size: var(--fs-sm); }
-.configStrip { display: flex; flex-wrap: wrap; gap: var(--sp-2); padding: var(--sp-2) var(--sp-4); background: var(--c-surface-2); border-bottom: 1px solid var(--c-border); }
+.configStrip { list-style: none; display: flex; flex-wrap: wrap; gap: var(--sp-2); margin: 0; padding: var(--sp-2) var(--sp-4); background: var(--c-surface-2); border-bottom: 1px solid var(--c-border); }
 .configItem { padding: var(--sp-1) var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-sm); background: var(--c-surface); color: var(--c-text-muted); font-family: var(--font-mono); font-size: var(--fs-xs); }
 .listPane, .detailPane { display: flex; flex: 1; flex-direction: column; gap: var(--sp-3); padding: var(--sp-3); min-width: 0; }
 .scope { margin: 0; padding: var(--sp-2); border: 1px solid var(--c-border); border-radius: var(--radius-md); color: var(--c-text); font-size: var(--fs-sm); }

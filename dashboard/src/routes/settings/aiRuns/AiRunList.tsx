@@ -44,7 +44,10 @@ export function AiRunList({
     {status === 'ready' && rows.length > 0 ? <>
       <ul className={styles.rows} aria-label="AI runs">
         {rows.map((row) => row.expired ? <li key={row.runId} className={styles.expired}>Expired run {row.runId}</li> : <li key={row.runId}>
-          <button type="button" className={styles.runRow} onClick={() => onOpen(row.runId)} aria-label={`Run ${row.runId}`}>
+          {/* No `aria-label`: it would OVERRIDE the row's contents, and the
+              runId it carried is rendered nowhere a sighted operator can see.
+              Named from content, the row reads as what the run actually did. */}
+          <button type="button" className={styles.runRow} onClick={() => onOpen(row.runId)}>
             <span className={styles.runTime}>{new Date(row.startedAt).toLocaleString()}</span>
             <span className={styles.outcome}>{humanizeEnum(row.outcome)}</span>
             <span>{row.trigger} via {row.driver}</span>

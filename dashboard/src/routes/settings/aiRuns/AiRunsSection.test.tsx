@@ -31,8 +31,21 @@ beforeEach(() => {
 });
 
 describe('AiRunsSection', () => {
-  it('renders the config strip so an empty log is never misread', () => { renderSection(); expect(screen.getByLabelText('Extraction driver: fake')).toBeInTheDocument(); expect(screen.getByLabelText(/^Extraction model: /)).toBeInTheDocument(); expect(screen.getByLabelText(/^Prompt fingerprint: [0-9a-f]{12}$/)).toBeInTheDocument(); expect(screen.getByLabelText(/^AI extraction: (on|off)$/)).toBeInTheDocument(); });
-  it('lists runs newest-first and opens one into the detail pane', async () => { renderSection(); await userEvent.click(screen.getByRole('button', { name: /run-1/i })); expect(screen.getByTestId('location')).toHaveTextContent('run=run-1'); expect(screen.getByRole('heading', { name: /run run-1/i })).toBeInTheDocument(); });
+  // By ROLE, not getByLabelText: `aria-label` on a bare div/span (role=generic)
+  // is honoured by Testing Library and Playwright but DROPPED by assistive tech,
+  // so a label-text assertion here proves something a screen reader never hears.
+  it('renders the config strip so an empty log is never misread', () => { renderSection(); const strip = within(screen.getByRole('list', { name: 'Extraction configuration' })); expect(strip.getByRole('listitem', { name: 'Extraction driver: fake' })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^Extraction model: / })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^Prompt fingerprint: [0-9a-f]{12}$/ })).toBeInTheDocument(); expect(strip.getByRole('listitem', { name: /^AI extraction: (on|off)$/ })).toBeInTheDocument(); });
+  it('names a run row by what the run DID, never by a bare id', () => {
+    renderSection();
+    const row = within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button');
+    // The runId is not rendered anywhere a sighted operator can see it, so an
+    // `aria-label` of it hides the whole row from assistive tech.
+    expect(row).toHaveAccessibleName(/applied/i);
+    expect(row).toHaveAccessibleName(/sms via fake/i);
+    expect(row).toHaveAccessibleName(/contact-1/);
+    expect(row.getAttribute('aria-label')).not.toBe('Run run-1');
+  });
+  it('lists runs newest-first and opens one into the detail pane', async () => { renderSection(); await userEvent.click(within(screen.getByRole('list', { name: 'AI runs' })).getByRole('button')); expect(screen.getByTestId('location')).toHaveTextContent('run=run-1'); expect(screen.getByRole('heading', { name: /run run-1/i })).toBeInTheDocument(); });
   it('offers scope as a SINGLE choice, never a checkbox matrix', () => { renderSection(); expect(screen.queryAllByRole('checkbox')).toHaveLength(0); expect(screen.getByRole('radiogroup', { name: /scope/i })).toBeInTheDocument(); });
   it('stores a composable From and To range in the URL and passes it to the list hook', async () => {
     const user = userEvent.setup();

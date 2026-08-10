@@ -189,7 +189,9 @@ async function openRunFor(
     `${NEXT}/settings/ai-runs?scope=${encodeURIComponent(`contacts#${contactId}`)}`,
   );
   await expect(page.getByRole("heading", { name: "AI run log" })).toBeVisible();
-  const row = page.getByRole("button", { name: /^Run / });
+  // Scope to the list: the row is named by its own CONTENT (no runId
+  // aria-label), and `Load more` / the error-block `Retry` sit outside the <ul>.
+  const row = page.getByRole("list", { name: "AI runs" }).getByRole("button");
   await expect(row).toHaveCount(1);
   await expect(row).toContainText(outcome);
   await row.click();
@@ -230,7 +232,11 @@ test("an applied run shows rehydrated text and every decision state", async ({
   expect((await extractionTick(request)).processed).toBeGreaterThan(0);
 
   await openRunFor(page, contactId, /applied/i);
-  await expect(page.getByLabel("Extraction driver: fake")).toBeVisible();
+  // By ROLE: `getByLabel` alone also passes on a role=generic <span>, whose
+  // aria-label assistive tech never exposes.
+  await expect(
+    page.getByRole("listitem", { name: "Extraction driver: fake" }),
+  ).toBeVisible();
   await expect(
     page.getByRole("region", { name: "AI run detail" }),
   ).toContainText(/Prompt fingerprint: [0-9a-f]{12}/);

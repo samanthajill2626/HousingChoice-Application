@@ -34,7 +34,10 @@ export function AiRunsSection(): React.JSX.Element {
   ] : [];
   return <div className={shell.page}>
     <header className={shell.header}><div className={shell.identity}><div className={shell.nameRow}><h2 id="ai-runs-heading" className={shell.name}>AI run log</h2></div><p className={styles.headerLede}>Forensic record of what extraction saw, proposed, and did.</p></div></header>
-    <div className={styles.configStrip} aria-label="Extraction configuration">{flagItems.map(([label, flagValue]) => <span key={label} className={styles.configItem} aria-label={`${label}: ${flagValue}`}>{label}: {flagValue}</span>)}</div>
+    {/* A `<ul>` of `<li>`s, mirroring FlagPills: `aria-label` on a bare div/span
+        (role=generic) is dropped by assistive tech even though Testing Library
+        and Playwright honour it. `list`/`listitem` support naming from author. */}
+    <ul className={styles.configStrip} aria-label="Extraction configuration">{flagItems.map(([label, flagValue]) => <li key={label} className={styles.configItem} aria-label={`${label}: ${flagValue}`}>{label}: {flagValue}</li>)}</ul>
     <div className={shell.segMobile} role="group" aria-label="View"><button type="button" className={pane === 'list' ? shell.segOn : shell.segBtn} aria-pressed={pane === 'list'} onClick={() => setPane('list')}>Runs</button><button type="button" className={pane === 'detail' ? shell.segOn : shell.segBtn} aria-pressed={pane === 'detail'} onClick={() => setPane('detail')}>Detail</button></div>
     <div className={shell.body}>
       <div className={`${shell.left} ${pane === 'list' ? shell.paneActive : shell.paneHidden}`}><AiRunList rows={list.rows} status={list.status} scope={scope} from={from ?? ''} to={to ?? ''} onScopeChange={(next) => setParam('scope', next)} onFromChange={(next) => setParam('from', next)} onToChange={(next) => setParam('to', next)} onOpen={(id) => { setParam('run', id); setPane('detail'); }} hasMore={list.hasMore} loadingMore={list.loadingMore} loadMoreFailed={list.loadMoreFailed} onLoadMore={list.loadMore} onRetry={list.retry} /></div>

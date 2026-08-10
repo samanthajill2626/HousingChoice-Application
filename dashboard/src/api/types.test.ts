@@ -18,6 +18,7 @@ const SERVER_CODES = [
   'suggestion_resolution_in_progress',
   'suggestion_already_resolved',
   'suggestion_replaced',
+  'suggestion_field_edited',
   'suggestion_resolution_lost',
   'suggestion_resolution_retry_exhausted',
 ];

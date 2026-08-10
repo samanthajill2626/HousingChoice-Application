@@ -1216,6 +1216,10 @@ const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
     'That suggestion was already accepted or dismissed - the list now shows its real state.',
   suggestion_replaced:
     'That suggestion changed since this page loaded - refresh and review the new one.',
+  // The fenced write was refused: the field had already been changed by hand, so
+  // the accept applied nothing. Say that plainly and promise nothing else.
+  suggestion_field_edited:
+    'Someone changed that field after the AI suggested it, so nothing was applied.',
   suggestion_resolution_lost: 'That did not go through and nothing changed - try again in a moment.',
   suggestion_resolution_retry_exhausted:
     'That suggestion was too busy to resolve - try again in a moment.',

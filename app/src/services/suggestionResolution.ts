@@ -65,8 +65,12 @@ export interface SuggestionResolutionService {
    * read of the contact's suggestions therefore helps every expired journal of
    * that contact to completion first. Best-effort per journal: one journal's
    * failure never blocks the others, and the next read retries.
+   *
+   * `stateChanged` is a NOTIFY flag - "durable state changed that the dashboard
+   * has not been told about" - and is true for a refused (consumed-chip) journal
+   * as well as a committed one. See `applyJournal`.
    */
-  recoverAbandoned(contactId: string): Promise<{ recovered: number; domainCommitted: boolean }>;
+  recoverAbandoned(contactId: string): Promise<{ recovered: number; stateChanged: boolean }>;
 }
 
 export class SuggestionResolutionError extends Error {
@@ -325,15 +329,31 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
     }
   }
 
+  /**
+   * Drives one journal to completion.
+   *
+   * `stateChanged` means "durable state changed that the dashboard has NOT been
+   * told about", not "a domain effect was written". It covers the refusal cases
+   * too: a `superseded_by_human_edit` accept writes nothing to the contact, but
+   * `claim()` already consumed the `sugg#` row and this pass finalizes the
+   * journal, so every open dashboard is showing a chip that no longer exists.
+   * It is a NOTIFY flag (the only consumers are the two `suggestion.updated`
+   * emits), never a report of what committed.
+   *
+   * `refusedByHumanEdit` is the honest answer for the REQUESTER: the fenced
+   * write was refused because the field changed after the plan was built, so
+   * nothing of theirs applied.
+   */
   async function applyJournal(
     initial: ActiveSuggestionResolution,
     opts: { helping: boolean },
-  ): Promise<{ domainCommitted: boolean }> {
+  ): Promise<{ stateChanged: boolean; refusedByHumanEdit: boolean }> {
     let journal = initial;
     // Entering above `claimed` means the domain effect is already durable (a
     // previous process committed it), so carrying the journal forward is still
     // a state change the dashboard has never been told about.
-    let domainCommitted = initial.phase !== 'claimed';
+    let stateChanged = initial.phase !== 'claimed';
+    let refusedByHumanEdit = false;
     for (let attempt = 0; attempt < MAX_RESOLUTION_LOOPS; attempt += 1) {
       const token = tokenFor(journal);
       if (journal.phase === 'claimed') {
@@ -347,18 +367,13 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         const helpedPhoneConflict = opts.helping
           && plan.kind === 'phone'
           && await phoneOwnedElsewhere(journal.contactId, plan.phone);
-        let result;
-        try {
-          result = helpedPhoneConflict
-            ? ('phone_conflict' as const)
-            : plan.kind === 'phone'
-              ? await deps.resolutionRepo.commitPhoneEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
-              : plan.kind === 'dismiss'
-                ? await deps.resolutionRepo.commitDismissalEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
-                : await deps.resolutionRepo.commitContactEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' });
-        } catch (error) {
-          throw error;
-        }
+        const result = helpedPhoneConflict
+          ? ('phone_conflict' as const)
+          : plan.kind === 'phone'
+            ? await deps.resolutionRepo.commitPhoneEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
+            : plan.kind === 'dismiss'
+              ? await deps.resolutionRepo.commitDismissalEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' })
+              : await deps.resolutionRepo.commitContactEffect({ token, expectedPhase: 'claimed', nextPhase: 'domain_applied' });
         if (result === 'phone_conflict') {
           const released = await deps.resolutionRepo.release({ token, expectedPhase: 'claimed' });
           if (released === 'unsafe') {
@@ -403,7 +418,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           // gives the requester an answer about their OWN chip (adv P2-5).
           // 'stale' alone still throws: nothing is settled and the caller
           // should retry.
-          if (opts.helping && released !== 'stale') return { domainCommitted };
+          if (opts.helping && released !== 'stale') return { stateChanged, refusedByHumanEdit };
           throw new SuggestionResolutionError(409, 'phone_in_use');
         }
         // `stale` means this token can no longer prove its domain transaction
@@ -413,11 +428,25 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         // journal is finished by whoever holds it, so a retry is honest and
         // safe either way.
         if (result === 'stale') throw new SuggestionResolutionError(409, 'suggestion_resolution_lost', true);
-        domainCommitted = true;
+        stateChanged = true;
+        // The ONLY producer of this result is commitContactEffect (repo:763,
+        // repo:772) - the fenced write found the field changed since the plan's
+        // guard was built, so nothing of the human's accept was applied. The
+        // journal still runs to completion below (verdict + scrub); this flag is
+        // what lets `resolve()` answer the REQUESTER honestly (H1 / item 1).
+        if (result === 'superseded_by_human_edit') refusedByHumanEdit = true;
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
         // Post-commit: the effect + audit + phase advance landed atomically and
         // somebody else now owns the journal. The human's action took effect.
-        if (refreshed?.state !== 'active') return { domainCommitted };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        // FENCE NOTE (item 12): this re-ADOPTS whatever token the journal now
+        // carries instead of enforcing our own - a helper that took over mid
+        // flight is followed, not refused. Benign ONLY because every effect
+        // below is independently idempotent (deterministic audit/activity keys,
+        // conditional puts, phase guards). The moment anyone adds a
+        // NON-idempotent effect to this protocol, the fence must be ENFORCED
+        // here (compare tokens and bail) - see
+        // docs/issues/ai-run-log-final-review-followups.md item 12.
         journal = refreshed;
         await boundary('domain_applied', journal);
         continue;
@@ -456,9 +485,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         }
         // Post-commit from here on: the domain effect and its audit are durable,
         // so losing the journal to another helper is not the human's problem.
-        if (result === 'stale') return { domainCommitted };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { domainCommitted };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('activity_applied', journal);
         continue;
@@ -473,9 +503,10 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           expectedPhase: journal.phase,
           nextPhase: 'verdict_attempted',
         });
-        if (result === 'stale') return { domainCommitted };
+        if (result === 'stale') return { stateChanged, refusedByHumanEdit };
         const refreshed = await deps.resolutionRepo.get(journal.contactId, journal.target);
-        if (refreshed?.state !== 'active') return { domainCommitted };
+        if (refreshed?.state !== 'active') return { stateChanged, refusedByHumanEdit };
+        // Same fence re-adoption as the post-commit read above - see FENCE NOTE.
         journal = refreshed;
         await boundary('verdict_attempted', journal);
         continue;
@@ -488,7 +519,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
         expectedPhase: 'verdict_attempted',
         completedAt: now(),
       });
-      return { domainCommitted };
+      return { stateChanged, refusedByHumanEdit };
     }
     throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);
   }
@@ -497,7 +528,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
     async recoverAbandoned(contactId) {
       const at = now();
       let recovered = 0;
-      let domainCommitted = false;
+      let stateChanged = false;
       for (const journal of await deps.resolutionRepo.listJournals(contactId)) {
         if (journal.state !== 'active') continue;
         if (Date.parse(journal.leaseExpiresAt) > Date.parse(at)) continue;
@@ -512,7 +543,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           if (takeover.status !== 'taken_over') continue;
           const applied = await applyJournal(takeover.journal, { helping: true });
           recovered += 1;
-          if (applied.domainCommitted) domainCommitted = true;
+          if (applied.stateChanged) stateChanged = true;
         } catch (err) {
           // Ids only - a journal carries the suggestion's values.
           deps.logger.warn(
@@ -521,7 +552,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           );
         }
       }
-      return { recovered, domainCommitted };
+      return { recovered, stateChanged };
     },
 
     async resolve(input) {
@@ -549,7 +580,9 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             }
             if (takeover.status === 'taken_over') {
               const helped = await applyJournal(takeover.journal, { helping: true });
-              if (helped.domainCommitted) helpedCommitted = true;
+              // A journal reached by HELPING never turns its refusal into this
+              // request's answer - that belongs to whoever owns the identity.
+              if (helped.stateChanged) helpedCommitted = true;
             }
             continue;
           }
@@ -615,7 +648,17 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             throw new SuggestionResolutionError(409, 'suggestion_already_resolved');
           }
           await boundary('claimed', claim.journal);
-          await applyJournal(claim.journal, { helping: false });
+          const applied = await applyJournal(claim.journal, { helping: false });
+          // H1 / item 1: the journal ran to completion - verdict stamped,
+          // snapshot scrubbed - but the fenced write was REFUSED because the
+          // field changed after the plan's guard was built. The chip is gone and
+          // the contact does NOT carry the accepted value, so a 200 would tell
+          // the operator their action applied when nothing of it did. Same
+          // shape as the `released_unsafe` refusal above: throw AFTER the
+          // durable work, never instead of it.
+          if (applied.refusedByHumanEdit) {
+            throw new SuggestionResolutionError(409, 'suggestion_field_edited');
+          }
           return { completedNow: true, helpedCommitted };
         }
         throw new SuggestionResolutionError(409, 'suggestion_resolution_retry_exhausted', true);

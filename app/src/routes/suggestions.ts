@@ -99,7 +99,7 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
     // must never fail or delay-fail the read the dashboard depends on.
     try {
       const recovery = await service.recoverAbandoned(contactId);
-      if (recovery.domainCommitted) events.emit('suggestion.updated', { contactId });
+      if (recovery.stateChanged) events.emit('suggestion.updated', { contactId });
     } catch (err) {
       log.warn({ err, contactId }, 'abandoned suggestion resolution recovery failed (best-effort)');
     }
@@ -169,9 +169,18 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
       }
     } catch (error) {
       if (error instanceof SuggestionResolutionError) {
-        // The request failed on its OWN identity, but a journal it helped along
-        // the way did commit - the contact and the pending list really changed.
-        if (error.helpedCommitted) events.emit('suggestion.updated', { contactId });
+        // Two independent reasons a FAILED request still has to notify, and
+        // never twice for one request:
+        //  - `helpedCommitted`: the request failed on its OWN identity, but a
+        //    journal it helped along the way did commit - the contact and the
+        //    pending list really changed (adv P3-25);
+        //  - `suggestion_field_edited`: the request's own accept was refused,
+        //    yet claim() had already consumed the `sugg#` row and the journal
+        //    was scrubbed, so every open dashboard is showing a chip that no
+        //    longer exists (H1).
+        if (error.helpedCommitted || error.code === 'suggestion_field_edited') {
+          events.emit('suggestion.updated', { contactId });
+        }
         res.status(error.status).json({
           error: error.code,
           ...(error.retryable && { retryable: true }),

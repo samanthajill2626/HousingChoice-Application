@@ -516,6 +516,52 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
       'run-pets', 'pets', 'superseded_by_human_edit', expect.objectContaining({ by: ACTOR }),
     );
     expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+    // H3: nothing committed to the contact, but the `sugg#` row was consumed and
+    // the journal is terminal, so every open dashboard just went stale. The flag
+    // that drives this emit means "durable state the dashboard has not been told
+    // about", NOT "a domain effect landed" - a naive flip to false on the
+    // superseded path would delete this SSE.
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated').length)
+      .toBeGreaterThan(0);
+  });
+
+  // H1 / item 1: the contact read that builds the plan and its attribute guard is
+  // eventually consistent, so the requester's OWN claim can still lose the fence
+  // to a human edit that lands before the commit. The journal must still run to
+  // completion (verdict stamped, snapshot scrubbed) - but answering 200 would
+  // tell the operator their accept applied when the fenced write was REFUSED and
+  // the returned contact does not carry the value. Same class as F2.
+  it('answers 409 when a human edit supersedes the requester own accept', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'two cats', conversationId: 'conv-1', runId: 'run-pets',
+    });
+    // The edit lands after the plan was built from the eventually consistent
+    // read and before the fenced contact write - the real race, not a helper.
+    const racing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: async (boundary) => {
+          if (boundary === 'claimed') await world.contactsRepo.update('c1', { pets: 'one dog' });
+        },
+      },
+    }).app;
+
+    const res = await accept(racing, 'c1', 'pets');
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('suggestion_field_edited');
+    expect(world.contacts.find((contact) => contact.contactId === 'c1')?.pets).toBe('one dog');
+    expect(world.auditEvents.filter((event) => event.event_type === 'ai_suggestion_accepted')).toHaveLength(0);
+    expect(setVerdict).toHaveBeenCalledWith(
+      'run-pets', 'pets', 'superseded_by_human_edit', expect.objectContaining({ by: ACTOR }),
+    );
+    expect([...world.suggestionResolutions.values()][0]?.state).toBe('completed');
+    // The chip was consumed by claim() and the journal scrubbed, so the refusal
+    // still has to tell every open dashboard - exactly once.
+    expect(await world.extractionRepo.getSuggestion('c1', 'pets')).toBeUndefined();
+    expect(world.emitted.filter((event) => event.event === 'suggestion.updated')).toHaveLength(1);
   });
 
   it('lets a status PATCH supersede an expired claimed accept without replaying status effects', async () => {

@@ -126,3 +126,29 @@ known variant spellings to one canonical form each (consistency is what the
 exact-match byHousingAuthority GSI actually needs) and passes unknown values
 through verbatim with a once-per-value warning. The two-field/two-kind modelling
 decision stays open here.
+
+**Model decision (2026-08-10, Cameron, after founder discussion).** The taxonomy above is now a
+decided MODEL, not just a classification of strings:
+
+- Two entity types: **housing authority** and **agency**. "Voucher program" is not a third - that
+  concept dissolves into housing authority (the founder's tenant-side "voucher program" column was
+  recording the authority-or-agency mix all along).
+- A tenant has **exactly one** housing authority - the org issuing their voucher, determining
+  rent, paying the landlord. **Porting = moving the voucher between authorities** (matches the
+  existing informational `porting` flag).
+- **Units** accept vouchers from **one or more** authorities (at least one). Two distinct
+  questions the current single `jurisdiction` string cannot separate: is the unit in authority
+  X's area, and does this landlord choose to accept X's vouchers? Landlords themselves carry no
+  authority.
+- **Agencies** (Hope Atlanta, HUD VASH, Claratel, Step Up) exist solely to help tenants get or
+  use a voucher. Case workers in this app are tied to agencies (authority-employed caseworkers
+  are out of our workflow). A unit is never tied to an agency. They were "shoehorned" into the
+  authority field in the old data structure for lack of anywhere better.
+
+Build implications now owed here (unchanged in priority by the tenant-list feature, which only
+displays stored values): an agency field/entity for tenants + the caseworker link; unit
+multi-authority acceptance (jurisdiction vs accepted-list); the extraction-vocabulary split
+(authority-kind only for `housingAuthority` - today it mixes kinds AND is missing DeKalb);
+whether stored `Georgia Housing Voucher (GHV)` values merge into `DCA` (GHV is DCA's program);
+the datalist mirror in the dashboard has no mechanical drift guard against `CANONICAL_AUTHORITY`
+(cross-workspace imports unavailable) - keep the two lists in sync by hand when either changes.

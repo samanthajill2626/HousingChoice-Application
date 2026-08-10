@@ -171,10 +171,18 @@ describe('ListingsList', () => {
   });
 
   it('groups spelling variants of one authority under a single chip', async () => {
-    // Same authority, three stored spellings: a legacy slug, and two typed prose
-    // values (one with interior double-space). The normalized key folds
-    // underscores, whitespace and case, so ONE chip must cover all three - and it
-    // DISPLAYS the most frequent raw spelling, not the case-folded key.
+    // Same authority, three stored spellings: a legacy slug, a SHOUTED value with
+    // an interior double-space, and the prose spelling twice. The normalized key
+    // folds underscores, whitespace and case, so ONE chip must cover all four
+    // units - and it DISPLAYS the most frequent raw spelling, not the key.
+    //
+    // The spellings are chosen so that claim is FALSIFIABLE. `Atlanta Housing`
+    // (the obvious fixture) cannot do it: the slug, both prose variants AND the
+    // case-folded key all humanize to the identical "Atlanta Housing", so the
+    // assertion would pass even if displaySpelling returned the key. Here the key
+    // and the slug humanize to "Dekalb County Housing" (lowercase k - humanizing
+    // only title-cases the first letter) and the shouted variant to "DEKALB
+    // County Housing", so only the most frequent RAW spelling renders "DeKalb".
     state = {
       status: 'ready',
       units: [
@@ -182,22 +190,29 @@ describe('ListingsList', () => {
           unitId: 'u5',
           landlordId: 'l5',
           status: 'available',
-          jurisdiction: 'atlanta_housing',
+          jurisdiction: 'dekalb_county_housing',
           address: { line1: '5 Slug Ln' },
         },
         {
           unitId: 'u6',
           landlordId: 'l6',
           status: 'available',
-          accepted_authorities: ['Atlanta Housing'],
-          address: { line1: '6 Prose Way' },
+          accepted_authorities: ['DEKALB  County Housing'],
+          address: { line1: '6 Shouted Way' },
         },
         {
           unitId: 'u7',
           landlordId: 'l7',
           status: 'available',
-          accepted_authorities: ['Atlanta  Housing'],
-          address: { line1: '7 Spaced St' },
+          accepted_authorities: ['DeKalb County Housing'],
+          address: { line1: '7 Prose St' },
+        },
+        {
+          unitId: 'u7b',
+          landlordId: 'l7b',
+          status: 'available',
+          accepted_authorities: ['DeKalb County Housing'],
+          address: { line1: '7 Prose Twin St' },
         },
       ],
     };
@@ -205,8 +220,9 @@ describe('ListingsList', () => {
     const haGroup = screen.getByRole('group', { name: /housing authority/i });
     expect(within(haGroup).getAllByRole('button')).toHaveLength(1);
 
-    await userEvent.click(within(haGroup).getByRole('button', { name: 'Atlanta Housing' }));
-    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+    // Exact name match: "Dekalb County Housing" would NOT satisfy it.
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'DeKalb County Housing' }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(4);
   });
 
   it('humanizes the raw display spelling, not the case-folded grouping key', async () => {

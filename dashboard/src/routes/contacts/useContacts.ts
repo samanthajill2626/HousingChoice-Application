@@ -17,7 +17,10 @@ import { getContacts, type Contact, type ContactType } from '../../api/index.js'
 const MAX_PAGES = 40;
 
 /** The server's MAX_PAGE_LIMIT. Asking for it halves the round trips a list view
- *  needs (the default page is 50); a larger value is capped server-side. */
+ *  needs (the default page is 50). It is the CEILING, not a hint: the server
+ *  accepts 1..100 and 400s anything outside that (`parseLimit`,
+ *  app/src/routes/contacts.ts), so raising this value breaks every contacts list
+ *  view on first load. */
 const PAGE_LIMIT = '100';
 
 /** Fetch every page of one contact type (nextCursor walk, bounded). The page size

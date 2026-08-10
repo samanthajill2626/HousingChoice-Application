@@ -154,24 +154,44 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   // params on any other view are inert: they filter nothing and no control shows.
   const isTenantView = filter === 'tenant';
 
-  // The authority option keys, derived from the LOADED TENANTS ALONE (the option
-  // list is selection-independent by design). A ghost `ha` key - a stale link, or
-  // a hand-typed non-normalized `?ha=DCA` when the URL contract is the NORMALIZED
-  // key - matches nobody, so it is pruned from the selection here: spec section 10
-  // promises unknown values drop INDIVIDUALLY and a stale link never empties the
-  // list. Pruning must precede buildFacets too, since a ghost left in the
-  // selection zeroes the OTHER facet's counts. The URL is deliberately NOT
-  // rewritten on mount; the next interaction re-serializes the pruned selection.
+  // An UNCONSTRAINED probe of the loaded tenants, used only to prune the parsed
+  // selection below. All three signals it supplies - the authority option keys,
+  // `voucherEmpty`, `showPorting` - are selection-INDEPENDENT by construction, so
+  // this one pass serves the prune and no second one is needed.
+  const facetProbe = useMemo(() => buildFacets(contacts, NO_SELECTION, MATCH_ALL), [contacts]);
   const validAuthorityKeys = useMemo(
-    () => new Set(buildFacets(contacts, NO_SELECTION, MATCH_ALL).authority.map((o) => o.key)),
-    [contacts],
+    () => new Set(facetProbe.authority.map((o) => o.key)),
+    [facetProbe],
   );
+  // THE INVARIANT: a selection the user can neither see nor clear must not
+  // filter. Three ways a selection goes invisible, all pruned here - before BOTH
+  // applySelection and the count-bearing buildFacets, since a phantom left in
+  // the selection also zeroes the OTHER facets' counts:
+  //   - a ghost `ha` key (a stale link, or a hand-typed non-normalized `?ha=DCA`
+  //     when the URL contract is the NORMALIZED key) matches nobody. Spec
+  //     section 10: unknown values drop INDIVIDUALLY and a stale link never
+  //     empties the list;
+  //   - any `voucher` key while `voucherEmpty` - the muted explanatory line
+  //     REPLACES all five chips plus Not recorded, and the per-facet Clear with
+  //     them, so nothing is lit and nothing can unset it;
+  //   - `porting` while no tenant is porting - the whole group hides (a toggle
+  //     with nothing to match is dead UI). Reachable in ONE session: filter by
+  //     Porting, resolve that tenant's port, come Back.
+  // Left unpruned, each filters to zero rows with no chip lit, no Clear, and
+  // every other chip click re-serializing the phantom (spec section 5: a
+  // selected chip is always clickable - deselection must never lock).
+  // The URL is deliberately NOT rewritten on mount; the next interaction
+  // re-serializes the pruned selection.
   const selection = useMemo<TenantSelection>(() => {
     const parsed = parseSelection(searchParams);
     const ha = new Set<string>();
     for (const key of parsed.ha) if (validAuthorityKeys.has(key)) ha.add(key);
-    return { ...parsed, ha };
-  }, [searchParams, validAuthorityKeys]);
+    return {
+      ha,
+      voucher: facetProbe.voucherEmpty ? new Set<string>() : parsed.voucher,
+      porting: facetProbe.showPorting ? parsed.porting : false,
+    };
+  }, [searchParams, validAuthorityKeys, facetProbe]);
 
   const q = query.trim().toLowerCase();
   const visible = useMemo(() => {

@@ -73,6 +73,15 @@ const T_NONE: Contact = {
   lastName: 'None',
   phone: '+14040100003',
 };
+/** An authority but NO voucher size - the `voucherEmpty` population. */
+const T_HA_ONLY: Contact = {
+  contactId: 'th',
+  type: 'tenant',
+  firstName: 'Hana',
+  lastName: 'Authorityonly',
+  phone: '+14040100005',
+  housingAuthority: 'DCA',
+};
 /** NAMED on purpose: a nameless contact falls back to the formatted phone, and
  *  the /Lana Landlord/ query would then throw. */
 const LANDLORD: Contact = {
@@ -83,6 +92,12 @@ const LANDLORD: Contact = {
   phone: '+14040100004',
 };
 const TENANTS: Contact[] = [T_STUDIO, T_SIX, T_NONE];
+/** Nobody is porting, so the Porting GROUP does not render (T_SIX is the only
+ *  porting fixture). Voucher sizes are still recorded, isolating the toggle. */
+const TENANTS_NO_PORTING: Contact[] = [T_STUDIO, T_NONE];
+/** Nobody has a recorded voucher size, so that facet renders its muted line
+ *  INSTEAD of all five chips plus Not recorded - and its Clear with them. */
+const TENANTS_NO_VOUCHER: Contact[] = [T_HA_ONLY, T_NONE];
 
 // The row separator is U+00B7 with spaces, built ONE way in source AND tests.
 const SEP = ' ' + String.fromCharCode(0xB7) + ' ';
@@ -296,6 +311,30 @@ describe('ContactsList - tenant facets, row facts, and URL state', () => {
     // truthful (a ghost left in place would zero every one of them).
     expect(screen.getByRole('button', { name: 'Studio (1)' })).toBeInTheDocument();
     expect(screen.getByTestId('loc').textContent).toBe('?ha=ghost');
+  });
+
+  it('a ?porting=1 selection nobody can SEE or CLEAR does not filter the list', () => {
+    // Reachable in one session: filter by Porting while one tenant is porting,
+    // resolve that port, come Back. The group now hides (a toggle with nothing
+    // to match is dead UI), so the selection is invisible, no Clear exists, and
+    // every other chip click re-serializes porting=1. It must not filter.
+    state = { status: 'ready', contacts: TENANTS_NO_PORTING };
+    renderAt('/contacts/tenants?porting=1');
+    expect(screen.queryByRole('group', { name: 'Porting' })).toBeNull();
+    expect(rowsOf('Tenants').getAllByRole('listitem')).toHaveLength(2);
+    // Pruned from the SELECTION only - the URL is never rewritten on mount.
+    expect(screen.getByTestId('loc').textContent).toBe('?porting=1');
+  });
+
+  it('a ?voucher= selection nobody can SEE or CLEAR does not filter the list', () => {
+    // Same lock on the value facet: the muted line REPLACES the chips and the
+    // Clear button, so a selected bucket is unreachable.
+    state = { status: 'ready', contacts: TENANTS_NO_VOUCHER };
+    renderAt('/contacts/tenants?voucher=2');
+    expect(screen.getByText('No voucher sizes recorded yet')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /Clear voucher size/i })).toBeNull();
+    expect(rowsOf('Tenants').getAllByRole('listitem')).toHaveLength(2);
+    expect(screen.getByTestId('loc').textContent).toBe('?voucher=2');
   });
 
   it('keeps the Not-recorded authority sentinel through pruning', () => {

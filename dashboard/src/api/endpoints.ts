@@ -1117,7 +1117,8 @@ export function getContacts(
     status?: string;
     cursor?: string;
     deleted?: boolean;
-    /** Page size; the server caps it at MAX_PAGE_LIMIT (100). Omitted = 50. */
+    /** Page size, 1..MAX_PAGE_LIMIT (100) - the server REJECTS anything outside
+     *  that range with a 400, it does not clamp it. Omitted = 50. */
     limit?: string;
   } = {},
   signal?: AbortSignal,

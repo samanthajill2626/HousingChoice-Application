@@ -243,9 +243,19 @@
   max-width: 55cqw;
 }
 
+/* The auto margin RE-ESTABLISHES the trailing edge the base `.name { flex: 1 1
+ * auto }` used to provide by growing. Above, .name is `flex: 1 0 auto` with a
+ * cap, and per Flexbox 9.7 an item that hits its max-width during flexible-
+ * length resolution FREEZES, so leftover space would otherwise collect after the
+ * last chip and a short-named tenant row would sit ragged next to the flush
+ * landlord rows (spec section 6: ".meta (right-aligned)"). An auto main-axis
+ * margin resolves in 9.5 step 12, AFTER flexible lengths, so it takes exactly
+ * what .name could not grow into and is a no-op when there is no leftover. Not
+ * testable in jsdom (no layout, no container queries), hence live-QA only. */
 .factsRow .meta {
   flex: 0 1 auto;
   min-width: 0;
+  margin-left: auto;
 }
 
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
@@ -277,8 +287,15 @@
     overflow: visible;
     text-overflow: clip;
   }
+  /* Stacked, .meta owns its own line and sits UNDER the name (spec section 6's
+   * narrow skeleton), so the wide-pane trailing-edge margin is switched off.
+   * With `flex: 1 1 100%` the line's free space is 0, so an auto margin would
+   * already resolve to 0 (Flexbox 9.5 step 12 distributes only POSITIVE free
+   * space) - this states it outright rather than leaning on that arithmetic,
+   * and jsdom cannot assert either way. */
   .factsRow .meta {
     flex: 1 1 100%;
+    margin-left: 0;
   }
 }
 

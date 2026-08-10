@@ -899,6 +899,50 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect((await world.contactsRepo.getById('c1'))?.phones ?? []).toHaveLength(0);
   });
 
+  // H2 / item 4. Same terminal finalization as above, except the Put's
+  // ACKNOWLEDGEMENT is lost, so the repo's catch arm re-reads the row it just
+  // wrote and reports this caller's OWN finalization as somebody else's
+  // (repo:1084-1087). Nothing else can ever stamp that decision - claim()
+  // deleted the sugg# row so the replacement displaced nothing, and
+  // recoverAbandoned skips completed journals - so `pending` would tell the run
+  // log nobody ever looked at a decision a named operator accepted.
+  it('stamps the terminal verdict when its own completion is reported already_completed', async () => {
+    const { world, setVerdict } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    await seedPhoneOwner(world, '+15550104040');
+    expireActiveResolution(world, 'c1', 'phone');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+    const realComplete = world.suggestionResolutionRepo.complete.bind(world.suggestionResolutionRepo);
+    world.suggestionResolutionRepo.complete = async (input) => {
+      const result = await realComplete(input);
+      // The Put landed; its acknowledgement did not, so the catch arm re-reads
+      // the row it just wrote and reports `already_completed` (repo:1084-1087).
+      return result === 'completed' ? 'already_completed' : result;
+    };
+
+    await list(makeWebhookHarness({ world }).app, 'c1').expect(200);
+
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal).toMatchObject({ state: 'completed', disposition: 'released_unsafe' });
+    expect(setVerdict.mock.calls).toHaveLength(1);
+    expect(setVerdict.mock.calls[0]?.slice(0, 3)).toEqual(['run-a', 'phone', 'superseded']);
+    expect(setVerdict.mock.calls[0]?.[3]).toMatchObject({ expectedVerdict: 'pending' });
+  });
+
   // FIX-4 / conf P2-3 mitigation. A number held as another contact's PRIMARY has
   // no `phoneref#` pointer row by design, so commitPhoneEffect - which arbitrates
   // on the pointer alone - cannot see its owner and would attach it anyway. The

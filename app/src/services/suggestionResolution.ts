@@ -408,7 +408,22 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
             // must no-op with it: setVerdict is fenced on the CURRENT verdict,
             // so a `superseded` written by a helper that finalized nothing is
             // permanent and blocks the true owner's `accepted`.
-            if (finalized === 'completed') await stampVerdict(journal, 'superseded');
+            if (finalized === 'completed') {
+              await stampVerdict(journal, 'superseded');
+            } else if (finalized === 'already_completed') {
+              // H2 / item 4: a lost Put acknowledgement (repo:1084-1087) reports
+              // our OWN finalization as somebody else's. The journal is terminal,
+              // the `sugg#` row is gone and recoverAbandoned skips completed
+              // rows, so nothing else will ever stamp this decision. Confirm the
+              // terminal DISPOSITION first: a journal that completed NORMALLY
+              // already stamped its real verdict at the verdict phase, and
+              // `superseded` over that would be the conf P2-1 lie again - the
+              // narrow `finalized !== 'stale'` test cannot tell the two apart.
+              const terminal = await deps.resolutionRepo.get(journal.contactId, journal.target);
+              if (terminal?.state === 'completed' && terminal.disposition === 'released_unsafe') {
+                await stampVerdict(journal, 'superseded');
+              }
+            }
           }
           // Helping somebody else's journal: hand control back so the caller
           // can go on to its OWN identity. Only the requester's own claim turns

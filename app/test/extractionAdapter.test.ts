@@ -290,6 +290,25 @@ describe('anthropic driver - malformed SDK responses (F9)', () => {
     expect(call.meta.rawText).toBe('{"fields":{"pets":{"op":"none","value":"","reason":""}}}');
   });
 
+  it('a refusal WITHOUT usage counts is a refusal, not a driver fault', async () => {
+    // A pre-output classifier decline is a 200 with stop_reason 'refusal', an
+    // EMPTY content array, and no billing - so no usage counts. The run log
+    // must say the model declined, not that the transport broke.
+    sdk.reply = { stop_reason: 'refusal', content: [] };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('refusal');
+    expect(call.meta.usage).toBeUndefined();
+  });
+
+  it('a refusal WITH usage counts keeps its counts (billed mid-generation decline)', async () => {
+    sdk.reply = { stop_reason: 'refusal', usage: { input_tokens: 7, output_tokens: 0 } };
+    const call = await anthropic().extract(baseInput);
+    expect(call.ok).toBe(false);
+    expect(call.ok === false && call.failure).toBe('refusal');
+    expect(call.meta.usage).toEqual({ inputTokens: 7, outputTokens: 0 });
+  });
+
   it('rawText SURVIVES a parse failure - the one case where the text is the whole answer', async () => {
     sdk.reply = {
       stop_reason: 'end_turn',

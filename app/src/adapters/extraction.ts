@@ -212,27 +212,39 @@ class AnthropicExtractionDriver implements ExtractionDriver {
     // object type this codebase's loggers serialize wholesale (rawText is PII).
     // A malformed response is therefore a 'driver' FAILURE, never a throw.
     const usage: typeof message.usage | undefined = message?.usage;
-    if (typeof usage?.input_tokens !== 'number' || typeof usage.output_tokens !== 'number') {
-      return {
-        ok: false, meta, failure: 'driver',
-        message: 'Anthropic extraction response carried no usage counts',
-      };
+    const usageOk =
+      typeof usage?.input_tokens === 'number' && typeof usage.output_tokens === 'number';
+    if (usageOk) {
+      meta.usage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
+      // Per-run token spend (cost observability for the input caps). Counts
+      // only - never transcript text (PII). Stays with the stamp so a BILLED
+      // refusal is still costed - the refusal return below is not a reason to
+      // stop accounting for tokens the provider charged us for.
+      this.log.info(
+        {
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          transcriptUtterances: input.transcript.length,
+        },
+        'anthropic extraction usage',
+      );
     }
-    meta.usage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
-    // Per-run token spend (cost observability for the input caps). Counts
-    // only - never transcript text (PII).
-    this.log.info(
-      {
-        inputTokens: usage.input_tokens,
-        outputTokens: usage.output_tokens,
-        transcriptUtterances: input.transcript.length,
-      },
-      'anthropic extraction usage',
-    );
-    if (message.stop_reason === 'refusal') {
+    // A refusal is the model DECLINING, not the transport breaking. Its
+    // discriminator is stop_reason, which arrives on a 200 regardless of the
+    // usage shape - a pre-output classifier decline is not billed at all, so
+    // it can carry no counts. Classify it BEFORE the usage guard, or an honest
+    // refusal is filed as errorKind 'driver'. Usage is stamped above first, so
+    // a billed refusal still keeps its counts.
+    if (message?.stop_reason === 'refusal') {
       return {
         ok: false, meta, failure: 'refusal',
         message: 'Anthropic declined to extract (stop_reason: refusal)',
+      };
+    }
+    if (!usageOk) {
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response carried no usage counts',
       };
     }
     const content: typeof message.content | undefined = message.content;

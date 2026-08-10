@@ -626,7 +626,7 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
   // F6: addPhone ALWAYS attaches a number as non-primary and never touches the
   // byPhone-indexed `phone` scalar. The pre-F6 code promoted a first number to
   // primary and wrote the scalar (setPhone semantics, not addPhone semantics).
-  it('adds a first-ever number as non-primary and leaves the phone scalar untouched', async () => {
+  it('promotes a first-ever number to primary, mirrors the scalar, and writes no pointer', async () => {
     const contactId = 'phone-first';
     await putContact(contactId, { created_at: '2026-02-03T04:05:06.000Z' });
     const suggestion = await putSuggestion(contactId, 'phone', '+14045557777');
@@ -645,19 +645,23 @@ describe.skipIf(!reachable)('suggestion resolution protocol against DynamoDB Loc
       nextPhase: 'domain_applied',
     })).toBe('committed');
     const stored = await doc.send(new GetCommand({ TableName: contactsTable, Key: { contactId } }));
-    expect(stored.Item?.['phone']).toBeUndefined();
+    // The scalar is the byPhone-indexed attribute and MUST mirror the primary.
+    expect(stored.Item?.['phone']).toBe('+14045557777');
     expect(stored.Item?.['phones']).toEqual([{
       phone: '+14045557777',
-      primary: false,
+      primary: true,
       firstSeenAt: '2026-08-08T12:01:00.000Z',
       lastSeenAt: '2026-08-08T12:01:00.000Z',
       label: 'cell',
     }]);
+    // A primary is resolvable through the scalar's GSI entry, so it must NOT
+    // also carry a pointer - "the primary has no pointer" is the invariant the
+    // delete branch of this transaction exists to keep.
     const pointer = await doc.send(new GetCommand({
       TableName: contactsTable,
       Key: { contactId: 'phoneref#+14045557777' },
     }));
-    expect(pointer.Item?.['phone_ref_owner']).toBe(contactId);
+    expect(pointer.Item).toBeUndefined();
   });
 
   // F6 parity: the same seeded contact, one number attached by the REAL

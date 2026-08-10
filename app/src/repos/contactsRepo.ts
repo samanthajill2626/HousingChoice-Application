@@ -975,18 +975,26 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         return contact;
       }
       const now = new Date().toISOString();
+      // A contact with NO phones has no primary to defer to, so the first
+      // number becomes the primary: it is mirrored to the `phone` scalar (the
+      // byPhone-indexed attribute) and gets NO pointer, exactly as the contract
+      // above describes. Appending it as non-primary left phones[] with zero
+      // primaries and the scalar unset - a state every reader has been quietly
+      // compensating for with `find(p => p.primary) ?? phones[0]`.
+      const isFirst = phones.length === 0;
       const entry: ContactPhone = {
         phone,
-        primary: false,
+        primary: isFirst,
         firstSeenAt: now,
         lastSeenAt: now,
         ...(label !== undefined && { label }),
       };
       const next = [...phones, entry];
-      const updated = await persistPhones(contactId, next);
-      // Non-primary number → make it resolvable via a pointer.
-      await putPointer(phone, contactId);
-      log.info({ contactId, phoneCount: next.length }, 'contact phone added');
+      const updated = await persistPhones(contactId, next, isFirst ? phone : undefined);
+      // Only a NON-primary number needs a pointer; the primary is resolvable
+      // through the scalar's byPhone GSI entry.
+      if (!isFirst) await putPointer(phone, contactId);
+      log.info({ contactId, phoneCount: next.length, primary: isFirst }, 'contact phone added');
       return updated;
     },
 

@@ -77,9 +77,25 @@ const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
 // so an ISO validator applied here would 400 every "Load more" click.
 const BEFORE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z#[\w.-]+$/;
 
-/** Shape check AND real-date check: 2026-13-45 passes the regex, not Date.parse. */
+/**
+ * Shape check AND real-date check, by CANONICAL ROUND TRIP.
+ *
+ * `Date.parse` alone is not calendar validation: it rejects an out-of-range
+ * MONTH (2026-13-01 is NaN) but silently ROLLS OVER an out-of-range DAY -
+ * 2026-02-30 parses to 2026-03-02, and 2026-02-29 to 2026-03-01 because 2026 is
+ * not a leap year. The impossible bound then reached DynamoDB and answered a
+ * plausible-looking page for a range nobody asked for, which is exactly the
+ * silent-wrongness these 400s exist to prevent on a forensic surface.
+ *
+ * Round-tripping the parsed date back to YYYY-MM-DD catches every rollover: a
+ * date survives only if the calendar agrees it exists. A real leap day
+ * (2024-02-29) round-trips unchanged and still passes.
+ */
 function isCalendarDate(value: string): boolean {
-  return DATE_PATTERN.test(value) && Number.isFinite(Date.parse(value));
+  if (!DATE_PATTERN.test(value)) return false;
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) return false;
+  return new Date(parsed).toISOString().slice(0, 10) === value;
 }
 
 /**

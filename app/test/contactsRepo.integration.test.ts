@@ -60,6 +60,29 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     client.destroy();
   }, 120_000);
 
+  it('addPhone promotes a FIRST number to primary, mirrors the scalar, and writes no pointer', async () => {
+    // A phone-less contact has no primary to defer to. Appending the first
+    // number as non-primary left phones[] with ZERO primaries and the scalar
+    // unset, contradicting the ContactPhone contract ("Exactly one entry is
+    // primary: true") - every reader had been compensating with
+    // `find(p => p.primary) ?? phones[0]`. Dropping the `isFirst` promotion in
+    // addPhone turns this red.
+    const A = nextPhone();
+    const created = await contacts.create({ type: 'tenant' });
+    expect(created.phone).toBeUndefined();
+
+    const after = await contacts.addPhone(created.contactId, { phone: A, label: 'cell' });
+
+    expect(after.phones).toEqual([
+      expect.objectContaining({ phone: A, primary: true, label: 'cell' }),
+    ]);
+    // The scalar is the byPhone-indexed attribute; it must mirror the primary.
+    expect(after.phone).toBe(A);
+    // A primary resolves through the scalar's GSI entry, so it takes no pointer.
+    const owner = await contacts.findByPhone(A);
+    expect(owner?.contactId).toBe(created.contactId);
+  });
+
   it('addPhone seeds phones[] from the scalar, attaches a second number via a pointer, and findByPhone resolves the owner', async () => {
     const A = nextPhone();
     const B = nextPhone();

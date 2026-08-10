@@ -806,16 +806,18 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
           : undefined;
         // F6: this is contactsRepo.addPhone, replayed under the journal's fence.
         // Materialize through the WRITER seeder (keeps the primary's firstSeenAt
-        // from created_at and stamps lastSeenAt), attach the accepted number as
-        // NON-primary, and never write the `phone` scalar - addPhone promotes
-        // nothing. journal.claimedAt is the clock so every replay writes the
-        // same bytes.
+        // from created_at and stamps lastSeenAt), then follow addPhone's rule
+        // exactly: a number joining a contact that HAS phones is non-primary,
+        // but the FIRST-EVER number becomes the primary and is mirrored to the
+        // `phone` scalar below. journal.claimedAt is the clock so every replay
+        // writes the same bytes.
         const phones: ContactPhone[] = seedPhonesForWrite(contact, journal.claimedAt);
+        const isFirstPhone = phones.length === 0;
         let targetPhone = phones.find((entry) => entry.phone === plan.phone);
         if (targetPhone === undefined) {
           phones.push({
             phone: plan.phone,
-            primary: false,
+            primary: isFirstPhone,
             firstSeenAt: journal.claimedAt,
             lastSeenAt: journal.claimedAt,
             ...(plan.label !== undefined && { label: plan.label }),
@@ -842,11 +844,23 @@ export function createSuggestionResolutionRepo(deps: RepoDeps = {}): SuggestionR
           contactCondition = 'attribute_exists(contactId) AND #phones = :beforePhones';
           contactValues[':beforePhones'] = beforePhones;
         }
+        // The first-ever number is the primary, so mirror it to the scalar in
+        // this SAME transaction - phones[] and `phone` must never disagree, and
+        // a separate write could be interrupted between them. `#phone` is
+        // already registered by the two beforePhones === undefined branches
+        // above; register it here too for the `phones: []` case, which reaches
+        // the else-branch with an empty array and no name bound.
+        if (isFirstPhone) {
+          contactNames['#phone'] = 'phone';
+          contactValues[':phone'] = plan.phone;
+          sets.push('#phone = :phone');
+        }
         // Pointer, inside the SAME fenced transaction: a non-primary number is
         // established or verified (a retry with a missing pointer repairs it),
         // while an accepted number that is ALREADY this contact's primary keeps
         // the "primary has no pointer" invariant - the delete only ever removes
-        // our own dangling row.
+        // our own dangling row. A promoted FIRST number is primary, so it takes
+        // the delete branch and never leaves a pointer behind.
         const needsPointer = targetPhone?.primary !== true;
         const effects: NonNullable<TransactWriteCommandInput['TransactItems']> = [
           {

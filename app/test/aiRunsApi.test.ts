@@ -130,6 +130,57 @@ describe('GET /api/ai-runs', () => {
     expect(res.body.nextBefore).toBe('2026-08-05T10:00:00.000Z#run-8');
   });
 
+  it('a fractional limit never reaches the repo as Limit 0', async () => {
+    // Math.floor(0.5) is 0, and the repo's `opts.limit ?? DEFAULT` does NOT
+    // replace 0 - so this used to reach DynamoDB as Limit: 0, which is a
+    // ValidationException -> 500 + an ERROR log on a read-only forensic page.
+    const { app, repo } = makeWorld();
+    await admin(app, '/api/ai-runs?limit=0.5').expect(200);
+    expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 25 }));
+  });
+
+  it('clamps a zero or negative limit into the valid range', async () => {
+    for (const raw of ['0', '-5']) {
+      const { app, repo } = makeWorld();
+      await admin(app, `/api/ai-runs?limit=${raw}`).expect(200);
+      expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 1 }));
+    }
+  });
+
+  it('rejects a malformed date filter by name instead of answering an empty page', async () => {
+    const { app, repo } = makeWorld();
+    for (const [q, code] of [
+      ['from=not-a-date', 'invalid_from'],
+      ['to=2026-13-45', 'invalid_to'],
+      ['before=2026-08-06T10:00:00.000Z', 'invalid_before'],
+    ] as const) {
+      const res = await admin(app, `/api/ai-runs?${q}`).expect(400);
+      expect(res.body.error).toBe(code);
+    }
+    expect(repo.listByEntity).not.toHaveBeenCalled();
+  });
+
+  it('treats an EMPTY filter as no filter rather than a malformed one', async () => {
+    const { app, repo } = makeWorld();
+    await admin(app, '/api/ai-runs?from=&to=&before=').expect(200);
+    const [, opts] = repo.listByEntity.mock.calls[0]!;
+    expect(opts).toEqual({ limit: 25 });
+  });
+
+  it('accepts a REAL paging cursor handed back from a first page', async () => {
+    // `before` is an opaque sort key `<ISO>#<runId>`, NOT a bare timestamp -
+    // Date.parse() on it is NaN, so an ISO-shaped validator would 400 every
+    // Load-more click.
+    const { app, repo } = makeWorld({ nextBefore: '2026-08-05T10:00:00.000Z#run-8' });
+    const first = await admin(app, '/api/ai-runs').expect(200);
+    const cursor = first.body.nextBefore as string;
+    await admin(app, `/api/ai-runs?before=${encodeURIComponent(cursor)}`).expect(200);
+    expect(repo.listByEntity).toHaveBeenLastCalledWith(
+      'global',
+      expect.objectContaining({ before: cursor }),
+    );
+  });
+
   it('projects a summary row, never raw text or decision values', async () => {
     const { app } = makeWorld({
       runs: [fullRun({

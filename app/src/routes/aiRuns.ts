@@ -35,6 +35,47 @@ function decisionCounts(run: AiRunRecord): Record<string, number> {
   return counts;
 }
 
+/**
+ * Parse + clamp ?limit= into 1..MAX_PAGE_SIZE; default DEFAULT_PAGE_SIZE.
+ * Clamping (not rejecting) preserves this route's shipped contract, where an
+ * oversized limit answers 200 capped at MAX_PAGE_SIZE. The floor of 1 is the
+ * load-bearing half: a fractional or non-positive limit used to floor to 0,
+ * and the repo's `opts.limit ?? DEFAULT` does not replace 0, so DynamoDB got
+ * Limit: 0 and answered a ValidationException. Modeled on inbox.ts parseLimit.
+ */
+function parseLimit(raw: unknown): number {
+  if (raw === undefined) return DEFAULT_PAGE_SIZE;
+  const n = typeof raw === 'string' ? Number(raw) : NaN;
+  if (!Number.isInteger(n)) return DEFAULT_PAGE_SIZE;
+  return Math.min(MAX_PAGE_SIZE, Math.max(1, n));
+}
+
+// `from`/`to` are the dashboard's two <input type="date"> values (AiRunList.tsx),
+// so their wire shape is exactly YYYY-MM-DD. They are compared LEXICOGRAPHICALLY
+// against the byEntity sort key, so a Date.parse-only check is too loose: it
+// accepts "August 1, 2026", which parses fine and then sorts nowhere near a
+// 2026-08-... sort key - i.e. it would still answer a silent empty page.
+const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+// `before` is the opaque paging cursor - a sort key `<ISO>#<runId>`
+// (aiRunsRepo.runSortKey), NEVER a bare timestamp. Date.parse() on it is NaN,
+// so an ISO validator applied here would 400 every "Load more" click.
+const BEFORE_PATTERN = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z#[\w.-]+$/;
+
+/** Shape check AND real-date check: 2026-13-45 passes the regex, not Date.parse. */
+function isCalendarDate(value: string): boolean {
+  return DATE_PATTERN.test(value) && Number.isFinite(Date.parse(value));
+}
+
+/**
+ * An absent filter and an EMPTY one mean the same thing: no filter. The
+ * dashboard already deletes a cleared control's search param rather than
+ * sending it empty, and an empty bound was a harmless no-op before these
+ * params were validated - so an empty value must not become a 400.
+ */
+function optionalParam(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw !== '' ? raw : undefined;
+}
+
 export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
@@ -49,14 +90,22 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
       res.status(400).json({ error: 'invalid_scope' });
       return;
     }
-    const rawLimit = Number(req.query['limit']);
-    const limit =
-      Number.isFinite(rawLimit) && rawLimit > 0
-        ? Math.min(Math.floor(rawLimit), MAX_PAGE_SIZE)
-        : DEFAULT_PAGE_SIZE;
-    const before = typeof req.query['before'] === 'string' ? req.query['before'] : undefined;
-    const from = typeof req.query['from'] === 'string' ? req.query['from'] : undefined;
-    const to = typeof req.query['to'] === 'string' ? req.query['to'] : undefined;
+    const limit = parseLimit(req.query['limit']);
+    const before = optionalParam(req.query['before']);
+    const from = optionalParam(req.query['from']);
+    const to = optionalParam(req.query['to']);
+    // This is a forensic surface: a malformed filter must say WHICH parameter
+    // is wrong, not render a silent empty page that reads as "no runs".
+    for (const [name, value] of [['from', from], ['to', to]] as const) {
+      if (value !== undefined && !isCalendarDate(value)) {
+        res.status(400).json({ error: `invalid_${name}` });
+        return;
+      }
+    }
+    if (before !== undefined && !BEFORE_PATTERN.test(before)) {
+      res.status(400).json({ error: 'invalid_before' });
+      return;
+    }
     const page = await aiRuns.listByEntity(scope, {
       limit,
       ...(before !== undefined && { before }),

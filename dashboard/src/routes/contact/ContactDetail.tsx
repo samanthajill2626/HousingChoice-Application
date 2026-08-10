@@ -270,11 +270,16 @@ export function ContactDetail(): React.JSX.Element {
       setSuggestionError({ target, message: suggestionResolutionErrorMessage(err.code) });
       // These three answer with a list that has genuinely moved on: two of them
       // PROMISE "the list now shows its real state", and a refused accept has
-      // already deleted the row server-side. The server emits `suggestion.updated`
-      // on these paths only when the request happened to help somebody else's
-      // journal commit (app/src/routes/suggestions.ts:174), so the SSE is not a
-      // correction we can rely on - make the answer true here. The other codes
-      // describe a live in-flight resolution and promise nothing about the list.
+      // already deleted the row server-side. The server DOES emit
+      // `suggestion.updated` for `suggestion_field_edited` now, and for any
+      // request that helped somebody else's journal commit - the
+      // `helped || refused` emit in the suggestions router's shared error path
+      // (named rather than cited by line, so an edit above it cannot silently
+      // repoint this reference). Neither covers a plain `no_pending_suggestion`
+      // or `suggestion_already_resolved`, and no emit reaches a tab whose SSE
+      // stream has dropped, so the refetch is what makes the answer true HERE.
+      // The remaining codes describe a live in-flight resolution and promise
+      // nothing about the list.
       if (
         err.code === 'no_pending_suggestion' ||
         err.code === 'suggestion_already_resolved' ||

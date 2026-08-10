@@ -59,7 +59,13 @@ export function FlagPills(): React.JSX.Element {
         </div>
       ) : (
         <>
-          <ul className={styles.pills}>
+          {/* Each pill's name lives on its `<li>` (role=listitem). WebKit strips
+              list/listitem semantics from a list styled `list-style: none`
+              (.pills is), which would drop every pill back to role=generic in
+              Safari/VoiceOver and unexpose the labels - and no DOM-computed
+              test can see it, since Testing Library and Playwright read the
+              markup, not WebKit's heuristic (adv P3-5). */}
+          <ul className={styles.pills} role="list">
             <Pill label="Environment" state={flags.env} tone="info" />
             <Pill label="Messaging driver" state={flags.messagingDriver} tone="info" />
             {/* A2P kill-switches: OFF is the EXPECTED pre-launch state (amber, not red). */}

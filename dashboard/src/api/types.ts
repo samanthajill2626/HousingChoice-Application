@@ -1195,10 +1195,12 @@ export function sendNowErrorMessage(code: string): string {
  * exhausted) read as transient because a retry is SAFE - every effect behind
  * them is idempotent, and the same click usually works a moment later. They do
  * NOT all mean nothing was written: `suggestion_resolution_lost` is thrown when
- * the token can no longer prove its domain transaction committed
- * (app/src/services/suggestionResolution.ts:409-415), which covers a
- * committed-then-lost acknowledgement as well as pre-commit contention, so its
- * copy says the outcome is unconfirmed rather than claiming nothing changed.
+ * the token can no longer prove its domain transaction committed (the
+ * `suggestion_resolution_lost` throw in `applyJournal`, named rather than cited
+ * by line so an insert above it cannot silently repoint this reference), which
+ * covers a committed-then-lost acknowledgement as well as pre-commit
+ * contention, so its copy says the outcome is unconfirmed rather than claiming
+ * nothing changed.
  */
 const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
   // The identity this page sent is unusable - its copy of the suggestion is

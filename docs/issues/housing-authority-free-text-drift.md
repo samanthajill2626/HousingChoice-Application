@@ -93,12 +93,15 @@ backwards:
   backfill, so it is not free.
 
 **Partially addressed by the tenant-list visibility work**
-(`docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md`), which does two things and
-deliberately not the rest: it makes the CONTACT edit form a suggestion-backed input over the
-extraction vocabulary (aligning the only human writer with the only machine writer), and it demotes
-`humanizeAuthority` to a legacy fallback applied only to slug-shaped values, so free text is never
-mangled. Everything above - the unit-side inputs, the seeds, deleting the helper, the backfill, and
-the field-name decision - remains open here.
+(`docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md`, as revised at the
+2026-08-10 spec gate): the contact edit form becomes a datalist-suggested input over the
+importer's canonical AUTHORITY spellings (plus a new `agency` field with its own datalist); the
+unit side is CONSOLIDATED to an `accepted_authorities` list replacing `jurisdiction` +
+`accepted_programs`, with read-time synthesis from legacy values; and everything displays stored
+values AS-IS (no humanize anywhere in the new work). Still open here: the agency entity +
+caseworker link, the extraction-vocabulary split, the GHV data decision, prod value cleanup, and
+the `byJurisdiction` GSI terraform removal. Seed SPELLING normalization + deleting
+`humanizeAuthority` itself: [[retire-humanize-authority]].
 
 **Adjacent open question.** `voucher_program` half-exists: seeds write `voucher_program: 'HCV'` on
 every cast tenant, but it is absent from the `Contact` type, the edit form, the tenant file, and
@@ -153,9 +156,12 @@ decided MODEL, not just a classification of strings:
   are out of our workflow). A unit is never tied to an agency. They were "shoehorned" into the
   authority field in the old data structure for lack of anywhere better.
 
-Build implications now owed here (unchanged in priority by the tenant-list feature, which only
-displays stored values): an agency field/entity for tenants + the caseworker link; the unit
-accepted-authorities list (ONE field - see the ruling above); the extraction-vocabulary split
+Build implications owed here, UPDATED 2026-08-10 after the tenant-list-visibility spec gate
+(that feature now DELIVERS: the plain contact `agency` field, and the unit
+`accepted_authorities` list replacing `jurisdiction` + `accepted_programs` with read-time
+synthesis from legacy values): the agency ENTITY + the caseworker-to-agency link; dropping the
+now-unwritten `byJurisdiction` GSI from the units table (terraform - explicit ask only); the
+extraction-vocabulary split
 (authority-kind only for `housingAuthority` - today it mixes kinds AND is missing DeKalb);
 whether stored `Georgia Housing Voucher (GHV)` values merge into `DCA` (GHV is DCA's program);
 the datalist mirror in the dashboard has no mechanical drift guard against `CANONICAL_AUTHORITY`

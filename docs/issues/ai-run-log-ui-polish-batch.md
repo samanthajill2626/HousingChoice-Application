@@ -16,6 +16,20 @@ All re-verified against HEAD after the fix wave.
 - [x] **Detail pane never shows when the run happened.** (Fixed by the
       follow-up wave's U3: the detail header now renders the run time.)
       `AiRunDetail.tsx:31`
+- [ ] **A suggestion resolution error message cannot outlive its chip.** The
+      alert renders INSIDE `SuggestionChip` (`SuggestionChip.tsx`, the
+      `role="alert"` span), and the ApiError branch's refetch removes the dead
+      suggestion row, unmounting chip and explanation together - the operator
+      sees the chip vanish but the WHY flashes for one refetch round-trip.
+      Pre-existing with the `SUGGESTION_NOT_PENDING` precedent (observed live
+      2026-08-09, wave self-QA); the follow-up wave's H5 refetch now routes
+      three more codes (`suggestion_field_edited`,
+      `suggestion_resolution_lost` retry advice, `suggestion_replaced`) into
+      the same pattern. The `suggestionError` STATE already survives in
+      `ContactDetail`; only its render anchor dies. Persist the message
+      outside the chip (e.g. a card-level alert region) so refetch cannot eat
+      it. The unit tests cannot see this - their mocked refetch still returns
+      the row, so the alert survives in jsdom.
       renders runId, trigger, outcome, driver/model, contact or conversation id,
       durationMs, fingerprint and tokens - but not `startedAt` or `finishedAt`,
       both of which are on the payload (`dashboard/src/api/types.ts:276-277`)

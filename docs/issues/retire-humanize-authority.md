@@ -33,6 +33,12 @@ worlds):**
    one.
 3. **Sweep for stragglers**: the e2e `lean` world is byte-stable, so its reseed expectations may
    pin slug values; update in the same change.
+4. **Delete the PATCH tombstones** (added 2026-08-10 by tenant-list-visibility):
+   `TOMBSTONED_FIELDS` in `app/src/lib/unitFields.ts` accepts-and-discards the retired
+   `jurisdiction` / `accepted_programs` keys plus the `sawTombstone` no-op path in
+   `app/src/routes/units.ts`, so a stale cached dashboard bundle's save does not 400 during the
+   transition. The code comments name THIS issue as their end-of-life; once no deployed bundle
+   predates the consolidation, remove the tombstones so an unknown field surfaces loudly again.
 
 **Non-goals.** The two-field-name question (`housingAuthority` vs `jurisdiction`), the agency
 split, and production data cleanup all stay with [[housing-authority-free-text-drift]]. This

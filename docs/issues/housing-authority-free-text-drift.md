@@ -58,21 +58,27 @@ backwards:
    as its own authority with the counts split between them.
 4. **Import populates only the unit side.** ~~`import/apply.ts` writes `jurisdiction` for units and
    no contact-side authority at all, so imported tenants arrive with none.~~
-   **ADDRESSED 2026-08-06** (`import-display-name-unread` resolution): `apply.ts`
-   now writes `contact.housingAuthority`, mapped onto the EXACT
-   `HOUSING_AUTHORITY_VOCAB` strings via `housingAuthorityFor`, with unmapped
-   values reported and left unset rather than guessed into the GSI. The import
-   spec had justified the omission by calling her values "programs, not
-   authorities" - wrong, since GHV, HUD VASH, Claratel and Hope Atlanta are all
-   in that vocabulary verbatim.
+   **ADDRESSED 2026-08-06, description corrected 2026-08-10** (`import-display-name-unread`
+   resolution; the correction matches the code as merged): `apply.ts` now writes
+   `contact.housingAuthority` via `housingAuthorityFor`, which maps known variant
+   spellings onto `CANONICAL_AUTHORITY`'s canonical forms (NOT onto
+   `HOUSING_AUTHORITY_VOCAB` - the canonical set includes `Dekalb County Housing`,
+   which the extraction vocab is missing entirely) and passes unknown values
+   through VERBATIM with a once-per-value warning (the final 2026-08-09 posture;
+   an earlier draft said "left unset", which is not what shipped). The import
+   spec had justified the old omission by calling her values "programs, not
+   authorities" - wrong then, and now formally wrong under the decided taxonomy
+   below.
 
-   THIS ISSUE STAYS OPEN: the import now writes the human-readable vocabulary on
-   BOTH sides, but that does not resolve the two field names
-   (`contact.housingAuthority` vs `unit.jurisdiction`), the slug-vs-readable split
-   in seeds and placeholders, or `humanizeAuthority` corrupting free text
-   (consequences 1-3). Real coverage is also thin for a founder-data reason
-   rather than a code one: only 17 of 629 imported contacts carry any authority
-   value.
+   THIS ISSUE STAYS OPEN: the import writing canonical human-readable spellings
+   does not resolve the two field names (`contact.housingAuthority` vs
+   `unit.jurisdiction`), the slug-vs-readable split in seeds and placeholders,
+   `humanizeAuthority` corrupting free text (consequences 1-3), or the
+   authority-vs-agency mix within the field. Coverage is genuinely UNRESOLVED
+   in-repo: a 2026-08-06 run measured 17 of 629 contacts with a value, while the
+   2026-08-09 table comment says 533 of 666 tenant rows populate the source
+   column (~450 one Atlanta spelling). Re-measure at the next import run; do not
+   quote either number as fact.
 
 **Suggested fix.** Treat human-readable as canonical and normalize toward it:
 
@@ -87,12 +93,15 @@ backwards:
   backfill, so it is not free.
 
 **Partially addressed by the tenant-list visibility work**
-(`docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md`), which does two things and
-deliberately not the rest: it makes the CONTACT edit form a suggestion-backed input over the
-extraction vocabulary (aligning the only human writer with the only machine writer), and it demotes
-`humanizeAuthority` to a legacy fallback applied only to slug-shaped values, so free text is never
-mangled. Everything above - the unit-side inputs, the seeds, deleting the helper, the backfill, and
-the field-name decision - remains open here.
+(`docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md`, as revised at the
+2026-08-10 spec gate): the contact edit form becomes a datalist-suggested input over the
+importer's canonical AUTHORITY spellings (plus a new `agency` field with its own datalist); the
+unit side is CONSOLIDATED to an `accepted_authorities` list replacing `jurisdiction` +
+`accepted_programs`, with read-time synthesis from legacy values; and everything displays stored
+values AS-IS (no humanize anywhere in the new work). Still open here: the agency entity +
+caseworker link, the extraction-vocabulary split, the GHV data decision, prod value cleanup, and
+the `byJurisdiction` GSI terraform removal. Seed SPELLING normalization + deleting
+`humanizeAuthority` itself: [[retire-humanize-authority]].
 
 **Adjacent open question.** `voucher_program` half-exists: seeds write `voucher_program: 'HCV'` on
 every cast tenant, but it is absent from the `Contact` type, the edit form, the tenant file, and
@@ -126,3 +135,34 @@ known variant spellings to one canonical form each (consistency is what the
 exact-match byHousingAuthority GSI actually needs) and passes unknown values
 through verbatim with a once-per-value warning. The two-field/two-kind modelling
 decision stays open here.
+
+**Model decision (2026-08-10, Cameron, after founder discussion).** The taxonomy above is now a
+decided MODEL, not just a classification of strings:
+
+- Two entity types: **housing authority** and **agency**. "Voucher program" is not a third - that
+  concept dissolves into housing authority (the founder's tenant-side "voucher program" column was
+  recording the authority-or-agency mix all along).
+- A tenant has **exactly one** housing authority - the org issuing their voucher, determining
+  rent, paying the landlord. **Porting = moving the voucher between authorities** (matches the
+  existing informational `porting` flag).
+- **Units** accept vouchers from **one or more** authorities (at least one). Jurisdiction ("is
+  the unit in authority X's area?") and acceptance ("does this landlord take X's vouchers?") are
+  two distinct QUESTIONS - but **explicitly ONE field** (Cameron, 2026-08-10): track only the
+  unit's accepted-authorities list. Do NOT build a separate jurisdiction field alongside it; the
+  two-question framing is how staff reason about filling the list, not two things to store.
+  Landlords themselves carry no authority.
+- **Agencies** (Hope Atlanta, HUD VASH, Claratel, Step Up) exist solely to help tenants get or
+  use a voucher. Case workers in this app are tied to agencies (authority-employed caseworkers
+  are out of our workflow). A unit is never tied to an agency. They were "shoehorned" into the
+  authority field in the old data structure for lack of anywhere better.
+
+Build implications owed here, UPDATED 2026-08-10 after the tenant-list-visibility spec gate
+(that feature now DELIVERS: the plain contact `agency` field, and the unit
+`accepted_authorities` list replacing `jurisdiction` + `accepted_programs` with read-time
+synthesis from legacy values): the agency ENTITY + the caseworker-to-agency link; dropping the
+now-unwritten `byJurisdiction` GSI from the units table (terraform - explicit ask only); the
+extraction-vocabulary split
+(authority-kind only for `housingAuthority` - today it mixes kinds AND is missing DeKalb);
+whether stored `Georgia Housing Voucher (GHV)` values merge into `DCA` (GHV is DCA's program);
+the datalist mirror in the dashboard has no mechanical drift guard against `CANONICAL_AUTHORITY`
+(cross-workspace imports unavailable) - keep the two lists in sync by hand when either changes.

@@ -208,6 +208,34 @@ describe('GET /api/ai-runs', () => {
     expect(repo.listByEntity).not.toHaveBeenCalled();
   });
 
+  it('rejects a date that ROLLS OVER instead of letting it filter a range nobody asked for', async () => {
+    // Date.parse is not calendar validation: it rejects an out-of-range MONTH
+    // (2026-13-01 -> NaN) but silently rolls over an out-of-range DAY.
+    // 2026-02-30 parses to 2026-03-02, and 2026-02-29 to 2026-03-01 because
+    // 2026 is not a leap year - so an impossible bound used to reach DynamoDB
+    // and answer a plausible page for a range the operator never asked for, on
+    // the one surface where that is least acceptable. Reverting isCalendarDate
+    // to the bare Date.parse check turns this red.
+    const { app, repo } = makeWorld();
+    for (const [q, code] of [
+      ['from=2026-02-30', 'invalid_from'],
+      ['to=2026-02-29', 'invalid_to'],
+      ['from=2026-04-31', 'invalid_from'],
+    ] as const) {
+      const res = await admin(app, `/api/ai-runs?${q}`).expect(400);
+      expect(res.body.error).toBe(code);
+    }
+    expect(repo.listByEntity).not.toHaveBeenCalled();
+  });
+
+  it('accepts a REAL leap day', async () => {
+    // The round-trip guard must not over-reject: 2024 is a leap year, so
+    // 2024-02-29 is a real date and has to survive.
+    const { app, repo } = makeWorld();
+    await admin(app, '/api/ai-runs?from=2024-02-29').expect(200);
+    expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ from: '2024-02-29' }));
+  });
+
   it('treats an EMPTY filter as no filter rather than a malformed one', async () => {
     const { app, repo } = makeWorld();
     await admin(app, '/api/ai-runs?from=&to=&before=').expect(200);

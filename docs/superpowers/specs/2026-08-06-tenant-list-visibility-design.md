@@ -28,9 +28,11 @@ This section is authoritative for every naming decision below. Recorded in full 
   Step Up are agencies, NOT authorities). Agencies help tenants get or use a voucher. Case
   workers in this app are tied to agencies. A unit is never tied to an agency. A tenant can have
   an authority AND an agency ("HUD VASH and AHA").
-- **Units** accept vouchers from one or more authorities - at least one, chosen by the landlord;
-  jurisdiction ("is this unit in authority X's area?") and acceptance ("does this landlord take
-  X's vouchers?") are two different questions. Landlords themselves have no authority.
+- **Units** accept vouchers from one or more authorities - at least one, chosen by the landlord.
+  Jurisdiction ("is this unit in authority X's area?") and acceptance ("does this landlord take
+  X's vouchers?") are two different QUESTIONS but deliberately ONE stored thing (Cameron,
+  2026-08-10): the future unit build tracks only the accepted-authorities list, never a separate
+  jurisdiction field beside it. Landlords themselves have no authority.
 
 **What this feature does with that model - stated honestly.** The model says every tenant HAS
 exactly one authority. It does NOT say the `housingAuthority` FIELD holds one: the field is a

@@ -486,6 +486,40 @@ describe('ContactDetail', () => {
       // One fetch on mount, one from the refetch this failure triggers.
       await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
     });
+
+    // The SERVER answers these three with a list that has genuinely moved on:
+    // two of them PROMISE "the list now shows its real state", and a refused
+    // accept has already deleted the row. The server emits `suggestion.updated`
+    // on these paths only when the request helped somebody else's journal commit
+    // (app/src/routes/suggestions.ts:174), so the SSE is not a correction we can
+    // rely on - the refetch is what makes the answer true.
+    it.each([
+      ['no_pending_suggestion', 404],
+      ['suggestion_already_resolved', 409],
+      ['suggestion_field_edited', 409],
+    ])('refetches on a SERVER %s so the list really does show its real state', async (code, httpStatus) => {
+      acceptSuggestion.mockRejectedValue(new ApiError(httpStatus, code, code));
+      const chip = await clickChip('Accept');
+
+      // The message is state on this page, not a field of the refetched list, so
+      // it is still there after the correction lands.
+      const alert = await within(chip).findByRole('alert');
+      expect(alert.textContent ?? '').not.toContain('_');
+      // One fetch on mount, one from the refetch this failure must trigger.
+      await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+      expect(await within(chip).findByRole('alert')).toBeInTheDocument();
+    });
+
+    it('does NOT refetch on the in-flight codes, whose copy promises nothing about the list', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_resolution_in_progress', 'suggestion_resolution_in_progress'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('try again in a moment');
+      expect(getSuggestions).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('shows the Auto badge on the Current address row when address_source is ai', async () => {

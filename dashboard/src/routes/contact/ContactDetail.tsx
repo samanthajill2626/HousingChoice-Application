@@ -268,6 +268,20 @@ export function ContactDetail(): React.JSX.Element {
   const failSuggestion = (target: string, err: unknown): void => {
     if (err instanceof ApiError) {
       setSuggestionError({ target, message: suggestionResolutionErrorMessage(err.code) });
+      // These three answer with a list that has genuinely moved on: two of them
+      // PROMISE "the list now shows its real state", and a refused accept has
+      // already deleted the row server-side. The server emits `suggestion.updated`
+      // on these paths only when the request happened to help somebody else's
+      // journal commit (app/src/routes/suggestions.ts:174), so the SSE is not a
+      // correction we can rely on - make the answer true here. The other codes
+      // describe a live in-flight resolution and promise nothing about the list.
+      if (
+        err.code === 'no_pending_suggestion' ||
+        err.code === 'suggestion_already_resolved' ||
+        err.code === 'suggestion_field_edited'
+      ) {
+        suggestions.refetch();
+      }
       return;
     }
     if (err instanceof Error && err.message === SUGGESTION_NOT_PENDING) {

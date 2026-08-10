@@ -1192,8 +1192,13 @@ export function sendNowErrorMessage(code: string): string {
  * never put a snake_case token in front of staff.
  *
  * The three codes the server flags `retryable` (in progress / lost / retry
- * exhausted) read as transient, because they are: nothing was written under this
- * request, and the same click usually works a moment later.
+ * exhausted) read as transient because a retry is SAFE - every effect behind
+ * them is idempotent, and the same click usually works a moment later. They do
+ * NOT all mean nothing was written: `suggestion_resolution_lost` is thrown when
+ * the token can no longer prove its domain transaction committed
+ * (app/src/services/suggestionResolution.ts:409-415), which covers a
+ * committed-then-lost acknowledgement as well as pre-commit contention, so its
+ * copy says the outcome is unconfirmed rather than claiming nothing changed.
  */
 const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
   // The identity this page sent is unusable - its copy of the suggestion is
@@ -1220,7 +1225,11 @@ const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
   // the accept applied nothing. Say that plainly and promise nothing else.
   suggestion_field_edited:
     'Someone changed that field after the AI suggested it, so nothing was applied.',
-  suggestion_resolution_lost: 'That did not go through and nothing changed - try again in a moment.',
+  // The one retryable code whose effect MAY have landed: the token could not
+  // prove its transaction committed, and a committed-then-lost acknowledgement
+  // reaches here too. Never claim nothing changed - send them to the value.
+  suggestion_resolution_lost:
+    'We could not confirm whether that saved - reload to see the current value, then try again in a moment.',
   suggestion_resolution_retry_exhausted:
     'That suggestion was too busy to resolve - try again in a moment.',
 };

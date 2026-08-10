@@ -576,7 +576,7 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
           recovered += 1;
           if (applied.stateChanged) stateChanged = true;
         } catch (err) {
-          // Ids only - a journal carries the suggestion's values.
+          // Ids and the error only - a journal carries the suggestion's values.
           deps.logger.warn(
             { err, contactId, target: journal.target },
             'abandoned suggestion resolution recovery failed (best-effort)',

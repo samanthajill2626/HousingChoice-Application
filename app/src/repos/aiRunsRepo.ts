@@ -354,7 +354,7 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
        * type mismatch), and no caller inspects the boolean - so without this
        * line a future expression bug would silently stop stamping every verdict
        * in production with the run log showing `pending` and no error anywhere.
-       * Ids only: never the value under review.
+       * Ids and the error only: never the value under review.
        */
       const rejected = (err: unknown): false => {
         log.warn({ runId, target, err }, 'ai run verdict stamp rejected (ValidationException)');

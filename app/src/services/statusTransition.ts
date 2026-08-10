@@ -212,8 +212,20 @@ export class EntityNotFoundError extends Error {
 
 /**
  * The contact status write committed, but a required follow-up failed afterward.
- * Callers may safely treat the status as changed while preserving `cause` for
- * the original operational failure. This wrapper carries no contact data.
+ * The wrapper preserves `cause` for the original operational failure and carries
+ * no contact data.
+ *
+ * TODO(suggestion-status-accept-contract-drift): NOTHING in production catches
+ * this today. Its one intended consumer was the pre-journal suggestion-accept
+ * route, which stamped the run's verdict before rethrowing; the journal rewrite
+ * replaced that route body, and a status accept no longer calls
+ * `setTenantStatus` at all - the contact write and its audit commit in one
+ * fenced transaction, so the split this wrapper describes cannot occur there.
+ * The only remaining caller (`routes/statusTransition.ts`) rethrows anything it
+ * does not recognize, so a committed-then-audit-failed status write surfaces as
+ * a 500 and a caller may retry a transition that already committed. Kept rather
+ * than deleted because the throw site is a live signal that the status DID
+ * commit; wiring a handler is a route behavior change, tracked in the issue.
  */
 export class StatusTransitionCommittedError extends Error {
   constructor(cause: unknown) {
@@ -228,9 +240,12 @@ export interface StatusTransitionService {
   /** Explicit tenant-status write (incl. manual drop-out; no RTA-in-hand gate — 2026-06-19). */
   /**
    * If the contact update committed but a required later side effect fails, this
-   * rejects with StatusTransitionCommittedError. Injected implementations that
-   * throw after committing must use that error; callers resolve arbitrary errors
-   * with a strongly consistent read.
+   * rejects with StatusTransitionCommittedError, and injected implementations
+   * that throw after committing must use it too. Be aware that no production
+   * caller DISTINGUISHES it today: the status route rethrows it like any other
+   * failure, so the request answers 500 and a caller that needs the truth must
+   * resolve it with a strongly consistent read of the contact
+   * (TODO(suggestion-status-accept-contract-drift)).
    */
   setTenantStatus(contactId: string, input: SetTenantStatusInput): Promise<ContactItem>;
   /** Explicit property-status write. */

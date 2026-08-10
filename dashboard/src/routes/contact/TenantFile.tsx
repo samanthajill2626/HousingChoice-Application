@@ -20,6 +20,7 @@ import {
 } from '../../api/index.js';
 import { StatusBadge, contactStatusTone } from '../../ui/index.js';
 import {
+  BLANK,
   Card,
   CardAction,
   CardInlineAction,
@@ -163,6 +164,10 @@ export function TenantFile({
         {chipFor('voucherSize')}
         <KV k="Housing authority" v={<>{housingAuthority}{badgeFor('housingAuthority')}</>} />
         {chipFor('housingAuthority')}
+        {/* The helper organization that assists this tenant - NOT the authority
+            that issues the voucher. No AI badge or suggestion chip: nothing
+            extracts `agency`, so it is deliberately not a provenance field. */}
+        <KV k="Agency" v={contact.agency ?? BLANK} />
         <KV k="Current address" v={<>{currentAddress}{badgeFor('address')}</>} />
         {chipFor('address')}
         <KV

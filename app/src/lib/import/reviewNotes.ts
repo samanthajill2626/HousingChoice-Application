@@ -126,6 +126,16 @@ export function interpretReviewNotes(
       continue;
     }
 
+    // --- "yes" answering a yes/no question we asked in `why` -----------------
+    // Only one yes/no question exists ("...drop it?"), and she answered "yes" on
+    // exactly the two test contacts it was asked of. Context-bound on purpose: a
+    // bare "yes" against any other question stays uninterpreted.
+    if (/^yes\.?$/i.test(note) && /drop it\?/i.test(row.why ?? '')) {
+      row.drop = 'Y';
+      interpreted.push({ ...base, action: 'drop=Y (she answered yes to "drop it?")' });
+      continue;
+    }
+
     // --- "N/a": the question was answered with "nothing to tell you" ---------
     // 16 of her 18 N/a rows sit on the star-marker question, which she has
     // separately answered ("no meaning"). Clear the note so it does not carry

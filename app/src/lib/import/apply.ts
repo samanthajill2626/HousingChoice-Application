@@ -78,7 +78,13 @@ export interface ApplyOptions {
 
 export interface ApplyReport {
   contacts: { written: number; skippedDropped: number; statusPreserved: number };
-  conversations: { written: number; groups: number; connectedDayOne: number };
+  conversations: {
+    written: number;
+    groups: number;
+    connectedDayOne: number;
+    /** Groups the founder marked drop=Y - thread AND messages skipped. */
+    droppedGroups: number;
+  };
   messages: { written: number };
   calls: { written: number };
   units: { written: number; skippedDropped: number };
@@ -101,7 +107,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 
   const report: ApplyReport = {
     contacts: { written: 0, skippedDropped: 0, statusPreserved: 0 },
-    conversations: { written: 0, groups: 0, connectedDayOne: 0 },
+    conversations: { written: 0, groups: 0, connectedDayOne: 0, droppedGroups: 0 },
     messages: { written: 0 },
     calls: { written: 0 },
     units: { written: 0, skippedDropped: 0 },
@@ -194,6 +200,14 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     if (live.length === 0) continue;
 
     const groupRow = groupRowByConversationId.get(thread.conversationId);
+
+    // Founder-excluded group: the whole thread stays out - conversation,
+    // messages and calls. Counted, never silent.
+    if (groupRow !== undefined && isDropped(groupRow)) {
+      report.conversations.droppedGroups += 1;
+      continue;
+    }
+
     const connectDayOne = groupRow !== undefined && wantsDayOneConnect(groupRow);
     if (connectDayOne) report.conversations.connectedDayOne += 1;
 

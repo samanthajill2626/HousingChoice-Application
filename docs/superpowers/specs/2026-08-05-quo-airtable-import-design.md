@@ -4,7 +4,7 @@
 - Status: BUILT (2026-08-05/06). Both commands implemented, 77 import tests,
   full gates green, exercised end-to-end against the real export.
 - Milestone: M1.6 "Data import" (PHASE1_KICKOFF_PROMPT.md)
-- Hard deadline: **go-live 2026-08-10** - number port + cutover
+- Hard deadline: ~~go-live 2026-08-10~~ **moved to 2026-08-17** (2026-08-09) - number port + cutover
 
 ## 1. Why
 
@@ -500,3 +500,14 @@ most landlords - lives on her PERSONAL phone number. Quo holds the tenant book;
 the landlord book is only partially present (22 classified landlords vs 37
 distinct landlord names on properties). Post-cutover, landlord texts will keep
 arriving on her personal phone until those relationships migrate.
+
+### 10.1 Groups decision reversed (2026-08-09, after the founder call)
+
+The "which groups connect as relay on day one?" question is RETIRED. Decision:
+**all 132 groups continue as regular group texts** - a native group-texting
+feature is being built (docs/issues/regular-group-texting-for-imported-groups.md).
+The workbook's groups tab now defaults every group to continuing and offers only
+an exclusion column (`drop`, honoured by apply: the whole thread including its
+messages stays out). Import storage is unchanged (`relay_group`/`connecting` is
+the only shape that exists today); the new feature owns what those threads become.
+Cutover moved 2026-08-10 -> **2026-08-17**.

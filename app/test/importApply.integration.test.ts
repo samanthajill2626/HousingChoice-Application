@@ -449,23 +449,29 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(conv.Item!.last_activity_at).toBe('2026-08-09T10:00:00.000Z');
   });
 
-  it('records connect-day-one as intent without provisioning a number', async () => {
-    // Buying a Twilio number has real cost and A2P consequences; it is never a
-    // side effect of a spreadsheet cell.
-    const review = cleanReview();
-    const groupRow = [...review.groups.values()][0]!;
-    groupRow.connect_day_one = 'Y';
-
-    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
-    expect(report.conversations.connectedDayOne).toBe(1);
-
+  it('a dropped group keeps its whole thread out - conversation and messages', async () => {
+    // 2026-08-09: all groups continue by default; drop=Y is the exclusion path
+    // and it must exclude the MESSAGES too, not just the conversation row.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
     const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    expect(await countMessages(id)).toBeGreaterThan(0);
+
+    // Fresh tables so the exclusion is observable (the group was written above).
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+
+    const review = cleanReview();
+    [...review.groups.values()][0]!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+    expect(report.conversations.droppedGroups).toBe(1);
+
     const conv = await doc.send(
       new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
     );
-    expect(conv.Item!.import_connect_requested).toBe(true);
-    expect(conv.Item!.pool_number).toBeUndefined();
-    expect(conv.Item!.status).toBe('connecting');
+    expect(conv.Item).toBeUndefined();
+    expect(await countMessages(id)).toBe(0);
   });
 
   it('writes nothing on a dry run', async () => {

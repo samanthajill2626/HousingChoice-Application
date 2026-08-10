@@ -63,12 +63,16 @@ export const GROUP_COLUMNS = [
   'needs_your_input',
   'change',
   // --- editable ---
-  'connect_day_one',
+  // 2026-08-09: ALL groups continue (regular group texting is being built -
+  // docs/issues/regular-group-texting-for-imported-groups.md), so the old
+  // "connect on day one?" question is gone. The only decision left is
+  // exclusion: `drop` = Y keeps a group (and its messages) out entirely.
+  'drop',
   'label',
   'notes',
   // --- read-only evidence ---
   'why',
-  // WHO is in the group, by name — the column that makes the yes/no answerable.
+  // WHO is in the group, by name — what makes the tab skimmable.
   'who',
   'composition',
   'messages',
@@ -198,14 +202,14 @@ export function buildGroupRows(
 
     const suggested: CsvRow = {
       row_key: rowKey('GRP', i),
-      // Every group needs a yes/no on day-one connection, so all of them are
-      // "your input" — but they are cheap: the default N is almost always right.
-      needs_your_input: YES,
+      // No mandatory decision any more: every group continues by default
+      // (2026-08-09 - regular group texting is being built). Spot-check only.
+      needs_your_input: '',
       change: '',
-      connect_day_one: 'N',
+      drop: '',
       label: '',
       notes: '',
-      why: 'Group texting changes at cutover - connect only what must work on day one',
+      why: 'All group chats continue - mark drop=Y only if this one should NOT come over',
       who: t.participants.map(describe).join(' | '),
       participants: String(t.participants.length),
       participant_phones: t.participants.join(' | '),
@@ -213,7 +217,7 @@ export function buildGroupRows(
       last_activity: t.lastActivityAt.slice(0, 10),
       composition,
     };
-    return applyCarryForward(suggested, prior?.groups, ['connect_day_one', 'label', 'notes']);
+    return applyCarryForward(suggested, prior?.groups, ['drop', 'label', 'notes']);
   });
 }
 

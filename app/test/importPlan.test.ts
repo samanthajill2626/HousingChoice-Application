@@ -240,10 +240,13 @@ describe('the workbook', () => {
     expect(row.why).toContain('two different voucher sizes');
   });
 
-  it('defaults every group to NOT connecting on day one', () => {
+  it('defaults every group to CONTINUING - the only decision is exclusion', () => {
+    // 2026-08-09: regular group texting is being built, so all groups come over.
     const groups = parseCsv(plan.files['groups.csv']!).rows;
     expect(groups).toHaveLength(1);
-    expect(groups[0]!.connect_day_one).toBe('N');
+    expect(groups[0]!.drop).toBe('');
+    expect(groups[0]!.connect_day_one).toBeUndefined();
+    expect(groups[0]!.needs_your_input).toBe('');
   });
 
   it('names the people in each group', () => {

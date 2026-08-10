@@ -115,8 +115,18 @@ describe('the rest', () => {
     expect(res.kept).toHaveLength(1);
   });
 
-  it('a bare "yes" is not guessed at', () => {
-    const r = row({ notes: 'yes' });
+  it('a bare "yes" answering our "drop it?" question drops the row', () => {
+    const r = row({
+      notes: 'yes',
+      why: 'Looks like a test or system contact rather than a real person - drop it?',
+    });
+    const res = run(r);
+    expect(r.drop).toBe('Y');
+    expect(res.interpreted).toHaveLength(1);
+  });
+
+  it('a bare "yes" against any OTHER question is not guessed at', () => {
+    const r = row({ notes: 'yes', why: 'Could not tell tenant from landlord - which is it?' });
     const res = run(r);
     expect(res.kept).toHaveLength(1);
     expect(r.drop).toBe('');

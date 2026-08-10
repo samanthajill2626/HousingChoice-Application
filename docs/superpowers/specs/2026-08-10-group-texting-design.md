@@ -1,9 +1,15 @@
 # Native group texting - design spec
 
-Status: v5 - APPROVED AT THE HUMAN GATE (Cameron, 2026-08-10) with his
+Status: v6 - APPROVED AT THE HUMAN GATE (Cameron, 2026-08-10; v5) with his
 rulings folded: label Option A; auto-convert backstop; EAGER rail creation;
-run-to-completion migration guarantee. Review trail: 4 adversarial rounds,
-hard cap reached, decision items resolved by Cameron at the gate.
+run-to-completion migration guarantee. v6 folds the PLAN review round-1
+amendments, all within the ratified rulings: status='group_open' replaces
+the byGroupStatus GSI (no schema change); the connect_day_one/
+import_connect_requested field is ONE attribute and conversion converts it
+(reporting the flag) per the auto-convert ruling; parity checking is scoped
+to the bulk migration entry; identity normalizes inputs; extraction
+filtering is transcript-level. Review trail: 4 spec rounds (hard cap) + gate
++ plan round 1.
 Date: 2026-08-10. Cutover gate: 2026-08-17.
 Branch: `feat/group-texting` (worktree `W:\tmp\group-texting`, cut from main
 @2caeaba5).
@@ -122,6 +128,13 @@ participants" = the envelope's From + OtherRecipients minus the EXCLUDED set:
   the var is unset (empty-by-omission is the dangerous default and must be
   impossible); non-production WARNs when unset on a twilio-driver stack.
 
+NORMALIZATION IS PART OF THE CONTRACT (plan-r1): `conversationIdForGroup`
+sorts and dedupes but does NOT normalize (its docstring puts that on the
+caller, and the importer normalizes upstream via `normalizeToE164`). The
+runtime identity function normalizes every envelope number with the SAME
+`normalizeToE164` before exclusion and id derivation; parser tests cover
+formatting variants.
+
 IMMUTABILITY RULE, ENFORCED IN DEPLOYED ENVS ONLY (r4 finding 4: the
 settings table is wiped by local reseeds, where a fingerprint protects
 nothing): in deployed environments, boot compares a hash of the sorted list
@@ -150,34 +163,36 @@ per-member suppression (4.4).
 
 ### 4.2 ConversationItem shape (additive)
 
-- `type: 'group_text'` joins the union. That union is declared in THREE
-  places, all updated: `app/src/repos/conversationsRepo.ts:39`,
-  `dashboard/src/api/types.ts:408`, and the SSE payload type in
-  `app/src/lib/events.ts:43`; `dashboard/src/routes/today/buildToday.ts:60`
-  is an exhaustive Record and gets the new label.
+- `type: 'group_text'` joins the union, declared in TWO places
+  (`app/src/repos/conversationsRepo.ts:39`, `dashboard/src/api/types.ts:408`
+  - events.ts imports it); every ConversationType-keyed structure gets an
+  explicit ruling, INCLUDING the silent non-Record ones the compiler cannot
+  catch (buildToday's ONE_TO_ONE Set, participantContactId, is1to1; the
+  today.ts unreplied allowlist) - enumerated in the plan.
 - `participants: ConversationParticipant[]` - outside members (contactId +
   phone + optional name), written ONCE at creation (single conditional
   claim; see 5). The business number is implicit.
-- **`group_status`: sparse GSI attribute, value `group_text#open`** - a NEW
-  sparse GSI `byGroupStatus` (HASH `group_status`, RANGE `last_activity_at`)
-  makes group threads listable without entering the 1:1 byLastActivity
-  partition (the same dilution-proofing relay got via byRelayStatus) and
-  without touching relay's GSI. Rollout (r2 finding 4: `ensureTable` is
-  create-if-absent and reseed only clears rows - nothing upgrades a warm
-  lane): dev/prod get the GSI via Terraform BEFORE deploy (14); every LOCAL
-  lane and worktree must delete its `hc-local-<L>-*` tables once so the
-  harness recreates them - a stated step in the branch setup notes and the
-  plan. Readers of this GSI treat an index error as LOUD (ERROR log +
-  surfaced UI failure state), never a best-effort empty list - "no groups"
-  must not be reachable by misconfiguration.
+- **`status: 'group_open'`** - group threads live in their OWN partition of
+  the EXISTING byLastActivity GSI (HASH is `status`), which is the entire
+  listing mechanism: `listGroupTexts` queries the `group_open` partition
+  directly. NO new GSI, NO schema change, NO Terraform, NO lane-table
+  resets (plan-r1 amendment: the earlier byGroupStatus design would have
+  ALSO left `status: 'open'` diluting Today's hard-capped 100-row
+  byLastActivity read and the inbox pager batches with 132+ group rows -
+  the exact `relay-inbox-open-groups-truncation` bug class). Consequences,
+  all deliberate: today.ts, the inbox contact pager, and
+  `GET /api/conversations?status=open` (api.ts:1562 - the 50-row page four
+  dashboard hooks consume) never see group threads by construction; and
+  inboundEmail's `status !== 'open'` not-1:1 check excludes groups for
+  free. `touchLastActivity` gains an optional status-value parameter
+  (default `'open'`; the 1:1 path is byte-identical); all group-path
+  writers pass `'group_open'`. Readers of the group partition treat a query
+  error as LOUD (ERROR + surfaced failure state), never best-effort-empty.
 - `participant_phone` / `participant_email`: ABSENT. Group threads are
-  reached via byGroupStatus, conversationId, or the participants roster -
+  reached via the group_open partition, conversationId, or the participants roster -
   never byParticipantPhone.
-- `twilio_conversation_sid?: string` - CHxx of the lazily created rail
-  (absent until first outbound).
-- `status: 'open'` (byLastActivity also lists it; the inbox third source
-  reads byGroupStatus - readers that iterate byLastActivity and reject
-  unknown shapes are enumerated in the plan).
+- `twilio_conversation_sid?: string` - CHxx of the eagerly created rail
+  (6.1; absent only pre-rail or when rail creation failed).
 - NO `pool_number`, NO `relay_status` ever (the v2 sentinel is DROPPED - the
   importer type-guard in 9 protects converted AND detected threads alike,
   which the sentinel could not; r2 finding 1).
@@ -263,12 +278,16 @@ today's relay behavior with the envelope dropped -
      (c) FOUND, type relay_group with status connecting and no pool_number
          (an imported row not yet converted) -> AUTO-CONVERT (Cameron's gate
          ruling): run the conversion function inline (idempotent; its
-         preconditions are exactly this state) and file the message as a
-         group message, with a WARN + metric recording the self-heal. A
-         `connect_day_one`-flagged row auto-converts the same way (observed
+         preconditions are exactly this state; called WITHOUT ownNumbers -
+         parity checking belongs to the bulk migration entry, which has the
+         import context) and file the message as a group message, with a
+         WARN + metric recording the self-heal. NOTE (plan-r1): the
+         workbook's `connect_day_one` column persists as the single
+         attribute `import_connect_requested` - ONE field, not two. Rows
+         carrying it auto-convert exactly the same way (observed
          carrier-group activity implements the standing "all groups
-         continue" ruling; the flag is surfaced in migration reports, not
-         honored as a runtime refusal). OPERATIONAL NOTE: this branch is a
+         continue" ruling; the flag is REPORTED, never a runtime refusal).
+         OPERATIONAL NOTE: this branch is a
          backstop expected never to fire - the migration guarantee (14) is
          that every imported group reaches converted-or-deleted BEFORE
          go-live; the reachable trigger is a post-cutover import re-run
@@ -307,7 +326,10 @@ today's relay behavior with the envelope dropped -
      run for group inbound in v1 (scope, not principle).
 4. Tripwire (8.1) on the MM/no-envelope shape; file as 1:1 (fail open -
    never lose a message) + WARN. Tripwire-filed messages carry a marker and
-   AI fact extraction is SUPPRESSED on them (r4 finding 2: possibly-group
+   AI fact extraction EXCLUDES THEM AT THE TRANSCRIPT LEVEL (plan-r1:
+   extraction reads whole-thread windows, so guarding only the trigger
+   suppresses nothing - the extraction job filters marked messages out of
+   every transcript it builds; r4 finding 2's intent: possibly-group
    content must not be attributed to the sender as 1:1 facts).
 
 First message of a never-seen group creates the thread synchronously in the
@@ -493,15 +515,22 @@ mainline; import mission owns the RUN). This feature ships:
   contact carrying the detection origin marker, or present on any group_text
   roster, is reported and NOT deleted.
 - `convertConnectingRelayGroupToGroupText(conversationId, opts)`:
-  - Preconditions: type relay_group, status connecting, no pool_number, and
-    NOT `import_connect_requested` (the founder asked for a masked relay
-    there; conversion REFUSES and reports - a human decides).
-  - Rewrites to the 4.2 shape: type group_text, status open, group_status
-    written, participants preserved, ALL relay-only fields removed
-    (relay_status included - the importer type-guard makes a sentinel
-    unnecessary).
-  - Verifies exclusion-set parity against the caller's `ownNumbers` (4.1)
-    and REFUSES loudly on a mismatch.
+  - Preconditions: type relay_group, status connecting, no pool_number.
+    `import_connect_requested` does NOT refuse (plan-r1 established it is
+    the same single field as the workbook's connect column; Cameron's
+    auto-convert ruling governs): the flag is included in the result for
+    reporting.
+  - Rewrites to the 4.2 shape: type group_text, status 'group_open',
+    participants preserved WITH contactId BACKFILL (imported rosters carry
+    `contactId: ''` - apply.ts:216-220; conversion fills each empty
+    contactId with `contactIdForPhone(phone)`, converging with both the
+    import's and detection's contact id schemes so member keying and
+    suppression chips work), ALL relay-only fields removed.
+  - Parity (4.1) is verified by the BULK entry point, which receives
+    `ownNumbers` from the import context and refuses on either-direction
+    mismatch BEFORE converting anything; the conversion core skips parity
+    when called without ownNumbers (the runtime inline path - boot
+    validation + fingerprint guard that caller).
   - Idempotent; conversationId unchanged (identity parity), so history stays
     attached.
 - A thin bulk entry point for the import mission to invoke; per-row results
@@ -527,17 +556,17 @@ mainline; import mission owns the RUN). This feature ships:
 
 ## 11. Dashboard behavior (staff)
 
-- Inbox: a THIRD row source reading byGroupStatus, row kind `group_text`,
+- Inbox: a THIRD row source reading the group_open partition, row kind `group_text`,
   label per 3, member-derived title, unread badge. NOT "merged like the
   relay source" unqualified - relay's additive first-page merge is sized for
   a handful of rows and the founder has 132 group threads on day one (r2
   finding 8). The group source merges the TOP 50 by last-activity into page
   one with a relay-style `truncated` surfacing ("Showing latest 50 group
-  texts - view all"; NO exact total, which the GSI cannot produce without
+  texts - view all"; NO exact total, which the partition cannot produce without
   walking the partition - r3 finding 11), linking to an inbox groups filter
-  (`?filter=groups`) that pages the FULL list via the byGroupStatus cursor.
+  (`?filter=groups`) that pages the FULL list via the group_open-partition cursor.
   The filter joins the InboxFilter union + route allowlist (both declaration
-  sites); its cursor is NAMESPACED/tagged (a byGroupStatus LEK is not a
+  sites); its cursor is NAMESPACED/tagged (a group_open-partition LEK is not an 'open'-partition
   byLastActivity LEK - replaying one into the other is a 500; switching
   filters drops the cursor client-side AND the server 400s a cursor whose
   tag mismatches the filter - defense in depth, r4 finding 10), and the
@@ -552,7 +581,7 @@ mainline; import mission owns the RUN). This feature ships:
   an "everyone sees everyone's number" affordance in the header, and the
   >9-member banner when applicable.
 - Contact page: a small "Group threads" card listing group_text threads whose
-  roster contains the contact - read through a BOUNDED byGroupStatus pager
+  roster contains the contact - read through a BOUNDED group_open-partition pager
   with a `truncated` flag the card MUST surface (relay's bounded-reader
   discipline, conversationsRepo.ts:552-561; there is no member->thread
   index and this spec does not add one), linking into the thread view.
@@ -641,13 +670,13 @@ mainline; import mission owns the RUN). This feature ships:
 
 ## 14. Owed ops at merge/cutover (documented, not built)
 
-- Dev + prod, in order: byGroupStatus GSI Terraform apply (SCHEMA FIRST),
-  `GROUP_IDENTITY_EXCLUDED_NUMBERS` env values set (from the import plan's
+- Dev + prod, in order: `GROUP_IDENTITY_EXCLUDED_NUMBERS` env values set (from the import plan's
   `ownNumbers`; BEFORE detection deploys - identity depends on it), deploy,
   Conversations default-service webhook config (receipts URL),
   account-global Conversations webhook config (cross-check URL), support
-  ticket (8), reseed where applicable. Local lanes: one-time
-  `hc-local-<L>-*` table deletion for the new GSI (4.2).
+  ticket (8), reseed where applicable. (No schema change: v6 removed the
+  GSI - group threads use the existing byLastActivity 'group_open'
+  partition.)
 - Migration run (import mission) invokes the conversion bulk entry point
   (converts + creates rails + reports; connect_day_one-flagged rows
   surfaced in the report). MIGRATION GUARANTEE (Cameron): every imported

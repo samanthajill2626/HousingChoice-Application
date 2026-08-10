@@ -42,7 +42,9 @@ export function AiRunList({
     {status === 'error' ? <div className={styles.error} role="alert"><p>We could not load the AI run log.</p><button type="button" onClick={onRetry}>Retry</button></div> : null}
     {status === 'ready' && rows.length === 0 ? <p className={styles.empty}>No extraction runs match this scope.</p> : null}
     {status === 'ready' && rows.length > 0 ? <>
-      <ul className={styles.rows} aria-label="AI runs">
+      {/* Explicit role: `list-style: none` makes WebKit drop the implicit list
+          role, and this ul's aria-label (the e2e anchor) rides on that role. */}
+      <ul className={styles.rows} role="list" aria-label="AI runs">
         {rows.map((row) => row.expired ? <li key={row.runId} className={styles.expired}>Expired run {row.runId}</li> : <li key={row.runId}>
           {/* No `aria-label`: it would OVERRIDE the row's contents, and the
               runId it carried is rendered nowhere a sighted operator can see.

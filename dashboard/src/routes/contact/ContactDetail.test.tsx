@@ -489,10 +489,11 @@ describe('ContactDetail', () => {
 
     // The SERVER answers these three with a list that has genuinely moved on:
     // two of them PROMISE "the list now shows its real state", and a refused
-    // accept has already deleted the row. The server emits `suggestion.updated`
-    // on these paths only when the request helped somebody else's journal commit
-    // (app/src/routes/suggestions.ts:174), so the SSE is not a correction we can
-    // rely on - the refetch is what makes the answer true.
+    // accept has already deleted the row. The server does emit
+    // `suggestion.updated` for a helped commit and for the refused accept (the
+    // helped-or-refused emit in the suggestions router's shared error path),
+    // but an SSE is asynchronous and not guaranteed to reach THIS tab before
+    // the operator looks - the refetch is what makes the answer true here.
     it.each([
       ['no_pending_suggestion', 404],
       ['suggestion_already_resolved', 409],

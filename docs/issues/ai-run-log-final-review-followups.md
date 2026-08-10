@@ -16,8 +16,10 @@ with tests that can fail. These are the remaining findings, carried here rather
 than fixed, so nothing is lost at merge. Two got their own files:
 `ai-run-log-recovery-hook-unbounded` and `ai-run-log-decisions-count-miscounts`.
 
-**Follow-up wave (2026-08-09, commits `629551cc..`).** Items 1-10, 17, 18, 20,
-21, 23, 24, 26 and 28 were FIXED; item 25 was resolved as documentation (the
+**Follow-up wave (2026-08-09, commits `629551cc..`).** Items 2-10, 17, 18, 20,
+21, 23, 24, 26 and 28 were FIXED; item 1 was fixed for the DRIVING request
+(the identity-matched replay residual is spun off as
+`ai-run-log-refused-accept-replay-200`); item 25 was resolved as documentation (the
 error class stays - deleting it would lose a live log signal, and wiring a
 catch is a route behavior change - its docs now tell the truth and carry a
 `TODO(suggestion-status-accept-contract-drift)` marker); items 11-16, 19, 22
@@ -131,8 +133,14 @@ items 29-30 and spun off `ai-run-log-refused-accept-replay-200`.
     head, so a journal that fails recovery PERSISTENTLY could consume the
     budget on every read and starve the tail. No producer of a persistently
     failing journal is known - transient faults clear and the budget moves on.
+    Two precision notes from the re-review: the budget is consumed BEFORE
+    `takeover`, so a persistently BLOCKED journal (takeover refused) spends
+    budget silently with no warn; and "every read" holds only for reads spaced
+    beyond the ~30s lease (`DEFAULT_LEASE_MS`), since an unexpired lease is
+    filtered before the budget.
     Trigger: repeated `abandoned suggestion resolution recovery failed` warns
-    for the SAME target across successive reads in any environment.
+    for the SAME target across reads, OR journals observed stuck `active`
+    across successive spaced reads (the silent blocked variant).
 30. The dashboard collapses the aiRuns 400 filter errors
     (`invalid_from`/`invalid_to`/`invalid_before`/`invalid_scope`) into one
     generic "We could not load the AI run log." (`useAiRuns.ts`), so the API's
@@ -140,6 +148,12 @@ items 29-30 and spun off `ai-run-log-refused-accept-replay-200`.
     produce these.
     Trigger: first staff confusion report, or fold into the next pass on
     `ai-run-log-ui-polish-batch`.
+31. The item-4 fix's confirm-read is guarded best-effort (a faulting read must
+    never fail the human action). Its double-fault residual - the completion
+    ack was lost AND the confirm-read fails - leaves that decision `pending`
+    forever, with the warn `ai run terminal verdict confirm read failed
+    (best-effort)` as the only trace. Deliberate trade, recorded here.
+    Trigger: that warn sighted in any environment.
 
 **Attribution note (cosmetic, no action required).** Commits `002fe2a5`,
 `ea1cbedd`, `f80c957a`, `dd894e83`, `0520eb8a`, `cd898692` and `3a6b913c` carry

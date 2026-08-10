@@ -65,10 +65,11 @@ describe('suggestionResolutionErrorMessage', () => {
   });
 
   it('never claims nothing changed for the one code whose effect may have committed', () => {
-    // app/src/services/suggestionResolution.ts:409-415 - a `stale` token also
-    // covers a committed-then-lost acknowledgement, not just pre-commit
-    // contention, so this copy may NOT assert the effect did not land. It has to
-    // say the outcome is unconfirmed and point at the current value instead.
+    // The `suggestion_resolution_lost` throw in `applyJournal`
+    // (app/src/services/suggestionResolution.ts): a `stale` token also covers a
+    // committed-then-lost acknowledgement, not just pre-commit contention, so
+    // this copy may NOT assert the effect did not land. It has to say the
+    // outcome is unconfirmed and point at the current value instead.
     const copy = suggestionResolutionErrorMessage('suggestion_resolution_lost');
     expect(copy).not.toContain('nothing changed');
     expect(copy).toMatch(/could not confirm/i);

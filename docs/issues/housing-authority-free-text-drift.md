@@ -58,21 +58,27 @@ backwards:
    as its own authority with the counts split between them.
 4. **Import populates only the unit side.** ~~`import/apply.ts` writes `jurisdiction` for units and
    no contact-side authority at all, so imported tenants arrive with none.~~
-   **ADDRESSED 2026-08-06** (`import-display-name-unread` resolution): `apply.ts`
-   now writes `contact.housingAuthority`, mapped onto the EXACT
-   `HOUSING_AUTHORITY_VOCAB` strings via `housingAuthorityFor`, with unmapped
-   values reported and left unset rather than guessed into the GSI. The import
-   spec had justified the omission by calling her values "programs, not
-   authorities" - wrong, since GHV, HUD VASH, Claratel and Hope Atlanta are all
-   in that vocabulary verbatim.
+   **ADDRESSED 2026-08-06, description corrected 2026-08-10** (`import-display-name-unread`
+   resolution; the correction matches the code as merged): `apply.ts` now writes
+   `contact.housingAuthority` via `housingAuthorityFor`, which maps known variant
+   spellings onto `CANONICAL_AUTHORITY`'s canonical forms (NOT onto
+   `HOUSING_AUTHORITY_VOCAB` - the canonical set includes `Dekalb County Housing`,
+   which the extraction vocab is missing entirely) and passes unknown values
+   through VERBATIM with a once-per-value warning (the final 2026-08-09 posture;
+   an earlier draft said "left unset", which is not what shipped). The import
+   spec had justified the old omission by calling her values "programs, not
+   authorities" - wrong then, and now formally wrong under the decided taxonomy
+   below.
 
-   THIS ISSUE STAYS OPEN: the import now writes the human-readable vocabulary on
-   BOTH sides, but that does not resolve the two field names
-   (`contact.housingAuthority` vs `unit.jurisdiction`), the slug-vs-readable split
-   in seeds and placeholders, or `humanizeAuthority` corrupting free text
-   (consequences 1-3). Real coverage is also thin for a founder-data reason
-   rather than a code one: only 17 of 629 imported contacts carry any authority
-   value.
+   THIS ISSUE STAYS OPEN: the import writing canonical human-readable spellings
+   does not resolve the two field names (`contact.housingAuthority` vs
+   `unit.jurisdiction`), the slug-vs-readable split in seeds and placeholders,
+   `humanizeAuthority` corrupting free text (consequences 1-3), or the
+   authority-vs-agency mix within the field. Coverage is genuinely UNRESOLVED
+   in-repo: a 2026-08-06 run measured 17 of 629 contacts with a value, while the
+   2026-08-09 table comment says 533 of 666 tenant rows populate the source
+   column (~450 one Atlanta spelling). Re-measure at the next import run; do not
+   quote either number as fact.
 
 **Suggested fix.** Treat human-readable as canonical and normalize toward it:
 
@@ -136,18 +142,20 @@ decided MODEL, not just a classification of strings:
 - A tenant has **exactly one** housing authority - the org issuing their voucher, determining
   rent, paying the landlord. **Porting = moving the voucher between authorities** (matches the
   existing informational `porting` flag).
-- **Units** accept vouchers from **one or more** authorities (at least one). Two distinct
-  questions the current single `jurisdiction` string cannot separate: is the unit in authority
-  X's area, and does this landlord choose to accept X's vouchers? Landlords themselves carry no
-  authority.
+- **Units** accept vouchers from **one or more** authorities (at least one). Jurisdiction ("is
+  the unit in authority X's area?") and acceptance ("does this landlord take X's vouchers?") are
+  two distinct QUESTIONS - but **explicitly ONE field** (Cameron, 2026-08-10): track only the
+  unit's accepted-authorities list. Do NOT build a separate jurisdiction field alongside it; the
+  two-question framing is how staff reason about filling the list, not two things to store.
+  Landlords themselves carry no authority.
 - **Agencies** (Hope Atlanta, HUD VASH, Claratel, Step Up) exist solely to help tenants get or
   use a voucher. Case workers in this app are tied to agencies (authority-employed caseworkers
   are out of our workflow). A unit is never tied to an agency. They were "shoehorned" into the
   authority field in the old data structure for lack of anywhere better.
 
 Build implications now owed here (unchanged in priority by the tenant-list feature, which only
-displays stored values): an agency field/entity for tenants + the caseworker link; unit
-multi-authority acceptance (jurisdiction vs accepted-list); the extraction-vocabulary split
+displays stored values): an agency field/entity for tenants + the caseworker link; the unit
+accepted-authorities list (ONE field - see the ruling above); the extraction-vocabulary split
 (authority-kind only for `housingAuthority` - today it mixes kinds AND is missing DeKalb);
 whether stored `Georgia Housing Voucher (GHV)` values merge into `DCA` (GHV is DCA's program);
 the datalist mirror in the dashboard has no mechanical drift guard against `CANONICAL_AUTHORITY`

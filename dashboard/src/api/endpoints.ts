@@ -1112,7 +1112,14 @@ export async function setUnitPhotoCover(unitId: string, entry: string): Promise<
  *  and merges. First page only (the server pages via nextCursor) - the list
  *  views note this transitional limitation. */
 export function getContacts(
-  params: { type?: ContactType; status?: string; cursor?: string; deleted?: boolean } = {},
+  params: {
+    type?: ContactType;
+    status?: string;
+    cursor?: string;
+    deleted?: boolean;
+    /** Page size; the server caps it at MAX_PAGE_LIMIT (100). Omitted = 50. */
+    limit?: string;
+  } = {},
   signal?: AbortSignal,
 ): Promise<ContactsPage> {
   return request<ContactsPage>('/api/contacts', {
@@ -1120,6 +1127,7 @@ export function getContacts(
       type: params.type,
       status: params.status,
       cursor: params.cursor,
+      limit: params.limit,
       // ?deleted=true ? the Deleted view (only soft-deleted); omit otherwise.
       ...(params.deleted === true && { deleted: 'true' }),
     },

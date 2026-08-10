@@ -194,6 +194,60 @@
   white-space: nowrap;
 }
 
+/* --- Tenant facts row (spec section 6) ------------------------------------- */
+
+/* The facts span (voucher size + housing authority). Five unshrinkable chips
+ * would crush the ellipsizing name in the pane band just above 560px, so the
+ * sacrifice order is explicit: .meta becomes shrinkable, this span is its only
+ * compressible child (kind/phone/status/Porting and the StatusBadge all keep
+ * flex: 0 0 auto), and .name grows but NEVER shrinks - it only ellipsizes past
+ * its own container-relative cap. So the facts truncate first and fully, and the
+ * name gives nothing until they are exhausted.
+ *
+ * Scoped PER-ROW (.factsRow), not per-route: facts render on the All view too,
+ * where the same crush would otherwise survive. Only the DENSITY rules below are
+ * route-scoped (.tenantList) - a list that mixed densities would read as a bug,
+ * whereas mixed shrink behavior is invisible. */
+.facts {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+/* Porting: the SHIPPED placement chip's treatment (PlacementRow.module.css:61-70),
+ * so one concept is never spelled two ways - and the purple family clears AA at
+ * this size, which the amber warning token does not. */
+.porting {
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-purple-bg);
+  border: 1px solid var(--c-evt-purple-border);
+  color: var(--c-evt-purple-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+/* NOTE: 55cqw measures the .page query container (the only container-type in this
+ * file), i.e. roughly 57-58% of the row box - the starting value is tuned in live
+ * QA. The @container block BELOW must stay after this rule: identical
+ * specificity, so source order decides. */
+.factsRow .name {
+  flex: 1 0 auto;
+  max-width: 55cqw;
+}
+
+.factsRow .meta {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
  * stack the meta chips below the name so the name gets a full line instead of the
  * unshrinkable kind/phone/status crushing it to a few characters. */
@@ -205,6 +259,26 @@
   .meta {
     flex: 1 1 100%;
     flex-wrap: wrap;
+  }
+  /* Tighter density for the tenant ROUTE only (never per row type: /contacts
+   * interleaves all three types in one list and must not mix densities). */
+  .tenantList .row {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .tenantList .rowItem {
+    margin-bottom: var(--sp-1);
+  }
+  /* Stacked, the name is the row's identity: it wraps in full instead of
+   * truncating, and the cap is off. */
+  .factsRow .name {
+    flex: 1 1 100%;
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  .factsRow .meta {
+    flex: 1 1 100%;
   }
 }
 

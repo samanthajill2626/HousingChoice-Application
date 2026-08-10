@@ -1,9 +1,9 @@
-# Native group texting - implementation plan (v5, post plan-review r1-r3 + external design review)
+# Native group texting - implementation plan (v6, post plan reviews r1-r3 + external design review + delta round)
 
-Spec: `../specs/2026-08-10-group-texting-design.md` (v6). Branch
+Spec: `../specs/2026-08-10-group-texting-design.md` (v8). Branch
 `feat/group-texting`, worktree `W:\tmp\group-texting`. Cutover 2026-08-17.
 Adjudications: `.superpowers/design-review/adjudications.md` (plan r1-r3
-sections).
++ external review + delta sections).
 
 RULES OF THE BUILD (AGENTS.md + spec; for a zero-context builder):
 
@@ -161,6 +161,7 @@ T7.4 Bulk entry point (script per import-mission convention): receives
   ownNumbers, performs the EITHER-DIRECTION set-equality parity check
   against the runtime exclusion set BEFORE any conversion (refuse all on
   mismatch), converts each (stamping member consent bases per spec 9),
+  stamps member `group_participation_at` (spec 9 distinct-field basis),
   and creates rails SYNCHRONOUSLY per converted row (plan-r2: per-row
   50407-class outcomes must land in the migration report). The rail step
   depends on S5's adapter, so T7.4 lands the conversion+parity+reporting
@@ -185,15 +186,18 @@ T3.3 Group filing: groupIdentity() (T2.3; WARN+metric when a POOL number
   extraction marker. Persist with relay_sender_key = sender memberKey;
   sid-pointer dedupe; unread; touchLastActivity (the repo guard keeps the
   partition; no special parameters); SSE.
-T3.4 Contact stubs: contactIdForPhone ids + origin marker +
-  `consent_method: 'group_participation'` (Cameron's option-(a) ruling,
-  spec 5 - NEVER inbound_text; an existing contact WITHOUT any basis also
-  gains group_participation, never overwriting an existing basis); sender
-  resolved (existing-by-phone else stub). The proactive 1:1 send gate
-  (sendMessage.ts:284 area) is taught that group_participation does NOT
-  satisfy proactive 1:1 sends - explicit tests both directions.
-  participants written once conditional, race-loser re-reads. Tests incl.
-  basis stamping + race.
+T3.4 Contact stubs: contactIdForPhone ids + origin marker + the
+  DISTINCT-FIELD basis `group_participation_at` (delta finding 2/3: NEVER
+  consent_method - that field feeds hasSmsConsent's nine consumers
+  (broadcastFanOut, placementNudges, tourReminders, both has-consent
+  displays, etc.) and would make silent members proactively sendable;
+  the distinct field leaves every existing consumer untouched and cannot
+  mask a later genuine basis). Existing contacts also gain the field when
+  absent. NO per-call-site consent patches anywhere (smsCompliance.ts
+  single-predicate rule). Tests: silent member NOT broadcastable/nudgable/
+  reminder-able and shows no has-consent; group send accepts the field;
+  a later genuine inbound_text stamp lands normally. participants written
+  once conditional, race-loser re-reads.
 T3.5 Consent/keywords (spec 4.4): shared seam refactor - contact-level
   plain-inbound stamp callable without a conversation; sender's 1:1
   materialized ONLY on opt-out/opt-in keywords (NOT HELP); reply usage
@@ -342,17 +346,30 @@ T5.2 app/src/services/groupSend.ts: thread checks (>9 -> refuse with the
   banner error; ANY member without a recorded consent basis -> refuse
   naming the blocking member (group_participation qualifies; spec 6.2);
   rail missing -> create-on-send backstop through the T6.1 claimed
-  sequence), persist with IMxx provider sid + delivery_recipients parent
-  map seeded via setRecipientDelivery ('queued' slots - the unconditional
-  seeder's ONLY permitted use), audit. Unit matrix incl. consent-blocked.
+  sequence), persist with IMxx provider sid + the delivery_recipients
+  parent map WRITTEN AT APPEND TIME with 'queued' slots (the api.ts:1452
+  pattern - delta finding 1: setRecipientDelivery is CHILD-only and
+  throws ValidationException when the parent is absent; it cannot seed),
+  audit. Unit matrix incl. the consent-blocked case (unreachable by
+  construction once stamping lands - the test constructs the gap via a
+  direct repo write and is labeled defense-in-depth).
 T5.3 Receipts endpoint POST /webhooks/twilio/conversations/receipts:
   X-Twilio-Signature; IMxx->row; MBxx->memberKey (map; refresh on
   recreate; known-IM/unknown-MB = WARN+counter);
   `updateRecipientDeliveryStatus` (forward-only guarded, messagesRepo.ts:
-  1577; slot extended to record the per-member channel SMxx + error code;
-  NEVER the unconditional setRecipientDelivery for receipts - external
-  review finding 1, code-verified; required tests: delivered->sent
-  rejected, failed->sent rejected, duplicate receipts idempotent);
+  1577) with THREE delta-round corrections: (a) the slot TYPE already has
+  `sid?` and `errorCode?` (messagesRepo.ts:141-148) - the method gains a
+  sid PARAMETER, no new field; (b) the sid on a duplicate-status receipt
+  is applied via a SEPARATE targeted child write (slot.sid if-absent) so
+  the status race guard is never weakened and the sid is never dropped;
+  (c) a Conversations status with no ALLOWED_PRIOR mapping is DROPPED with
+  WARN + counter (an unmapped value currently TypeErrors at :1590 -> 500
+  -> Twilio retry loop) via an explicit status-mapping table. Group
+  callers pass a context label so log lines are group-labeled (relay
+  callers byte-identical - invariant 6). NEVER setRecipientDelivery for
+  receipts. Required tests: delivered->sent rejected, failed->sent
+  rejected, duplicate receipt keeps sid + stays idempotent, unmapped
+  status dropped, relay log snapshot unchanged;
   first-receipt syssid marker WITH expires_at (~30d;
   app/src/repos/messagesRepo.ts putSystemSidMarker gains optional
   expiresAt; update the tables.ts:184-189 TTL comment) - subject to
@@ -368,23 +385,28 @@ Gates; commit.
 
 T6.1 Rail-create job defineJobHandler('groupRail.create'); callers are
   wired in T6.6 (detection enqueue, send backstop direct, bulk sync).
-  LIFECYCLE (spec 6.1, external review finding 2): conditional local
-  `rail_creating` claim before any Twilio call (loser re-reads);
-  deterministic UniqueName; fetch-by-UniqueName recovery on
-  retry-after-crash; post-active MB-map validation against the roster
-  before compose enables; failed/closed attach -> rail-failed record;
-  failure otherwise -> rail-less + WARN + report. Tests: concurrent
-  double-create, crash-retry recovery, closed-rail, recreation race,
-  MB-map mismatch.
+  LIFECYCLE (spec 6.1, external review finding 2 + delta finding 6):
+  conditional local `rail_creating` claim CARRYING ITS TIMESTAMP before
+  any Twilio call (loser re-reads; a claim older than the expiry window
+  is RE-CLAIMABLE - the dead-claimant cell - and recovery then runs
+  fetch-by-UniqueName adopt-or-create so a crashed claimant can never
+  strand a thread against the hardened cutover gate); deterministic
+  UniqueName; post-active MB-map validation before compose enables;
+  failed/closed attach -> rail-failed record; failure otherwise ->
+  rail-less + WARN + report. Tests: concurrent double-create, crash-retry
+  recovery, EXPIRED-claim takeover, closed-rail, recreation race, MB-map
+  mismatch.
 T6.2 Cross-check endpoint POST /webhooks/twilio/conversations/events:
-  signature; PERSIST + DEDUPE by IM SID; a GRACE-DEADLINE reconciliation
-  sweep (not an immediate compare - external review finding 5:
-  event-first delivery and redelivery must not false-alarm) matches
-  events to classic-filed messages and alarms ONCE per still-unmatched
-  event past the deadline; documented as a liveness HEURISTIC (no
-  deterministic SM/MM join exists in the payload). Tests: both delivery
-  orders, duplicate redelivery, rapid same-author messages, genuine miss.
-  Updates settings `group_crosscheck_last_event_at`;
+  signature; PERSIST + DEDUPE by IM SID - stored as messages-table marker
+  rows (`imevt#<IMsid>` partition, short TTL; the existing syssid#/sid#
+  marker pattern, NO schema change - delta finding 7); the GRACE-DEADLINE
+  reconciliation sweep FOLDS INTO the T6.3 daily-poller mechanism as a
+  cadenced duty with its own last-run state (no undeclared third job)
+  and alarms ONCE per still-unmatched event past the deadline; documented
+  as a liveness HEURISTIC (no deterministic SM/MM join in the payload).
+  Tests: both delivery orders, duplicate redelivery, rapid same-author
+  messages, genuine miss. Updates settings
+  `group_crosscheck_last_event_at`;
   ingestion (T3.3) updates `group_railed_inbound_last_at`. Unit tests both
   directions.
 T6.3 Periodic jobs, wired like the four existing worker pollers

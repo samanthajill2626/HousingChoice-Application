@@ -1,17 +1,17 @@
 # Native group texting - design spec
 
-Status: v7 - APPROVED AT THE HUMAN GATE (external design review
-2026-08-10 adjudicated: 8 findings + ops items ALL ACCEPTED; Cameron ruled
-consent option (a) - the group_participation basis). (Cameron, 2026-08-10; v5) with his
-rulings folded: label Option A; auto-convert backstop; EAGER rail creation;
-run-to-completion migration guarantee. v6 folds the PLAN review round-1
-amendments, all within the ratified rulings: status='group_open' replaces
-the byGroupStatus GSI (no schema change); the connect_day_one/
-import_connect_requested field is ONE attribute and conversion converts it
-(reporting the flag) per the auto-convert ruling; parity checking is scoped
-to the bulk migration entry; identity normalizes inputs; extraction
-filtering is transcript-level. Review trail: 4 spec rounds (hard cap) + gate
-+ plan round 1.
+Status: v8 - APPROVED. Gate rulings (Cameron, 2026-08-10): label Option
+A; auto-convert backstop; EAGER rail creation; run-to-completion migration
+guarantee; consent option (a) - the group_participation basis, carried in
+a DISTINCT contact field (delta review), never consent_method. Review
+trail: 4 adversarial spec rounds (hard cap) + human gate + 3 plan rounds +
+external design review (8 findings, all accepted) + a delta round (12
+findings, all accepted) - all folded. Key structural amendments:
+status='group_open' partition (no new GSI/schema); one connect flag field,
+conversion converts + reports it; parity at the bulk migration entry;
+normalized identity inputs; transcript-level extraction filtering;
+receipts through the forward-only guarded method with a targeted sid
+write; rails carry UniqueName + an EXPIRING conditional claim.
 Date: 2026-08-10. Cutover gate: 2026-08-17.
 Branch: `feat/group-texting` (worktree `W:\tmp\group-texting`, cut from main
 @2caeaba5).
@@ -326,16 +326,22 @@ today's relay behavior with the envelope dropped -
          file to the sender's 1:1 + ERROR; never guess.
    - Creation: resolve-or-create a contact per member by phone. CONSENT
      BASIS (Cameron's ruling, external review finding 4, option (a)):
-     member stubs are stamped `consent_method: 'group_participation'` - a
-     DISTINCT recorded basis (they joined or were added to a carrier group
-     including our number), never `inbound_text` (which would fabricate a
-     texted-us-first claim - adjudication #8 still holds). The same stamp
-     is applied to imported-group members at conversion (9). GATING RULE:
-     group sends require every member to hold SOME recorded basis
-     (group_participation qualifies); proactive 1:1 sends do NOT accept
-     group_participation - a silent group member cannot be individually
-     messaged without their own basis. The A2P compliance docs gain a
-     paragraph documenting this basis. Group stubs are minted
+     member stubs record the basis in a DISTINCT CONTACT FIELD
+     `group_participation_at` (ISO timestamp) - NEVER in `consent_method`
+     (delta review finding 2: consent_method flows through the shared
+     hasSmsConsent predicate into broadcasts, nudges, reminders and both
+     staff has-consent displays, which would make silent members
+     PROACTIVELY sendable - the opposite of the ruling; and never-
+     overwrite semantics on consent_method would mask a later genuine
+     basis, finding 3. A separate field has neither problem: consent_method
+     stays absent until a real basis arrives, and every existing consumer
+     is untouched by construction). The same stamp is applied to
+     imported-group members at conversion (9). GATING RULE: group sends
+     require every member to hold consent_method OR group_participation_at;
+     proactive 1:1 paths read hasSmsConsent exactly as today and therefore
+     still refuse silent members - no per-call-site patching (the
+     smsCompliance.ts single-predicate rule holds). The A2P compliance
+     docs gain a paragraph documenting this basis. Group stubs are minted
      with the IMPORTER'S id scheme `contactIdForPhone(e164)` (uuidv5) so the
      import's later contact upsert converges on the same row (r2 finding
      11), AND carry an origin marker (`origin: 'group_detection'`-style
@@ -404,13 +410,16 @@ Rail creation mechanics:
 - No timers (account default null - spike snapshot
   conversations-global-config.json; assert, do not set).
 - Store CHxx + the MBxx->member-key mapping (receipts need it).
-- LIFECYCLE + IDEMPOTENCY (external review finding 2): creation sets a
-  deterministic, non-PII `UniqueName` = our conversationId. Before any
-  Twilio call the creator takes a conditional local claim
-  (`rail_creating` attribute, conditional write; loser re-reads) so
-  detection-job, migration, and send-backstop can never double-create. A
-  crash between Twilio create and local persist is recovered by
-  fetch-by-UniqueName on retry. After `active`, participants are fetched
+- LIFECYCLE + IDEMPOTENCY (external review finding 2 + delta finding 6):
+  creation sets a deterministic, non-PII `UniqueName` = our
+  conversationId. Before any Twilio call the creator takes a conditional
+  local claim (`rail_creating` attribute CARRYING ITS TIMESTAMP,
+  conditional write; loser re-reads; a claim older than the expiry window
+  is RE-CLAIMABLE, so a crashed claimant can never strand a thread
+  rail-less against the hardened cutover gate) - detection-job, migration,
+  and send-backstop can never double-create. A crash between Twilio
+  create and local persist is recovered by fetch-by-UniqueName
+  adopt-or-create on retry. After `active`, participants are fetched
   and the MB map VALIDATED against the roster before compose enables; a
   conversation that fails/closes during attach is recorded rail-failed.
   Recreate-on-404 re-runs the same claimed sequence. Tests: concurrent
@@ -432,8 +441,10 @@ Rail creation mechanics:
 - A dedicated group send service (NOT `sendMessage`, which is structurally
   1:1: single participantPhone, whole-send opt-out refusal). CONSENT GATE
   (Cameron's option-(a) ruling): the service refuses when any member lacks
-  a recorded consent basis (group_participation qualifies; the UI surfaces
-  which member blocks). Shared seams, named exactly: the SMS kill-switch
+  consent_method OR group_participation_at (the UI surfaces which member
+  blocks). Defense-in-depth: creation paths stamp every member, so the
+  refusal should be unreachable - its test constructs the gap via a direct
+  repo write and says so. Shared seams, named exactly: the SMS kill-switch
   predicate (`smsSendingEnabled` -
   enforced INSIDE the groupConversationsPort adapter, same
   SmsSendingDisabledError), the message catalog for any automated copy, and
@@ -582,9 +593,9 @@ mainline; import mission owns the RUN). This feature ships:
     auto-convert ruling governs): the flag is included in the result for
     reporting.
   - Rewrites to the 4.2 shape: type group_text, status 'group_open',
-    members stamped `consent_method: 'group_participation'` where no basis
-    exists (Cameron's option-(a) ruling; never overwrites an existing
-    basis), participants preserved WITH contactId BACKFILL (imported rosters carry
+    members stamped `group_participation_at` (the distinct-field basis;
+    consent_method untouched), participants preserved WITH contactId
+    BACKFILL (imported rosters carry
     `contactId: ''` - apply.ts:216-220; conversion fills each empty
     contactId with `contactIdForPhone(phone)`, converging with both the
     import's and detection's contact id schemes so member keying and
@@ -701,11 +712,12 @@ mainline; import mission owns the RUN). This feature ships:
 
 ## 13. Invariants (plan enumerates every surface per the standing rule)
 
-1. A group-origin inbound is never filed as a 1:1. Exactly two exceptions,
-   both alarmed and extraction-suppressed: the fail-open tripwire path, and
-   the corrupt-shape branch of 5.3(c) (r4 finding 5 wording fix; the
-   auto-convert branch files as a GROUP message, so it is not an
-   exception).
+1. A group-origin inbound is never filed as a 1:1. Exactly THREE
+   exceptions, all alarmed/marked and extraction-suppressed: the fail-open
+   tripwire path, the corrupt-shape branch of 5.3(c), and the
+   collapsed-roster (<2 outside members) rule of section 5 - which files
+   1:1 because it semantically IS 1:1, but still carries the extraction
+   marker since the body may reference other parties.
 2. The 1:1-classified inbound path gains no new I/O and no new persisted
    side effects; behavior is unchanged.
 3. No inbound is ever lost: every webhook inbound persists somewhere even

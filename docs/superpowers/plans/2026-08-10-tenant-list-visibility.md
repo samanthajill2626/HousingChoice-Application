@@ -618,14 +618,11 @@ Implementation checklist, all in `ContactsList.tsx`:
  * (.tenantList) so no list ever mixes densities. */
 .facts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-muted); font-size: var(--fs-xs); font-weight: var(--fw-medium); }
 .porting { flex: 0 0 auto; padding: 1px var(--sp-2); border-radius: var(--radius-pill); border: 1px solid var(--c-warning); color: var(--c-warning); font-size: var(--fs-xs); font-weight: var(--fw-semibold); white-space: nowrap; }
-/* Wide-pane sacrifice order: PER-ROW (facts render on the All view too). */
 .factsRow .name { flex: 1 0 auto; max-width: 55cqw; }
 .factsRow .meta { flex: 0 1 auto; min-width: 0; }
 @container (max-width: 560px) {
-  /* Density: route-scoped (one density per list). */
   .tenantList .row { padding: var(--sp-2) var(--sp-3); }
   .tenantList .rowItem { margin-bottom: var(--sp-1); }
-  /* Narrow stack: per-row, same predicate as the wide rules. */
   .factsRow .name { flex: 1 1 100%; max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
   .factsRow .meta { flex: 1 1 100%; }
 }
@@ -650,11 +647,15 @@ Implementation checklist, all in `ContactsList.tsx`:
 it('tenant view: controls render, a chip narrows the list, the URL carries it', async () => {
   renderAt('/contacts/tenants');
   await user.click(screen.getByRole('button', { name: /Studio \(1\)/ }));
-  expect(screen.getAllByRole('listitem')).toHaveLength(1); // only t0 remains
+  const rows = within(screen.getByRole('list', { name: 'Tenants' })); // scoped - TenantFilters must not count
+  expect(rows.getAllByRole('listitem')).toHaveLength(1); // only t0 remains
   expect(screen.getByTestId('loc').textContent).toContain('voucher=0');
 });
 it('all/landlord views: no controls, facet params inert', () => {
   // ('deleted' is outside this suite's route helper union - covered by the e2e layer.)
+  // The useContacts mock must be VIEW-AWARE here (return only the landlord fixture for the
+  // landlords view) - the hook is mocked, so ContactsList does no type filtering of its own,
+  // and a filter-blind mock would render all four fixtures and void the exact count.
   renderAt('/contacts/landlords?voucher=0');
   expect(screen.queryByRole('button', { name: /Studio/ })).toBeNull();
   const rows = within(screen.getByRole('list', { name: 'Landlords' }));
@@ -702,8 +703,8 @@ it('facets + empty query -> the filter-miss message', async () => {
   page-limit change needs its own test. `dashboard/src/routes/contacts/useContacts.test.tsx`
   ALREADY EXISTS with six tests - EXTEND it (Write/overwrite destroys them) IN ITS OWN IDIOM:
   the file drives the hook through a Probe component, not renderHook - copy one of its existing
-  tests wholesale. Mock `getContacts` to resolve ONE EMPTY PAGE (`{ contacts: [] }`, no
-  nextCursor - a rejecting or hanging mock leaves the test green over the hook's error path),
+  tests wholesale. Mock `getContacts` to resolve ONE EMPTY PAGE using the file's OWN `page()`
+  helper (a rejecting or hanging mock leaves the test green over the hook's error path),
   mount the probe with filter `'tenant'` (the hook throws without a filter), and
   `await waitFor(() => expect(getContacts).toHaveBeenCalledWith(expect.objectContaining({ limit: '100' }), expect.anything()));`
 - [ ] **Step 2-4:** fail -> implement (the checklist above) -> pass
@@ -930,8 +931,10 @@ test('tenant facets narrow the list and survive reload', async ({ page }) => {
 - [ ] **Step 1b: STRAGGLER SWEEP** - the retired fields must not survive in prose:
   `grep -rn "accepted_programs\|jurisdiction" app/src app/test dashboard/src documentation e2e/support --include=*.ts --include=*.tsx --include=*.md`
   (NOTE `app/test` is in the sweep - test TITLES count) and fix every hit that is not (a) the
-  tombstone set itself, (b) the LEGACY-commented type fields, or (c) a retire-issue/drift-issue
-  reference. Known hits from review: `documentation/GLOSSARY.md:150` (names
+  tombstone set itself, (b) the LEGACY-commented type fields, (c) a retire-issue/drift-issue
+  reference, or (d) LEGACY FIXTURE DATA a test deliberately depends on - e.g.
+  `unitFields.test.ts:181` seeds `jurisdiction` precisely to prove synthesis, and Task 2's
+  `['DCA']` flyer assertion rides on it; a literal sweep must not undo Task 2. Known hits from review: `documentation/GLOSSARY.md:150` (names
   `accepted_programs` as a per-property fact), `app/src/routes/contacts.ts:307` +
   `app/src/repos/contactsRepo.ts:254-255` (the field-move comments), any remaining GSI
   comments, `app/test/tables.test.ts:150`'s test title, and the `useContacts.ts` page-math

@@ -147,6 +147,48 @@ describe('GET /api/ai-runs', () => {
     }
   });
 
+  it('treats an EMPTY or whitespace limit as absent, not as one row per page', async () => {
+    // conf P2-3 / adv P2: Number('') and Number(' ') are both 0, which IS an
+    // integer, so the clamp's floor of 1 turned a bookmarked `?limit=` into a
+    // one-row page. The sibling optionalParam already treats an empty value as
+    // absent for before/from/to; limit means the same thing by the same rule.
+    for (const raw of ['', '%20']) {
+      const { app, repo } = makeWorld();
+      await admin(app, `/api/ai-runs?limit=${raw}`).expect(200);
+      expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 25 }));
+    }
+  });
+
+  it('falls back to the default page size for a REPEATED limit', async () => {
+    // limit keeps the clamp philosophy: a shape it cannot read is the default,
+    // never a 400 and never one row. Pinned so the date-filter 400s below are
+    // not "simplified" into covering limit too.
+    const { app, repo } = makeWorld();
+    await admin(app, '/api/ai-runs?limit=5&limit=7').expect(200);
+    expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 25 }));
+  });
+
+  it('rejects a REPEATED date filter by name instead of silently dropping it', async () => {
+    // adv P2: Express hands a duplicated param back as an ARRAY, which fails
+    // every `typeof === 'string'` shape check below - so the filter used to
+    // vanish and the route answered 200 with the WHOLE table, reading as "these
+    // are your 2026-01-01+ runs". On a forensic surface an over-broad page is
+    // at least as misleading as the empty one these 400s exist to prevent.
+    const { app, repo } = makeWorld();
+    for (const [q, code] of [
+      ['from=2026-01-01&from=2026-01-02', 'invalid_from'],
+      ['to=2026-01-01&to=2026-01-02', 'invalid_to'],
+      [
+        'before=2026-08-06T10:00:00.000Z%23run-9&before=2026-08-05T10:00:00.000Z%23run-8',
+        'invalid_before',
+      ],
+    ] as const) {
+      const res = await admin(app, `/api/ai-runs?${q}`).expect(400);
+      expect(res.body.error).toBe(code);
+    }
+    expect(repo.listByEntity).not.toHaveBeenCalled();
+  });
+
   it('rejects a malformed date filter by name instead of answering an empty page', async () => {
     const { app, repo } = makeWorld();
     for (const [q, code] of [

@@ -42,10 +42,17 @@ function decisionCounts(run: AiRunRecord): Record<string, number> {
  * load-bearing half: a fractional or non-positive limit used to floor to 0,
  * and the repo's `opts.limit ?? DEFAULT` does not replace 0, so DynamoDB got
  * Limit: 0 and answered a ValidationException. Modeled on inbox.ts parseLimit.
+ *
+ * An EMPTY or whitespace value is ABSENT, exactly as `optionalParam` reads
+ * before/from/to: `Number('')` and `Number(' ')` are both 0, which IS an
+ * integer, so the floor of 1 silently served a ONE-row page (conf P2-3). A
+ * value of another shape entirely - a repeated `?limit=` arrives as an array -
+ * keeps the clamp philosophy and falls back to the default rather than 400ing;
+ * a page size is a preference, while a date filter changes WHICH rows answer.
  */
 function parseLimit(raw: unknown): number {
-  if (raw === undefined) return DEFAULT_PAGE_SIZE;
-  const n = typeof raw === 'string' ? Number(raw) : NaN;
+  if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_PAGE_SIZE;
+  const n = Number(raw);
   if (!Number.isInteger(n)) return DEFAULT_PAGE_SIZE;
   return Math.min(MAX_PAGE_SIZE, Math.max(1, n));
 }
@@ -89,6 +96,19 @@ export function createAiRunsRouter(deps: AiRunsRouterDeps = {}): Router {
     if (!SCOPE_PATTERN.test(scope)) {
       res.status(400).json({ error: 'invalid_scope' });
       return;
+    }
+    // A REPEATED filter (?from=a&from=b) arrives as an ARRAY, and every shape
+    // check below reads a non-string as absent - so the filter used to vanish
+    // and this route answered 200 with the WHOLE table under a heading that
+    // claims a date range. An over-broad forensic page misleads at least as
+    // badly as the empty one the per-parameter 400s exist to prevent, so say
+    // WHICH parameter cannot be read (adv P2).
+    for (const name of ['before', 'from', 'to'] as const) {
+      const raw = req.query[name];
+      if (raw !== undefined && typeof raw !== 'string') {
+        res.status(400).json({ error: `invalid_${name}` });
+        return;
+      }
     }
     const limit = parseLimit(req.query['limit']);
     const before = optionalParam(req.query['before']);

@@ -1126,6 +1126,59 @@ describe('runDueExtractions - run log backstop and isolation', () => {
     expect(h.contactsUpdate).toHaveBeenCalled();
   });
 
+  it('a clock fault on ONE row never aborts the rest of the batch', async () => {
+    // The draft allocation (deps.now() + randomUUID) used to sit OUTSIDE the
+    // per-row try, so a throw there escaped the for loop and killed every
+    // remaining row - the one place the per-row isolation guarantee did not
+    // hold, and that guarantee is the whole point of the backstop.
+    const h = makeHarness({
+      dueRows: [dueRow({ conversationId: 'conv1' }), dueRow({ conversationId: 'conv2' })],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    let calls = 0;
+    h.deps.now = () => {
+      calls += 1;
+      if (calls === 1) throw new Error('clock down');
+      return WALL_NOW;
+    };
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out.processed).toBe(1);
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('a clock fault in the superseded stamp never aborts the rest of the batch', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ conversationId: 'conv1' }), dueRow({ conversationId: 'conv2' })],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+    });
+    // Row 1's tail makes exactly two clock reads once putSuggestion flips this
+    // on: recordRun's finishedAt (swallowed by recordRun's own catch) and then
+    // stampSuperseded's `at`. Break both and let row 2 run on a healthy clock,
+    // so this pins ISOLATION rather than a permanently dead clock (which row 1's
+    // own draft guard would already handle).
+    let breakClock = 0;
+    h.deps.now = () => {
+      if (breakClock > 0) {
+        breakClock -= 1;
+        throw new Error('clock down');
+      }
+      return WALL_NOW;
+    };
+    // The displaced pointer is what makes stampSuperseded reach its clock read.
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => {
+      breakClock = 2;
+      return {
+        item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+        displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+      };
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out.processed).toBe(2);
+    expect(h.repo.complete).toHaveBeenCalledTimes(2);
+  });
+
   it('PII GUARD: no run-path error object ever carries rawText or a decision value', async () => {
     const capture = createLogCapture();
     const h = makeHarness({

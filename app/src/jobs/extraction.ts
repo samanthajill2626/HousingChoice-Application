@@ -564,10 +564,14 @@ async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: Ru
  * turn a successful suggestion replacement into a suggestion failure.
  */
 async function stampSuperseded(deps: ExtractionJobDeps, draft: RunDraft): Promise<void> {
-  const at = deps.now();
   for (const { target, runId, createdAt } of draft.displaced) {
     if (!isDecisionTarget(target)) continue;
     try {
+      // Inside the per-item backstop: this was the run log's last unguarded
+      // clock read, and stampSuperseded's call site is itself unguarded, so a
+      // throw here escaped the whole poll loop. Now per-item rather than one
+      // shared value - no invariant depends on the stamps being equal.
+      const at = deps.now();
       await deps.aiRuns.setVerdict(runId, target, 'superseded', { at, expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAt });
     } catch (err) {
       deps.logger.warn(
@@ -597,7 +601,23 @@ export async function runDueExtractions(
   logger.info({ count: dueRows.length }, 'extraction poll: processing due rows');
 
   for (const row of dueRows) {
-    const draft = newRunDraft(row, deps.now());
+    // The only statement that used to sit outside the per-row backstop. A clock
+    // or uuid fault here has no runId to record under and never claimed the
+    // row, so the honest outcome is to skip THIS row and let the next poll
+    // retry it - never to abort the rest of the batch. Deliberately NOT counted
+    // as `failed` and NOT routed through repo.fail(): the row was never
+    // claimed, so burning an attempt for an observability fault is exactly the
+    // anti-pattern the draft helpers exist to prevent.
+    let draft: RunDraft;
+    try {
+      draft = newRunDraft(row, deps.now());
+    } catch (err) {
+      logger.error(
+        { conversationId: row.conversationId, err },
+        'extraction poll: run draft allocation failed - row skipped',
+      );
+      continue;
+    }
     let result: ProcessRowResult;
     try {
       result = await processRow(row, nowIso, deps, draft);

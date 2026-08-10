@@ -112,6 +112,21 @@ table below:
 |--------|-------|------|--------|
 | AI run log (2026-08) - **NOT YET APPLIED anywhere** | `ai_runs` | **new table** - PK `itemId`, GSI `byEntity` (`entityKey` + `sortKey`), TTL `expires_at` | `/settings/ai-runs` forensic log |
 
+**Tenant-list visibility (2026-08-10) - GSI DELETION owed, dev then prod.** The
+tenant-list-visibility feature removed the dead `byJurisdiction` GSI from the units-table schema
+(`app/src/lib/tables.ts` + BOTH generated `tables.auto.tfvars.json` files are already committed,
+verified idempotent under `gen-tables --check`). After it merges, run `npm run plan -- dev` (the
+plan shows ONE index deletion, nothing else) then `npm run apply -- dev`; prod at its usual gate.
+NOTHING breaks while unapplied - the index just lingers unused - but note the next UNRELATED
+`npm run apply` will carry the deletion with it, so do not be surprised by it in another
+feature's plan output. Deleting a GSI is an online operation and cheap; RE-creating one later
+would need a full index backfill. Stale local lanes keep a harmless extra index; fresh lanes
+create without it.
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| Tenant-list visibility (2026-08) - **committed, NOT YET APPLIED anywhere** | `units` | **GSI DELETE** - `byJurisdiction` (attribute no longer written; zero callers) | nothing (dead index removal) |
+
 **New-dashboard backend-slice schema — APPLIED TO DEV (2026-07-01); PROD applies at the M1.11 go-live cutover.**
 
 | Change | Table | Kind | Powers |

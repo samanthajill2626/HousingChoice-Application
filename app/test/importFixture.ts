@@ -21,6 +21,8 @@ export const PHONES = {
   noTraffic: '+15550100007', // saved contact, no messages
   groupTenant: '+15550100008',
   roleClash: '+15550100009', // -Nbed suffix but the name says landlord
+  airtableLandlordTyped: '+15550100010', // tenants-table row typed `Landlord`
+  conflictResolved: '+15550100011', // conflicting -Nbed suffixes, Airtable settles it
 } as const;
 
 // Fixtures go through the real serializer, never hand-joined: a body containing
@@ -48,6 +50,8 @@ function quoContacts(): string {
     ['695ef5b40bdaade262577c07', 'Ghost Contact-2bed', PHONES.noTraffic],
     ['695ef5b40bdaade262577c08', 'Priya Raman-3bed', PHONES.groupTenant],
     ['695ef5b40bdaade262577c09', 'Landlord Larry-2bed', PHONES.roleClash],
+    ['695ef5b40bdaade262577c0a', 'Vera Cole-2bed', PHONES.conflictResolved],
+    ['695ef5b40bdaade262577c0b', 'Vera Cole-3bed', PHONES.conflictResolved],
   ].map(([id, firstName, phone]) => ({
     id: id!,
     userId: 'US1',
@@ -203,6 +207,24 @@ function airtableTenants(): string {
       Created: '7/9/2026 11:39am',
       'Voucher In hand?': 'yes',
       'Quo ID': '695ef5b40bdaade262577c05',
+    },
+    // The FULL 2026-08-09 tenants table keeps landlords INSIDE it, typed by the
+    // `tenant type ` column - classification must respect that.
+    {
+      Name: 'Bianca Owner',
+      'Phone Number': PHONES.airtableLandlordTyped,
+      'tenant type ': 'Landlord',
+      Created: '7/10/2026 9:00am',
+    },
+    // Conflicting -Nbed suffixes in Quo; Airtable's integer settles it
+    // (Cameron 2026-08-09: Airtable overrules voucher size).
+    {
+      Name: 'Vera Cole',
+      'Phone Number': PHONES.conflictResolved,
+      'tenant type ': 'Tenant',
+      'Voucher Size': '3',
+      'voucher program': 'Atlanta, aha, Atlanta housing',
+      Created: '7/11/2026 9:00am',
     },
   ]);
 }

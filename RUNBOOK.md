@@ -1143,11 +1143,24 @@ workbook plus the raw exports and upserts DynamoDB.
 npm run import:plan -- --quo "W:\AI Projects\Housing Choice\Quo Exports" --airtable "W:\AI Projects\Housing Choice\Airtable Exports" --out "W:\AI Projects\Housing Choice\Import Review\<date>"
 ```
 
-Carry a previous review forward so she reviews a DIFF, not the whole corpus:
+Carry a previous review forward so she reviews a DIFF, not the whole corpus.
+The full form (used for the real 2026-08-09 replan):
 
 ```powershell
-npm run import:plan -- --quo "<quo dir>" --airtable "<airtable dir>" --out "W:\AI Projects\Housing Choice\Import Review\<new date>" --prior "W:\AI Projects\Housing Choice\Import Review\<old date>"
+npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --out "<out dir>" --prior-contacts "<her edited contacts csv>" --baseline-contacts "<the contacts.csv she started FROM>" --interpret-notes
 ```
+
+- `--prior-contacts` takes her edited file directly, any filename; `--prior <dir>`
+  still works for a whole workbook directory.
+- `--baseline-contacts` is ESSENTIAL on a replan: the workbook ships pre-filled,
+  so without the baseline diff her file's untouched suggestions (v1 statuses,
+  names) fossilise and override fresh derivation. Only values that DIFFER from
+  the baseline are treated as her edits.
+- `--interpret-notes` translates answers she wrote into the notes column (bare
+  voucher numbers, "delete", "Caseworker", "landlord", misspellings) into the
+  real columns, printing every action taken and anything left for a human.
+- Contact carry-forward joins on PHONE (digits-only), so her edits survive the
+  wholesale row_key reshuffle a re-export causes.
 
 Apply — **always dry-run first**; the write needs an explicit `--yes`:
 

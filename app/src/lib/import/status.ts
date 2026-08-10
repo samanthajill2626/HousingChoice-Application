@@ -16,8 +16,17 @@
 
 import type { ContactType } from '../../repos/contactsRepo.js';
 
-/** Days since last contact before an imported tenant is parked on `on_hold`. */
-export const DEFAULT_ACTIVE_WINDOW_DAYS = 30;
+/**
+ * Days since last contact before an imported tenant is parked on `on_hold`.
+ *
+ * THE FOUNDER'S NUMBER (email, 2026-08-09): "I'd prefer for everyone to come
+ * across as searching until they have truly gone dormant ~6 months." The
+ * original 30 was our placeholder awaiting exactly this answer. Note the
+ * consequence: her export spans ~5 months, so under 180 days effectively every
+ * contact with any traffic imports as `searching` — that is her stated intent,
+ * not an accident.
+ */
+export const DEFAULT_ACTIVE_WINDOW_DAYS = 180;
 
 export interface StatusInput {
   type: ContactType;

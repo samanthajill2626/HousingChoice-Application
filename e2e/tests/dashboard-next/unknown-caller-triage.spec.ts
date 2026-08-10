@@ -20,7 +20,7 @@ import { placeCall } from '../../fixtures/fakeVoice.js';
 import { reseed } from '../../fixtures/reseed.js';
 import { uniqueVoicePhone, NEXT } from '../../fixtures/voiceSetup.js';
 
-/** The app's business number in the e2e stack (OUR_PHONE_NUMBERS[0]). */
+/** The app's business number in the e2e stack (BUSINESS_PHONE_NUMBER). */
 const BUSINESS = '+15550009999';
 
 async function devLogin(page: Page): Promise<void> {

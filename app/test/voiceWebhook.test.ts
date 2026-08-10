@@ -297,6 +297,11 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).toContain('/webhooks/twilio/voice/whisper-gate');
     expect(xml).toContain('Alice'); // the masked caller label
     expect(xml).toContain('Press 1');
+    // The press-0 team escape was removed (docs/issues/press-0-team-escape-removed.md),
+    // and this leg is where the ", or press 0 to reach the team." clause used to
+    // live. Guards the AUDIO COPY, not the gate branch: restoring the clause to the
+    // voice.whisper_relay default in app/src/messages/catalog.ts turns this red.
+    expect(xml.toLowerCase()).not.toContain('press 0');
     expect(xml).not.toContain('+1555'); // never a phone
     // No input falls through to hangup (no auto-bridge to carrier voicemail).
     expect(xml).toContain('<Hangup');
@@ -318,7 +323,9 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     expect(xml).not.toContain('<Dial');
   });
 
-  it("gate: Digits='0' → <Dial> the team from OUR number, never the caller's From", async () => {
+  it("gate: Digits='0' -> <Hangup> (the press-0 team escape was removed)", async () => {
+    // '0' is no longer special: it takes the same fall-through as a Gather
+    // timeout or any other key. See docs/issues/press-0-team-escape-removed.md.
     const world = createFakeWorld();
     seedRelay(world);
     const { app } = makeWebhookHarness({ world });
@@ -329,10 +336,8 @@ describe('whisper + press-1/press-0/timeout gate (M1.9a)', () => {
     });
     expect(res.status).toBe(200);
     const xml = res.text;
-    expect(xml).toContain('<Dial');
-    expect(xml).toContain(OUR_NUMBER); // team number = our business number
-    expect(xml).toContain(`callerId="${OUR_NUMBER}"`);
-    expect(xml).not.toContain(ALICE);
+    expect(xml).toContain('<Hangup');
+    expect(xml).not.toContain('<Dial');
   });
 
   it('gate: timeout / other key → <Hangup> the callee leg (no carrier voicemail)', async () => {

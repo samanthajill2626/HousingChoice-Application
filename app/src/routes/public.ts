@@ -158,7 +158,7 @@ export interface PublicRouterDeps {
   sendMessageService?: SendMessageService;
   /**
    * flyer-full-info: the public-facing texting number shown on the flyer (the
-   * "I'm interested - text us" CTA) - config.ourPhoneNumbers[0], the SAME main
+   * "I'm interested - text us" CTA) - config.businessPhoneNumber, the SAME main
    * number all 1:1 Twilio traffic uses. Absent -> the page degrades to
    * reply-prompt copy (never a broken button).
    */
@@ -172,7 +172,7 @@ export function createPublicRouter(deps: PublicRouterDeps = {}): Router {
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
-  // flyer-full-info: config.ourPhoneNumbers[0] (or null when unconfigured). Rides
+  // flyer-full-info: config.businessPhoneNumber (or null when unconfigured). Rides
   // on the flyer payload AND every opaque 404 so the page's unavailable state can
   // still offer the text-us CTA (there is no flyer payload to read it from there).
   const contactNumber = deps.contactNumber ?? null;

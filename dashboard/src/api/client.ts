@@ -75,11 +75,24 @@ function errorFrom(status: number, body: unknown): ApiError {
   return new ApiError(status, `http_${status}`, `Request failed (${status})`, body);
 }
 
+/** A 2xx response whose STATUS is part of the endpoint's contract. */
+export interface ApiResponse<T> {
+  status: number;
+  body: T;
+}
+
 /**
- * Core request. Returns the parsed JSON body typed as T (use `void`/`undefined`
- * for 204 endpoints). Throws ApiError on non-2xx or network failure.
+ * Core request, with the HTTP status. Almost every endpoint wants `request`
+ * (the body alone); use this one where two DIFFERENT successful outcomes share
+ * a route and the status is what tells them apart - today that is the
+ * quiet-hours deferral (201 provisioned vs 202 deferred, contact-rosters spec
+ * D7), where the two bodies are different shapes and guessing from the payload
+ * would be a decode-by-duck-typing.
  */
-export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+export async function requestWithStatus<T>(
+  path: string,
+  options: RequestOptions = {},
+): Promise<ApiResponse<T>> {
   const { method = 'GET', body, query, signal } = options;
   const headers: Record<string, string> = { Accept: 'application/json' };
   let payload: string | undefined;
@@ -106,5 +119,13 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
   if (!res.ok) {
     throw errorFrom(res.status, parsed);
   }
-  return parsed as T;
+  return { status: res.status, body: parsed as T };
+}
+
+/**
+ * Core request. Returns the parsed JSON body typed as T (use `void`/`undefined`
+ * for 204 endpoints). Throws ApiError on non-2xx or network failure.
+ */
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return (await requestWithStatus<T>(path, options)).body;
 }

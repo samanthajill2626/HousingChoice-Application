@@ -1,7 +1,8 @@
 // useTourChannels tests - resolves the GROUP channel to a conversationId + unread,
-// the two 1:1 channels to a SUMMED unread over the contact's non-relay threads,
-// the two mark-read paths (group = single conversation, person = inbox fan-out),
-// group id injection, and a live conversation.updated refetch.
+// each PERSON channel (keyed by contactId) to a SUMMED unread over that contact's
+// non-relay threads, the two mark-read paths (group = single conversation,
+// person = inbox fan-out), group id injection, and a live conversation.updated
+// refetch.
 import { useEffect } from 'react';
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -26,7 +27,11 @@ vi.mock('../../api/index.js', async () => {
   };
 });
 
-import { useTourChannels, type TourChannelKey, type TourChannelsState } from './useTourChannels.js';
+import {
+  useTourChannels,
+  type PersonChannelInput,
+  type TourChannelsState,
+} from './useTourChannels.js';
 
 function makeTour(over: Partial<Tour> = {}): Tour {
   return { tourId: 't1', tenantId: 'ten-1', unitId: 'u1', tourType: 'self_guided', status: 'scheduled', ...over };
@@ -62,21 +67,36 @@ function emailConv(conversationId: string, contactId: string, unread: number): C
   } as ConversationSummary;
 }
 
+/** WHAT THE PAGE PASSES: the tenant + the unit's landlord when there is one,
+ *  keyed by contactId and labelled with the display name. */
+function peopleFor(tour: Tour, landlordId?: string): PersonChannelInput[] {
+  return [
+    { contactId: tour.tenantId, label: 'Ann Tenant' },
+    ...(landlordId !== undefined ? [{ contactId: landlordId, label: 'Lon Landlord' }] : []),
+  ];
+}
+
+/** The channel's unread for a person, 0 when they are not on the channels. */
+function unreadOf(s: TourChannelsState, contactId: string): number {
+  return s.people.find((p) => p.contactId === contactId)?.unread ?? 0;
+}
+
 function Probe({ tour, landlordId }: { tour: Tour; landlordId?: string }): React.JSX.Element {
-  const s = useTourChannels(tour, landlordId);
+  const s = useTourChannels(tour, peopleFor(tour, landlordId));
+  const tenantUnread = unreadOf(s, tour.tenantId);
   return (
     <div>
       <span data-testid="status">{s.status}</span>
       <span data-testid="group">{`${s.group.conversationId ?? '-'}/${s.group.unread}`}</span>
-      <span data-testid="tenant">{`unread:${s.tenant.unread}`}</span>
-      <span data-testid="landlord">{`unread:${s.landlord.unread}`}</span>
-      <button type="button" onClick={() => s.markPersonRead('tenant', tour.tenantId, s.tenant.unread)}>
+      <span data-testid="tenant">{`unread:${tenantUnread}`}</span>
+      <span data-testid="landlord">{`unread:${unreadOf(s, landlordId ?? '')}`}</span>
+      <button type="button" onClick={() => s.markPersonRead(tour.tenantId, tenantUnread)}>
         markTenant
       </button>
-      <button type="button" onClick={() => s.markPersonRead('tenant', undefined, s.tenant.unread)}>
+      <button type="button" onClick={() => s.markPersonRead(undefined, tenantUnread)}>
         markTenantUnresolved
       </button>
-      <button type="button" onClick={() => s.markPersonRead('tenant', '', s.tenant.unread)}>
+      <button type="button" onClick={() => s.markPersonRead('', tenantUnread)}>
         markTenantEmptyId
       </button>
       <button type="button" onClick={() => s.markGroupRead(s.group.conversationId, s.group.unread)}>
@@ -99,44 +119,36 @@ function MarkReadHarness({
 }: {
   tour: Tour;
   landlordId?: string;
-  activeKey: TourChannelKey;
+  activeKey: string;
 }): React.JSX.Element {
-  const channels = useTourChannels(tour, landlordId);
+  const channels = useTourChannels(tour, peopleFor(tour, landlordId));
   return (
     <div>
       <span data-testid="status">{channels.status}</span>
       <span data-testid="group">{`${channels.group.conversationId ?? '-'}/${channels.group.unread}`}</span>
-      <span data-testid="tenant">{`unread:${channels.tenant.unread}`}</span>
-      <span data-testid="landlord">{`unread:${channels.landlord.unread}`}</span>
-      <MarkReadChild
-        channels={channels}
-        activeKey={activeKey}
-        tenantId={tour.tenantId}
-        {...(landlordId !== undefined && { landlordId })}
-      />
+      <span data-testid="tenant">{`unread:${unreadOf(channels, tour.tenantId)}`}</span>
+      <span data-testid="landlord">{`unread:${unreadOf(channels, landlordId ?? '')}`}</span>
+      <MarkReadChild channels={channels} activeKey={activeKey} />
     </div>
   );
 }
 function MarkReadChild({
   channels,
   activeKey,
-  tenantId,
-  landlordId,
 }: {
   channels: TourChannelsState;
-  activeKey: TourChannelKey;
-  tenantId: string;
-  landlordId?: string;
+  activeKey: string;
 }): React.JSX.Element {
-  const active = channels[activeKey];
-  const contactId = activeKey === 'landlord' ? landlordId : tenantId;
+  const active = channels.people.find((p) => p.contactId === activeKey);
+  const contactId = active?.contactId;
+  const unread = active === undefined ? channels.group.unread : active.unread;
   useEffect(() => {
     if (activeKey === 'group') {
       channels.markGroupRead(channels.group.conversationId, channels.group.unread);
       return;
     }
-    channels.markPersonRead(activeKey, contactId, active.unread);
-  }, [activeKey, contactId, active.unread, channels]);
+    channels.markPersonRead(contactId, unread);
+  }, [activeKey, contactId, unread, channels]);
   return <span />;
 }
 
@@ -316,7 +328,7 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
       conversations: [conv('c-ten', 'ten-1', 3, 'tenant_1to1')],
       nextCursor: null,
     });
-    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     // Fires WITHOUT any interaction - the regression the ref-based version missed.
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledWith({ contactId: 'ten-1' }));
     expect(markInboxRead).toHaveBeenCalledTimes(1);
@@ -329,7 +341,7 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
       conversations: [conv('c-ten', 'ten-1', 1, 'tenant_1to1')],
       nextCursor: null,
     });
-    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(markInboxRead).toHaveBeenCalledTimes(1));
 
     getConversations.mockResolvedValue({
@@ -357,7 +369,7 @@ describe('useTourChannels - initial active tab auto-mark-read (MAJOR 2)', () => 
       ],
       nextCursor: null,
     });
-    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="tenant" />);
+    render(<MarkReadHarness tour={makeTour()} landlordId="lord-1" activeKey="ten-1" />);
     await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
     // Active (tenant) tab loaded at unread 0 -> no mark-read.
     expect(markInboxRead).not.toHaveBeenCalled();

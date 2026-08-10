@@ -11,7 +11,11 @@
 //              extractionFake.ts; config refuses driver 'fake' in production).
 import Anthropic from '@anthropic-ai/sdk';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { buildExtractionSystemPrompt, buildExtractionUserContent } from '../services/extraction/prompt.js';
+import {
+  buildExtractionSystemPrompt,
+  buildExtractionUserContent,
+  extractionPromptFingerprint,
+} from '../services/extraction/prompt.js';
 import { EXTRACTION_SCHEMA, parseExtractionText } from '../services/extraction/schema.js';
 import { FakeExtractionDriver } from './extractionFake.js';
 // Type-only import (erased at runtime) keeps the fake-driver no-runtime-cycle
@@ -19,6 +23,14 @@ import { FakeExtractionDriver } from './extractionFake.js';
 import type { ExtractionAddressParts } from '../services/extraction/address.js';
 
 export interface TranscriptUtterance {
+  /**
+   * The tsMsgId of the stored message this utterance came from. REQUIRED, not
+   * optional: an optional id would let a construction site omit it and silently
+   * produce a message the run log cannot hash (design 2026-08-06 section 6.1).
+   * A call transcript yields many utterances - all share the call row's id.
+   * NEVER rendered into the prompt (services/extraction/prompt.ts).
+   */
+  tsMsgId: string;
   // 'unknown' is a call line labeled `Speaker N:` (legacy/underivable role) -
   // the extraction job assigns it (adapters/extractionFake skips non-client
   // speakers; the prompt renders the label verbatim).
@@ -97,12 +109,40 @@ export interface ExtractionInput {
   profile: ExtractionProfileSnapshot;
 }
 
-export interface ExtractionDriver {
-  readonly kind: 'anthropic' | 'console' | 'fake';
-  extract(input: ExtractionInput): Promise<ExtractionResult>;
+/** Everything about the CALL, independent of whether it succeeded. */
+export interface ExtractionMeta {
+  driver: 'anthropic' | 'console' | 'fake';
+  /** The model id actually called. Absent on console/fake. */
+  model?: string;
+  /** The model's response text, VERBATIM, pre-parse. REAL JSON - on the fake
+   *  driver this is the EXTRACT: marker PAYLOAD, never the prefixed line, so
+   *  parseExtractionOps can read it. Absent on console, and on a driver failure
+   *  before a response arrived. PII by design. */
+  rawText?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+  promptFingerprint?: string;
 }
 
-/** Thrown when the model declines to answer (stop_reason 'refusal'). */
+/**
+ * A DISCRIMINATED result rather than a throw, for two reasons (design 6.4): the
+ * caller must know WHICH STAGE failed, and a thrown error carrying rawText
+ * would put contact PII on the one object type this codebase's loggers
+ * serialize wholesale (`logger.error({ err })`).
+ *
+ * It also saves the case a throwing parse loses outright: meta is assembled
+ * FIRST, so rawText survives a parse failure - the single failure mode where
+ * the response text is the entire answer to "what went wrong".
+ */
+export type ExtractionCall =
+  | { ok: true; meta: ExtractionMeta; result: ExtractionResult }
+  | { ok: false; meta: ExtractionMeta; failure: 'refusal' | 'parse' | 'driver'; message: string };
+
+export interface ExtractionDriver {
+  readonly kind: 'anthropic' | 'console' | 'fake';
+  extract(input: ExtractionInput): Promise<ExtractionCall>;
+}
+
+/** The model declined to answer. The anthropic driver now RETURNS { ok:false, failure:'refusal' } instead of throwing this; the class survives as the error the job's temporary unwrap raises and as a stable instanceof for callers. */
 export class ExtractionRefusedError extends Error {}
 
 /** The canonical "nothing to do" result. */
@@ -118,12 +158,15 @@ class ConsoleExtractionDriver implements ExtractionDriver {
     this.log = opts.logger ?? defaultLogger;
   }
 
-  async extract(input: ExtractionInput): Promise<ExtractionResult> {
+  async extract(input: ExtractionInput): Promise<ExtractionCall> {
     this.log.info(
       { transcriptLength: input.transcript.length, contactType: input.profile.contactType },
       'console extraction driver: returning empty result (offline)',
     );
-    return EMPTY_EXTRACTION;
+    // No model, no response text, no usage - it never called anything. The run
+    // log records `driver: console` and leaves the rest absent, and with no
+    // rawText NO target may be recorded as no_finding (design 7.1).
+    return { ok: true, meta: { driver: 'console' }, result: EMPTY_EXTRACTION };
   }
 }
 
@@ -140,34 +183,94 @@ class AnthropicExtractionDriver implements ExtractionDriver {
     this.log = opts.logger ?? defaultLogger;
   }
 
-  async extract(input: ExtractionInput): Promise<ExtractionResult> {
-    const message = await this.client.messages.create({
+  async extract(input: ExtractionInput): Promise<ExtractionCall> {
+    // Meta is assembled INCREMENTALLY and returned on every path, so a failure
+    // never discards what we already learned (design 6.4).
+    const meta: ExtractionMeta = {
+      driver: 'anthropic',
       model: this.model,
-      max_tokens: MAX_OUTPUT_TOKENS,
-      output_config: { format: { type: 'json_schema', schema: EXTRACTION_SCHEMA } },
-      system: buildExtractionSystemPrompt(),
-      messages: [{ role: 'user', content: buildExtractionUserContent(input) }],
-    });
-    // Per-run token spend (cost observability for the input caps). Counts
-    // only - never transcript text (PII).
-    this.log.info(
-      {
-        inputTokens: message.usage.input_tokens,
-        outputTokens: message.usage.output_tokens,
-        transcriptUtterances: input.transcript.length,
-      },
-      'anthropic extraction usage',
-    );
-    if (message.stop_reason === 'refusal') {
-      throw new ExtractionRefusedError('Anthropic declined to extract (stop_reason: refusal)');
+      promptFingerprint: extractionPromptFingerprint(),
+    };
+    let message: Awaited<ReturnType<typeof this.client.messages.create>>;
+    try {
+      message = await this.client.messages.create({
+        model: this.model,
+        max_tokens: MAX_OUTPUT_TOKENS,
+        output_config: { format: { type: 'json_schema', schema: EXTRACTION_SCHEMA } },
+        system: buildExtractionSystemPrompt(),
+        messages: [{ role: 'user', content: buildExtractionUserContent(input) }],
+      });
+    } catch (err) {
+      return { ok: false, meta, failure: 'driver', message: err instanceof Error ? err.message : String(err) };
     }
-    const textBlock = message.content.find(
+    // Everything below dereferences the RESPONSE. The types promise `usage` and
+    // `content`, but a stubbed/proxied client, a future SDK version or a
+    // streaming variant can hand back a shape that lacks them - and a TypeError
+    // escaping extract() would defeat the discriminated return entirely: its one
+    // caller (jobs/extraction.ts) does not wrap it, so the job's backstop would
+    // record errorKind 'repo' for a driver fault, and a thrown Error is the one
+    // object type this codebase's loggers serialize wholesale (rawText is PII).
+    // A malformed response is therefore a 'driver' FAILURE, never a throw.
+    const usage: typeof message.usage | undefined = message?.usage;
+    const usageOk =
+      typeof usage?.input_tokens === 'number' && typeof usage.output_tokens === 'number';
+    if (usageOk) {
+      meta.usage = { inputTokens: usage.input_tokens, outputTokens: usage.output_tokens };
+      // Per-run token spend (cost observability for the input caps). Counts
+      // only - never transcript text (PII). Stays with the stamp so a BILLED
+      // refusal is still costed - the refusal return below is not a reason to
+      // stop accounting for tokens the provider charged us for.
+      this.log.info(
+        {
+          inputTokens: usage.input_tokens,
+          outputTokens: usage.output_tokens,
+          transcriptUtterances: input.transcript.length,
+        },
+        'anthropic extraction usage',
+      );
+    }
+    // A refusal is the model DECLINING, not the transport breaking. Its
+    // discriminator is stop_reason, which arrives on a 200 regardless of the
+    // usage shape - a pre-output classifier decline is not billed at all, so
+    // it can carry no counts. Classify it BEFORE the usage guard, or an honest
+    // refusal is filed as errorKind 'driver'. Usage is stamped above first, so
+    // a billed refusal still keeps its counts.
+    if (message?.stop_reason === 'refusal') {
+      return {
+        ok: false, meta, failure: 'refusal',
+        message: 'Anthropic declined to extract (stop_reason: refusal)',
+      };
+    }
+    if (!usageOk) {
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response carried no usage counts',
+      };
+    }
+    const content: typeof message.content | undefined = message.content;
+    if (!Array.isArray(content)) {
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response contained no content blocks',
+      };
+    }
+    const textBlock = content.find(
       (block): block is Extract<typeof block, { type: 'text' }> => block.type === 'text',
     );
     if (!textBlock) {
-      throw new Error('Anthropic extraction response contained no text block');
+      return {
+        ok: false, meta, failure: 'driver',
+        message: 'Anthropic extraction response contained no text block',
+      };
     }
-    return parseExtractionText(textBlock.text);
+    // rawText is stamped BEFORE the parse, so a malformed response still carries
+    // the text that explains it.
+    meta.rawText = textBlock.text;
+    try {
+      return { ok: true, meta, result: parseExtractionText(textBlock.text) };
+    } catch (err) {
+      return { ok: false, meta, failure: 'parse', message: err instanceof Error ? err.message : String(err) };
+    }
   }
 }
 

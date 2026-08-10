@@ -17,7 +17,7 @@ function gsiNames(s: TableSpec): string[] {
 }
 
 describe('tables.ts — the table contract', () => {
-  it('defines the 9 doc-§5 tables plus settings (M1.4), pool_numbers (M1.7), broadcasts (M1.8a), activity_events (BE2), listing_sends (BE4), tours + tourReminders (Tours feature), placementNudges (Post-Tour & Application), placementDeadlines (placement-deadline-model), ai_extraction (conversation-fact-extraction)', () => {
+  it('defines all 22 source-order tables, including ai_runs', () => {
     expect(TABLES.map((t) => t.baseName)).toEqual([
       'contacts',
       'units',
@@ -36,9 +36,11 @@ describe('tables.ts — the table contract', () => {
       'tourReminders',
       'placementNudges',
       'placementDeadlines',
+      'pendingRosterActions',
       'tours',
       'ai_extraction',
       'unmatched_email',
+      'ai_runs',
     ]);
   });
 
@@ -56,6 +58,20 @@ describe('tables.ts — the table contract', () => {
     expect(t.stream).toBeUndefined();
     // F19 retention: linked/dismissed/quarantined rows expire via expires_at.
     expect(t.ttlAttribute).toBe('expires_at');
+  });
+
+  it('ai_runs (ai-run-log): PK itemId; sparse byEntity (entityKey + sortKey); TTL expires_at; no stream', () => {
+    const t = spec('ai_runs');
+    expect(t.hashKey.name).toBe('itemId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byEntity']);
+    const byEntity = t.gsis.find((g) => g.indexName === 'byEntity');
+    expect(byEntity?.hashKey.name).toBe('entityKey');
+    expect(byEntity?.rangeKey?.name).toBe('sortKey');
+    // Sparse: only ptr# rows carry entityKey, so run# rows never index here.
+    expect(byEntity?.sparse).toBe(true);
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBe('expires_at'); // 90-day retention (spec 10)
   });
 
   it('activity_events (BE2/C2): PK contactId + SK tsEventId; no GSIs/stream/TTL', () => {
@@ -207,6 +223,24 @@ describe('tables.ts — the table contract', () => {
     expect(t.stream).toBeUndefined();
   });
 
+  it('pendingRosterActions (contact-rosters 5.3): PK actionId; GSIs byOwner, byDueAt (fixed partition + dueAt range); no stream/TTL', () => {
+    const t = spec('pendingRosterActions');
+    expect(t.hashKey.name).toBe('actionId');
+    expect(t.rangeKey).toBeUndefined();
+    expect(gsiNames(t)).toEqual(['byOwner', 'byDueAt']);
+    const byOwner = t.gsis.find((g) => g.indexName === 'byOwner');
+    expect(byOwner?.hashKey.name).toBe('ownerKey');
+    expect(byOwner?.rangeKey).toBeUndefined();
+    const byDueAt = t.gsis.find((g) => g.indexName === 'byDueAt');
+    expect(byDueAt?.hashKey.name).toBe('_actionPartition');
+    expect(byDueAt?.rangeKey?.name).toBe('dueAt');
+    // NOT sparse - every row stamps _actionPartition, so a row can never fall
+    // out of the poller's index (the pool_numbers failure mode).
+    expect(byDueAt?.sparse).toBeUndefined();
+    expect(t.stream).toBeUndefined();
+    expect(t.ttlAttribute).toBeUndefined();
+  });
+
   it('invoices: PK invoiceId; GSIs byLandlord, byStatus', () => {
     const t = spec('invoices');
     expect(t.hashKey.name).toBe('invoiceId');
@@ -252,7 +286,7 @@ describe('tables.ts — the table contract', () => {
     expect(t.ttlAttribute).toBeUndefined();
   });
 
-  it('only messages and placements have streams; messages + matches + unmatched_email have TTL', () => {
+  it('only messages and placements have streams; messages + matches + unmatched_email + ai_runs have TTL', () => {
     expect(TABLES.filter((t) => t.stream).map((t) => t.baseName)).toEqual(['messages', 'placements']);
     // messages: reaps orphan F12 parked SES events (email-channel fix-wave adv
     // M3) - real conversation messages never set expires_at. matches: volatile
@@ -262,6 +296,7 @@ describe('tables.ts — the table contract', () => {
       'messages',
       'matches',
       'unmatched_email',
+      'ai_runs',
     ]);
   });
 

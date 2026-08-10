@@ -13,7 +13,7 @@ const person = (phone: string) => plan.merge.people.find((p) => p.phone === phon
 
 describe('loading', () => {
   it('finds all three Quo entity files across separate job directories', () => {
-    expect(plan.quo.contacts).toHaveLength(9);
+    expect(plan.quo.contacts).toHaveLength(11);
     expect(plan.quo.messages).toHaveLength(12);
     expect(plan.quo.calls).toHaveLength(2);
   });
@@ -32,7 +32,7 @@ describe('loading', () => {
     const airtable = plan.airtable;
     expect(airtable.landlords).toHaveLength(1);
     expect(airtable.properties).toHaveLength(1);
-    expect(airtable.tenants).toHaveLength(1);
+    expect(airtable.tenants).toHaveLength(3);
   });
 });
 
@@ -43,11 +43,36 @@ describe('merging people', () => {
     expect(p.contactId).toBe(contactIdForPhone(PHONES.tenantConflict));
   });
 
-  it('surfaces a voucher-size conflict instead of guessing', () => {
+  it('surfaces a voucher-size conflict instead of guessing (no Airtable value)', () => {
     const p = person(PHONES.tenantConflict)!;
     expect(p.voucherSizesSeen).toEqual([3, 4]);
     expect(p.suggestedVoucherBeds).toBeUndefined();
     expect(p.flags).toContain('bed_size_conflict');
+  });
+
+  it('lets Airtable settle a voucher-size conflict (Cameron 2026-08-09)', () => {
+    // Vera Cole is saved -2bed AND -3bed in Quo, but Airtable's integer column
+    // says 3 - Airtable overrules, so the conflict is resolved, not flagged.
+    const p = person(PHONES.conflictResolved)!;
+    expect(p.voucherSizesSeen).toEqual([2, 3]);
+    expect(p.suggestedVoucherBeds).toBe(3);
+    expect(p.flags).not.toContain('bed_size_conflict');
+  });
+
+  it('classifies a tenants-table row typed `Landlord` as a landlord', () => {
+    // The FULL 2026-08-09 export keeps landlords inside the tenants table. Her
+    // email also settled the handshake: it means landlord, but its ABSENCE means
+    // nothing (a personal-phone habit), so this typed column is the stronger
+    // signal.
+    const p = person(PHONES.airtableLandlordTyped)!;
+    expect(p.suggestedType).toBe('landlord');
+    // No traffic at all still means needs_review - type does not outrank the
+    // we-know-nothing-about-this-person rule.
+    expect(p.suggestedStatus).toBe('needs_review');
+  });
+
+  it('no longer burns review time on the star marker (founder: it means nothing)', () => {
+    for (const p of plan.merge.people) expect(p.flags).not.toContain('star_marker');
   });
 
   it('classifies a handshake-marked contact as a landlord', () => {
@@ -215,10 +240,13 @@ describe('the workbook', () => {
     expect(row.why).toContain('two different voucher sizes');
   });
 
-  it('defaults every group to NOT connecting on day one', () => {
+  it('defaults every group to CONTINUING - the only decision is exclusion', () => {
+    // 2026-08-09: regular group texting is being built, so all groups come over.
     const groups = parseCsv(plan.files['groups.csv']!).rows;
     expect(groups).toHaveLength(1);
-    expect(groups[0]!.connect_day_one).toBe('N');
+    expect(groups[0]!.drop).toBe('');
+    expect(groups[0]!.connect_day_one).toBeUndefined();
+    expect(groups[0]!.needs_your_input).toBe('');
   });
 
   it('names the people in each group', () => {
@@ -279,13 +307,34 @@ describe('carry-forward', () => {
     expect(rows.every((r) => r.change === 'new')).toBe(true);
   });
 
-  it('flags a conflict when a row key now holds a different phone', () => {
-    // row_key is position-derived, so a changed export can slide a different
-    // person onto the same key. Her edits must NOT silently transfer.
+  it('carries edits by PHONE, so they survive a wholesale row-key reshuffle', () => {
+    // Row keys are position-derived and the 2026-08-09 re-export moved nearly
+    // every row. Identity is the phone: an edit made against HC-0007 last week
+    // must find the same PERSON this week, whatever seat they sort into.
+    const shuffled = parseWorkbook({ contacts: plan.files['contacts.csv'] });
+    for (const [key, row] of [...shuffled.contacts]) {
+      shuffled.contacts.delete(key);
+      shuffled.contacts.set(`ZZ-${key}`, { ...row, row_key: `ZZ-${key}` });
+    }
+    const edited = [...shuffled.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!;
+    edited.name = 'Edited By Phone';
+
+    const replay = runPlan({
+      quoDir: fixture.quoDir,
+      airtableDir: fixture.airtableDir,
+      prior: shuffled,
+    });
+    const rows = parseCsv(replay.files['contacts.csv']!).rows;
+    const row = rows.find((r) => r.phone === PHONES.tenantBusy)!;
+    expect(row.name).toBe('Edited By Phone');
+    expect(row.change).toBe('unchanged');
+  });
+
+  it('does NOT transfer edits when the phone does not match anyone', () => {
     const prior = parseWorkbook({ contacts: plan.files['contacts.csv'] });
-    const first = prior.contacts.get('HC-0001')!;
-    first.name = 'Edited Name';
-    prior.contactPhones.set('HC-0001', '+15550109999');
+    const target = [...prior.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!;
+    target.name = 'Edited Name';
+    target.phone = '+15550109999'; // a person who no longer exists
 
     const replanned = runPlan({
       quoDir: fixture.quoDir,
@@ -293,9 +342,9 @@ describe('carry-forward', () => {
       prior,
     });
     const rows = parseCsv(replanned.files['contacts.csv']!).rows;
-    const row = rows.find((r) => r.row_key === 'HC-0001')!;
-    expect(row.change).toBe('conflict');
-    expect(row.needs_your_input).toBe('YES');
+    const row = rows.find((r) => r.phone === PHONES.tenantBusy)!;
+    // The real person gets no prior match - marked new, suggestion kept.
+    expect(row.change).toBe('new');
     expect(row.name).not.toBe('Edited Name');
   });
 });

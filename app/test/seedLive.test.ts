@@ -127,7 +127,7 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     }
     // Run seedLive with the fixed now.
     await seedLive(endpoint, FIXED_NOW);
-  });
+  }, 120_000);
 
   afterAll(async () => {
     // Drop all throwaway tables.
@@ -137,7 +137,7 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     process.env.TABLE_PREFIX = origPrefix;
     process.env.DYNAMODB_ENDPOINT = origEndpoint;
     doc.destroy();
-  });
+  }, 120_000);
 
   // ---------------------------------------------------------------------------
   // Today tour assertions

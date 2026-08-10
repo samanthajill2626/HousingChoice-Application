@@ -1,0 +1,94 @@
+/* RosterConfirmDialog - the pre-open / add-to-live-group confirm.
+ * Tokens only. The 860px breakpoint is the SAME one as ui/twoPaneShell
+ * (TWO_PANE_BREAKPOINT_PX) - below it the dialog is a phone-width sheet and its
+ * actions stack (spec 6.7). */
+
+/* The message preview reads as a TEXT, not as body copy: it is the literal SMS
+ * the group receives, so it gets a bubble. */
+.previewBox {
+  margin: 0 0 var(--sp-3);
+}
+
+.bubble {
+  margin: 0;
+  padding: var(--sp-2) var(--sp-3);
+  background: var(--c-bubble-out-bg);
+  border: 1px solid var(--c-bubble-out-border);
+  border-radius: var(--radius-lg);
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.recipients {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.recipient {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-surface-2);
+}
+
+.recipient:last-child {
+  border-bottom: none;
+}
+
+.recipientName {
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+/* Why a leg is suppressed - muted, but never hidden: a bare recipient count
+ * over a suppressed leg is the lie this dialog exists to prevent. */
+.reason {
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.count {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* Quiet hours DEFER the change (the default button does it at the window's
+ * end), so this is a note explaining the default, not a warning. */
+.quiet {
+  margin: var(--sp-1) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+.error {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}
+
+/* The footer's own action row. Desktop: Cancel then the DEFAULT, rightmost. */
+.actions {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+@media (max-width: 860px) {
+  /* Stack FULL WIDTH with the default on TOP, same order as desktop reads
+   * (spec 6.7). column-reverse gets it without re-authoring the JSX order. */
+  .actions {
+    flex: 1 1 100%;
+    flex-direction: column-reverse;
+    align-items: stretch;
+  }
+
+  .actions > * {
+    width: 100%;
+  }
+}

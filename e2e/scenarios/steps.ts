@@ -40,7 +40,7 @@ import { composeTourReminderBody } from '../../app/src/messages/tourCopy.js';
 // config load from the lane resolver). Fall back to the lane-0 dev default so
 // `npm run e2e:session` without Playwright still has a sane value.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
-/** The app's own number — OUR_PHONE_NUMBERS in the e2e stack (owns the conversation). */
+/** The app's own number — BUSINESS_PHONE_NUMBER in the e2e stack (owns the conversation). */
 export const APP_NUMBER = '+15550009999';
 /** Seeded landlord every created property is owned by (app/src/lib/seedData.ts). */
 const SEEDED_LANDLORD = 'contact-landlord-0001';
@@ -1696,11 +1696,17 @@ export class Scenario {
       // tab to reach its in-place empty state with the [Open group text] button
       // (the same action the header kebab offers).
       await this.page.getByRole('tab', { name: 'Group text' }).click();
+      // Opening SENDS the intro to real people, so it confirms first
+      // (contact-rosters spec 6.3): the click shows the server-composed preview
+      // and the dialog's own [Open group text] is what provisions.
+      await this.page.getByRole('button', { name: 'Open group text' }).click();
+      const confirm = this.page.getByRole('dialog', { name: 'Open the group text?' });
+      await expect(confirm).toBeVisible({ timeout: 15_000 });
       const [res] = await Promise.all([
         this.page.waitForResponse(
           (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
         ),
-        this.page.getByRole('button', { name: 'Open group text' }).click(),
+        confirm.getByRole('button', { name: 'Open group text' }).click(),
       ]);
       expect(res.status(), await res.text()).toBe(201);
       const { tour: updated, conversation } = (await res.json()) as {
@@ -2337,9 +2343,12 @@ export class Scenario {
    *  (a known prior inbound renders in that transcript). */
   expectTenantTabShows1to1(bodyRe: RegExp): Promise<void> {
     const tour = this.requireActiveTour();
-    return step('Team opens the Tenant channel tab (1:1 transcript)', async () => {
+    const tenant = this.requireActiveTenant();
+    return step('Team opens the tenant 1:1 channel tab (transcript)', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('tab', { name: /^Tenant/ }).click();
+      // Person tabs are labeled by DISPLAY NAME (contact-rosters slice 2) -
+      // anchor on the run-unique first name.
+      await this.page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`) }).click();
       const comms = this.page.getByRole('region', { name: 'Communications and activity' });
       await expect(comms.getByText(bodyRe).first()).toBeVisible({ timeout: 10_000 });
     });
@@ -2378,13 +2387,14 @@ export class Scenario {
    *  Guidance card leads with the bolded ID-gate rule. */
   expectSelfGuidedTourPage(): Promise<void> {
     const tour = this.requireActiveTour();
-    return step('App: self-guided tour defaults to the Tenant tab + shows the ID-gate guidance', async () => {
+    const tenant = this.requireActiveTenant();
+    return step('App: self-guided tour defaults to the tenant tab + shows the ID-gate guidance', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      // No group thread -> the initial channel tab is Tenant (selected).
-      await expect(this.page.getByRole('tab', { name: /^Tenant/ })).toHaveAttribute(
-        'aria-selected',
-        'true',
-      );
+      // No group thread -> the initial channel tab is the tenant's (selected).
+      // Person tabs are labeled by DISPLAY NAME (contact-rosters slice 2).
+      await expect(
+        this.page.getByRole('tab', { name: new RegExp(`^${tenant.firstName}\\b`) }),
+      ).toHaveAttribute('aria-selected', 'true');
       // The self-guided Guidance card leads with the ID-gate rule (ASCII hyphen).
       await expect(this.page.getByText('Photo ID before lockbox code - always.')).toBeVisible();
     });

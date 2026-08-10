@@ -439,6 +439,33 @@ export const TABLES: readonly TableSpec[] = [
     ],
   },
   {
+    // NEW in contact-rosters (spec 5.3): deferred roster actions - an
+    // "open the group text" or "add this member" the operator confirmed during
+    // QUIET HOURS, held until dueAt (quiet-end) and applied by the poller.
+    //
+    // PK actionId is DETERMINISTIC (`${ownerType}#${ownerId}#open` /
+    // `${ownerType}#${ownerId}#add#${contactId}`) so the KEY ITSELF enforces
+    // spec 5.3's dedupe: at most one action per (owner) open and per (owner,
+    // contact) add, and a duplicate confirm SUPERSEDES rather than queueing a
+    // second. Same deterministic-PK idea as placementDeadlines above.
+    //
+    // byOwner (hash ownerKey = `${ownerType}#${ownerId}`) enumerates a tour's
+    // or placement's actions for the People card and for conversion migration.
+    // byDueAt (fixed 'roster_actions' partition, range=dueAt) is the poller
+    // query - clones the tourReminders/placementNudges shape. NOT sparse: every
+    // row stamps _actionPartition, so no row can fall out of the poll's index.
+    baseName: 'pendingRosterActions',
+    hashKey: { name: 'actionId', type: 'S' },
+    gsis: [
+      { indexName: 'byOwner', hashKey: { name: 'ownerKey', type: 'S' } },
+      {
+        indexName: 'byDueAt',
+        hashKey: { name: '_actionPartition', type: 'S' },
+        rangeKey: { name: 'dueAt', type: 'S' },
+      },
+    ],
+  },
+  {
     // NEW in Tours feature (NOT in the doc §5 9-table model — README deviation):
     // first-class Tour entity (a scheduled visit by a tenant to a unit). Separate
     // from placements — a tenant stays `searching`; no touring stage. Four read
@@ -538,6 +565,39 @@ export const TABLES: readonly TableSpec[] = [
         indexName: 'byStatus',
         hashKey: { name: 'status', type: 'S' },
         rangeKey: { name: 'received_at', type: 'S' },
+        sparse: true,
+      },
+    ],
+    ttlAttribute: 'expires_at',
+  },
+  {
+    // NEW in ai-run-log (README deviation): the durable record of every
+    // conversation-fact-extraction run. Two disjoint row kinds share the key:
+    //   run#<runId>                          the full run record
+    //   ptr#<entityKey>#<startedAt>#<runId>  an adjacency pointer
+    // byEntity is TRULY sparse - only ptr# rows carry entityKey/sortKey, so a
+    // run# row never appears in the index. entityKey is either a LITERAL SCOPE
+    // TOKEN ('global', 'outcome#<outcome>') or the `<table>#<id>` convention
+    // audit_events uses ('conversations#<id>', 'contacts#<id>'); both forms
+    // coexist here by design. sortKey is `<startedAt ISO>#<runId>`, so a scope
+    // reads newest-first with ScanIndexForward false and a date range is a
+    // BETWEEN. Reads are Query(byEntity) then ONE BatchGetItem - never a Scan.
+    //
+    // Why a separate table (design 5.1): adding run# rows to ai_extraction
+    // would force table-wide TTL onto a table holding PERMANENT dismissal
+    // tombstones and extraction cursors, which survive only by lacking
+    // expires_at.
+    //
+    // TTL: 90 days on BOTH row kinds. DynamoDB TTL is asynchronous and may lag
+    // up to 48h, unordered, so a pointer can outlive its run# row - readers
+    // render that entry as expired rather than erroring.
+    baseName: 'ai_runs',
+    hashKey: { name: 'itemId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byEntity',
+        hashKey: { name: 'entityKey', type: 'S' },
+        rangeKey: { name: 'sortKey', type: 'S' },
         sparse: true,
       },
     ],

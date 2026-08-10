@@ -28,14 +28,19 @@ import {
   type MessagingAdapter,
 } from '../adapters/messaging.js';
 import type { AuthedRequest } from '../middleware/auth.js';
-import { createMessagesRepo, relayMemberKey, type MessagesRepo } from '../repos/messagesRepo.js';
+import { createMessagesRepo, type MessagesRepo } from '../repos/messagesRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
 import { provisionRelayGroup } from '../services/relayProvisioning.js';
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
-import { enqueueImmediate } from '../jobs/jobs.js';
-import { RELAY_MEMBER_ADDED_JOB } from '../jobs/relayFanOut.js';
+import {
+  addMemberToRelay,
+  parseRelayMember,
+  removeMemberFromRelay,
+  resolveMemberName,
+  type RelayMemberDeps,
+} from '../services/relayMembers.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { type ContactItem, createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
   CLOSE_NAG_INTERVAL_MS,
   type ConversationItem,
@@ -43,7 +48,6 @@ import {
   createConversationsRepo,
   type ConversationsRepo,
   getOwner,
-  RosterConflictError,
 } from '../repos/conversationsRepo.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
 import {
@@ -99,52 +103,10 @@ export interface RelayGroupsRouterDeps {
   events?: EventBus;
 }
 
-/** Resolved display name from a contact's firstName/lastName, or undefined.
- *  Exported for the tour relay route (tours.ts), which auto-resolves rosters. */
-export function nameFromContact(contact: ContactItem | undefined): string | undefined {
-  if (!contact) return undefined;
-  // Part-wise trim BEFORE the join (legacy padded parts must not render an
-  // interior gap; new writes arrive trimmed via trimJsonBody).
-  const first = typeof contact.firstName === 'string' ? contact.firstName.trim() : '';
-  const last = typeof contact.lastName === 'string' ? contact.lastName.trim() : '';
-  const joined = [first, last].filter((p) => p.length > 0).join(' ');
-  return joined.length > 0 ? joined : undefined;
-}
-
-/** Resolve a member's display name: explicit > contact-derived > undefined.
- *  Best-effort — an unknown contactId passes the member through nameless.
- *  Shared with the tour relay route (tours.ts). */
-export async function resolveMemberName(
-  contacts: ContactsRepo,
-  member: ConversationParticipant,
-): Promise<ConversationParticipant> {
-  if (member.name !== undefined) return member;
-  if (member.contactId && member.contactId.length > 0) {
-    const contact = await contacts.getById(member.contactId);
-    const name = nameFromContact(contact);
-    if (name !== undefined) return { ...member, name };
-  }
-  return member;
-}
-
-/** Validate + normalize one member input. Returns the member or an error string. */
-function parseMember(raw: unknown): ConversationParticipant | { error: string } {
-  if (typeof raw !== 'object' || raw === null) return { error: 'member must be an object' };
-  const m = raw as { phone?: unknown; contactId?: unknown; name?: unknown };
-  if (typeof m.phone !== 'string' || m.phone.length === 0) {
-    return { error: 'member.phone is required' };
-  }
-  const phone = normalizeToE164(m.phone);
-  if (phone === undefined) return { error: `member.phone is not a valid phone: ${m.phone}` };
-  const contactId =
-    typeof m.contactId === 'string' && m.contactId.length > 0 ? m.contactId : undefined;
-  const name = typeof m.name === 'string' && m.name.trim().length > 0 ? m.name.trim() : undefined;
-  return {
-    phone,
-    contactId: contactId ?? '',
-    ...(name !== undefined && { name }),
-  };
-}
+// nameFromContact / resolveMemberName / parseRelayMember now live in
+// services/relayMembers.ts (contact-rosters Task 10) next to the member
+// add/remove implementation they belong to - one home, no import cycle back
+// into this router.
 
 export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
@@ -163,6 +125,17 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
+  // Everything the shared member add/remove implementation touches
+  // (services/relayMembers) - built once from this router's resolved repos.
+  const memberDeps: RelayMemberDeps = {
+    conversations,
+    contacts,
+    audit,
+    activityEvents,
+    poolNumbers,
+    events,
+    log,
+  };
 
   const router = Router();
 
@@ -281,7 +254,7 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const members: ConversationParticipant[] = [];
     const seenPhones = new Set<string>();
     for (const raw of body.members) {
-      const parsed = parseMember(raw);
+      const parsed = parseRelayMember(raw);
       if ('error' in parsed) {
         res.status(400).json({ error: parsed.error });
         return;
@@ -336,229 +309,57 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     res.json({ members: conversation.participants ?? [] });
   });
 
-  // POST /api/conversations/:id/members — idempotent add.
+  // POST /api/conversations/:id/members - idempotent add. The whole sequence
+  // (connecting guard, burn claim, roster write, audit, milestone,
+  // announcement, conversation.updated emit) lives in
+  // services/relayMembers.addMemberToRelay - the ONE implementation the
+  // owner-scoped roster call-through endpoints share.
+  //
+  // NOTE (contact-rosters spec section 7): STANDALONE relay groups keep this
+  // RAW route and DO NOT defer for quiet hours. Deferral is owner-scoped and
+  // lives on POST /api/{tours,placements}/:id/roster/live-members, the only add
+  // path the dashboard uses for a tour/placement roster - so the deferral
+  // machinery has exactly one add path to guard.
   router.post('/conversations/:conversationId/members', async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId;
     const { conversationId } = req.params;
     mergeContext({ conversationId });
-    const conversation = await conversations.getById(conversationId);
-    if (!conversation || conversation.type !== 'relay_group') {
-      res.status(404).json({ error: 'relay_group_not_found' });
-      return;
-    }
-    // D11: a CONNECTING group has NO pool number yet, so a member add would
-    // SILENTLY SKIP the burn-claim (the burn gate below is `pool_number` present)
-    // - breaking the burn-multiplexing invariant + letting a future group reuse
-    // this number for an unburned phone. Refuse member mutations until connected.
-    // PII: actor + reason only (never the phone).
-    if (conversation.status === 'connecting') {
-      await audit.append(`conversations#${conversationId}`, 'relay_member_add_refused', {
-        actor,
-        reason: 'group_connecting',
-      });
-      res.status(409).json({
-        error: 'group_connecting',
-        message:
-          'This group text is still connecting to its number. Add members once it is connected.',
-      });
-      return;
-    }
-    const parsed = parseMember(req.body);
-    if ('error' in parsed) {
-      res.status(400).json({ error: parsed.error });
-      return;
-    }
-    const member = await resolveMemberName(contacts, parsed);
-    // addMember is idempotent on phone — capture whether this member was already
-    // on the roster so we only emit added_to_group_text for a REAL add.
-    const wasMember = (conversation.participants ?? []).some((p) => p.phone === member.phone);
-    // W1 BURN GAP: a NEW member must be BURNED onto the group's pool number
-    // BEFORE the roster mutation, or (a) they might already be rostered on
-    // another group sharing this number - breaking (To,From) resolution (wrong
-    // delivery / privacy leak) - and (b) an unburned add lets a FUTURE group
-    // containing this phone legitimately reuse the same number (reuse consults
-    // only burned_phones). ever_member_phones records the phones THIS group has
-    // burned here, so the rule is:
-    //   (1) already a current participant -> unchanged idempotent add (no burn);
-    //   (2) already in ever_member_phones -> burned by THIS group already
-    //       (remove-then-re-add) -> allowed WITHOUT a new claim;
-    //   (3) else burnClaim FIRST - on conflict 409, on success the roster + the
-    //       ever_member_phones provenance are written together (addMember).
-    // CRASH-ORDERING: burn-then-roster. A crash between the two leaves a
-    // burned-but-unrostered phone - the CONSERVATIVE direction (blocks reuse,
-    // never mis-routes; consistent with burn-forever). Never roster-then-burn.
-    // LEGACY: a pre-W1 group has no ever_member_phones; a new phone is not a
-    // current participant, so rule (3) claims it, and addMember then initializes
-    // the set from the current roster (their burns belong to this group).
-    if (!wasMember) {
-      const rawEver = conversation.ever_member_phones;
-      const everSet =
-        rawEver instanceof Set ? rawEver : Array.isArray(rawEver) ? new Set(rawEver) : undefined;
-      const burnedByThisGroup = everSet !== undefined && everSet.has(member.phone);
-      const poolNumber = conversation.pool_number;
-      if (!burnedByThisGroup && typeof poolNumber === 'string' && poolNumber.length > 0) {
-        const burned = await poolNumbers.burnMember(poolNumber, member.phone);
-        if (!burned) {
-          // PII (doc section 9): actor + reason only - NEVER the phone in the audit/log.
-          await audit.append(`conversations#${conversationId}`, 'relay_member_add_refused', {
-            actor,
-            reason: 'phone_conflict_on_number',
-          });
-          log.info(
-            { conversationId, actor },
-            'relay member add refused - phone already burned on this number',
-          );
-          res.status(409).json({
-            error: 'phone_conflict_on_number',
-            message:
-              'This person already has a group text history on this number. Start a new ' +
-              'group text with them instead.',
-          });
-          return;
-        }
-      }
-    }
-    let updated: ConversationItem;
-    try {
-      updated = await conversations.addMember(conversationId, member);
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'relay_group_not_found' });
-        return;
-      }
-      // FIX 3: roster optimistic-concurrency conflict past the retry bound.
-      if (err instanceof RosterConflictError) {
-        res.status(409).json({ error: 'roster_conflict' });
-        return;
-      }
-      throw err;
-    }
-    await audit.append(`conversations#${conversationId}`, 'relay_member_added', {
-      actor,
-      contactId: member.contactId || null,
+    const result = await addMemberToRelay(memberDeps, conversationId, req.body, {
+      announce: true,
+      ...(actor !== undefined && { actor }),
     });
-    // BE2/C2: a real member-add is a timeline milestone for THAT member's
-    // contact (link-out to the relay conversation). Only for members with a
-    // contactId; best-effort (a log failure must not fail the roster mutation).
-    if (!wasMember && member.contactId && member.contactId.length > 0) {
-      try {
-        await activityEvents.record({
-          contactId: member.contactId,
-          type: 'added_to_group_text',
-          label: 'Added to group text',
-          refType: 'conversation',
-          refId: conversationId,
-        });
-      } catch (err) {
-        log.error({ err, conversationId }, 'relay member add: recording milestone failed');
-      }
+    if (!result.ok) {
+      const { status, error, message } = result.refusal;
+      res.status(status).json({ error, ...(message !== undefined && { message }) });
+      return;
     }
-    // Announce a REAL add to the WHOLE group (founder decision 2026-07-14):
-    // the new member's welcome + everyone else's join notice, persisted in the
-    // thread as a system announcement (relay.memberAdded job → the intro
-    // chain). Best-effort — a failed enqueue must not fail the roster mutation
-    // (the member IS on the roster; log + continue).
-    if (!wasMember) {
-      try {
-        await enqueueImmediate(RELAY_MEMBER_ADDED_JOB, {
-          relayConversationId: conversationId,
-          addedMemberKey: relayMemberKey(member),
-        });
-      } catch (err) {
-        log.error(
-          { err, conversationId },
-          'relay member add: announcement enqueue failed — member added without a join notice',
-        );
-      }
-    }
-    events.emit('conversation.updated', toConversationUpdatedEvent(updated));
-    log.info(
-      { conversationId, memberCount: (updated.participants ?? []).length, actor },
-      'relay member added via api',
-    );
-    res.json({ members: updated.participants ?? [] });
+    res.json({ members: result.members });
   });
 
-  // DELETE /api/conversations/:id/members/:phone — idempotent remove.
+  // DELETE /api/conversations/:id/members/:phone - idempotent remove, and
+  // SILENT (a removal announces nothing to anyone). Shared implementation:
+  // services/relayMembers.removeMemberFromRelay.
   router.delete('/conversations/:conversationId/members/:phone', async (req, res) => {
     const actor = (req as AuthedRequest).user?.userId;
     const { conversationId } = req.params;
     mergeContext({ conversationId });
+    // This URL contract is PHONE-keyed, so the param is validated here and the
+    // 400 stays with the route (the service also accepts a contactId or a
+    // `phone:<E164>` roster key - forms this route never produces).
     const phone = normalizeToE164(String(req.params['phone'] ?? ''));
     if (phone === undefined) {
       res.status(400).json({ error: 'invalid phone' });
       return;
     }
-    const conversation = await conversations.getById(conversationId);
-    if (!conversation || conversation.type !== 'relay_group') {
-      res.status(404).json({ error: 'relay_group_not_found' });
-      return;
-    }
-    // D11: refuse roster mutations while CONNECTING (parity with the add guard -
-    // the roster is frozen until the group opens on its number).
-    if (conversation.status === 'connecting') {
-      res.status(409).json({
-        error: 'group_connecting',
-        message:
-          'This group text is still connecting to its number. Remove members once it is connected.',
-      });
-      return;
-    }
-    // Capture the member being removed (for the milestone's contactId) BEFORE
-    // the mutation — removeMember is idempotent, so a no-op (absent phone)
-    // leaves removedMember undefined and we emit nothing.
-    const removedMember = (conversation.participants ?? []).find((p) => p.phone === phone);
-    let updated: ConversationItem;
-    try {
-      updated = await conversations.removeMember(conversationId, phone);
-    } catch (err) {
-      if (err instanceof ConditionalCheckFailedException) {
-        res.status(404).json({ error: 'relay_group_not_found' });
-        return;
-      }
-      // FIX 3: roster optimistic-concurrency conflict past the retry bound.
-      if (err instanceof RosterConflictError) {
-        res.status(409).json({ error: 'roster_conflict' });
-        return;
-      }
-      throw err;
-    }
-    await audit.append(`conversations#${conversationId}`, 'relay_member_removed', {
-      actor,
+    const result = await removeMemberFromRelay(memberDeps, conversationId, phone, {
+      ...(actor !== undefined && { actor }),
     });
-    // A2P — resolve the Today opt-out attention item: removing the member clears
-    // their relay_opted_out_members entry (the item auto-resolves). Keyed by the
-    // SAME relayMemberKey the fan-out used (contactId, else `phone#<E164>`).
-    // Best-effort — a failure must not fail the remove.
-    if (removedMember !== undefined) {
-      const memberKey = relayMemberKey(removedMember);
-      try {
-        await conversations.clearRelayMemberOptedOut(conversationId, memberKey);
-      } catch (err) {
-        log.error({ err, conversationId }, 'relay member remove: clearing opt-out annotation failed');
-      }
+    if (!result.ok) {
+      const { status, error, message } = result.refusal;
+      res.status(status).json({ error, ...(message !== undefined && { message }) });
+      return;
     }
-    // BE2/C2: a real member-remove is a timeline milestone for THAT member's
-    // contact. Only for members with a contactId; best-effort.
-    if (removedMember?.contactId && removedMember.contactId.length > 0) {
-      try {
-        await activityEvents.record({
-          contactId: removedMember.contactId,
-          type: 'removed_from_group_text',
-          label: 'Removed from group text',
-          refType: 'conversation',
-          refId: conversationId,
-        });
-      } catch (err) {
-        log.error({ err, conversationId }, 'relay member remove: recording milestone failed');
-      }
-    }
-    events.emit('conversation.updated', toConversationUpdatedEvent(updated));
-    log.info(
-      { conversationId, memberCount: (updated.participants ?? []).length, actor },
-      'relay member removed via api',
-    );
-    res.json({ members: updated.participants ?? [] });
+    res.json({ members: result.members });
   });
 
   // PATCH /api/conversations/:id/close - close / reopen a relay group.

@@ -32,6 +32,7 @@ import { VoiceSection } from './routes/settings/VoiceSection.js';
 import { SystemStatusSection } from './routes/settings/SystemStatusSection.js';
 import { QuietHoursSection } from './routes/settings/QuietHoursSection.js';
 import { NumbersSection } from './routes/settings/NumbersSection.js';
+import { AiRunsSection } from './routes/settings/aiRuns/AiRunsSection.js';
 import { AdminRoute } from './routes/settings/AdminRoute.js';
 import { defaultTabPath } from './routes/settings/settingsTabs.js';
 import { allNavTargets } from './app/nav.js';
@@ -199,13 +200,18 @@ function AuthedApp(): React.JSX.Element {
                 }
               />
               <Route
-                path="numbers"
+                path="ai-runs"
                 element={
                   <AdminRoute>
-                    <NumbersSection />
+                    <AiRunsSection />
                   </AdminRoute>
                 }
               />
+              {/* Phone numbers: OUR one business number is read-only and
+                  reachable by any logged-in user (NOT admin-guarded); the
+                  section's own role gate keeps the pool inventory admin-only,
+                  and GET /api/pool-numbers stays role-guarded on the server. */}
+              <Route path="numbers" element={<NumbersSection />} />
             </Route>
 
             {/* The remaining nav destinations stay placeholders for now. */}

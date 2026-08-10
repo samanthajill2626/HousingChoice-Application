@@ -159,11 +159,24 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 - **"Group text number"** = the STAFF-FACING name a navigator sees for a relay
   **pool number** (the shared number the relay multiplexes group texts onto).
   Code and data stay `pool_number` / `poolNumber` (`poolNumbersRepo`,
-  `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the admin Settings
-  inventory at `/settings/numbers` is titled **"Group text numbers"** (admin-only,
-  read-only). A number is provisioned with the first group text and can outlive
-  many groups (burn-as-claim multiplexing), so the accurate noun is "group text
-  number", never "the group's number". Tenants and landlords never see this term.
+  `PoolNumberItem`, `lifecycle_state`, `burned_phones`); the Settings tab at
+  `/settings/numbers` is titled **"Phone numbers"** and its pool inventory block
+  is still headed **"Group text numbers"** (admin-only, read-only - the tab
+  itself is visible to every authenticated user, since its other block shows OUR
+  one business number). A number is provisioned with the first group text and
+  can outlive many groups (burn-as-claim multiplexing), so the accurate noun is
+  "group text number", never "the group's number". Tenants and landlords never
+  see this term.
+
+- **"Our number"** / **the business number** (2026-08-06) = the ONE number an
+  environment texts and calls FROM, configured as the env var
+  `BUSINESS_PHONE_NUMBER` and read as `config.businessPhoneNumber` (a scalar; it
+  replaced the positional `OUR_PHONE_NUMBERS` list whose `[0]` was silently
+  special). Staff see it read-only as "Our number" in **Settings > Phone
+  numbers** and as the "Sending from" pill on **Settings > System status**;
+  tenants and landlords know it as the number on the flyer. It is NEVER a relay
+  pool number ("group text number", above): dev and prod each have their own,
+  and there is no in-app edit path.
 
 - **`partner`** (email-channel v1, 2026-07-21) - a FIRST-CLASS `ContactType` (the
   code/data value `partner`, a union member beside `tenant` / `landlord` /
@@ -192,6 +205,29 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   **Delete** it. Distinct from `unmatched` (a clean unknown-sender email): same
   store, a different `status`. The Email nav badge counts UNMATCHED unread only,
   never quarantine.
+
+- **primary contact** (contact-rosters, 2026-08-04) - the property-side person we
+  put on group texts and reach by a masked call: the unit's DEFAULT contact. Code
+  and data: the roster-row flag `UnitContact.primaryContact` plus the unit scalar
+  `primary_contact`, which `unitsRepo.addContact` / `removeContact` keep
+  consistent with each other. AT MOST ONE per unit (zero is legal and reachable -
+  removing the primary from a unit with no `landlordId` clears both). Staff see it
+  as the "primary" on the property's Contacts card. RENAMED 2026-08-04 from
+  `primaryVoice` / `primary_voice_contact`: the old names meant only "the
+  landlord-side person a masked tenant call routes to", and the concept widened to
+  cover group texts as well as calls (persisted keys were renamed too - safe only
+  because prod is not live yet and dev reseeds).
+
+- **landlord of record** (contact-rosters, 2026-08-04) - `unit.landlordId`: who
+  OWNS the unit. Deliberately distinct from the **primary contact** (who we put on
+  threads and dial): the landlord of record is IMMOVABLE from the roster -
+  `unitsRepo.removeContact` refuses with `CannotRemoveLandlordOfRecordError`,
+  which the route maps to 409 `cannot_remove_landlord_of_record` ("cannot remove
+  the unit's landlord of record; reassign landlordId first"). Their roster row's
+  role is also structural (always `landlord`). RENAMED 2026-08-04 from
+  `CannotRemovePrimaryLandlordError` / `cannot_remove_primary_landlord`: the old
+  "primary landlord" wording collided with the primary contact, which is exactly
+  the ambiguity this pair of names removes.
 
 ---
 

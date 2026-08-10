@@ -208,7 +208,7 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       // object below, so the flyer test FAILS loudly if tour_type ever leaks.
       tour_type: 'self_guided',
       application_process: 'SECRET portal',
-      primary_voice_contact: 'contact-ll-agent',
+      primary_contact: 'contact-ll-agent',
       status_source: 'manual',
       propertyId: 'SECRET-parent',
       ...overrides,
@@ -245,7 +245,7 @@ describe('toUnitFlyer - the merged public allowlist', () => {
     const flyer = toUnitFlyer(fullUnit());
     const keys = Object.keys(flyer);
     for (const forbidden of [
-      'landlordId', 'primary_voice_contact', 'tour_process', 'tour_type',
+      'landlordId', 'primary_contact', 'tour_process', 'tour_type',
       'application_process', 'status', 'status_source', 'notes',
       'payment_standard', 'lif', 'propertyId', 'jurisdiction', 'priority',
       'final_rent', 'voucher_size_accepted',

@@ -115,6 +115,18 @@ const UNITS: UnitsPage = {
   units: [{ unitId: 'u1', landlordId: 'L1', status: 'available', beds: 2, address: '1450 Joseph Blvd' }],
 };
 
+// One pending suggestion - the fixture the accept/dismiss FAILURE tests drive.
+const PETS_SUGGESTION = {
+  itemId: 'sugg#k1#pets',
+  ownerContactId: 'k1',
+  target: 'pets',
+  suggestedValue: 'two cats',
+  conversationId: 'conv-1',
+  revision: 'rev-pets',
+  runId: 'run-pets',
+  createdAt: '2026-07-16T11:00:00.000Z',
+};
+
 // A second contact used in relationship-candidate tests.
 const OTHER: Contact = {
   contactId: 'z99',
@@ -344,6 +356,8 @@ describe('ContactDetail', () => {
         suggestedValue: '3',
         reason: 'said a 3BR',
         conversationId: 'conv-1',
+        revision: 'rev-voucher',
+        runId: 'run-voucher',
         createdAt: '2026-07-16T10:00:00.000Z',
       },
     ]);
@@ -359,13 +373,154 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "3"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'voucherSize');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'voucherSize', {
+      revision: 'rev-voucher',
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: 'run-voucher',
+    });
     // The returned contact is applied in place: value shows 3 with the Auto badge; chip gone.
     await waitFor(() => expect(screen.getByText('3 BR')).toBeInTheDocument());
     expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
     await waitFor(() =>
       expect(screen.queryByRole('group', { name: 'AI suggestion for voucher size' })).not.toBeInTheDocument(),
     );
+  });
+
+  it('dismisses using the current suggestion immutable identity', async () => {
+    const { default: userEvent } = await import('@testing-library/user-event');
+    const user = userEvent.setup();
+    getContact.mockResolvedValue(TENANT);
+    getSuggestions.mockResolvedValue([{
+      itemId: 'sugg#k1#pets',
+      ownerContactId: 'k1',
+      target: 'pets',
+      suggestedValue: 'two cats',
+      conversationId: 'conv-1',
+      revision: 'rev-pets',
+      runId: 'run-pets',
+      createdAt: '2026-07-16T11:00:00.000Z',
+    }]);
+    dismissSuggestion.mockResolvedValue([]);
+    renderAt('k1');
+
+    const chip = await screen.findByRole('group', { name: 'AI suggestion for pets' });
+    await user.click(within(chip).getByRole('button', { name: 'Dismiss' }));
+
+    expect(dismissSuggestion).toHaveBeenCalledWith('k1', 'pets', {
+      revision: 'rev-pets',
+      createdAt: '2026-07-16T11:00:00.000Z',
+      runId: 'run-pets',
+    });
+    await waitFor(() => expect(screen.queryByRole('group', { name: 'AI suggestion for pets' })).not.toBeInTheDocument());
+  });
+
+  // The resolution routes answer with a whole vocabulary of codes (400/404/409),
+  // and ApiError.message is the RAW code - every failure must reach the chip the
+  // navigator clicked as its own honest sentence, never the phone-conflict copy
+  // and never silence.
+  describe('suggestion accept/dismiss failures', () => {
+    async function clickChip(action: 'Accept' | 'Dismiss'): Promise<HTMLElement> {
+      const { default: userEvent } = await import('@testing-library/user-event');
+      const user = userEvent.setup();
+      getContact.mockResolvedValue(TENANT);
+      getSuggestions.mockResolvedValue([PETS_SUGGESTION]);
+      renderAt('k1');
+      const chip = await screen.findByRole('group', { name: 'AI suggestion for pets' });
+      await user.click(within(chip).getByRole('button', { name: action }));
+      return chip;
+    }
+
+    it('shows the replaced-suggestion copy on a 409 suggestion_replaced accept, not the phone sentence', async () => {
+      acceptSuggestion.mockRejectedValue(new ApiError(409, 'suggestion_replaced', 'suggestion_replaced'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent(
+        'That suggestion changed since this page loaded - refresh and review the new one.',
+      );
+      expect(alert).not.toHaveTextContent('That number already belongs to another contact.');
+      // The chip stays put and re-enables for a retry.
+      expect(within(chip).getByRole('button', { name: 'Accept' })).toBeEnabled();
+    });
+
+    it('surfaces a failed DISMISS instead of swallowing it', async () => {
+      dismissSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_already_resolved', 'suggestion_already_resolved'),
+      );
+      const chip = await clickChip('Dismiss');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('That suggestion was already accepted or dismissed');
+      expect(within(chip).getByRole('button', { name: 'Dismiss' })).toBeEnabled();
+    });
+
+    it('surfaces a 400 accept refusal instead of re-enabling the chip in silence', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(400, 'invalid_suggestion_value', 'invalid_suggestion_value'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('could not be used');
+      expect(alert.textContent ?? '').not.toContain('invalid_suggestion_value');
+    });
+
+    it('falls back to the generic sentence for a code this build has never heard of', async () => {
+      acceptSuggestion.mockRejectedValue(new ApiError(409, 'a_brand_new_server_code', 'a_brand_new_server_code'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('Something went wrong - please try again.');
+      expect(alert.textContent ?? '').not.toContain('a_brand_new_server_code');
+    });
+
+    it('answers the not-pending rejection with copy AND refetches so the stale chip corrects itself', async () => {
+      // useSuggestions rejects with this exact plain Error (not an ApiError) when
+      // the target is no longer in its list; the value reaching this catch is the
+      // same whether the hook or the request produced it.
+      acceptSuggestion.mockRejectedValue(new Error('Suggestion is no longer pending'));
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('That suggestion is no longer pending');
+      // One fetch on mount, one from the refetch this failure triggers.
+      await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+    });
+
+    // The SERVER answers these three with a list that has genuinely moved on:
+    // two of them PROMISE "the list now shows its real state", and a refused
+    // accept has already deleted the row. The server does emit
+    // `suggestion.updated` for a helped commit and for the refused accept (the
+    // helped-or-refused emit in the suggestions router's shared error path),
+    // but an SSE is asynchronous and not guaranteed to reach THIS tab before
+    // the operator looks - the refetch is what makes the answer true here.
+    it.each([
+      ['no_pending_suggestion', 404],
+      ['suggestion_already_resolved', 409],
+      ['suggestion_field_edited', 409],
+    ])('refetches on a SERVER %s so the list really does show its real state', async (code, httpStatus) => {
+      acceptSuggestion.mockRejectedValue(new ApiError(httpStatus, code, code));
+      const chip = await clickChip('Accept');
+
+      // The message is state on this page, not a field of the refetched list, so
+      // it is still there after the correction lands.
+      const alert = await within(chip).findByRole('alert');
+      expect(alert.textContent ?? '').not.toContain('_');
+      // One fetch on mount, one from the refetch this failure must trigger.
+      await waitFor(() => expect(getSuggestions).toHaveBeenCalledTimes(2));
+      expect(await within(chip).findByRole('alert')).toBeInTheDocument();
+    });
+
+    it('does NOT refetch on the in-flight codes, whose copy promises nothing about the list', async () => {
+      acceptSuggestion.mockRejectedValue(
+        new ApiError(409, 'suggestion_resolution_in_progress', 'suggestion_resolution_in_progress'),
+      );
+      const chip = await clickChip('Accept');
+
+      const alert = await within(chip).findByRole('alert');
+      expect(alert).toHaveTextContent('try again in a moment');
+      expect(getSuggestions).toHaveBeenCalledTimes(1);
+    });
   });
 
   it('shows the Auto badge on the Current address row when address_source is ai', async () => {
@@ -412,7 +567,11 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "1 Main St, Atlanta"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'address');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'address', {
+      revision: undefined,
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: undefined,
+    });
     // The returned contact applies in place: the row shows the new address + Auto badge; chip gone.
     await waitFor(() => expect(screen.getByText('1 Main St, Atlanta')).toBeInTheDocument());
     expect(screen.getByRole('img', { name: 'Auto' })).toBeInTheDocument();
@@ -448,7 +607,11 @@ describe('ContactDetail', () => {
     expect(within(chip).getByText('AI heard "Tasha"')).toBeInTheDocument();
 
     await user.click(within(chip).getByRole('button', { name: 'Accept' }));
-    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName');
+    expect(acceptSuggestion).toHaveBeenCalledWith('k1', 'firstName', {
+      revision: undefined,
+      createdAt: '2026-07-16T10:00:00.000Z',
+      runId: undefined,
+    });
     // The returned contact applies in place: the chip drops.
     await waitFor(() =>
       expect(screen.queryByRole('group', { name: 'AI suggestion for first name' })).not.toBeInTheDocument(),

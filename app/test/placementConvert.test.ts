@@ -138,6 +138,78 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect((res.body.tour as Record<string, unknown>)['status']).toBe('closed');
   });
 
+  // --- roster inheritance (contact-rosters D4) -------------------------------
+
+  it('a THREAD-BEARING tour needs no roster copy: the participants ride the rebind', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const conversation = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550309998',
+      members: [
+        { phone: '+15550300001', contactId: tenantId },
+        { phone: '+15550300002', contactId: 'll-convert-1' },
+      ],
+      owner: { type: 'tour', id: 'tour-convert-fact' },
+    });
+
+    const tourId = 'tour-convert-fact';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      groupThreadId: conversation.conversationId,
+      // A stale plan left by a crash between the pointer write and the delete is
+      // INERT (spec D1) - the thread wins, and conversion must not resurrect it.
+      roster: [{ contactId: 'c-ghost' }],
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+
+    const placement = res.body.placement as Record<string, unknown>;
+    expect(placement['group_thread']).toBe(conversation.conversationId);
+    expect(placement['roster']).toBeUndefined();
+    // The rebound thread still carries both members - that IS the inheritance.
+    const rebound = world.conversations.get(conversation.conversationId)!;
+    expect((rebound.participants ?? []).map((p) => p.contactId)).toEqual([tenantId, 'll-convert-1']);
+  });
+
+  it('a PLAN-ONLY tour (no thread) hands its roster to the placement, verbatim', async () => {
+    const { app, world } = makeWebhookHarness();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+
+    const tourId = 'tour-convert-plan';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'self_guided',
+      status: 'toured',
+      convertible: true,
+      roster: [{ contactId: 'c-caseworker' }, { phone: '+15550300007' }],
+      rosterVersion: 3,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+
+    const placement = res.body.placement as Record<string, unknown>;
+    expect(placement['group_thread']).toBeUndefined();
+    expect(placement['roster']).toEqual([{ contactId: 'c-caseworker' }, { phone: '+15550300007' }]);
+    // The placement starts its own optimistic-concurrency line, not the tour's.
+    expect(placement['rosterVersion']).toBe(1);
+  });
+
   it('records the tours# tour_converted milestone + emits tour.updated (tour-detail-page 1a)', async () => {
     const { app, world } = makeWebhookHarness();
     const { tenantId, unitId } = seedTenantAndUnit(world);
@@ -431,6 +503,98 @@ describe('POST /api/placements/from-tour — conversion', () => {
     expect(finalTour.status).toBe('closed');
     expect(finalTour.convertedPlacementId).toBe(
       (ok.body.placement as Record<string, unknown>)['placementId'],
+    );
+  });
+
+  it('migrates the tour PENDING roster actions onto the placement (contact-rosters D4/Task 13)', async () => {
+    const world = createFakeWorld();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    const tourId = 'tour-convert-actions';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    // One PENDING open deferred to quiet-end, plus a TERMINAL notice that must
+    // stay with the tour's own history.
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'open_group',
+      dueAt: '2026-07-15T12:00:00.000Z',
+      createdAt: '2026-07-15T03:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'add_member',
+      contactId: 'c-old',
+      dueAt: '2026-07-14T12:00:00.000Z',
+      createdAt: '2026-07-14T03:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.claimSkip(
+      `tour#${tourId}#add#c-old`,
+      '2026-07-14T12:00:01.000Z',
+      'already_member',
+    );
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+    expect(res.status).toBe(201);
+    const placementId = (res.body.placement as Record<string, unknown>)['placementId'] as string;
+
+    // The PENDING row moved (its deterministic id was rewritten with the owner).
+    expect(await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`)).toBeUndefined();
+    const moved = await world.pendingRosterActionsRepo.getById(`placement#${placementId}#open`);
+    expect(moved!.status).toBe('pending');
+    expect(moved!.ownerKey).toBe(`placement#${placementId}`);
+    expect(moved!.dueAt).toBe('2026-07-15T12:00:00.000Z');
+
+    // The TERMINAL notice stayed with the tour.
+    const stayed = await world.pendingRosterActionsRepo.getById(`tour#${tourId}#add#c-old`);
+    expect(stayed!.status).toBe('skipped');
+  });
+
+  it('a failing action migration NEVER fails the conversion (the poller retires the orphan)', async () => {
+    const world = createFakeWorld();
+    const { tenantId, unitId } = seedTenantAndUnit(world);
+    const tourId = 'tour-convert-migrate-fail';
+    world.toursMap.set(tourId, {
+      tourId,
+      tenantId,
+      unitId,
+      tourType: 'landlord_led',
+      status: 'toured',
+      convertible: true,
+      _schedPartition: 'tours',
+      createdAt: '2026-07-02T00:00:00.000Z',
+      updatedAt: '2026-07-02T00:00:00.000Z',
+    });
+    await world.pendingRosterActionsRepo.upsertPending({
+      ownerType: 'tour',
+      ownerId: tourId,
+      action: 'open_group',
+      dueAt: '2026-07-15T12:00:00.000Z',
+      createdAt: '2026-07-15T03:00:00.000Z',
+    });
+    world.pendingRosterActionsRepo.migrate = async () => {
+      throw new Error('injected migrate failure');
+    };
+
+    const { app } = makeWebhookHarness({ world });
+    const res = await authed(app).post('/api/placements/from-tour').send({ tourId });
+
+    expect(res.status).toBe(201);
+    // The orphan is still on the (now converted) tour - the poller's 'converted'
+    // skip is what retires it visibly.
+    expect((await world.pendingRosterActionsRepo.getById(`tour#${tourId}#open`))!.status).toBe(
+      'pending',
     );
   });
 

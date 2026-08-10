@@ -16,9 +16,10 @@
 // Staff see "property" for the unit (GLOSSARY). The old StageDataCard +
 // PaperworkCard recorders live INSIDE the Now card now (its stage-scoped
 // Record section) — they no longer render standalone here.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Link, useParams } from 'react-router-dom';
 import {
+  ApiError,
   PLACEMENT_STAGES,
   STAGE_LABELS,
   STAGE_PHASE,
@@ -28,6 +29,7 @@ import {
   getPlacement,
   getContact,
   getUnit,
+  previewPlacementRosterOpen,
   provisionPlacementRelay,
   setPlacementFollowUp,
   transitionPlacement,
@@ -39,6 +41,7 @@ import {
   type Contact,
   type LostReason,
   type PlacementStage,
+  type RosterPreview,
   type UnitItem,
 } from '../../api/index.js';
 import {
@@ -63,6 +66,12 @@ import { gateFor, type TransitionGate } from './transitionGate.js';
 import { LostReasonModal } from './LostReasonModal.js';
 import { MovePromptModal, type MovePromptResult } from './MovePromptModal.js';
 import { RelayCloseAskDialog } from '../conversation/RelayCloseAskDialog.js';
+import { PeopleCard } from '../shared/PeopleCard.js';
+import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
+import { useRoster } from '../shared/useRoster.js';
+import { useRosterContacts } from '../shared/useRosterContacts.js';
+import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
+import { pendingActionNote } from '../shared/rosterWrites.js';
 import { usePlacementHistory } from './usePlacementHistory.js';
 import { usePlacementChannels } from './usePlacementChannels.js';
 import { usePlacementNudges } from './usePlacementNudges.js';
@@ -125,6 +134,9 @@ export function PlacementDetail(): React.JSX.Element {
   // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
   // The "Also close the group text?" ask, opened AFTER a terminal move saves.
+  // The pre-open confirm's server-composed preview (spec 6.3). Non-null == the
+  // dialog is up; nothing is provisioned until the operator confirms.
+  const [openPreview, setOpenPreview] = useState<RosterPreview | null>(null);
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
   );
@@ -208,14 +220,74 @@ export function PlacementDetail(): React.JSX.Element {
   const landlord = fresh.landlord;
   const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
 
-  // The three comms channels (group / tenant 1:1 / landlord 1:1). Called
-  // UNCONDITIONALLY (hooks rules) with a loading-safe placeholder while the
-  // bundle loads - it keys on the real placementId, so once the placement +
-  // unit resolve the hook refetches against the real tenant/landlord/group. Only
-  // consumed in the render below, which runs after the loaded guard.
+  // Staff see people by NAME (GLOSSARY); degrade to the raw id only when the
+  // contact record truly cannot be loaded. Declared HERE, above the channels
+  // hook, because the 1:1 tabs are labelled with these display names.
+  const tenantLabel = tenant
+    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
+    : placement?.tenantId ?? '';
+  const landlordLabel = landlord
+    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
+    : landlordId ?? null;
+  // The tenant's free-text caseworker: a NAME on the record, not a contact - the
+  // People card hints it whenever it is set (spec 6.2).
+  const caseworker = typeof tenant?.caseworker === 'string' ? tenant.caseworker : undefined;
+
+  // THE roster: one fetch feeding the People card AND the 1:1 tabs, so the card
+  // and the tabs can never disagree about who is on this placement (spec goal
+  // 4). The group-thread pointer rides along: once it exists, the thread's
+  // participants ARE the roster (spec D1), so the pointer moving is a different
+  // question and must refetch.
+  const roster = useRoster({
+    type: 'placement',
+    id: placementId,
+    ...(placement?.group_thread !== undefined && { threadId: placement.group_thread }),
+  });
+  const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // The 1:1 PANES need a loaded Contact, and this page joins only two of them
+  // (tenant + the unit's landlord-of-record). Fetch the records for whoever
+  // else is on the roster - the PM on a PM-managed property, anyone added by
+  // hand - so their tab opens a real pane instead of a dead end (spec D6).
+  const rosterContacts = useRosterContacts(rosterPeople, [placement?.tenantId, landlordId]);
+  // Who belongs on this placement but is not on the roster - the property's
+  // other contacts and, when they have been removed, the tenant (spec 6.2).
+  const unitContacts = unit?.contacts;
+  const placementTenantId = placement?.tenantId;
+  const rosterSuggestionRows = useMemo(
+    () =>
+      rosterSuggestions({
+        scope: 'placement',
+        roster: roster.roster,
+        unitContacts,
+        tenant:
+          placementTenantId === undefined
+            ? undefined
+            : { contactId: placementTenantId, name: tenantLabel },
+      }),
+    [roster.roster, unitContacts, placementTenantId, tenantLabel],
+  );
+
+  // The comms channels (group + one 1:1 per person). Called UNCONDITIONALLY
+  // (hooks rules) with a loading-safe placeholder while the bundle loads - it
+  // keys on the real placementId, so once the placement + unit resolve the hook
+  // refetches against the real people/group. Only consumed in the render below,
+  // which runs after the loaded guard.
+  //
+  // Until the roster is a fact we can key on, the tabs keep the ids this page
+  // already renders (tenant + the property's landlord) so they never blink out
+  // mid-conversation - never a phone-gated resolver (a tenant with no mobile
+  // number keeps their tab). The placeholder's tenantId is '' - a legal,
+  // unread-0 person the hook's mark-read guard rejects by design.
   const channels = usePlacementChannels(
     placement ?? { placementId, tenantId: '', unitId: '', stage: 'send_application' },
-    landlordId,
+    rosterDrivesTabs(roster.status, roster.roster)
+      ? rosterPeople
+      : [
+          { contactId: placement?.tenantId ?? '', label: tenantLabel },
+          ...(landlordId !== undefined
+            ? [{ contactId: landlordId, label: landlordLabel ?? landlordId }]
+            : []),
+        ],
   );
 
   // The ONE nudge-ladder fetch for this placement (spec's "do not fetch twice"),
@@ -227,15 +299,56 @@ export function PlacementDetail(): React.JSX.Element {
   // server-side), then inject the new conversationId so the group tab mounts at
   // once. Shared by the header kebab; the left-pane empty state has its OWN
   // button (both hit the same channels instance).
+  // Opening a group text SENDS the intro to real people, so it confirms first
+  // (spec 6.3): fetch the server-composed preview and provision only on confirm.
+  // A 409 relay_already_provisioned means someone else just opened it - refetch
+  // the roster and NEVER open a dialog we could only fail.
   const handleOpenGroup = useCallback(() => {
     if (busy) return;
     setBusy(true);
     setError(null);
-    void provisionPlacementRelay(placementId)
-      .then(({ conversationId }) => channels.setGroupConversationId(conversationId))
+    void previewPlacementRosterOpen(placementId)
+      .then((p) => setOpenPreview(p))
+      .catch((err: unknown) => {
+        if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+          roster.refetch();
+        } else {
+          setError('Could not open the group text. Please try again.');
+        }
+      })
+      .finally(() => setBusy(false));
+  }, [busy, placementId, roster]);
+
+  // The confirmed half. Throws on failure so the dialog shows the reason and
+  // stays open; on success the plan is consumed (spec D1), so re-read.
+  // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
+  // answers 202 with the ROSTER - nothing is opened, so there is no conversation
+  // id to mount. Committing the returned payload is the whole handling: its
+  // `pending` row is what the card and the [Open group text] control render as
+  // "Opens at 8:00 AM - quiet hours". `force` is "Send now anyway".
+  const runOpenGroup = useCallback(
+    async (force: boolean): Promise<void> => {
+      const result = await provisionPlacementRelay(placementId, { force });
+      if (result.deferred) {
+        roster.apply(result.roster);
+        return;
+      }
+      channels.setGroupConversationId(result.conversationId);
+      roster.refetch();
+    },
+    [placementId, channels, roster],
+  );
+
+  // "Send now" on a DEFERRED open: the operator already confirmed this send
+  // once, so it never re-previews - it forces the same provision through.
+  const forceOpenGroup = useCallback((): void => {
+    if (busy) return;
+    setBusy(true);
+    setError(null);
+    void runOpenGroup(true)
       .catch(() => setError('Could not open the group text. Please try again.'))
       .finally(() => setBusy(false));
-  }, [busy, placementId, channels]);
+  }, [busy, runOpenGroup]);
 
   // After a terminal move (lost / moved_in) the LINKED relay group is NOT
   // auto-closed (nothing auto-closes now). If it is still OPEN, offer to close it.
@@ -332,12 +445,6 @@ export function PlacementDetail(): React.JSX.Element {
 
   const stageLabel = STAGE_LABELS[placement.stage] ?? placement.stage;
   const phase = STAGE_PHASE[placement.stage];
-  // Staff see the person by NAME (GLOSSARY); degrade to the raw id only when the
-  // contact truly can't be loaded.
-  const tenantLabel = tenant ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone) : placement.tenantId;
-  const landlordLabel = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : landlordId ?? null;
   const listing = unit ? formatAddress(unit.address) || placement.unitId : placement.unitId;
   const lostReason = formatLostReason(placement.lost_reason);
   const finalRent = formatMoney(unit?.final_rent);
@@ -352,6 +459,22 @@ export function PlacementDetail(): React.JSX.Element {
   // Open group text is a kebab action ONLY until a group exists (then the group
   // tab shows the thread).
   const canOpenGroup = placement.group_thread === undefined;
+  // The ROSTER's own gate: fewer than two reachable members and there is nothing
+  // to open a group text with (spec 6.2). The People card carries the reason.
+  const openGroupBlocked =
+    canOpenGroup && roster.roster !== null && !roster.roster.canOpenGroup;
+  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // header kebab's menu item are the same click, so they carry the same reason
+  // and the same disabled state (spec 6.2 - the reason on a disabled control
+  // rather than a click-time 400 relay_member_unresolvable).
+  const openGroupBlockedReason = openGroupBlocked
+    ? 'Not enough people to open a group text - two reachable members are needed'
+    : undefined;
+  // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
+  // again would silently supersede it with a new dueAt, so the control says
+  // when it opens instead - and the People card carries the two ways out.
+  const pendingOpen = roster.roster?.pending.find((p) => p.kind === 'open_group');
+  const pendingOpenNote = pendingOpen !== undefined ? pendingActionNote(pendingOpen) : undefined;
 
   // The date-vocabulary facts line (spec section 6): phase, in-stage-since, the
   // voucher deadline, and the source-tour provenance - each a verb phrase, joined
@@ -412,6 +535,9 @@ export function PlacementDetail(): React.JSX.Element {
             onMove={requestMove}
             canOpenGroup={canOpenGroup}
             onOpenGroup={handleOpenGroup}
+            {...(openGroupBlockedReason !== undefined && {
+              openGroupDisabledReason: openGroupBlockedReason,
+            })}
             onMarkLost={() => requestMove('lost')}
             onSetFollowUp={() => setFollowUpOpen(true)}
             busy={busy}
@@ -452,11 +578,18 @@ export function PlacementDetail(): React.JSX.Element {
         >
           <PlacementConversation
             placement={placement}
-            unit={unit}
             tenant={tenant}
             landlord={landlord}
+            rosterContacts={rosterContacts}
             channels={channels}
             commsVisible={commsVisible}
+            onOpenGroup={handleOpenGroup}
+            openGroupBusy={busy}
+            {...(pendingOpenNote !== undefined
+              ? { openGroupDisabledReason: pendingOpenNote }
+              : openGroupBlockedReason !== undefined && {
+                  openGroupDisabledReason: openGroupBlockedReason,
+                })}
           />
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
@@ -497,19 +630,20 @@ export function PlacementDetail(): React.JSX.Element {
               actionError={nudges.actionError}
             />
 
-            {/* 3. People and provenance */}
-            <Card title="People">
-              <KV k="Tenant" v={<Link to={`/contacts/${placement.tenantId}`}>{tenantLabel}</Link>} />
-              <KV
-                k="Landlord"
-                v={
-                  landlordId !== undefined ? (
-                    <Link to={`/contacts/${landlordId}`}>{landlordLabel ?? landlordId}</Link>
-                  ) : (
-                    <EmptyRow>No landlord on file.</EmptyRow>
-                  )
-                }
-              />
+            {/* 3. People (the ROSTER) + the provenance rows the page owns */}
+            <PeopleCard
+              scope="placement"
+              status={roster.status}
+              roster={roster.roster}
+              onRetry={roster.refetch}
+              {...(caseworker !== undefined && { caseworker })}
+              edit={{
+                owner: { type: 'placement', id: placementId },
+                suggestions: rosterSuggestionRows,
+                onApply: roster.apply,
+                onOpenNow: forceOpenGroup,
+              }}
+            >
               <KV k="Property" v={<Link to={`/listings/${placement.unitId}`}>{listing}</Link>} />
               {placement.fromTourId !== undefined ? (
                 <Row
@@ -519,7 +653,7 @@ export function PlacementDetail(): React.JSX.Element {
                   } \u2192`}
                 />
               ) : null}
-            </Card>
+            </PeopleCard>
 
             {/* 4. Placement facts (read-only fields, date vocabulary) */}
             <Card title="Placement facts">
@@ -603,6 +737,16 @@ export function PlacementDetail(): React.JSX.Element {
           onDone={() => setCloseAsk(null)}
         />
       ) : null}
+      {openPreview !== null ? (
+        <RosterConfirmDialog
+          title="Open the group text?"
+          preview={openPreview}
+          confirmLabel="Open group text"
+          deferLabel="Open"
+          onConfirm={runOpenGroup}
+          onClose={() => setOpenPreview(null)}
+        />
+      ) : null}
     </div>
   );
 }
@@ -617,6 +761,7 @@ function PlacementActionsMenu({
   onMove,
   canOpenGroup,
   onOpenGroup,
+  openGroupDisabledReason,
   onMarkLost,
   onSetFollowUp,
   busy = false,
@@ -625,6 +770,11 @@ function PlacementActionsMenu({
   onMove: (toStage: PlacementStage) => void;
   canOpenGroup: boolean;
   onOpenGroup: () => void;
+  /** Why the group text cannot be opened right now even though the placement
+   *  could otherwise take one - today: fewer than two reachable roster members
+   *  (spec 6.2). The item stays VISIBLE and DISABLED carrying this reason,
+   *  instead of failing at click time with 400 relay_member_unresolvable. */
+  openGroupDisabledReason?: string;
   onMarkLost: () => void;
   onSetFollowUp: () => void;
   busy?: boolean;
@@ -695,7 +845,8 @@ function PlacementActionsMenu({
               type="button"
               role="menuitem"
               className={menuStyles.item}
-              disabled={busy}
+              disabled={busy || openGroupDisabledReason !== undefined}
+              {...(openGroupDisabledReason !== undefined && { title: openGroupDisabledReason })}
               onClick={() => run(onOpenGroup)}
             >
               Open group text

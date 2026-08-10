@@ -72,7 +72,7 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
         NODE_ENV: 'production',
         CF_ORIGIN_SECRET: 's',
         MESSAGING_DRIVER: undefined,
-        OUR_PHONE_NUMBERS: '+15550009999',
+        BUSINESS_PHONE_NUMBER: '+15550009999',
       }).messagingDriver,
     ).toBe('twilio');
   });
@@ -90,24 +90,24 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
     );
   });
 
-  it('fail-fasts when twilio runs in production with an empty OUR_PHONE_NUMBERS (echo defense 1)', () => {
+  it('fail-fasts when twilio runs in production with an unconfigured BUSINESS_PHONE_NUMBER (echo defense 1)', () => {
     const prodTwilio = { ...TWILIO_ENV, ...JOB_DELIVERY_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's' };
-    expect(() => loadConfig(prodTwilio)).toThrow(/OUR_PHONE_NUMBERS/);
-    // Configured list → boots.
-    expect(loadConfig({ ...prodTwilio, OUR_PHONE_NUMBERS: '+15550009999' }).ourPhoneNumbers).toEqual([
+    expect(() => loadConfig(prodTwilio)).toThrow(/BUSINESS_PHONE_NUMBER/);
+    // Configured → boots.
+    expect(loadConfig({ ...prodTwilio, BUSINESS_PHONE_NUMBER: '+15550009999' }).businessPhoneNumber).toBe(
       '+15550009999',
-    ]);
+    );
     // The guard is twilio+production only: console-in-production and
-    // twilio-in-dev both still boot with an empty list (SID dedupe is layer 2).
+    // twilio-in-dev both still boot unconfigured (SID dedupe is layer 2).
     expect(
       loadConfig({
         ...JOB_DELIVERY_ENV,
         NODE_ENV: 'production',
         CF_ORIGIN_SECRET: 's',
         MESSAGING_DRIVER: 'console',
-      }).ourPhoneNumbers,
-    ).toEqual([]);
-    expect(loadConfig(TWILIO_ENV).ourPhoneNumbers).toEqual([]);
+      }).businessPhoneNumber,
+    ).toBeUndefined();
+    expect(loadConfig(TWILIO_ENV).businessPhoneNumber).toBeUndefined();
   });
 
   it('builds the matching driver for each config', () => {

@@ -4,8 +4,9 @@
 // The user content lays out the CURRENT PROFILE (what we already know) then a
 // chronological TRANSCRIPT, so the model can reconcile new facts against known
 // ones per the reconciliation rules below.
-import type { ExtractionInput } from '../../adapters/extraction.js';
-import { HOUSING_AUTHORITY_VOCAB } from './schema.js';
+import { createHash } from 'node:crypto';
+import type { ExtractionInput, TranscriptUtterance } from '../../adapters/extraction.js';
+import { EXTRACTION_SCHEMA, HOUSING_AUTHORITY_VOCAB } from './schema.js';
 
 export function buildExtractionSystemPrompt(): string {
   const vocab = HOUSING_AUTHORITY_VOCAB.join(', ');
@@ -78,6 +79,25 @@ export function buildExtractionSystemPrompt(): string {
 }
 
 /**
+ * sha256 of the assembled system prompt CONCATENATED with the serialized
+ * EXTRACTION_SCHEMA, first 12 hex (design 2026-08-06 section 6). Both are sent
+ * on the same messages.create call and both define the model contract, so
+ * fingerprinting the prompt alone would miss half of it.
+ *
+ * Memoized: both inputs are module constants, and this is read on every run and
+ * on every System Status flags request.
+ */
+let promptFingerprintCache: string | undefined;
+export function extractionPromptFingerprint(): string {
+  promptFingerprintCache ??= createHash('sha256')
+    .update(buildExtractionSystemPrompt(), 'utf8')
+    .update(JSON.stringify(EXTRACTION_SCHEMA), 'utf8')
+    .digest('hex')
+    .slice(0, 12);
+  return promptFingerprintCache;
+}
+
+/**
  * Collapse an utterance body to a SINGLE line: replace any run of CR/LF with
  * ' / '. Each transcript line is `<timestamp> [<speaker>/<channel>] <text>` and the lines
  * are '\n'-joined, so a raw client SMS containing a newline plus a forged
@@ -90,9 +110,27 @@ function toSingleLine(text: string): string {
   return text.replace(/[\r\n]+/g, ' / ');
 }
 
+/**
+ * Render ONE utterance to its transcript line. THE single renderer: the
+ * extraction request is built from it (below) and the run log hashes its output
+ * (services/extraction/runWindow.ts), so the recorded hash and the sent bytes
+ * can never diverge. Reconstructing this format anywhere else would guarantee a
+ * permanent false hash mismatch (design 2026-08-06 section 6.1).
+ *
+ * Deliberately does NOT render tsMsgId - the wire format is fixed by the system
+ * prompt at line 20 ("<timestamp> [<speaker>/<channel>] <text>").
+ */
+export function renderUtteranceLine(u: TranscriptUtterance): string {
+  return `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`;
+}
+
 export function buildExtractionUserContent(input: ExtractionInput): string {
   const profileJson = JSON.stringify(input.profile, null, 2);
+  // GLOBAL sort by timestamp. All utterances of ONE message share that
+  // message's timestamp (toUtterances stamps a call's lines with the call row's
+  // created_at), and Array.prototype.sort is stable, so per-message order is
+  // preserved - which is what makes the per-message hash in runWindow.ts match.
   const ordered = [...input.transcript].sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
-  const lines = ordered.map((u) => `${u.at} [${u.speaker}/${u.channel}] ${toSingleLine(u.text)}`);
+  const lines = ordered.map(renderUtteranceLine);
   return ['CURRENT PROFILE', profileJson, '', 'TRANSCRIPT', ...lines].join('\n');
 }

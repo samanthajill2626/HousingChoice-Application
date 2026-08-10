@@ -1,6 +1,9 @@
 // M1.4 System Status service (services/systemStatus.ts) — the read model behind
 // the admin-only panel. Injects a FAKE CloudWatchClientSeam (no AWS) and asserts:
-//   - getFlags(): booleans/enums/strings ONLY — NEVER the founder number/secret
+//   - getFlags(): booleans/enums/strings ONLY — never a secret, and never a
+//     CONTACT's phone number. The ONE exception is our OWN business number
+//     (BUSINESS_PHONE_NUMBER), which we publish on public flyers: it is included
+//     deliberately, omitted when unconfigured, and never logged.
 //   - getAlarms()/getErrors(): graceful degradation
 //       * local (appEnv 'local' OR messagingDriver 'console') → unavailable_local,
 //         and the seam is NEVER called (a spy proves the short-circuit)
@@ -62,11 +65,52 @@ describe('systemStatus.getFlags', () => {
       relayLiveProvisioning: false,
       pushConfigured: false,
       messagingDriver: 'twilio',
+      aiExtractionEnabled: true,
+      aiExtractionDriver: 'console',
+      aiExtractionModel: 'claude-opus-4-8',
+      aiExtractionPromptFingerprint: expect.stringMatching(/^[0-9a-f]{12}$/),
     });
     // Every value is a primitive (boolean/string) — no nested objects/secrets.
     for (const v of Object.values(flags)) {
       expect(['boolean', 'string']).toContain(typeof v);
     }
+  });
+
+  it('includes the ONE configured business number (our own, published number - not a contact phone)', () => {
+    const config = deployedConfig({ businessPhoneNumber: '+15550009999' });
+    const service = makeService({ config, cloudwatch: fakeSeam() });
+
+    const flags = service.getFlags();
+    expect(flags.businessPhoneNumber).toBe('+15550009999');
+    // Still primitives only - the field is a string, never a nested object.
+    for (const v of Object.values(flags)) {
+      expect(['boolean', 'string']).toContain(typeof v);
+    }
+  });
+
+  it('OMITS the business number when unconfigured (absent key, NEVER null)', () => {
+    const flags = makeService({ config: deployedConfig(), cloudwatch: fakeSeam() }).getFlags();
+    expect('businessPhoneNumber' in flags).toBe(false);
+  });
+
+  it('reports the extraction configuration so an empty run log is never misread', () => {
+    const flags = makeService({
+      config: localConfig({
+        aiExtractionEnabled: false,
+        extractionDriver: 'console',
+        aiExtractionModel: 'claude-opus-4-8',
+      }),
+      cloudwatch: fakeSeam(),
+    }).getFlags();
+
+    expect(flags.aiExtractionEnabled).toBe(false);
+    expect(flags.aiExtractionDriver).toBe('console');
+    expect(flags.aiExtractionModel).toBe('claude-opus-4-8');
+    expect(flags.aiExtractionPromptFingerprint).toMatch(/^[0-9a-f]{12}$/);
+  });
+
+  it('getFlags stays AWS-free - the fingerprint is pure', () => {
+    expect(() => makeService({ config: localConfig(), cloudwatch: fakeSeam() }).getFlags()).not.toThrow();
   });
 
   it('messagingDriver shows "mock" when the twilio driver is redirected to a fake host', () => {

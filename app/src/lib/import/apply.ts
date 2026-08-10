@@ -78,7 +78,13 @@ export interface ApplyOptions {
 
 export interface ApplyReport {
   contacts: { written: number; skippedDropped: number; statusPreserved: number };
-  conversations: { written: number; groups: number; connectedDayOne: number };
+  conversations: {
+    written: number;
+    groups: number;
+    connectedDayOne: number;
+    /** Groups the founder marked drop=Y - thread AND messages skipped. */
+    droppedGroups: number;
+  };
   messages: { written: number };
   calls: { written: number };
   units: { written: number; skippedDropped: number };
@@ -101,7 +107,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 
   const report: ApplyReport = {
     contacts: { written: 0, skippedDropped: 0, statusPreserved: 0 },
-    conversations: { written: 0, groups: 0, connectedDayOne: 0 },
+    conversations: { written: 0, groups: 0, connectedDayOne: 0, droppedGroups: 0 },
     messages: { written: 0 },
     calls: { written: 0 },
     units: { written: 0, skippedDropped: 0 },
@@ -118,6 +124,8 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const droppedPhones = new Set<string>();
 
   const people = plan.merge.people;
+  /** Free-field authority values written verbatim (no canonical spelling). */
+  const authorityPassthroughs = new Map<string, number>();
   let i = 0;
   for (const person of people) {
     options.onProgress?.('contacts', ++i, people.length);
@@ -141,9 +149,27 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       continue;
     }
 
+    if (resolved.housingAuthority && !KNOWN_AUTHORITIES.has(resolved.housingAuthority)) {
+      authorityPassthroughs.set(
+        resolved.housingAuthority,
+        (authorityPassthroughs.get(resolved.housingAuthority) ?? 0) + 1,
+      );
+    }
+
     const preserved = await upsertContact(doc, contactsTable, person, resolved, importedAt);
     if (preserved) report.contacts.statusPreserved += 1;
     report.contacts.written += 1;
+  }
+
+  // Free-field posture (2026-08-09): unknown authority spellings are WRITTEN,
+  // not dropped - but say so once per distinct value, because each new spelling
+  // is its own broadcast audience and a typo here quietly splits one.
+  for (const [value, n] of authorityPassthroughs) {
+    warnings.push(
+      `housingAuthority ${JSON.stringify(value)} (x${n}) has no canonical spelling - written ` +
+        `verbatim. Fine if intentional; a variant spelling of an existing authority would ` +
+        `split the broadcast audience.`,
+    );
   }
 
   // ---------------------------------------------------------------------
@@ -174,6 +200,14 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     if (live.length === 0) continue;
 
     const groupRow = groupRowByConversationId.get(thread.conversationId);
+
+    // Founder-excluded group: the whole thread stays out - conversation,
+    // messages and calls. Counted, never silent.
+    if (groupRow !== undefined && isDropped(groupRow)) {
+      report.conversations.droppedGroups += 1;
+      continue;
+    }
+
     const connectDayOne = groupRow !== undefined && wantsDayOneConnect(groupRow);
     if (connectDayOne) report.conversations.connectedDayOne += 1;
 
@@ -271,6 +305,98 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 }
 
 /**
+ * The founder's Airtable "voucher program" spellings -> ONE canonical spelling
+ * each. FREE FIELD, not a closed vocabulary (Cameron, 2026-08-09): the field is
+ * a flexible document attribute and nothing requires membership in the AI
+ * extractor's list. What DOES matter is spelling CONSISTENCY - broadcast
+ * audience resolution does an exact hash match on the byHousingAuthority GSI, so
+ * "Dekalb Housing" and "Dekalb County Housing" would be two audiences invisible
+ * to each other. Known variants therefore normalize to one spelling (aligned
+ * with `HOUSING_AUTHORITY_VOCAB` where an entry exists, so AI-extracted and
+ * imported values agree); UNKNOWN values pass through verbatim rather than being
+ * dropped.
+ *
+ * The full 2026-08-09 tenants table (666 rows) is where most of these spellings
+ * come from - e.g. "Atlanta, aha, Atlanta housing" x450. Note the founder's
+ * taxonomy (email 2026-08-09): agencies/non-profits (HUD VASH, Hope Atlanta,
+ * Claratel, Step Up) are DIFFERENT things from housing authorities (AHA, JHA,
+ * DCA, ...) and one person can hold both. The single field cannot represent
+ * the pair; that model gap is docs/issues/housing-authority-free-text-drift.md,
+ * not this importer's to solve.
+ */
+const CANONICAL_AUTHORITY: Readonly<Record<string, string>> = {
+  'atlanta, aha, atlanta housing': 'Atlanta (AHA)',
+  'atlanta housing': 'Atlanta (AHA)',
+  'jonesboro, jha, jonesboro housing': 'Jonesboro (JHA)',
+  'jonesboro housing': 'Jonesboro (JHA)',
+  'dekalb county housing': 'Dekalb County Housing',
+  'dekalb housing': 'Dekalb County Housing',
+  'georgia housing voucher, ghv': 'Georgia Housing Voucher (GHV)',
+  'georgia housing voucher (ghv)': 'Georgia Housing Voucher (GHV)',
+  ghv: 'Georgia Housing Voucher (GHV)',
+  'dca, department of community affairs': 'DCA',
+  dca: 'DCA',
+  'fulton, fulton county': 'Fulton County',
+  'fulton county': 'Fulton County',
+  clayton: 'Clayton County',
+  'clayton county': 'Clayton County',
+  'eastpoint housing authority': 'East Point',
+  'east point': 'East Point',
+  'mcdonough housing authority': 'McDonough',
+  mcdonough: 'McDonough',
+  'hud vash': 'HUD VASH',
+  claratel: 'Claratel',
+  'hope atlanta': 'Hope Atlanta',
+  'step up': 'Step Up',
+};
+
+/** The canonical spellings this importer emits (for the passthrough report). */
+export const KNOWN_AUTHORITIES: ReadonlySet<string> = new Set(
+  Object.values(CANONICAL_AUTHORITY),
+);
+
+/**
+ * Normalize an Airtable program value: canonical spelling when known, verbatim
+ * (whitespace-collapsed) when not, undefined only when empty.
+ */
+export function housingAuthorityFor(rawProgram: string | undefined): string | undefined {
+  if (!rawProgram) return undefined;
+  const cleaned = rawProgram.trim().replace(/\s+/g, ' ');
+  if (!cleaned) return undefined;
+  return CANONICAL_AUTHORITY[cleaned.toLowerCase()] ?? cleaned;
+}
+
+/** Honorifics that must not become someone's first name (spelt with or without a dot). */
+const HONORIFIC_RE = /^(mr|mrs|ms|miss|dr|rev|pastor|sir|madam)\.?$/i;
+
+/**
+ * Split a founder-reviewed name into the `firstName` / `lastName` the app reads.
+ *
+ * Two consumers, and they want different things from the same split:
+ *   - DISPLAY (`contactDisplayName` in the dashboard, `displayNameOf` in the API)
+ *     re-joins both parts, so any split renders identically. Display cannot be
+ *     got wrong here.
+ *   - BROADCASTS (`lib/mergeFields.ts` renderBody) substitute `[TenantName]` with
+ *     **firstName ALONE**. That is what makes the split consequential: a wrong
+ *     first token greets a real tenant badly in a real text message.
+ *
+ * So the rule is first-token-is-the-first-name, EXCEPT when that token is an
+ * honorific. "Ms. Cooper" split naively greets her "Hi Ms." — keeping the
+ * honorific attached to the following token yields firstName "Ms. Cooper",
+ * which renders the same and greets her "Hi Ms. Cooper". Ten of the founder's
+ * 478 named tenants are titled this way.
+ */
+export function splitReviewedName(raw: string): { firstName: string; lastName: string } {
+  const tokens = raw.trim().split(/\s+/).filter(Boolean);
+  if (tokens.length === 0) return { firstName: '', lastName: '' };
+  // Honorific + at least one more token: keep them together as the first name.
+  if (tokens.length > 1 && HONORIFIC_RE.test(tokens[0]!)) {
+    return { firstName: `${tokens[0]} ${tokens[1]}`, lastName: tokens.slice(2).join(' ') };
+  }
+  return { firstName: tokens[0]!, lastName: tokens.slice(1).join(' ') };
+}
+
+/**
  * Undo a previous import of one person, for a `drop` marked in a later review.
  *
  * SAFETY RULE: only items this importer created are removed, verified by the
@@ -354,6 +480,8 @@ interface ResolvedPerson {
   voucherBeds?: number;
   status: string;
   notes?: string;
+  /** Exact HOUSING_AUTHORITY_VOCAB string, when her Airtable program maps to one. */
+  housingAuthority?: string;
 }
 
 function resolvePerson(
@@ -390,12 +518,15 @@ function resolvePerson(
   const status = (row?.status ?? '').trim() || person.suggestedStatus;
   const notes = (row?.notes ?? '').trim();
 
+  const housingAuthority = housingAuthorityFor(person.airtableTenant?.voucherProgram);
+
   return {
     name,
     type,
     ...(voucherBeds !== undefined && { voucherBeds }),
     status,
     ...(notes && { notes }),
+    ...(housingAuthority !== undefined && { housingAuthority }),
   };
 }
 
@@ -460,8 +591,25 @@ async function upsertContact(
   const names: Record<string, string> = { '#type': 'type' };
 
   if (resolved.name) {
-    sets.push('display_name = :name');
-    values[':name'] = resolved.name;
+    // WRITE THE FIELDS THE APP ACTUALLY READS: firstName + lastName.
+    //
+    // An earlier version wrote a single `display_name`, which nothing in the
+    // codebase reads — `routes/contacts.ts` displayNameOf() joins firstName and
+    // lastName and returns null when both are absent, and a null name renders as
+    // the phone number ("a name is NEVER invented"). So every imported contact
+    // would have shown as a bare phone number, silently discarding all 539
+    // resolved names — including the ~117 the founder reviews by hand. The whole
+    // review would have evaporated at the last step.
+    //
+    // Split on the first token, matching lib/contactName.ts's own convention
+    // (tokens[0] is the first name, the remainder joins as the last name, so
+    // multi-word and hyphenated surnames survive). A single-token name — 122 of
+    // hers are first-name-only — yields an empty lastName, which displayNameOf
+    // filters out before joining, rendering just "Angela".
+    const { firstName, lastName } = splitReviewedName(resolved.name);
+    sets.push('firstName = :firstName', 'lastName = :lastName');
+    values[':firstName'] = firstName;
+    values[':lastName'] = lastName;
   }
   if (resolved.voucherBeds !== undefined) {
     sets.push('voucherSize = :beds');
@@ -470,6 +618,14 @@ async function upsertContact(
   if (resolved.notes) {
     sets.push('notes = :notes');
     values[':notes'] = resolved.notes;
+  }
+  // Contact-side housing authority (the byHousingAuthority GSI that broadcast
+  // audience resolution queries). Without it an imported tenant can never be
+  // reached by an authority-filtered broadcast - see the
+  // housing-authority-free-text-drift issue, consequence 4.
+  if (resolved.housingAuthority) {
+    sets.push('housingAuthority = :housingAuthority');
+    values[':housingAuthority'] = resolved.housingAuthority;
   }
   if (!preserveStatus) {
     sets.push('#status = :status', 'status_source = :statusSource');

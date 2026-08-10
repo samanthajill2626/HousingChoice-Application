@@ -22,7 +22,11 @@ export const SETTINGS_TABS: SettingsTab[] = [
   // logged-in user (not admin-only), so a VA can set + verify their own cell.
   { id: 'voice', label: 'Voice', path: '/settings/voice', adminOnly: false },
   { id: 'system', label: 'System status', path: '/settings/system', adminOnly: true },
-  { id: 'numbers', label: 'Group text numbers', path: '/settings/numbers', adminOnly: true },
+  { id: 'ai-runs', label: 'AI run log', path: '/settings/ai-runs', adminOnly: true },
+  // Phone numbers: OUR one business number is read-only and visible to ANY
+  // logged-in user, so the tab is not admin-only. The pool inventory inside the
+  // section carries its own role gate (and its route stays guarded server-side).
+  { id: 'numbers', label: 'Phone numbers', path: '/settings/numbers', adminOnly: false },
 ];
 
 /** The self cell-verification tab path — the CallMenu deep-links here when the

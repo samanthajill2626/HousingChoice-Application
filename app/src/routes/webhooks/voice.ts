@@ -1,7 +1,7 @@
 // Twilio Programmable Voice webhooks (M1.9a Change Order 1, doc §7.1 v2.17):
 //   POST /webhooks/twilio/voice              — inbound call entry point
 //   POST /webhooks/twilio/voice/whisper      — callee-leg whisper + press-1 gate
-//   POST /webhooks/twilio/voice/whisper-gate — the press-1/press-0/timeout gate
+//   POST /webhooks/twilio/voice/whisper-gate — the press-1/timeout gate
 //   POST /webhooks/twilio/voice/status       — call status callback (forward-only)
 //   POST /webhooks/twilio/voice/recording    — recordingStatusCallback (M1.9c)
 //   POST /webhooks/twilio/voice/intelligence - Voice Intelligence completion webhook (JSON)
@@ -14,7 +14,7 @@
 // pool_number + participants[]. When a member calls the pool number, we bridge
 // them to the OTHER member(s) with the POOL NUMBER as caller ID (NEVER the real
 // caller's number), after a whisper + press-1 gate on the callee leg (blocks
-// carrier voicemail), with press-0 → team. Masked calls are NEVER recorded /
+// carrier voicemail). Masked calls are NEVER recorded /
 // transcribed (record="do-not-record") — they produce a metadata-only `call`
 // timeline entry (who→whom by ROLE, when, duration, answered/missed).
 //
@@ -62,8 +62,6 @@ import {
   type ConversationParticipant,
   type ConversationsRepo,
 } from '../../repos/conversationsRepo.js';
-import { createPlacementsRepo, type PlacementsRepo } from '../../repos/placementsRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../../repos/unitsRepo.js';
 import {
   createMessagesRepo,
   type CallStatus,
@@ -83,6 +81,7 @@ import {
 } from '../../lib/voiceMasking.js';
 import type { AuditRepo } from '../../repos/auditRepo.js';
 import { createContactCapture } from '../../services/contactCapture.js';
+import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { createPushService, type PushService } from '../../services/pushService.js';
 import { persistViTranscript } from '../../services/voiceTranscripts.js';
 import { enqueue, enqueueImmediate } from '../../jobs/jobs.js';
@@ -243,9 +242,6 @@ export interface TwilioVoiceWebhookDeps {
   contactsRepo?: ContactsRepo;
   /** Audit trail (contact auto-capture appends contact_auto_captured). */
   auditRepo?: AuditRepo;
-  /** M1.10d masked-call landlord-leg routing (placement -> unit.primary_voice_contact). */
-  placementsRepo?: PlacementsRepo;
-  unitsRepo?: UnitsRepo;
   /** Founder-editable templates (M1.9b: missed-call quick-replies); real repo by default. */
   settingsRepo?: SettingsRepo;
   /** Team lookup (M1.9b: resolve the founder = admin user(s)); real repo by default. */
@@ -271,8 +267,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   const messages = deps.messagesRepo ?? createMessagesRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
-  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
-  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   const settings = deps.settingsRepo ?? createSettingsRepo({ logger: deps.logger });
   const users = deps.usersRepo ?? createUsersRepo({ logger: deps.logger });
   const pushService =
@@ -288,11 +282,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     auditRepo: deps.auditRepo,
     logger: deps.logger,
   });
-  const ourNumbers = new Set(config.ourPhoneNumbers);
+  const ourNumberKind = createOurNumberKind({ config, conversations });
   const baseUrl = config.publicBaseUrl ?? '';
-  // Founder-bridge caller ID: ALWAYS a number we own (the first business
-  // number), NEVER the real caller's From (the M1.9b guardrail).
-  const businessCallerId = config.ourPhoneNumbers[0];
+  // Founder-bridge caller ID: ALWAYS a number we own (the business number),
+  // NEVER the real caller's From (the M1.9b guardrail).
+  const businessCallerId = config.businessPhoneNumber;
 
   // Boot readiness signal (PII-safe — booleans only, never the cell itself):
   // inbound call-triage bridges to the assigned inbound-voice-line HOLDER's
@@ -300,11 +294,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   // so it can't be checked at startup. What IS boot config is the business number
   // used as caller ID; without it every inbound business call degrades to the
   // "text us" fallback (see handleFounderTriage). Log it so a missing
-  // OUR_PHONE_NUMBERS[0] is obvious without a live test call.
+  // BUSINESS_PHONE_NUMBER is obvious without a live test call.
   log.info(
     { hasBusinessNumber: businessCallerId !== undefined },
     `voice: business number ${
-      businessCallerId !== undefined ? 'configured' : 'NOT configured (OUR_PHONE_NUMBERS[0])'
+      businessCallerId !== undefined ? 'configured' : 'NOT configured (BUSINESS_PHONE_NUMBER)'
     }; inbound bridges to the assigned inbound-voice-line holder's verified cell`,
   );
 
@@ -359,12 +353,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // outbound leg projected back. Answer with an empty <Response/> and drop:
     // never bridge, never persist. (Our masked bridge dials FROM the pool
     // number, so a misconfigured loop would otherwise re-enter here.)
-    if (ourNumbers.has(From)) {
+    const kind = await ourNumberKind(From);
+    if (kind === 'business') {
       log.info({ callSid: CallSid }, 'twilio voice echo (From is our number) — dropped');
       sendTwiml(res, new VoiceResponse());
       return;
     }
-    if (await conversations.getByPoolNumber(From)) {
+    if (kind === 'pool') {
       log.info({ callSid: CallSid }, 'twilio voice echo (From is a pool number) — dropped');
       sendTwiml(res, new VoiceResponse());
       return;
@@ -379,14 +374,18 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       }
     }
 
-    // (3) To is a business number (ourPhoneNumbers) or unknown → FOUNDER
+    // (3) To is the business number (config.businessPhoneNumber) or unknown → FOUNDER
     // CALL-TRIAGE (M1.9b / CO2 §7.1). Pre-ring push to the founder ~preRingPause
     // seconds AHEAD of the ring, then bridge the call to the founder's cell with
     // the BUSINESS number as caller ID (never the real caller's) via the same
     // whisper + press-1 accept gate as the masked bridge. Missed → missed-call
     // push + zero-tap auto-text (the /voice/status handler below). The
-    // main-business-number → landlord-by-unit (primary_voice_contact) masked
+    // main-business-number → landlord-by-unit (primary_contact) masked
     // path stays M1.10 (needs the unit↔placement linkage).
+    // NOTE (contact-rosters spec 2026-08-04 section 12): when this path is
+    // built it must consult the THREAD roster, not the unit scalar.
+    // TODO(voice-business-number-roster): resolve callees through the shared
+    // roster resolver (docs/issues/voice-business-number-roster.md).
     await handleFounderTriage(res, { CallSid, From });
   });
 
@@ -455,7 +454,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     // their own number is nonsensical, and with answerOnBridge it leaves the
     // caller leg unanswered → a VoIP client can loop on it. Refuse to bridge — a
     // brief greeting + hangup, no self-dial, no bogus call entry/push. (The
-    // masked relay path already has the equivalent dialPhone !== From guard.)
+    // masked relay path's equivalent protection is its CALLEE FILTER - callees
+    // are `participants` minus From - so a member can never be dialed back on
+    // the number they are calling from.)
     if (From === dialedCell) {
       log.info({ callSid: CallSid }, 'founder triage: caller is the dialed cell — not bridging to self');
       sendTwiml(
@@ -847,49 +848,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       log.error({ err, callSid: CallSid }, 'masked call: persisting the call entry failed — bridging anyway');
     }
 
-    // M1.10d: for a tenant->landlord masked call on a PLACEMENT-linked relay, the
-    // landlord LEG dials the unit's primary_voice_contact (the per-property
-    // voice contact, §7.1) instead of the roster SMS number — resolved at CALL
-    // TIME (so a changed per-unit voice contact takes effect without
-    // re-rostering), with the roster number as the fallback. It substitutes ONLY
-    // when the CALLER is the placement's tenant (destination = the landlord side);
-    // texts are unaffected (relay fan-out always uses the roster SMS numbers).
-    // Best-effort: any lookup hiccup falls back to the roster number — the
-    // bridge must never crash on routing resolution.
-    let landlordVoiceOverride: { landlordContactId: string; dialPhone: string } | undefined;
-    try {
-      const placementId = typeof relay.placementId === 'string' && relay.placementId.length > 0 ? relay.placementId : undefined;
-      if (placementId !== undefined && caller.contactId) {
-        const linkedPlacement = await placements.getById(placementId);
-        if (linkedPlacement && caller.contactId === linkedPlacement.tenantId) {
-          const unit = await units.getById(linkedPlacement.unitId);
-          const voiceContactId =
-            typeof unit?.primary_voice_contact === 'string' && unit.primary_voice_contact.length > 0
-              ? unit.primary_voice_contact
-              : undefined;
-          const landlordContactId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
-          if (voiceContactId !== undefined && landlordContactId !== undefined) {
-            const voiceContact = await contacts.getById(voiceContactId);
-            const dialPhone =
-              typeof voiceContact?.phone === 'string' && voiceContact.phone.length > 0
-                ? voiceContact.phone
-                : undefined;
-            // Guard a misconfig where the unit's voice contact resolves to the
-            // CALLER's own number — never bridge the tenant to themselves; fall
-            // back to the roster number.
-            if (dialPhone !== undefined && dialPhone !== From) {
-              landlordVoiceOverride = { landlordContactId, dialPhone };
-            }
-          }
-        }
-      }
-    } catch (err) {
-      log.error(
-        { err, callSid: CallSid },
-        'masked call: landlord voice-contact resolution failed — using the roster number',
-      );
-    }
-
     // Build the bridge TwiML. callerId MUST be the pool number — NEVER From.
     // record="do-not-record": masked calls are NEVER recorded/transcribed. The
     // <Dial action> reports the dial outcome to /voice/status; each <Number>
@@ -913,13 +871,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       `&conversationId=${encodeURIComponent(relay.conversationId)}` +
       `&parentCallSid=${encodeURIComponent(CallSid)}`;
     for (const callee of callees) {
-      // M1.10d: the landlord-side callee dials the unit's primary_voice_contact
-      // when resolved (else the roster number). Identified by contactId so a
-      // multi-member group only substitutes the actual landlord leg.
-      const dialPhone =
-        landlordVoiceOverride !== undefined && callee.contactId === landlordVoiceOverride.landlordContactId
-          ? landlordVoiceOverride.dialPhone
-          : callee.phone;
+      // THE ROSTER IS THE ROUTING (contact-rosters D10): every callee is dialed
+      // on the number stored on their participant row. There is no per-property
+      // substitution - a leg moves only when the roster moves, which is exactly
+      // what the People card edits.
+      const dialPhone = callee.phone;
       dial.number(
         {
           url: whisperUrl,
@@ -940,7 +896,6 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
         calleeCount: callees.length,
         masked: true,
         callerIdIsPool: true,
-        landlordVoiceOverride: landlordVoiceOverride !== undefined,
       },
       'masked inbound call bridged (callerId = pool number, do-not-record, whisper+gate)',
     );
@@ -1044,13 +999,13 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       typeof q['callerLabel'] === 'string' ? q['callerLabel'] : resolveMessage('voice.caller_label_default');
     const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
     const parentCallSid = typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
-    // leg=founder selects the founder-bridge whisper copy (M1.9b): the founder
-    // IS the team, so there is no press-0 "reach the team" escape on her leg —
-    // just press-1 to accept (the same gate that blocks carrier voicemail).
+    // leg=founder selects the founder-bridge whisper copy (M1.9b). Both legs
+    // now offer the same single choice: press-1 to accept (the gate that
+    // blocks carrier voicemail).
     const isFounderLeg = q['leg'] === 'founder';
     if (conversationId.length > 0) mergeContext({ conversationId });
 
-    // Carry leg forward to the gate so it can pick the right press-0 behavior.
+    // Carry leg forward to the gate so it can log which leg answered.
     const gateUrl =
       `${baseUrl}/webhooks/twilio/voice/whisper-gate` +
       `?conversationId=${encodeURIComponent(conversationId)}` +
@@ -1065,9 +1020,8 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       method: 'POST',
     });
     // Masked announcement: the caller's ROLE/name only — NEVER a phone (PII).
-    // Press 1 to accept (gates the bridge, blocks carrier voicemail). The masked
-    // (relay) leg also offers press-0 → team; the founder leg does not (she is
-    // the team).
+    // Press 1 to accept (gates the bridge, blocks carrier voicemail). That is
+    // the ONLY offered key on both legs; anything else falls through to hangup.
     gather.say(
       isFounderLeg
         ? resolveMessage('voice.whisper_founder', { callerLabel })
@@ -1084,10 +1038,9 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
   });
 
   // ---------------------------------------------------------------------
-  // Whisper gate — POST /voice/whisper-gate. The press-1/press-0/timeout
-  // decision, stateless (context via the query string). Runs on the CALLEE leg.
+  // Whisper gate — POST /voice/whisper-gate. The press-1/timeout decision,
+  // stateless (context via the query string). Runs on the CALLEE leg.
   //   Digits == '1' → empty/<Pause> TwiML → the bridge PROCEEDS (callee accepted)
-  //   Digits == '0' → <Dial> the team (press-0 escape)
   //   else          → <Hangup> the callee leg (caller hears masked no-answer,
   //                   never the carrier voicemail)
   // ---------------------------------------------------------------------
@@ -1097,9 +1050,10 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
     const digits = params['Digits'];
     const conversationId = typeof q['conversationId'] === 'string' ? q['conversationId'] : '';
     const parentCallSid = typeof q['parentCallSid'] === 'string' ? q['parentCallSid'] : (params['CallSid'] ?? '');
-    // Founder-bridge leg (M1.9b): the founder IS the team, so press-0 has no
-    // team to escape to — it falls through to hangup (→ MISSED → the status
-    // handler fires the missed-call push + auto-text).
+    // Founder-bridge leg (M1.9b). The gate treats both legs identically now;
+    // this only labels the log line. A non-accept on the founder leg still
+    // falls through to hangup (→ MISSED → the status handler fires the
+    // missed-call push + auto-text).
     const isFounderLeg = q['leg'] === 'founder';
     // Outbound-bridge leg (Voice Phase 1, spec §5): the navigator's press-1
     // ORIGINATES the leg to the target (a <Dial>), rather than accepting an
@@ -1116,7 +1070,7 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       // outbound call RECORDS like the founder-bridge; the <Dial action> reports
       // the terminal outcome to /voice/status by the PARENT (originated) CallSid.
       const target = await resolveOutboundTarget(conversationId);
-      const businessCallerId = config.ourPhoneNumbers[0];
+      const businessCallerId = config.businessPhoneNumber;
       if (target === undefined || businessCallerId === undefined) {
         vr.hangup();
         log.warn(
@@ -1208,28 +1162,11 @@ export function createTwilioVoiceRouter(deps: TwilioVoiceWebhookDeps = {}): Rout
       sendTwiml(res, vr);
       return;
     }
-    if (digits === '0' && !isFounderLeg && !isOutboundLeg) {
-      // Press-0 escape (masked relay only): dial the team. callerId stays a
-      // number we own (the first configured business number) — NEVER the
-      // original caller's From (PII).
-      const teamNumbers = config.ourPhoneNumbers;
-      const teamCallerId = teamNumbers[0];
-      if (teamNumbers.length > 0 && teamCallerId !== undefined) {
-        const dial = vr.dial({ callerId: teamCallerId, record: 'do-not-record' });
-        for (const n of teamNumbers) dial.number(n);
-        log.info({ callSid: parentCallSid, gate: 'team', masked: true }, 'masked whisper gate: press-0 — dialing team');
-      } else {
-        // No team number configured — say + hangup rather than leak/await.
-        vr.say(resolveMessage('voice.team_unreachable'));
-        vr.hangup();
-        log.warn({ callSid: parentCallSid, gate: 'team' }, 'masked whisper gate: press-0 but no team number configured');
-      }
-      sendTwiml(res, vr);
-      return;
-    }
-    // Timeout / press-0 on the founder leg / any other key → hang up the bridged
-    // leg so the caller hears a no-answer (the press-1 gate is exactly what
-    // blocks the leg's carrier voicemail from silently "answering" the bridge).
+    // Timeout, or ANY key other than the accept, on ANY leg -> hang up the
+    // bridged leg so the caller hears a no-answer (the press-1 gate is exactly
+    // what blocks the leg's carrier voicemail from silently "answering" the
+    // bridge). '0' is not special: the team escape was removed
+    // (docs/issues/press-0-team-escape-removed.md).
     vr.hangup();
     log.info(
       { callSid: parentCallSid, gate: 'hangup', leg: isFounderLeg ? 'founder' : 'callee' },

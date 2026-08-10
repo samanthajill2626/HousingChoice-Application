@@ -7,11 +7,13 @@
 // mechanical (message bodies, timestamps, directions, durations, membership).
 // That split is why she reviews ~150 decisions instead of 17,854 messages.
 //
-// THE JOIN COLUMN IS `row_key`, NEVER `phone`. Excel reads a leading `+` in an
-// E.164 cell as a formula and hands back a bare integer, so a phone-keyed join
-// would silently corrupt on every row she touches. `phone` is display-only, and
-// a phone that disagrees with the one we issued for a row_key is a flagged
-// conflict for a human — never a silent trust of either value.
+// IDENTITY: contacts carry-forward joins on the PHONE (digits-only, so an
+// Excel-stripped `+` cannot break it) - row keys are position-derived and
+// reshuffle whenever the data or flag rules change, so they cannot identify a
+// person across plan runs. `row_key` remains the join for the SAME-generation
+// apply step (plan -> she edits -> apply), where positions cannot have moved;
+// apply cross-checks each row_key's phone against the export and refuses on
+// mismatch.
 
 import { parseCsv, serializeCsv, type CsvRow } from './csv.js';
 import { explainFlags, needsFounderInput, type MergedPerson } from './merge.js';
@@ -61,12 +63,16 @@ export const GROUP_COLUMNS = [
   'needs_your_input',
   'change',
   // --- editable ---
-  'connect_day_one',
+  // 2026-08-09: ALL groups continue (regular group texting is being built -
+  // docs/issues/regular-group-texting-for-imported-groups.md), so the old
+  // "connect on day one?" question is gone. The only decision left is
+  // exclusion: `drop` = Y keeps a group (and its messages) out entirely.
+  'drop',
   'label',
   'notes',
   // --- read-only evidence ---
   'why',
-  // WHO is in the group, by name — the column that makes the yes/no answerable.
+  // WHO is in the group, by name — what makes the tab skimmable.
   'who',
   'composition',
   'messages',
@@ -122,6 +128,19 @@ const YES = 'YES';
 // ---------------------------------------------------------------------------
 
 export function buildContactRows(people: readonly MergedPerson[], prior?: PriorReview): CsvRow[] {
+  // Carry-forward joins on PHONE, not row_key. Row keys are POSITION-derived
+  // (severity-sorted), so any change to the data or the flag rules reshuffles
+  // them wholesale - the 2026-08-09 re-export moved almost every row. The phone
+  // is the person's stable identity (it is the merge key), so her edits follow
+  // the person, not the seat. Digits-only comparison so an Excel-stripped `+`
+  // cannot break the join.
+  const priorByPhone = new Map<string, CsvRow>();
+  if (prior) {
+    for (const row of prior.contacts.values()) {
+      const digits = (row.phone ?? '').replace(/\D/g, '');
+      if (digits) priorByPhone.set(digits, row);
+    }
+  }
   return people.map((p) => {
     const suggested: CsvRow = {
       row_key: p.rowKey,
@@ -143,10 +162,8 @@ export function buildContactRows(people: readonly MergedPerson[], prior?: PriorR
       airtable_caseworker_org: p.airtableTenant?.caseworkerOrganization ?? '',
       airtable_note: p.airtableTenant?.note.replace(/\s+/g, ' ').trim() ?? '',
     };
-    return applyCarryForward(suggested, prior?.contacts, CONTACT_EDITABLE, {
-      priorPhone: prior?.contactPhones.get(p.rowKey),
-      currentPhone: p.phone,
-    });
+    const priorRow = prior ? priorByPhone.get(p.phone.replace(/\D/g, '')) : undefined;
+    return applyCarryForwardRow(suggested, priorRow, CONTACT_EDITABLE, prior !== undefined);
   });
 }
 
@@ -185,14 +202,14 @@ export function buildGroupRows(
 
     const suggested: CsvRow = {
       row_key: rowKey('GRP', i),
-      // Every group needs a yes/no on day-one connection, so all of them are
-      // "your input" — but they are cheap: the default N is almost always right.
-      needs_your_input: YES,
+      // No mandatory decision any more: every group continues by default
+      // (2026-08-09 - regular group texting is being built). Spot-check only.
+      needs_your_input: '',
       change: '',
-      connect_day_one: 'N',
+      drop: '',
       label: '',
       notes: '',
-      why: 'Group texting changes at cutover - connect only what must work on day one',
+      why: 'All group chats continue - mark drop=Y only if this one should NOT come over',
       who: t.participants.map(describe).join(' | '),
       participants: String(t.participants.length),
       participant_phones: t.participants.join(' | '),
@@ -200,7 +217,7 @@ export function buildGroupRows(
       last_activity: t.lastActivityAt.slice(0, 10),
       composition,
     };
-    return applyCarryForward(suggested, prior?.groups, ['connect_day_one', 'label', 'notes']);
+    return applyCarryForward(suggested, prior?.groups, ['drop', 'label', 'notes']);
   });
 }
 
@@ -342,26 +359,24 @@ function applyCarryForward(
   row: CsvRow,
   priorRows: ReadonlyMap<string, CsvRow> | undefined,
   editable: readonly string[],
-  identity?: { priorPhone?: string; currentPhone: string },
 ): CsvRow {
   if (!priorRows) return row;
-  const prior = priorRows.get(row.row_key ?? '');
-  if (!prior) return { ...row, change: 'new' };
+  return applyCarryForwardRow(row, priorRows.get(row.row_key ?? ''), editable, true);
+}
 
-  // The row_key is a POSITION-derived key, so a changed export can slide a
-  // different person onto the same key. Verifying the phone catches that, and it
-  // is the reason we keep phone in the file at all.
-  if (identity?.priorPhone && identity.priorPhone !== identity.currentPhone) {
-    return {
-      ...row,
-      change: 'conflict',
-      needs_your_input: YES,
-      why:
-        `${row.why ?? ''}${row.why ? '; ' : ''}` +
-        `This row key held a different phone in the last review (${identity.priorPhone}) - ` +
-        `your earlier edits were NOT carried over`,
-    };
-  }
+/**
+ * Merge one prior row (matched by the caller - by phone for contacts, by
+ * row_key for groups/units) onto a freshly generated row. Her non-empty
+ * editable values win; a person with no prior row is marked `new`.
+ */
+function applyCarryForwardRow(
+  row: CsvRow,
+  prior: CsvRow | undefined,
+  editable: readonly string[],
+  havePrior: boolean,
+): CsvRow {
+  if (!havePrior) return row;
+  if (!prior) return { ...row, change: 'new' };
 
   const merged: CsvRow = { ...row, change: 'unchanged' };
   for (const col of editable) {

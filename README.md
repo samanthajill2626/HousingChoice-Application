@@ -38,9 +38,10 @@ This table is the changelog of every place the build intentionally deviates from
 | 2026-06-12 | Access (M1.3) | §11.3 workstream 8 — "Google OAuth Workspace-restricted, sessions, founder/VA RBAC" (implies domain = access) | **Invite-first**: a Google login succeeds only if an admin has pre-created (`npm run user:invite`) a user record for that email; no record → 403 "not invited". The domain allowlist is retained as defense-in-depth. No more auto-provisioning. | Operator decision — two whole Workspace domains (incl. the operator's consulting company) is too broad a trust boundary for tenant PII; access is invite-gated, the domain allowlist is the second fence. First admin is bootstrapped with `npm run user:invite -- <env> <email> admin`. |
 | 2026-06-12 | Data model (M1.4) | §5's 9-table model (contacts, units, conversations, messages, matches, placements, invoices, users, audit_events) | Added a 10th table `settings` (PK `settingId`, singleton item `org`, no GSIs) | Change Order 2's founder-editable templates (missed-call auto-text + quick replies) need an in-app-editable DB home; Parameter Store is the wrong home (Terraform/operator-managed, not in-app editable). Flexible document, keys-only-contractual per §5; generated through `gen:tables` like the rest, so Terraform mirrors it automatically. Stored/edited in M1.4; consumed in M1.9. |
 | 2026-06-13 | Units address (M1.5) | §5 "Geocoded address" on the `units` table | `address` is a STRUCTURED postal object (`line1`/`line2`/`city`/`state`/`zip`, all optional — `lib/address.ts`), reused for tenant/contact addresses later; `jurisdiction` is an operator-set string. Still NO geocoding (no lat/long). | Kickoff explicitly scoped geocoding OUT of Phase 1. Structured fields make the address usable (display, future filtering) without coordinates; §5 already treats jurisdiction as a string the engine costs, and matching never needs lat/long at this scale (§5.1). Geocoding can be added later (a stream-fed enrichment) with no key/contract change — units are flexible documents. |
-| 2026-06-13 | Public surface (M1.5) | The doc implies the dashboard API is the only HTTP surface, all behind auth | Added an UNAUTHENTICATED `/public` router (housing-fair intake + unit flyer) — the §11.3 "housing-fair form → auto welcome text". It sits BEHIND the locked chain's CloudFront origin-secret validator + body parsers, but is the one place `requireAuth` is intentionally absent. | The housing-fair form and flyer link are filled in / opened by the public, who have no session. Compensating controls: a reusable per-IP in-memory rate limiter on all `/public` routes (`PUBLIC_RATE_LIMIT_MAX`/`_WINDOW_MS`, default 5/min, single-instance — same assumption as the SSE bus), strict generic-error input validation, idempotent welcome-text send (one SMS per phone, ever — abuse/cost guard), no-PII logging (hashed phone marker), and a flyer projection that allowlists shareable fields so internal data (tour/application process, primary_voice_contact, landlord PII) can never leak. |
+| 2026-06-13 | Public surface (M1.5) | The doc implies the dashboard API is the only HTTP surface, all behind auth | Added an UNAUTHENTICATED `/public` router (housing-fair intake + unit flyer) — the §11.3 "housing-fair form → auto welcome text". It sits BEHIND the locked chain's CloudFront origin-secret validator + body parsers, but is the one place `requireAuth` is intentionally absent. | The housing-fair form and flyer link are filled in / opened by the public, who have no session. Compensating controls: a reusable per-IP in-memory rate limiter on all `/public` routes (`PUBLIC_RATE_LIMIT_MAX`/`_WINDOW_MS`, default 5/min, single-instance — same assumption as the SSE bus), strict generic-error input validation, idempotent welcome-text send (one SMS per phone, ever — abuse/cost guard), no-PII logging (hashed phone marker), and a flyer projection that allowlists shareable fields so internal data (tour/application process, primary_contact, landlord PII) can never leak. |
 | 2026-06-13 | DNS / custom domain (Change Order 3) | §13 left DNS hosting open; the zero-drift principle implies all infrastructure (incl. DNS) lives in Terraform | **DNS records are managed manually in Namecheap, outside Terraform** (the `housingchoice.org` zone is not migrated to Route 53). The ACM cert + CloudFront alias ARE in Terraform; only the ACM validation CNAME and the app CNAMEs (`app` / `dev.app`) are hand-entered at Namecheap. | `housingchoice.org` is registered at Namecheap and the operator has zone access; the two subdomains need only plain CNAMEs (no apex ALIAS/ANAME problem). Migrating the zone to Route 53 to bring DNS back under IaC is parked (doc §14). The cert + alias staging (`custom_domain_phase`) keeps the apply from ever deadlocking on a DNS record Terraform can't create. |
 | 2026-07-16 | Data model (conversation-fact-extraction) | ai_extraction table added for conversation-fact-extraction (2026-07-16) | Added an 11th table `ai_extraction` (PK `itemId`; three sparse GSIs byDueAt/byOwner/byPending) holding both per-conversation debounce/cursor items and per-(contact, target) pending suggestion items | AI fact extraction needs a debounced worker queue (sliding due items) plus per-contact and global pending-suggestion listings. The contacts table has no sort key, so per-owner suggestion listing would need a contacts-table GSI anyway; one new single-key table serves the poll, the review list, and the Today count. Flexible document, keys-only-contractual; generated through `gen:tables` like the rest so Terraform mirrors it. |
+| 2026-08-08 | Data model (AI run log) | The architecture's original table inventory has no durable forensic record of individual AI extraction runs | Added a new table `ai_runs` (the 22nd; PK `itemId`) holding `run#<runId>` envelopes and `ptr#<entityKey>#<startedAt>#<runId>` pointers, with one sparse `byEntity` GSI and `expires_at` TTL | Operators need a 90-day, queryable record of what extraction saw, proposed, and did without putting PII in general logs. The table is generated from `tables.ts`; apply it to dev after merge and to prod at M1.11 before deploying code that writes it. |
 
 ## Repo layout
 
@@ -183,6 +184,57 @@ The 9-table schema (keys/GSIs are contractual) lives in [`app/src/lib/tables.ts`
 | Terraform | >= 1.15 | `terraform version` |
 | AWS CLI | v2 | `aws --version` |
 | git | current | `git --version` |
+
+## Claude Code settings — permissions live in an UNTRACKED file, on purpose
+
+You must create your own `.claude/settings.local.json` to grant tool
+permissions. The committed `.claude/settings.json` carries only `env` — its
+`permissions` block is intentionally empty, because **permission rules in the
+committed file are NOT honored** (verified by A/B test 2026-08-07: identical
+command, identical restart; allowed with the rules in `settings.local.json`,
+prompted with the same rules in `settings.json` alone).
+
+That is a sensible security boundary rather than a bug: if a committed file
+could self-grant `Bash`, cloning any repository would hand it your machine.
+Permissions must come from a file YOU authored — user settings or the
+gitignored local file.
+
+Consequence for this repo's agent workflow: feature missions run in
+`git worktree` checkouts under `w:\tmp\<feature>`, and a gitignored file does
+NOT follow a worktree. **Copy your local settings into each new worktree**, or
+background agents will stall on permission prompts nobody is present to
+answer:
+
+```
+git worktree add w:\tmp\<feature> -b feat/<feature> main
+copy .claude\settings.local.json w:\tmp\<feature>\.claude\settings.local.json
+```
+
+The feature-mission profile (`.claude/feature-mission.profile.md`) carries this
+as part of its worktree recipe.
+
+Notes on the rules themselves:
+
+- The three files layer user -> project -> local:
+  `~/.claude/settings.json` (you, every project), `.claude/settings.json`
+  (this repo, everyone, committed — `env`/`hooks`/plugin config, NOT
+  permissions), `.claude/settings.local.json` (this repo, your clone only,
+  gitignored — where permissions actually work).
+- Rule syntax has three forms: exact (`Bash(npm run test)`), prefix-wildcard
+  (`Bash(git *)` — a LITERAL prefix then a space-star), and tool-only
+  (`Bash`, no parentheses). A bare `Bash(*)` is none of these and matches
+  NOTHING — it fails silently, which is easy to mistake for a config that
+  simply is not loading.
+- MCP rules take `mcp__<server>` (whole server) or `mcp__<server>__<tool>`.
+  There is no wildcard form; `mcp__server__*` matches nothing.
+- `allow` lists MERGE across files and cannot be subtracted from. To get a
+  prompt back, add the rule to **`ask`** (outranks `allow`); to refuse
+  outright use **`deny`** (outranks both). Both work at any granularity —
+  e.g. `ask` on `Bash(git push *)` while leaving the rest allowed.
+- Both settings files are honored **live** — they are re-read in real time, so
+  an edit takes effect immediately and you can retry a blocked call at once.
+  No restart. If a rule is not working, the cause is one of the two above
+  (wrong file, or a form that matches nothing), never staleness.
 
 ## Binding engineering guidelines
 

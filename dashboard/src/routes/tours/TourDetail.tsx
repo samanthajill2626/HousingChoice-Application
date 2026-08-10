@@ -28,9 +28,11 @@ import {
   getConversation,
   getNoShowCheckinDraft,
   patchTour,
+  previewTourRosterOpen,
   TOUR_OUTCOME_LABELS,
   TOUR_TYPE_LABELS,
   type Contact,
+  type RosterPreview,
   type Tour,
   type TourOutcome,
   type TourStatus,
@@ -38,12 +40,13 @@ import {
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge, useTwoPaneNarrow } from '../../ui/index.js';
 import { Card, CardAction, Chips, EmptyRow, KV, NotesText, PendingPanel, Row } from '../contact/Card.js';
-import {
-  contactDisplayName,
-  contactStatusLabel,
-  formatAddress,
-  formatPhone,
-} from '../contact/format.js';
+import { contactDisplayName, formatAddress } from '../contact/format.js';
+import { PeopleCard } from '../shared/PeopleCard.js';
+import { RosterConfirmDialog } from '../shared/RosterConfirmDialog.js';
+import { useRoster } from '../shared/useRoster.js';
+import { useRosterContacts } from '../shared/useRosterContacts.js';
+import { rosterDrivesTabs, rosterPersonInputs, rosterSuggestions } from '../shared/rosterPeople.js';
+import { pendingActionNote } from '../shared/rosterWrites.js';
 import { formatRent } from '../listing/listingFormat.js';
 import { dateTime, shortDate } from '../placements/placementsFormat.js';
 import { useTour } from './useTour.js';
@@ -150,7 +153,61 @@ function TourDetailLoaded({
 }: LoadedProps): React.JSX.Element {
   const navigate = useNavigate();
   const landlordId = typeof unit?.landlordId === 'string' ? unit.landlordId : undefined;
-  const channels = useTourChannels(tour, landlordId);
+  // Staff see people by NAME (GLOSSARY); degrade to the raw id only when the
+  // contact record truly cannot be loaded. Declared HERE, above the channels
+  // hook, because the 1:1 tabs are labelled with these display names.
+  const tenantName = tenant
+    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
+    : tour.tenantId;
+  const landlordName = landlord
+    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
+    : landlordId ?? null;
+  // THE roster: one fetch feeding the People card AND the 1:1 tabs, so the card
+  // and the tabs can never disagree about who is on this tour (spec goal 4).
+  // The group-thread pointer rides along: once it exists, the thread's
+  // participants ARE the roster (spec D1), so the pointer moving is a different
+  // question and must refetch.
+  const roster = useRoster({
+    type: 'tour',
+    id: tourId,
+    ...(tour.groupThreadId !== undefined && { threadId: tour.groupThreadId }),
+  });
+  const rosterPeople = useMemo(() => rosterPersonInputs(roster.roster), [roster.roster]);
+  // The 1:1 PANES need a loaded Contact, and this page joins only two of them
+  // (tenant + the unit's landlord-of-record). Fetch the records for whoever
+  // else is on the roster - the PM on a PM-managed property, anyone added by
+  // hand - so their tab opens a real pane instead of a dead end (spec D6).
+  const rosterContacts = useRosterContacts(rosterPeople, [tour.tenantId, landlordId]);
+  // Who belongs on this tour but is not on the roster - the property's other
+  // contacts and, when they have been removed, the tenant (spec 6.2). This is
+  // what makes the swap two clicks and a restore one.
+  const unitContacts = unit?.contacts;
+  const tenantId = tour.tenantId;
+  const rosterSuggestionRows = useMemo(
+    () =>
+      rosterSuggestions({
+        scope: 'tour',
+        roster: roster.roster,
+        unitContacts,
+        tenant: { contactId: tenantId, name: tenantName },
+      }),
+    [roster.roster, unitContacts, tenantId, tenantName],
+  );
+  // Until the roster is a fact we can key on, the tabs keep the ids this page
+  // already renders (tenant + the property's landlord) so they never blink out
+  // mid-conversation - never a phone-gated resolver (a tenant with no mobile
+  // number keeps their tab).
+  const channels = useTourChannels(
+    tour,
+    rosterDrivesTabs(roster.status, roster.roster)
+      ? rosterPeople
+      : [
+          { contactId: tour.tenantId, label: tenantName },
+          ...(landlordId !== undefined
+            ? [{ contactId: landlordId, label: landlordName ?? landlordId }]
+            : []),
+        ],
+  );
   // ONE activity fetch feeds both the Activity card and the conversation
   // transcripts (as interleaved milestone pins). Rows arrive newest-first;
   // the transcripts want oldest-first, hence the reverse. Only the loaded
@@ -181,15 +238,11 @@ function TourDetailLoaded({
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
   );
+  // The pre-open confirm's server-composed preview (spec 6.3). Non-null == the
+  // dialog is up; nothing is provisioned until the operator confirms.
+  const [openPreview, setOpenPreview] = useState<RosterPreview | null>(null);
 
-  const isPm = tour.tourType === 'pm_team';
   const address = unit ? formatAddress(unit.address) || tour.unitId : tour.unitId;
-  const tenantName = tenant
-    ? contactDisplayName(tenant.firstName, tenant.lastName, tenant.phone)
-    : tour.tenantId;
-  const landlordName = landlord
-    ? contactDisplayName(landlord.firstName, landlord.lastName, landlord.phone)
-    : landlordId ?? null;
   const typeLabel = TOUR_TYPE_LABELS[tour.tourType] ?? tour.tourType;
   const whenText = tour.scheduledAt !== undefined ? formatScheduledAt(tour.scheduledAt) : 'Not booked';
   const factsLine = `${whenText} - ${typeLabel} - ${tenantName} -> ${address}`;
@@ -205,8 +258,26 @@ function TourDetailLoaded({
     typeof tour.scheduledAt === 'string' && new Date(tour.scheduledAt).getTime() <= Date.now();
   const canSendNoShowCheckin =
     startPassed && (tour.status === 'scheduled' || tour.status === 'no_show');
+  // The ROSTER's own gate: fewer than two reachable members and there is nothing
+  // to open a group text with. Say so on a DISABLED control (the People card
+  // already carries the reason) instead of failing at click time with the
+  // route's 400 relay_member_unresolvable - the route keeps its guard regardless.
+  const rosterTooThin = roster.roster !== null && !roster.roster.canOpenGroup;
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
+  const openGroupBlocked = canOpenGroup && rosterTooThin;
+  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // header kebab's menu item are the same click, so they carry the same reason
+  // and the same disabled state (spec 6.2 - the reason on a disabled control
+  // rather than a click-time 400 relay_member_unresolvable).
+  const openGroupBlockedReason = openGroupBlocked
+    ? 'Not enough people to open a group text - two reachable members are needed'
+    : undefined;
+  // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
+  // again would silently supersede it with a new dueAt, so the control says
+  // when it opens instead - and the People card carries the two ways out.
+  const pendingOpen = roster.roster?.pending.find((p) => p.kind === 'open_group');
+  const pendingOpenNote = pendingOpen !== undefined ? pendingActionNote(pendingOpen) : undefined;
   const isConverted = typeof tour.convertedPlacementId === 'string';
 
   // --- Mutations ------------------------------------------------------------
@@ -265,37 +336,68 @@ function TourDetailLoaded({
       });
   };
 
-  // Provision the masked group thread (members auto-resolved server-side); shared
-  // by the header kebab AND the left-pane empty state.
+  // Opening a group text SENDS the intro to real people, so it confirms first
+  // (spec 6.3): fetch the server-composed preview, show it, and provision only
+  // on confirm. Shared by the header kebab AND the left-pane empty state.
+  //
+  // A 409 relay_already_provisioned means someone else just opened it - refetch
+  // the roster (its source flips to `participants`) and NEVER open a dialog we
+  // would only be able to fail.
   const handleOpenGroup = async (): Promise<void> => {
     if (busy) return;
     setBusy(true);
     setActionError(null);
     try {
-      const { tour: updated } = await createTourRelay(tourId);
-      setTour(updated);
-      if (typeof updated.groupThreadId === 'string') {
-        channels.setGroupConversationId(updated.groupThreadId);
-      }
+      setOpenPreview(await previewTourRosterOpen(tourId));
     } catch (err) {
-      if (err instanceof ApiError) {
-        // relay_member_unresolvable carries a human `detail` (which member has no
-        // phone) - show that, not the raw code.
-        const detail =
-          err.body !== null && typeof err.body === 'object'
-            ? (err.body as { detail?: unknown }).detail
-            : undefined;
-        setActionError(
-          err.code === 'relay_member_unresolvable' && typeof detail === 'string'
-            ? detail
-            : err.message,
-        );
+      if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
+        roster.refetch();
       } else {
-        setActionError('Failed to open group text');
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
       }
     } finally {
       setBusy(false);
     }
+  };
+
+  // Provision the masked group thread (members auto-resolved server-side) - the
+  // confirmed half of handleOpenGroup. Throws on failure so the dialog can show
+  // the reason and stay open.
+  //
+  // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
+  // answers 202 with the ROSTER - nothing is opened, so there is no tour to
+  // apply and no thread id to mount. Committing the returned payload is the
+  // whole handling: its `pending` row is what the card and the [Open group
+  // text] control render as "Opens at 8:00 AM - quiet hours".
+  // `force` is the dialog's "Send now anyway" (and the pending banner's
+  // "Send now"), which opens immediately despite the window.
+  const runOpenGroup = async (force: boolean): Promise<void> => {
+    const result = await createTourRelay(tourId, { force });
+    if (result.deferred) {
+      roster.apply(result.roster);
+      return;
+    }
+    setTour(result.tour);
+    if (typeof result.tour.groupThreadId === 'string') {
+      channels.setGroupConversationId(result.tour.groupThreadId);
+    }
+    // The plan was consumed at open (spec D1) - re-read so the card and the tabs
+    // switch to the thread's participants.
+    roster.refetch();
+  };
+
+  // "Send now" on a DEFERRED open: the operator already confirmed this send
+  // once, so it never re-previews - it forces the same provision through.
+  // Failures land in the header alert (there is no dialog to hold them).
+  const forceOpenGroup = (): void => {
+    if (busy) return;
+    setBusy(true);
+    setActionError(null);
+    void runOpenGroup(true)
+      .catch((err: unknown) => {
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
+      })
+      .finally(() => setBusy(false));
   };
 
   // Convert a convertible, not-yet-converted tour into a placement, then jump to
@@ -413,9 +515,9 @@ function TourDetailLoaded({
   }
 
   // --- People card data -----------------------------------------------------
-  const tenantChips: string[] = [];
-  if (tenant?.status) tenantChips.push(contactStatusLabel(tenant.type, tenant.status));
-  if (typeof tenant?.voucherSize === 'number') tenantChips.push(`Voucher ${tenant.voucherSize}BR`);
+  // The tenant's free-text caseworker: a NAME on the record, not a contact - the
+  // card hints it whenever it is set (spec 6.2).
+  const caseworker = typeof tenant?.caseworker === 'string' ? tenant.caseworker : undefined;
   const propertyChips: string[] = [];
   if (unit) {
     if (typeof unit.beds === 'number') propertyChips.push(`${unit.beds} BR`);
@@ -470,6 +572,9 @@ function TourDetailLoaded({
             onSendNoShowCheckin={handleSendNoShowCheckin}
             canOpenGroup={canOpenGroup}
             onOpenGroup={() => void handleOpenGroup()}
+            {...(openGroupBlockedReason !== undefined && {
+              openGroupDisabledReason: openGroupBlockedReason,
+            })}
             busy={busy}
           />
         </div>
@@ -510,10 +615,15 @@ function TourDetailLoaded({
             tour={tour}
             tenant={tenant}
             landlord={landlord}
-            landlordId={landlordId}
+            rosterContacts={rosterContacts}
             channels={channels}
             onOpenGroup={() => void handleOpenGroup()}
             openGroupBusy={busy}
+            {...(pendingOpenNote !== undefined
+              ? { openGroupDisabledReason: pendingOpenNote }
+              : openGroupBlockedReason !== undefined && {
+                  openGroupDisabledReason: openGroupBlockedReason,
+                })}
             tourMilestones={tourMilestones}
             commsVisible={commsVisible}
             {...(noShowSeed !== null && { noShowDraft: noShowSeed })}
@@ -544,32 +654,20 @@ function TourDetailLoaded({
               />
             </Card>
 
-            {/* --- People --- */}
-            <Card title="People">
-              <KV
-                k="Tenant"
-                v={
-                  <span className={styles.person}>
-                    <Link to={`/contacts/${tour.tenantId}`}>{tenantName}</Link>
-                    {tenantChips.length > 0 ? <Chips items={tenantChips} /> : null}
-                  </span>
-                }
-              />
-              <KV
-                k={isPm ? 'Property manager' : 'Landlord'}
-                v={
-                  landlordId !== undefined ? (
-                    <span className={styles.person}>
-                      <Link to={`/contacts/${landlordId}`}>{landlordName ?? landlordId}</Link>
-                      {landlord?.phone ? (
-                        <span className={styles.subtle}>{formatPhone(landlord.phone)}</span>
-                      ) : null}
-                    </span>
-                  ) : (
-                    <EmptyRow>No landlord on file.</EmptyRow>
-                  )
-                }
-              />
+            {/* --- People (the ROSTER) + the property row the page owns --- */}
+            <PeopleCard
+              scope="tour"
+              status={roster.status}
+              roster={roster.roster}
+              onRetry={roster.refetch}
+              {...(caseworker !== undefined && { caseworker })}
+              edit={{
+                owner: { type: 'tour', id: tourId },
+                suggestions: rosterSuggestionRows,
+                onApply: roster.apply,
+                onOpenNow: forceOpenGroup,
+              }}
+            >
               <KV
                 k="Property"
                 v={
@@ -579,7 +677,7 @@ function TourDetailLoaded({
                   </span>
                 }
               />
-            </Card>
+            </PeopleCard>
 
             {/* --- Reminders (RemindersPanel renders its own Card) --- */}
             <RemindersPanel tourId={tour.tourId} />
@@ -642,6 +740,16 @@ function TourDetailLoaded({
           conversationId={closeAsk.conversationId}
           memberSummary={closeAsk.memberSummary}
           onDone={() => setCloseAsk(null)}
+        />
+      ) : null}
+      {openPreview !== null ? (
+        <RosterConfirmDialog
+          title="Open the group text?"
+          preview={openPreview}
+          confirmLabel="Open group text"
+          deferLabel="Open"
+          onConfirm={runOpenGroup}
+          onClose={() => setOpenPreview(null)}
         />
       ) : null}
     </div>

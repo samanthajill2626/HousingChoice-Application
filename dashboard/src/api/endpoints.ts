@@ -1,9 +1,12 @@
 // Typed endpoint functions - one per route. Every function returns a typed
 // result and throws ApiError on non-2xx (see api/client.ts). Components import
 // these (via api/index.ts) and never construct fetch calls by hand.
-import { ApiError, request } from './client.js';
+import { ApiError, request, requestWithStatus } from './client.js';
 import type {
   AdminUserView,
+  AiRunDetailResponse,
+  AiRunListPage,
+  AiRunScope,
   AudienceFilter,
   BroadcastResults,
   BroadcastsPage,
@@ -48,9 +51,12 @@ import type {
   PlacementNudgeView,
   RelatedUnit,
   RelayGroupRow,
+  RosterPreview,
+  RosterView,
   SendMessageResult,
   SimilarUnit,
   SuggestionItem,
+  SuggestionRequestIdentity,
   SystemAlarmsResult,
   SystemErrorsResult,
   SystemFlags,
@@ -66,6 +72,7 @@ import type {
   TourRemindersPage,
   TourReminderView,
   UnitActivityEvent,
+  UnitContact,
   UnitItem,
   UnitsPage,
   MmsMediaAttachment,
@@ -347,21 +354,41 @@ export async function postNudgeSendNow(
   return res.nudge;
 }
 
+/**
+ * What opening a relay group did. TWO successful outcomes share the route and
+ * the STATUS is what tells them apart (contact-rosters D7):
+ *   - 201 -> provisioned NOW; the thread exists and can be mounted.
+ *   - 202 -> DEFERRED to quiet-end; NOTHING was opened. The body is the roster,
+ *     whose `pending` carries the row the card renders as "Opens at 8:00 AM".
+ * Modelled as a union so no caller can read a conversation id that is not there
+ * (and mount a thread that does not exist).
+ */
+export type PlacementRelayOpenResult =
+  | { deferred: false; conversationId: string }
+  | { deferred: true; roster: RosterView };
+
 /** POST /api/placements/:placementId/relay — provision the placement's masked
  *  relay group thread (tenant + the unit's landlord, by their SMS numbers) and
  *  link placement.group_thread. Idempotent: 409 relay_exists when an OPEN relay
  *  already fronts the placement; 503 relay_provisioning_disabled (kill-switch) /
  *  pool_number_unavailable; 400 tenant_unreachable / landlord_unreachable /
- *  unit_not_found; 404 placement_not_found. The server responds 201
- *  { conversation, placement }; we unwrap the new thread's id. */
+ *  unit_not_found; 404 placement_not_found. 201 { conversation, placement } ->
+ *  the new thread's id; 202 <RosterView> -> deferred (see the result type).
+ *  `force` is the dialog's "Send now anyway" (`?force=send_now`), which opens
+ *  immediately despite quiet hours. */
 export async function provisionPlacementRelay(
   placementId: string,
-): Promise<{ conversationId: string }> {
-  const res = await request<{ conversation: { conversationId: string }; placement: PlacementItem }>(
-    `/api/placements/${encodeURIComponent(placementId)}/relay`,
-    { method: 'POST' },
-  );
-  return { conversationId: res.conversation.conversationId };
+  opts: { force?: boolean } = {},
+): Promise<PlacementRelayOpenResult> {
+  const res = await requestWithStatus<
+    { conversation: { conversationId: string }; placement: PlacementItem } | RosterView
+  >(`/api/placements/${encodeURIComponent(placementId)}/relay`, {
+    method: 'POST',
+    ...(opts.force === true && { query: { force: 'send_now' } }),
+  });
+  if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
+  const opened = res.body as { conversation: { conversationId: string } };
+  return { deferred: false, conversationId: opened.conversation.conversationId };
 }
 
 /** POST /api/placements/:placementId/deadline { type:'follow_up', at } — arm the
@@ -871,6 +898,42 @@ export async function restoreUnit(unitId: string): Promise<UnitItem> {
   return res.unit;
 }
 
+/** POST /api/units/:unitId/contacts (C3) - add OR update a contact on the
+ *  property's roster. The route is an UPSERT keyed by contactId, so the SAME call
+ *  re-roles a row (send its current `primaryContact`) and promotes a row to the
+ *  property's PRIMARY CONTACT (send its current `role` with `primaryContact:
+ *  true`) - the server demotes whoever held it, keeping the single-primary
+ *  invariant and the `primary_contact` scalar in agreement. The landlord of
+ *  record's role is STRUCTURALLY pinned to 'landlord' server-side whatever is
+ *  sent. Returns the updated unit with its enriched `contacts` roster. Errors:
+ *  404 unit_not_found / contact_not_found; 400 on a bad role or a non-boolean
+ *  primaryContact. */
+export async function addUnitContact(
+  unitId: string,
+  input: { contactId: string; role: UnitContact['role']; primaryContact?: boolean },
+): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/contacts`,
+    { method: 'POST', body: input },
+  );
+  return res.unit;
+}
+
+/** DELETE /api/units/:unitId/contacts/:contactId (C3) - drop a contact from the
+ *  property's roster. Returns the updated unit (with `contacts`). Removing the
+ *  CURRENT primary contact promotes the landlord of record in its place (or
+ *  clears the primary entirely when the property has no landlordId) - so the
+ *  caller must confirm that promotion BEFORE calling (spec 6.1). Errors: 409
+ *  cannot_remove_landlord_of_record (the target IS `unit.landlordId` - reassign
+ *  the property's landlord first); 404 unit_or_contact_not_found. */
+export async function removeUnitContact(unitId: string, contactId: string): Promise<UnitItem> {
+  const res = await request<{ unit: UnitItem }>(
+    `/api/units/${encodeURIComponent(unitId)}/contacts/${encodeURIComponent(contactId)}`,
+    { method: 'DELETE' },
+  );
+  return res.unit;
+}
+
 /** GET /api/units/:id/related (C3) - duplex-sibling / same-landlord properties.
  *  404s until BE3 lands ? the property page degrades to a same-landlord FALLBACK
  *  it derives from getUnits(). */
@@ -1165,10 +1228,11 @@ export async function getSuggestions(
 export async function acceptSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<{ contact: Contact; suggestions: SuggestionItem[] }> {
   return request<{ contact: Contact; suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/accept`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
 }
 
@@ -1177,10 +1241,11 @@ export async function acceptSuggestion(
 export async function dismissSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<SuggestionItem[]> {
   const res = await request<{ suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/dismiss`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
   return res.suggestions;
 }
@@ -1535,8 +1600,10 @@ export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }>
   });
 }
 
-// --- Settings > Group text numbers (/api/pool-numbers) (admin-only) ----------
-// The admin pool-number inventory. requireRole('admin') upstream; a VA gets 403.
+// --- Settings > Phone numbers: the group text pool (/api/pool-numbers) -------
+// The ADMIN-ONLY pool-number inventory (the other half of that section, OUR one
+// business number, rides on /api/settings and is visible to everyone).
+// requireRole('admin') upstream; a VA gets 403.
 
 /** GET /api/pool-numbers - the pool-number inventory (unwrapped from { numbers }). */
 export async function listPoolNumbers(signal?: AbortSignal): Promise<PoolNumberRow[]> {
@@ -1658,7 +1725,8 @@ export function confirmCellVerify(code: string): Promise<{ ok: true; cell_verifi
 // VAs may VIEW (GET requireAuth); only admins EDIT (PUT requireRole('admin')).
 
 /** GET /api/settings — the founder-editable templates plus `welcomeTextDefault`
- *  (the read-only built-in welcome body, shown so admins see what "blank" sends). */
+ *  (the read-only built-in welcome body, shown so admins see what "blank" sends)
+ *  and `businessPhoneNumber` (OUR one number, omitted when unconfigured). */
 export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
   return request<SettingsResponse>('/api/settings', {
     ...(signal !== undefined && { signal }),
@@ -1666,7 +1734,8 @@ export function getSettings(signal?: AbortSignal): Promise<SettingsResponse> {
 }
 
 /** PUT /api/settings { ...patch } — admin-only edit; send ONLY changed fields.
- *  Returns the merged settings (+ welcomeTextDefault). 400 on a validation
+ *  Returns the merged settings (+ the SAME read-only siblings the GET carries,
+ *  welcomeTextDefault + businessPhoneNumber). 400 on a validation
  *  failure. `welcomeText: null` is an explicit CLEAR (revert to the default). */
 export function putSettings(patch: SettingsPatch): Promise<SettingsResponse> {
   return request<SettingsResponse>('/api/settings', {
@@ -1783,6 +1852,326 @@ export async function getTour(tourId: string, signal?: AbortSignal): Promise<Tou
     ...(signal !== undefined && { signal }),
   });
   return res.tour;
+}
+
+/** GET /api/tours/:tourId/roster - WHO is on this tour's roster right now, with
+ *  the source it was resolved from (spec D1: thread participants when a thread
+ *  exists, else the plan override, else the property default). Returned AS THE
+ *  BODY (no unwrap). Carries names + a phone's last 4 only - the full phone
+ *  never leaves the server. 404 tour_not_found. */
+export async function getTourRoster(tourId: string, signal?: AbortSignal): Promise<RosterView> {
+  return request<RosterView>(`/api/tours/${encodeURIComponent(tourId)}/roster`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/placements/:placementId/roster - the placement twin of
+ *  getTourRoster (same payload, same rules). 404 placement_not_found. */
+export async function getPlacementRoster(
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<RosterView> {
+  return request<RosterView>(`/api/placements/${encodeURIComponent(placementId)}/roster`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+// --- Roster editing: plan writes, live call-through, previews (Task 10/11) ---
+//
+// TWO families of write, and WHICH one the card uses is the whole safety story
+// (spec section 7 / D1):
+//
+//   PLAN  (`.../roster/members`, `.../roster/reset`)  - no thread exists yet.
+//         Silent: nothing has been sent, the roster is only a plan. These
+//         REFUSE with 409 `thread_exists` the moment a group text exists, and
+//         THE DASHBOARD MUST NEVER AUTO-RESUBMIT THAT EDIT through the live
+//         endpoints - a silent plan edit would escalate into a `member_added`
+//         text nobody confirmed. Refetch, surface the live state, and let the
+//         add proceed only through the confirm dialog.
+//
+//   LIVE  (`.../roster/live-members`)                 - a thread exists (ANY
+//         status). Owner-scoped ON PURPOSE: the raw relay member routes
+//         (addConversationMember / removeConversationMember) stay for
+//         STANDALONE groups and the roster card never calls them, because the
+//         deferral + announcement policy hangs off these owner routes.
+//         REMOVE takes the payload's `memberKey` - the SERVER finds the
+//         participant row and deletes by the phone stored ON that row, so a
+//         contact whose number changed after joining still leaves. The client
+//         never handles a phone.
+//
+// Every mutating endpoint answers with the SAME unwrapped `RosterView` that GET
+// serves, so the card has one shape and one decoder.
+
+/** `/api/tours/:id/roster` or `/api/placements/:id/roster` - the owner prefix
+ *  every roster endpoint hangs off. */
+function rosterPath(owner: 'tours' | 'placements', id: string): string {
+  return `/api/${owner}/${encodeURIComponent(id)}/roster`;
+}
+
+/** The ONE member an add names: an existing contact, or a bare phone number
+ *  (normalized to E.164 server-side). Exactly one, or 400 `invalid_member`. */
+export type RosterMemberInput = { contactId: string } | { phone: string };
+
+/** POST /api/tours/:tourId/roster/members - add ONE member to the tour's PLAN
+ *  override (materializing it from the current default first). Idempotent.
+ *  Errors: 404 tour_not_found; 409 thread_exists (use the live endpoint - and
+ *  never auto-resubmit); 400 invalid_member; 409 roster_conflict. */
+export async function addTourRosterMember(
+  tourId: string,
+  member: RosterMemberInput,
+): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('tours', tourId)}/members`, {
+    method: 'POST',
+    body: member,
+  });
+}
+
+/** DELETE /api/tours/:tourId/roster/members/:memberKey - drop ONE member from
+ *  the PLAN. `memberKey` is the payload's own key (a contactId, else
+ *  `phone:<E164>`). Errors: 409 last_member (renderable `message`); 404
+ *  member_not_found; 409 thread_exists; 409 roster_conflict. */
+export async function removeTourRosterMember(
+  tourId: string,
+  memberKey: string,
+): Promise<RosterView> {
+  return request<RosterView>(
+    `${rosterPath('tours', tourId)}/members/${encodeURIComponent(memberKey)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** POST /api/tours/:tourId/roster/reset - delete the plan override; the roster
+ *  re-resolves from the property. 409 thread_exists once a thread exists (the
+ *  plan was already consumed at open). */
+export async function resetTourRoster(tourId: string): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('tours', tourId)}/reset`, { method: 'POST' });
+}
+
+/** POST /api/tours/:tourId/roster/live-members - add a contact to the tour's
+ *  EXISTING group thread. An OPEN thread gets the `relay.member_added`
+ *  announcement (confirm first - spec 6.4); a CLOSED thread is silent and
+ *  immediate. Errors: 409 no_thread (use the plan endpoint); 404
+ *  contact_not_found (incl. soft-deleted); 400 contact_unreachable; 409
+ *  group_connecting / phone_conflict_on_number / roster_conflict. */
+export async function addTourRosterLiveMember(
+  tourId: string,
+  contactId: string,
+  opts: { force?: boolean } = {},
+): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('tours', tourId)}/live-members`, {
+    method: 'POST',
+    body: { contactId },
+    ...(opts.force === true && { query: { force: 'send_now' } }),
+  });
+}
+
+/** DELETE /api/tours/:tourId/roster/live-members/:memberKey - remove a member
+ *  from the tour's EXISTING group thread, by the payload's memberKey.
+ *  Immediate, never announced, never deferred. 404 member_not_found; 409
+ *  no_thread / last_member (race backstop - the card disables the last row). */
+export async function removeTourRosterLiveMember(
+  tourId: string,
+  memberKey: string,
+): Promise<RosterView> {
+  return request<RosterView>(
+    `${rosterPath('tours', tourId)}/live-members/${encodeURIComponent(memberKey)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** GET /api/tours/:tourId/roster/preview-open - what opening the group text
+ *  would send: the server-composed intro body, per-member deliverability, the
+ *  distinct reachable count, and the quiet state. 409 relay_already_provisioned
+ *  once a thread exists - refetch, never dialog. */
+export async function previewTourRosterOpen(
+  tourId: string,
+  signal?: AbortSignal,
+): Promise<RosterPreview> {
+  return request<RosterPreview>(`${rosterPath('tours', tourId)}/preview-open`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/tours/:tourId/roster/preview-add - what adding this contact to the
+ *  LIVE group would send (the `relay.member_added` body). 409 no_thread before
+ *  a group exists: a pre-open add sends nothing, so there is nothing to
+ *  preview. */
+export async function previewTourRosterAdd(
+  tourId: string,
+  contactId: string,
+): Promise<RosterPreview> {
+  return request<RosterPreview>(`${rosterPath('tours', tourId)}/preview-add`, {
+    method: 'POST',
+    body: { contactId },
+  });
+}
+
+/** POST /api/placements/:placementId/roster/members - the placement twin of
+ *  `addTourRosterMember` (identical semantics; 404 placement_not_found). */
+export async function addPlacementRosterMember(
+  placementId: string,
+  member: RosterMemberInput,
+): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('placements', placementId)}/members`, {
+    method: 'POST',
+    body: member,
+  });
+}
+
+/** DELETE /api/placements/:placementId/roster/members/:memberKey - the
+ *  placement twin of `removeTourRosterMember`. */
+export async function removePlacementRosterMember(
+  placementId: string,
+  memberKey: string,
+): Promise<RosterView> {
+  return request<RosterView>(
+    `${rosterPath('placements', placementId)}/members/${encodeURIComponent(memberKey)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** POST /api/placements/:placementId/roster/reset - the placement twin of
+ *  `resetTourRoster`. */
+export async function resetPlacementRoster(placementId: string): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('placements', placementId)}/reset`, { method: 'POST' });
+}
+
+/** POST /api/placements/:placementId/roster/live-members - the placement twin
+ *  of `addTourRosterLiveMember`. */
+export async function addPlacementRosterLiveMember(
+  placementId: string,
+  contactId: string,
+  opts: { force?: boolean } = {},
+): Promise<RosterView> {
+  return request<RosterView>(`${rosterPath('placements', placementId)}/live-members`, {
+    method: 'POST',
+    body: { contactId },
+    ...(opts.force === true && { query: { force: 'send_now' } }),
+  });
+}
+
+/** DELETE /api/placements/:placementId/roster/live-members/:memberKey - the
+ *  placement twin of `removeTourRosterLiveMember`. */
+export async function removePlacementRosterLiveMember(
+  placementId: string,
+  memberKey: string,
+): Promise<RosterView> {
+  return request<RosterView>(
+    `${rosterPath('placements', placementId)}/live-members/${encodeURIComponent(memberKey)}`,
+    { method: 'DELETE' },
+  );
+}
+
+/** GET /api/placements/:placementId/roster/preview-open - the placement twin of
+ *  `previewTourRosterOpen`. */
+export async function previewPlacementRosterOpen(
+  placementId: string,
+  signal?: AbortSignal,
+): Promise<RosterPreview> {
+  return request<RosterPreview>(`${rosterPath('placements', placementId)}/preview-open`, {
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** POST /api/placements/:placementId/roster/preview-add - the placement twin of
+ *  `previewTourRosterAdd`. */
+export async function previewPlacementRosterAdd(
+  placementId: string,
+  contactId: string,
+): Promise<RosterPreview> {
+  return request<RosterPreview>(`${rosterPath('placements', placementId)}/preview-add`, {
+    method: 'POST',
+    body: { contactId },
+  });
+}
+
+// --- Pending roster actions: the three ways a deferral ends (Task 14) --------
+//
+// A change confirmed inside quiet hours becomes a PENDING action the poller
+// applies at quiet-end. Until then the operator has three moves, all of them
+// answering with the SAME unwrapped RosterView every other roster endpoint
+// serves (its `pending` / `skipped` arrays are the card's whole story):
+//
+//   cancel     pending -> canceled. It never happens; a notice says so.
+//   apply-now  do it RIGHT NOW - the same applier the poller runs, so a world
+//              that moved lands a VISIBLE skip instead of a surprise send.
+//   dismiss    a TERMINAL row's notice is done being read; the server excludes
+//              it from `skipped` for good (a dismissed notice never returns).
+//
+// `actionId` is the server's deterministic id (`tour#<id>#add#<contactId>`) and
+// carries `#`, so it MUST be percent-encoded into the path.
+// Refusals: 404 pending_action_not_found (incl. a row owned by another
+// tour/placement), 409 action_not_pending (cancel/apply-now on a terminal row),
+// 409 action_not_dismissable (dismiss on a PENDING row, or a second dismiss).
+
+/** `.../roster/pending/:actionId/<verb>` for either owner. */
+function pendingActionPath(
+  owner: 'tours' | 'placements',
+  id: string,
+  actionId: string,
+  verb: 'cancel' | 'apply-now' | 'dismiss',
+): string {
+  return `${rosterPath(owner, id)}/pending/${encodeURIComponent(actionId)}/${verb}`;
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/cancel */
+export async function cancelTourRosterAction(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'cancel'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/apply-now */
+export async function applyTourRosterActionNow(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'apply-now'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/tours/:tourId/roster/pending/:actionId/dismiss */
+export async function dismissTourRosterAction(
+  tourId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('tours', tourId, actionId, 'dismiss'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/cancel */
+export async function cancelPlacementRosterAction(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'cancel'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/apply-now */
+export async function applyPlacementRosterActionNow(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'apply-now'), {
+    method: 'POST',
+  });
+}
+
+/** POST /api/placements/:placementId/roster/pending/:actionId/dismiss */
+export async function dismissPlacementRosterAction(
+  placementId: string,
+  actionId: string,
+): Promise<RosterView> {
+  return request<RosterView>(pendingActionPath('placements', placementId, actionId, 'dismiss'), {
+    method: 'POST',
+  });
 }
 
 /** GET /api/tours/:tourId/reminders — the armed reminder ladder for a tour
@@ -1917,21 +2306,52 @@ export async function patchTour(
   return res.tour;
 }
 
+/** The tour twin of `PlacementRelayOpenResult`: 201 -> the updated tour (its
+ *  `groupThreadId` is the new thread); 202 -> DEFERRED, nothing opened. */
+export type TourRelayOpenResult =
+  | { deferred: false; tour: Tour }
+  | { deferred: true; roster: RosterView };
+
 /** POST /api/tours/:tourId/relay — provision a masked relay group thread for
  *  the tour. `members` is optional: when omitted the server auto-resolves
  *  [tenant contact, unit's landlord contact] (phones + names). Stamps
  *  groupThreadId back on the tour. Errors: 409 relay_already_provisioned when
  *  the tour already has a group; 400 relay_member_unresolvable (with `detail`)
- *  when a member can't resolve. Returns the updated tour + the new
- *  conversation (unwrapped). */
+ *  when a member can't resolve. 201 { tour, conversation } -> the updated tour;
+ *  202 <RosterView> -> deferred to quiet-end (nothing was opened). `force` is
+ *  "Send now anyway" (`?force=send_now`). */
 export async function createTourRelay(
   tourId: string,
-  members?: Array<{ phone: string; contactId?: string; name?: string }>,
-): Promise<{ tour: Tour; conversation: unknown }> {
-  return request<{ tour: Tour; conversation: unknown }>(
+  opts: { members?: Array<{ phone: string; contactId?: string; name?: string }>; force?: boolean } = {},
+): Promise<TourRelayOpenResult> {
+  const res = await requestWithStatus<{ tour: Tour; conversation: unknown } | RosterView>(
     `/api/tours/${encodeURIComponent(tourId)}/relay`,
-    // Omit the members key entirely when not given (server auto-resolves) —
-    // never send members: undefined.
-    { method: 'POST', body: members !== undefined ? { members } : {} },
+    {
+      method: 'POST',
+      // Omit the members key entirely when not given (server auto-resolves) -
+      // never send members: undefined.
+      body: opts.members !== undefined ? { members: opts.members } : {},
+      ...(opts.force === true && { query: { force: 'send_now' } }),
+    },
   );
+  if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
+  return { deferred: false, tour: (res.body as { tour: Tour }).tour };
+}
+
+/** GET /api/ai-runs - one page of the admin AI run log. */
+export function listAiRuns(
+  params: { scope?: AiRunScope; before?: string; from?: string; to?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AiRunListPage> {
+  return request<AiRunListPage>('/api/ai-runs', {
+    query: { scope: params.scope, before: params.before, from: params.from, to: params.to, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/ai-runs/:runId - one run plus its rehydrated message window. */
+export function getAiRun(runId: string, signal?: AbortSignal): Promise<AiRunDetailResponse> {
+  return request<AiRunDetailResponse>(`/api/ai-runs/${encodeURIComponent(runId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
 }

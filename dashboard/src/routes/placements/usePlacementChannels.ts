@@ -1,16 +1,23 @@
-// usePlacementChannels - resolves the placement's THREE conversation channels
-// (group text, tenant 1:1, landlord 1:1) and keeps their unread dots live via
-// `conversation.updated`. Structural mirror of tours/useTourChannels.ts - only
-// the channel SOURCES differ:
+// usePlacementChannels - resolves the placement's conversation channels (the
+// group text + ONE 1:1 per person on the placement) and keeps their unread dots
+// live via `conversation.updated`. Structural mirror of
+// tours/useTourChannels.ts - only the channel SOURCES differ:
 //
-//   - group   = placement.group_thread (absent until [Open group text] provisions
-//               it via provisionPlacementRelay) -> {conversationId, unread}: ONE
-//               relay thread the Group tab mounts.
-//   - tenant  = the tenant contact -> {unread} ONLY: the SUM of unread across the
-//               contact's NON-relay conversations on the inbox page (every phone
-//               AND email thread they own), mirroring their inbox row.
-//   - landlord= the unit.landlordId contact (passed in by the page), same
-//               person-shaped rule.
+//   - group  = placement.group_thread (absent until [Open group text] provisions
+//              it via provisionPlacementRelay) -> {conversationId, unread}: ONE
+//              relay thread the Group tab mounts.
+//   - people = one channel per PersonChannelInput the CALLER passes
+//              ({contactId, label}) -> {unread} on top: the SUM of unread across
+//              that contact's NON-relay conversations on the inbox page (every
+//              phone AND email thread they own), mirroring their inbox row.
+//
+// The people list is CALLER-OWNED and keyed by contactId - there are no fixed
+// 'tenant' / 'landlord' slots any more (contact-rosters spec 6.6, slice 2). The
+// placement page passes the ids it already renders (placement.tenantId + the
+// unit's landlordId when there is one), never a phone-gated resolver: a tenant
+// with no mobile number is still on the placement and keeps their tab. Slice 3
+// swaps the same input for the resolved ROSTER without this hook changing. A
+// label is the person's DISPLAY NAME and nothing else - never a role word.
 //
 // The 1:1 channels carry NO conversationId: their pane is the shared contact
 // comms surface, which is keyed by CONTACT and fetches the person's whole
@@ -24,7 +31,7 @@
 // a person's tab clears every thread they own). Both zero the tab's unread
 // locally FIRST so the dot clears at once and the consumer's per-render effect
 // cannot loop.
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   getConversations,
   markConversationRead,
@@ -36,10 +43,6 @@ import {
 } from '../../api/index.js';
 import { involvesContact } from '../contact/useContactTimeline.js';
 
-export type PlacementChannelKey = 'group' | 'tenant' | 'landlord';
-/** The two channels that resolve to a PERSON rather than one conversation. */
-export type PlacementPersonKey = 'tenant' | 'landlord';
-
 export interface PlacementGroupChannel {
   /** The resolved conversationId, or null when no group thread exists yet. */
   conversationId: string | null;
@@ -47,7 +50,18 @@ export interface PlacementGroupChannel {
   unread: number;
 }
 
-export interface PlacementPersonChannel {
+/** One person the caller wants a 1:1 channel for. */
+export interface PersonChannelInput {
+  /** WHO the channel is with. May be '' while a page builds a loading
+   *  placeholder - markPersonRead rejects that (see its guard). */
+  contactId: string;
+  /** The tab's whole label: the person's DISPLAY NAME. Never a role word. */
+  label: string;
+}
+
+export interface PersonChannel {
+  contactId: string;
+  label: string;
   /** Summed unread across the contact's non-relay conversations (their inbox
    *  row), which is exactly the set markPersonRead's fan-out clears. */
   unread: number;
@@ -56,8 +70,8 @@ export interface PlacementPersonChannel {
 export interface PlacementChannelsState {
   status: 'loading' | 'ready' | 'error';
   group: PlacementGroupChannel;
-  tenant: PlacementPersonChannel;
-  landlord: PlacementPersonChannel;
+  /** One channel per person input, in the caller's order. */
+  people: PersonChannel[];
   /** Inject a just-provisioned GROUP conversationId (open-group). */
   setGroupConversationId: (conversationId: string) => void;
   /** Mark the group's single conversation read + zero its unread locally. The
@@ -67,17 +81,17 @@ export interface PlacementChannelsState {
    *  conversation has unread > 0. */
   markGroupRead: (conversationId: string | null, unread: number) => void;
   /** Mark a PERSON's comms read (the inbox fan-out) + zero that tab's unread
-   *  locally. No-ops when the contact is unresolved or the tab has nothing
-   *  unread - the consumer's effect re-runs on every render, so that guard plus
-   *  the local zero BEFORE the network call is what keeps it from looping. */
-  markPersonRead: (key: PlacementPersonKey, contactId: string | undefined, unread: number) => void;
+   *  locally, keyed by contactId. No-ops when the contact is unresolved or the tab
+   *  has nothing unread - the consumer's effect re-runs on every render, so that
+   *  guard plus the local zero BEFORE the network call is what keeps it from
+   *  looping. */
+  markPersonRead: (contactId: string | undefined, unread: number) => void;
 }
 
 interface Committed {
   status: 'loading' | 'ready' | 'error';
   group: PlacementGroupChannel;
-  tenant: PlacementPersonChannel;
-  landlord: PlacementPersonChannel;
+  people: PersonChannel[];
   /** Which placementId the committed state describes. */
   forId: string;
 }
@@ -85,6 +99,10 @@ interface Committed {
 /** Debounce window (ms) for SSE-triggered refetches - coalesces a burst of
  *  conversation events into one getConversations re-resolve. */
 const REFETCH_DEBOUNCE_MS = 300;
+
+/** Stable identity for "no resolved people yet" (a fresh [] would make the
+ *  projection memo below recompute on every render). */
+const NO_PEOPLE: PersonChannel[] = [];
 
 /** Total unread across the contact's NON-relay conversations on this inbox page.
  *  A relay_group NEVER counts - its unread belongs to the Group tab, and the 1:1
@@ -103,16 +121,15 @@ function sumUnread(summaries: ConversationSummary[], contactId: string): number 
   );
 }
 
-/** Resolve the three channels from a fresh inbox page. The GROUP keeps the
+/** Resolve the channels from a fresh inbox page. The GROUP keeps the
  *  preserve-an-id-we-already-hold merge (a just-provisioned thread is not on the
  *  inbox page yet, and it must never unmount); the 1:1s are pure sums. */
 function resolveChannels(
-  prev: Pick<Committed, 'group' | 'tenant' | 'landlord'>,
+  prev: Pick<Committed, 'group' | 'people'>,
   groupThreadId: string | undefined,
-  tenantId: string,
-  landlordId: string | undefined,
+  people: PersonChannelInput[],
   summaries: ConversationSummary[],
-): Pick<Committed, 'group' | 'tenant' | 'landlord'> {
+): Pick<Committed, 'group' | 'people'> {
   const byId = (id: string): ConversationSummary | undefined =>
     summaries.find((s) => s.conversationId === id);
   const merge = (prevCh: PlacementGroupChannel, id: string | null): PlacementGroupChannel => {
@@ -128,32 +145,43 @@ function resolveChannels(
   };
   return {
     group: merge(prev.group, groupThreadId ?? null),
-    tenant: { unread: sumUnread(summaries, tenantId) },
-    landlord: { unread: landlordId ? sumUnread(summaries, landlordId) : 0 },
+    // Falsy id -> 0, never a sum: an empty contactId is a page's loading
+    // placeholder, not a person whose threads could be counted.
+    people: people.map((p) => ({ ...p, unread: p.contactId ? sumUnread(summaries, p.contactId) : 0 })),
   };
+}
+
+function initialGroup(groupThreadId: string | undefined): PlacementGroupChannel {
+  return { conversationId: groupThreadId ?? null, unread: 0 };
 }
 
 function initialChannels(
   groupThreadId: string | undefined,
-): Pick<Committed, 'group' | 'tenant' | 'landlord'> {
-  return {
-    group: { conversationId: groupThreadId ?? null, unread: 0 },
-    tenant: { unread: 0 },
-    landlord: { unread: 0 },
-  };
+  people: PersonChannelInput[],
+): Pick<Committed, 'group' | 'people'> {
+  return { group: initialGroup(groupThreadId), people: people.map((p) => ({ ...p, unread: 0 })) };
 }
 
 export function usePlacementChannels(
   placement: PlacementItem,
-  landlordId: string | undefined,
+  people: PersonChannelInput[],
 ): PlacementChannelsState {
   const placementId = placement.placementId;
-  const tenantId = placement.tenantId;
   const groupThreadId = placement.group_thread;
+
+  // Callers build `people` INLINE, so a fresh array identity arrives on every
+  // render - keying the fetch on that identity would refetch forever. Stabilize
+  // it by VALUE: the JSON string is the memo's ONLY input, so the unstable array
+  // cannot smuggle itself back in through a dependency.
+  const peopleJson = JSON.stringify(people);
+  const peopleInputs = useMemo<PersonChannelInput[]>(
+    () => JSON.parse(peopleJson) as PersonChannelInput[],
+    [peopleJson],
+  );
 
   const [state, setState] = useState<Committed>(() => ({
     status: 'loading',
-    ...initialChannels(groupThreadId),
+    ...initialChannels(groupThreadId, peopleInputs),
     forId: placementId,
   }));
 
@@ -171,8 +199,12 @@ export function usePlacementChannels(
         const base =
           prev.forId === placementId
             ? prev
-            : { status: 'loading' as const, ...initialChannels(groupThreadId), forId: placementId };
-        const resolved = resolveChannels(base, groupThreadId, tenantId, landlordId, page.conversations);
+            : {
+                status: 'loading' as const,
+                ...initialChannels(groupThreadId, peopleInputs),
+                forId: placementId,
+              };
+        const resolved = resolveChannels(base, groupThreadId, peopleInputs, page.conversations);
         return { status: 'ready', ...resolved, forId: placementId };
       });
     } catch (err) {
@@ -180,10 +212,10 @@ export function usePlacementChannels(
       setState((prev) =>
         prev.forId === placementId
           ? { ...prev, status: 'error' }
-          : { status: 'error', ...initialChannels(groupThreadId), forId: placementId },
+          : { status: 'error', ...initialChannels(groupThreadId, peopleInputs), forId: placementId },
       );
     }
-  }, [placementId, groupThreadId, tenantId, landlordId]);
+  }, [placementId, groupThreadId, peopleInputs]);
 
   useEffect(() => {
     // fetchNow sets state only after an await (never synchronously).
@@ -248,24 +280,44 @@ export function usePlacementChannels(
   // exactly the set the tab's summed dot counts. Same ordering contract as
   // markGroupRead - guard, zero LOCALLY, then fire - and the guard is what stops
   // the consumer's every-render effect from POSTing in a loop.
-  const markPersonRead = useCallback(
-    (key: PlacementPersonKey, contactId: string | undefined, unread: number) => {
-      // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read, and
-      // PlacementDetail really does build a placeholder with tenantId: '' for
-      // this hook while its bundle loads.
-      if (!contactId || unread <= 0) return;
-      setState((prev) => (prev[key].unread === 0 ? prev : { ...prev, [key]: { unread: 0 } }));
-      void markInboxRead({ contactId }).catch(() => {
-        /* best-effort - a failed mark-read must not break the view */
-      });
-    },
-    [],
+  const markPersonRead = useCallback((contactId: string | undefined, unread: number) => {
+    // Falsy, not `=== undefined`: an EMPTY id would POST /api/inbox//read, and
+    // PlacementDetail really does build a placeholder with tenantId: '' for
+    // this hook while its bundle loads.
+    if (!contactId || unread <= 0) return;
+    setState((prev) => {
+      const hit = prev.people.find((p) => p.contactId === contactId);
+      if (hit === undefined || hit.unread === 0) return prev;
+      return {
+        ...prev,
+        people: prev.people.map((p) => (p.contactId === contactId ? { ...p, unread: 0 } : p)),
+      };
+    });
+    void markInboxRead({ contactId }).catch(() => {
+      /* best-effort - a failed mark-read must not break the view */
+    });
+  }, []);
+
+  // The people we RETURN are the CURRENT inputs carrying the unread the last
+  // resolved inbox page holds for each of them. Returning the committed snapshot
+  // instead would lag the rail by a whole fetch: the landlord contact resolves
+  // after the placement does, and their tab must appear on the next render, not a
+  // round trip later (and a person the page drops must lose theirs at once).
+  const committedPeople = state.forId === placementId ? state.people : NO_PEOPLE;
+  const channelPeople = useMemo(
+    () =>
+      peopleInputs.map((p) => {
+        const resolved = committedPeople.find((c) => c.contactId === p.contactId);
+        return { ...p, unread: resolved === undefined ? 0 : resolved.unread };
+      }),
+    [peopleInputs, committedPeople],
   );
 
   if (state.forId !== placementId) {
     return {
       status: 'loading',
-      ...initialChannels(groupThreadId),
+      group: initialGroup(groupThreadId),
+      people: channelPeople,
       setGroupConversationId,
       markGroupRead,
       markPersonRead,
@@ -274,8 +326,7 @@ export function usePlacementChannels(
   return {
     status: state.status,
     group: state.group,
-    tenant: state.tenant,
-    landlord: state.landlord,
+    people: channelPeople,
     setGroupConversationId,
     markGroupRead,
     markPersonRead,

@@ -245,7 +245,7 @@ export function createUsersMeRouter(deps: UsersMeRouterDeps = {}): Router {
     // main business number here too — otherwise the Messaging Service picks, and
     // a staff verification code can arrive from a relay pool number
     // (docs/issues/one-to-one-sender-not-pinned-to-ported-number.md).
-    const sender = config.ourPhoneNumbers[0];
+    const sender = config.businessPhoneNumber;
     let providerSid: string | undefined;
     try {
       ({ providerSid } = await adapter.sendMessage({

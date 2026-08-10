@@ -88,7 +88,13 @@ import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
+import {
+  createSuggestionResolutionRepo,
+  type SuggestionResolutionRepo,
+} from '../repos/suggestionResolutionRepo.js';
 import { createSuggestionsRouter } from './suggestions.js';
+import type { SuggestionResolutionHooks } from '../services/suggestionResolution.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import {
@@ -116,11 +122,16 @@ import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
+import { createAiRunsRouter } from './aiRuns.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
 import { createTourRemindersRouter } from './tourReminders.js';
 import { createToursRepo, type ToursRepo } from '../repos/toursRepo.js';
+import {
+  createPendingRosterActionsRepo,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { createTourRemindersRepo, type TourRemindersRepo } from '../repos/tourRemindersRepo.js';
 import { type SystemStatusService } from '../services/systemStatus.js';
 
@@ -205,6 +216,15 @@ export interface ApiRouterDeps {
   transcodeGate?: Semaphore;
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
+  /** AI run-log repo shared by suggestion resolution surfaces. */
+  aiRunsRepo?: AiRunsRepo;
+  /** Durable phase journal shared by all suggestion resolution routes. */
+  suggestionResolutionRepo?: SuggestionResolutionRepo;
+  /** Process-boundary fault/clock seams used by focused recovery tests. */
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  suggestionResolutionNow?: () => string;
+  suggestionResolutionLeaseId?: () => string;
+  suggestionResolutionLeaseMs?: number;
   settingsRepo?: SettingsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   contactVocabularyRepo?: ContactVocabularyRepo;
@@ -230,6 +250,10 @@ export interface ApiRouterDeps {
   tourRemindersRepo?: TourRemindersRepo;
   /** Injected clock for tour-reminder arm/re-arm dueAt computation (tests only). */
   toursNow?: () => string;
+  /** Injected clock for the placement router's quiet-hours evaluation (tests only). */
+  placementsNow?: () => string;
+  /** Quiet-hours roster deferrals (contact-rosters Task 13) - injected in tests. */
+  pendingRosterActionsRepo?: PendingRosterActionsRepo;
   /** BE2/C2 activity-event log — injected in tests; default to the real repo. */
   activityEventsRepo?: ActivityEventsRepo;
   /** BE4/C4 listing-send record — injected in tests; default to the real repo. */
@@ -427,6 +451,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // conversation-fact-extraction (T8): the pending-suggestion store, shared by the
   // review API (suggestions router) and the contacts-router PATCH provenance-clear.
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
+  const suggestionResolutions = deps.suggestionResolutionRepo
+    ?? createSuggestionResolutionRepo({ logger: deps.logger });
   // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
   // gather walks these five scheduled-send repos. Default-construct them here (the
   // same `?? create…` pattern as conversations/messages above) so the gather is
@@ -439,6 +466,10 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   const tours = deps.toursRepo ?? createToursRepo({ logger: deps.logger });
   const tourReminders = deps.tourRemindersRepo ?? createTourRemindersRepo({ logger: deps.logger });
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
+  // contact-rosters Task 13: ONE pending-roster-actions repo for both hubs, so a
+  // tour's deferrals and the placement's read/write the same rows.
+  const rosterActions =
+    deps.pendingRosterActionsRepo ?? createPendingRosterActionsRepo({ logger: deps.logger });
   const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
   // M1.9c recording serving: undefined when MEDIA_BUCKET is unset (404 then).
   const mediaStore = deps.mediaStore ?? createMediaStore({ config });
@@ -530,6 +561,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   router.use(
     '/settings',
     createSettingsRouter({
+      config,
       logger: deps.logger,
       ...(deps.settingsRepo !== undefined && { settingsRepo: deps.settingsRepo }),
       auditRepo: audit,
@@ -586,6 +618,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       }),
     }),
   );
+  // AI run log (design 2026-08-06 section 9). The router applies its own
+  // server-side admin guard and uses the shared repositories above.
+  router.use(
+    '/ai-runs',
+    createAiRunsRouter({
+      logger: deps.logger,
+      messagesRepo: messages,
+      aiRunsRepo: aiRuns,
+    }),
+  );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation
   // type and emits conversation.updated so connected inboxes update live).
   router.use(
@@ -612,6 +654,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // conversation-fact-extraction (T8): a human field edit clears AI provenance
       // + supersedes any pending suggestion for that field (best-effort).
       extractionRepo: extraction,
+      aiRunsRepo: aiRuns,
       // Triage re-extraction hook: a flip to tenant schedules an immediate
       // 'triage' run (gated by the same kill switch as the other schedule sites).
       aiExtractionEnabled: config.aiExtractionEnabled,
@@ -712,6 +755,8 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
       // tour_took_place milestone on the toured transition (Post-Tour & Application).
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 13: the quiet-hours deferral rows (pending open/add).
+      pendingRosterActionsRepo: rosterActions,
       events,
     }),
   );
@@ -728,6 +773,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       ...(deps.tourRemindersRepo !== undefined && { tourRemindersRepo: deps.tourRemindersRepo }),
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       conversationsRepo: conversations,
+      // ONE unit read, TWO consumers: D11 (contact-rosters) - send-now resolves
+      // the tour's roster, whose DEFAULT rung is the property's primary contact
+      // - AND the unit address behind the composed reminder copy. Forwarded as
+      // the RESOLVED local (same rationale as the timeline gather above) so
+      // prod/e2e read a real repo while injected fakes still win.
+      unitsRepo: units,
       // Quiet hours (spec 2026-08-03): the suppression estimate reads the org
       // window through the SAME repo the armers use.
       settingsRepo: settings,
@@ -739,10 +790,6 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       adapter,
       messagesRepo: messages,
       auditRepo: audit,
-      // The unit address behind the composed reminder copy - forwarded as the
-      // RESOLVED local (same rationale as the timeline gather above) so prod/e2e
-      // read a real repo while injected fakes still win.
-      unitsRepo: units,
       // PATCH cancel/restore emits scheduled.updated on this bus.
       events,
     }),
@@ -820,6 +867,13 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
       // BE2: emit placement_opened/placement_closed/stage_changed/tour_* milestones.
       activityEventsRepo: activityEvents,
+      // contact-rosters Task 10: the roster previews read the org quiet-hours
+      // window through the SAME settings repo the armers use.
+      settingsRepo: settings,
+      // contact-rosters Task 13: the quiet-hours deferral rows + the clock the
+      // open/live-add paths evaluate the window against.
+      pendingRosterActionsRepo: rosterActions,
+      ...(deps.placementsNow !== undefined && { now: deps.placementsNow }),
       events,
     }),
   );
@@ -892,12 +946,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       extractionRepo: extraction,
-      auditRepo: audit,
-      activityEventsRepo: activityEvents,
+      aiRunsRepo: aiRuns,
+      suggestionResolutionRepo: suggestionResolutions,
+      ...(deps.suggestionResolutionHooks !== undefined && {
+        suggestionResolutionHooks: deps.suggestionResolutionHooks,
+      }),
+      ...(deps.suggestionResolutionNow !== undefined && {
+        resolutionNow: deps.suggestionResolutionNow,
+      }),
+      ...(deps.suggestionResolutionLeaseId !== undefined && {
+        resolutionLeaseId: deps.suggestionResolutionLeaseId,
+      }),
+      ...(deps.suggestionResolutionLeaseMs !== undefined && {
+        resolutionLeaseMs: deps.suggestionResolutionLeaseMs,
+      }),
       events,
-      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
-      placementDeadlinesRepo: placementDeadlines,
-      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only

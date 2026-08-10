@@ -54,6 +54,14 @@ describe('GET /api/system/flags', () => {
       relayLiveProvisioning: true,
       pushConfigured: false,
       messagingDriver: 'console',
+      aiExtractionEnabled: true,
+      aiExtractionDriver: 'console',
+      aiExtractionModel: 'claude-opus-4-8',
+      aiExtractionPromptFingerprint: expect.stringMatching(/^[0-9a-f]{12}$/),
+      // The harness DOES configure a business number (BUSINESS_PHONE_NUMBER =
+      // OUR_NUMBER), so the flags payload carries it. Our own published number
+      // is not a contact's phone; see services/systemStatus.ts.
+      businessPhoneNumber: '+15550009999',
     });
   });
 });
@@ -112,6 +120,10 @@ describe('GET /api/system/* — available:true shape via an injected fake servic
       relayLiveProvisioning: false,
       pushConfigured: true,
       messagingDriver: 'twilio',
+      aiExtractionEnabled: true,
+      aiExtractionDriver: 'console',
+      aiExtractionModel: 'claude-opus-4-8',
+      aiExtractionPromptFingerprint: '0123456789ab',
     }),
     getAlarms: async () => ({
       available: true,

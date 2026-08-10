@@ -9,6 +9,8 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join, relative, resolve } from 'node:path';
+import { loadAirtableExport } from '../src/lib/import/airtableSource.js';
+import { interpretReviewNotes, stripUnchangedFromBaseline } from '../src/lib/import/reviewNotes.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
 
@@ -17,6 +19,12 @@ interface Args {
   airtable: string;
   out: string;
   prior?: string;
+  /** A reviewed contacts CSV by itself (any filename) - overrides --prior's contacts.csv. */
+  priorContacts?: string;
+  /** Translate the founder's notes-column answers into the proper columns. */
+  interpretNotes: boolean;
+  /** The workbook she STARTED from - values equal to it are pre-fills, not edits. */
+  baselineContacts?: string;
   activeWindowDays?: number;
   allowRepoOutput: boolean;
 }
@@ -36,7 +44,9 @@ function parseArgs(argv: readonly string[]): Args {
         '  --quo       directory holding the three unpacked Quo export jobs\n' +
         '  --airtable  directory holding the Airtable CSV exports\n' +
         '  --out       where to write the review workbook (MUST be outside the repo)\n' +
-        '  --prior     a previously reviewed workbook directory; her edits carry forward',
+        '  --prior     a previously reviewed workbook directory; her edits carry forward\n' +
+        '  --prior-contacts <file>  a reviewed contacts CSV on its own (any filename)\n' +
+        '  --interpret-notes        translate notes-column answers into the proper columns',
     );
     process.exit(2);
   }
@@ -47,6 +57,9 @@ function parseArgs(argv: readonly string[]): Args {
     airtable: resolve(airtable),
     out: resolve(out),
     ...(get('--prior') && { prior: resolve(get('--prior')!) }),
+    ...(get('--prior-contacts') && { priorContacts: resolve(get('--prior-contacts')!) }),
+    ...(get('--baseline-contacts') && { baselineContacts: resolve(get('--baseline-contacts')!) }),
+    interpretNotes: argv.includes('--interpret-notes'),
     ...(parsedWindow !== undefined && Number.isFinite(parsedWindow) && {
       activeWindowDays: parsedWindow,
     }),
@@ -90,16 +103,64 @@ for (const [label, dir] of [
   }
 }
 
-const prior = args.prior
-  ? parseWorkbook({
-      contacts: readIfPresent(join(args.prior, CONTACTS_FILE)),
-      groups: readIfPresent(join(args.prior, GROUPS_FILE)),
-      units: readIfPresent(join(args.prior, UNITS_FILE)),
-    })
-  : undefined;
-
 function readIfPresent(path: string): string | undefined {
   return existsSync(path) ? readFileSync(path, 'utf8') : undefined;
+}
+
+const priorContactsText = args.priorContacts
+  ? readFileSync(args.priorContacts, 'utf8')
+  : args.prior
+    ? readIfPresent(join(args.prior, CONTACTS_FILE))
+    : undefined;
+
+const prior =
+  priorContactsText !== undefined || args.prior
+    ? parseWorkbook({
+        ...(priorContactsText !== undefined && { contacts: priorContactsText }),
+        ...(args.prior && {
+          groups: readIfPresent(join(args.prior, GROUPS_FILE)),
+          units: readIfPresent(join(args.prior, UNITS_FILE)),
+        }),
+      })
+    : undefined;
+
+// --- strip pre-filled suggestions so only her real edits carry forward ------
+if (args.baselineContacts && prior) {
+  const baseline = parseWorkbook({ contacts: readFileSync(args.baselineContacts, 'utf8') });
+  const { edited, stripped } = stripUnchangedFromBaseline(
+    prior.contacts.values(),
+    baseline.contacts,
+    ['name', 'type', 'voucher_beds', 'status', 'drop', 'notes'],
+  );
+  console.log(
+    `
+baseline strip: ${stripped} pre-filled values cleared; ${edited} rows carry real edits`,
+  );
+}
+
+// --- interpret the founder's notes-column answers (2026-08-09) --------------
+if (args.interpretNotes && prior) {
+  // Airtable overrules a numeric voucher note, so the interpreter needs the
+  // sizes up front. Loading the export twice is cheap and keeps runPlan pure.
+  const airtableForNotes = loadAirtableExport(args.airtable);
+  const sizeByPhone = new Map<string, number>();
+  for (const t of airtableForNotes.tenants) {
+    const digits = (t.phone ?? '').replace(/\D/g, '');
+    const n = Number.parseInt(t.voucherSize, 10);
+    if (digits && Number.isInteger(n) && n > 0 && n <= 9 && !sizeByPhone.has(digits)) {
+      sizeByPhone.set(digits, n);
+    }
+  }
+  const result = interpretReviewNotes(prior.contacts.values(), sizeByPhone);
+  console.log('\n=== note interpretation (her answers -> the right columns) ===');
+  console.log(`  interpreted   : ${result.interpreted.length}`);
+  console.log(`  acknowledged  : ${result.acknowledged.length} (N/a - question answered, nothing to record)`);
+  console.log(`  left verbatim : ${result.kept.length}`);
+  for (const a of result.interpreted) console.log(`    ${a.rowKey}  ${a.action}`);
+  if (result.kept.length > 0) {
+    console.log('  still needing a human:');
+    for (const a of result.kept) console.log(`    ${a.rowKey}  note=${JSON.stringify(a.note)}`);
+  }
 }
 
 const result = runPlan({

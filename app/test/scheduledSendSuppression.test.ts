@@ -201,6 +201,8 @@ function makeSendFakes(
     setTranscriptFailed: async () => false,
     upgradeCallOutcomeToVoicemail: async () => false,
     listByConversation: async () => [],
+    getByTsMsgId: async () => undefined,
+    getManyByTsMsgIds: async () => new Map(),
     annotateMessage: async () => {},
     putJobExecutionMarker: async () => true,
     getJobExecutionMarker: async () => false,

@@ -22,11 +22,15 @@ export interface RosterRow {
   contactId: string;
   /** Display name, when known (from the C3 row or the resolved contact). */
   name?: string;
+  /** The MACHINE role - what the roster edit-mode role selector reads and what
+   *  POST /api/units/:id/contacts takes back. `roleLabel` is its display twin. */
+  role: UnitContact['role'];
   /** Human role label, e.g. "Landlord" / "Property manager". */
   roleLabel: string;
   company?: string;
-  /** The ☎ primary-voice contact. */
-  primaryVoice: boolean;
+  /** The ☎ primary contact: the property's default contact - group texts
+   *  and masked calls. */
+  primaryContact: boolean;
   /** True when synthesized from `landlordId` (C3 not live), false from contacts[]. */
   fallback: boolean;
 }
@@ -39,19 +43,20 @@ export const ROLE_LABEL: Record<UnitContact['role'], string> = {
   other: 'Contact',
 };
 
-/** The landlord/PM roster for a unit. Prefers the C3 `contacts[]` (primaryVoice
+/** The landlord/PM roster for a unit. Prefers the C3 `contacts[]` (primaryContact
  *  first); falls back to a single landlord row from `landlordId` + the resolved
  *  contact when the roster isn't live yet. Empty only when neither exists. */
 export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterRow[] {
   if (unit.contacts && unit.contacts.length > 0) {
     return [...unit.contacts]
-      .sort((a, b) => Number(b.primaryVoice) - Number(a.primaryVoice))
+      .sort((a, b) => Number(b.primaryContact) - Number(a.primaryContact))
       .map((c) => ({
         contactId: c.contactId,
         ...(c.name !== undefined && { name: c.name }),
+        role: c.role,
         roleLabel: ROLE_LABEL[c.role],
         ...(c.company !== undefined && { company: c.company }),
-        primaryVoice: c.primaryVoice,
+        primaryContact: c.primaryContact,
         fallback: false,
       }));
   }
@@ -72,9 +77,10 @@ export function listingRoster(unit: UnitItem, landlord: Contact | null): RosterR
     {
       contactId: landlordId,
       ...(name !== undefined && { name }),
+      role: 'landlord',
       roleLabel: 'Landlord',
       ...(company !== undefined && { company }),
-      primaryVoice: true,
+      primaryContact: true,
       fallback: true,
     },
   ];

@@ -56,8 +56,23 @@ backwards:
    Atlanta'`. Any surface that humanizes a non-slug value invents a string.
 3. **Facet fragmentation.** Lists deriving filter options from distinct values render each spelling
    as its own authority with the counts split between them.
-4. **Import populates only the unit side.** `import/apply.ts` writes `jurisdiction` for units and
-   no contact-side authority at all, so imported tenants arrive with none.
+4. **Import populates only the unit side.** ~~`import/apply.ts` writes `jurisdiction` for units and
+   no contact-side authority at all, so imported tenants arrive with none.~~
+   **ADDRESSED 2026-08-06** (`import-display-name-unread` resolution): `apply.ts`
+   now writes `contact.housingAuthority`, mapped onto the EXACT
+   `HOUSING_AUTHORITY_VOCAB` strings via `housingAuthorityFor`, with unmapped
+   values reported and left unset rather than guessed into the GSI. The import
+   spec had justified the omission by calling her values "programs, not
+   authorities" - wrong, since GHV, HUD VASH, Claratel and Hope Atlanta are all
+   in that vocabulary verbatim.
+
+   THIS ISSUE STAYS OPEN: the import now writes the human-readable vocabulary on
+   BOTH sides, but that does not resolve the two field names
+   (`contact.housingAuthority` vs `unit.jurisdiction`), the slug-vs-readable split
+   in seeds and placeholders, or `humanizeAuthority` corrupting free text
+   (consequences 1-3). Real coverage is also thin for a founder-data reason
+   rather than a code one: only 17 of 629 imported contacts carry any authority
+   value.
 
 **Suggested fix.** Treat human-readable as canonical and normalize toward it:
 
@@ -86,3 +101,28 @@ the import, so nothing reads it. The Airtable source carries a real `voucherProg
 as read-only evidence and then drops. Note the extraction vocabulary above already mixes PHAs and
 program sponsors into one field, which is evidence the distinction has never been drawn. Whether
 program is a second dimension is outstanding with the founder.
+
+---
+
+**Founder clarification (email via Cameron, 2026-08-09).** The taxonomy is now
+authoritative, from the person who runs the book:
+
+- **Housing authorities**: Atlanta (AHA), Jonesboro (JHA), DeKalb, Fulton,
+  Clayton, East Point, McDonough - and **DCA**, "a unique one for Georgia which
+  is a 'housing authority' that governs 120+ counties/larger area of Georgia."
+- **Agencies / non-profits** (NOT authorities): Hope Atlanta, HUD VASH, Claratel,
+  Step Up.
+- **They coexist**: "Someone can be HUD VASH (veteran org) AND AHA. But someone
+  can also be just AHA. Then someone could be HUD VASH AND DCA."
+
+So the single `housingAuthority` field genuinely cannot represent her world - a
+person can hold one from EACH column. The AI-extraction vocabulary
+(`HOUSING_AUTHORITY_VOCAB`) mixes both kinds in one list, and is also missing
+**DeKalb** entirely - 19 tenants in the full Airtable export carry
+"Dekalb County Housing" and the extractor could never emit it.
+
+**Import posture (2026-08-09, Cameron):** free field. The importer normalizes
+known variant spellings to one canonical form each (consistency is what the
+exact-match byHousingAuthority GSI actually needs) and passes unknown values
+through verbatim with a once-per-value warning. The two-field/two-kind modelling
+decision stays open here.

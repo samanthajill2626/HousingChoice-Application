@@ -18,10 +18,14 @@ import {
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   UpdateCommand,
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import {
+  ConditionalCheckFailedException,
+  TransactionCanceledException,
+} from '@aws-sdk/client-dynamodb';
 import { describe, expect, it } from 'vitest';
 import { createLogger } from '../src/lib/logger.js';
 import { createExtractionRepo } from '../src/repos/extractionRepo.js';
@@ -176,20 +180,84 @@ function makeFakeDoc(): FakeDoc {
     send: async (cmd: unknown) => {
       if (cmd instanceof PutCommand) {
         const item = cmd.input.Item as Row;
+        const previous = store.get(item['itemId'] as string);
+        const names = cmd.input.ExpressionAttributeNames ?? {};
+        const values = cmd.input.ExpressionAttributeValues ?? {};
+        if (cmd.input.ConditionExpression && !conditionHolds(cmd.input.ConditionExpression, names, values, previous)) {
+          throw new ConditionalCheckFailedException({ message: 'put cond', $metadata: {} });
+        }
         // Model removeUndefinedValues: undefined attrs are never stored (keeps
         // sparse GSIs sparse), exactly like the real document client.
         const stored: Row = {};
         for (const [k, v] of Object.entries(item)) if (v !== undefined) stored[k] = v;
         store.set(item['itemId'] as string, stored);
-        return {};
+        return cmd.input.ReturnValues === 'ALL_OLD' && previous !== undefined
+          ? { Attributes: { ...previous } }
+          : {};
       }
       if (cmd instanceof GetCommand) {
         const key = cmd.input.Key as { itemId: string };
         const row = store.get(key.itemId);
         return { Item: row ? { ...row } : undefined };
       }
+      if (cmd instanceof TransactWriteCommand) {
+        const items = cmd.input.TransactItems ?? [];
+        // Evaluate every condition against the same pre-transaction snapshot.
+        for (const item of items) {
+          const operation = item.ConditionCheck ?? item.Put ?? item.Delete ?? item.Update;
+          if (operation === undefined) throw new Error('fake doc: empty transaction operation');
+          const key = 'Key' in operation && operation.Key !== undefined
+            ? operation.Key as { itemId: string }
+            : 'Item' in operation && operation.Item !== undefined
+              ? { itemId: operation.Item['itemId'] as string }
+              : undefined;
+          if (key === undefined) throw new Error('fake doc: transaction operation has no key');
+          const condition = operation.ConditionExpression;
+          if (
+            condition !== undefined &&
+            !conditionHolds(
+              condition,
+              operation.ExpressionAttributeNames ?? {},
+              operation.ExpressionAttributeValues ?? {},
+              store.get(key.itemId),
+            )
+          ) {
+            throw new TransactionCanceledException({ message: 'transaction condition', $metadata: {} });
+          }
+        }
+        for (const item of items) {
+          if (item.Put !== undefined) {
+            const itemRow = item.Put.Item;
+            if (itemRow === undefined) throw new Error('fake doc: transaction Put has no item');
+            const stored: Row = {};
+            for (const [key, value] of Object.entries(itemRow)) {
+              if (value !== undefined) stored[key] = value;
+            }
+            store.set(itemRow['itemId'] as string, stored);
+          } else if (item.Delete !== undefined) {
+            store.delete((item.Delete.Key as { itemId: string }).itemId);
+          } else if (item.Update !== undefined) {
+            const key = item.Update.Key as { itemId: string };
+            const row = store.get(key.itemId) ?? { ...key };
+            applyUpdate(
+              item.Update.UpdateExpression!,
+              item.Update.ExpressionAttributeNames ?? {},
+              item.Update.ExpressionAttributeValues ?? {},
+              row,
+            );
+            store.set(key.itemId, row);
+          }
+        }
+        return {};
+      }
       if (cmd instanceof DeleteCommand) {
         const key = cmd.input.Key as { itemId: string };
+        const existing = store.get(key.itemId);
+        const names = cmd.input.ExpressionAttributeNames ?? {};
+        const values = cmd.input.ExpressionAttributeValues ?? {};
+        if (cmd.input.ConditionExpression && !conditionHolds(cmd.input.ConditionExpression, names, values, existing)) {
+          throw new ConditionalCheckFailedException({ message: 'delete cond', $metadata: {} });
+        }
         store.delete(key.itemId);
         return {};
       }
@@ -428,11 +496,11 @@ describe('extractionRepo.fail', () => {
 // ---------------------------------------------------------------------------
 
 describe('extractionRepo suggestions', () => {
-  it('putSuggestion stamps itemId, pending partition and createdAt; get round-trips', async () => {
+  it('putSuggestion stamps itemId, pending partition, createdAt and runId; get round-trips', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    const s = await repo.putSuggestion({
+    const { item, displaced } = await repo.putSuggestion({
       ownerContactId: 'contact-1',
       target: 'voucherSize',
       currentValue: '2',
@@ -440,37 +508,49 @@ describe('extractionRepo suggestions', () => {
       reason: 'said needs a 3-bedroom',
       conversationId: 'conv-1',
       tsMsgId: 'msg-1',
+      runId: 'run-1',
       createdAt: T1,
     });
 
-    expect(s.itemId).toBe('sugg#contact-1#voucherSize');
-    expect(s._pendingPartition).toBe('pending');
-    expect(s.createdAt).toBe(T1);
+    expect(item.itemId).toBe('sugg#contact-1#voucherSize');
+    expect(item._pendingPartition).toBe('pending');
+    expect(item.createdAt).toBe(T1);
+    expect(item.runId).toBe('run-1');
+    expect(displaced).toBeUndefined();
 
     const got = await repo.getSuggestion('contact-1', 'voucherSize');
     expect(got!.suggestedValue).toBe('3');
     expect(got!.ownerContactId).toBe('contact-1');
+    expect(got!.runId).toBe('run-1');
   });
 
-  it('a re-put on the same target REPLACES (latest wins)', async () => {
+  it('a re-put on the same target REPLACES and RETURNS the displaced row', async () => {
     const { doc, store } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'conv-1' });
-    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-2' });
+    await repo.putSuggestion({
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat',
+      conversationId: 'conv-1', runId: 'run-old', createdAt: T1,
+    });
+    const second = await repo.putSuggestion({
+      ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog',
+      conversationId: 'conv-2', runId: 'run-new', createdAt: T2,
+    });
 
     const rows = [...store.values()].filter((r) => r['itemId'] === 'sugg#c1#pets');
     expect(rows).toHaveLength(1);
     expect((await repo.getSuggestion('c1', 'pets'))!.suggestedValue).toBe('dog');
+    expect(second.displaced?.runId).toBe('run-old');
+    expect(second.displaced?.suggestedValue).toBe('cat');
   });
 
   it('defaults createdAt to now when omitted', async () => {
     const { doc } = makeFakeDoc();
     const repo = repoWith(doc);
 
-    const s = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-1' });
-    expect(s.createdAt).toBeDefined();
-    expect(Number.isFinite(Date.parse(s.createdAt))).toBe(true);
+    const { item } = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'conv-1' });
+    expect(item.createdAt).toBeDefined();
+    expect(Number.isFinite(Date.parse(item.createdAt))).toBe(true);
   });
 
   it('listSuggestionsByContact returns all of one contact via the byOwner GSI', async () => {
@@ -495,6 +575,54 @@ describe('extractionRepo suggestions', () => {
 
     expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
     expect(await repo.listSuggestionsByContact('c1')).toHaveLength(0);
+  });
+
+  it('conditionally deletes only the exact suggestion version read by a resolver', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const old = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-old' });
+    const latest = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2, runId: 'run-new' });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-old', old.item.revision)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T2, 'run-new', latest.item.revision)).toBe(true);
+    expect(await repo.getSuggestion('c1', 'pets')).toBeUndefined();
+  });
+
+  it('does not delete a replacement that shares the resolver timestamp but has a different run', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const s1 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1, runId: 'run-s1' });
+    const s2 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1, runId: 'run-s2' });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, 'run-s1', s1.item.revision)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.runId).toBe('run-s2');
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
+    expect((await repo.getSuggestion('c1', 'pets'))?.revision).toBe(s2.item.revision);
+  });
+
+  it('does not let a legacy timestamp identity delete a revisioned replacement', async () => {
+    const { doc, store } = makeFakeDoc();
+    const repo = repoWith(doc);
+    store.set('sugg#c1#pets', {
+      itemId: 'sugg#c1#pets', ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x',
+      _pendingPartition: 'pending', createdAt: T1,
+    });
+    const s2 = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'y', createdAt: T1 });
+
+    expect(await repo.deleteSuggestionIfCurrent('c1', 'pets', T1)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.revision).toBe(s2.item.revision);
+  });
+
+  it('restores a claimed suggestion without overwriting a newer replacement', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    const { item } = await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'cat', conversationId: 'x', createdAt: T1 });
+    await repo.deleteSuggestionIfCurrent('c1', 'pets', T1, undefined, item.revision);
+    expect(await repo.restoreSuggestionIfAbsent(item)).toBe(true);
+    await repo.putSuggestion({ ownerContactId: 'c1', target: 'pets', suggestedValue: 'dog', conversationId: 'x', createdAt: T2 });
+    expect(await repo.restoreSuggestionIfAbsent(item)).toBe(false);
+    expect((await repo.getSuggestion('c1', 'pets'))?.suggestedValue).toBe('dog');
   });
 
   it('round-trips suggestedAddress parts for the compound address target', async () => {
@@ -583,5 +711,27 @@ describe('dismissal tombstones', () => {
     await repo.putDismissal('c1', 'firstName', 'cameron');
     expect(await repo.listSuggestionsByContact('c1')).toEqual([]);
     expect(await repo.listPending()).toEqual([]);
+  });
+
+  it('the atomic writer fence suppresses the same normalized value and preserves a different one', async () => {
+    const { doc } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await repo.putDismissal('c1', 'pets', 'two cats');
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'c1',
+      target: 'pets',
+      suggestedValue: '  TWO   CATS  ',
+      conversationId: 'x',
+    })).rejects.toMatchObject({ name: 'SuggestionDismissedError' });
+
+    await expect(repo.putSuggestion({
+      ownerContactId: 'c1',
+      target: 'pets',
+      suggestedValue: 'one dog',
+      conversationId: 'x',
+    })).resolves.toMatchObject({
+      item: { suggestedValue: 'one dog', _normalizedValue: 'one dog' },
+    });
   });
 });

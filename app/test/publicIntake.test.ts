@@ -282,7 +282,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       listing_link: 'https://example.com/listing/1',
       tour_process: 'SECRET lockbox 9999',
       application_process: 'SECRET portal',
-      primary_voice_contact: 'contact-ll-agent',
+      primary_contact: 'contact-ll-agent',
       ...overrides,
     };
     world.units.set(unit.unitId, unit);
@@ -351,7 +351,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     for (const secret of [
       'tour_process',
       'application_process',
-      'primary_voice_contact',
+      'primary_contact',
       'landlordId',
       'contact-ll-secret',
       'payment_standard',

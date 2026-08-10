@@ -1,39 +1,9 @@
-// Conversation-fact-extraction review API (T8): the surface over the pending AI
-// suggestions a contact accumulated (services/extraction/apply.ts writes them).
-// requireAuth only (the /api mount supplies the gate), mounted in routes/api.ts.
-//
-//   GET  /api/contacts/:contactId/suggestions
-//        -> 200 { suggestions }                            (empty array when none)
-//   POST /api/contacts/:contactId/suggestions/:target/accept   (no body)
-//        -> 200 { contact, suggestions }                   (updated contact + remaining)
-//        -> 400 { error: 'accept_type_via_triage' }        (type is triaged, not accepted here)
-//        -> 404 unknown contact or no pending suggestion for target
-//        -> 409 { error: 'phone_in_use' }                  (phone target conflict)
-//   POST /api/contacts/:contactId/suggestions/:target/dismiss  (no body)
-//        -> 200 { suggestions }
-//        -> 404 unknown contact / no pending suggestion for target
-//
-// Accept semantics per target (all audited, all emit suggestion.updated):
-//   - the eight ExtractableField values: coerce like apply.ts (voucherSize int,
-//     porting boolean), write the value + `<field>_source` provenance carrying
-//     `accepted_by`, audit `ai_suggestion_accepted`, delete the suggestion.
-//   - 'address': write the item's cleaned parts as the contact `address` object
-//     + `address_source` provenance carrying `accepted_by`, audit
-//     `ai_suggestion_accepted` (FORMATTED from/to strings), delete the
-//     suggestion; 400 invalid_suggestion_value when the item carries no parts.
-//   - 'status': route through the ONE status-transition service
-//     (setTenantStatus, source 'ai'); a stale suggestion is still attempted and
-//     the service governs validity (a refusal surfaces 409 and KEEPS it).
-//   - 'phone': mirror POST /:contactId/phones (E.164 normalize + 409 conflict +
-//     addPhone + contact_phone_added audit + number_added milestone).
-//   - 'type': 400 accept_type_via_triage (the dashboard triages via PATCH {type}).
-//
-// PII (doc SS9): responses carry full contacts to the authed client; LOG LINES
-// are ids/targets/counts only.
+// Durable review API for pending AI suggestions. Every accept/dismiss request
+// carries the immutable suggestion identity and resolves through the same
+// phase-fenced journal executor.
 import { Router } from 'express';
 import { mergeContext } from '../lib/context.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import { normalizeToE164 } from '../lib/phone.js';
 import type { AuthedRequest } from '../middleware/auth.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import {
@@ -43,304 +13,199 @@ import {
   type ContactsRepo,
 } from '../repos/contactsRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
-import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
-import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
-import { createPlacementsRepo, type PlacementsRepo } from '../repos/placementsRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
 import {
-  createPlacementDeadlinesRepo,
-  type PlacementDeadlinesRepo,
-} from '../repos/placementDeadlinesRepo.js';
-import { createUnitsRepo, type UnitsRepo } from '../repos/unitsRepo.js';
+  createSuggestionResolutionRepo,
+  type ResolutionAction,
+  type SuggestionResolutionRepo,
+} from '../repos/suggestionResolutionRepo.js';
 import {
-  createStatusTransitionService,
-  EntityNotFoundError,
-  TransitionRefusedError,
-  type StatusTransitionDeps,
-  type StatusTransitionService,
-} from '../services/statusTransition.js';
-import { EXTRACTABLE_FIELDS, normalizeSuggestionValue } from '../services/extraction/schema.js';
-import {
-  cleanAddressParts,
-  contactAddressToParts,
-  formatAddressParts,
-} from '../services/extraction/address.js';
-import type { ExtractableField } from '../adapters/extraction.js';
-import type { TenantStatus } from '../lib/statusModel.js';
+  createSuggestionResolutionService,
+  SuggestionResolutionError,
+  type SuggestionRequestIdentity,
+  type SuggestionResolutionHooks,
+  type SuggestionResolutionService,
+} from '../services/suggestionResolution.js';
 
 export interface SuggestionsRouterDeps {
   logger?: Logger;
   contactsRepo?: ContactsRepo;
   extractionRepo?: ExtractionRepo;
-  auditRepo?: AuditRepo;
-  activityEventsRepo?: ActivityEventsRepo;
+  aiRunsRepo?: AiRunsRepo;
+  suggestionResolutionRepo?: SuggestionResolutionRepo;
+  suggestionResolutionService?: SuggestionResolutionService;
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  resolutionNow?: () => string;
+  resolutionLeaseId?: () => string;
+  resolutionLeaseMs?: number;
   events?: EventBus;
-  /** Repos the status-transition service is built from (accept 'status'). */
-  placementsRepo?: PlacementsRepo;
-  placementDeadlinesRepo?: PlacementDeadlinesRepo;
-  unitsRepo?: UnitsRepo;
-  armStageNudge?: StatusTransitionDeps['armStageNudge'];
-  /** D5 close-nag arm on terminal placements (relay-number-lifecycle seam). */
-  conversationsRepo?: StatusTransitionDeps['conversationsRepo'];
-  /** Test seam: inject the assembled status-transition service directly. */
-  statusService?: StatusTransitionService;
 }
 
-const EXTRACTABLE = new Set<string>(EXTRACTABLE_FIELDS);
-
-type Coerced = { ok: true; value: unknown } | { ok: false };
-
-/** Coerce a suggestion's string value per field (mirrors apply.ts coerceField). */
-function coerceAccept(field: ExtractableField, raw: string): Coerced {
-  const t = raw.trim();
-  if (field === 'voucherSize') {
-    if (!/^\d+$/.test(t)) return { ok: false };
-    const n = Number(t);
-    if (!Number.isInteger(n) || n < 0 || n > 12) return { ok: false };
-    return { ok: true, value: n };
-  }
-  if (field === 'porting') {
-    if (t === 'true') return { ok: true, value: true };
-    if (t === 'false') return { ok: true, value: false };
-    return { ok: false };
-  }
-  if (t.length === 0) return { ok: false };
-  return { ok: true, value: t };
-}
-
-/** Serialize a contact for the wire with its phones[] (mirror the contacts route). */
 function serializeContact(contact: ContactItem): ContactItem & { phones: ReturnType<typeof contactPhones> } {
   return { ...contact, phones: contactPhones(contact) };
+}
+
+/**
+ * True when the client sent no identity at all. Express hands a body-less POST
+ * to the route as `{}`, so absent, null and empty-object are one case; an array
+ * or a populated object is a MODERN request that must still pass the fence.
+ */
+function isBodyAbsent(body: unknown): boolean {
+  if (body === undefined || body === null) return true;
+  if (typeof body !== 'object' || Array.isArray(body)) return false;
+  return Object.keys(body).length === 0;
+}
+
+function parseIdentity(body: unknown): SuggestionRequestIdentity | undefined {
+  if (body === null || typeof body !== 'object' || Array.isArray(body)) return undefined;
+  const value = body as Record<string, unknown>;
+  if (typeof value['createdAt'] !== 'string' || value['createdAt'].length === 0) return undefined;
+  if (value['revision'] !== undefined && typeof value['revision'] !== 'string') return undefined;
+  if (value['runId'] !== undefined && typeof value['runId'] !== 'string') return undefined;
+  return {
+    createdAt: value['createdAt'],
+    ...(value['revision'] !== undefined && { revision: value['revision'] as string }),
+    ...(value['runId'] !== undefined && { runId: value['runId'] as string }),
+  };
 }
 
 export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Router {
   const log = deps.logger ?? defaultLogger;
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
-  const audit = deps.auditRepo ?? createAuditRepo({ logger: deps.logger });
-  const activityEvents = deps.activityEventsRepo ?? createActivityEventsRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
+  const resolutions = deps.suggestionResolutionRepo
+    ?? createSuggestionResolutionRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
-  const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
-  const placementDeadlines =
-    deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
-  const units = deps.unitsRepo ?? createUnitsRepo({ logger: deps.logger });
-  const statusService =
-    deps.statusService ??
-    createStatusTransitionService({
-      placementsRepo: placements,
-      placementDeadlinesRepo: placementDeadlines,
-      unitsRepo: units,
-      contactsRepo: contacts,
-      auditRepo: audit,
-      activityEventsRepo: activityEvents,
-      events,
-      ...(deps.logger !== undefined && { logger: deps.logger }),
-      ...(deps.armStageNudge !== undefined && { armStageNudge: deps.armStageNudge }),
-      ...(deps.conversationsRepo !== undefined && { conversationsRepo: deps.conversationsRepo }),
-    });
-
+  const service = deps.suggestionResolutionService ?? createSuggestionResolutionService({
+    contactsRepo: contacts,
+    extractionRepo: extraction,
+    aiRunsRepo: aiRuns,
+    resolutionRepo: resolutions,
+    logger: log,
+    ...(deps.resolutionNow !== undefined && { now: deps.resolutionNow }),
+    ...(deps.resolutionLeaseId !== undefined && { leaseId: deps.resolutionLeaseId }),
+    ...(deps.resolutionLeaseMs !== undefined && { leaseMs: deps.resolutionLeaseMs }),
+    ...(deps.suggestionResolutionHooks !== undefined && { hooks: deps.suggestionResolutionHooks }),
+  });
   const router = Router();
 
-  // GET /api/contacts/:contactId/suggestions
   router.get('/contacts/:contactId/suggestions', async (req, res) => {
     const contactId = String(req.params['contactId'] ?? '');
     mergeContext({ contactId });
-    const suggestions = await extraction.listSuggestionsByContact(contactId);
-    res.json({ suggestions });
+    // F1: a crash between claim and commit removed the suggestion card, so this
+    // ordinary read is the recovery surface - it helps any expired journal of
+    // this contact to completion before listing. Strictly best-effort: recovery
+    // must never fail or delay-fail the read the dashboard depends on.
+    try {
+      const recovery = await service.recoverAbandoned(contactId);
+      if (recovery.stateChanged) events.emit('suggestion.updated', { contactId });
+    } catch (err) {
+      log.warn({ err, contactId }, 'abandoned suggestion resolution recovery failed (best-effort)');
+    }
+    res.json({ suggestions: await extraction.listSuggestionsByContact(contactId) });
   });
 
-  // POST /api/contacts/:contactId/suggestions/:target/accept
-  router.post('/contacts/:contactId/suggestions/:target/accept', async (req: AuthedRequest, res) => {
+  async function resolve(
+    req: AuthedRequest,
+    res: import('express').Response,
+    action: ResolutionAction,
+  ): Promise<void> {
     const contactId = String(req.params['contactId'] ?? '');
     const target = String(req.params['target'] ?? '');
     mergeContext({ contactId });
-    const actor = req.user?.userId;
-
-    // `type` is triaged via PATCH { type }, never accepted here.
-    if (target === 'type') {
-      res.status(400).json({ error: 'accept_type_via_triage' });
-      return;
+    let identity = parseIdentity(req.body);
+    if (identity === undefined) {
+      if (!isBodyAbsent(req.body)) {
+        res.status(400).json({ error: 'invalid_suggestion_identity' });
+        return;
+      }
+      // Legacy body-less callers (the documented pre-identity contract) resolve
+      // whatever is pending now. This read is eventually consistent, so for
+      // THOSE callers it reopens the last-writer-wins TOCTOU the identity fence
+      // closes - accepted deliberately to grandfather the published contract;
+      // every modern caller still sends and is fenced by its own identity.
+      const pending = await extraction.getSuggestion(contactId, target);
+      if (pending === undefined) {
+        res.status(404).json({ error: 'no_pending_suggestion' });
+        return;
+      }
+      identity = {
+        createdAt: pending.createdAt,
+        ...(pending.revision !== undefined && { revision: pending.revision }),
+        ...(pending.runId !== undefined && { runId: pending.runId }),
+      };
     }
-
-    const suggestion = await extraction.getSuggestion(contactId, target);
-    if (!suggestion) {
-      res.status(404).json({ error: 'no_pending_suggestion' });
-      return;
-    }
-    const contact = await contacts.getById(contactId);
-    if (!contact) {
-      res.status(404).json({ error: 'contact_not_found' });
-      return;
-    }
-
-    const now = new Date().toISOString();
-
-    // --- 'status' -> the ONE transition service (source 'ai') -----------------
-    if (target === 'status') {
-      try {
-        const updated = await statusService.setTenantStatus(contactId, {
-          toStatus: suggestion.suggestedValue as TenantStatus,
-          source: 'ai',
-          ...(actor !== undefined && { actor }),
-        });
-        await extraction.deleteSuggestion(contactId, 'status');
+    try {
+      const outcome = await service.resolve({
+        contactId,
+        target,
+        action,
+        identity,
+        ...(req.user?.userId !== undefined && { actorId: req.user.userId }),
+      });
+      // Emit BEFORE the response's list read. The emit announces DURABLE state
+      // that already committed, so it must not be contingent on a read that
+      // only builds this response body: a throw there used to lose the SSE for
+      // a committed accept, and the client's retry does not repair it. Ordering
+      // is the whole fix - the emit is synchronous and cannot itself throw.
+      //
+      // A helped journal commits a domain effect for somebody else's suggestion,
+      // so it needs the same SSE as this request's own completion (adv P3-25).
+      if (outcome.completedNow || outcome.helpedCommitted) {
         events.emit('suggestion.updated', { contactId });
-        const remaining = await extraction.listSuggestionsByContact(contactId);
-        log.info({ contactId, target, actor }, 'ai suggestion accepted (status)');
-        res.json({ contact: serializeContact(updated), suggestions: remaining });
-      } catch (err) {
-        // Stale suggestion: the service/allowlist governs validity. Surface the
-        // service error and KEEP the suggestion (never a silent delete on refuse).
-        if (err instanceof EntityNotFoundError) {
-          res.status(404).json({ error: `${err.entity}_not_found` });
+      }
+      const suggestions = await extraction.listSuggestionsByContact(contactId);
+      log.info(
+        { contactId, target, action, actor: req.user?.userId, replay: !outcome.completedNow },
+        'ai suggestion resolution completed',
+      );
+      if (action === 'accept') {
+        // Consistent: this re-read serves the response for a write that just
+        // committed, and an eventually consistent GetItem can still answer with
+        // the pre-write item (F9d).
+        const contact = await contacts.getById(contactId, { consistentRead: true });
+        if (!contact) {
+          res.status(404).json({ error: 'contact_not_found' });
           return;
         }
-        if (err instanceof TransitionRefusedError) {
-          res.status(409).json({ error: err.code });
-          return;
-        }
-        throw err;
+        res.json({ contact: serializeContact(contact), suggestions });
+      } else {
+        res.json({ suggestions });
       }
-      return;
-    }
-
-    // --- 'phone' -> mirror POST /:contactId/phones ---------------------------
-    if (target === 'phone') {
-      const normalized = normalizeToE164(suggestion.suggestedValue);
-      if (normalized === undefined) {
-        res.status(400).json({ error: 'phone is not a valid phone number' });
+    } catch (error) {
+      // Two independent reasons a FAILED request still has to notify, and never
+      // twice for one request:
+      //  - `helpedCommitted`: the request failed on its OWN identity, but a
+      //    journal it helped along the way did commit - the contact and the
+      //    pending list really changed (adv P3-25). Read BEFORE the instanceof
+      //    branch: a raw repo/SDK throw strands the flag otherwise, and that
+      //    failure is not less of a state change (item 28);
+      //  - `suggestion_field_edited`: the request's own accept was refused, yet
+      //    claim() had already consumed the `sugg#` row and the journal was
+      //    scrubbed, so every open dashboard is showing a chip that no longer
+      //    exists (H1).
+      const helped = (error as { helpedCommitted?: boolean } | null)?.helpedCommitted === true;
+      const refused = error instanceof SuggestionResolutionError
+        && error.code === 'suggestion_field_edited';
+      if (helped || refused) events.emit('suggestion.updated', { contactId });
+      if (error instanceof SuggestionResolutionError) {
+        res.status(error.status).json({
+          error: error.code,
+          ...(error.retryable && { retryable: true }),
+        });
         return;
       }
-      // Conflict guard (pointer-aware): a number owned by ANOTHER contact -> 409,
-      // suggestion KEPT for the human to reconcile.
-      const owner = await contacts.findByPhone(normalized);
-      if (owner && owner.contactId !== contactId) {
-        res.status(409).json({ error: 'phone_in_use' });
-        return;
-      }
-      const alreadyAttached = owner?.contactId === contactId;
-      const updated = await contacts.addPhone(contactId, { phone: normalized });
-      await audit.append(`contacts#${contactId}`, 'contact_phone_added', {
-        ...(actor !== undefined && { actor }),
-        phone: normalized,
-      });
-      // A genuinely new number is a timeline milestone (best-effort - the phone is
-      // already saved; a log hiccup must never fail the action).
-      if (!alreadyAttached) {
-        try {
-          await activityEvents.record({ contactId, type: 'number_added', label: 'Number added' });
-        } catch (err) {
-          log.error({ err, contactId }, 'ai suggestion accept (phone): number_added milestone failed');
-        }
-      }
-      await extraction.deleteSuggestion(contactId, 'phone');
-      events.emit('suggestion.updated', { contactId });
-      const remaining = await extraction.listSuggestionsByContact(contactId);
-      log.info({ contactId, target, actor }, 'ai suggestion accepted (phone)');
-      res.json({ contact: serializeContact(updated), suggestions: remaining });
-      return;
+      throw error;
     }
+  }
 
-    // --- 'address' -> compound parts write (spec 2026-07-20 SS6) -------------
-    if (target === 'address') {
-      const parts = cleanAddressParts(suggestion.suggestedAddress);
-      const formatted = formatAddressParts(parts);
-      if (formatted.length === 0) {
-        // A malformed/legacy item (no usable parts) must never half-write an address.
-        res.status(400).json({ error: 'invalid_suggestion_value' });
-        return;
-      }
-      const from = formatAddressParts(contactAddressToParts(contact['address']));
-      const patch: Record<string, unknown> = {
-        address: parts,
-        address_source: {
-          source: 'ai',
-          at: now,
-          conversationId: suggestion.conversationId,
-          ...(suggestion.tsMsgId !== undefined && { tsMsgId: suggestion.tsMsgId }),
-          ...(actor !== undefined && { accepted_by: actor }),
-        },
-      };
-      const updated = await contacts.update(contactId, patch);
-      await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
-        ...(actor !== undefined && { actor }),
-        target,
-        ...(from.length > 0 && { from }),
-        to: formatted,
-      });
-      await extraction.deleteSuggestion(contactId, 'address');
-      events.emit('suggestion.updated', { contactId });
-      const remaining = await extraction.listSuggestionsByContact(contactId);
-      log.info({ contactId, target, actor }, 'ai suggestion accepted (address)');
-      res.json({ contact: serializeContact(updated), suggestions: remaining });
-      return;
-    }
-
-    // --- field targets (the eight ExtractableField values) -------------------
-    if (EXTRACTABLE.has(target)) {
-      const field = target as ExtractableField;
-      const coerced = coerceAccept(field, suggestion.suggestedValue);
-      if (!coerced.ok) {
-        res.status(400).json({ error: 'invalid_suggestion_value' });
-        return;
-      }
-      const from = contact[field];
-      const patch: Record<string, unknown> = {
-        [field]: coerced.value,
-        [`${field}_source`]: {
-          source: 'ai',
-          at: now,
-          conversationId: suggestion.conversationId,
-          ...(suggestion.tsMsgId !== undefined && { tsMsgId: suggestion.tsMsgId }),
-          ...(actor !== undefined && { accepted_by: actor }),
-        },
-      };
-      const updated = await contacts.update(contactId, patch);
-      await audit.append(`contacts#${contactId}`, 'ai_suggestion_accepted', {
-        ...(actor !== undefined && { actor }),
-        target,
-        from,
-        to: coerced.value,
-      });
-      await extraction.deleteSuggestion(contactId, target);
-      events.emit('suggestion.updated', { contactId });
-      const remaining = await extraction.listSuggestionsByContact(contactId);
-      log.info({ contactId, target, actor }, 'ai suggestion accepted (field)');
-      res.json({ contact: serializeContact(updated), suggestions: remaining });
-      return;
-    }
-
-    res.status(400).json({ error: 'unknown_target' });
+  router.post('/contacts/:contactId/suggestions/:target/accept', async (req: AuthedRequest, res) => {
+    await resolve(req, res, 'accept');
   });
 
-  // POST /api/contacts/:contactId/suggestions/:target/dismiss
   router.post('/contacts/:contactId/suggestions/:target/dismiss', async (req: AuthedRequest, res) => {
-    const contactId = String(req.params['contactId'] ?? '');
-    const target = String(req.params['target'] ?? '');
-    mergeContext({ contactId });
-    const actor = req.user?.userId;
-
-    const suggestion = await extraction.getSuggestion(contactId, target);
-    if (!suggestion) {
-      res.status(404).json({ error: 'no_pending_suggestion' });
-      return;
-    }
-    await audit.append(`contacts#${contactId}`, 'ai_suggestion_dismissed', {
-      ...(actor !== undefined && { actor }),
-      target,
-    });
-    // Tombstone the rejected value PERMANENTLY (ruling 2026-07-21): the same
-    // normalized value is never re-suggested for this target; a different
-    // value still comes through. A human field edit does NOT clear it.
-    await extraction.putDismissal(
-      contactId,
-      target,
-      normalizeSuggestionValue(target, suggestion.suggestedValue),
-    );
-    await extraction.deleteSuggestion(contactId, target);
-    events.emit('suggestion.updated', { contactId });
-    const remaining = await extraction.listSuggestionsByContact(contactId);
-    log.info({ contactId, target, actor }, 'ai suggestion dismissed');
-    res.json({ suggestions: remaining });
+    await resolve(req, res, 'dismiss');
   });
 
   return router;

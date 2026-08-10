@@ -1,0 +1,232 @@
+/* PeopleCard - the roster card shared by the tour and placement hubs.
+ * Tokens only (no raw colours). The 860px breakpoint below is the SAME one as
+ * ui/twoPaneShell (TWO_PANE_BREAKPOINT_PX) - the point at which the file pane
+ * is a phone-width column and the "name ... role" pair stops fitting on one
+ * line (spec 6.7). */
+
+.roster {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.row {
+  padding: var(--sp-1) 0;
+  border-bottom: 1px solid var(--c-surface-2);
+}
+
+.row:last-child {
+  border-bottom: none;
+}
+
+/* Name + role on ONE line: the name takes the slack, the role sits right.
+ * A future per-row remove control anchors HERE (spec 6.7) so it does not move
+ * when the role wraps. */
+.nameLine {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-height: 24px;
+}
+
+.name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-sm);
+  color: var(--c-text);
+}
+
+a.name {
+  color: var(--c-brand);
+  text-decoration: none;
+}
+
+a.name:hover {
+  text-decoration: underline;
+}
+
+a.name:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+  border-radius: var(--radius-sm);
+}
+
+.role {
+  flex: 0 0 auto;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+/* Muted explanations: reachability, shares-a-number, the D11 paused note, the
+ * customized note, and the disabled-open reason. */
+.note {
+  margin: 2px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-subtle);
+}
+
+/* The caseworker hint - italic, because it names someone who is NOT a contact
+ * record and must not read as a roster row. */
+.hint {
+  margin: var(--sp-2) 0 0;
+  font-size: var(--fs-xs);
+  font-style: italic;
+  color: var(--c-text-subtle);
+}
+
+.unavailable {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+}
+
+.resetRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+/* --- Edit mode (spec 6.2 / 6.7) ------------------------------------------ */
+
+/* Editing rows carry the 44px touch target at EVERY width - the remove control
+ * lives on them now, and a 44px target is not a phone-only courtesy. */
+.rowEditing {
+  min-height: 44px;
+}
+
+/* Remove / + Add: a small inline text button, anchored to the name line so it
+ * does not move when the role wraps under the name below 860px. */
+.rowAction {
+  flex: 0 0 auto;
+  background: transparent;
+  border: none;
+  padding: var(--sp-1);
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+
+.rowAction:hover:not(:disabled) {
+  background: var(--c-surface-2);
+}
+
+.rowAction:disabled {
+  color: var(--c-text-subtle);
+  cursor: default;
+}
+
+.rowAction:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+}
+
+.rowError {
+  margin: 2px 0 0;
+  font-size: var(--fs-xs);
+  color: var(--c-danger);
+}
+
+/* An inline suggestion is deliberately NOT a roster row: it sits outside the
+ * list, muted, so nobody reads it as someone who is already on the roster. */
+.suggestion {
+  padding: var(--sp-1) 0;
+}
+
+.suggestionLine {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-2);
+  min-height: 44px;
+}
+
+.suggestionText {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-text-muted);
+}
+
+.addBtn {
+  display: block;
+  background: transparent;
+  border: none;
+  padding: var(--sp-2) 0;
+  margin: 0;
+  font-size: var(--fs-xs);
+  color: var(--c-brand);
+  cursor: pointer;
+}
+
+.addBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 1px;
+  border-radius: var(--radius-sm);
+}
+
+.addForm {
+  padding: var(--sp-2) 0;
+}
+
+.addActions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--sp-2);
+  margin-top: var(--sp-2);
+}
+
+/* Pending deferrals and their notices (spec 6.5). Deliberately NOT the roster
+ * list: a pending add is not a member yet, so it must never read as one. The
+ * 44px touch target is not a phone-only courtesy - these rows always carry
+ * controls. */
+.pendingList {
+  list-style: none;
+  margin: var(--sp-2) 0 0;
+  padding: 0;
+}
+
+.pendingRow {
+  padding: var(--sp-1) 0;
+  min-height: 44px;
+  border-top: 1px solid var(--c-surface-2);
+}
+
+/* Add now / Send now / Cancel stay together at the end of the name line, so
+ * they do not move when the sentence wraps under them below 860px. */
+.pendingActions {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--sp-1);
+}
+
+/* People above, the page's non-people rows (Property, provenance) below. */
+.divider {
+  border: none;
+  border-top: 1px solid var(--c-border);
+  margin: var(--sp-2) 0;
+}
+
+@media (max-width: 860px) {
+  /* The role wraps UNDER the name whenever the pair does not fit (spec 6.7). */
+  .nameLine {
+    flex-wrap: wrap;
+    row-gap: 0;
+  }
+
+  .name {
+    flex: 1 1 100%;
+  }
+
+  /* The touch target is the full row (44px min), not the glyph. */
+  .row {
+    min-height: 44px;
+  }
+}

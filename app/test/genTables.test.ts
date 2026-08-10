@@ -1,6 +1,6 @@
 // gen-tables generator contract: the in-memory tfvars object Terraform
 // consumes must carry all 9 tables with the contractual GSI names, the
-// messages+matches+unmatched_email TTL, streams on messages+placements only,
+// messages+matches+unmatched_email+ai_runs TTL, streams on messages+placements only,
 // and PITR on everything.
 // (tables.test.ts asserts the TABLES source itself; this asserts the
 // Terraform-facing projection of it.)
@@ -10,10 +10,11 @@ import { buildTablesTfvars, renderTablesTfvarsJson } from '../scripts/gen-tables
 const { tables } = buildTablesTfvars();
 
 describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
-  it('contains the 9 doc-§5 tables plus settings (M1.4) + pool_numbers (M1.7) + broadcasts (M1.8a) + activity_events (BE2) + listing_sends (BE4) + tours + tourReminders (Tours feature) + placementNudges (Post-Tour & Application) + ai_extraction (conversation-fact-extraction), alphabetically keyed (for_each/state keys)', () => {
+  it('contains all 22 tables, alphabetically keyed for Terraform state', () => {
     expect(Object.keys(tables)).toEqual([
       'activity_events',
       'ai_extraction',
+      'ai_runs',
       'audit_events',
       'broadcasts',
       'contacts',
@@ -22,6 +23,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'listing_sends',
       'matches',
       'messages',
+      'pendingRosterActions',
       'placementDeadlines',
       'placementNudges',
       'placements',
@@ -43,6 +45,22 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
           index_name: 'byStatus',
           hash_key: { name: 'status', type: 'S' },
           range_key: { name: 'received_at', type: 'S' },
+        },
+      ],
+      stream: false,
+      ttl_attribute: 'expires_at',
+      pitr: true,
+    });
+  });
+
+  it('ai_runs (ai-run-log): PK itemId; byEntity GSI (entityKey + sortKey); TTL expires_at', () => {
+    expect(tables['ai_runs']).toEqual({
+      hash_key: { name: 'itemId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byEntity',
+          hash_key: { name: 'entityKey', type: 'S' },
+          range_key: { name: 'sortKey', type: 'S' },
         },
       ],
       stream: false,
@@ -177,6 +195,7 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
       'byTourDate',
     ]);
     expect(gsiNames('placementDeadlines')).toEqual(['byPlacement', 'byDueAt']);
+    expect(gsiNames('pendingRosterActions')).toEqual(['byOwner', 'byDueAt']);
     expect(gsiNames('invoices')).toEqual(['byLandlord', 'byStatus']);
     expect(gsiNames('users')).toEqual(['byEmail']);
     expect(gsiNames('audit_events')).toEqual(['byActor']);
@@ -198,12 +217,32 @@ describe('buildTablesTfvars — Terraform projection of tables.ts', () => {
     expect(tables['users']?.gsis[0]?.range_key).toBeUndefined();
   });
 
-  it('TTL on messages + matches + unmatched_email (expires_at)', () => {
+  it('pendingRosterActions (contact-rosters 5.3): PK actionId; byOwner (ownerKey) + byDueAt (_actionPartition + dueAt); no stream/TTL', () => {
+    expect(tables['pendingRosterActions']).toEqual({
+      hash_key: { name: 'actionId', type: 'S' },
+      gsis: [
+        {
+          index_name: 'byOwner',
+          hash_key: { name: 'ownerKey', type: 'S' },
+        },
+        {
+          index_name: 'byDueAt',
+          hash_key: { name: '_actionPartition', type: 'S' },
+          range_key: { name: 'dueAt', type: 'S' },
+        },
+      ],
+      stream: false,
+      pitr: true,
+    });
+  });
+
+  it('TTL on messages + matches + unmatched_email + ai_runs (expires_at)', () => {
     expect(tables['messages']?.ttl_attribute).toBe('expires_at');
     expect(tables['matches']?.ttl_attribute).toBe('expires_at');
     expect(tables['unmatched_email']?.ttl_attribute).toBe('expires_at');
+    expect(tables['ai_runs']?.ttl_attribute).toBe('expires_at');
     const withTtl = Object.entries(tables).filter(([, t]) => t.ttl_attribute !== undefined);
-    expect(withTtl.map(([base]) => base)).toEqual(['matches', 'messages', 'unmatched_email']); // alphabetical keys
+    expect(withTtl.map(([base]) => base)).toEqual(['ai_runs', 'matches', 'messages', 'unmatched_email']); // alphabetical keys
   });
 
   it('streams on messages and placements ONLY', () => {

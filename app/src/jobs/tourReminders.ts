@@ -47,13 +47,14 @@ import {
   type TourRemindersRepo,
 } from '../repos/tourRemindersRepo.js';
 import { type TourItem, type ToursRepo } from '../repos/toursRepo.js';
+import type { UnitsRepo } from '../repos/unitsRepo.js';
+import { isOnRoster, resolveRoster, rosterWaitExpired } from '../lib/rosterResolution.js';
 import {
   SendRefusedError,
   type SendMessageService,
 } from '../services/sendMessage.js';
 import { sendRelayAnnouncement } from '../services/relayAnnouncements.js';
 import type { MessagesRepo } from '../repos/messagesRepo.js';
-import type { UnitsRepo } from '../repos/unitsRepo.js';
 import type { Address } from '../lib/address.js';
 import {
   composeTourReminderBody,
@@ -69,6 +70,10 @@ import {
   type QuietHoursWindow,
 } from '../lib/quietHours.js';
 import { DEFAULT_ORG_SETTINGS, type SettingsRepo } from '../repos/settingsRepo.js';
+import {
+  rosterActionIdFor,
+  type PendingRosterActionsRepo,
+} from '../repos/pendingRosterActionsRepo.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
 import { isKillSwitchOff, isOptedOut } from '../services/scheduledSendSuppression.js';
 
@@ -300,9 +305,30 @@ export async function cancelTourReminders(
 
 export interface RunDueTourRemindersDeps {
   tourRemindersRepo: TourRemindersRepo;
+  /**
+   * Pending roster actions (contact-rosters D7), OPTIONAL: when supplied, a
+   * group-eligible rung whose tour has a PENDING open_group WAITS for the open
+   * instead of falling back to the tenant 1:1. Omitted (older call sites, unit
+   * tests) = today's immediate fallback, unchanged.
+   */
+  pendingRosterActionsRepo?: Pick<PendingRosterActionsRepo, 'getById'>;
   toursRepo: ToursRepo;
   contactsRepo: ContactsRepo;
   conversationsRepo: ConversationsRepo;
+  /**
+   * ONE unit read serving TWO consumers - both must survive any future edit:
+   *   1. Roster resolution (contact-rosters D11): the tenant-1:1 suppression
+   *      check resolves the tour's CURRENT roster, whose default rung is the
+   *      property's primary contact. REQUIRED so no call site can silently
+   *      skip the check.
+   *   2. The ADDRESS in composed reminder copy (tour-reminder-details). A
+   *      missing unit or a read failure degrades to the no-address variant -
+   *      never blocks a send.
+   * Merged from both sides at the 2026-08-06 second main sync: each branch had
+   * declared this dep for its own consumer. Dropping either consumer still
+   * compiles, and is silently wrong.
+   */
+  unitsRepo: UnitsRepo;
   sendMessageService: SendMessageService;
   /**
    * Quiet-hours source for the FIRE-TIME BACKSTOP (REQUIRED - an unfenced
@@ -329,11 +355,6 @@ export interface RunDueTourRemindersDeps {
    * dashboard thread) and records per-member delivery slots on it.
    */
   messagesRepo: MessagesRepo;
-  /**
-   * Unit lookup for the address in reminder copy. A missing unit or a read
-   * failure degrades to the no-address variant - never blocks a send.
-   */
-  unitsRepo: UnitsRepo;
   /**
    * Shared A2P pacing bucket (optional): group-route reminders send N member
    * messages per rung through the raw adapter, so they must draw from the SAME
@@ -465,6 +486,47 @@ type ReminderResolutionFailure =
   | 'contact_missing'
   | 'contact_no_phone'
   | 'no_conversation';
+
+/**
+ * Is the tour's tenant on the tour's CURRENT roster (contact-rosters D11)?
+ *
+ *   'on'          - deliver as usual.
+ *   'off'         - the operator removed them (the caseworker-to-PM
+ *                   arrangement). Every TENANT-1:1-routed rung is suppressed.
+ *   'unavailable' - the roster could not be read (a thread pointer that will
+ *                   not load). NOT an answer: the caller must neither send nor
+ *                   retire the rung, exactly like the quiet-hours backstop.
+ *
+ * Consults `resolveRoster` - never `resolveUsableGroup`: a CLOSED thread returns
+ * no usable group but its participants are still the roster FACT (D1), and
+ * reading that as "no roster" would text a removed tenant.
+ */
+type TenantRosterGate = 'on' | 'off' | 'unavailable';
+
+async function tenantRosterGate(
+  tour: TourItem,
+  deps: RunDueTourRemindersDeps,
+  log: Logger,
+): Promise<TenantRosterGate> {
+  const roster = await resolveRoster(
+    {
+      conversations: deps.conversationsRepo,
+      units: deps.unitsRepo,
+      contacts: deps.contactsRepo,
+      log,
+    },
+    {
+      type: 'tour',
+      id: tour.tourId,
+      tenantId: tour.tenantId,
+      unitId: tour.unitId,
+      ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
+      ...(tour.roster !== undefined && { roster: tour.roster }),
+    },
+  );
+  if (roster.source === 'unavailable') return 'unavailable';
+  return isOnRoster(roster, tour.tenantId) ? 'on' : 'off';
+}
 
 /** Where one rung would be delivered, resolved PRE-CLAIM. */
 type ReminderTarget =
@@ -621,11 +683,87 @@ async function processReminderRow(
 
   const { tour, conversation: conv } = target;
 
-  // COMPOSE ABOVE THE CLAIM (spec W6). An unusable scheduledAt cannot produce a
-  // body, and claimSend IS the sentAt stamp - so this must resolve BEFORE it.
-  // An uncontained throw would escape into the caller's per-row catch, leaving
-  // the row unclaimed and re-listed by every tick forever; the claim-skip
-  // retires it exactly once instead.
+  // D7 REMINDER COUPLING (contact-rosters): this rung is GROUP-ELIGIBLE but fell
+  // back to the tenant 1:1, and the tour has a PENDING open_group - the group
+  // text is confirmed, just held until quiet-end. Sending 1:1 now would deliver
+  // the reminder to the tenant alone, minutes before the group it belongs in
+  // exists. Leave the rung UNCLAIMED (the ladder's existing "wait" idiom: it
+  // re-lists next tick, and the open applies within one tick of quiet-end).
+  // BOUNDED BY TOUR START: at/after the scheduled time the rung proceeds through
+  // today's fallback, so a morning_of reminder can never be held past the tour.
+  if (tour.tourType !== 'self_guided' && deps.pendingRosterActionsRepo !== undefined) {
+    const pendingOpen = await deps.pendingRosterActionsRepo.getById(
+      rosterActionIdFor({ ownerType: 'tour', ownerId: tour.tourId, action: 'open_group' }),
+    );
+    const beforeStart = typeof tour.scheduledAt === 'string' && now < tour.scheduledAt;
+    if (pendingOpen?.status === 'pending' && beforeStart) {
+      log.info(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+        'tour reminder: group open is pending until quiet-end - leaving the rung unclaimed',
+      );
+      return;
+    }
+  }
+
+  // D11 (contact-rosters): delivery has resolved to the TENANT 1:1 - the ONE
+  // place both doors meet. A self_guided rung lands here, and so does a
+  // landlord_led/pm_team rung whose group was unusable and fell back. The check
+  // therefore binds to the ROUTING OUTCOME, not the rung kind: a tenant the
+  // operator removed is never texted through either door.
+  //
+  // PRE-CLAIM, like the quiet-hours backstop above: an 'unavailable' roster
+  // returns WITHOUT claiming (the next tick retries), because a transient blip
+  // must neither text a possibly-removed tenant nor burn the rung with a false
+  // skip. A removed tenant IS an answer, so that rung is retired visibly.
+  const gate = await tenantRosterGate(tour, deps, log);
+  if (gate === 'unavailable') {
+    // BOUNDED BY TIME PAST DUE. 'unavailable' is not always transient: a
+    // pointer at a conversation that no longer exists (or a provisioning
+    // sentinel a crash left behind) never resolves, and an unbounded wait means
+    // this rung re-lists every tick FOREVER - never sent, never visibly
+    // skipped, nothing on the panel to say why. Past the grace window the state
+    // is treated as permanent and the rung is retired with a VISIBLE skip.
+    if (rosterWaitExpired(row.dueAt, now)) {
+      log.warn(
+        { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind, dueAt: row.dueAt },
+        'tour reminder: roster STILL unreadable past the grace window - retiring (claim-skipped)',
+      );
+      await claimSkipRow(row, 'roster_unavailable', now, deps, tour.tenantId);
+      return;
+    }
+    log.warn(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: roster unreadable - leaving the rung unclaimed for the next tick',
+    );
+    return;
+  }
+  if (gate === 'off') {
+    log.info(
+      { reminderId: row.reminderId, tourId: row.tourId, kind: row.kind },
+      'tour reminder: tenant is not on this tour roster - retiring (claim-skipped)',
+    );
+    await claimSkipRow(row, 'tenant_not_on_roster', now, deps, tour.tenantId);
+    return;
+  }
+
+  // COMPOSE ABOVE THE CLAIM (spec W6), but BELOW the roster gates above (second
+  // main sync, 2026-08-06). Both branches independently put work above the
+  // claim - this one composes the body, the gates decide whether the rung may
+  // be sent at all - and the merge had to pick an order. GATES FIRST, because:
+  // composing is PURE (a unit read + composeTourReminderBody, which does no
+  // I/O), so neither order can change what gets sent or to whom; the gates need
+  // nothing composition produces, and vice versa; a skipped rung needs no body
+  // (claimSkip stores none), so gate-first also skips composition's unit read
+  // entirely on the suppressed paths. Decisively: composing first would let an
+  // unusable scheduledAt retire a rung as 'invalid_schedule' while the roster
+  // was merely UNREADABLE - overriding D11's rule that an unreadable roster
+  // leaves the rung UNCLAIMED until the grace bound. Order therefore preserves
+  // both intents; `forceSendReminder` merged to this same order on its own.
+  //
+  // An unusable scheduledAt cannot produce a body, and claimSend IS the sentAt
+  // stamp - so this must still resolve BEFORE the claim. An uncontained throw
+  // would escape into the caller's per-row catch, leaving the row unclaimed and
+  // re-listed by every tick forever; the claim-skip retires it exactly once.
   let body: string;
   try {
     body = await composeBodyForRow(row, tour, window, deps, log);
@@ -864,12 +1002,32 @@ async function announceGroupReminder(
 // forceSendReminder (Send now - quiet-hours spec section 7)
 // ---------------------------------------------------------------------------
 
-/** Why a human force-send was refused BEFORE the row was claimed. */
+/**
+ * Why a human force-send was refused BEFORE the row was claimed.
+ *
+ * NOTE the asymmetry with the nudge twin: tours' refusal union does NOT include
+ * ReminderSkipReason, so a reason that is BOTH a claim-skip and a refusal (D11's
+ * `tenant_not_on_roster`) has to be listed here explicitly.
+ */
 export type ForceSendRefusal =
   | 'sms_sending_disabled'
   | 'contact_opted_out'
   | 'contact_deleted'
   | 'no_consent'
+  /** D11: the rung targets the tenant 1:1, but the tenant is off the roster. */
+  | 'tenant_not_on_roster'
+  /**
+   * D11, the other half: the roster could not be READ (an unloadable thread
+   * pointer). On the HUMAN path this is only ever a refusal - the row is left
+   * pending and the operator is told to try again, rather than being allowed to
+   * text a tenant who may have been removed. (The POLL does eventually retire
+   * such a rung, once it is more than ROSTER_UNAVAILABLE_GRACE_MS past due -
+   * that is the same token as a ReminderSkipReason, listed here because tours'
+   * refusal union does not include the skip union.) Deliberately absent from
+   * the dashboard's copy map: `sendNowErrorMessage` falls back to its generic
+   * retry sentence, which is exactly the right thing to say.
+   */
+  | 'roster_unavailable'
   /** The tour has no usable scheduledAt, so no body can be composed. Refused
    *  PRE-claim and left pending: a human action must never retire a rung (the
    *  poll's own claim-skip is what retires it). */
@@ -945,6 +1103,13 @@ export async function forceSendReminder(
   };
   if (isKillSwitchOff(smsSendingEnabled)) return refuse('sms_sending_disabled');
   if (target.route === 'one_to_one') {
+    // D11 (contact-rosters): this send targets the tenant 1:1, so the roster
+    // rule applies to the human path too - pressing "Send now" on a rung aimed
+    // at a REMOVED tenant is refused, mirroring the poll's claim-skip. It stays
+    // a REFUSAL (never a claim-skip): a human failure must not retire a rung.
+    const gate = await tenantRosterGate(target.tour, deps, log);
+    if (gate === 'unavailable') return refuse('roster_unavailable');
+    if (gate === 'off') return refuse('tenant_not_on_roster');
     // Opt-out is absolute; consent is required because `automated: false` is
     // subject to the JIT consent gate (services/sendMessage.ts) - checking it
     // here is what keeps that gate from firing AFTER the claim.

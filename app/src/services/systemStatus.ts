@@ -12,8 +12,13 @@
 // Any thrown SDK error is caught → { available: false, reason: 'cloudwatch_error' }
 // and logged (no PII). Flags ALWAYS work (no AWS).
 //
-// PII (doc §9): flags are booleans/enums/strings ONLY — never the founder
-// number or any secret. Errors are projected to message + correlationId (+
+// PII (doc §9): flags are booleans/enums/strings ONLY — never a secret, and
+// never a CONTACT's phone number. ONE narrow exception, added deliberately:
+// our OWN business number (BUSINESS_PHONE_NUMBER), which we print on public
+// flyers and send from, so an admin can see what the app is configured to use.
+// It is omitted when unconfigured and is never logged. A founder cell, a
+// tenant cell, or any other person's number still never appears here.
+// Errors are projected to message + correlationId (+
 // timestamp/level) by the adapter; this service logs counts/reasons only.
 import {
   classifyCloudWatchError,
@@ -28,6 +33,7 @@ import {
 } from '../adapters/cloudwatch.js';
 import { isPushConfigured, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { extractionPromptFingerprint } from './extraction/prompt.js';
 
 /** The error window the dashboard offers (default 24h). */
 export type SystemErrorWindow = '1h' | '24h' | '7d';
@@ -57,7 +63,12 @@ const OOM_APP_LABEL = 'V8 heap out of memory';
  */
 export type MessagingDriverDisplay = AppConfig['messagingDriver'] | 'mock';
 
-/** Go-live readiness flags (booleans/enums/strings only — never secrets). */
+/**
+ * Go-live readiness flags (booleans/enums/strings only — never secrets, and
+ * never a CONTACT's phone). `businessPhoneNumber` is the one deliberate phone
+ * number here: it is OUR own published number, not a person's (see the file
+ * header).
+ */
 export interface SystemFlags {
   /** The deploy env name (local | dev | prod). */
   env: string;
@@ -69,6 +80,20 @@ export interface SystemFlags {
   pushConfigured: boolean;
   /** The outbound messaging driver as displayed (twilio | console | mock). */
   messagingDriver: MessagingDriverDisplay;
+  /** Whether the conversation-fact-extraction poll runs in this env. */
+  aiExtractionEnabled: boolean;
+  /** The extraction driver in use, distinct from the messaging driver above. */
+  aiExtractionDriver: AppConfig['extractionDriver'];
+  /** The model id the Anthropic driver would call. */
+  aiExtractionModel: string;
+  /** sha256(system prompt + EXTRACTION_SCHEMA), first 12 hex. */
+  aiExtractionPromptFingerprint: string;
+  /**
+   * OUR one business number (BUSINESS_PHONE_NUMBER), E.164. OPTIONAL and
+   * OMITTED when unconfigured - never `null`, so every flag value stays a
+   * primitive.
+   */
+  businessPhoneNumber?: string;
 }
 
 /** getAlarms result — degrades to { available: false, reason } (still HTTP 200). */
@@ -140,6 +165,15 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         relayLiveProvisioning: config.relayLiveProvisioning,
         pushConfigured: isPushConfigured(config),
         messagingDriver: messagingDriverDisplay(config),
+        aiExtractionEnabled: config.aiExtractionEnabled,
+        aiExtractionDriver: config.extractionDriver,
+        aiExtractionModel: config.aiExtractionModel,
+        aiExtractionPromptFingerprint: extractionPromptFingerprint(),
+        // OMITTED (not null) when unconfigured: this payload is asserted to
+        // carry primitives only, and `typeof null === 'object'`.
+        ...(config.businessPhoneNumber !== undefined && {
+          businessPhoneNumber: config.businessPhoneNumber,
+        }),
       };
     },
 

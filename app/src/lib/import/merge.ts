@@ -262,13 +262,20 @@ export function mergePeople(
     const suggestedVoucherBeds = resolveVoucherBeds(a, sizes);
 
     const flags: PersonFlag[] = [];
-    if (sizes.length > 1) flags.push('bed_size_conflict');
+    // A size conflict is only a QUESTION when Airtable does not settle it -
+    // Cameron 2026-08-09: Airtable overrules voucher size, so a conflict with an
+    // Airtable value present is resolved, not flagged.
+    if (sizes.length > 1 && suggestedVoucherBeds === undefined) {
+      flags.push('bed_size_conflict');
+    }
     if (suggestedType === 'unknown') flags.push('unclassified');
     if (!a.sawQuoContact && traffic.messageCount + traffic.callCount > 0) {
       flags.push('no_contact_record');
     }
     if (traffic.messageCount + traffic.callCount === 0) flags.push('no_traffic');
-    if (hasStarMarker) flags.push('star_marker');
+    // star_marker: RETIRED 2026-08-09. The founder answered - the asterisk has
+    // no meaning ("no meaning, this can be deleted"). Still stripped from names
+    // by parseName; no longer worth anyone's review time.
     if (parsed.some((p) => p.isCaseworkerMarked) || isAirtableCaseworker(a.airtableTenant)) {
       flags.push('caseworker');
     }
@@ -394,6 +401,12 @@ function classify(
 ): ContactType {
   if (parsed.some((p) => p.isLandlordMarked)) return 'landlord';
   if (a.airtableLandlord) return 'landlord';
+  // The FULL Airtable tenants table (2026-08-09 export) types some rows
+  // `Landlord` - the founder keeps landlords inside that table. Also note her
+  // email: the handshake emoji means landlord but its ABSENCE means nothing
+  // (it is a personal-phone habit that does not exist in Quo), so this typed
+  // column is the stronger landlord signal of the two.
+  if (isAirtableLandlordTyped(a.airtableTenant)) return 'landlord';
   if (parsed.some((p) => p.isCaseworkerMarked) || isAirtableCaseworker(a.airtableTenant)) {
     // No `caseworker` ContactType exists yet (docs/issues/caseworker-contact-type.md).
     // `partner` is the closest honest mapping and the workbook lets her correct it.
@@ -402,6 +415,10 @@ function classify(
   if (sizes.length > 0) return 'tenant';
   if (a.airtableTenant) return 'tenant';
   return 'unknown';
+}
+
+function isAirtableLandlordTyped(t: AirtableTenant | undefined): boolean {
+  return t !== undefined && t.tenantType.trim().toLowerCase() === 'landlord';
 }
 
 function isAirtableCaseworker(t: AirtableTenant | undefined): boolean {
@@ -421,19 +438,22 @@ function resolveName(a: Accumulator): string {
 }
 
 /**
- * Resolve the voucher size.
+ * Resolve the voucher size. PRECEDENCE (Cameron, 2026-08-09): **Airtable
+ * overrules** - its Voucher Size column is a maintained integer field, where the
+ * -Nbed name suffix is a texting-era habit that drifts (12 phones carry two
+ * different suffixes). Cross-checked on the 12 conflicts: Airtable agreed with
+ * the founder's own hand answers on 8, and Cameron ruled Airtable wins on the 3
+ * that differed.
  *
- * A single parsed size wins. A CONFLICT deliberately yields no suggestion: the
- * row is flagged and the founder fills it in. Guessing "the largest" or "the most
- * recent" here would bury a real question under a plausible-looking number, and
- * voucher size is the attribute that drives matching.
+ * Without an Airtable value: a single parsed size wins, and a CONFLICT yields no
+ * suggestion - the row is flagged and the founder fills it in. The founder's
+ * email confirms the stakes: -Nbed is the APPROVED size and "it absolutely needs
+ * to be accurate" (it drives matching).
  */
 function resolveVoucherBeds(a: Accumulator, sizes: readonly number[]): number | undefined {
+  const fromAirtable = Number.parseInt(a.airtableTenant?.voucherSize ?? '', 10);
+  if (Number.isInteger(fromAirtable) && fromAirtable > 0 && fromAirtable <= 9) return fromAirtable;
   if (sizes.length === 1) return sizes[0];
-  if (sizes.length === 0) {
-    const fromAirtable = Number.parseInt(a.airtableTenant?.voucherSize ?? '', 10);
-    return Number.isInteger(fromAirtable) && fromAirtable > 0 ? fromAirtable : undefined;
-  }
   return undefined;
 }
 

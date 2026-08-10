@@ -151,6 +151,7 @@ console.log(`    status preserved      : ${report.contacts.statusPreserved} (a h
 console.log(`  conversations written   : ${report.conversations.written}`);
 console.log(`    relay groups          : ${report.conversations.groups}`);
 console.log(`    flagged connect-day-1 : ${report.conversations.connectedDayOne}`);
+console.log(`    dropped by review     : ${report.conversations.droppedGroups}`);
 // Print the reconciliation, not just the total, so a short count is never left
 // looking like data loss (spec §5).
 const unroutable = plan.threads.unroutable;

@@ -14,15 +14,20 @@
 import { useMemo, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import {
+  addUnitContact,
   ApiError,
   confirmUnitPhotos,
   deleteUnit,
+  getUnit,
   presignUnitPhotos,
+  removeUnitContact,
   removeUnitPhoto,
   restoreUnit,
   setUnitPhotoCover,
   uploadToPresignedPost,
   type Contact,
+  type UnitContact,
+  type UnitItem,
   type UnitMediaDisplay,
 } from '../../api/index.js';
 import { Button, Spinner, StatusBadge, StatusMenu, type StatusTone } from '../../ui/index.js';
@@ -36,10 +41,12 @@ import {
   type ListingStatus,
 } from '../../api/index.js';
 import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
+import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
 import { ScheduleTourForm } from '../tours/ScheduleTourForm.js';
 import { useListing } from './useListing.js';
+import { listingRoster, ROLE_LABEL, type RosterRow } from './buildListingFile.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
@@ -84,6 +91,25 @@ const STATUS_DOT: Record<ListingStatus, string> = {
 
 /** How many rows the Related / Similar property lists show before collapsing. */
 const RELATED_LIMIT = 4;
+
+/** The roster roles the Contacts card can set, in menu order. Mirrors the
+ *  server's UNIT_CONTACT_ROLES (app/src/repos/unitsRepo.ts) - the route 400s on
+ *  anything else; ROLE_LABEL supplies each one's display word. */
+const ROSTER_ROLES: readonly UnitContact['role'][] = ['landlord', 'pm', 'owner', 'other'];
+
+/** The busy/error key for the "+ Add contact" form (rows key on contactId). */
+const ADD_ROW_KEY = 'add-contact';
+
+/** The reason the landlord of record's remove is disabled. `landlordId` IS who
+ *  owns the property; the roster row for them is structural, so the operator
+ *  reassigns the property's landlord first (spec 6.1 / D2). */
+const LANDLORD_OF_RECORD_REASON = "Landlord of record - reassign the property's landlord first";
+
+/** The ONE conflict these endpoints raise: the row we tried to remove is (now)
+ *  the landlord of record. Rendered inline ON the row, and the card refetches so
+ *  the row settles into the state that won the race (spec 6.1). */
+const ROSTER_CONFLICT_COPY =
+  "That contact is the landlord of record now - reassign the property's landlord first.";
 
 // Mirror of app/src/lib/unitMedia.ts UNIT_MEDIA_MAX (the dashboard has no import
 // path into the app lib). An abuse/runaway BACKSTOP, not a product limit; keep in
@@ -182,6 +208,26 @@ export function ListingDetail(): React.JSX.Element {
   const [removingEntry, setRemovingEntry] = useState<string | null>(null);
   const [removeBusy, setRemoveBusy] = useState(false);
   const [removeError, setRemoveError] = useState<string | null>(null);
+  // --- Contacts card edit mode (contact-rosters spec 6.1 / D9) --------------
+  // `rosterUnit` is the AUTHORITATIVE unit after a roster write. Every
+  // unit-contact endpoint returns the whole updated unit (enriched contacts[],
+  // landlordId, the primary_contact scalar), so applying that response is both
+  // how each action persists ON CLICK and how a lost race settles: on a 409 we
+  // refetch the property into here and the toggled row re-renders into its TRUE
+  // state. Held per unitId so navigating to another property drops it.
+  const [editingContacts, setEditingContacts] = useState(false);
+  const [rosterUnit, setRosterUnit] = useState<UnitItem | null>(null);
+  /** The row currently being written (contactId, or ADD_ROW_KEY); null = idle.
+   *  One write at a time - a roster is small and the writes are read-modify-write
+   *  server-side. */
+  const [rosterBusy, setRosterBusy] = useState<string | null>(null);
+  const [rosterError, setRosterError] = useState<{ key: string; message: string } | null>(null);
+  const [addingContact, setAddingContact] = useState(false);
+  const [addContactValue, setAddContactValue] = useState<ContactSearchValue>({ name: '' });
+  const [addContactRole, setAddContactRole] = useState<UnitContact['role']>('pm');
+  /** The roster row whose removal is awaiting the promotion confirm (spec 6.1);
+   *  only the CURRENT primary contact ever lands here. */
+  const [removingContact, setRemovingContact] = useState<RosterRow | null>(null);
 
   // Property-status write - goes through the transition service (status is NOT
   // writable via a plain unit PATCH). On success apply the returned unit in
@@ -222,7 +268,16 @@ export function ListingDetail(): React.JSX.Element {
 
   const { unit, roster, placementsOnUnit, related, recipients, similar, activity, tours } = state;
   const address = shortAddress(unit.address, unit.unitId);
-  const landlordName = roster.find((r) => r.primaryVoice)?.company ?? roster[0]?.company;
+  // The Contacts roster: the hook's rows until a roster write answers, then the
+  // server's own response (see `rosterUnit`). The unitId guard keeps a stale
+  // property's roster from leaking onto the next one.
+  const contactsUnit = rosterUnit !== null && rosterUnit.unitId === unit.unitId ? rosterUnit : null;
+  const contactRows: RosterRow[] =
+    contactsUnit !== null ? listingRoster(contactsUnit, state.landlord) : roster;
+  /** Who OWNS the property (`unit.landlordId`) - never removable from the roster,
+   *  and whoever inherits the primary-contact routing when the primary leaves. */
+  const landlordOfRecord = contactsUnit?.landlordId ?? unit.landlordId;
+  const landlordName = contactRows.find((r) => r.primaryContact)?.company ?? contactRows[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
   const programs = unit.accepted_programs ?? [];
   // The gallery renders resolved display media (presign-per-read). The server
@@ -283,6 +338,136 @@ export function ListingDetail(): React.JSX.Element {
         /* leave it deleted; the action re-enables for a retry */
       })
       .finally(() => setDeleteBusy(false));
+  };
+
+  // --- Contacts card edit mode (spec 6.1 / D9) ------------------------------
+  // This card is where the property's PRIMARY CONTACT is set: the person tours
+  // and placements put on the group text and reach by masked call when nobody
+  // has overridden the roster. A deleted property is read-only, like every other
+  // card here.
+  const contactsEditing = editingContacts && !deleted;
+  const rosteredIds = new Set(contactRows.map((r) => r.contactId));
+  /** Search candidates for "+ Add contact": every live contact NOT already on
+   *  the roster (re-adding a rostered contact is a re-role, which the row's own
+   *  selector does). */
+  const addContactCandidates = contactsList.filter((c) => !rosteredIds.has(c.contactId));
+
+  /** The server's answer IS the new truth - apply it to the card AND the page. */
+  const applyRosterUnit = (updated: UnitItem): void => {
+    setRosterUnit(updated);
+    setUnit(updated);
+  };
+
+  const closeAddContact = (): void => {
+    setAddingContact(false);
+    setAddContactValue({ name: '' });
+    setAddContactRole('pm');
+  };
+
+  /**
+   * Run one roster write. EVERY action persists the moment it is clicked (spec
+   * D5) - there is never a pending edit to lose, so "Done" is only a view
+   * toggle. On a 409 the reason renders inline ON the row AND the property is
+   * refetched, so the row the operator just toggled visibly settles into the
+   * state that won the race rather than reading as a dead click (spec 6.1).
+   */
+  const runRosterWrite = (
+    key: string,
+    write: () => Promise<UnitItem>,
+    onSuccess?: () => void,
+  ): void => {
+    if (rosterBusy !== null) return;
+    setRosterBusy(key);
+    setRosterError(null);
+    void write()
+      .then((updated) => {
+        applyRosterUnit(updated);
+        onSuccess?.();
+      })
+      .catch(async (err: unknown) => {
+        const conflict = err instanceof ApiError && err.status === 409;
+        setRosterError({
+          key,
+          message: conflict
+            ? ROSTER_CONFLICT_COPY
+            : "Couldn't save that change - please try again.",
+        });
+        if (!conflict) return;
+        try {
+          applyRosterUnit(await getUnit(unit.unitId));
+        } catch {
+          /* the refetch is the settle; on failure the inline reason still stands */
+        }
+      })
+      .finally(() => setRosterBusy(null));
+  };
+
+  /** Re-role a row: the POST is an upsert, so its CURRENT primary flag rides
+   *  along untouched (dropping it would silently unset the primary contact). */
+  const onSetContactRole = (row: RosterRow, role: UnitContact['role']): void => {
+    runRosterWrite(row.contactId, () =>
+      addUnitContact(unit.unitId, {
+        contactId: row.contactId,
+        role,
+        primaryContact: row.primaryContact,
+      }),
+    );
+  };
+
+  /** Promote a row to the property's primary contact - the same upsert with
+   *  `primaryContact: true`; the server demotes whoever held it. Idempotent. */
+  const onMakePrimaryContact = (row: RosterRow): void => {
+    runRosterWrite(row.contactId, () =>
+      addUnitContact(unit.unitId, {
+        contactId: row.contactId,
+        role: row.role,
+        primaryContact: true,
+      }),
+    );
+  };
+
+  const removeContactRow = (row: RosterRow): void => {
+    runRosterWrite(
+      row.contactId,
+      () => removeUnitContact(unit.unitId, row.contactId),
+      () => setRemovingContact(null),
+    );
+  };
+
+  /** Removing the CURRENT primary contact re-points live masked calls and every
+   *  new group text, so it confirms first and NAMES who inherits that routing.
+   *  Any other row removes on click. */
+  const onRemoveContactRow = (row: RosterRow): void => {
+    if (row.primaryContact) {
+      setRosterError(null);
+      setRemovingContact(row);
+      return;
+    }
+    removeContactRow(row);
+  };
+
+  /** Who the primary-contact routing lands on once `row` is gone: the landlord
+   *  of record (the repo promotes them), or nobody when the property has no
+   *  landlordId - in which case tour/placement resolution falls back to the
+   *  landlord of record anyway (spec D3). */
+  const promotionNotice = (): string => {
+    const promoted =
+      landlordOfRecord.length > 0
+        ? contactRows.find((r) => r.contactId === landlordOfRecord)?.name ?? landlordOfRecord
+        : undefined;
+    return promoted !== undefined
+      ? `${promoted} becomes the primary contact - calls and new group texts for this property will go to them.`
+      : 'This property will have no primary contact - tours fall back to the landlord of record.';
+  };
+
+  const onAddContact = (): void => {
+    const contactId = addContactValue.contactId;
+    if (contactId === undefined) return;
+    runRosterWrite(
+      ADD_ROW_KEY,
+      () => addUnitContact(unit.unitId, { contactId, role: addContactRole, primaryContact: false }),
+      closeAddContact,
+    );
   };
 
   // Photos: "+ Add" opens the hidden multi-select file input; the chosen files
@@ -661,11 +846,96 @@ export function ListingDetail(): React.JSX.Element {
 
         {/* RIGHT column */}
         <div className={styles.right}>
-          <Card title="Contacts" aside="landlord / PM roster">
-            {roster.length === 0 ? (
+          <Card
+            title="Contacts"
+            aside={
+              deleted ? (
+                'landlord / PM roster'
+              ) : (
+                <CardAction
+                  onClick={() => {
+                    setEditingContacts((v) => !v);
+                    setRosterError(null);
+                    closeAddContact();
+                  }}
+                  label={contactsEditing ? 'Done editing contacts' : 'Edit contacts'}
+                >
+                  {contactsEditing ? 'Done' : 'Edit'}
+                </CardAction>
+              )
+            }
+          >
+            {contactRows.length === 0 ? (
               <EmptyRow>No contacts on this property yet.</EmptyRow>
+            ) : contactsEditing ? (
+              contactRows.map((r) => {
+                const name = r.name ?? r.contactId;
+                // The landlord of record may not leave the roster (server 409) -
+                // say so instead of offering a doomed click.
+                const immovable = r.contactId === landlordOfRecord;
+                const rowError =
+                  rosterError !== null && rosterError.key === r.contactId ? rosterError.message : null;
+                return (
+                  <div key={r.contactId} className={styles.contactEditRow}>
+                    {/* The remove control anchors to the NAME line so it does not
+                        move when the role controls wrap below 860px (spec 6.7). */}
+                    <div className={styles.contactEditName}>
+                      <span className={styles.contactName}>{name}</span>
+                      {r.primaryContact ? (
+                        <span className={styles.primaryStar}> (primary)</span>
+                      ) : null}
+                      <button
+                        type="button"
+                        className={styles.contactRowAction}
+                        aria-label={`Remove ${name} from this property`}
+                        onClick={() => onRemoveContactRow(r)}
+                        disabled={immovable || rosterBusy !== null}
+                      >
+                        Remove
+                      </button>
+                    </div>
+                    <div className={styles.contactEditControls}>
+                      {/* The landlord of record's role is STRUCTURALLY pinned to
+                          'landlord' server-side; a change there answers with the
+                          pinned row and the selector snaps back. */}
+                      <select
+                        className={styles.contactRoleSelect}
+                        aria-label={`Role for ${name}`}
+                        value={r.role}
+                        onChange={(e) => onSetContactRole(r, e.target.value as UnitContact['role'])}
+                        disabled={rosterBusy !== null}
+                      >
+                        {ROSTER_ROLES.map((role) => (
+                          <option key={role} value={role}>
+                            {ROLE_LABEL[role]}
+                          </option>
+                        ))}
+                      </select>
+                      {r.primaryContact ? null : (
+                        <button
+                          type="button"
+                          className={styles.contactRowAction}
+                          aria-label={`Make ${name} the primary contact`}
+                          onClick={() => onMakePrimaryContact(r)}
+                          disabled={rosterBusy !== null}
+                        >
+                          Make primary
+                        </button>
+                      )}
+                    </div>
+                    {immovable ? (
+                      <p className={styles.contactRowNote}>{LANDLORD_OF_RECORD_REASON}</p>
+                    ) : null}
+                    {rowError !== null ? (
+                      <p role="alert" className={styles.contactRowError}>
+                        {rowError}
+                      </p>
+                    ) : null}
+                  </div>
+                );
+              })
             ) : (
-              roster.map((r) => (
+              contactRows.map((r) => (
                 <Row
                   key={r.contactId}
                   to={`/contacts/${r.contactId}`}
@@ -674,7 +944,7 @@ export function ListingDetail(): React.JSX.Element {
                       {/* The NAME is the visible link (brand-styled; the whole row
                           stays the hit target) — no separate "Open" affordance. */}
                       <span className={styles.contactName}>{r.name ?? r.contactId}</span>
-                      {r.primaryVoice ? <span className={styles.primaryStar}> (primary)</span> : null}
+                      {r.primaryContact ? <span className={styles.primaryStar}> (primary)</span> : null}
                       <span className={styles.roleLine}>
                         {r.roleLabel}
                         {r.company ? ` - ${r.company}` : ''}
@@ -684,6 +954,68 @@ export function ListingDetail(): React.JSX.Element {
                 />
               ))
             )}
+            {contactsEditing ? (
+              addingContact ? (
+                <div className={styles.contactAdd}>
+                  {/* Committed-pick typeahead (the unit-search contract): typing
+                      alone never carries a contactId, so only a PICKED candidate
+                      can be added. */}
+                  <ContactSearchField
+                    value={addContactValue}
+                    onChange={setAddContactValue}
+                    candidates={addContactCandidates}
+                    inputLabel="Add contact"
+                  />
+                  <div className={styles.contactEditControls}>
+                    <select
+                      className={styles.contactRoleSelect}
+                      aria-label="Role for the new contact"
+                      value={addContactRole}
+                      onChange={(e) => setAddContactRole(e.target.value as UnitContact['role'])}
+                      disabled={rosterBusy !== null}
+                    >
+                      {ROSTER_ROLES.map((role) => (
+                        <option key={role} value={role}>
+                          {ROLE_LABEL[role]}
+                        </option>
+                      ))}
+                    </select>
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      type="button"
+                      aria-label="Add contact to this property"
+                      onClick={onAddContact}
+                      disabled={addContactValue.contactId === undefined || rosterBusy !== null}
+                    >
+                      Add
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      type="button"
+                      onClick={closeAddContact}
+                      disabled={rosterBusy !== null}
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                  {rosterError !== null && rosterError.key === ADD_ROW_KEY ? (
+                    <p role="alert" className={styles.contactRowError}>
+                      {rosterError.message}
+                    </p>
+                  ) : null}
+                </div>
+              ) : (
+                <button
+                  type="button"
+                  className={styles.contactAddBtn}
+                  onClick={() => setAddingContact(true)}
+                >
+                  + Add contact
+                </button>
+              )
+            ) : null}
           </Card>
 
           <Card
@@ -1003,6 +1335,53 @@ export function ListingDetail(): React.JSX.Element {
           {deleteError !== null ? (
             <p role="alert" className={styles.error}>
               {deleteError}
+            </p>
+          ) : null}
+        </Modal>
+      ) : null}
+
+      {/* Removing the primary contact re-points live routing, so it NAMES the
+          promotion before it writes - silently moving calls is not acceptable
+          (spec 6.1). */}
+      {removingContact !== null ? (
+        <Modal
+          title="Remove the primary contact?"
+          onClose={() => {
+            if (rosterBusy === null) {
+              setRemovingContact(null);
+              setRosterError(null);
+            }
+          }}
+          footer={
+            /* Authored Cancel -> default: desktop puts the default rightmost,
+               and the narrow rule reverses the column so it lands on TOP
+               (spec 6.7) without either order being re-authored. */
+            <div className={styles.confirmActions}>
+              <Button
+                variant="secondary"
+                size="sm"
+                type="button"
+                onClick={() => setRemovingContact(null)}
+                disabled={rosterBusy !== null}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="danger"
+                size="sm"
+                type="button"
+                onClick={() => removeContactRow(removingContact)}
+                disabled={rosterBusy !== null}
+              >
+                Remove contact
+              </Button>
+            </div>
+          }
+        >
+          <p>{promotionNotice()}</p>
+          {rosterError !== null && rosterError.key === removingContact.contactId ? (
+            <p role="alert" className={styles.error}>
+              {rosterError.message}
             </p>
           ) : null}
         </Modal>

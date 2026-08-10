@@ -28,6 +28,9 @@ const uploadToPresignedPost = vi.fn();
 const confirmUnitPhotos = vi.fn();
 const removeUnitPhoto = vi.fn();
 const setUnitPhotoCover = vi.fn();
+// Contacts-card edit mode (contact-rosters Task 9): the two unit-contact writes.
+const addUnitContact = vi.fn();
+const removeUnitContact = vi.fn();
 vi.mock('../../api/index.js', async () => {
   const actual = await vi.importActual<typeof import('../../api/index.js')>('../../api/index.js');
   return {
@@ -46,6 +49,8 @@ vi.mock('../../api/index.js', async () => {
     confirmUnitPhotos: (...a: unknown[]) => confirmUnitPhotos(...a),
     removeUnitPhoto: (...a: unknown[]) => removeUnitPhoto(...a),
     setUnitPhotoCover: (...a: unknown[]) => setUnitPhotoCover(...a),
+    addUnitContact: (...a: unknown[]) => addUnitContact(...a),
+    removeUnitContact: (...a: unknown[]) => removeUnitContact(...a),
   };
 });
 
@@ -109,9 +114,10 @@ const READY: ListingState = {
     {
       contactId: 'll1',
       name: 'James Porter',
+      role: 'landlord',
       roleLabel: 'Landlord',
       company: 'Porter Properties',
-      primaryVoice: true,
+      primaryContact: true,
       fallback: true,
     },
   ],
@@ -181,9 +187,11 @@ describe('ListingDetail', () => {
     expect(screen.getByText((t) => t.includes('2 BR') && t.includes('1 BA') && t.includes('$1,400') && t.includes('1,600/mo'))).toBeInTheDocument();
     // Broadcast + Start placement moved into the ⋯ menu (asserted in its own test).
     // Edit is not a standalone HEADER button either — it's under the ⋯ menu — but it
-    // IS available inline on the Property details + Notes + Tour & application cards
-    // (three real, clickable CardAction buttons; the ⋯ menu's Edit is hidden until open).
-    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(3);
+    // IS available inline on the Property details + Notes + Tour & application +
+    // Contacts cards (four real, clickable CardAction buttons - Contacts gained
+    // its "Edit contacts" toggle with the roster editor; the More-actions
+    // menu's Edit is hidden until open).
+    expect(screen.getAllByRole('button', { name: /Edit/ })).toHaveLength(4);
     expect(screen.getByRole('button', { name: /More actions/ })).toBeInTheDocument();
   });
 
@@ -1106,5 +1114,265 @@ describe('ListingDetail', () => {
     await user.click(screen.getAllByRole('button', { name: /^Restore$/i })[0]!);
     expect(restoreUnit).toHaveBeenCalledWith('u1');
     await waitFor(() => expect(setUnit).toHaveBeenCalled());
+  });
+});
+
+// --- Contacts card EDIT MODE (contact-rosters Task 9, spec 6.1 / D9) --------
+// The property roster is where `primaryContact` is set, so these tests pin the
+// four things an operator can do (add / remove / make primary / re-role), that
+// each one persists ON CLICK against the real endpoints, and that a lost race
+// never reads as a dead click.
+//
+// The fixture is a PM-MANAGED property - the motivating case: the PM is the
+// primary contact, the OWNER is the landlord of record (`unit.landlordId`, which
+// may never leave the roster), and a second PM is the ordinary removable row.
+const ROSTER_UNIT: NonNullable<ListingState['unit']> = {
+  ...READY.unit!,
+  landlordId: 'll1',
+  primary_contact: 'pm1',
+  contacts: [
+    { contactId: 'pm1', role: 'pm', primaryContact: true, name: 'Alicia Grant', company: 'Grant Mgmt' },
+    { contactId: 'll1', role: 'landlord', primaryContact: false, name: 'James Porter', company: 'Porter Properties' },
+    { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' },
+  ],
+};
+
+const ROSTER_READY: ListingState = {
+  ...READY,
+  unit: ROSTER_UNIT,
+  // Primary first, exactly as listingRoster() sorts it.
+  roster: [
+    { contactId: 'pm1', name: 'Alicia Grant', role: 'pm', roleLabel: 'Property manager', company: 'Grant Mgmt', primaryContact: true, fallback: false },
+    { contactId: 'll1', name: 'James Porter', role: 'landlord', roleLabel: 'Landlord', company: 'Porter Properties', primaryContact: false, fallback: false },
+    { contactId: 'pm2', name: 'Dana Reyes', role: 'pm', roleLabel: 'Property manager', primaryContact: false, fallback: false },
+  ],
+};
+
+describe('ListingDetail - Contacts card edit mode', () => {
+  beforeEach(() => {
+    // A searchable candidate for the "+ Add contact" typeahead, plus the tenant
+    // the placements card resolves.
+    useContacts.mockImplementation((filter: string) =>
+      filter === 'deleted'
+        ? { status: 'ready', contacts: [] }
+        : {
+            status: 'ready',
+            contacts: [
+              { contactId: 't1', type: 'tenant', status: 'active', firstName: 'Fixture', lastName: 'Tenant', phone: '+14045550111' },
+              { contactId: 'pm9', type: 'landlord', status: 'active', firstName: 'Renata', lastName: 'Vale', phone: '+14045550188' },
+            ],
+          },
+    );
+  });
+
+  it('Edit flips the card into edit mode (rows stop being links) and Done returns', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    renderAt();
+
+    // Read mode is unchanged: the name is the row link, no per-row controls.
+    expect(screen.getByRole('link', { name: /Alicia Grant/ })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: 'Remove Alicia Grant from this property' }),
+    ).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    expect(
+      screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }),
+    ).toBeInTheDocument();
+    // Rows are NOT links while editing (a row-wide anchor cannot host buttons).
+    expect(screen.queryByRole('link', { name: /Alicia Grant/ })).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'Done editing contacts' }));
+    expect(screen.getByRole('link', { name: /Alicia Grant/ })).toBeInTheDocument();
+  });
+
+  it('adds a contact: committed search pick + role -> POST { contactId, role, primaryContact: false }', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact.mockResolvedValue({
+      ...ROSTER_UNIT,
+      contacts: [
+        ...ROSTER_UNIT.contacts!,
+        { contactId: 'pm9', role: 'pm', primaryContact: false, name: 'Renata Vale' },
+      ],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: '+ Add contact' }));
+
+    // Committed-pick typeahead (the UnitSearchField contract): typing alone can
+    // never add anybody - only a PICKED candidate carries a contactId.
+    await user.type(screen.getByRole('combobox', { name: 'Add contact' }), 'Renata');
+    await user.click(screen.getByRole('option', { name: 'Renata Vale' }));
+    await user.selectOptions(
+      screen.getByRole('combobox', { name: 'Role for the new contact' }),
+      'pm',
+    );
+    await user.click(screen.getByRole('button', { name: 'Add contact to this property' }));
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', {
+      contactId: 'pm9',
+      role: 'pm',
+      primaryContact: false,
+    });
+    // Persisted on click: the server's roster is what the card re-renders.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Remove Renata Vale from this property' }),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it('make primary contact re-POSTs the row with primaryContact: true, role preserved', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact.mockResolvedValue({
+      ...ROSTER_UNIT,
+      primary_contact: 'll1',
+      contacts: [
+        { contactId: 'pm1', role: 'pm', primaryContact: false, name: 'Alicia Grant' },
+        { contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' },
+        { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' },
+      ],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Make James Porter the primary contact' }));
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', {
+      contactId: 'll1',
+      role: 'landlord',
+      primaryContact: true,
+    });
+    // The star moved: the old primary now offers the control, the new one does not.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Make Alicia Grant the primary contact' }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole('button', { name: 'Make James Porter the primary contact' }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('changing a row role re-POSTs with the new role and the row primary flag preserved', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    addUnitContact.mockResolvedValue(ROSTER_UNIT);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.selectOptions(screen.getByRole('combobox', { name: 'Role for Dana Reyes' }), 'owner');
+
+    expect(addUnitContact).toHaveBeenCalledWith('u1', {
+      contactId: 'pm2',
+      role: 'owner',
+      primaryContact: false,
+    });
+  });
+
+  it('the landlord-of-record row cannot be removed, and says why', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    expect(
+      screen.getByRole('button', { name: 'Remove James Porter from this property' }),
+    ).toBeDisabled();
+    expect(
+      screen.getByText("Landlord of record - reassign the property's landlord first"),
+    ).toBeInTheDocument();
+    expect(removeUnitContact).not.toHaveBeenCalled();
+  });
+
+  it('removing the CURRENT primary confirms first and NAMES the promotion', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    removeUnitContact.mockResolvedValue({
+      ...ROSTER_UNIT,
+      primary_contact: 'll1',
+      contacts: [
+        { contactId: 'll1', role: 'landlord', primaryContact: true, name: 'James Porter' },
+        { contactId: 'pm2', role: 'pm', primaryContact: false, name: 'Dana Reyes' },
+      ],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+
+    // Nothing is written until the operator has read WHO inherits the routing.
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText(
+        'James Porter becomes the primary contact - calls and new group texts for this property will go to them.',
+      ),
+    ).toBeInTheDocument();
+    expect(removeUnitContact).not.toHaveBeenCalled();
+
+    await user.click(within(dialog).getByRole('button', { name: 'Remove contact' }));
+    expect(removeUnitContact).toHaveBeenCalledWith('u1', 'pm1');
+    await waitFor(() =>
+      expect(
+        screen.queryByRole('button', { name: 'Remove Alicia Grant from this property' }),
+      ).not.toBeInTheDocument(),
+    );
+  });
+
+  it('names the NO-primary outcome when there is no landlord of record to promote', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue({
+      ...ROSTER_READY,
+      unit: { ...ROSTER_UNIT, landlordId: '', contacts: [ROSTER_UNIT.contacts![0]!] },
+      roster: [ROSTER_READY.roster[0]!],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Alicia Grant from this property' }));
+
+    const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
+    expect(
+      within(dialog).getByText(
+        'This property will have no primary contact - tours fall back to the landlord of record.',
+      ),
+    ).toBeInTheDocument();
+  });
+
+  it('a 409 renders inline on the row, refetches the unit, and the row VISIBLY SETTLES', async () => {
+    const user = userEvent.setup();
+    useListing.mockReturnValue(ROSTER_READY);
+    // The lost race: another operator reassigned the property's landlord of
+    // record to Dana while this page was open, so her remove now 409s.
+    removeUnitContact.mockRejectedValue(
+      new ApiError(409, 'cannot_remove_landlord_of_record', 'conflict'),
+    );
+    getUnit.mockResolvedValue({
+      ...ROSTER_UNIT,
+      landlordId: 'pm2',
+      contacts: [
+        { contactId: 'pm1', role: 'pm', primaryContact: true, name: 'Alicia Grant' },
+        { contactId: 'pm2', role: 'landlord', primaryContact: false, name: 'Dana Reyes' },
+        { contactId: 'll1', role: 'other', primaryContact: false, name: 'James Porter' },
+      ],
+    });
+    renderAt();
+
+    await user.click(screen.getByRole('button', { name: 'Edit contacts' }));
+    await user.click(screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }));
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(/landlord of record/i);
+    await waitFor(() => expect(getUnit).toHaveBeenCalledWith('u1'));
+    // SETTLED into the truth: Dana is the landlord of record now, so her remove
+    // is disabled - the click read as a real outcome, not a dead button.
+    await waitFor(() =>
+      expect(
+        screen.getByRole('button', { name: 'Remove Dana Reyes from this property' }),
+      ).toBeDisabled(),
+    );
   });
 });

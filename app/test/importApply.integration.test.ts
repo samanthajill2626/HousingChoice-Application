@@ -16,7 +16,7 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { runApply } from '../src/lib/import/apply.js';
+import { housingAuthorityFor, runApply, splitReviewedName } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
@@ -106,10 +106,111 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(contact.Item).toMatchObject({
       type: 'landlord',
       phone: PHONES.landlord,
-      display_name: 'Marlon Pike',
+      // firstName/lastName, NOT display_name - see the name-fields regression
+      // test above for why that distinction matters.
+      firstName: 'Marlon',
+      lastName: 'Pike',
       status: 'active',
       status_source: 'import',
     });
+  });
+
+  it('writes the name fields the app actually renders from', async () => {
+    // REGRESSION. The import used to write a single `display_name`, which nothing
+    // reads: routes/contacts.ts displayNameOf() joins firstName + lastName and
+    // returns null when both are absent, and a null name renders as the phone
+    // number. Every imported contact would have shown as a bare phone, throwing
+    // away all 539 resolved names including the ~117 reviewed by hand.
+    //
+    // This asserts the STORED SHAPE satisfies that resolver, reproducing its
+    // logic rather than trusting that some field is populated.
+    const displayNameOf = (c: Record<string, unknown>): string | null => {
+      const first = typeof c.firstName === 'string' ? c.firstName.trim() : '';
+      const last = typeof c.lastName === 'string' ? c.lastName.trim() : '';
+      const joined = [first, last].filter((p) => p.length > 0).join(' ');
+      return joined.length > 0 ? joined : null;
+    };
+
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const multiToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.landlord) },
+      }),
+    );
+    expect(multiToken.Item).toMatchObject({ firstName: 'Marlon', lastName: 'Pike' });
+    expect(displayNameOf(multiToken.Item!)).toBe('Marlon Pike');
+    // The dead field is gone, not merely supplemented.
+    expect(multiToken.Item!.display_name).toBeUndefined();
+
+    // A single-token name (122 of the founder's are first-name-only) must render
+    // as just that name, not as "Angela " with a trailing space.
+    const singleToken = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.roleClash) },
+      }),
+    );
+    expect(displayNameOf(singleToken.Item!)).toBe('Landlord Larry');
+  });
+
+  it('keeps an honorific attached so broadcasts do not greet someone "Hi Ms."', () => {
+    // firstName is NOT display-only: lib/mergeFields.ts renderBody substitutes
+    // [TenantName] with firstName ALONE, so a naive first-token split sends a
+    // real tenant a text saying "Hi Ms.,". Ten of the founder's 478 named
+    // tenants are titled (Ms. Cooper, Miss Johnson, Ms Kendrick...).
+    expect(splitReviewedName('Ms. Cooper')).toEqual({ firstName: 'Ms. Cooper', lastName: '' });
+    expect(splitReviewedName('Miss Johnson')).toEqual({ firstName: 'Miss Johnson', lastName: '' });
+    expect(splitReviewedName('Ms Kendrick')).toEqual({ firstName: 'Ms Kendrick', lastName: '' });
+    // An honorific with a full name keeps the remainder as the surname.
+    expect(splitReviewedName('Dr. Maya Fernandez')).toEqual({
+      firstName: 'Dr. Maya',
+      lastName: 'Fernandez',
+    });
+    // Ordinary names are unaffected - first token is the first name.
+    expect(splitReviewedName('Candy Faulk')).toEqual({ firstName: 'Candy', lastName: 'Faulk' });
+    // Multi-word surnames survive intact rather than being dropped.
+    expect(splitReviewedName('Mary-Jo Van Der Berg')).toEqual({
+      firstName: 'Mary-Jo',
+      lastName: 'Van Der Berg',
+    });
+    // Single token: whole name is the first name, empty surname.
+    expect(splitReviewedName('Angela')).toEqual({ firstName: 'Angela', lastName: '' });
+    // A bare honorific has nothing to attach to - treated as the name itself.
+    expect(splitReviewedName('Ms.')).toEqual({ firstName: 'Ms.', lastName: '' });
+  });
+
+  it('normalizes the Airtable program to one canonical spelling per authority', async () => {
+    // FREE FIELD (Cameron 2026-08-09), but consistently spelled: broadcast
+    // audience resolution does an exact hash match on the byHousingAuthority
+    // GSI, so two spellings of one authority are two audiences invisible to
+    // each other. Known variants collapse to one form; unknown values pass
+    // through verbatim instead of being dropped.
+    expect(housingAuthorityFor('Atlanta, aha, Atlanta housing')).toBe('Atlanta (AHA)');
+    expect(housingAuthorityFor('Jonesboro, JHA, Jonesboro housing')).toBe('Jonesboro (JHA)');
+    expect(housingAuthorityFor('Dekalb County Housing')).toBe('Dekalb County Housing');
+    expect(housingAuthorityFor('DCA, Department of Community Affairs')).toBe('DCA');
+    expect(housingAuthorityFor('Georgia Housing Voucher, GHV')).toBe(
+      'Georgia Housing Voucher (GHV)',
+    );
+    expect(housingAuthorityFor('HUD VASH')).toBe('HUD VASH');
+    expect(housingAuthorityFor('Hope Atlanta')).toBe('Hope Atlanta');
+    // Free field: an unknown value is WRITTEN (whitespace-collapsed), not lost.
+    expect(housingAuthorityFor('Some New Authority')).toBe('Some New Authority');
+    expect(housingAuthorityFor('  odd   spacing ')).toBe('odd spacing');
+    expect(housingAuthorityFor('')).toBeUndefined();
+    expect(housingAuthorityFor(undefined)).toBeUndefined();
+
+    // And it lands on the contact: the fixture's caseworker carries Hope Atlanta.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+    const item = await doc.send(
+      new GetCommand({
+        TableName: table('contacts'),
+        Key: { contactId: contactIdForPhone(PHONES.caseworker) },
+      }),
+    );
+    expect(item.Item!.housingAuthority).toBe('Hope Atlanta');
   });
 
   it('folds two Quo conversations for one phone into a single thread', async () => {
@@ -212,7 +313,8 @@ describe.skipIf(!reachable)('import:apply', () => {
       }),
     );
     expect(item.Item).toMatchObject({
-      display_name: 'Rey Okonkwo',
+      firstName: 'Rey',
+      lastName: 'Okonkwo',
       voucherSize: 4,
       type: 'tenant',
     });
@@ -347,23 +449,29 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(conv.Item!.last_activity_at).toBe('2026-08-09T10:00:00.000Z');
   });
 
-  it('records connect-day-one as intent without provisioning a number', async () => {
-    // Buying a Twilio number has real cost and A2P consequences; it is never a
-    // side effect of a spreadsheet cell.
-    const review = cleanReview();
-    const groupRow = [...review.groups.values()][0]!;
-    groupRow.connect_day_one = 'Y';
-
-    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
-    expect(report.conversations.connectedDayOne).toBe(1);
-
+  it('a dropped group keeps its whole thread out - conversation and messages', async () => {
+    // 2026-08-09: all groups continue by default; drop=Y is the exclusion path
+    // and it must exclude the MESSAGES too, not just the conversation row.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
     const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    expect(await countMessages(id)).toBeGreaterThan(0);
+
+    // Fresh tables so the exclusion is observable (the group was written above).
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+
+    const review = cleanReview();
+    [...review.groups.values()][0]!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+    expect(report.conversations.droppedGroups).toBe(1);
+
     const conv = await doc.send(
       new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
     );
-    expect(conv.Item!.import_connect_requested).toBe(true);
-    expect(conv.Item!.pool_number).toBeUndefined();
-    expect(conv.Item!.status).toBe('connecting');
+    expect(conv.Item).toBeUndefined();
+    expect(await countMessages(id)).toBe(0);
   });
 
   it('writes nothing on a dry run', async () => {

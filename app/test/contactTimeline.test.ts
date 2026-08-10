@@ -703,7 +703,7 @@ describe('GET /api/contacts/:id/timeline — scheduled upcoming[] gather (Part B
     const logger = createLogger({ destination: createLogCapture().stream });
     const config = {
       smsSendingEnabled: true,
-      ourPhoneNumbers: [OUR_NUMBER],
+      businessPhoneNumber: OUR_NUMBER,
       relayPreferredAreaCodes: [],
     } as unknown as AppConfig;
     const router = createContactTimelineRouter({

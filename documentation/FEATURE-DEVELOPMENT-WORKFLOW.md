@@ -1,13 +1,16 @@
 # Feature Development Workflow
 
 How we take a top-level issue from idea to merge-ready code. This is the
-standardized process the human (Cameron) and the orchestrator agent (Claude) run
+standardized process the human (Cameron) and the active orchestrator agent run
 together, plus the learnings, best practices, and gotchas accumulated while running
 it. Follow it for any non-trivial feature or change.
 
-Companion docs: `.claude/CLAUDE.md` (the always-loaded rules this expands on),
+Companion docs: `AGENTS.md` (canonical cross-agent project rules),
 `documentation/GLOSSARY.md` (domain nouns), `docs/issues/README.md` (issue registry),
-`e2e/README.md` (the self-QA harness).
+and `e2e/README.md` (the self-QA harness). Client-specific runtime details live in
+`.claude/CLAUDE.md`, `.claude/feature-mission.profile.md`, `.codex/config.toml`, and
+`.codex/feature-mission.profile.md`; they must not duplicate shared behavior from
+this file or `AGENTS.md`.
 
 ---
 
@@ -16,7 +19,7 @@ Companion docs: `.claude/CLAUDE.md` (the always-loaded rules this expands on),
 - **Human (Cameron):** hands over the top-level issue; makes the product/architecture
   decisions; launches the builder agent with the orchestrator prompt; merges. The only
   actor who moves `main` and who runs infra (terraform/secrets/deploys).
-- **Orchestrator (Claude, main session):** runs the design conversation, writes the
+- **Orchestrator (active agent, main session):** runs the design conversation, writes the
   spec and the plan, cuts the worktree, hands over the orchestrator prompt, and later
   runs the independent review. Never merges; never runs infra without an explicit ask.
 - **Builder (a separate agent):** executes the plan task-by-task in the isolated
@@ -103,9 +106,11 @@ Run every time; do not shortcut because the builder said "green":
    `git -C <worktree> diff main...HEAD --stat`, `git rev-list --count HEAD..main`.
 2. Run your OWN gates, BARE, from the worktree: `npm run typecheck`, `npm test`,
    `timeout 1500 npm run e2e`. Quote the real exit codes.
-3. Dispatch two opus sub-agents in parallel: a spec-conformance reviewer and an
-   adversarial reviewer (make the adversarial one security-focused when the surface
-   warrants - e.g. a browser-to-S3 write grant). Explicit `model: opus`.
+3. When the active client supports parallel agents, dispatch two independent
+   reviewers: a spec-conformance reviewer and an adversarial reviewer. Make the
+   adversarial reviewer security-focused when the surface warrants it (for example,
+   a browser-to-S3 write grant). Let the client-specific overlay/configuration choose
+   supported models; never put client model identifiers in this shared workflow.
 4. Read the riskiest diffs yourself.
 5. Live Playwright-MCP pass: drive the real dashboard and prove the behavior end to
    end (not just that tests pass).
@@ -199,10 +204,10 @@ Gates:
 
 Sub-agents:
 
-- Pin an explicit `model` on EVERY sub-agent dispatch (Agent tool and Workflow
-  `agent()`): **opus** for routine fan-outs (reviews, explores, audits), **sonnet** for
-  trivial mechanical sweeps, **Fable never** by default (usage limits; a deliberate,
-  stated choice only).
+- Follow the active client's overlay and configuration for supported roles, models,
+  reasoning effort, permissions, and concurrency. Keep those identifiers out of this
+  shared document. Use independent reviewers for spec conformance and adversarial
+  review; reserve any top-tier child-model override for a deliberate, stated reason.
 
 Git:
 
@@ -257,7 +262,7 @@ Dev-stack self-QA:
 - [ ] Write the ASCII spec in a fresh worktree; self-review; get user review.
 - [ ] Write the TDD plan (complete code, exact commands, no placeholders); self-review.
 - [ ] Hand over a self-contained orchestrator prompt (fenced block).
-- [ ] On handback: scope the diff, run bare gates, 2 opus reviewers, read risky diffs,
+- [ ] On handback: scope the diff, run bare gates, 2 independent reviewers, read risky diffs,
       live Playwright pass, fix small must-fixes with tests, file the rest.
 - [ ] Verdict with quoted exit codes + PowerShell merge command. Human merges.
 - [ ] Record owed post-merge ops (infra / npm install / restart+reseed) in RUNBOOK.

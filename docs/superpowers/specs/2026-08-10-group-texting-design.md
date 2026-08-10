@@ -1,6 +1,6 @@
 # Native group texting - design spec
 
-Status: DRAFT v3 (post adversarial review rounds 1-2; pre human gate)
+Status: DRAFT v4 (post adversarial review rounds 1-3; pre human gate)
 Date: 2026-08-10. Cutover gate: 2026-08-17.
 Branch: `feat/group-texting` (worktree `W:\tmp\group-texting`, cut from main
 @2caeaba5).
@@ -102,24 +102,32 @@ participants" = the envelope's From + OtherRecipients minus the EXCLUDED set:
 - the business number (config.businessPhoneNumber), plus
 - all pool numbers (byPoolNumber GSI; cached read), plus
 - `GROUP_IDENTITY_EXCLUDED_NUMBERS`: an env-config comma list of E.164
-  numbers, shipped in every env file per the env-defaults rule (template
-  carries it uncommented; dev/prod values are the Quo export's `ownNumbers`
-  minus the business number - the importer resolved threads against ALL org
-  numbers, `app/src/lib/import/apply.ts:281`). Set BEFORE detection first
-  deploys; an ops item in 14, values confirmed with Cameron from the import
-  plan output.
+  numbers, shipped in every env file per the env-defaults rule (dev/prod
+  values are the Quo export's `ownNumbers` minus the business number - the
+  importer resolved threads against ALL org numbers,
+  `app/src/lib/import/apply.ts:281`). Set BEFORE detection first deploys; an
+  ops item in 14, values confirmed with Cameron from the import plan output.
+  BOOT VALIDATION (r3 finding 4; the BUSINESS_PHONE_NUMBER three-tier idiom,
+  config.ts:1137-1170): per-entry E.164 format throw; the literal value
+  `none` asserts "no extra org numbers" deliberately; production THROWS when
+  the var is unset (empty-by-omission is the dangerous default and must be
+  impossible); non-production WARNs when unset on a twilio-driver stack.
 
-IMMUTABILITY RULE: changing this list re-keys every future detection against
-every past one (same carrier thread, new uuid). The list is fixed at deploy;
-any later change is a migration-grade decision with its own thread-merge
-plan, not a config tweak. The env file documents this next to the var.
+IMMUTABILITY RULE, ENFORCED: changing this list re-keys every future
+detection against every past one (same carrier thread, new uuid). At boot
+the app compares a hash of the sorted list against a persisted settings
+fingerprint (first boot writes it); a mismatch is an ERROR naming the rule -
+any deliberate change is a migration-grade decision with its own
+thread-merge plan and a fingerprint reset step.
 
-Conversion (section 9) verifies parity: it receives the importer's
-`ownNumbers` and REFUSES to run if any of them (beyond the business number)
-is missing from the runtime exclusion set - the loud failure replaces the
-silently-blind WARN of v2. Detection additionally WARNs + counts if an
-envelope contains a pool number or an excluded number in the outside-roster
-position (a signal the exclusion config and reality disagree).
+Conversion (section 9) verifies SET EQUALITY (modulo the business number and
+pool numbers) between the importer's `ownNumbers` and the runtime exclusion
+set, and REFUSES on a mismatch in EITHER direction - a missing number mints
+divergent ids, and an extra (typo'd/stale) number silently subtracts a real
+member from every roster containing them (r3 finding 8). Detection WARNs +
+counts only when a POOL number appears in the outside-roster position
+(genuinely anomalous); an excluded number appearing there is the
+correctly-configured steady state, not a signal (r3 finding 9).
 
 Lookups: exclusion-set resolution runs ONLY on envelope-bearing inbound
 (1:1s never reach it) and uses one cached read (pool list + config list
@@ -192,11 +200,19 @@ Group messages persist under the group conversationId with existing shapes:
   (the sender's 1:1) + a context detail field rather than being passed the
   group thread.
 - UNLIKE the relay precedent (which calls the shared seam only on keyword
-  commands), the group path calls `processInboundKeywords` on EVERY group
-  inbound - because the plain-inbound `inbound_text` consent stamp for the
-  SENDER lives inside that function (twilio.ts:639-650), and skipping it
-  strands first-contact group senders JIT-gated for proactive sends (r2
-  finding 7). Only the reply usage is suppressed, never the call.
+  commands), the group path runs the shared consent/keyword seam on EVERY
+  group inbound - because the plain-inbound `inbound_text` consent stamp for
+  the SENDER lives there (twilio.ts:639-650), and skipping it strands
+  first-contact group senders JIT-gated for proactive sends (r2 finding 7).
+  BUT the seam's target conversation becomes LAZY (r3 finding 1: eagerly
+  resolving via createOrGetByParticipantPhone mints an EMPTY 1:1 thread per
+  group sender - a blank needs-triage inbox row per member, a product
+  regression): the plain-inbound consent stamp is CONTACT-level and needs no
+  conversation; the sender's 1:1 thread is materialized ONLY when a keyword
+  actually matched and `setSmsOptOut` needs a target. Mechanism: a lazy
+  thunk parameter or an extracted contact-level stamp function - either way,
+  NO conversation row is created for a plain group inbound. Only the reply
+  usage is suppressed, never the consent call.
 - START symmetric. HELP: bookkeeping only.
 - The app SENDS NOTHING on group keywords in v1. Observed (spike F6): Twilio's
   standard opt-out auto-replies 1:1 to the sender. The unresolved app-wide
@@ -228,18 +244,33 @@ today's relay behavior with the envelope dropped -
    - Roster per 4.1 (exclusion set applied; WARN metric on divergence
      signals).
    - conversationId = conversationIdForGroup(roster).
-   - Find-or-create the group_text thread. Creation: resolve-or-create a
-     contact per member by phone - creating STUBS WITHOUT any consent stamp
-     (they never texted us; stamping inbound_text would fabricate A2P consent
-     - adjudication #8). Group stubs are minted with the IMPORTER'S id scheme
-     `contactIdForPhone(e164)` (uuidv5), NOT `contact-<randomUUID>`, so the
-     import's later contact upsert converges on the same row instead of
-     duplicating every detected member at migration (r2 finding 11). Write
-     `participants` once with the full roster (single conditional claim; on
-     race, loser re-reads). The SENDER gets normal inbound consent semantics
-     via the every-inbound `processInboundKeywords` call (4.4), and the
-     sender's `touchPhoneLastSeen` second-number attribution runs exactly as
-     on a 1:1 (it is sender attribution, not a 1:1-ism).
+   - Resolve the thread at the group id. THREE cases, all specified:
+     (a) NOT FOUND -> create the group_text thread (below).
+     (b) FOUND, type group_text -> file into it.
+     (c) FOUND, type relay_group (an imported row awaiting conversion, or an
+         import_connect_requested row the conversion REFUSED - r3 finding 2)
+         -> the message files into the SENDER'S 1:1 thread (preserved, per
+         invariant 3) with an ERROR-level alarm naming the conversationId:
+         "group inbound on unconverted imported group". No group filing, no
+         relay filing, no silent anything - a human decides that thread's
+         fate (convert it, or connect it as relay). This is the pre-feature
+         behavior scoped to exactly the rows awaiting a human decision.
+   - Creation: resolve-or-create a contact per member by phone - STUBS
+     WITHOUT any consent stamp (they never texted us; stamping inbound_text
+     would fabricate A2P consent - adjudication #8). Group stubs are minted
+     with the IMPORTER'S id scheme `contactIdForPhone(e164)` (uuidv5) so the
+     import's later contact upsert converges on the same row (r2 finding
+     11), AND carry an origin marker (`origin: 'group_detection'`-style
+     field) that the import's `retractImported` MUST refuse to delete
+     through (r3 finding 3: id convergence made detection stubs reachable by
+     the import's unconditional contact DeleteCommand, apply.ts:467-470 -
+     the retract gains a guard symmetric with its existing foreign-message
+     guard: contact carries the origin marker OR appears on any group_text
+     roster -> report, do not delete). Write `participants` once with the
+     full roster (single conditional claim; on race, loser re-reads). The
+     SENDER gets normal inbound consent semantics via the lazy-seam call
+     (4.4), and the sender's `touchPhoneLastSeen` second-number attribution
+     runs exactly as on a 1:1 (it is sender attribution, not a 1:1-ism).
    - Persist the message (dedupe by MessageSid via the existing sid-pointer
      transaction) with `relay_sender_key` = sender's member key. It MUST NOT
      also file into the sender's 1:1 thread.
@@ -328,15 +359,20 @@ events reliably).
   mis-sized the race): on learning each member's SMxx from a receipt, the
   handler writes a `syssid#` SYSTEM MARKER (the existing ack-quietly kind,
   twilio.ts:1306-1316) so classic status callbacks for that SID are
-  INFO-acked with no relay dispatch. Delivery state comes SOLELY from
-  onDeliveryUpdated. Whether classic callbacks fire at all for
-  Conversations-originated sends is spike-addendum item (b): if they do not,
-  the marker write is dropped from the plan; if they do, the residual race
-  (callback arriving before the first receipt writes the marker; receipts
-  observed at ~1-5s vs the status route's single 2.5s retry) is measured in
-  e2e/live-QA, and the plan either adds a bounded second retry to the
-  unknown-SID terminus or documents the rare alarm string. e2e asserts no
-  unknown-SID ERROR from a group send in the fake harness either way.
+  INFO-acked with no relay dispatch. Group markers SET `expires_at` (~30d
+  TTL - they are not conversation messages, and per-recipient-per-send
+  accrual would otherwise be unbounded; r3 finding 13). Delivery state comes
+  SOLELY from onDeliveryUpdated - which makes a dead/misconfigured receipts
+  webhook SILENT, so it gets its own alarm (r3 finding 6): each group send
+  enqueues ONE delayed staleness check (`jobs.enqueue` runAt ~+10min) that
+  ERRORs if the message's `delivery_recipients` is still empty/queued -
+  "group delivery receipts silent - check Conversations service webhook
+  config". Whether classic callbacks fire at all for Conversations sends is
+  spike-addendum item (b): if not, the marker write is dropped from the
+  plan; if so, the residual race (callback before first receipt; receipts at
+  ~1-5s vs the status route's single 2.5s retry) is measured in e2e/live-QA
+  and the plan adds a bounded second retry or documents the rare alarm
+  string. e2e asserts no unknown-SID ERROR from a group send either way.
 - Recreate-on-404 staleness (r2 finding 10): recreating a Conversation mints
   new ParticipantSids - the stored MBxx map is refreshed from a Participants
   read on every recreate, and a KNOWN IMxx with an UNKNOWN ParticipantSid is
@@ -367,10 +403,13 @@ A2P sink and are not touched):
    - Event without a matching classic-filed message (conversation + author +
      time window) -> ERROR "conversation-bound inbound missing from classic
      webhook" - the suppression alarm.
-   - Classic-filed group inbound on a thread WITH a `twilio_conversation_sid`
-     but NO corresponding event within the window -> WARN "cross-check
-     channel quiet" - the monitor-is-dead alarm. This is the liveness signal;
-     it runs from the ingestion side, so the cross-check cannot silently rot.
+   - Liveness (the monitor-is-dead signal), as a SINGLE SCHEDULED SWEEP, not
+     per-message state (r3 finding 7: absence of an event is not computable
+     inline at ingestion; a per-inbound delayed job would be a permanent tax):
+     the cross-check endpoint records a last-event-received timestamp;
+     ingestion counts classic group inbound on railed threads; a daily job
+     WARNs when railed-thread classic inbound occurred in the last 24h while
+     the cross-check recorded zero events - "cross-check channel quiet".
    Honest coverage statement: the cross-check observes only threads whose
    rail exists (lazy creation = post-first-outbound). During the
    detection-only slice, mechanisms 1 and 3 are the guards. Scope precedence
@@ -394,14 +433,25 @@ mainline; import mission owns the RUN). This feature ships:
 
 - IMPORTER TYPE-GUARD (in this branch - the importer code is on mainline and
   in-repo; only the RUN is the import mission's): `upsertConversation`
-  (apply.ts:672-720) learns to protect `group_text` rows. When the existing
-  row's type is `group_text`, the group upsert SKIPS `relay_status` and the
-  unconditional `participants` overwrite (which would re-key detection's
-  contactId-bearing roster and every relay_sender_key chip). This replaces
-  v2's `converted:group_text` sentinel - which protected only CONVERTED
-  threads, while the identity contract guarantees DETECTED threads collide
-  with importer ids too (r2 finding 1). Messages/history import unchanged
-  (separately keyed).
+  (apply.ts:672-720) learns to protect `group_text` rows. Mechanism is the
+  CONDITIONAL-WRITE form, not read-then-write (r3 finding 5: a Get-then-
+  Update races with live detection during the import's own supported
+  re-run-under-traffic scenario): attempt the full group upsert with
+  `ConditionExpression: attribute_not_exists(#type) OR #type <> :groupText`;
+  on ConditionalCheckFailedException, retry with a REDUCED expression that
+  skips `relay_status`, the `participants` overwrite (which would re-key
+  detection's contactId roster and every relay_sender_key chip), AND
+  `imported_from`/`imported_at` (stamping those would expose the thread to
+  retract paths). This replaces v2's sentinel - which protected only
+  CONVERTED threads while the identity contract guarantees DETECTED threads
+  collide with importer ids too (r2 finding 1). Messages/history import
+  unchanged (separately keyed). COORDINATION NOTE for 14: this edits
+  mainline `apply.ts`, which the unmerged import branch also touches -
+  Cameron sequences the merges.
+- IMPORT RETRACT GUARD (same file): `retractImported`'s contact delete
+  (apply.ts:467-470, currently unconditional) gains the guard from 5: a
+  contact carrying the detection origin marker, or present on any group_text
+  roster, is reported and NOT deleted.
 - `convertConnectingRelayGroupToGroupText(conversationId, opts)`:
   - Preconditions: type relay_group, status connecting, no pool_number, and
     NOT `import_connect_requested` (the founder asked for a masked relay
@@ -433,10 +483,17 @@ mainline; import mission owns the RUN). This feature ships:
   relay source" unqualified - relay's additive first-page merge is sized for
   a handful of rows and the founder has 132 group threads on day one (r2
   finding 8). The group source merges the TOP 50 by last-activity into page
-  one with a surfaced "showing 50 of N group texts" affordance linking to an
-  inbox groups filter (`?filter=groups`) that pages the FULL list via the
-  byGroupStatus cursor. Group threads do NOT enter the contact unread SUM
-  (consistent with relay's exclusion; enumerated readers in the plan).
+  one with a relay-style `truncated` surfacing ("Showing latest 50 group
+  texts - view all"; NO exact total, which the GSI cannot produce without
+  walking the partition - r3 finding 11), linking to an inbox groups filter
+  (`?filter=groups`) that pages the FULL list via the byGroupStatus cursor.
+  The filter joins the InboxFilter union + route allowlist (both declaration
+  sites); its cursor is NAMESPACED/tagged (a byGroupStatus LEK is not a
+  byLastActivity LEK - replaying one into the other is a 500; switching
+  filters drops the cursor), and the contact pager does NOT run under
+  `filter=groups` (r3 finding 10). Group threads do NOT enter the contact
+  unread SUM (consistent with relay's exclusion; enumerated readers in the
+  plan).
 - Thread view: `ConversationDetail` currently redirects every non-relay type
   to a contact page (ConversationDetail.tsx:134) - that branch becomes
   explicitly 1:1-only, and a new GroupTextView renders: member panel
@@ -458,11 +515,17 @@ mainline; import mission owns the RUN). This feature ships:
 
 ## 12. Testing and verification
 
-- Unit: golden-vector id tests; envelope parser shapes (indexed, gap,
-  single, absent); exclusion-set application; conversion function incl.
-  sentinel + refusal paths; receipts mapping/idempotency + sid-pointer
-  write; group STOP consent scoping (sender 1:1 flagged, group thread NOT);
-  stub-capture-without-consent.
+- Unit: golden-vector id tests for BOTH `conversationIdForGroup` AND
+  `contactIdForPhone` (runtime code now depends on the uuidv5 NAMESPACE
+  through both - r3 finding 14); envelope parser shapes (indexed, gap,
+  single, absent); exclusion-set application + boot validation +
+  fingerprint; importer type-guard INCLUDING the concurrent
+  conditional-write case; retract guard; conversion refusal paths (both
+  parity directions, import_connect_requested); the case-(c)
+  unconverted-thread branch; receipts mapping/idempotency + system-marker
+  write + staleness-check job; group STOP consent scoping (sender 1:1
+  flagged lazily, group thread NOT, no phantom 1:1 on plain inbound);
+  stub-capture-without-consent + origin marker.
 - Fake Twilio: inbound group MMS injection with OtherRecipients (indexed,
   multi, media-bearing); minimal conversations surface (create/participants/
   post -> fan-out to fake phones + onDeliveryUpdated to the receipts route);

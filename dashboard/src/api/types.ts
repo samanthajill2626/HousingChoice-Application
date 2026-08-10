@@ -1848,6 +1848,10 @@ export interface UnitItem {
   accepted_authorities?: string[];
   /** Structured street address, or a plain string on pre-contract dev records. */
   address?: Address | string;
+  /** LEGACY - read-only. The dissolved "program" concept (HCV / Section 8 / VASH
+   *  are program-type labels, NOT authorities), superseded by
+   *  `accepted_authorities` (spec section 8). No longer written and no longer
+   *  rendered; stored values stay on the document untouched. */
   accepted_programs?: string[];
   beds?: number;
   baths?: number;

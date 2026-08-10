@@ -304,7 +304,7 @@ const LANDLORD_BOOLEAN_FIELDS = [
 
 // NOTE (2026-07-10): the landlord preference fields (accepts_programs /
 // lease_terms / pet_policy) and expected_rent MOVED to the UNIT (GLOSSARY —
-// they are per-property facts: accepted_programs / lease_terms / pets /
+// they are per-property facts: accepted_authorities / lease_terms / pets /
 // rent_min-rent_max on UnitItem). The contact parsers no longer accept them;
 // unknown keys are ignored, so a stale client sending them simply no-ops.
 

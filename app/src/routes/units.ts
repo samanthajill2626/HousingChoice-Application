@@ -216,7 +216,7 @@ const UNIT_PHOTO_PRESIGN_BATCH_MAX = 20;
 /**
  * BE5/C6: the cap on how many `available` units the similar-properties endpoint
  * will sweep before ranking. The ranker is O(candidates) and the result is a
- * top-N panel, so 500 is a generous bound on a single jurisdiction's open
+ * top-N panel, so 500 is a generous bound on a single market's open
  * inventory. If MORE than this remain, we stop and log.warn (the ranker ran on
  * a prefix of the available set — never silent truncation).
  */

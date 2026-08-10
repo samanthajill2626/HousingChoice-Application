@@ -32,7 +32,7 @@ const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   ...LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] })),
 ];
 
-/** Humanize a jurisdiction slug for the filter chips: tokens ≤3 chars become
+/** Humanize an authority slug for the filter chips: tokens <= 3 chars become
  *  acronyms, longer ones are title-cased — 'atlanta_housing' → "Atlanta Housing",
  *  'ga_dca' → "GA DCA". */
 function humanizeAuthority(slug: string): string {

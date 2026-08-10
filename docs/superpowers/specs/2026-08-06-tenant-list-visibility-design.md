@@ -141,7 +141,8 @@ explicit ask.
 | `contact.agency` | string, NEW | Optional; the helper org (section 2). PATCH-allowlisted this feature; no GSI, no facet |
 
 The one backend change is the `agency` PATCH allowlist entry (+ `changedFields` tracking,
-mirroring `housingAuthority`'s block at `contacts.ts:498-502`) and the dashboard type mirror.
+mirroring `housingAuthority`'s block at `contacts.ts:520-525` - the earlier `:498-502` citation
+was stale, that block is `notes` now) and the dashboard type mirror.
 **No other API, route, repo, or GSI changes.** The repo stores flexible documents, so no schema
 or table work.
 
@@ -167,15 +168,19 @@ are inert: they filter nothing and no control renders. Follows `ListingsList` (c
 - **Housing authority** - multi-select chips, options DERIVED from loaded data (open
   vocabulary). **Facet key = the NORMALIZED stored value**: trim, collapse internal whitespace,
   case-fold, and fold underscores to spaces - so `atlanta_housing`, `Atlanta_Housing`,
-  `Atlanta Housing`, and `Atlanta Housing ` (trailing space) all group as ONE chip with summed
-  counts, and selecting it matches every member value. The chip DISPLAYS the most frequent raw
-  member spelling, untransformed (ties broken by sort order, deterministic). Byte-identical
-  merging alone is not enough - the PATCH path stores strings untrimmed, so trailing-space and
-  case variants would otherwise render indistinguishable duplicate chips with split counts (and
-  a Playwright strict-mode collision; `selectors.md` documents that bug class). The importer
-  already trims/folds on its side (`housingAuthorityFor`); this rule is the read-side
-  equivalent, and the edit form additionally trims + collapses whitespace before PATCHing
-  (section 7).
+  `Atlanta Housing`, and `Atlanta  Housing` (doubled interior space) all group as ONE chip with
+  summed counts, and selecting it matches every member value. The chip DISPLAYS the most frequent
+  raw member spelling, untransformed (ties broken by sort order, deterministic). Byte-identical
+  merging alone is not enough - INTERIOR whitespace, case, and underscore/slug spellings all
+  produce variants that would otherwise render indistinguishable duplicate chips with split
+  counts (and a Playwright strict-mode collision; `selectors.md` documents that bug class), and
+  legacy STORED rows predate any write-side rule. RATIONALE CORRECTED on-branch 2026-08-10: an
+  earlier draft justified this with "the PATCH path stores strings untrimmed", which is FALSE -
+  `trimJsonBody()` (`app/src/app.ts:100`) has deep-trimmed every inbound JSON string value since
+  2026-07-14, so an END-whitespace duplicate is unreachable from the human write path. The rule
+  ships unchanged on the four grounds above. The importer also trims/folds on its side
+  (`housingAuthorityFor`); this rule is the read-side equivalent, and the edit form additionally
+  collapses interior whitespace before PATCHing (section 7).
 - **Porting** - single toggle chip. Label and title match the existing placement chip
   (`PlacementRow.tsx:41-45`: text `Porting`, title `Tenant is porting`).
 
@@ -293,9 +298,14 @@ directly below it in the same idiom:
 - Agency `<datalist>`: the four known agencies (`HUD VASH`, `Claratel`, `Hope Atlanta`,
   `Step Up`), placeholder `e.g. Hope Atlanta`, tenant-only like the authority input.
 - Free text fully accepted in both; the datalists suggest, never constrain.
-- Both inputs TRIM and collapse internal whitespace before PATCHing (the importer already does
-  this on its side via `housingAuthorityFor`; the human write path currently has no equivalent,
-  which is half of how indistinguishable duplicate chips arise - section 5).
+- Both inputs TRIM and collapse INTERIOR whitespace before PATCHing (the importer already does
+  this on its side via `housingAuthorityFor`). RATIONALE CORRECTED on-branch 2026-08-10: an
+  earlier draft said "the human write path currently has no equivalent", which is FALSE for END
+  whitespace - `trimJsonBody()` (`app/src/app.ts:100`) already deep-trims every inbound JSON
+  string. What the form-side collapse earns is the INTERIOR case (`Atlanta  Housing`), a value
+  that matches what section 5's normalized key groups by, and - collapsing BOTH sides before the
+  comparison - keeping an effectively-unchanged `housingAuthority` off the wire, which the
+  provenance rules require.
 - Datalist ids from `useId()` (the module-constant collision is a documented fix at
   `CustomFieldsEditor.tsx:22-24`).
 - The `autoComplete="off"` attribute on the current input is DROPPED (whether it suppresses

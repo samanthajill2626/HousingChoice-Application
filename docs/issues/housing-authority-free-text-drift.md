@@ -159,10 +159,16 @@ decided MODEL, not just a classification of strings:
 Build implications owed here, UPDATED 2026-08-10 after the tenant-list-visibility spec gate
 (that feature now DELIVERS: the plain contact `agency` field, and the unit
 `accepted_authorities` list replacing `jurisdiction` + `accepted_programs` with read-time
-synthesis from legacy values): the agency ENTITY + the caseworker-to-agency link; dropping the
-now-unwritten `byJurisdiction` GSI from the units table (terraform - explicit ask only); the
+synthesis from legacy values): the agency ENTITY + the caseworker-to-agency link; the
 extraction-vocabulary split
 (authority-kind only for `housingAuthority` - today it mixes kinds AND is missing DeKalb);
 whether stored `Georgia Housing Voucher (GHV)` values merge into `DCA` (GHV is DCA's program);
 the datalist mirror in the dashboard has no mechanical drift guard against `CANONICAL_AUTHORITY`
 (cross-workspace imports unavailable) - keep the two lists in sync by hand when either changes.
+
+CORRECTED 2026-08-10 (on the tenant-list-visibility branch): the `byJurisdiction` GSI is no
+longer owed here. That feature REMOVED the index from the schema (`app/src/lib/tables.ts`) and
+regenerated both `infra/envs/{dev,prod}/tables.auto.tfvars.json`, per the gate ruling that
+DESIGNING an infra change is feature work. What remains owed is only the `terraform apply` on
+dev (and prod at its gate) to drop the index - non-destructive, a GSI is a projection; stale
+local lanes keep a harmless extra index and fresh lanes create without it.

@@ -10,9 +10,10 @@
 //
 // NO GEOCODING (kickoff "no geocoding — out of scope"): `address` is a
 // STRUCTURED postal address (lib/address.ts Address: line1/line2/city/state/zip,
-// all optional) and `jurisdiction` is a plain string the operator sets; §5's
-// "geocoded address" is intentionally NOT implemented here (README deviation
-// row). The Address type is reused for tenant/contact addresses later.
+// all optional) and `accepted_authorities` is a plain operator-set list of
+// strings; section 5's "geocoded address" is intentionally NOT implemented here
+// (README deviation row). The Address type is reused for tenant/contact
+// addresses later.
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {

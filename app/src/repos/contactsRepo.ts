@@ -252,7 +252,7 @@ export interface ContactItem {
   income_includes_voucher?: boolean;
   // NOTE (2026-07-10): expected_rent + the landlord preference defaults
   // (accepts_programs / lease_terms / pet_policy) MOVED to the UNIT — they are
-  // per-property facts (rent_min-rent_max / accepted_programs / lease_terms /
+  // per-property facts (rent_min-rent_max / accepted_authorities / lease_terms /
   // pets on UnitItem; GLOSSARY "Feature & label notes"). Rows written before
   // the move may still carry the attributes; flexible-doc posture — they
   // simply go unread.

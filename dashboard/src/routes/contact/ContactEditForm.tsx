@@ -7,7 +7,7 @@
 // PATCHed (the server SET-merges, so an untouched field is never blanked) -
 // switching type leaves the other type's old fields on the record (harmless; they
 // just stop showing). On success the parent applies the returned contact in place.
-import { useState } from 'react';
+import { useId, useState } from 'react';
 import {
   TENANT_STATUSES,
   TENANT_STATUS_LABELS,
@@ -70,6 +70,7 @@ import { RelationshipsEditor } from './RelationshipsEditor.js';
 import { CustomFieldsEditor } from './CustomFieldsEditor.js';
 import { KindPicker, type KindPickerValue } from './KindPicker.js';
 import { useContactVocabulary } from './useContactVocabulary.js';
+import { AGENCY_SUGGESTIONS, AUTHORITY_SUGGESTIONS, collapseOrgInput } from './orgVocabulary.js';
 import {
   CONTACT_TYPE_LABEL,
   normalizeRelationships,
@@ -118,6 +119,13 @@ function str(v: unknown): string {
 export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: ContactEditFormProps): React.JSX.Element {
   const vocab = useContactVocabulary();
 
+  // Instance-unique datalist ids for the two org inputs. NOT module constants:
+  // two mounted copies of the form would then point at the same ids (the
+  // documented bug fixed at CustomFieldsEditor.tsx:22-24).
+  const uid = useId();
+  const authorityListId = `${uid}-authority-suggestions`;
+  const agencyListId = `${uid}-agency-suggestions`;
+
   // Type + role together - a KindPicker value, kept collapsed behind "Change type"
   // (changingType) since retyping is rare. isTenant/isLandlord derive from the
   // LIVE kind so the type-specific fields swap the moment the base type changes.
@@ -165,6 +173,9 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
   );
   const [parkReason, setParkReason] = useState(str(contact.park_reason));
   const [housingAuthority, setHousingAuthority] = useState(str(contact.housingAuthority));
+  // The helper organization a tenant works with - a DIFFERENT dimension from the
+  // authority that issues the voucher (founder taxonomy; see orgVocabulary).
+  const [agency, setAgency] = useState(str(contact.agency));
   const [pets, setPets] = useState(str(contact['pets']));
   const [evictions, setEvictions] = useState(str(contact['evictions']));
   const [tenure, setTenure] = useState(str(contact['tenure']));
@@ -294,7 +305,29 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
         patch.voucher_expiration_date =
           voucherExpiration.trim() === '' ? null : consentAtFromDate(voucherExpiration.trim());
       }
-      if (housingAuthority !== str(contact.housingAuthority)) patch.housingAuthority = housingAuthority;
+      // Housing authority + agency: dirty-tracked on the COLLAPSED value, and the
+      // comparison collapses BOTH SIDES.
+      //
+      // `housingAuthority` is a server-side PROVENANCE field, and the server
+      // builds `changedFields` from key PRESENCE alone: merely INCLUDING the key
+      // in the PATCH body nulls `housingAuthority_source`, consumes (deletes) any
+      // pending AI suggestion for the field and stamps its ai_run
+      // `superseded_by_human_edit` - whatever the value. So a field whose
+      // EFFECTIVE value did not change must never reach the wire.
+      //
+      // Collapsing one side only breaks that in one direction each: collapsing
+      // just the outgoing value re-sends an untouched field whenever the STORE
+      // holds an interior whitespace run, while comparing raw-to-raw re-sends on a
+      // whitespace-ONLY edit. Collapsing both is a no-op in both cases and sends
+      // only on a real value change.
+      const nextAuthority = collapseOrgInput(housingAuthority);
+      if (nextAuthority !== collapseOrgInput(str(contact.housingAuthority))) {
+        patch.housingAuthority = nextAuthority;
+      }
+      const nextAgency = collapseOrgInput(agency);
+      if (nextAgency !== collapseOrgInput(str(contact.agency))) {
+        patch.agency = nextAgency;
+      }
       if (pets !== str(contact['pets'])) patch.pets = pets;
       if (evictions !== str(contact['evictions'])) patch.evictions = evictions;
       if (tenure !== str(contact['tenure'])) patch.tenure = tenure;
@@ -476,17 +509,44 @@ export function ContactEditForm({ contact, onClose, onSaved, candidates = [] }: 
           </label>
         ) : null}
 
+        {/* The two org fields: the authority that ISSUES the voucher, and the
+            agency that HELPS the tenant. Both offer the importer's canonical
+            spellings through a datalist and both still accept free text. No
+            autoComplete attribute - whether it suppresses list= suggestions is
+            browser-dependent, and neither precedent datalist sets one. */}
         {isTenant ? (
-          <label className={styles.field}>
-            <span className={styles.label}>Housing authority</span>
-            <input
-              className={styles.input}
-              value={housingAuthority}
-              onChange={(e) => setHousingAuthority(e.target.value)}
-              placeholder="e.g. atlanta_housing"
-              autoComplete="off"
-            />
-          </label>
+          <>
+            <label className={styles.field}>
+              <span className={styles.label}>Housing authority</span>
+              <input
+                className={styles.input}
+                value={housingAuthority}
+                onChange={(e) => setHousingAuthority(e.target.value)}
+                placeholder="e.g. Atlanta (AHA)"
+                list={authorityListId}
+              />
+            </label>
+            <datalist id={authorityListId}>
+              {AUTHORITY_SUGGESTIONS.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+            <label className={styles.field}>
+              <span className={styles.label}>Agency</span>
+              <input
+                className={styles.input}
+                value={agency}
+                onChange={(e) => setAgency(e.target.value)}
+                placeholder="e.g. Hope Atlanta"
+                list={agencyListId}
+              />
+            </label>
+            <datalist id={agencyListId}>
+              {AGENCY_SUGGESTIONS.map((s) => (
+                <option key={s} value={s} />
+              ))}
+            </datalist>
+          </>
         ) : null}
 
         {isTenant ? (

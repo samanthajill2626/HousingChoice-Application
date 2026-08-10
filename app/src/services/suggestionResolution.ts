@@ -70,9 +70,12 @@ export interface SuggestionResolutionService {
   /**
    * F1 lazy recovery. A crash between claim and commit deletes the `sugg#` row,
    * so no suggestion card can offer the identity needed to resume. Any ordinary
-   * read of the contact's suggestions therefore helps every expired journal of
-   * that contact to completion first. Best-effort per journal: one journal's
-   * failure never blocks the others, and the next read retries.
+   * read of the contact's suggestions therefore helps that contact's expired
+   * journals to completion first - at most MAX_RECOVERIES_PER_READ of them per
+   * read, counting ATTEMPTS, so one page load cannot be held open driving a
+   * backlog. Any remainder is picked up by the next read. Best-effort per
+   * journal: one journal's failure never blocks the others, and the next read
+   * retries.
    *
    * `stateChanged` is a NOTIFY flag - "durable state changed that the dashboard
    * has not been told about" - and is true for a refused (consumed-chip) journal

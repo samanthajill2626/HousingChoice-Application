@@ -427,9 +427,25 @@ export function createSuggestionResolutionService(deps: ResolutionServiceDeps): 
               // already stamped its real verdict at the verdict phase, and
               // `superseded` over that would be the conf P2-1 lie again - the
               // narrow `finalized !== 'stale'` test cannot tell the two apart.
-              const terminal = await deps.resolutionRepo.get(journal.contactId, journal.target);
-              if (terminal?.state === 'completed' && terminal.disposition === 'released_unsafe') {
-                await stampVerdict(journal, 'superseded');
+              //
+              // conf P1-1: the confirm READ is best-effort too, and it has to be
+              // wrapped to say so. stampVerdict swallows its own failure for
+              // exactly this contract; an unguarded GetItem here escaped
+              // applyJournal, and on the resolve() path (takeover help, or the
+              // requester's own claim) it turned a 200 into a 500 - the run log
+              // failing the human action it only observes.
+              try {
+                const terminal = await deps.resolutionRepo.get(journal.contactId, journal.target);
+                if (terminal?.state === 'completed' && terminal.disposition === 'released_unsafe') {
+                  await stampVerdict(journal, 'superseded');
+                }
+              } catch (err) {
+                // `err`, not `error`: pino serializes an Error only under `err`.
+                // Ids and the error only: never the value under review.
+                deps.logger.warn(
+                  { err, contactId: journal.contactId, target: journal.target },
+                  'ai run terminal verdict confirm read failed (best-effort)',
+                );
               }
             }
           }

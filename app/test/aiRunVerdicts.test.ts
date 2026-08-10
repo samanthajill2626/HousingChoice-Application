@@ -992,6 +992,144 @@ describe('verdict write-back - surface 1: suggestions.ts accept and dismiss', ()
     expect(setVerdict.mock.calls[0]?.[3]).toMatchObject({ expectedVerdict: 'pending' });
   });
 
+  // conf P1-1. The confirm read the block above added is OBSERVABILITY, on a path
+  // whose own contract two comments up is "it must never fail the human action" -
+  // which is exactly why stampVerdict wraps its write. The read sat outside any
+  // catch: the only enclosing swallow is recoverAbandoned's, so on the resolve()
+  // path a single transient GetItem fault escaped applyJournal and turned the
+  // operator's answer into a 500.
+  it('answers the human even when the terminal confirm read faults', async () => {
+    const { world } = makeWorld();
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    const abandoned = [...world.suggestionResolutions.values()][0];
+    const originalSnapshot = abandoned?.state === 'active' ? abandoned.snapshot : undefined;
+    const originalIdentity = originalSnapshot === undefined ? undefined : {
+      createdAt: originalSnapshot.createdAt,
+      ...(originalSnapshot.revision !== undefined && { revision: originalSnapshot.revision }),
+      ...(originalSnapshot.runId !== undefined && { runId: originalSnapshot.runId }),
+    };
+    await seedPhoneOwner(world, '+15550104040');
+    expireActiveResolution(world, 'c1', 'phone');
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+    const realComplete = world.suggestionResolutionRepo.complete.bind(world.suggestionResolutionRepo);
+    world.suggestionResolutionRepo.complete = async (input) => {
+      const result = await realComplete(input);
+      return result === 'completed' ? 'already_completed' : result;
+    };
+    // ...and the confirm read that follows faults exactly ONCE, the way a
+    // throttled or briefly unavailable table does.
+    const realGet = world.suggestionResolutionRepo.get.bind(world.suggestionResolutionRepo);
+    let faulted = false;
+    world.suggestionResolutionRepo.get = async (contactId, target) => {
+      const row = await realGet(contactId, target);
+      if (!faulted && row?.state === 'completed') {
+        faulted = true;
+        throw new Error('GetItem down');
+      }
+      return row;
+    };
+
+    // The operator's own retry of the identity still on their screen.
+    const harness = makeWebhookHarness({ world });
+    const res = await accept(harness.app, 'c1', 'phone', originalIdentity);
+
+    expect(faulted).toBe(true);
+    expect(res.status).toBe(409);
+    expect(res.body.error).toBe('suggestion_replaced');
+    expect(
+      harness.capture.atLevel(40).map((line) => line['msg']),
+    ).toContain('ai run terminal verdict confirm read failed (best-effort)');
+  });
+
+  // conf P2-2. Pins the ADJUDICATED shape of the block above: the rejected
+  // `finalized !== 'stale'` one-liner cannot tell "my own finalization came back
+  // as somebody else's" from "somebody else finished this journal NORMALLY", and
+  // stamping `superseded` over the latter is the conf P2-1 lie with a green
+  // suite. Here the journal really is completed - by another actor, through the
+  // ordinary ladder, with its true `accepted` verdict already recorded - so the
+  // helper that lands in the terminal block must stamp NOTHING.
+  it('does not stamp superseded when the already_completed journal completed NORMALLY', async () => {
+    const recorded = new Map<string, Verdict>();
+    const { world, setVerdict } = makeWorld(async (runId, target, verdict, opts) => {
+      const decision = `${runId}#${target}`;
+      const current = recorded.get(decision) ?? 'pending';
+      if (opts?.expectedVerdict !== undefined && current !== opts.expectedVerdict) return false;
+      recorded.set(decision, verdict);
+      return true;
+    });
+    seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550104040', conversationId: 'conv-a', runId: 'run-a',
+    });
+    const crashing = makeWebhookHarness({
+      world,
+      suggestionResolutionHooks: {
+        afterBoundary: (boundary) => {
+          if (boundary === 'claimed') throw new Error('simulated termination after phone claim');
+        },
+      },
+    }).app;
+    await accept(crashing, 'c1', 'phone').expect(500);
+    await seedPhoneOwner(world, '+15550104040');
+    expireActiveResolution(world, 'c1', 'phone');
+    // A replacement holds the pending slot, so a release can only be 'unsafe'.
+    await seedSuggestion(world, {
+      ownerContactId: 'c1', target: 'phone', suggestedValue: '+15550105050', conversationId: 'conv-b', runId: 'run-b',
+    });
+
+    const helperB = makeWebhookHarness({ world }).app;
+    const helperA = makeWebhookHarness({ world }).app;
+    const realRelease = world.suggestionResolutionRepo.release;
+    world.suggestionResolutionRepo.release = async (input) => {
+      // Helper A stalls INSIDE release (SDK retry, GC pause, throttled table)
+      // past its own lease. Once only - B must see the real protocol.
+      world.suggestionResolutionRepo.release = realRelease;
+      // The conflict clears while A is stalled: the other contact's number is
+      // removed, pointer and all.
+      const pointerIndex = world.contacts.findIndex(
+        (contact) => contact.phone_ref === true && contact.phone === '+15550104040',
+      );
+      if (pointerIndex < 0) throw new Error('expected the foreign owner pointer');
+      world.contacts.splice(pointerIndex, 1);
+      const other = world.contacts.find((contact) => contact.contactId === 'c-other');
+      if (other !== undefined) {
+        other.phones = (other.phones ?? []).filter((entry) => entry.phone !== '+15550104040');
+      }
+      // ...and B takes the journal over and drives it to NORMAL completion:
+      // phone committed, activity recorded, `accepted` stamped, journal scrubbed
+      // with NO disposition.
+      expireActiveResolution(world, 'c1', 'phone');
+      await list(helperB, 'c1').expect(200);
+      return realRelease(input);
+    };
+
+    await list(helperA, 'c1').expect(200);
+
+    // The journal is terminal and carries no disposition, so A's complete()
+    // answers `already_completed` for a journal it did not finalize.
+    const journal = [...world.suggestionResolutions.values()][0];
+    expect(journal?.state).toBe('completed');
+    expect(journal).not.toHaveProperty('disposition');
+    // Exactly one verdict, and it is the true one B wrote. A `superseded` here
+    // would be permanent: setVerdict is fenced on the CURRENT verdict.
+    expect(setVerdict.mock.calls.map((call) => [call[0], call[2]])).toEqual([['run-a', 'accepted']]);
+    expect(recorded.get('run-a#phone')).toBe('accepted');
+  });
+
   // FIX-4 / conf P2-3 mitigation. A number held as another contact's PRIMARY has
   // no `phoneref#` pointer row by design, so commitPhoneEffect - which arbitrates
   // on the pointer alone - cannot see its owner and would attach it anyway. The

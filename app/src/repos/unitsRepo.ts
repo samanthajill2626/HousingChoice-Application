@@ -119,15 +119,33 @@ export interface UnitItem {
   landlordId: string;
   /** byStatus GSI: lifecycle status (UNIT_STATUSES). */
   status: string;
-  /** byJurisdiction GSI: the primary HCV jurisdiction string (free text, no geocoding). */
+  /**
+   * LEGACY - read-only. The pre-consolidation single jurisdiction string (free
+   * text, no geocoding). No longer writable: `accepted_authorities` below
+   * replaced it, and reads go through `authoritiesOf` (lib/unitFields.ts), which
+   * synthesizes this value into a one-item list. See spec section 8:
+   * docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md.
+   */
   jurisdiction?: string;
+  /**
+   * The authorities whose vouchers this unit accepts - ONE list replacing BOTH
+   * `jurisdiction` and `accepted_programs` (spec section 8). At least one entry
+   * on a new write, chosen by the landlord. Read via `authoritiesOf` so legacy
+   * units synthesize instead of needing a backfill.
+   */
+  accepted_authorities?: string[];
   /**
    * Structured postal address (lib/address.ts) — NO geocoding (out of scope,
    * kickoff). All sub-fields optional. Legacy dev units may still hold a plain
    * string here; reads tolerate both (see units route / frontend display).
    */
   address?: Address;
-  /** HCV programs this unit accepts (e.g. GHV, Step Up); §13 question pending. */
+  /**
+   * LEGACY - read-only. The dissolved "program" concept (HCV / Section 8 / VASH
+   * are program-type labels, NOT authorities), superseded by
+   * `accepted_authorities` (spec section 8). No longer writable and no longer
+   * rendered; stored values stay on the document untouched.
+   */
   accepted_programs?: string[];
   beds?: number;
   baths?: number;

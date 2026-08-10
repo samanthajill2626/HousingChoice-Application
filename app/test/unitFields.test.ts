@@ -5,6 +5,7 @@
 // internal/landlord/contact field.
 import { describe, expect, it } from 'vitest';
 import {
+  authoritiesOf,
   toUnitFlyer,
   validateUnitBody,
   type UnitFlyer,
@@ -170,6 +171,91 @@ describe('validateUnitBody - tour_type (structured, clear-to-absent)', () => {
   });
 });
 
+describe('validateUnitBody - accepted_authorities consolidation (spec section 8)', () => {
+  // ONE list field replaces BOTH the single `jurisdiction` string and the
+  // dissolved `accepted_programs` concept. The two retired keys are ACCEPT-AND-
+  // IGNORE tombstones rather than a hard removal: the parser 400s an unknown key,
+  // and a stale cached dashboard bundle must not fail its save.
+  it('accepts accepted_authorities and DISCARDS the tombstoned legacy keys', () => {
+    const res = validateUnitBody(
+      {
+        accepted_authorities: ['Atlanta (AHA)', 'DCA'],
+        jurisdiction: 'x',
+        accepted_programs: ['HCV'],
+      },
+      'update',
+    );
+    expect(res).toEqual({ ok: true, fields: { accepted_authorities: ['Atlanta (AHA)', 'DCA'] } });
+  });
+
+  it('rejects an accepted_authorities that is not an array of strings', () => {
+    expect(validateUnitBody({ accepted_authorities: [1, 2] }, 'update')).toEqual({
+      ok: false,
+      error: 'accepted_authorities must be an array of strings',
+    });
+    expect(validateUnitBody({ accepted_authorities: 'DCA' }, 'update')).toEqual({
+      ok: false,
+      error: 'accepted_authorities must be an array of strings',
+    });
+  });
+
+  it('accepts accepted_authorities on create as well as update', () => {
+    expect(
+      validateUnitBody({ landlordId: 'contact-ll', accepted_authorities: ['DCA'] }, 'create'),
+    ).toEqual({ ok: true, fields: { landlordId: 'contact-ll', accepted_authorities: ['DCA'] } });
+  });
+
+  it('a save supplying ONLY tombstoned keys validates ok with an EMPTY field set', () => {
+    // A retired key COUNTS as supplied, so this is NOT the no-updatable-fields
+    // 400 - the route turns the empty set into a 200 no-op instead.
+    expect(validateUnitBody({ jurisdiction: 'x' }, 'update')).toEqual({ ok: true, fields: {} });
+    expect(validateUnitBody({ accepted_programs: ['HCV'] }, 'update')).toEqual({
+      ok: true,
+      fields: {},
+    });
+  });
+
+  it('still rejects a TRULY empty update body', () => {
+    expect(validateUnitBody({}, 'update')).toEqual({
+      ok: false,
+      error: 'no updatable fields supplied',
+    });
+  });
+
+  it('authoritiesOf: the new list wins, a legacy jurisdiction synthesizes, else []', () => {
+    expect(authoritiesOf({ accepted_authorities: ['DCA'], jurisdiction: 'old' })).toEqual(['DCA']);
+    expect(authoritiesOf({ jurisdiction: 'atlanta_housing' })).toEqual(['atlanta_housing']);
+    expect(authoritiesOf({})).toEqual([]);
+    // A STORED empty list means "cleared" and still wins - otherwise clearing the
+    // authorities on a legacy unit would resurrect its old jurisdiction value.
+    expect(authoritiesOf({ accepted_authorities: [], jurisdiction: 'legacy' })).toEqual([]);
+    // A malformed stored value falls back to the legacy string instead of
+    // shipping garbage; an empty legacy string is not a value at all.
+    expect(authoritiesOf({ accepted_authorities: 'not-a-list', jurisdiction: 'j' })).toEqual(['j']);
+    expect(authoritiesOf({ jurisdiction: '' })).toEqual([]);
+  });
+
+  it('toUnitFlyer projects the SYNTHESIZED list and carries no accepted_programs key', () => {
+    const flyer = toUnitFlyer({
+      unitId: 'u1',
+      landlordId: 'l1',
+      status: 'available',
+      jurisdiction: 'Atlanta (AHA)',
+    });
+    expect(flyer.accepted_authorities).toEqual(['Atlanta (AHA)']);
+    expect('accepted_programs' in flyer).toBe(false);
+    // Stored accepted_programs data stays on the document and simply stops
+    // rendering (spec section 8) - it never migrates into the new field.
+    const stale = toUnitFlyer({
+      unitId: 'u2',
+      landlordId: 'l1',
+      status: 'available',
+      accepted_programs: ['HCV'],
+    });
+    expect(stale.accepted_authorities).toEqual([]);
+  });
+});
+
 describe('toUnitFlyer - the merged public allowlist', () => {
   // A unit loaded with EVERY internal/landlord/contact field set, to prove none
   // leak through the projection.
@@ -184,7 +270,6 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       baths: 1,
       area: 'Westside',
       subzone: 'Zone 4',
-      accepted_programs: ['GHV'],
       rent_min: 1400,
       rent_max: 1600,
       media: ['s3://photo1.jpg'],
@@ -225,7 +310,10 @@ describe('toUnitFlyer - the merged public allowlist', () => {
       area: 'Westside',
       subzone: 'Zone 4',
       voucher_size: 2,
-      accepted_programs: ['GHV'],
+      // SYNTHESIZED from the fixture's legacy `jurisdiction: 'DCA'` (spec section
+      // 8): the fixture no longer sets accepted_programs at all, since that field
+      // is retired and never folded into the new one.
+      accepted_authorities: ['DCA'],
       listing_link: 'https://example.com/listing/9',
       rent_min: 1400,
       rent_max: 1600,
@@ -244,6 +332,12 @@ describe('toUnitFlyer - the merged public allowlist', () => {
   it('NEVER leaks an internal/landlord/contact field (allowlist wall)', () => {
     const flyer = toUnitFlyer(fullUnit());
     const keys = Object.keys(flyer);
+    // CONSCIOUS narrowing (spec section 8): `jurisdiction` stays a forbidden KEY,
+    // but its VALUE is no longer walled off - on a legacy unit it is the single
+    // synthesized entry of the public `accepted_authorities` list (asserted in the
+    // exact-shape test above). That is the deliberate, defended consequence of the
+    // consolidation, not a leak; this wall is about keys and SECRET-marked
+    // internal values.
     for (const forbidden of [
       'landlordId', 'primary_contact', 'tour_process', 'tour_type',
       'application_process', 'status', 'status_source', 'notes',

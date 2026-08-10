@@ -1259,6 +1259,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
       res.status(400).json({ error: validation.error });
       return;
     }
+    // A TRUE no-op save (spec section 8). An ok-but-EMPTY validated field set is
+    // reachable only through the retired `jurisdiction` / `accepted_programs`
+    // tombstones - a truly empty body is still the 400 above - i.e. a stale cached
+    // dashboard bundle saving nothing but dead keys. Calling units.update here
+    // would stamp `updated_at` and append a bare "Property updated" activity row
+    // for a change that did not happen, so return the unchanged unit instead. The
+    // normal path gets its 404 from update's attribute_exists condition; this early
+    // return has to re-establish it explicitly or an unknown unit would 200.
+    if (Object.keys(validation.fields).length === 0) {
+      const existing = await units.getById(unitId);
+      if (existing === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      log.info({ unitId, actor: req.user?.userId }, 'unit patch was a no-op (retired fields only)');
+      res.json({ unit: existing });
+      return;
+    }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a
     // wholesale replace can drop stored keys. Snapshot the PRIOR list BEFORE the
     // write - as a COPY, because a read-modify-write repo can return the SAME

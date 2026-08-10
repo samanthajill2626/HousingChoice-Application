@@ -6,7 +6,7 @@
 // The allowlist is strict by design: a unit is a flexible document at rest, but
 // the WRITE surface only accepts known fields with the right types, so a
 // caller can never inject `tour_process` through an unexpected key or set a GSI
-// key (status/jurisdiction) to a non-string that would poison the index.
+// key (status) to a non-string that would poison the index.
 import { type Address, validateAddress } from './address.js';
 import { isTourType } from './toursModel.js';
 import { type UnitItem } from '../repos/unitsRepo.js';
@@ -26,8 +26,10 @@ type FieldKind =
   | 'tour_type';
 
 /**
- * The writable unit fields and their kinds. `jurisdiction` is a GSI partition
- * key (validated as a string here). `landlordId` is required on create only
+ * The writable unit fields and their kinds. `accepted_authorities` is the
+ * unit's accepted-authorities LIST (spec section 8); the retired `jurisdiction`
+ * and `accepted_programs` keys it replaces are tombstoned below.
+ * `landlordId` is required on create only
  * (checked by the caller). NOTE: unitId/created_at/updated_at are NOT writable
  * (repo-owned).
  *
@@ -42,9 +44,11 @@ type FieldKind =
  */
 const WRITABLE_FIELDS: Record<string, FieldKind> = {
   landlordId: 'string',
-  jurisdiction: 'string',
   address: 'address',
-  accepted_programs: 'string[]',
+  // The decided model (spec section 8): the unit's accepted-authorities LIST -
+  // one or more authorities whose vouchers the landlord takes. Replaces BOTH the
+  // single `jurisdiction` string and the dissolved `accepted_programs` concept.
+  accepted_authorities: 'string[]',
   beds: 'number',
   baths: 'number',
   area: 'string',
@@ -106,6 +110,18 @@ const WRITABLE_FIELDS: Record<string, FieldKind> = {
   propertyId: 'string',
 };
 
+/**
+ * Retired writable keys: ACCEPTED and DISCARDED for one transition (spec section
+ * 8). A hard removal would 400 through the unknown-key rejection below, and a
+ * stale cached dashboard bundle must not fail its save. `jurisdiction` (the old
+ * single string) and `accepted_programs` (the dissolved "program" concept, whose
+ * HCV / Section 8 / VASH values are program-type labels, NOT authorities) are
+ * both superseded by `accepted_authorities`. Stored values stay on the document
+ * untouched and simply stop rendering; the tombstones themselves die with
+ * docs/issues/retire-humanize-authority.md.
+ */
+const TOMBSTONED_FIELDS = new Set(['jurisdiction', 'accepted_programs']);
+
 function isFiniteNumber(v: unknown): v is number {
   return typeof v === 'number' && Number.isFinite(v);
 }
@@ -126,8 +142,17 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
   }
   const b = body as Record<string, unknown>;
   const fields: Record<string, unknown> = {};
+  // A tombstoned key COUNTS as supplied. Without this signal a body carrying only
+  // retired keys would fall through to the no-updatable-fields 400 below, which is
+  // exactly the stale-bundle save the tombstones exist to keep working. The route
+  // answers the resulting ok-but-EMPTY field set with a 200 no-op instead.
+  let sawTombstone = false;
 
   for (const [key, value] of Object.entries(b)) {
+    if (TOMBSTONED_FIELDS.has(key)) {
+      sawTombstone = true;
+      continue;
+    }
     const kind = WRITABLE_FIELDS[key];
     if (kind === undefined) {
       return { ok: false, error: `unknown field: ${key}` };
@@ -186,7 +211,7 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
     if (typeof landlordId !== 'string' || landlordId.length === 0) {
       return { ok: false, error: 'landlordId is required (the owning landlord contactId)' };
     }
-  } else if (Object.keys(fields).length === 0) {
+  } else if (Object.keys(fields).length === 0 && !sawTombstone) {
     return { ok: false, error: 'no updatable fields supplied' };
   }
 
@@ -200,7 +225,15 @@ export function validateUnitBody(body: unknown, mode: 'create' | 'update'): Unit
  * added to UnitItem can NEVER leak, because it simply won't be copied here.
  * NEVER include tour_process, tour_type, application_process, landlordId,
  * primary_contact, notes, internal status/status_source, payment_standard,
- * lif, priority, propertyId, jurisdiction, final_rent, voucher_size_accepted.
+ * lif, priority, propertyId, final_rent, voucher_size_accepted.
+ *
+ * `jurisdiction` is DELIBERATELY off that never-list now (spec section 8). The
+ * KEY is still absent, but on a legacy unit its VALUE ships as the single entry
+ * of the synthesized `accepted_authorities` list below - it is that unit's only
+ * authority datum, and walling it off would blank the public "Accepts:" line for
+ * every pre-feature unit. Published on purpose: the line answers the tenant's
+ * actual question ("will this home take MY voucher"). Do NOT "fix" this by
+ * dropping the synthesis.
  */
 export interface UnitFlyer {
   unitId: string;
@@ -211,7 +244,8 @@ export interface UnitFlyer {
   subzone: string | null;
   /** Voucher size the unit is sized for - derived from beds (shareable). */
   voucher_size: number | null;
-  accepted_programs: string[];
+  /** The authorities whose vouchers this unit accepts (synthesized - see authoritiesOf). */
+  accepted_authorities: string[];
   listing_link: string | null;
   rent_min: number | null;
   rent_max: number | null;
@@ -235,6 +269,27 @@ export interface UnitFlyer {
   lease_terms: string | null;
 }
 
+/**
+ * Read-time synthesis of a unit's accepted authorities (spec section 8) - there
+ * is NO backfill, so every stored legacy unit keeps working. The new
+ * `accepted_authorities` list wins whenever it is stored, INCLUDING when it is
+ * empty (an empty stored list means "cleared"; falling back there would resurrect
+ * the old jurisdiction value the operator just removed). Otherwise a legacy
+ * non-empty `jurisdiction` string synthesizes a one-item list; otherwise [].
+ *
+ * Hand-mirrored on the dashboard side (dashboard/src/routes/listing/listingFormat.ts)
+ * because no cross-workspace import exists - keep the two in step by hand.
+ */
+export function authoritiesOf(unit: {
+  accepted_authorities?: unknown;
+  jurisdiction?: unknown;
+}): string[] {
+  const list = unit.accepted_authorities;
+  if (Array.isArray(list)) return list.filter((a): a is string => typeof a === 'string');
+  const legacy = unit.jurisdiction;
+  return typeof legacy === 'string' && legacy.length > 0 ? [legacy] : [];
+}
+
 export function toUnitFlyer(unit: UnitItem): UnitFlyer {
   // voucher_size: a unit's bedroom count IS the voucher size it serves. The
   // address is re-validated through the SAME write-surface validator so the
@@ -249,7 +304,7 @@ export function toUnitFlyer(unit: UnitItem): UnitFlyer {
     area: typeof unit.area === 'string' ? unit.area : null,
     subzone: typeof unit.subzone === 'string' ? unit.subzone : null,
     voucher_size: beds,
-    accepted_programs: isStringArray(unit.accepted_programs) ? unit.accepted_programs : [],
+    accepted_authorities: authoritiesOf(unit),
     listing_link: typeof unit.listing_link === 'string' ? unit.listing_link : null,
     rent_min: isFiniteNumber(unit.rent_min) ? unit.rent_min : null,
     rent_max: isFiniteNumber(unit.rent_max) ? unit.rent_max : null,

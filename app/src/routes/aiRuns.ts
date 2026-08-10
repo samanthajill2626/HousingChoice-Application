@@ -56,8 +56,14 @@ function decisionCounts(run: AiRunRecord): Record<string, number> {
 function parseLimit(raw: unknown): number {
   if (typeof raw !== 'string' || raw.trim() === '') return DEFAULT_PAGE_SIZE;
   const n = Number(raw);
-  if (!Number.isInteger(n)) return DEFAULT_PAGE_SIZE;
-  return Math.min(MAX_PAGE_SIZE, Math.max(1, n));
+  // A non-positive limit falls back to the DEFAULT, it does not floor to 1.
+  // `Math.max(1, n)` served `?limit=0` and `?limit=-5` a ONE-row page - the
+  // same defect this function's own comment describes catching for the empty
+  // string, left behind for the explicit values. Flooring is wrong here for the
+  // reason stated above: a page size is a preference, so an unusable one falls
+  // back rather than being honored at its nearest legal value.
+  if (!Number.isInteger(n) || n < 1) return DEFAULT_PAGE_SIZE;
+  return Math.min(MAX_PAGE_SIZE, n);
 }
 
 // `from`/`to` are the dashboard's two <input type="date"> values (AiRunList.tsx),

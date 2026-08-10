@@ -144,12 +144,18 @@ export function createSuggestionsRouter(deps: SuggestionsRouterDeps = {}): Route
         identity,
         ...(req.user?.userId !== undefined && { actorId: req.user.userId }),
       });
-      const suggestions = await extraction.listSuggestionsByContact(contactId);
+      // Emit BEFORE the response's list read. The emit announces DURABLE state
+      // that already committed, so it must not be contingent on a read that
+      // only builds this response body: a throw there used to lose the SSE for
+      // a committed accept, and the client's retry does not repair it. Ordering
+      // is the whole fix - the emit is synchronous and cannot itself throw.
+      //
       // A helped journal commits a domain effect for somebody else's suggestion,
       // so it needs the same SSE as this request's own completion (adv P3-25).
       if (outcome.completedNow || outcome.helpedCommitted) {
         events.emit('suggestion.updated', { contactId });
       }
+      const suggestions = await extraction.listSuggestionsByContact(contactId);
       log.info(
         { contactId, target, action, actor: req.user?.userId, replay: !outcome.completedNow },
         'ai suggestion resolution completed',

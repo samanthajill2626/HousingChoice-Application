@@ -139,11 +139,17 @@ describe('GET /api/ai-runs', () => {
     expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 25 }));
   });
 
-  it('clamps a zero or negative limit into the valid range', async () => {
+  it('falls back to the DEFAULT page size for a zero or negative limit', async () => {
+    // This used to assert `limit: 1`, pinning a regression rather than catching
+    // it: flooring `?limit=0` and `?limit=-5` to 1 served a ONE-row page, which
+    // is the exact defect the empty-string case below was fixed for. An
+    // unusable page size falls back to the default; it is not honored at its
+    // nearest legal value. Dropping the `n < 1` guard in parseLimit turns this
+    // red.
     for (const raw of ['0', '-5']) {
       const { app, repo } = makeWorld();
       await admin(app, `/api/ai-runs?limit=${raw}`).expect(200);
-      expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 1 }));
+      expect(repo.listByEntity).toHaveBeenCalledWith('global', expect.objectContaining({ limit: 25 }));
     }
   });
 

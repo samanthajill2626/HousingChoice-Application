@@ -142,6 +142,39 @@ describe('POST /api/contacts/:contactId/suggestions/:target/accept', () => {
     expect(world.emitted.some((e) => e.event === 'suggestion.updated')).toBe(true);
   });
 
+  it('still emits suggestion.updated when the response list read throws after a committed accept', async () => {
+    // The emit announces DURABLE state. It used to run AFTER the list read that
+    // only builds the response body, so a transient read fault swallowed the
+    // SSE for an accept that had already committed - and the client's retry
+    // does not repair a missed event. Moving the emit back below the list read
+    // turns this red.
+    const { app, world } = makeWebhookHarness();
+    const contactId = seedTenant(world);
+    await seedSuggestion(world, {
+      ownerContactId: contactId,
+      target: 'pets',
+      suggestedValue: 'yes',
+      conversationId: 'conv-9',
+      tsMsgId: 'ts-9',
+    });
+    const realList = world.extractionRepo.listSuggestionsByContact.bind(world.extractionRepo);
+    let thrown = false;
+    world.extractionRepo.listSuggestionsByContact = async (id: string) => {
+      if (!thrown) {
+        thrown = true;
+        throw new Error('transient list read fault');
+      }
+      return realList(id);
+    };
+
+    await accept(app, contactId, 'pets');
+
+    // The write committed even though the response could not be built...
+    expect(world.contacts.find((c) => c.contactId === contactId)?.pets).toBe('yes');
+    // ...and the SSE that tells every open dashboard about it still fired.
+    expect(world.emitted.some((e) => e.event === 'suggestion.updated')).toBe(true);
+  });
+
   it('coerces voucherSize to an integer on accept (like apply.ts)', async () => {
     const { app, world } = makeWebhookHarness();
     const contactId = seedTenant(world, { voucherSize: 2 });

@@ -288,6 +288,12 @@ function makeFakeDoc(opts: {
         const table = Object.keys(cmd.input.RequestItems ?? {})[0]!;
         const req = cmd.input.RequestItems![table] as { Keys?: Array<{ itemId: string }> };
         const keys = req.Keys ?? [];
+        // Real BatchGetItem rejects more than 100 keys per request with a
+        // ValidationException. The fake used to serve any number, which is why
+        // an unchunked BatchGet passed its own unit tests.
+        if (keys.length > 100) {
+          throw validationException('Too many items requested for the BatchGetItem call');
+        }
         const withhold = batchGetCalls <= throttleFirstN ? keys.slice(Math.ceil(keys.length / 2)) : [];
         const served = keys.filter((k) => !withhold.some((w) => w.itemId === k.itemId));
         const items = served
@@ -520,6 +526,30 @@ describe('aiRunsRepo - listByEntity', () => {
       }));
     }
   }
+
+  // `seed` interpolates i into the MINUTES field, so it only yields real,
+  // lexicographically ordered timestamps up to n=60. Past the 100-key
+  // BatchGet ceiling we need genuine ones, so walk seconds too.
+  async function seedMany(repo: AiRunsRepo, n: number): Promise<void> {
+    for (let i = 0; i < n; i += 1) {
+      const minutes = String(Math.floor(i / 60)).padStart(2, '0');
+      const seconds = String(i % 60).padStart(2, '0');
+      await repo.putRun(draftRecord({
+        runId: `run-${String(i).padStart(3, '0')}`,
+        startedAt: `2026-08-06T10:${minutes}:${seconds}.000Z`,
+      }));
+    }
+  }
+
+  it('chunks a BatchGet above the 100-key ceiling instead of faulting', async () => {
+    const { doc, batchGetCalls } = makeFakeDoc();
+    const repo = repoWith(doc);
+    await seedMany(repo, 150);
+    const { entries } = await repo.listByEntity('global', { limit: 150 });
+    expect(entries).toHaveLength(150);
+    expect(entries.every((entry) => entry.expired === false)).toBe(true);
+    expect(batchGetCalls()).toBe(2);
+  });
 
   it('returns runs NEWEST-FIRST and never trusts BatchGetItem response order', async () => {
     const { doc } = makeFakeDoc();

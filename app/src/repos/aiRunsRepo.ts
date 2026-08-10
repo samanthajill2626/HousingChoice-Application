@@ -113,6 +113,8 @@ export const DEFAULT_PAGE_SIZE = 25;
 const SORT_KEY_CEILING = '\uffff';
 const MAX_BATCH_ATTEMPTS = 4;
 const BATCH_BACKOFF_MS = 25;
+/** BatchGetItem caps at 100 keys per request; more is a ValidationException. */
+const BATCH_GET_MAX_KEYS = 100;
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -153,15 +155,26 @@ export function createAiRunsRepo(deps: RepoDeps = {}): AiRunsRepo {
 
   async function batchGetRuns(runIds: string[]): Promise<Map<string, AiRunRecord>> {
     const found = new Map<string, AiRunRecord>();
-    let keys = runIds.map((runId) => ({ itemId: runItemId(runId) }));
-    for (let attempt = 0; attempt < MAX_BATCH_ATTEMPTS && keys.length > 0; attempt += 1) {
-      if (attempt > 0) await sleep(BATCH_BACKOFF_MS * 2 ** (attempt - 1));
-      const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
-      for (const item of (res.Responses?.[table] ?? []) as AiRunRecord[]) found.set(item.runId, item);
-      keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ itemId: string }>;
+    let unprocessed = 0;
+    // Chunk OUTSIDE, retry INSIDE - each chunk gets its own fresh key list and
+    // its own full backoff budget (messagesRepo.getManyByTsMsgIds chunks the
+    // same way). listByEntity only stays under the ceiling today because the
+    // route caps ?limit at 100, a coupling nothing in this repo enforces.
+    for (let i = 0; i < runIds.length; i += BATCH_GET_MAX_KEYS) {
+      let keys = runIds
+        .slice(i, i + BATCH_GET_MAX_KEYS)
+        .map((runId) => ({ itemId: runItemId(runId) }));
+      for (let attempt = 0; attempt < MAX_BATCH_ATTEMPTS && keys.length > 0; attempt += 1) {
+        if (attempt > 0) await sleep(BATCH_BACKOFF_MS * 2 ** (attempt - 1));
+        const res = await doc.send(new BatchGetCommand({ RequestItems: { [table]: { Keys: keys } } }));
+        for (const item of (res.Responses?.[table] ?? []) as AiRunRecord[]) found.set(item.runId, item);
+        keys = (res.UnprocessedKeys?.[table]?.Keys ?? []) as Array<{ itemId: string }>;
+      }
+      unprocessed += keys.length;
     }
-    if (keys.length > 0) {
-      log.warn({ unprocessed: keys.length }, 'ai run log: BatchGet left keys unprocessed after retries');
+    // Warn ONCE per call rather than once per chunk.
+    if (unprocessed > 0) {
+      log.warn({ unprocessed }, 'ai run log: BatchGet left keys unprocessed after retries');
     }
     return found;
   }

@@ -1109,8 +1109,9 @@ export async function setUnitPhotoCover(unitId: string, entry: string): Promise<
 /** GET /api/contacts - the records list (the Contacts list views' source). The
  *  server REQUIRES a `type` filter (unless an exact `phone` lookup is given), so
  *  callers fetch one type at a time; the "all Contacts" view fans out per type
- *  and merges. First page only (the server pages via nextCursor) - the list
- *  views note this transitional limitation. */
+ *  and merges. Returns ONE page; `nextCursor` continues the walk. The list views'
+ *  hook (routes/contacts/useContacts.ts) and usePlacements walk EVERY page; the
+ *  typeahead candidate lists read only the first. */
 export function getContacts(
   params: {
     type?: ContactType;

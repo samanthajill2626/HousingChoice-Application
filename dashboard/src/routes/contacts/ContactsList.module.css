@@ -198,11 +198,22 @@
 
 /* The facts span (voucher size + housing authority). Five unshrinkable chips
  * would crush the ellipsizing name in the pane band just above 560px, so the
- * sacrifice order is explicit: .meta becomes shrinkable, this span is its only
+ * sacrifice order is explicit: .meta becomes shrinkable and this span is its ONLY
  * compressible child (kind/phone/status/Porting and the StatusBadge all keep
- * flex: 0 0 auto), and .name grows but NEVER shrinks - it only ellipsizes past
- * its own container-relative cap. So the facts truncate first and fully, and the
- * name gives nothing until they are exhausted.
+ * flex: 0 0 auto), so it absorbs the WHOLE deficit on its own.
+ *
+ * What the mechanism does NOT do, stated so nobody reads a guarantee into it:
+ * .factsRow .name below is `flex: 1 0 auto` - shrink factor ZERO - so the name
+ * gives nothing EVER, at any width. It is not "held back until the facts are
+ * exhausted"; it simply never participates in shrinking, and it ellipsizes only
+ * when its own content passes its 55cqw cap. And once this span is compressed to
+ * 0 the row has no give LEFT: everything still on the line - the name and .meta's
+ * other chips alike - is unshrinkable, and .row does not wrap above 560px, so any
+ * further deficit overflows .meta's box rather than being absorbed anywhere by
+ * anything. The `overflow: hidden` on .factsRow .meta below
+ * CONTAINS that overflow inside the row card; it does not cure it. Measurements
+ * and the cap-vs-shrink decision live in
+ * docs/issues/tenant-row-longname-midpane-overflow.md.
  *
  * Scoped PER-ROW (.factsRow), not per-route: facts render on the All view too,
  * where the same crush would otherwise survive. Only the DENSITY rules below are
@@ -256,6 +267,17 @@
   flex: 0 1 auto;
   min-width: 0;
   margin-left: auto;
+  /* CONTAINMENT, not a cure. Once .facts is compressed to 0 (see the note above)
+   * the trailing chips render OUTSIDE the row's rounded border - measured live at
+   * a 612px pane with a 41-character name, where the Porting chip's right edge
+   * lands at 899 against a row card ending at 876. Clipping keeps the border
+   * intact and the escape invisible; the actual sizing decision (whether the
+   * 55cqw cap is right) belongs to
+   * docs/issues/tenant-row-longname-midpane-overflow.md, not to a magic number
+   * re-tuned here. Harmless in the normal case: .facts keeps its OWN
+   * overflow: hidden + text-overflow: ellipsis, so the ellipsis is still drawn by
+   * .facts, and this clip does nothing until the row is already past its limit. */
+  overflow: hidden;
 }
 
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):

@@ -83,8 +83,9 @@ CSS Modules, Vitest, Playwright.
 - Modify: `app/src/lib/unitFields.ts` (WRITABLE_FIELDS ~:43-47; the flyer type ~:214; the
   `toUnitFlyer` projection ~:252)
 - Modify: `app/src/repos/unitsRepo.ts` (:122-131 - the `UnitItem` type)
+- Modify: `app/src/routes/units.ts` (the PATCH handler - the true-no-op early return, Step 4c)
 - Test: `app/test/unitFields.test.ts`, `app/test/publicIntake.test.ts` (:322-330 pins the flyer
-  key list)
+  key list), `app/test/unitsApi.test.ts` (the no-op route tests, Step 4c)
 
 **Interfaces:**
 - Produces: `accepted_authorities?: string[]` writable on the unit PATCH; `jurisdiction` and
@@ -111,17 +112,10 @@ describe('accepted_authorities consolidation', () => {
       expect('accepted_programs' in r.fields).toBe(false);
     }
   });
-  it('a save supplying ONLY tombstoned keys is a TRUE no-op: 200, no update call', () => {
+  it('a save supplying ONLY tombstoned keys validates ok with an EMPTY field set', () => {
     const r = validateUnitBody({ jurisdiction: 'x' }, 'update');
     expect(r.ok).toBe(true); // tombstoned keys COUNT as supplied; the update set is empty
   });
-  // MECHANISM (review round 2): an empty-fields "update" must NOT reach the repo -
-  // units.ts:1304-1307 stamps updated_at and writes a bare "Property updated" activity row
-  // for any update call, so a phantom write is not a no-op. In the units route: when the
-  // validated field set is EMPTY and the body contained tombstoned keys, FETCH and return
-  // the unit unchanged (200) WITHOUT calling update - no updated_at bump, no activity row.
-  // Route-level test: PATCH {jurisdiction:'x'} -> 200, unchanged updated_at, and the
-  // activity feed gains NO row (extend the unitsApi suite).
   it('authoritiesOf: new field wins, legacy synthesizes, neither is empty', () => {
     expect(authoritiesOf({ accepted_authorities: ['DCA'], jurisdiction: 'old' })).toEqual(['DCA']);
     expect(authoritiesOf({ jurisdiction: 'atlanta_housing' })).toEqual(['atlanta_housing']);
@@ -181,6 +175,19 @@ const TOMBSTONED_FIELDS = new Set(['jurisdiction', 'accepted_programs']);
   authorities ARE the old `jurisdiction` value, now public through the new field - update the
   flyer allowlist-wall test consciously, do not "fix" it by hiding the value.
   Run: `npm test` (app workspace, FULL) to pass.
+- [ ] **Step 4c: the true-no-op ROUTE change** (review round 3: this was previously only a
+  comment in a test fence - it must be a real step). In `app/src/routes/units.ts`'s PATCH
+  handler, immediately after validation succeeds in UPDATE mode: if the validated field set is
+  EMPTY, do NOT call `units.update` (any update stamps `updated_at` and writes a bare
+  "Property updated" activity row - `units.ts:1304-1307`); instead
+  `const existing = await units.getById(unitId);` -> if `undefined`, return the handler's
+  EXISTING 404 shape (the normal path gets its 404 from update's `attribute_exists` condition,
+  and an early return silently loses it - review round 3 finding 3); else return 200 with the
+  unchanged unit in the handler's normal response shape. NO tombstone signal is needed: an
+  empty-but-ok validation on update is reachable ONLY via tombstoned keys
+  (`unitFields.ts:189-191` rejects a truly empty body). Route tests in `unitsApi.test.ts`:
+  (a) PATCH `{jurisdiction:'x'}` on a real unit -> 200, `updated_at` UNCHANGED, activity feed
+  gains NO row; (b) the same body on an unknown unitId -> 404.
 - [ ] **Step 5: Commit** all touched files.
 
 ### Task 3: `similarUnits` scores authority overlap (app)
@@ -367,9 +374,10 @@ export function voucherBucketOf(c: Contact): VoucherBucketKey | null; // typeof 
 export function normalizeAuthorityKey(raw: string): string; // trim, collapse ws, toLowerCase, underscores->spaces
 export interface FacetOption { key: string; label: string; count: number; }
 export interface TenantFacetModel {
-  voucher: FacetOption[];      // fixed five + Not recorded last (Not recorded appears only
-                               // when its count > 0 OR it is selected - a permanent 0-count
-                               // inert chip is dead UI, review round 2)
+  voucher: FacetOption[];      // fixed five + Not recorded last. Not recorded is ALWAYS
+                               // present (spec section 5: the option list is stable and chips
+                               // never vanish); at zero count it behaves like any other
+                               // zero-count chip (aria-disabled unless selected)
   authority: FacetOption[];    // derived, sorted by label, + Not recorded last (same rule)
   authorityEmpty: boolean;     // zero recorded values
   voucherEmpty: boolean;
@@ -604,9 +612,10 @@ Implementation checklist, all in `ContactsList.tsx`:
 `ContactsList.module.css` additions (tokens only):
 
 ```css
-/* Tenant-route modifiers (spec section 6): exact facts chip + density + the
- * wide-pane sacrifice order (facts truncate first; the name never shrinks,
- * only caps). Scoped under .tenantList so no other view changes. */
+/* Facts-row + tenant-route modifiers (spec section 6). Sacrifice order (facts
+ * truncate first; the name never shrinks, only caps) is PER-ROW (.factsRow) -
+ * facts render on the All view too. Density alone is route-scoped
+ * (.tenantList) so no list ever mixes densities. */
 .facts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-muted); font-size: var(--fs-xs); font-weight: var(--fw-medium); }
 .porting { flex: 0 0 auto; padding: 1px var(--sp-2); border-radius: var(--radius-pill); border: 1px solid var(--c-warning); color: var(--c-warning); font-size: var(--fs-xs); font-weight: var(--fw-semibold); white-space: nowrap; }
 /* Wide-pane sacrifice order: PER-ROW (facts render on the All view too). */
@@ -644,17 +653,23 @@ it('tenant view: controls render, a chip narrows the list, the URL carries it', 
   expect(screen.getAllByRole('listitem')).toHaveLength(1); // only t0 remains
   expect(screen.getByTestId('loc').textContent).toContain('voucher=0');
 });
-it('all/landlord/deleted views: no controls, facet params inert', () => {
+it('all/landlord views: no controls, facet params inert', () => {
+  // ('deleted' is outside this suite's route helper union - covered by the e2e layer.)
   renderAt('/contacts/landlords?voucher=0');
   expect(screen.queryByRole('button', { name: /Studio/ })).toBeNull();
-  expect(screen.getAllByRole('listitem').length).toBeGreaterThan(0); // param filtered nothing
+  const rows = within(screen.getByRole('list', { name: 'Landlords' }));
+  expect(rows.getAllByRole('listitem')).toHaveLength(1); // EXACT: the one landlord fixture -
+  // a >0 assertion would pass even if the param wrongly filtered (the failure case itself)
 });
 it('tenant rows show facts + keep kind/phone/status; landlord rows show none', () => {
   renderAt('/contacts');
-  const row6 = screen.getByRole('link', { name: new RegExp('6 BR') });
+  const rows = within(screen.getByRole('list', { name: 'Contacts' })); // scope to the ROWS ul
+  const row6 = rows.getByRole('link', { name: new RegExp('6 BR') });
   expect(row6.textContent).toContain('Fulton County');
-  expect(within(row6.parentElement as HTMLElement).getByText(/\(\d{3}\)/)).toBeInTheDocument(); // phone kept
-  expect(screen.getByRole('link', { name: /Landlord Name/ }).textContent).not.toContain('BR');
+  expect(row6.textContent).toMatch(/\(\d{3}\)/); // phone kept in the same link
+  // The landlord fixture MUST carry firstName/lastName in the arrange block
+  // (nameless -> contactDisplayName falls back to the phone and this query throws):
+  expect(rows.getByRole('link', { name: /Lana Landlord/ }).textContent).not.toContain('BR');
 });
 it('?voucher=0 and ?voucher=4plus round-trip a re-render at the same URL', () => {
   renderAt('/contacts/tenants?voucher=0&voucher=4plus');
@@ -663,8 +678,14 @@ it('?voucher=0 and ?voucher=4plus round-trip a re-render at the same URL', () =>
 });
 it('active Tenants tab preserves params; Landlords tab is bare', () => {
   renderAt('/contacts/tenants?voucher=0');
-  expect(screen.getByRole('link', { name: 'Tenants' })).toHaveAttribute('href', expect.stringContaining('voucher=0'));
-  expect(screen.getByRole('link', { name: 'Landlords' })).toHaveAttribute('href', '/contacts/landlords');
+  const bar = within(screen.getByRole('navigation', { name: 'Filter contacts' }));
+  // Exact string equality via getAttribute - no asymmetric matcher inside
+  // toHaveAttribute (support UNVERIFIED), and no unscoped substring match that
+  // would pass on a wrong pathname:
+  expect(bar.getByRole('link', { name: 'Tenants' }).getAttribute('href')).toBe('/contacts/tenants?voucher=0');
+  expect(bar.getByRole('link', { name: 'Landlords' }).getAttribute('href')).toBe('/contacts/landlords');
+  // The tab-link change also touches the existing exact href assertions at
+  // ContactsList.test.tsx:73-79 - update them in the same pass.
 });
 it('facets + empty query -> the filter-miss message', async () => {
   renderAt('/contacts/tenants?voucher=3'); // no tenant has bucket 3
@@ -679,11 +700,12 @@ it('facets + empty query -> the filter-miss message', async () => {
 
 - [ ] **Step 1b: the `limit=100` test** - `useContacts` is mocked in the component suite, so the
   page-limit change needs its own test. `dashboard/src/routes/contacts/useContacts.test.tsx`
-  ALREADY EXISTS with six tests - EXTEND it (Write/overwrite destroys them); copy its existing
-  getContacts-mock idiom and add ONE test. The hook REQUIRES a filter argument
-  (`TYPES_FOR[undefined]` throws), so: `renderHook(() => useContacts('tenant'))`, then
-  `await waitFor(() => expect(getContacts).toHaveBeenCalledWith(expect.objectContaining({ limit: '100' }), expect.anything()))` -
-  matching however the file's existing tests already await the fetch.
+  ALREADY EXISTS with six tests - EXTEND it (Write/overwrite destroys them) IN ITS OWN IDIOM:
+  the file drives the hook through a Probe component, not renderHook - copy one of its existing
+  tests wholesale. Mock `getContacts` to resolve ONE EMPTY PAGE (`{ contacts: [] }`, no
+  nextCursor - a rejecting or hanging mock leaves the test green over the hook's error path),
+  mount the probe with filter `'tenant'` (the hook throws without a filter), and
+  `await waitFor(() => expect(getContacts).toHaveBeenCalledWith(expect.objectContaining({ limit: '100' }), expect.anything()));`
 - [ ] **Step 2-4:** fail -> implement (the checklist above) -> pass
   (`npm test -- ContactsList tenantFacets TenantFilters useContacts`), plus `npm run typecheck`.
   While in `useContacts.ts`, also update its :14-17 page-math comment (the 40 x 50 arithmetic
@@ -762,8 +784,11 @@ it('an untouched authority NEVER reaches the PATCH (provenance protection)', asy
   expect('housingAuthority' in sent).toBe(false); // collapse-before-diff would have re-sent it
 });
 it('a whitespace-ONLY edit is also a no-op (same effective value)', async () => {
-  updateContact.mockResolvedValue(TENANT); // TENANT.housingAuthority: 'Atlanta (AHA)'
-  render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+  // LOCAL fixture - do NOT add housingAuthority to the shared TENANT (it would
+  // break the exact-assertion test at :70-77).
+  const stored = { ...TENANT, housingAuthority: 'Atlanta (AHA)' };
+  updateContact.mockResolvedValue(stored);
+  render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
   await user.type(screen.getByLabelText(/Housing authority/i), ' '); // trailing space only
   await user.type(screen.getByLabelText(/First name/i), 'X');
   await user.click(screen.getByRole('button', { name: /^Save$/i }));

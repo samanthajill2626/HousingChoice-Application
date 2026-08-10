@@ -419,7 +419,8 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   (`String.fromCharCode(0xB7)` in specs/tests, the same form as the em-dash convention already
   recorded there).
 - **e2e**: lean holds ONE tenant, so the spec creates its own tenants via
-  `e2e/scenarios/steps.ts:581-647` (`voucherSize`/`housingAuthority` supported): apply a facet,
+  `teamCreatesTenant` (`e2e/scenarios/steps.ts:604-651`; `voucherSize`/`housingAuthority`
+  supported): apply a facet,
   list narrows, reload, filter survives. New spec file (none exists for the contacts list).
 - **Live self-QA** at 375px AND ~700px pane against a hermetic `npm run e2e:session` lane
   (never lane 0 / the live stack), asserting section 6's two criteria plus the datalist

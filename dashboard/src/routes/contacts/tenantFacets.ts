@@ -185,8 +185,13 @@ function matchesPorting(c: Contact, on: boolean): boolean {
  * The display spelling for a merged authority option: the most frequent raw
  * member, untransformed. Ties break deterministically by sort order (the
  * spellings are visited sorted, and only a STRICTLY greater count wins).
+ *
+ * Exported because the PROPERTIES list's authority chips group by the same rule
+ * (spec section 8 defers to section 5) - routes/listings/ListingsList.tsx tallies
+ * raw spellings per normalized key and asks this for the label, so the two facets
+ * cannot drift apart on the tie-break.
  */
-function displaySpelling(spellings: Map<string, number>): string {
+export function displaySpelling(spellings: Map<string, number>): string {
   let best = '';
   let bestCount = -1;
   for (const raw of [...spellings.keys()].sort()) {

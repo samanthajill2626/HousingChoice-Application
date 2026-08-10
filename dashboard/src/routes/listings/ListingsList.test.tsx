@@ -13,6 +13,8 @@ vi.mock('./useListings.js', () => ({ useListings: () => state }));
 
 import { ListingsList } from './ListingsList.js';
 
+// LEGACY units: both carry only the retired `jurisdiction` string, so the
+// authority chips they produce come from read-time synthesis (spec section 8).
 const UNITS: UnitItem[] = [
   {
     unitId: 'u1',
@@ -130,6 +132,101 @@ describe('ListingsList', () => {
     await userEvent.click(within(haGroup).getByRole('button', { name: /clear/i }));
     expect(screen.getAllByRole('listitem')).toHaveLength(2);
     expect(within(haGroup).queryByRole('button', { name: /clear/i })).not.toBeInTheDocument();
+  });
+
+  it('lists a unit under EVERY authority it accepts', async () => {
+    state = {
+      status: 'ready',
+      units: [
+        {
+          unitId: 'u3',
+          landlordId: 'l3',
+          status: 'available',
+          accepted_authorities: ['atlanta_housing', 'ga_dca'],
+          address: { line1: '9 Both Ways Ct' },
+        },
+        {
+          unitId: 'u4',
+          landlordId: 'l4',
+          status: 'available',
+          accepted_authorities: ['ga_dca'],
+          address: { line1: '10 Solo Rd' },
+        },
+      ],
+    };
+    renderList();
+    const haGroup = screen.getByRole('group', { name: /housing authority/i });
+
+    // The two-authority unit shows under the first authority...
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'Atlanta Housing' }));
+    let rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(1);
+    expect(within(rows[0]!).getByText(/9 Both Ways Ct/)).toBeInTheDocument();
+
+    // ...and under the second one too, alongside the single-authority unit.
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'Atlanta Housing' }));
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'GA DCA' }));
+    rows = screen.getAllByRole('listitem');
+    expect(rows).toHaveLength(2);
+  });
+
+  it('groups spelling variants of one authority under a single chip', async () => {
+    // Same authority, three stored spellings: a legacy slug, and two typed prose
+    // values (one with interior double-space). The normalized key folds
+    // underscores, whitespace and case, so ONE chip must cover all three - and it
+    // DISPLAYS the most frequent raw spelling, not the case-folded key.
+    state = {
+      status: 'ready',
+      units: [
+        {
+          unitId: 'u5',
+          landlordId: 'l5',
+          status: 'available',
+          jurisdiction: 'atlanta_housing',
+          address: { line1: '5 Slug Ln' },
+        },
+        {
+          unitId: 'u6',
+          landlordId: 'l6',
+          status: 'available',
+          accepted_authorities: ['Atlanta Housing'],
+          address: { line1: '6 Prose Way' },
+        },
+        {
+          unitId: 'u7',
+          landlordId: 'l7',
+          status: 'available',
+          accepted_authorities: ['Atlanta  Housing'],
+          address: { line1: '7 Spaced St' },
+        },
+      ],
+    };
+    renderList();
+    const haGroup = screen.getByRole('group', { name: /housing authority/i });
+    expect(within(haGroup).getAllByRole('button')).toHaveLength(1);
+
+    await userEvent.click(within(haGroup).getByRole('button', { name: 'Atlanta Housing' }));
+    expect(screen.getAllByRole('listitem')).toHaveLength(3);
+  });
+
+  it('humanizes the raw display spelling, not the case-folded grouping key', async () => {
+    state = {
+      status: 'ready',
+      units: [
+        {
+          unitId: 'u8',
+          landlordId: 'l8',
+          status: 'available',
+          accepted_authorities: ['Atlanta (AHA)'],
+          address: { line1: '8 Canonical Cir' },
+        },
+      ],
+    };
+    renderList();
+    const haGroup = screen.getByRole('group', { name: /housing authority/i });
+    // The grouping key is 'atlanta (aha)'; humanizing THAT would render
+    // "Atlanta (aha)". The chip must carry the stored spelling's case.
+    expect(within(haGroup).getByRole('button', { name: 'Atlanta (AHA)' })).toBeInTheDocument();
   });
 
   it('combines the status + housing-authority filters (AND)', async () => {

@@ -88,6 +88,8 @@ const READY: ListingState = {
     rent_max: 1600,
     payment_standard: 1550,
     deposit: 1400,
+    // LEGACY: only the retired `jurisdiction` string is stored, so the Housing
+    // authorities row below is produced by read-time synthesis (spec section 8).
     jurisdiction: 'Atlanta',
     area: 'West End',
     utilities: 'Electric and gas',
@@ -98,7 +100,6 @@ const READY: ListingState = {
     same_day_rta: true,
     voucher_size_accepted: 2,
     video_url: 'https://example.com/tour.mp4',
-    accepted_programs: ['Housing Choice Voucher (HCV)', 'Section 8', 'VASH'],
     tour_process: 'Text the landlord to arrange access.',
     application_process: 'Apply via the property portal.',
     media: ['units/u1/cover.jpg', 'units/u1/photo-2.jpg'],
@@ -233,7 +234,7 @@ describe('ListingDetail', () => {
     expect(screen.queryByRole('link', { name: /View flyer/ })).not.toBeInTheDocument();
   });
 
-  it('renders property details and accepted vouchers as a bulleted list', () => {
+  it('renders property details and the Housing authorities row', () => {
     useListing.mockReturnValue(READY);
     renderAt();
     expect(screen.getByText('$1,550')).toBeInTheDocument(); // payment standard
@@ -256,9 +257,26 @@ describe('ListingDetail', () => {
       'href',
       'https://example.com/tour.mp4',
     );
-    const list = screen.getByRole('list', { name: /Accepted vouchers/i });
-    const items = within(list).getAllByRole('listitem').map((li) => li.textContent);
-    expect(items).toEqual(['Housing Choice Voucher (HCV)', 'Section 8', 'VASH']);
+    // ONE authorities row from the synthesized list - the legacy `jurisdiction`
+    // value shows here now (spec section 8).
+    expect(screen.getByText('Housing authorities')).toBeInTheDocument();
+    expect(screen.getByText('Atlanta')).toBeInTheDocument();
+    // Both retired surfaces are gone: the Jurisdiction KV and the accepted
+    // vouchers bulleted list.
+    expect(screen.queryByText('Jurisdiction')).toBeNull();
+    expect(screen.queryByRole('list', { name: /Accepted vouchers/i })).toBeNull();
+    expect(screen.queryByText('Accepted vouchers')).toBeNull();
+  });
+
+  it('joins a multi-authority list into the Housing authorities row', () => {
+    useListing.mockReturnValue({
+      ...READY,
+      unit: { ...READY.unit, accepted_authorities: ['Atlanta (AHA)', 'DCA'] },
+    });
+    renderAt();
+    expect(screen.getByText('Atlanta (AHA), DCA')).toBeInTheDocument();
+    // The stored list wins over the legacy string it replaced.
+    expect(screen.queryByText('Atlanta')).toBeNull();
   });
 
   it('renders a Tour type row (placeholder when unset)', () => {

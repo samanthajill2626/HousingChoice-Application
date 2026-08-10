@@ -241,10 +241,10 @@ NARROW (<=560px container):
 - Facts and authority join with a middot (U+00B7) with spaces - rendered `3 BR`, middot,
   `Dekalb County Housing` - because a hyphen separator collides with `voucherSizeLabel`'s
   internal hyphen, and the approved mockup used middots. ONE construction form, everywhere
-  (source AND tests): the JS backslash-u escape for U+00B7 inside the joined string - never a
-  literal middot character, and never an HTML entity (an entity inside a JS string renders
-  literally as text). The convention mirrors the em-dash rule `selectors.md` records; the ASCII
-  gate covers new code and test lines. The facts are ONE text span
+  (source AND tests): `String.fromCharCode(0xB7)` - the SAME construction form the selectors.md
+  em-dash row already records - never a literal middot character, and never an HTML entity (an
+  entity inside a JS string renders literally as text). The ASCII gate covers new code and test
+  lines. The facts are ONE text span
   (one accessible-name token stream; nothing needs `aria-hidden`). Missing values collapse:
   only-size reads `3 BR`; only-authority reads the name alone; neither = no facts span. The
   separator never leads or trails.
@@ -327,7 +327,7 @@ the new field.
 | `unitFields.ts` allowlist (the unit PATCH) | Add `accepted_authorities: 'string[]'`; retire `jurisdiction` and `accepted_programs` as writable. CORRECTION (targeted review): unlike the contact route, the unit parser REJECTS unknown keys with a 400 (`unitFields.ts:130-134`), so a hard removal would fail a stale cached dashboard bundle's save. The two legacy keys become explicit ACCEPT-AND-IGNORE tombstones (parsed, discarded, commented) for the transition; the tombstones die with `retire-humanize-authority` |
 | `UnitCreateForm` / `ListingEditForm` | The single "Housing authority" input AND the "Accepted programs" comma input are replaced by ONE "Housing authorities" comma-separated input (the exact idiom `accepted_programs` uses today: split on comma, trim, drop empties), placeholder `e.g. Atlanta (AHA), DCA` |
 | Import unit writer (`apply.ts:790-793`) | `jurisdiction = value` becomes `accepted_authorities = [canonical]`, routed through the same `housingAuthorityFor` canonicalizer the contact side uses (the workbook column comes from the founder's authority-named "Voucher Type" data) |
-| Seeds (`cast.ts` x5, `lean.ts` x2, `live.ts` x3, `matrix.ts` x8) | `jurisdiction: X` becomes `accepted_authorities: [X]` - FIELD switch only; the slug VALUES are normalized by `retire-humanize-authority`, not here |
+| Seeds (`cast.ts` x5, `lean.ts` x2, `live.ts` x3, `matrix.ts` x7) | `jurisdiction: X` becomes `accepted_authorities: [X]` - FIELD switch only; the slug VALUES are normalized by `retire-humanize-authority`, not here |
 | e2e `steps.ts:816-828` (`seedAvailableUnit`) + `:1440-1458` (the create-form step) + the ~14 specs seeding `jurisdiction` | Mechanical follow: the dev seam takes `accepted_authorities`, the form step fills the new list input |
 | `GET /api/units?jurisdiction=` + `listByJurisdiction` (`units.ts:400-408`, `unitsRepo.ts:313,545`) | REMOVED - zero PRODUCTION callers (the dashboard never passes it and walks pages client-side; no app-internal caller). Three TEST-SIDE references go with it, enumerated so the typecheck gate does not ambush the builder: `unitsRepo.integration.test.ts:147-149` (deleted), the schema tests' GSI lists, and `twilioWebhookHarness.ts:1402` (the units-repo stub implements the interface - removing the method leaves an excess property that fails `npm run typecheck`) |
 | Tests pinning the REMOVED fields (invariant-rule completion) | `publicIntake.test.ts:322-330` asserts the flyer's EXACT key list (carries `accepted_programs` - becomes `accepted_authorities`); `listingFormat.test.ts:70` pins jurisdiction in the area phrase (assertion inverts); `ListingDetail` / `ListingEditForm` / `UnitCreateForm` / `FlyerPage` tests seed or assert the old fields and follow their surfaces |
@@ -335,7 +335,7 @@ the new field.
 | `ListingsList` authority facet | Derives from `authoritiesOf(unit)` - a unit now appears under EACH authority it accepts. Grouping reuses section 5's normalized-key rule |
 | `ListingDetail` | The `Jurisdiction` KV and the programs display become one "Housing authorities" row (the synthesized list, joined) |
 | `listingFormat.ts:53` (`buildListingFacts`) | `jurisdiction` DROPS out of the address/area phrase - it was an issuer name in an area slot; `unit.area` alone carries the area |
-| `toUnitFlyer` (`unitFields.ts:252`) + the PUBLIC flyer "Accepts:" line (`FlyerPage.tsx:253-254`) + `publicApi.ts:36` | The flyer projects `accepted_authorities` (synthesized) instead of `accepted_programs`. USER-VISIBLE on a public page: "Accepts: HCV, VASH" becomes "Accepts: Atlanta (AHA), DCA" - a deliberate improvement (it now answers the tenant's actual question: will this unit take MY voucher) |
+| `toUnitFlyer` (`unitFields.ts:252`) + the PUBLIC flyer "Accepts:" line (`FlyerPage.tsx:253-254`) + `publicApi.ts:36` | The flyer projects `accepted_authorities` (synthesized) instead of `accepted_programs`. USER-VISIBLE on a public page: "Accepts: HCV, VASH" becomes "Accepts: Atlanta (AHA), DCA" - a deliberate improvement (it now answers the tenant's actual question: will this unit take MY voucher). DELIBERATE consequence, stated: on a legacy unit the synthesized list IS the old `jurisdiction` value, so that value becomes public through the new field even though `jurisdiction` itself was never on the flyer allowlist - it is the unit's only authority datum, and hiding it would blank the line for every pre-feature unit. The flyer allowlist-wall test updates consciously |
 | `similarUnits.ts:94-120` (the programs-overlap score) | Same overlap logic over `authoritiesOf()` instead of `accepted_programs`. Cameron's ruling: the program list WAS the authority list all along, so this is a rename, not a semantic change. DELIBERATE side effect of synthesis, stated: the score is DORMANT today (no seed writes `accepted_programs`) and becomes live for every unit, since every seeded/imported unit synthesizes at least one authority - similar-unit rankings shift in demo worlds |
 | The flyer "Accepts:" line dormancy | Same always-on effect: today the line is hidden for every seeded unit (empty programs); post-feature every unit with an authority shows it on the PUBLIC flyer. Dev/demo flyers show raw slug values until `retire-humanize-authority` normalizes seeds; real units show the founder's spellings |
 | One authority, two spellings across import generations | The cutover import (pre-feature `main`) wrote `jurisdiction` as the RAW trimmed cell value; the post-feature import writes canonical spellings. `Atlanta Housing` (raw) and `Atlanta (AHA)` (canonical) do NOT normalize together, so the properties facet can show one authority as two chips until unit values are cleaned - operations-side data cleanup, per the gate ruling, accepted and stated |
@@ -396,8 +396,10 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   rule); unknown URL values; sentinel round-trip; `voucher=0` string-matched (never coerced).
 - **Unit** (app, `contacts.ts`): the `agency` PATCH allowlist - string accepted, non-string
   rejected, `changedFields` tracked.
-- **Unit** (app, unit side): `unitFields` allowlist accepts `accepted_authorities` and rejects
-  writes to `jurisdiction`/`accepted_programs`; `authoritiesOf` synthesis (new field wins;
+- **Unit** (app, unit side): `unitFields` allowlist accepts `accepted_authorities` and
+  TOMBSTONES `jurisdiction`/`accepted_programs` (accepts and discards, per section 8 - and a
+  save supplying ONLY tombstoned keys returns a 200 no-op, not the no-updatable-fields 400);
+  `authoritiesOf` synthesis (new field wins;
   legacy `jurisdiction` synthesizes to a one-item list; neither yields `[]`); `toUnitFlyer`
   projects the synthesized list; `similarUnits` scores authority overlap incl. a legacy-vs-new
   pair; the import unit writer canonicalizes into the list (`importApply` integration test
@@ -413,8 +415,9 @@ hardens one layer down). The component round-trip test includes `?voucher=0` AND
   PATCHes in both, PATCHed values are trimmed; the tenant file shows the Agency row; `noMatches`
   precedence. Structure/class assertions
   only - layout is live-QA's job. Accessibility-first selectors; add the new controls to
-  `e2e/support/selectors.md`, including the middot construction rule (backslash-u escape for
-  U+00B7 in specs/tests, mirroring the em-dash convention already recorded there).
+  `e2e/support/selectors.md`, including the middot construction rule
+  (`String.fromCharCode(0xB7)` in specs/tests, the same form as the em-dash convention already
+  recorded there).
 - **e2e**: lean holds ONE tenant, so the spec creates its own tenants via
   `e2e/scenarios/steps.ts:581-647` (`voucherSize`/`housingAuthority` supported): apply a facet,
   list narrows, reload, filter survives. New spec file (none exists for the contacts list).

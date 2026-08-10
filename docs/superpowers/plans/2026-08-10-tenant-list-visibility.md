@@ -19,8 +19,9 @@ CSS Modules, Vitest, Playwright.
 ## Global Constraints
 
 - ASCII-only in every new/touched line of specs, tests, comments, seed strings, labels. The row
-  separator is U+00B7 built ONLY via the JS string escape `\u00B7` - never a literal
-  middot character, never an HTML entity.
+  separator is U+00B7 built ONLY via `String.fromCharCode(0xB7)` (the same construction form
+  `e2e/support/selectors.md:47` records for the em dash) - never a literal middot character,
+  never an HTML entity, never a unicode escape pasted as the character.
 - CSS values from `dashboard/src/ui/tokens.css` variables - never hard-coded px.
 - Gates run BARE, never piped: `npm run typecheck`, `npm test`, `timeout 1500 npm run e2e` (from
   the worktree only; warm containers first with `npm run db:start` and `npm run s3:start`).
@@ -45,25 +46,19 @@ CSS Modules, Vitest, Playwright.
   400s with `agency must be a string`. NOT added to the `PROVENANCE` set (~:850) - nothing
   machine-writes it.
 
-- [ ] **Step 1: Failing test** - in `contactIntakeFields.test.ts`, alongside the existing PATCH
-  cases:
-
-```ts
-it('PATCH persists agency and GET returns it; non-string rejected', async () => {
-  const created = await request(app).post('/api/contacts').send({ type: 'tenant', phone: uniquePhone() });
-  const id = created.body.contact.contactId as string;
-  const patched = await request(app).patch(`/api/contacts/${id}`).send({ agency: 'Hope Atlanta' });
-  expect(patched.status).toBe(200);
-  const got = await request(app).get(`/api/contacts/${id}`);
-  expect(got.body.contact.agency).toBe('Hope Atlanta');
-  const bad = await request(app).patch(`/api/contacts/${id}`).send({ agency: 7 });
-  expect(bad.status).toBe(400);
-  expect(bad.body.error).toMatch(/agency must be a string/);
-});
-```
-
-  (Copy the create/patch helper idioms already in this file - use its existing app/bootstrap and
-  phone helpers verbatim rather than inventing new ones.)
+- [ ] **Step 1: Failing test** - in `contactIntakeFields.test.ts`. DO NOT write the request
+  calls from scratch: DUPLICATE the file's existing `it('PATCH persists intake fields and GET
+  returns them', ...)` block (its :10-38 region) VERBATIM - including however it builds the app,
+  authenticates (origin-verify header / session), and creates the contact - then change only the
+  payload and assertions:
+  - PATCH `{ agency: 'Hope Atlanta' }` -> 200, and the follow-up GET returns
+    `contact.agency === 'Hope Atlanta'`.
+  - PATCH `{ agency: 7 }` -> 400 with `/agency must be a string/`, mirroring the file's existing
+    `rejects a non-string pets` case at :39.
+  The earlier draft of this step invented `uniquePhone()` and a bare `app` - neither exists in
+  that file; its own idioms are the only valid source. NOTE also: `agency` is EDIT-only by
+  design - the POST create body does not accept it (the create dialog does not collect it), so
+  no create-path change or test.
 - [ ] **Step 2: Run to fail** - `npm test -- contactIntakeFields` from `app/`. Expected: 400
   `unknown field` or the field silently absent -> assertion fails.
 - [ ] **Step 3: Implement** - after the `housingAuthority` block in the patch parser:
@@ -100,18 +95,25 @@ it('PATCH persists agency and GET returns it; non-string rejected', async () => 
   flyer payload field RENAMES `accepted_programs` -> `accepted_authorities` and carries the
   synthesized list.
 
-- [ ] **Step 1: Failing tests** in `unitFields.test.ts`:
+- [ ] **Step 1: Failing tests** in `unitFields.test.ts`. CORRECTION from review: the parser's
+  real export is `validateUnitBody(body, mode)` - `parseUnitFields` does not exist. Open the
+  file first, copy an existing `validateUnitBody` call to get the exact `mode` argument and
+  result shape, then adapt:
 
 ```ts
 describe('accepted_authorities consolidation', () => {
   it('accepts accepted_authorities and tombstones the legacy keys without error', () => {
-    const r = parseUnitFields({ accepted_authorities: ['Atlanta (AHA)', 'DCA'], jurisdiction: 'x', accepted_programs: ['HCV'] });
+    const r = validateUnitBody({ accepted_authorities: ['Atlanta (AHA)', 'DCA'], jurisdiction: 'x', accepted_programs: ['HCV'] }, 'update');
     expect(r.ok).toBe(true);
     if (r.ok) {
       expect(r.fields['accepted_authorities']).toEqual(['Atlanta (AHA)', 'DCA']);
       expect('jurisdiction' in r.fields).toBe(false);
       expect('accepted_programs' in r.fields).toBe(false);
     }
+  });
+  it('a save supplying ONLY tombstoned keys is a 200 no-op, not the no-updatable-fields 400', () => {
+    const r = validateUnitBody({ jurisdiction: 'x' }, 'update');
+    expect(r.ok).toBe(true); // tombstoned keys COUNT as supplied; the update is empty
   });
   it('authoritiesOf: new field wins, legacy synthesizes, neither is empty', () => {
     expect(authoritiesOf({ accepted_authorities: ['DCA'], jurisdiction: 'old' })).toEqual(['DCA']);
@@ -154,10 +156,25 @@ const TOMBSTONED_FIELDS = new Set(['jurisdiction', 'accepted_programs']);
   `authoritiesOf(unit)`. In `UnitItem` (`unitsRepo.ts:122-131`): add
   `accepted_authorities?: string[];` and re-comment `jurisdiction` as
   `/** LEGACY - read-only; synthesized into accepted_authorities (spec section 8). */`.
-- [ ] **Step 4: Update the flyer key-list pin** in `publicIntake.test.ts:322-330`: replace
-  `accepted_programs` with `accepted_authorities` in the expected key array, and run
-  `npm test -- publicIntake unitFields` to pass.
-- [ ] **Step 5: Commit** the four files.
+- [ ] **Step 4: Update EVERY test the rename/tombstone breaks** (review enumerated them - run
+  the full app suite, not a filter, to prove the list complete):
+  - `publicIntake.test.ts:322-330` - the flyer exact key-list pin: `accepted_programs` ->
+    `accepted_authorities`.
+  - `publicIntake.test.ts:303-314` - a VALUE assertion on the flyer's programs (becomes the
+    synthesized authorities value, e.g. `['DCA']` - a value change, not just a key rename).
+  - `unitFields.test.ts:218-241` - the flyer projection block asserting `accepted_programs`.
+  - `app/test/unitsApi.test.ts:46-60` - asserts a stored `jurisdiction` on a created unit
+    (becomes `accepted_authorities`).
+  - `app/test/unitsApi.test.ts:99` - `accepted_programs: [1,2]` expecting a 400: the tombstone
+    now DISCARDS the key, so rewrite the test to assert acceptance-and-discard (200, field
+    absent from the stored unit).
+  - The tombstone no-op change also touches `unitFields.ts:189-191` (the no-updatable-fields
+    check must count tombstoned keys as supplied).
+  Also DELIBERATE, from the spec's section 8 flyer row: a legacy unit's synthesized flyer
+  authorities ARE the old `jurisdiction` value, now public through the new field - update the
+  flyer allowlist-wall test consciously, do not "fix" it by hiding the value.
+  Run: `npm test` (app workspace, FULL) to pass.
+- [ ] **Step 5: Commit** all touched files.
 
 ### Task 3: `similarUnits` scores authority overlap (app)
 
@@ -174,19 +191,26 @@ const TOMBSTONED_FIELDS = new Set(['jurisdiction', 'accepted_programs']);
 
 ```ts
 it('scores authority overlap across legacy and new fields', () => {
-  const target = { ...baseUnit('t'), accepted_authorities: ['Atlanta (AHA)', 'DCA'] };
-  const legacy = { ...baseUnit('c1'), jurisdiction: 'Atlanta (AHA)' };
-  const miss = { ...baseUnit('c2'), jurisdiction: 'Fulton County' };
-  const scored = rankSimilar(target, [legacy, miss]);
+  const target = { ...unit('t'), accepted_authorities: ['Atlanta (AHA)', 'DCA'] };
+  const legacy = { ...unit('c1'), jurisdiction: 'Atlanta (AHA)' };
+  const miss = { ...unit('c2'), jurisdiction: 'Fulton County' };
+  const scored = rankSimilarUnits(target, [legacy, miss]);
   expect(scored[0].unitId).toBe('c1');
 });
 ```
 
-  (Use this file's real fixture builder + ranking entry point - mirror its existing test idiom
-  and names exactly; do not invent `baseUnit`/`rankSimilar` if the file calls them otherwise.)
+  (CORRECTION from review: the real names are `rankSimilarUnits` and the fixture builder `unit` -
+  open the file and match its exact signatures before writing.)
 - [ ] **Step 2: Run to fail**, **Step 3:** swap both `(x.accepted_programs ?? []).filter(...)`
-  set builds and the `:119-120` render guard to `authoritiesOf(x)`, **Step 4: run to pass**
-  (`npm test -- similarUnits`), **Step 5: commit** both files.
+  set builds and the `:119-120` render guard to `authoritiesOf(x)`.
+- [ ] **Step 4: Fix the tests the switch breaks** (enumerated by review): every seeded unit now
+  synthesizes an authority, so the score is live where it was dormant -
+  `app/test/unitsApiSimilar.test.ts:60,:115` and `similarUnits.test.ts:60-62` pin
+  `matchPct === 100` values that change (recompute against the new scoring, e.g. 100 -> 80);
+  any old programs-overlap test that would go vacuously green gets REPLACED by the new authority
+  test, not left as decoration. Run the FULL app suite (`npm test`), not a name filter -
+  `npm test -- similarUnits` cannot even match `unitsApiSimilar.test.ts`.
+- [ ] **Step 5: commit** all touched files.
 
 ### Task 4: import unit writer -> canonical `accepted_authorities` (app)
 
@@ -241,12 +265,18 @@ it('scores authority overlap across legacy and new fields', () => {
   both FAIL against the current schema.
 - [ ] **Step 2: Implement** - delete `tables.ts:109`; delete the repo interface method + impl;
   delete the route's `?jurisdiction=` branch (the `else if` at :407-408) and drop it from the :5
-  comment; delete the harness stub's `listByJurisdiction`; delete the integration-test block +
-  fix its header comment. Regenerate tfvars with the gen-tables script - BOTH env files change
-  identically.
-- [ ] **Step 3: Verify** - `npm test -- tables genTables unitsRepo` green, then
-  `npm run typecheck` BARE (this is the step that catches any straggler reference, e.g. the
-  harness stub).
+  comment AND the filter-order comment at `units.ts:367`; delete the harness stub's
+  `listByJurisdiction` (at ~:1487, NOT :1402 - the file moved); in
+  `unitsRepo.integration.test.ts` delete the :147-149 block AND update :132-137 (it seeds
+  `jurisdiction` under an "each GSI" title that becomes false - switch the seed to
+  `accepted_authorities` and retitle); also update the now-false GSI comments at
+  `unitFields.ts:9,29` and `unitsRepo.ts:6`. Regenerate tfvars: the script is `gen:tables` in
+  the ROOT `package.json:29` - run `npm run gen:tables` from the REPO ROOT of the worktree, not
+  from app/ - BOTH env files change identically.
+- [ ] **Step 3: Verify** - `npm test` (app workspace, FULL - a name filter misses
+  `unitsApi.test.ts:216-239`, the `?jurisdiction=Fulton` filter test this task deletes), then
+  `npm run typecheck` BARE (this is the step that catches any straggler reference).
+  `unitsApi.test.ts:216-239` itself: DELETE that test with the param.
 - [ ] **Step 4: Commit** all files INCLUDING both generated tfvars, message noting the owed
   terraform apply.
 
@@ -272,11 +302,14 @@ it('scores authority overlap across legacy and new fields', () => {
 ### Task 7: dashboard types + `authoritiesOf` mirror
 
 **Files:**
-- Modify: `dashboard/src/api/types.ts` (Contact ~:1256+, ContactPatch ~:1352+, UnitItem ~:1447)
+- Modify: `dashboard/src/api/types.ts` (Contact :1639, ContactPatch :1735, UnitItem :1822 -
+  corrected against the current tree)
 - Modify: `dashboard/src/routes/listing/listingFormat.ts` (add the helper; `buildListingFacts`
   :53 drops jurisdiction from the area join)
-- Test: `dashboard/src/routes/listing/listingFormat.test.ts` (:70 pins the OLD area behavior -
-  the assertion inverts)
+- Test: `dashboard/src/routes/listing/listingFormat.test.ts` (the REAL pin is the exact-string
+  assertion at :72-74, not the fixture line at :70 - replace it with an equally exact
+  full-string assertion of the NEW output, not a weaker contains-check; use the file's actual
+  fixture name, not an invented `base`)
 
 **Interfaces:**
 - Produces: `Contact.agency?: string`, `ContactPatch.agency?: string`,
@@ -353,7 +386,7 @@ selection = unconstrained.
 const t = (over: Partial<Contact>): Contact => ({ contactId: Math.random().toString(36).slice(2), type: 'tenant', ...over } as Contact);
 const all = () => true;
 const emptySel = (): TenantSelection => ({ voucher: new Set<string>(), ha: new Set<string>(), porting: false });
-const SEP = ' ' + '\u00B7' + ' ';
+const SEP = ' ' + String.fromCharCode(0xB7) + ' ';
 describe('voucherBucketOf', () => {
   it('pins Studio=0 via typeof, never truthiness', () => { expect(voucherBucketOf(t({ voucherSize: 0 }))).toBe('0'); });
   it('caps at 4plus via the explicit table', () => { expect(voucherBucketOf(t({ voucherSize: 6 }))).toBe('4plus'); });
@@ -422,7 +455,27 @@ describe('factsLine', () => {
     expect(factsLine(t({}))).toBeNull();
   });
 });
+describe('option-list stability (spec section 5: pinned by test)', () => {
+  it('applying a selection never changes which authority options exist', () => {
+    const tenants = [t({ housingAuthority: 'DCA' }), t({ housingAuthority: 'Fulton County', voucherSize: 2 })];
+    const before = buildFacets(tenants, emptySel(), all).authority.map((o) => o.key);
+    const after = buildFacets(tenants, { voucher: new Set(['2']), ha: new Set<string>(), porting: false }, all).authority.map((o) => o.key);
+    expect(after).toEqual(before); // counts change; the option LIST does not
+  });
+});
+describe('porting filter', () => {
+  it('porting: true keeps only tenants with porting === true', () => {
+    const on = t({ porting: true });
+    const off = t({ porting: false });
+    const absent = t({});
+    expect(applySelection([on, off, absent], { voucher: new Set<string>(), ha: new Set<string>(), porting: true })).toEqual([on]);
+  });
+});
 ```
+
+  URL write form for porting: `applyToParams` sets `porting=1` when on (presence-only read;
+  the value is never inspected). Define `SEP` in the test file as
+  `' ' + String.fromCharCode(0xB7) + ' '`.
 
 - [ ] **Step 2: Run to fail** (`npm test -- tenantFacets`), **Step 3: implement** the module to
   these tests (unknown `voucher` values: parseSelection keeps only members of the literal key
@@ -452,9 +505,19 @@ voucher sizes recorded yet" instead of chips; the porting group renders only whe
 `model.showPorting`, its chip labelled `Porting` with `title="Tenant is porting"`. CSS from
 tokens; `.controls`/`.chips` wrap (`flex-wrap`) per `ListingsList.module.css:72-116`.
 
-- [ ] **Step 1: Failing tests** (jsdom, structure only - NO layout assertions):
+- [ ] **Step 1: Failing tests** (jsdom, structure only - NO layout assertions). COMPLETE
+  fixture preamble - the earlier draft left these undefined:
 
 ```tsx
+import userEvent from '@testing-library/user-event';
+const user = userEvent.setup();
+const empty: TenantSelection = { voucher: new Set<string>(), ha: new Set<string>(), porting: false };
+const tenant = (over: Partial<Contact>): Contact => ({ contactId: Math.random().toString(36).slice(2), type: 'tenant', ...over } as Contact);
+// Models come from the REAL buildFacets - never hand-assemble the shape:
+const model = buildFacets([tenant({ housingAuthority: 'DCA' }), tenant({ housingAuthority: 'DCA' })], empty, () => true);
+const withZeroCount = buildFacets([tenant({ voucherSize: 2 })], { ...empty, voucher: new Set(['2']) } as TenantSelection, () => true); // Studio contextual count 0
+const authorityEmptyModel = buildFacets([tenant({})], empty, () => true);
+
 it('renders groups, counts, and toggles a chip through onChange', async () => {
   const onChange = vi.fn();
   render(<TenantFilters model={model} selection={empty} onChange={onChange} />);
@@ -462,6 +525,7 @@ it('renders groups, counts, and toggles a chip through onChange', async () => {
   expect(onChange).toHaveBeenCalledWith(expect.objectContaining({ ha: new Set(['dca']) }));
 });
 it('zero-count unselected chip is aria-disabled, focusable, and inert', async () => {
+  const onChange = vi.fn();
   render(<TenantFilters model={withZeroCount} selection={empty} onChange={onChange} />);
   const chip = screen.getByRole('button', { name: 'Studio (0)' });
   expect(chip).toHaveAttribute('aria-disabled', 'true');
@@ -470,14 +534,18 @@ it('zero-count unselected chip is aria-disabled, focusable, and inert', async ()
   await user.click(chip);
   expect(onChange).not.toHaveBeenCalled();
 });
+it('a SELECTED chip is always clickable - deselection can never deadlock', async () => {
+  const onChange = vi.fn();
+  const sel: TenantSelection = { ...empty, voucher: new Set(['2']) };
+  render(<TenantFilters model={buildFacets([tenant({ voucherSize: 2 })], sel, () => true)} selection={sel} onChange={onChange} />);
+  await user.click(screen.getByRole('button', { name: /2-BR/ }));
+  expect(onChange).toHaveBeenCalled(); // even if its contextual count were 0
+});
 it('zero-recorded authority facet renders the empty line, no chips', () => {
-  render(<TenantFilters model={authorityEmptyModel} selection={empty} onChange={onChange} />);
+  render(<TenantFilters model={authorityEmptyModel} selection={empty} onChange={vi.fn()} />);
   expect(screen.getByText('No housing authorities recorded yet')).toBeInTheDocument();
 });
 ```
-
-  Build `model` fixtures by calling the REAL `buildFacets` on small contact arrays - never
-  hand-assemble the model shape.
 - [ ] **Step 2-5:** fail, implement, pass (`npm test -- TenantFilters`), commit.
 
 ### Task 10: `ContactsList` wiring - URL state, controls, row facts, CSS, page limit (dashboard)
@@ -508,7 +576,12 @@ Implementation checklist, all in `ContactsList.tsx`:
 6. `Row` gains a `showFacts: boolean` prop (`contact.type === 'tenant' && filter !== 'deleted'`);
    inside `.meta`, AFTER the status chip: `{showFacts && facts ? (<span className={styles.facts} title={facts}>{facts}</span>) : null}`
    then `{showFacts && contact.porting === true ? (<span className={styles.porting} title="Tenant is porting">Porting</span>) : null}`
-   where `const facts = factsLine(contact)`.
+   where `const facts = factsLine(contact)`. The row Link ALSO gains
+   `className={`${styles.row} ${showFacts && facts ? styles.factsRow : ''}`}` - the wide-pane
+   sacrifice-order CSS keys off `.factsRow` (per-ROW), NOT `.tenantList` (per-route), because
+   facts render on `/contacts` (All) too and the name-crush failure would otherwise survive
+   there. Only the DENSITY rules stay route-scoped (mixed density in one list is a bug; mixed
+   shrink behavior is invisible).
 7. `noMatches` gains ListingsList's conditional (`ListingsList.tsx:244-248` precedence: the
    query message when `query.trim()`, else `No tenants match the selected filters.`).
 8. The `<ul className={styles.rows}>` gains `styles.tenantList` when `isTenantView`.
@@ -521,22 +594,28 @@ Implementation checklist, all in `ContactsList.tsx`:
  * only caps). Scoped under .tenantList so no other view changes. */
 .facts { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--c-text-muted); font-size: var(--fs-xs); font-weight: var(--fw-medium); }
 .porting { flex: 0 0 auto; padding: 1px var(--sp-2); border-radius: var(--radius-pill); border: 1px solid var(--c-warning); color: var(--c-warning); font-size: var(--fs-xs); font-weight: var(--fw-semibold); white-space: nowrap; }
-.tenantList .name { flex: 1 0 auto; max-width: 55cqw; }
-.tenantList .meta { flex: 0 1 auto; min-width: 0; }
+/* Wide-pane sacrifice order: PER-ROW (facts render on the All view too). */
+.factsRow .name { flex: 1 0 auto; max-width: 55cqw; }
+.factsRow .meta { flex: 0 1 auto; min-width: 0; }
 @container (max-width: 560px) {
+  /* Density: route-scoped (one density per list). */
   .tenantList .row { padding: var(--sp-2) var(--sp-3); }
   .tenantList .rowItem { margin-bottom: var(--sp-1); }
-  .tenantList .name { flex: 1 1 100%; max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
-  .tenantList .meta { flex: 1 1 100%; }
+  /* Narrow stack: per-row, same predicate as the wide rules. */
+  .factsRow .name { flex: 1 1 100%; max-width: none; white-space: normal; overflow: visible; text-overflow: clip; }
+  .factsRow .meta { flex: 1 1 100%; }
 }
 ```
 
   (`.rowItem` is the `<li>`; the ul carries `.tenantList` so both selectors reach their targets.
   The narrow-pane name block is `ListingsList.module.css:292-299`'s idiom.)
 
-- [ ] **Step 1: Failing tests** - extend `ContactsList.test.tsx` (its harness renders with a
-  router; reuse it). Seed mock tenants with `voucherSize`/`housingAuthority`/`porting` covering
-  0 and 6:
+- [ ] **Step 1: Failing tests** - extend `ContactsList.test.tsx`. CORRECTION from review: that
+  file's real harness MOCKS `useContacts` (not `getContacts`) and renders inside a bare
+  `MemoryRouter` - open it, copy its actual setup block, and drive tests by setting the mocked
+  `useContacts` return value; use `<MemoryRouter initialEntries={['/contacts/tenants?voucher=0']}>`
+  for URL cases and a tiny location-probe child (`const Probe = () => { const loc = useLocation(); return <div data-testid="loc">{loc.search}</div>; }`)
+  to assert writes. Seed mock tenants covering `voucherSize` 0 and 6:
 
 ```tsx
 it('tenant view: controls render, a chip narrows the list, the URL carries it', ...);
@@ -547,8 +626,11 @@ it('active Tenants tab preserves params; Landlords tab is bare', ...);
 it('facets + empty query -> "No tenants match the selected filters."', ...);
 ```
 
-  Write each body with the file's existing helpers (its render-at-path idiom and `getContacts`
-  mock).
+- [ ] **Step 1b: the `limit=100` test** - `useContacts` is mocked in the component suite, so the
+  page-limit change needs its own test. CREATE
+  `dashboard/src/routes/contacts/useContacts.test.tsx` (add to this task's file list): mock
+  `../../api/index.js`'s `getContacts` to return one empty page and `renderHook(useContacts)`;
+  assert `getContacts` was called with `expect.objectContaining({ limit: '100' })`.
 - [ ] **Step 2-4:** fail -> implement (the checklist above) -> pass
   (`npm test -- ContactsList tenantFacets TenantFilters`), plus `npm run typecheck`.
 - [ ] **Step 5: Commit** the five files.
@@ -569,12 +651,28 @@ it('facets + empty query -> "No tenants match the selected filters."', ...);
   `export function collapseOrgInput(raw: string): string` - `raw.trim().replace(/\s+/g, ' ')`.
 
 Behavior (spec section 7): both inputs are `<input list={id}>` + `<datalist id={id}>` per
-`CustomFieldsEditor.tsx:62-82`; ids from `useId()`; NO `autoComplete` attribute; placeholders
-`e.g. Atlanta (AHA)` / `e.g. Hope Atlanta`; values run through `collapseOrgInput` BEFORE the
-changed-diff at :297 (both fields); the agency input sits directly below the authority input in
-the same tenant-only block; agency diff mirrors :297:
-`if (agency !== str(contact.agency)) patch.agency = agency;` with state seeded
-`useState(str(contact.agency))`.
+`CustomFieldsEditor.tsx:62-82`; ids from `useId()`; NO `autoComplete` attribute; the agency
+input's visible label text is exactly `Agency`; placeholders `e.g. Atlanta (AHA)` /
+`e.g. Hope Atlanta`; the agency input sits directly below the authority input in the same
+tenant-only block.
+
+**DIFF ORDER - the review's sharpest catch, get this exactly right.** `housingAuthority` is in
+`PROVENANCE_FIELDS` (`contacts.ts:1324-1327`): any PATCH that carries it clears AI provenance
+and consumes pending suggestions (`:1332-1340`). So an untouched field must NEVER reach the
+PATCH - which means the changed-check compares RAW state against RAW stored value, and only the
+VALUE SENT is collapsed:
+
+```ts
+if (housingAuthority !== str(contact.housingAuthority)) {
+  patch.housingAuthority = collapseOrgInput(housingAuthority);
+}
+if (agency !== str(contact.agency)) {
+  patch.agency = collapseOrgInput(agency);
+}
+```
+
+Collapsing BEFORE the diff (the naive order) makes an untouched save re-PATCH whenever the
+STORED value carries stray whitespace - silently destroying provenance on a no-op save.
 
 - [ ] **Step 1: Failing tests:**
 
@@ -595,6 +693,15 @@ it('agency input PATCHes trimmed', async () => {
   await user.click(screen.getByRole('button', { name: /^Save$/i }));
   expect(updateContact).toHaveBeenCalledWith('k1', expect.objectContaining({ agency: 'Hope Atlanta' }));
 });
+it('an untouched authority NEVER reaches the PATCH (provenance protection)', async () => {
+  const stored = { ...TENANT, housingAuthority: 'Atlanta  (AHA) ' }; // stray whitespace IN STORE
+  updateContact.mockResolvedValue(stored);
+  render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+  await user.type(screen.getByLabelText(/First name/i), 'X'); // dirty something else
+  await user.click(screen.getByRole('button', { name: /^Save$/i }));
+  const sent = updateContact.mock.calls[0]![1] as Record<string, unknown>;
+  expect('housingAuthority' in sent).toBe(false); // collapse-before-diff would have re-sent it
+});
 ```
 
 - [ ] **Step 2-5:** fail -> implement -> pass (`npm test -- ContactEditForm`) -> commit (three
@@ -607,9 +714,12 @@ it('agency input PATCHes trimmed', async () => {
   Housing authority KV at :164)
 - Test: `dashboard/src/routes/contact/files.test.tsx` (extend - it renders TenantFile)
 
-- [ ] **Step 1: Failing test:** `expect(screen.getByText('Agency')).toBeInTheDocument()` with a
-  contact fixture carrying `agency: 'Hope Atlanta'`, and the value rendered; absent -> the row
-  shows the card's standard blank.
+- [ ] **Step 1: Failing test:** with a contact fixture carrying `agency: 'Hope Atlanta'`, assert
+  the row via a SCOPED query (`within(detailsCard).getByText('Agency')` - a live custom field
+  labelled "Agency" exists in the deployed vocabulary, so an unscoped `getByText` can collide)
+  and the value rendered; absent -> the row shows the card's standard blank. If a tenant has
+  BOTH the custom field and the first-class field, both rows render - operations-side cleanup,
+  not a build concern (note it in the handback).
 - [ ] **Step 2-5:** fail -> add
   `<KV k="Agency" v={contact.agency ?? BLANK} />` right after the Housing authority KV
   (`BLANK` is the exported blank constant from `./Card.js` - reuse it, never paste a literal
@@ -624,12 +734,14 @@ it('agency input PATCHes trimmed', async () => {
 - Test: `UnitCreateForm`/`ListingEditForm` test files (extend; `ListingEditForm.test.tsx:18,24,98`
   seed the old fields)
 
-Behavior (spec section 8): the "Housing authority" single input AND the "Accepted programs"
-comma input are REPLACED by one labelled "Housing authorities" comma-separated input using the
-accepted_programs idiom (`ListingEditForm.tsx:158-160`: split on comma, trim, drop empties),
+Behavior (spec section 8): the "Housing authority" single input AND the existing programs comma
+input - whose REAL label is `Accepted vouchers / programs` (`ListingEditForm.tsx:417-424`), not
+"Accepted programs" - are REPLACED by one labelled "Housing authorities" comma-separated input
+using the same split-on-comma/trim/drop-empties idiom (`ListingEditForm.tsx:158-160`),
 placeholder `e.g. Atlanta (AHA), DCA`. Create sends `accepted_authorities` when non-empty; edit
 diffs against `authoritiesOf(unit).join(', ')` (the dashboard helper from Task 7) so a
-legacy-jurisdiction unit shows its synthesized value in the input.
+legacy-jurisdiction unit shows its synthesized value in the input. Tests to update include the
+label-anchored queries at `ListingEditForm.test.tsx:36,92-93`.
 
 - [ ] **Step 1: Failing tests:** create-form submits
   `accepted_authorities: ['Atlanta (AHA)', 'DCA']` from typing `Atlanta (AHA), DCA`; edit form
@@ -648,18 +760,26 @@ legacy-jurisdiction unit shows its synthesized value in the input.
 - Test: `ListingsList.test.tsx` (:21,:32 seed slugs - stay green via synthesis),
   `ListingDetail.test.tsx` (:86,:101), `FlyerPage.test.tsx` (:37)
 
-Behavior: `ListingsList` derives its authority options from `authoritiesOf(u)` (flatMap; a unit
-appears under EACH authority) - the humanize call stays EXACTLY as-is on the derived values (do
-not touch `humanizeAuthority`; the retire issue owns it); `ListingDetail` replaces the
-Jurisdiction KV and the programs block with ONE
-`<KV k="Housing authorities" v={authoritiesOf(unit).join(', ') || BLANK} />` (reuse the file's
-existing blank idiom for the fallback - check what its sibling KVs use);
-`publicApi.ts:36` renames the flyer field to `accepted_authorities: string[]`; `FlyerPage`
-renders `Accepts: {flyer.accepted_authorities.join(', ')}` when non-empty.
+Behavior: `ListingsList` derives its authority options from `authoritiesOf(u)` with SPEC
+SECTION 8's NORMALIZED-KEY GROUPING (import `normalizeAuthorityKey` from
+`../contacts/tenantFacets.js`): options group by normalized key (display = most frequent raw
+spelling), `selectedHAs` holds normalized KEYS, and the filter predicate is list-aware - a unit
+matches when ANY of `authoritiesOf(u)` normalizes to a selected key. The humanize call stays
+EXACTLY as-is on the displayed values (do not touch `humanizeAuthority`; the retire issue owns
+it). `ListingDetail`: the Jurisdiction KV (:729) AND the programs display (:282 and the second
+render site at :750-760, asserted by `ListingDetail.test.tsx:259-261`) become ONE
+`<KV k="Housing authorities" v={authoritiesOf(unit).join(', ') || BLANK} />` - `BLANK` imported
+from the shared card module (it is already importable there; NEVER paste a literal dash, the
+file's own em-dash idiom predates the ASCII rule). `publicApi.ts:36` renames the flyer field to
+`accepted_authorities: string[]`; `FlyerPage` renders
+`Accepts: {flyer.accepted_authorities.join(', ')}` when non-empty.
 
 - [ ] **Step 1: Failing tests:** ListingDetail fixture with only `jurisdiction: 'Atlanta'` shows
-  "Housing authorities" -> "Atlanta"; FlyerPage fixture field renamed; ListingsList: a unit with
-  `accepted_authorities: ['atlanta_housing', 'ga_dca']` appears under BOTH chips.
+  "Housing authorities" -> "Atlanta"; FlyerPage gains an EXPLICIT render assertion (fixture
+  field renamed AND `expect(screen.getByText(/Accepts: Atlanta \(AHA\), DCA/)).toBeInTheDocument()`
+  on a two-authority fixture - the spec's section 11 names this assertion); ListingsList: a unit
+  with `accepted_authorities: ['atlanta_housing', 'ga_dca']` appears under BOTH chips, and a
+  slug-seeded unit + a prose-typed variant of the same authority group under ONE chip.
 - [ ] **Step 2-5:** fail -> implement -> pass
   (`npm test -- ListingsList ListingDetail FlyerPage listingFormat`) + `npm run typecheck` ->
   commit.
@@ -670,8 +790,9 @@ renders `Accepts: {flyer.accepted_authorities.join(', ')}` when non-empty.
 - Modify: `e2e/scenarios/steps.ts` (:816-828 `seedAvailableUnit` takes
   `accepted_authorities?: string[]` and posts it, default `['atlanta_housing']`; :1440-1458 the
   create-form step fills the "Housing authorities" input)
-- Modify: the ~14 spec files seeding `jurisdiction:` (find them: `grep -rln "jurisdiction" e2e/tests/`)
-  - mechanical arg rename to `accepted_authorities: ['atlanta_housing']`
+- Modify: the 12 spec files that actually SEED `jurisdiction:` (13 grep hits, one is prose -
+  verify with `grep -rln "jurisdiction" e2e/tests/` and read each) - mechanical arg rename to
+  `accepted_authorities: ['atlanta_housing']`
 - Create: `e2e/tests/dashboard-next/contacts-list-facets.spec.ts`
 - Modify: `e2e/support/selectors.md` (the new controls + the U+00B7 escape construction rule,
   mirroring its em-dash row)
@@ -680,13 +801,14 @@ The new spec (lean world has ONE tenant, so create your own per spec section 11)
 
 ```ts
 test('tenant facets narrow the list and survive reload', async ({ page }) => {
-  // Arrange: three tenants via the existing createContact step support
-  // (steps.ts:581-647): 2BR/DCA, 3BR/DCA, 2BR/'Fulton County'.
+  // Arrange: three tenants via teamCreatesTenant (steps.ts:604-651 - the real
+  // step name; it supports voucherSize/housingAuthority):
+  // 2BR/DCA, 3BR/DCA, 2BR/'Fulton County'.
   // Act: open /contacts/tenants; click the '2-BR' chip, then the 'DCA' chip.
   // Assert: exactly the 2BR/DCA tenant row remains; the row facts read
-  //   '2 BR' + '\u00B7' spaced + 'DCA' (build the expectation with
-  //   the escape, never a literal); page.reload(); the same single row
-  //   remains and both chips are pressed (aria-pressed true).
+  //   '2 BR' + String.fromCharCode(0xB7) + 'DCA' with spaces (fromCharCode,
+  //   never a literal); page.reload(); the same single row remains and both
+  //   chips are pressed (aria-pressed true).
 });
 ```
 
@@ -707,6 +829,13 @@ test('tenant facets narrow the list and survive reload', async ({ page }) => {
 - [ ] **Step 1:** write the entries; verify only the ADDED lines are ASCII:
   `git diff -U0 documentation/GLOSSARY.md | grep '^+' | tr -d '\11\12\15\40-\176' | wc -c` -> 0
   (the file may hold legacy non-ASCII; the rule covers added lines).
+- [ ] **Step 1b: STRAGGLER SWEEP** - the retired fields must not survive in prose:
+  `grep -rn "accepted_programs\|jurisdiction" app/src dashboard/src documentation e2e/support --include=*.ts --include=*.tsx --include=*.md`
+  and fix every hit that is not (a) the tombstone set itself, (b) the LEGACY-commented type
+  fields, or (c) a retire-issue/drift-issue reference. Known hits from review:
+  `documentation/GLOSSARY.md:150` (names `accepted_programs` as a per-property fact),
+  `app/src/routes/contacts.ts:307` + `app/src/repos/contactsRepo.ts:254-255` (the field-move
+  comments), any remaining GSI comments, and one test TITLE describing the retired fields.
 - [ ] **Step 2:** commit.
 - [ ] **Step 3: FINAL GATES**, bare, from the worktree, containers warm:
   `npm run typecheck` then `npm test` then `timeout 1500 npm run e2e`. Known flakes

@@ -127,7 +127,9 @@ are inert: they filter nothing and no control renders. Follows `ListingsList` (c
   membership is `min(voucherSize, 4)`.
 - **Housing authority** - multi-select chips, options DERIVED from loaded data (open
   vocabulary). **Facet key = the NORMALIZED label**: `authorityLabel(value)` then trim, collapse
-  internal whitespace, and case-fold. Stored values sharing a normalized key merge into ONE chip
+  internal whitespace, case-fold, AND fold underscores to spaces (the slug regex is
+  case-sensitive, so `Atlanta_Housing` fails it and would otherwise key as `atlanta_housing`
+  while the true slug keys as `atlanta housing` - two near-identical chips again). Stored values sharing a normalized key merge into ONE chip
   with summed counts, and selecting it matches all of them; the chip displays the most frequent
   raw spelling among its members (ties broken by sort order, deterministic). Byte-identical
   merging alone is not enough - the PATCH path stores strings untrimmed, so `Atlanta (AHA)` with
@@ -136,9 +138,11 @@ are inert: they filter nothing and no control renders. Follows `ListingsList` (c
   `selectors.md` documents that bug class). The importer already trims/folds on its side
   (`housingAuthorityFor`); this rule is the read-side equivalent, and the edit form additionally
   trims + collapses whitespace before PATCHing (section 7).
-  Directly under this facet renders a muted disclosure line: "Some tenants may have an agency
-  recorded here instead of their housing authority." (section 2's field-vs-model gap - the facet
-  must not present agency values as authorities without saying so).
+  Directly under this facet - ONLY when it has at least one recorded value - renders a muted
+  disclosure line: "Some tenants may have an agency recorded here instead of their housing
+  authority." (section 2's field-vs-model gap - the facet must not present agency values as
+  authorities without saying so). In the zero-recorded state the empty-state line renders alone;
+  stacking both would contradict ("nothing recorded" + "some tenants have...").
 - **Porting** - single toggle chip. Label and title match the existing placement chip
   (`PlacementRow.tsx:41-45`: text `Porting`, title `Tenant is porting`).
 
@@ -163,8 +167,11 @@ re-derives as facets change (chips must not vanish mid-interaction; pinned by te
 unselected chip whose contextual count is 0 renders inert with `(0)`: `aria-disabled="true"` on
 an ENABLED button (it stays in the tab order so keyboard/screen-reader users can reach the
 explanation), click a no-op, plus a muted `.chipDisabled` visual variant (`ListingsList`'s chips
-have no disabled styling to inherit - this is new CSS). A selected chip is always clickable
-(deselection must never lock).
+have no disabled styling to inherit - this is new CSS). The variant must also NEUTRALIZE the
+interactive affordances at equal-or-higher specificity - `cursor: default` and a hover reset
+(e.g. `.chip.chipDisabled:hover`) - or the base `.chip:hover` rule outranks it and an inert chip
+still lights up under the pointer. A selected chip is always clickable (deselection must never
+lock).
 
 **Layout.** The control block sits between the filter tabs and the search box, wraps at narrow
 width (`flex-wrap`, as `ListingsList.controls`), and follows the search input's
@@ -198,11 +205,13 @@ NARROW (<=560px container):
   `4+ BR`. The bucket label belongs to the filter chip (a control); the row is a fact and
   `TenantFile` one click away already says `6 BR`. This deliberately narrows the earlier
   "one label everywhere" call to controls only - flagged for the human at the spec gate.
-- Facts and authority join with a middot with spaces (`3 BR &middot; Dekalb County Housing`) - a
-  hyphen separator collides with `voucherSizeLabel`'s internal hyphen, and the approved mockup
-  used middots. ASCII-construction rule (the convention `selectors.md` already records for the
-  em dash): source and tests build the separator with the backslash-u escape for U+00B7, never a
-  literal middot character - the ASCII gate covers new code and test lines. The facts are ONE text span
+- Facts and authority join with a middot (U+00B7) with spaces - rendered `3 BR`, middot,
+  `Dekalb County Housing` - because a hyphen separator collides with `voucherSizeLabel`'s
+  internal hyphen, and the approved mockup used middots. ONE construction form, everywhere
+  (source AND tests): the JS backslash-u escape for U+00B7 inside the joined string - never a
+  literal middot character, and never an HTML entity (an entity inside a JS string renders
+  literally as text). The convention mirrors the em-dash rule `selectors.md` records; the ASCII
+  gate covers new code and test lines. The facts are ONE text span
   (one accessible-name token stream; nothing needs `aria-hidden`). Missing values collapse:
   only-size reads `3 BR`; only-authority reads the name alone; neither = no facts span. The
   separator never leads or trails.
@@ -212,14 +221,19 @@ NARROW (<=560px container):
   alone - cannot fire: `.meta` is `flex: 0 0 auto`, so a shrinkable CHILD never receives
   compression, and `flex-shrink` only arbitrates between siblings, so "facts shrink before the
   name" is not expressible across two containers):
-  1. `.meta` becomes `flex: 0 4 auto; min-width: 0` - shrinkable, never growing, biased to give
-     before the name;
+  1. `.meta` becomes `flex: 0 1 auto; min-width: 0` - shrinkable, never growing;
   2. the facts span gets `min-width: 0; overflow: hidden; text-overflow: ellipsis;
-     white-space: nowrap` - inside `.meta` it is the only compressible child, so all of `.meta`'s
+     white-space: nowrap` - inside `.meta` it is the only compressible child, so ALL of `.meta`'s
      compression lands on it (kind/phone/status keep `flex: 0 0 auto`);
-  3. `.name` keeps `flex: 1 1 auto` and gains a floor, `min-width: 16ch` (starting value; tune in
-     live QA) - the backstop that pins the sacrifice order: facts truncate first, name second.
-  The facts span carries the full value in `title`.
+  3. `.name` becomes `flex: 1 0 auto` (grow, NEVER shrink) with `max-width: 55cqw` + its existing
+     ellipsis - a shrink factor of any size would make the name co-degrade with the facts from
+     the first pixel of deficit (shrink distributes proportionally; a min-width floor bounds how
+     FAR it shrinks, not WHEN it starts). With shrink 0 the name cedes nothing until the facts
+     span is exhausted, and only a name longer than its own container-relative cap ever
+     ellipsizes. The cap (55cqw starting value) is tuned in live QA; below it, the arithmetic is
+     guarded by the 560px stack.
+  Sacrifice order delivered: facts truncate first and fully; the name gives only past its own
+  cap. The facts span carries the full value in `title`.
 - **Narrow pane:** the name wraps in full instead of truncating (`ListingsList.module.css:292-299`
   idiom). Density tightens to `var(--sp-2) var(--sp-3)` padding / `var(--sp-1)` row gap -
   **scoped to the tenant ROUTE** (`filter === 'tenant'`), not the row type, so no view ever
@@ -276,10 +290,13 @@ a comma, but passthrough values can - the founder's raw cells demonstrably do, e
 (bucket keys `0|1|2|3|4plus|__none__`), `ha` (NORMALIZED facet keys per section 5, or
 `__none__`), `porting` (presence-only; `?porting=false` is treated as absent).
 
-The `voucher` key `0` (Studio) is matched by STRING comparison against the literal key set -
-never numeric coercion or truthiness, which would drop Studio from a shared or reloaded link
-while every in-memory test stays green (the same falsy-zero class section 5 hardens one layer
-down). The component round-trip test includes `?voucher=0`.
+Bucket keys map through an EXPLICIT two-way table (`0|1|2|3` and `4plus`), on write as well as
+read - a writer built as `String(min(v, 4))` emits `"4"`, which the unknown-value rule would
+then silently drop, losing the `4+ BR` selection on every reload. Reads are STRING comparison
+against the literal key set - never numeric coercion or truthiness, which would drop Studio from
+a shared link while every in-memory test stays green (the same falsy-zero class section 5
+hardens one layer down). The component round-trip test includes `?voucher=0` AND
+`?voucher=4plus`.
 
 - Writes use `{ replace: true }` (matches `FlyerPage.tsx:129`, the only existing writer; Back
   leaves the page rather than walking chip toggles) and MERGE the query string (`?phone=` must
@@ -295,12 +312,14 @@ down). The component round-trip test includes `?voucher=0`.
 
 ## 10. Testing and verification
 
-- **Unit** (`tenantFacets`): bucketing incl. `min(v,4)` and Studio=0 pinned; key normalization
-  (slug + typed same label merge; trailing-space variant merges; case variant merges; display
-  spelling = most frequent member); counts vs other-facets+query; OR/AND; Not-recorded;
-  zero-recorded empty state per facet; porting `=== true`; fixed-five voucher buckets vs derived
-  authority options (each pinned per its own rule); unknown URL values; sentinel round-trip;
-  `voucher=0` string-matched (never coerced).
+- **Unit** (`tenantFacets`): bucketing incl. `min(v,4)` and Studio=0 pinned; the explicit
+  bucket-key table both directions (`4 -> '4plus'`, never `String()`); key normalization (slug +
+  typed same label merge; trailing-space variant merges; case variant merges; underscore variant
+  `Atlanta_Housing` merges; display spelling = most frequent member); counts vs
+  other-facets+query; OR/AND; Not-recorded; zero-recorded empty state per facet; disclosure-line
+  suppression in the zero-recorded state; porting `=== true`; fixed-five voucher buckets vs
+  derived authority options (each pinned per its own rule); unknown URL values; sentinel
+  round-trip; `voucher=0` string-matched (never coerced).
 - **Unit** (`authorityLabel`): slug humanizes; `'Step Up'` passes through unchanged; single
   lowercase token passes through.
 - **Component**: controls on Tenants only; facts on tenant rows only (not landlord, not

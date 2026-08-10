@@ -3,9 +3,10 @@ id: ai-run-log-recovery-hook-unbounded
 title: Abandoned-resolution recovery on the suggestions GET has no cap or deadline
 type: debt
 severity: medium
-status: open
+status: resolved
 area: app
 created: 2026-08-09
+resolved: 2026-08-09
 refs: app/src/routes/suggestions.ts, app/src/repos/suggestionResolutionRepo.ts, app/src/services/suggestionResolution.ts
 ---
 
@@ -44,3 +45,17 @@ still recoverable on a subsequent read.
 
 **Evidence.** `.superpowers/design-review/final-conformance.md` (P2-1),
 `.superpowers/design-review/final-adversarial.md` (P2-2).
+
+**Resolution (2026-08-09, follow-up wave).** A per-read cap now bounds the hook:
+`MAX_RECOVERIES_PER_READ = 2` in `app/src/services/suggestionResolution.ts`,
+counting ATTEMPTS (not successes) and placed after the two free in-memory
+filters so cheap skips never consume the budget. A wall-clock deadline was
+deliberately rejected: the service clock is injectable and pinned by the suite,
+so a deadline is untestable or flaky. The GET-performs-writes shape is
+unchanged, per the assessment above. Pinned by a three-journal test in
+`app/test/aiRunVerdicts.test.ts` asserting the first read completes exactly two,
+leaves one active, and a later read completes the remainder. Known residual: the
+cap walks `listJournals` from the head, so journals that fail recovery
+PERSISTENTLY could starve the tail - no producer of a persistently failing
+journal is known; tracked as item 29 of
+`docs/issues/ai-run-log-final-review-followups.md`.

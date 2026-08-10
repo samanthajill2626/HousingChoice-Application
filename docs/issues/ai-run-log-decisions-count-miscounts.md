@@ -3,9 +3,10 @@ id: ai-run-log-decisions-count-miscounts
 title: AI run list "N decisions" cell double-counts and is constant across runs
 type: bug
 severity: low
-status: open
+status: resolved
 area: dashboard
 created: 2026-08-09
+resolved: 2026-08-09
 refs: dashboard/src/routes/settings/aiRuns/AiRunList.tsx, app/src/routes/aiRuns.ts, app/src/services/extraction/decisions.ts
 ---
 
@@ -32,3 +33,11 @@ assert two runs with different outcomes render different values.
 
 **Evidence.** `.superpowers/design-review/final-adversarial.md` (P2-7), plus
 the live observation above.
+
+**Resolution (2026-08-09, follow-up wave).** The cell now renders the outcome
+breakdown (wrote + suggested) instead of summing buckets plus the orthogonal
+pending cross-tab - dashboard-side only, in
+`dashboard/src/routes/settings/aiRuns/AiRunList.tsx`; the app route's
+`decisionCounts` is untouched. Pinned by a test built for the trap this issue
+describes: two runs that BOTH rendered 12 under the old sum must render
+different values now (`AiRunsSection.test.tsx`).

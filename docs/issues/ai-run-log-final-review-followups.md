@@ -16,6 +16,14 @@ with tests that can fail. These are the remaining findings, carried here rather
 than fixed, so nothing is lost at merge. Two got their own files:
 `ai-run-log-recovery-hook-unbounded` and `ai-run-log-decisions-count-miscounts`.
 
+**Follow-up wave (2026-08-09, commits `629551cc..`).** Items 1-10, 17, 18, 20,
+21, 23, 24, 26 and 28 were FIXED; item 25 was resolved as documentation (the
+error class stays - deleting it would lose a live log signal, and wiring a
+catch is a route behavior change - its docs now tell the truth and carry a
+`TODO(suggestion-status-accept-contract-drift)` marker); items 11-16, 19, 22
+and 27 remain deferred with the triggers below. The wave's own review appended
+items 29-30 and spun off `ai-run-log-refused-accept-replay-200`.
+
 **Honesty and reporting**
 
 1. An accept refused as `superseded_by_human_edit` answers HTTP 200 with the
@@ -116,6 +124,22 @@ than fixed, so nothing is lost at merge. Two got their own files:
     rewriting that suite for no behavioral gain.
 28. A helped commit loses its `suggestion.updated` SSE when the request then
     fails with a non-`SuggestionResolutionError`.
+
+**Appended by the follow-up wave's review (2026-08-09)**
+
+29. The recovery cap (`MAX_RECOVERIES_PER_READ`) walks `listJournals` from the
+    head, so a journal that fails recovery PERSISTENTLY could consume the
+    budget on every read and starve the tail. No producer of a persistently
+    failing journal is known - transient faults clear and the budget moves on.
+    Trigger: repeated `abandoned suggestion resolution recovery failed` warns
+    for the SAME target across successive reads in any environment.
+30. The dashboard collapses the aiRuns 400 filter errors
+    (`invalid_from`/`invalid_to`/`invalid_before`/`invalid_scope`) into one
+    generic "We could not load the AI run log." (`useAiRuns.ts`), so the API's
+    which-param honesty never reaches the operator. Only hand-edited URLs can
+    produce these.
+    Trigger: first staff confusion report, or fold into the next pass on
+    `ai-run-log-ui-polish-batch`.
 
 **Attribution note (cosmetic, no action required).** Commits `002fe2a5`,
 `ea1cbedd`, `f80c957a`, `dd894e83`, `0520eb8a`, `cd898692` and `3a6b913c` carry

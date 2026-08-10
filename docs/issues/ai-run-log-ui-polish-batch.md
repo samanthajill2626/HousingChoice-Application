@@ -13,7 +13,9 @@ refs: dashboard/src/routes/settings/aiRuns/AiRunDetail.tsx:31, dashboard/src/rou
 correctness bug, batched into one issue so they can be fixed in a single pass.
 All re-verified against HEAD after the fix wave.
 
-- [ ] **Detail pane never shows when the run happened.** `AiRunDetail.tsx:31`
+- [x] **Detail pane never shows when the run happened.** (Fixed by the
+      follow-up wave's U3: the detail header now renders the run time.)
+      `AiRunDetail.tsx:31`
       renders runId, trigger, outcome, driver/model, contact or conversation id,
       durationMs, fingerprint and tokens - but not `startedAt` or `finishedAt`,
       both of which are on the payload (`dashboard/src/api/types.ts:276-277`)

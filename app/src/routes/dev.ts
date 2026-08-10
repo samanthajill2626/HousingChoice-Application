@@ -52,6 +52,7 @@ import { createPoolNumbersService } from '../services/poolNumbers.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import { RELAY_INTRO_JOB } from '../jobs/relayFanOut.js';
 import { createExtractionRepo } from '../repos/extractionRepo.js';
+import { createAiRunsRepo } from '../repos/aiRunsRepo.js';
 import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
 import { appEvents } from '../lib/events.js';
@@ -404,6 +405,13 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       const contactsRepo = createContactsRepo({ logger: log });
       extractionTickDeps = {
         repo: extractionRepo,
+        // AI run log: the dev tick records runs too, which is what makes
+        // /settings/ai-runs exercisable in e2e and local development.
+        aiRuns: createAiRunsRepo({ logger: log }),
+        // REAL wall clock. This tick deliberately passes runDueExtractions a
+        // SIMULATED FUTURE nowIso (see the tick handler below), so the record's
+        // timestamps must NOT come from it.
+        now: () => new Date().toISOString(),
         conversations: createConversationsRepo({ logger: log }),
         messages: createMessagesRepo({ logger: log }),
         contacts: contactsRepo,

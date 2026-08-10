@@ -17,6 +17,7 @@ import type {
   ExtractionResult,
 } from '../../adapters/extraction.js';
 import { cleanAddressParts, normalizeAddressForCompare } from './address.js';
+import { DECISION_TARGETS, type DecisionTarget, type ProposedOp } from './runTypes.js';
 
 /** The eight client-profile fields the model may operate on. */
 export const EXTRACTABLE_FIELDS: readonly ExtractableField[] = [
@@ -308,4 +309,125 @@ export function parseExtractionText(text: string): ExtractionResult {
 export function normalizeSuggestionValue(target: string, value: string): string {
   if (target === 'address') return normalizeAddressForCompare(value);
   return value.toLowerCase().replace(/\s+/g, ' ').trim();
+}
+
+// ---------------------------------------------------------------------------
+// Raw per-target op view (AI run log, design 2026-08-06 section 7.1)
+// ---------------------------------------------------------------------------
+
+/** One target as the MODEL stated it, before any folding or downgrading. */
+export interface ExtractionOpView {
+  op: ProposedOp;
+  /** Carried ONLY on write/suggest, and KEPT even when it is the empty string -
+   *  an empty value on a write/suggest is exactly what parseExtractionText
+   *  erases at :215-219, and it is what makes empty_value_at_parse detectable. */
+  value?: string;
+  /** Carried ONLY on write/suggest, and only when non-blank. */
+  reason?: string;
+}
+
+export type ExtractionOpsView = Record<DecisionTarget, ExtractionOpView>;
+
+function absentView(): ExtractionOpsView {
+  const view = {} as ExtractionOpsView;
+  for (const target of DECISION_TARGETS) view[target] = { op: 'absent' };
+  return view;
+}
+
+/** All twelve targets absent. Frozen - callers must never mutate it. */
+export const EMPTY_OPS_VIEW: ExtractionOpsView = Object.freeze(absentView());
+
+/** The clamped reason, when the raw value is a non-blank string. */
+function readReason(raw: unknown): string | undefined {
+  return typeof raw === 'string' && raw.trim().length > 0 ? clamp(raw, MAX_REASON_CHARS) : undefined;
+}
+
+/**
+ * The RAW per-target op view of the model's response text.
+ *
+ * WHY NOT the parsed ExtractionResult (design 7.1): parseExtractionText folds
+ * the address and type `none` sentinels to ABSENT (:233, :258-263), so a
+ * decline is indistinguishable from a silence; and it REWRITES a write/suggest
+ * whose value is unusable into { op: 'none' } while dropping the reason
+ * (:215-219), so a parsed `none` means EITHER "the model declined" OR "the
+ * model tried and supplied an unusable value" - and the second is precisely
+ * what QA needs to see, because it is the model FAILING rather than abstaining.
+ *
+ * TOTAL BY CONTRACT - it never throws. On unparseable or non-object input every
+ * target comes back `absent`, and the recorder then records every target as
+ * not_addressed - never no_finding, because a decline that was never observed
+ * must never be inferred.
+ */
+export function parseExtractionOps(rawText: string | undefined): ExtractionOpsView {
+  const view = absentView();
+  if (rawText === undefined) return view;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(rawText);
+  } catch {
+    return view;
+  }
+  if (!isRecord(parsed)) return view;
+
+  // The eight scalars: fields.<name>.op, verbatim.
+  const rawFields = isRecord(parsed.fields) ? parsed.fields : {};
+  for (const field of EXTRACTABLE_FIELDS) {
+    const rawOp = rawFields[field];
+    if (!isRecord(rawOp)) continue;
+    const op = rawOp.op;
+    if (op !== 'none' && op !== 'write' && op !== 'suggest') continue;
+    if (op === 'none') {
+      view[field] = { op };
+      continue;
+    }
+    const reason = readReason(rawOp.reason);
+    view[field] = {
+      op,
+      ...(typeof rawOp.value === 'string' && { value: rawOp.value }),
+      ...(reason !== undefined && { reason }),
+    };
+  }
+
+  // address: the op only - no parts folding, so a `none` stays a `none`.
+  const rawAddress = parsed.address;
+  if (isRecord(rawAddress)) {
+    const op = rawAddress.op;
+    if (op === 'none') {
+      view.address = { op };
+    } else if (op === 'write' || op === 'suggest') {
+      const reason = readReason(rawAddress.reason);
+      view.address = { op, ...(reason !== undefined && { reason }) };
+    }
+  }
+
+  // status: the boolean IS the op.
+  const rawStatus = parsed.statusAdvance;
+  if (isRecord(rawStatus) && typeof rawStatus.suggest === 'boolean') {
+    const reason = readReason(rawStatus.reason);
+    view.status = rawStatus.suggest
+      ? { op: 'suggest', ...(reason !== undefined && { reason }) }
+      : { op: 'none' };
+  }
+
+  // type: "none" is the decline sentinel. ANY other non-empty string is the
+  // model proposing something - including an off-enum value, which is a FAILED
+  // ATTEMPT and must never read as a decline.
+  const rawType = parsed.typeSuggestion;
+  if (isRecord(rawType) && typeof rawType.value === 'string' && rawType.value.length > 0) {
+    const reason = readReason(rawType.reason);
+    view.type = rawType.value === 'none'
+      ? { op: 'none' }
+      : { op: 'suggest', value: rawType.value, ...(reason !== undefined && { reason }) };
+  }
+
+  // phone: the empty-string phone is the decline sentinel.
+  const rawPhone = parsed.phoneAddition;
+  if (isRecord(rawPhone) && typeof rawPhone.phone === 'string') {
+    const reason = readReason(rawPhone.reason);
+    view.phone = rawPhone.phone.trim().length === 0
+      ? { op: 'none' }
+      : { op: 'suggest', value: rawPhone.phone, ...(reason !== undefined && { reason }) };
+  }
+
+  return view;
 }

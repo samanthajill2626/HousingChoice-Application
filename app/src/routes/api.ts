@@ -88,7 +88,13 @@ import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
 import { createPlacementNudgesRepo, type PlacementNudgesRepo } from '../repos/placementNudgesRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
+import {
+  createSuggestionResolutionRepo,
+  type SuggestionResolutionRepo,
+} from '../repos/suggestionResolutionRepo.js';
 import { createSuggestionsRouter } from './suggestions.js';
+import type { SuggestionResolutionHooks } from '../services/suggestionResolution.js';
 import { armNudgeForStage } from '../jobs/placementNudges.js';
 import { enqueueImmediate } from '../jobs/jobs.js';
 import {
@@ -116,6 +122,7 @@ import { createRelayGroupsRouter } from './relayGroups.js';
 import { createSettingsRouter } from './settings.js';
 import { createStatusTransitionRouter } from './statusTransition.js';
 import { createSystemRouter } from './system.js';
+import { createAiRunsRouter } from './aiRuns.js';
 import { createTodayRouter } from './today.js';
 import { createUnitsRouter } from './units.js';
 import { createToursRouter } from './tours.js';
@@ -209,6 +216,15 @@ export interface ApiRouterDeps {
   transcodeGate?: Semaphore;
   /** M1.4 surfaces — injected in tests; default to the real repos/services. */
   contactsRepo?: ContactsRepo;
+  /** AI run-log repo shared by suggestion resolution surfaces. */
+  aiRunsRepo?: AiRunsRepo;
+  /** Durable phase journal shared by all suggestion resolution routes. */
+  suggestionResolutionRepo?: SuggestionResolutionRepo;
+  /** Process-boundary fault/clock seams used by focused recovery tests. */
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  suggestionResolutionNow?: () => string;
+  suggestionResolutionLeaseId?: () => string;
+  suggestionResolutionLeaseMs?: number;
   settingsRepo?: SettingsRepo;
   /** Task 4: auto-suggest vocabulary (roles, relationship roles, field labels). */
   contactVocabularyRepo?: ContactVocabularyRepo;
@@ -435,6 +451,9 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // conversation-fact-extraction (T8): the pending-suggestion store, shared by the
   // review API (suggestions router) and the contacts-router PATCH provenance-clear.
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
+  const suggestionResolutions = deps.suggestionResolutionRepo
+    ?? createSuggestionResolutionRepo({ logger: deps.logger });
   // Scheduled-message-visibility (Task 4 "Upcoming" gather): the contact-timeline
   // gather walks these five scheduled-send repos. Default-construct them here (the
   // same `?? create…` pattern as conversations/messages above) so the gather is
@@ -599,6 +618,16 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       }),
     }),
   );
+  // AI run log (design 2026-08-06 section 9). The router applies its own
+  // server-side admin guard and uses the shared repositories above.
+  router.use(
+    '/ai-runs',
+    createAiRunsRouter({
+      logger: deps.logger,
+      messagesRepo: messages,
+      aiRunsRepo: aiRuns,
+    }),
+  );
   // Contact triage + CRUD (requireAuth — VAs triage; propagates conversation
   // type and emits conversation.updated so connected inboxes update live).
   router.use(
@@ -625,6 +654,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // conversation-fact-extraction (T8): a human field edit clears AI provenance
       // + supersedes any pending suggestion for that field (best-effort).
       extractionRepo: extraction,
+      aiRunsRepo: aiRuns,
       // Triage re-extraction hook: a flip to tenant schedules an immediate
       // 'triage' run (gated by the same kill switch as the other schedule sites).
       aiExtractionEnabled: config.aiExtractionEnabled,
@@ -916,12 +946,21 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       logger: deps.logger,
       ...(deps.contactsRepo !== undefined && { contactsRepo: deps.contactsRepo }),
       extractionRepo: extraction,
-      auditRepo: audit,
-      activityEventsRepo: activityEvents,
+      aiRunsRepo: aiRuns,
+      suggestionResolutionRepo: suggestionResolutions,
+      ...(deps.suggestionResolutionHooks !== undefined && {
+        suggestionResolutionHooks: deps.suggestionResolutionHooks,
+      }),
+      ...(deps.suggestionResolutionNow !== undefined && {
+        resolutionNow: deps.suggestionResolutionNow,
+      }),
+      ...(deps.suggestionResolutionLeaseId !== undefined && {
+        resolutionLeaseId: deps.suggestionResolutionLeaseId,
+      }),
+      ...(deps.suggestionResolutionLeaseMs !== undefined && {
+        resolutionLeaseMs: deps.suggestionResolutionLeaseMs,
+      }),
       events,
-      ...(deps.placementsRepo !== undefined && { placementsRepo: deps.placementsRepo }),
-      placementDeadlinesRepo: placementDeadlines,
-      ...(deps.unitsRepo !== undefined && { unitsRepo: deps.unitsRepo }),
     }),
   );
   // BE6/C7 Today action-queue (requireAuth via the /api mount). A read-only

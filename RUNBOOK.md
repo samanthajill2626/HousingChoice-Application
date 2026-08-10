@@ -90,6 +90,28 @@ A new table or GSI lands in a real env via **`npm run plan -- <env>` + `npm run 
 NOT via `deploy:<env>` (which only rolls the app image). **Apply the schema BEFORE deploying the code
 that reads/writes it**, or the new endpoints 500 against a missing table/index.
 
+### AI extraction run log (owed post-merge operation)
+
+The admin-only forensic log is at `/settings/ai-runs`. It retains each `ai_runs` envelope for 90 days;
+the contact/conversation pointer can outlive that row and then renders as an expired run. A missing log
+record does not prove extraction did not run: recording is best-effort, so search the app/worker logs for
+`ai run log write failed` before treating it as an execution gap. Its timestamps use real wall clock time,
+even when the hermetic dev extraction tick simulates a future poll clock. A `dropped` decision without a
+reason is an unexplained gap; search logs for `unexplained dropped decision` and investigate the input and
+apply path.
+
+Do not run these automatically. After this feature merges, run `npm run plan -- dev` and `npm run apply -- dev`
+to create the `ai_runs` table before the dev deploy. Run the corresponding production Terraform apply at the
+M1.11 cutover before the prod deploy. Separately, and only when production rollout is approved, set
+`AI_EXTRACTION_ENABLED=true` for production; that flag flip is independent of the Terraform applies.
+Until the dev apply lands, `/settings/ai-runs` and `GET /api/ai-runs` 500 on dev deploys (local/hermetic
+lanes are unaffected - they bootstrap their own tables). The schema it adds, in the same shape as the
+table below:
+
+| Change | Table | Kind | Powers |
+|--------|-------|------|--------|
+| AI run log (2026-08) - **NOT YET APPLIED anywhere** | `ai_runs` | **new table** - PK `itemId`, GSI `byEntity` (`entityKey` + `sortKey`), TTL `expires_at` | `/settings/ai-runs` forensic log |
+
 **New-dashboard backend-slice schema — APPLIED TO DEV (2026-07-01); PROD applies at the M1.11 go-live cutover.**
 
 | Change | Table | Kind | Powers |

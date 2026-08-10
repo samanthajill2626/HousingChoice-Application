@@ -13,8 +13,10 @@ import { createFakeWorld, type FakeWorld } from './helpers/twilioWebhookHarness.
 import { createLogger } from '../src/lib/logger.js';
 import { createLogCapture } from './helpers/logCapture.js';
 import {
+  buildContactStatusTransitionPlan,
   createStatusTransitionService,
   EntityNotFoundError,
+  StatusTransitionCommittedError,
   TransitionRefusedError,
   type StatusTransitionDeps,
   type StatusTransitionService,
@@ -383,6 +385,43 @@ describe('statusTransition — tenant status (no RTA-in-hand gate, §5; 2026-06-
     expect(updated.status).toBe('inactive');
     // porting lives on the contact, never appears as a placement stage.
     expect(updated).not.toHaveProperty('stage');
+  });
+
+  it('marks a required audit failure as committed after persisting the status update', async () => {
+    await world.contactsRepo.create({ contactId: 't-audit-failure', type: 'tenant', status: 'onboarding' });
+    const cause = new Error('required audit append failed');
+    world.auditRepo.append = async () => { throw cause; };
+
+    let thrown: unknown;
+    try {
+      await svc.setTenantStatus('t-audit-failure', { toStatus: 'searching', source: 'manual' });
+    } catch (err) {
+      thrown = err;
+    }
+
+    expect(thrown).toBeInstanceOf(StatusTransitionCommittedError);
+    expect((thrown as StatusTransitionCommittedError).cause).toBe(cause);
+    expect((await world.contactsRepo.getById('t-audit-failure'))?.status).toBe('searching');
+  });
+});
+
+describe('contact status semantic plan', () => {
+  it('owns the exact patch, audit, and milestone used by journal replay', () => {
+    const plan = buildContactStatusTransitionPlan(
+      { contactId: 't-plan', type: 'tenant', status: 'onboarding', created_at: '2026-01-01T00:00:00.000Z' },
+      { toStatus: 'searching', source: 'ai', actor: 'usr-ai-reviewer', porting: false },
+    );
+
+    expect(plan).toEqual({
+      patch: { status: 'searching', status_source: 'ai', porting: false },
+      audit: {
+        eventType: 'tenant_status_changed',
+        payload: {
+          actor: 'usr-ai-reviewer', from: 'onboarding', to: 'searching', source: 'ai',
+        },
+      },
+      activity: { type: 'contact_status_changed', label: 'Status \u2192 Searching' },
+    });
   });
 });
 

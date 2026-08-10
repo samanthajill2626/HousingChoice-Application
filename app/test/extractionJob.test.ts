@@ -22,20 +22,24 @@ import {
   runDueExtractions,
   type ExtractionJobDeps,
 } from '../src/jobs/extraction.js';
-import type { DueExtractionItem, ExtractionRepo, SuggestionItem } from '../src/repos/extractionRepo.js';
+import type { DueExtractionItem, ExtractionRepo, PutSuggestionResult } from '../src/repos/extractionRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { FakeExtractionDriver } from '../src/adapters/extractionFake.js';
 import {
-  ExtractionRefusedError,
   type ExtractionDriver,
   type ExtractionInput,
 } from '../src/adapters/extraction.js';
 import type { ApplyDeps } from '../src/services/extraction/apply.js';
-import type { Logger } from '../src/lib/logger.js';
+import { createLogger, type Logger } from '../src/lib/logger.js';
+import type { AiRunRecordInput } from '../src/repos/aiRunsRepo.js';
+import { createLogCapture } from './helpers/logCapture.js';
 
 const NOW = '2026-07-17T00:00:00.000Z';
+/** The job's WALL clock for run-record timestamps - deliberately DIFFERENT from
+ *  NOW, so a test can prove the record does not use the poll clock. */
+const WALL_NOW = '2026-07-17T09:30:00.000Z';
 const DEBOUNCE = 30_000;
 
 const silentLogger = {
@@ -119,6 +123,18 @@ function tenantContact(): ContactItem {
   return { contactId: 'c1', type: 'tenant', status: 'onboarding', phone: '+15551230001' } as ContactItem;
 }
 
+function tenantContactWith(overrides: Partial<ContactItem>): ContactItem {
+  return { ...tenantContact(), ...overrides } as ContactItem;
+}
+
+function landlordContact(): ContactItem {
+  return { contactId: 'c1', type: 'landlord', status: 'interested', phone: '+15551230001' } as ContactItem;
+}
+
+function unknownContact(): ContactItem {
+  return { contactId: 'c1', type: 'unknown', status: 'needs_review', phone: '+15551230001' } as ContactItem;
+}
+
 function convWith(contactId: string): ConversationItem {
   return {
     conversationId: 'conv1',
@@ -134,11 +150,13 @@ function convWith(contactId: string): ConversationItem {
 
 function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionRepo {
   const put = vi.fn(
-    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<SuggestionItem> => ({
-      ...s,
-      itemId: `sugg#${s.ownerContactId}#${s.target}`,
-      _pendingPartition: 'pending',
-      createdAt: NOW,
+    async (s: Parameters<ExtractionRepo['putSuggestion']>[0]): Promise<PutSuggestionResult> => ({
+      item: {
+        ...s,
+        itemId: `sugg#${s.ownerContactId}#${s.target}`,
+        _pendingPartition: 'pending',
+        createdAt: NOW,
+      },
     }),
   );
   return {
@@ -152,6 +170,8 @@ function makeRepo(dueRows: DueExtractionItem[], claimResult = true): ExtractionR
     getSuggestion: vi.fn(async () => undefined),
     listSuggestionsByContact: vi.fn(async () => []),
     deleteSuggestion: vi.fn(async () => {}),
+    deleteSuggestionIfCurrent: vi.fn(async () => true),
+    restoreSuggestionIfAbsent: vi.fn(async () => true),
     listPending: vi.fn(async () => []),
     putDismissal: vi.fn(async () => {}),
     hasDismissal: vi.fn(async () => false),
@@ -163,6 +183,9 @@ interface Harness {
   repo: ExtractionRepo;
   seen: ExtractionInput[];
   contactsUpdate: ReturnType<typeof vi.fn>;
+  runs: AiRunRecordInput[];
+  aiRuns: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
+  applyEvents: { emit: ReturnType<typeof vi.fn> };
 }
 
 function makeHarness(opts: {
@@ -172,21 +195,31 @@ function makeHarness(opts: {
   conversation?: ConversationItem | undefined;
   claimResult?: boolean;
   driver?: ExtractionDriver;
+  aiRuns?: { beginFinalization: ReturnType<typeof vi.fn>; putRun: ReturnType<typeof vi.fn>; setVerdict: ReturnType<typeof vi.fn> };
+  logger?: Logger;
 }): Harness {
   const repo = makeRepo(opts.dueRows, opts.claimResult ?? true);
   const seen: ExtractionInput[] = [];
   const fake = new FakeExtractionDriver();
   const driver: ExtractionDriver =
-    opts.driver ??
-    ({
+    opts.driver ?? {
       kind: 'fake',
       extract: async (input: ExtractionInput) => {
         seen.push(input);
         return fake.extract(input);
       },
-    } as ExtractionDriver);
+    };
 
   const contactsUpdate = vi.fn(async () => ({}) as ContactItem);
+  const runs: AiRunRecordInput[] = [];
+  const aiRuns = opts.aiRuns ?? {
+    beginFinalization: vi.fn(async () => true),
+    putRun: vi.fn(async (r: AiRunRecordInput) => {
+      runs.push(r);
+      return { ...r, itemId: `run#${r.runId}`, expires_at: 0 };
+    }),
+    setVerdict: vi.fn(async () => true),
+  };
   const contacts = {
     getById: vi.fn(async () => opts.contact),
     findByPhone: vi.fn(async () => undefined),
@@ -194,27 +227,34 @@ function makeHarness(opts: {
     addPhone: vi.fn(async () => ({}) as ContactItem),
   };
 
+  // Hoisted so a test can make it THROW. apply.ts calls this emit OUTSIDE any
+  // try, and processRow deliberately does not wrap applyExtraction - so an emit
+  // throw is one of the few paths that actually reaches runDueExtractions'
+  // backstop. See Task 20.
+  const applyEvents = { emit: vi.fn() };
   const applyDeps: ApplyDeps = {
     contacts,
     extraction: repo,
     audit: { append: vi.fn(async () => undefined) },
-    events: { emit: vi.fn() },
-    logger: silentLogger,
+    events: applyEvents,
+    logger: opts.logger ?? silentLogger,
     now: () => NOW,
   };
 
   const deps: ExtractionJobDeps = {
     repo,
+    aiRuns,
+    now: () => WALL_NOW,
     conversations: { getById: vi.fn(async () => opts.conversation) },
     messages: { listByConversation: vi.fn(async () => opts.messages ?? []) },
     contacts,
     driver,
     applyDeps,
     config: { aiExtractionDebounceMs: DEBOUNCE },
-    logger: silentLogger,
+    logger: opts.logger ?? silentLogger,
   };
 
-  return { deps, repo, seen, contactsUpdate };
+  return { deps, repo, seen, contactsUpdate, runs, aiRuns, applyEvents };
 }
 
 function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
@@ -230,6 +270,28 @@ function dueRow(overrides: Partial<DueExtractionItem> = {}): DueExtractionItem {
 }
 
 describe('runDueExtractions', () => {
+  it('stamps every utterance with the tsMsgId of the message it came from', async () => {
+    // Design 6.1: without this the run log cannot attribute rendered output back
+    // to a message, so no per-message hash is possible. A call transcript
+    // produces MANY utterances - all carry the call row's tsMsgId.
+    const sms = msg(10, 'inbound', 'hello');
+    const call = callMsg(20, 'inbound', 'Staff: how can I help\nClient: I need a 2 bedroom', 'completed');
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [call, sms], // listByConversation returns NEWEST-first
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+    });
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.seen[0]!.transcript.map((u) => u.tsMsgId)).toEqual([
+      sms.tsMsgId,
+      call.tsMsgId,
+      call.tsMsgId,
+    ]);
+  });
+
   it('happy path: runs the driver on a chronological transcript, writes the field, advances the cursor', async () => {
     const messages = [
       // newest-first, as listByConversation returns
@@ -330,19 +392,19 @@ describe('runDueExtractions', () => {
     expect(h.repo.complete).toHaveBeenCalledWith('conv1', client.tsMsgId, NOW);
   });
 
-  it('driver throw: fails with a doubled nextDueAt (exponential backoff)', async () => {
-    const throwing = {
+  it('driver failure: fails with a doubled nextDueAt (exponential backoff)', async () => {
+    const failing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new Error('driver boom');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'driver boom',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow({ attempts: 1 })], // 2^1 = doubled backoff
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
       contact: tenantContact(),
       conversation: convWith('c1'),
-      driver: throwing,
+      driver: failing,
     });
 
     const out = await runDueExtractions(NOW, h.deps);
@@ -355,18 +417,18 @@ describe('runDueExtractions', () => {
   });
 
   it('final failure parks the item (nextDueAt null)', async () => {
-    const throwing = {
+    const failing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new Error('still failing');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'still failing',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow({ attempts: MAX_EXTRACTION_ATTEMPTS - 1 })], // attempts+1 >= MAX -> park
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
       contact: tenantContact(),
       conversation: convWith('c1'),
-      driver: throwing,
+      driver: failing,
     });
 
     const out = await runDueExtractions(NOW, h.deps);
@@ -376,12 +438,12 @@ describe('runDueExtractions', () => {
   });
 
   it('refusal error follows the failure path', async () => {
-    const refusing = {
+    const refusing: ExtractionDriver = {
       kind: 'fake',
-      extract: async () => {
-        throw new ExtractionRefusedError('declined');
-      },
-    } as unknown as ExtractionDriver;
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'refusal', message: 'declined',
+      }),
+    };
     const h = makeHarness({
       dueRows: [dueRow()], // attempts undefined -> 2^0 backoff, not parked
       messages: [msg(1, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"yes"}}}')],
@@ -422,10 +484,10 @@ describe('runDueExtractions', () => {
     expect(h.seen).toHaveLength(1);
     // Every utterance shares the call row's created_at and is channel 'voice'.
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'staff', text: 'how can I help', at: call.created_at, channel: 'voice' },
-      { speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
-      { speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
-      { speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'staff', text: 'how can I help', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'I have two kids', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'unknown', text: 'Speaker 1: legacy unattributed line', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'left a voicemail about a 2 bed', at: call.created_at, channel: 'voice' },
     ]);
   });
 
@@ -444,7 +506,7 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'I have a voucher for a 2 bed', at: mail.created_at, channel: 'email' },
+      { tsMsgId: mail.tsMsgId, speaker: 'client', text: 'I have a voucher for a 2 bed', at: mail.created_at, channel: 'email' },
     ]);
     // BODY only: the subject is metadata, never transcript content.
     const allText = h.seen[0]!.transcript.map((u) => u.text).join(' ');
@@ -465,8 +527,8 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'checking in', at: inboundSms.created_at, channel: 'sms' },
-      { speaker: 'staff', text: 'Sending the listing over now', at: reply.created_at, channel: 'email' },
+      { tsMsgId: inboundSms.tsMsgId, speaker: 'client', text: 'checking in', at: inboundSms.created_at, channel: 'sms' },
+      { tsMsgId: reply.tsMsgId, speaker: 'staff', text: 'Sending the listing over now', at: reply.created_at, channel: 'email' },
     ]);
   });
 
@@ -509,7 +571,7 @@ describe('runDueExtractions', () => {
     expect(h.seen).toHaveLength(1);
     // Only the SMS survives; neither the pending nor the empty-completed call
     // adds anything.
-    expect(h.seen[0]!.transcript).toEqual([{ speaker: 'client', text: 'hello', at: sms.created_at, channel: 'sms' }]);
+    expect(h.seen[0]!.transcript).toEqual([{ tsMsgId: sms.tsMsgId, speaker: 'client', text: 'hello', at: sms.created_at, channel: 'sms' }]);
   });
 
   it('voice due item: runs even when the newest call row is OLDER than the cursor (freshness bypass)', async () => {
@@ -530,7 +592,7 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'left a voicemail: I need a 2 bedroom', at: call.created_at, channel: 'voice' },
     ]);
     expect(h.repo.fail).not.toHaveBeenCalled();
     // Cursor is MONOTONIC: the call's tsMsgId (`...:01...#c1`) is older than the
@@ -558,7 +620,7 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'my voucher is a 3 bedroom', at: sms.created_at, channel: 'sms' },
+      { tsMsgId: sms.tsMsgId, speaker: 'client', text: 'my voucher is a 3 bedroom', at: sms.created_at, channel: 'sms' },
     ]);
     // The profile reflects the POST-triage type, so tenant-only fields apply.
     expect(h.seen[0]!.profile.contactType).toBe('tenant');
@@ -603,9 +665,9 @@ describe('runDueExtractions', () => {
     expect(out).toEqual({ processed: 1, failed: 0 });
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.transcript).toEqual([
-      { speaker: 'client', text: 'hi', at: client.created_at, channel: 'sms' },
-      { speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
-      { speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
+      { tsMsgId: client.tsMsgId, speaker: 'client', text: 'hi', at: client.created_at, channel: 'sms' },
+      { tsMsgId: staff.tsMsgId, speaker: 'staff', text: 'hello', at: staff.created_at, channel: 'sms' },
+      { tsMsgId: call.tsMsgId, speaker: 'client', text: 'my voucher got approved', at: call.created_at, channel: 'voice' },
     ]);
   });
 
@@ -659,6 +721,36 @@ describe('runDueExtractions', () => {
 
     expect(h.seen).toHaveLength(1);
     expect(h.seen[0]!.profile.address).toBeUndefined();
+  });
+
+  it('REGRESSION: a driver failure still burns exactly one attempt and re-arms with backoff', async () => {
+    // The ExtractionCall widening must not move backoff/park/attempts by one
+    // millisecond. Pin the CURRENT numbers so Task 19's rewrite cannot drift
+    // them either.
+    const failing: ExtractionDriver = {
+      kind: 'fake',
+      extract: async () => ({
+        ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'driver boom',
+      }),
+    };
+    const h = makeHarness({
+      dueRows: [dueRow({ attempts: 2 })],
+      messages: [msg(10, 'inbound', 'hello')],
+      contact: tenantContact(),
+      conversation: convWith('c1'),
+      driver: failing,
+    });
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    const [conversationId, message, nextDueAt] = (h.repo.fail as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(conversationId).toBe('conv1');
+    expect(message).toContain('driver boom');
+    // attempts=2 -> backoff = DEBOUNCE * 2^2, NOT parked (MAX is 5).
+    expect(nextDueAt).toBe(new Date(Date.parse(NOW) + DEBOUNCE * 4).toISOString());
+    expect(h.repo.complete).not.toHaveBeenCalled();
   });
 });
 
@@ -775,5 +867,333 @@ describe('transcript input caps', () => {
     expect(transcript).toHaveLength(30);
     expect(transcript[0]!.text.startsWith('B7 ')).toBe(true); // chronological, oldest kept = B7
     expect(transcript[transcript.length - 1]!.text).toBe('hi');
+  });
+});
+
+describe('runDueExtractions - the run log envelope', () => {
+  const WROTE_PETS = 'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats","reason":"said so"}}}';
+
+  it('writes EXACTLY ONE record per run on the success path', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', WROTE_PETS)], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({ outcome: 'applied', trigger: 'sms', driver: 'fake' });
+    expect(h.runs[0]!.decisions['pets']).toMatchObject({ outcome: 'wrote', verdict: 'auto_applied' });
+  });
+
+  it('stamps REAL WALL-CLOCK timestamps from now(), never the simulated poll clock', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', WROTE_PETS)], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.startedAt).toBe(WALL_NOW);
+    expect(h.runs[0]!.startedAt).not.toBe(NOW);
+    expect(h.runs[0]!.finishedAt).toBe(WALL_NOW);
+    expect(h.runs[0]!.durationMs).toBe(0);
+  });
+
+  it('records a run of pure DROPS as no_op, not applied', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"voucherSize":{"op":"write","value":"2"}}}')],
+      contact: unknownContact(), conversation: convWith('c1'),
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.outcome).toBe('no_op');
+    expect(h.runs[0]!.decisions['voucherSize']).toMatchObject({ outcome: 'dropped', dropReason: 'wrong_contact_type', verdict: 'not_presented' });
+  });
+
+  it('records a no_new_client SKIP with a LIGHT window - ids and cursor, no bytes', async () => {
+    const seen = msg(10, 'inbound', 'older');
+    const h = makeHarness({ dueRows: [dueRow({ cursor: seen.tsMsgId })], messages: [seen], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    const w = h.runs[0]!.window!;
+    expect(h.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'no_new_client' });
+    expect(w.detail).toBe('light');
+    expect(w.cursor).toBe(seen.tsMsgId);
+    expect(w.messages.map((m) => m.tsMsgId)).toEqual([seen.tsMsgId]);
+    expect(w.messages[0]!.hash).toBeUndefined();
+    expect(w.messages[0]!.chars).toBeUndefined();
+    expect(w.windowParams).toBeUndefined();
+    expect(h.runs[0]!.decisions).toEqual({});
+    expect(h.seen).toHaveLength(0);
+  });
+
+  it('records a FULL window - hashes, caps, params - once the model is called', async () => {
+    const sms = msg(10, 'inbound', WROTE_PETS);
+    const h = makeHarness({ dueRows: [dueRow()], messages: [sms], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    const w = h.runs[0]!.window!;
+    expect(w.detail).toBe('full');
+    expect(w.windowParams).toBeDefined();
+    expect(w.messages[0]).toMatchObject({ tsMsgId: sms.tsMsgId, tier: 'new', truncated: false });
+    expect(w.messages[0]!.hash).toMatch(/^[0-9a-f]{16}$/);
+    expect(w.totalChars).toBeGreaterThan(0);
+  });
+
+  it('records no_contact and ineligible_type with NO window (they exit before the fetch)', async () => {
+    const noContact = makeHarness({ dueRows: [dueRow()], conversation: convWith('c1'), contact: undefined });
+    await runDueExtractions(NOW, noContact.deps);
+    expect(noContact.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'no_contact' });
+    expect(noContact.runs[0]!.window).toBeUndefined();
+    const landlord = makeHarness({ dueRows: [dueRow()], conversation: convWith('c1'), contact: landlordContact() });
+    await runDueExtractions(NOW, landlord.deps);
+    expect(landlord.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'ineligible_type' });
+    expect(landlord.runs[0]!.contactId).toBe('c1');
+    expect(landlord.runs[0]!.window).toBeUndefined();
+  });
+
+  it('records empty_window when nothing survived the cutoffs', async () => {
+    const h = makeHarness({ dueRows: [dueRow({ channel: 'voice' })], messages: [], contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ outcome: 'skipped', skipReason: 'empty_window' });
+    expect(h.runs[0]!.window!.detail).toBe('light');
+  });
+
+  it('records NOTHING for a lost claim - the sliding debounce is not a run', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], claimResult: false, contact: tenantContact(), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.aiRuns.putRun).not.toHaveBeenCalled();
+  });
+
+  it('names the failing stage: refusal / parse / driver, and still records window + decisions', async () => {
+    for (const failure of ['refusal', 'parse', 'driver'] as const) {
+      const h = makeHarness({
+        dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+        driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake', rawText: '{broken' }, failure, message: `${failure} boom` }) },
+      });
+      await runDueExtractions(NOW, h.deps);
+      expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: failure } });
+      expect(h.runs[0]!.window!.detail).toBe('full');
+      expect(Object.keys(h.runs[0]!.decisions)).toHaveLength(12);
+      expect(h.runs[0]!.rawText).toBe('{broken');
+    }
+  });
+
+  it('names error.kind repo when a WRAPPED repository read throws', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], contact: tenantContact(), conversation: convWith('c1') });
+    (h.deps.messages.listByConversation as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('ddb down'));
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'repo', message: 'ddb down' } });
+    expect(h.runs[0]!.window).toBeUndefined();
+  });
+
+  it('a SKIP-path complete() throw is failed/complete, keeps the skipReason, and still calls repo.fail', async () => {
+    const seen = msg(10, 'inbound', 'older');
+    const h = makeHarness({ dueRows: [dueRow({ cursor: seen.tsMsgId })], messages: [seen], contact: tenantContact(), conversation: convWith('c1') });
+    (h.repo.complete as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('complete boom'));
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', skipReason: 'no_new_client', error: { kind: 'complete' } });
+  });
+
+  it('a SUCCESS-path complete() throw still records the run that mutated the contact', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', WROTE_PETS)], contact: tenantContact(), conversation: convWith('c1') });
+    (h.repo.complete as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('complete boom'));
+    await runDueExtractions(NOW, h.deps);
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]).toMatchObject({ outcome: 'failed', error: { kind: 'complete' } });
+    expect(h.runs[0]!.decisions['pets']).toMatchObject({ outcome: 'wrote' });
+  });
+
+  it('stamps attempts and parked onto error - only runDueExtractions knows them', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ attempts: 4 })], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      driver: { kind: 'fake', extract: async () => ({ ok: false, meta: { driver: 'fake' }, failure: 'driver', message: 'boom' }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]!.error).toEqual({ kind: 'driver', message: 'boom', attempts: 4, parked: true });
+  });
+
+  it('records driver, model, usage and promptFingerprint from the call meta', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContact(), conversation: convWith('c1'),
+      driver: { kind: 'anthropic', extract: async () => ({ ok: true, meta: { driver: 'anthropic', model: 'claude-opus-4-8', rawText: '{"fields":{}}', usage: { inputTokens: 100, outputTokens: 20 }, promptFingerprint: 'abc123def456' }, result: { fields: {} } }) },
+    });
+    await runDueExtractions(NOW, h.deps);
+    expect(h.runs[0]).toMatchObject({ driver: 'anthropic', model: 'claude-opus-4-8', usage: { inputTokens: 100, outputTokens: 20 }, promptFingerprint: 'abc123def456', rawText: '{"fields":{}}' });
+  });
+
+  it('records profileFieldsPopulated - names only, never a profile snapshot', async () => {
+    const h = makeHarness({ dueRows: [dueRow()], messages: [msg(10, 'inbound', 'hello')], contact: tenantContactWith({ firstName: 'Ann', voucherSize: 2 }), conversation: convWith('c1') });
+    await runDueExtractions(NOW, h.deps);
+    const fields = h.runs[0]!.profileFieldsPopulated!;
+    expect(fields).toContain('firstName');
+    expect(fields).toContain('voucherSize');
+    expect(fields.join(',')).not.toContain('Ann');
+  });
+});
+
+describe('runDueExtractions - run log backstop and isolation', () => {
+  it('keeps the producing runId when finalization marker creation fails so an early accept can reconcile', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()], messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+      aiRuns: { beginFinalization: vi.fn(async () => { throw new Error('marker down'); }), putRun: vi.fn(async (record) => ({ ...record, itemId: 'x', expires_at: 0 })), setVerdict: vi.fn(async () => true) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+    const suggestion = (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { runId?: string };
+    expect(suggestion.runId).toBe((h.aiRuns.putRun as ReturnType<typeof vi.fn>).mock.calls[0]![0].runId);
+  });
+
+  it('stamps superseded on the earlier run whose suggestion this run displaced', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }),
+      conversation: convWith('c1'),
+    });
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => ({
+      item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+      displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+    }));
+
+    await runDueExtractions(NOW, h.deps);
+
+    expect(h.aiRuns.setVerdict).toHaveBeenCalledWith('run-earlier', 'pets', 'superseded', expect.anything());
+  });
+
+  it('keeps extraction successful when a superseded stamp fails', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }),
+      conversation: convWith('c1'),
+      aiRuns: {
+        beginFinalization: vi.fn(async () => true),
+        putRun: vi.fn(async (record) => ({ ...record, itemId: 'x', expires_at: 0 })),
+        setVerdict: vi.fn(async () => { throw new Error('ai_runs down'); }),
+      },
+    });
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => ({
+      item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+      displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+    }));
+
+    const out = await runDueExtractions(NOW, h.deps);
+
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.repo.complete).toHaveBeenCalledTimes(1);
+  });
+
+  it('the BACKSTOP genuinely executes and writes the SAME draft, never a fresh one', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+    });
+    h.applyEvents.emit.mockImplementationOnce(() => { throw new TypeError('unexpected defect in the event bus'); });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 0, failed: 1 });
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+    expect(h.runs[0]!.error).toMatchObject({ kind: 'repo', message: /unexpected defect/ });
+    expect(h.repo.complete).not.toHaveBeenCalled();
+    const stamped = (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mock.calls[0]![0] as { runId?: string };
+    expect(stamped.runId).toBeDefined();
+    expect(h.runs[0]!.runId).toBe(stamped.runId);
+    expect(h.runs[0]!.window!.detail).toBe('full');
+    expect(h.runs[0]!.rawText).toContain('two cats');
+    expect(h.runs[0]!.decisions).toEqual({});
+    expect(h.repo.fail).toHaveBeenCalledTimes(1);
+  });
+
+  it('an UNWRAPPED throw on one row never aborts the rest of the batch', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ conversationId: 'conv1' }), dueRow({ conversationId: 'conv2' })],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+    });
+    h.applyEvents.emit.mockImplementationOnce(() => { throw new TypeError('unexpected defect in the event bus'); });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out.failed).toBe(1);
+    expect(out.processed).toBe(1);
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(2);
+  });
+
+  it('a throwing run-log write leaves the extraction outcome, cursor and attempts untouched', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+      aiRuns: { beginFinalization: vi.fn(async () => true), putRun: vi.fn(async () => { throw new Error('ai_runs is on fire'); }), setVerdict: vi.fn(async () => true) },
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out).toEqual({ processed: 1, failed: 0 });
+    expect(h.repo.complete).toHaveBeenCalledTimes(1);
+    expect(h.repo.fail).not.toHaveBeenCalled();
+    expect(h.contactsUpdate).toHaveBeenCalled();
+  });
+
+  it('a clock fault on ONE row never aborts the rest of the batch', async () => {
+    // The draft allocation (deps.now() + randomUUID) used to sit OUTSIDE the
+    // per-row try, so a throw there escaped the for loop and killed every
+    // remaining row - the one place the per-row isolation guarantee did not
+    // hold, and that guarantee is the whole point of the backstop.
+    const h = makeHarness({
+      dueRows: [dueRow({ conversationId: 'conv1' }), dueRow({ conversationId: 'conv2' })],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"two cats"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+    });
+    let calls = 0;
+    h.deps.now = () => {
+      calls += 1;
+      if (calls === 1) throw new Error('clock down');
+      return WALL_NOW;
+    };
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out.processed).toBe(1);
+    expect(h.aiRuns.putRun).toHaveBeenCalledTimes(1);
+  });
+
+  it('a clock fault in the superseded stamp never aborts the rest of the batch', async () => {
+    const h = makeHarness({
+      dueRows: [dueRow({ conversationId: 'conv1' }), dueRow({ conversationId: 'conv2' })],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"suggest","value":"two cats"}}}')],
+      contact: tenantContactWith({ pets: 'a dog' }), conversation: convWith('c1'),
+    });
+    // Row 1's tail makes exactly two clock reads once putSuggestion flips this
+    // on: recordRun's finishedAt (swallowed by recordRun's own catch) and then
+    // stampSuperseded's `at`. Break both and let row 2 run on a healthy clock,
+    // so this pins ISOLATION rather than a permanently dead clock (which row 1's
+    // own draft guard would already handle).
+    let breakClock = 0;
+    h.deps.now = () => {
+      if (breakClock > 0) {
+        breakClock -= 1;
+        throw new Error('clock down');
+      }
+      return WALL_NOW;
+    };
+    // The displaced pointer is what makes stampSuperseded reach its clock read.
+    (h.repo.putSuggestion as ReturnType<typeof vi.fn>).mockImplementationOnce(async (suggestion) => {
+      breakClock = 2;
+      return {
+        item: { ...suggestion, itemId: 'x', _pendingPartition: 'pending', createdAt: NOW },
+        displaced: { ...suggestion, itemId: 'x', createdAt: NOW, runId: 'run-earlier' },
+      };
+    });
+    const out = await runDueExtractions(NOW, h.deps);
+    expect(out.processed).toBe(2);
+    expect(h.repo.complete).toHaveBeenCalledTimes(2);
+  });
+
+  it('PII GUARD: no run-path error object ever carries rawText or a decision value', async () => {
+    const capture = createLogCapture();
+    const h = makeHarness({
+      dueRows: [dueRow()],
+      messages: [msg(10, 'inbound', 'EXTRACT:{"fields":{"pets":{"op":"write","value":"SECRETVALUE"}}}')],
+      contact: tenantContact(), conversation: convWith('c1'),
+      logger: createLogger({ destination: capture.stream, level: 'debug' }),
+    });
+    (h.repo.complete as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error('complete boom'));
+    await runDueExtractions(NOW, h.deps);
+    const logged = JSON.stringify(capture.lines);
+    expect(logged.length).toBeGreaterThan(0);
+    expect(logged).toContain('extraction poll: row failed');
+    expect(logged).not.toContain('SECRETVALUE');
+    expect(logged).not.toContain('EXTRACT:');
+    expect(JSON.stringify(h.runs[0])).toContain('SECRETVALUE');
   });
 });

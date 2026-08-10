@@ -4,6 +4,9 @@
 import { ApiError, request, requestWithStatus } from './client.js';
 import type {
   AdminUserView,
+  AiRunDetailResponse,
+  AiRunListPage,
+  AiRunScope,
   AudienceFilter,
   BroadcastResults,
   BroadcastsPage,
@@ -53,6 +56,7 @@ import type {
   SendMessageResult,
   SimilarUnit,
   SuggestionItem,
+  SuggestionRequestIdentity,
   SystemAlarmsResult,
   SystemErrorsResult,
   SystemFlags,
@@ -1224,10 +1228,11 @@ export async function getSuggestions(
 export async function acceptSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<{ contact: Contact; suggestions: SuggestionItem[] }> {
   return request<{ contact: Contact; suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/accept`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
 }
 
@@ -1236,10 +1241,11 @@ export async function acceptSuggestion(
 export async function dismissSuggestion(
   contactId: string,
   target: string,
+  identity: SuggestionRequestIdentity,
 ): Promise<SuggestionItem[]> {
   const res = await request<{ suggestions: SuggestionItem[] }>(
     `/api/contacts/${encodeURIComponent(contactId)}/suggestions/${encodeURIComponent(target)}/dismiss`,
-    { method: 'POST' },
+    { method: 'POST', body: identity },
   );
   return res.suggestions;
 }
@@ -2330,4 +2336,22 @@ export async function createTourRelay(
   );
   if (res.status === 202) return { deferred: true, roster: res.body as RosterView };
   return { deferred: false, tour: (res.body as { tour: Tour }).tour };
+}
+
+/** GET /api/ai-runs - one page of the admin AI run log. */
+export function listAiRuns(
+  params: { scope?: AiRunScope; before?: string; from?: string; to?: string; limit?: number } = {},
+  signal?: AbortSignal,
+): Promise<AiRunListPage> {
+  return request<AiRunListPage>('/api/ai-runs', {
+    query: { scope: params.scope, before: params.before, from: params.from, to: params.to, limit: params.limit },
+    ...(signal !== undefined && { signal }),
+  });
+}
+
+/** GET /api/ai-runs/:runId - one run plus its rehydrated message window. */
+export function getAiRun(runId: string, signal?: AbortSignal): Promise<AiRunDetailResponse> {
+  return request<AiRunDetailResponse>(`/api/ai-runs/${encodeURIComponent(runId)}`, {
+    ...(signal !== undefined && { signal }),
+  });
 }

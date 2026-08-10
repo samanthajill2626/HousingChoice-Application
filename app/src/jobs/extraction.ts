@@ -24,13 +24,27 @@ import type { ConversationsRepo } from '../repos/conversationsRepo.js';
 import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import { contactPhones, PHONE_REF_PREFIX } from '../repos/contactsRepo.js';
 import type { MessageItem, MessagesRepo } from '../repos/messagesRepo.js';
+import { randomUUID } from 'node:crypto';
 import type {
   ExtractionDriver,
   ExtractionProfileSnapshot,
+  ExtractionResult,
   TranscriptUtterance,
 } from '../adapters/extraction.js';
 import { applyExtraction, type ApplyDeps } from '../services/extraction/apply.js';
 import { contactAddressToParts, formatAddressParts } from '../services/extraction/address.js';
+import type {
+  AiRunRecordInput,
+  AiRunsRepo,
+  RunErrorKind,
+  RunOutcome,
+  RunTrigger,
+  SkipReason,
+} from '../repos/aiRunsRepo.js';
+import { isDecisionTarget, type DecisionTarget, type RunDecision, type RunWindow } from '../services/extraction/runTypes.js';
+import { buildFullRunWindow, buildLightRunWindow, type WindowMessagePieces } from '../services/extraction/runWindow.js';
+import { buildDecisions } from '../services/extraction/decisions.js';
+import { parseExtractionOps } from '../services/extraction/schema.js';
 
 /** Consecutive failures before an item is PARKED (no further auto-retries). */
 export const MAX_EXTRACTION_ATTEMPTS = 5;
@@ -69,6 +83,25 @@ export interface ExtractionJobDeps {
   applyDeps: ApplyDeps;
   config: Pick<AppConfig, 'aiExtractionDebounceMs'>;
   logger: Logger;
+  /**
+   * The run-log writer. REQUIRED so a missed construction site is a typecheck
+   * failure, not a silently empty log. All three sites must supply it:
+   * worker.ts (the 60s poll), routes/dev.ts (the deterministic dev tick), and
+   * the unit-test harness. Missing the dev tick would leave the log permanently
+   * empty in e2e and local development - the exact place this feature is first
+   * exercised (design 8).
+   */
+  aiRuns: Pick<AiRunsRepo, 'beginFinalization' | 'putRun' | 'setVerdict'>;
+  /**
+   * REAL WALL-CLOCK now, for the run record's timestamps ONLY (design section 6,
+   * as amended). NOT the poll's nowIso: the dev tick runs a SIMULATED FUTURE
+   * clock (routes/dev.ts:432 advances by the debounce window), so the poll clock
+   * would stamp dev and e2e runs about one debounce into the future and mis-sort
+   * the log against real time. All domain logic - cursor comparisons, the age
+   * cutoff, claim/complete/fail - keeps using nowIso, unchanged. Injected so
+   * tests can pin it.
+   */
+  now(): string;
 }
 
 /** Read a string field off the flexible contact document, or undefined. */
@@ -77,7 +110,7 @@ function str(v: unknown): string | undefined {
 }
 
 /** Build the ExtractionProfileSnapshot the model reconciles against. */
-function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
+export function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   const profile: ExtractionProfileSnapshot = {
     contactType: contact.type,
     phones: contactPhones(contact).map((p) => p.phone),
@@ -107,6 +140,9 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
   return profile;
 }
 
+/** EXPORTED for the run log + run-detail view. Reimplementing any of
+ *  toUtterances / capUtterances / clampHeadTail / toProfile would guarantee the
+ *  hash mismatch the window hash exists to detect (design 6.4). */
 /**
  * Map a stored message to zero or more channel-tagged transcript utterances.
  *
@@ -126,7 +162,7 @@ function toProfile(contact: ContactItem): ExtractionProfileSnapshot {
  *       caller is the client by construction).
  * - call WITHOUT a completed transcript, or with an empty one: nothing.
  */
-function toUtterances(m: MessageItem): TranscriptUtterance[] {
+export function toUtterances(m: MessageItem): TranscriptUtterance[] {
   if (m.type === 'call') {
     if (m.transcript_status !== 'completed' || !m.transcript) return [];
     const at = m.created_at;
@@ -135,25 +171,26 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
       if (line.length === 0) continue; // drop empty lines
       const staff = /^Staff: (.*)$/.exec(line);
       if (staff) {
-        utterances.push({ speaker: 'staff', text: staff[1]!, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'staff', text: staff[1]!, at, channel: 'voice' });
         continue;
       }
       const client = /^Client: (.*)$/.exec(line);
       if (client) {
-        utterances.push({ speaker: 'client', text: client[1]!, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'client', text: client[1]!, at, channel: 'voice' });
         continue;
       }
       if (/^Speaker \d+: /.test(line)) {
-        utterances.push({ speaker: 'unknown', text: line, at, channel: 'voice' });
+        utterances.push({ tsMsgId: m.tsMsgId, speaker: 'unknown', text: line, at, channel: 'voice' });
         continue;
       }
-      utterances.push({ speaker: 'client', text: line, at, channel: 'voice' });
+      utterances.push({ tsMsgId: m.tsMsgId, speaker: 'client', text: line, at, channel: 'voice' });
     }
     return utterances;
   }
   if (m.type === 'email') {
     return [
       {
+        tsMsgId: m.tsMsgId,
         speaker: m.direction === 'inbound' ? 'client' : 'staff',
         text: m.body ?? '',
         at: m.created_at,
@@ -163,6 +200,7 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
   }
   return [
     {
+      tsMsgId: m.tsMsgId,
       speaker: m.direction === 'inbound' ? 'client' : 'staff',
       text: m.body ?? '[media]',
       at: m.created_at,
@@ -172,7 +210,7 @@ function toUtterances(m: MessageItem): TranscriptUtterance[] {
 }
 
 /** `head [marker] tail` with total length <= cap (facts cluster at the edges). */
-function clampHeadTail(text: string, cap: number): string {
+export function clampHeadTail(text: string, cap: number): string {
   if (text.length <= cap) return text;
   const usable = cap - TRUNCATION_MARKER.length - 2; // two joining spaces
   const head = Math.floor(usable * 0.7);
@@ -188,7 +226,7 @@ function clampHeadTail(text: string, cap: number): string {
  * per-line speaker attribution (Layer 1) is never orphaned mid-line. The
  * marker is appended to the last kept head utterance.
  */
-function capUtterances(utterances: TranscriptUtterance[], cap: number): TranscriptUtterance[] {
+export function capUtterances(utterances: TranscriptUtterance[], cap: number): TranscriptUtterance[] {
   const total = utterances.reduce((n, u) => n + u.text.length, 0);
   if (total <= cap) return utterances;
   if (utterances.length === 1) {
@@ -233,151 +271,315 @@ function capUtterances(utterances: TranscriptUtterance[], cap: number): Transcri
   return [...head, ...tail];
 }
 
+/** The run record under construction, owned by runDueExtractions. */
+export interface RunDraft {
+  runId: string;
+  startedAt: string;
+  conversationId: string;
+  contactId?: string;
+  trigger: RunTrigger;
+  skipReason?: SkipReason;
+  error?: { kind: RunErrorKind; message: string; attempts?: number; parked?: boolean };
+  driver?: 'anthropic' | 'console' | 'fake';
+  model?: string;
+  promptFingerprint?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+  window?: RunWindow;
+  profileFieldsPopulated?: string[];
+  rawText?: string;
+  rawResult?: ExtractionResult;
+  decisions?: Partial<Record<DecisionTarget, RunDecision>>;
+  notedLines?: number;
+  displaced: Array<{ target: string; runId: string; createdAt: string }>;
+}
+
+/** Allocate a draft before processing so the outer backstop retains all evidence. */
+export function newRunDraft(row: DueExtractionItem, startedAt: string): RunDraft {
+  return { runId: randomUUID(), startedAt, conversationId: row.conversationId, trigger: row.channel, displaced: [] };
+}
+
+/** Only a lost claim and a defensive malformed due row are deliberately unrecorded. */
+export type ProcessRowResult = { record: false } | { record: true; outcome: RunOutcome };
+
+/** Record populated field names, never a profile snapshot. */
+function profileFieldNames(profile: ExtractionProfileSnapshot): string[] {
+  const names = Object.entries(profile)
+    .filter(([key, value]) => key !== 'phones' && key !== 'contactType' && value !== undefined)
+    .map(([key]) => key);
+  if (profile.phones.length > 0) names.push('phones');
+  return names.sort();
+}
+
 /**
- * Process ONE due row end-to-end. Throws on driver/apply failure so the caller
- * can route it through the backoff/park failure path; returns a discriminator
- * so the caller can count processed vs nothing-to-do runs.
+ * Build ONE piece of the run-log draft, best-effort (design section 8: "The
+ * recorder is strictly best-effort ... It must never fail an extraction run,
+ * re-arm a due row, or burn a retry attempt.").
+ *
+ * The builders below (window, decisions) are pure assembly for the run RECORD -
+ * nothing downstream of extraction reads them. A throw from one used to unwind
+ * into runDueExtractions' per-row backstop, which stamped outcome 'failed',
+ * called repo.fail(), burned an attempt and re-armed the row - so observability
+ * broke what it observed. On a throw this logs ids-only and returns undefined;
+ * the caller leaves its draft field as it was and continues on the exact same
+ * path (same gates, same outcome, same cursor advance, same complete/fail
+ * routing). Fields are optional on RunDraft and recordRun already defaults the
+ * absent shapes, so no degraded record is malformed.
  */
+function draftPiece<T>(logger: Logger, draft: RunDraft, build: () => T): T | undefined {
+  try {
+    return build();
+  } catch (err) {
+    logger.warn(
+      { conversationId: draft.conversationId, runId: draft.runId, err },
+      'ai run draft assembly failed (best-effort)',
+    );
+    return undefined;
+  }
+}
+
+/** Process one due row, filling the caller-owned draft on every known path. */
 async function processRow(
   row: DueExtractionItem,
   nowIso: string,
   deps: ExtractionJobDeps,
-): Promise<'processed' | 'skipped'> {
+  draft: RunDraft,
+): Promise<ProcessRowResult> {
   const { repo, conversations, messages, contacts, driver, applyDeps, logger } = deps;
   const conversationId = row.conversationId;
   const cursor = row.cursor ?? '';
+  const failed = (kind: RunErrorKind, err: unknown): ProcessRowResult => {
+    draft.error = { kind, message: err instanceof Error ? err.message : String(err) };
+    return { record: true, outcome: 'failed' };
+  };
+  const completeOrFail = async (nextCursor: string): Promise<ProcessRowResult | undefined> => {
+    try {
+      await repo.complete(conversationId, nextCursor, nowIso);
+      return undefined;
+    } catch (err) {
+      return failed('complete', err);
+    }
+  };
 
-  // Claim BEFORE any work: the conditional `dueAt = listedDueAt` guard means a
-  // row that slid forward (a newer inbound re-scheduled it) loses here, so a
-  // debounce burst yields exactly one run at the final dueAt.
   const listedDueAt = row.dueAt;
-  if (listedDueAt === undefined) return 'skipped'; // defensive; listed rows carry it
-  const claimed = await repo.claim(conversationId, nowIso, listedDueAt);
+  if (listedDueAt === undefined) return { record: false };
+  let claimed: boolean;
+  try {
+    claimed = await repo.claim(conversationId, nowIso, listedDueAt);
+  } catch (err) {
+    return failed('repo', err);
+  }
   if (!claimed) {
     logger.debug({ conversationId }, 'extraction claim lost (slid or already claimed) - skipping');
-    return 'skipped';
+    return { record: false };
   }
 
-  // Resolve the conversation + its 1:1 contact.
-  const conv = await conversations.getById(conversationId);
-  const participant = conv?.participants?.[0];
+  let conv: Awaited<ReturnType<typeof conversations.getById>>;
   let contact: ContactItem | undefined;
-  if (conv) {
-    if (participant?.contactId) {
-      contact = await contacts.getById(participant.contactId);
-    } else {
-      const phone = participant?.phone ?? conv.participant_phone;
-      if (phone) contact = await contacts.findByPhone(phone);
+  try {
+    conv = await conversations.getById(conversationId);
+    const participant = conv?.participants?.[0];
+    if (conv) {
+      if (participant?.contactId) contact = await contacts.getById(participant.contactId);
+      else {
+        const phone = participant?.phone ?? conv.participant_phone;
+        if (phone) contact = await contacts.findByPhone(phone);
+      }
     }
+  } catch (err) {
+    return failed('repo', err);
   }
 
-  // Nothing to extract for: a missing conversation/contact, a landlord/partner/
-  // team_member contact, or a bare phone-ref pointer item. Complete with the
-  // EXISTING cursor (never fail forever) so the row leaves the due index.
-  if (
-    !conv ||
-    !contact ||
-    contact.contactId.startsWith(PHONE_REF_PREFIX) ||
-    contact.type === 'landlord' ||
-    contact.type === 'partner' ||
-    contact.type === 'team_member'
-  ) {
-    logger.debug({ conversationId }, 'extraction: nothing to extract (missing/ineligible contact) - completing');
-    await repo.complete(conversationId, cursor, nowIso);
-    return 'skipped';
+  if (!conv || !contact || contact.contactId.startsWith(PHONE_REF_PREFIX)) {
+    logger.debug({ conversationId }, 'extraction: nothing to extract (missing contact) - completing');
+    draft.skipReason = 'no_contact';
+    const failure = await completeOrFail(cursor);
+    return failure ?? { record: true, outcome: 'skipped' };
   }
-
-  // Transcript window: newest N messages, REVERSED to chronological, with rows
-  // older than MAX_TRANSCRIPT_AGE_DAYS dropped. The window deliberately INCLUDES
-  // messages at/before the cursor for context - the cursor marks progress, not a
-  // hard filter; we only RUN when a client utterance is newer than the cursor.
-  const newestFirst = await messages.listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES });
+  // A resolved contact is still useful audit context when its type is ineligible.
+  // Set this before the eligibility exit so the run gets its contacts# pointer.
+  draft.contactId = contact.contactId;
+  if (contact.type === 'landlord' || contact.type === 'partner' || contact.type === 'team_member') {
+    logger.debug({ conversationId, contactType: contact.type }, 'extraction: ineligible contact type - completing');
+    draft.skipReason = 'ineligible_type';
+    const failure = await completeOrFail(cursor);
+    return failure ?? { record: true, outcome: 'skipped' };
+  }
+  let newestFirst: MessageItem[];
+  try {
+    newestFirst = await messages.listByConversation(conversationId, { limit: MAX_TRANSCRIPT_MESSAGES });
+  } catch (err) {
+    return failed('repo', err);
+  }
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
-  const fresh = [...newestFirst].reverse().filter((m) => m.created_at >= cutoff);
+  const chronological = [...newestFirst].reverse();
+  const fresh = chronological.filter((m) => m.created_at >= cutoff);
+  const agedOutTsMsgIds = chronological.filter((m) => m.created_at < cutoff).map((m) => m.tsMsgId);
+  const newestTsMsgId = fresh[fresh.length - 1]?.tsMsgId;
+  const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
+    cursor,
+    fetchedCount: newestFirst.length,
+    agedOutTsMsgIds,
+    messages: fresh.map((m) => ({ tsMsgId: m.tsMsgId, type: m.type, direction: m.direction })),
+    ...(newestTsMsgId !== undefined && { newestTsMsgId }),
+  }));
+  // A partial RunWindow is not expressible, so a failed build omits the window
+  // entirely rather than storing half of one.
+  if (lightWindow !== undefined) draft.window = lightWindow;
 
-  // Freshness gate. A voice- or triage-triggered run BYPASSES it entirely -
-  // both are signals for content the cursor logic can't see:
-  //   - voice: a transcript persists minutes after the call row's tsMsgId, so an
-  //     SMS-triggered run may already have advanced the cursor past the call row.
-  //   - triage: a human just flipped the contact to tenant, so tenant-only facts
-  //     (voucherSize/housingAuthority/...) the apply layer previously IGNORED
-  //     for the unknown type are now applicable - re-read the existing window.
-  // On an SMS-triggered run, a fresh COMPLETED-transcript call also counts as
-  // new client-side content: it carries the client's speech regardless of the
-  // call row's stored direction.
-  const hasNewClient =
-    row.channel === 'voice' ||
-    row.channel === 'triage' ||
-    fresh.some(
-      (m) =>
-        m.tsMsgId > cursor &&
-        (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
-    );
+  const hasNewClient = row.channel === 'voice' || row.channel === 'triage' || fresh.some(
+    (m) => m.tsMsgId > cursor && (m.direction === 'inbound' || (m.type === 'call' && m.transcript_status === 'completed')),
+  );
   if (!hasNewClient) {
     logger.debug({ conversationId }, 'extraction: no new client messages since cursor - completing');
-    await repo.complete(conversationId, cursor, nowIso);
-    return 'skipped';
+    draft.skipReason = 'no_new_client';
+    const failure = await completeOrFail(cursor);
+    return failure ?? { record: true, outcome: 'skipped' };
   }
-
-  // A voice-/triage-triggered run bypasses the client-freshness early-exit
-  // above, so an empty window (nothing survived the 30-day / newest-50 cutoff)
-  // would fall through to fresh[fresh.length - 1] and throw. Guard it
-  // explicitly: nothing to extract -> complete with the existing cursor. (An
-  // SMS run already early-exits on an empty window via hasNewClient=false.)
   if (fresh.length === 0) {
     logger.debug({ conversationId }, 'extraction: empty transcript window - completing');
-    await repo.complete(conversationId, cursor, nowIso);
-    return 'skipped';
+    draft.skipReason = 'empty_window';
+    const failure = await completeOrFail(cursor);
+    return failure ?? { record: true, outcome: 'skipped' };
   }
 
-  const newestTsMsgId = fresh[fresh.length - 1]!.tsMsgId;
-  // Tiered per-message caps (see the constants' header comment): post-cursor
-  // messages get their one generous full-fidelity read; already-extracted ones
-  // stay as tightly-capped reconciliation context.
-  const perMessage = fresh.map((m) => ({
-    tsMsgId: m.tsMsgId,
-    utterances: capUtterances(
-      toUtterances(m),
-      m.tsMsgId > cursor ? NEW_MESSAGE_CHAR_CAP : SEEN_MESSAGE_CHAR_CAP,
-    ),
-  }));
-  // Whole-window budget: fill newest-first and STOP at the first overflow, so
-  // the newest (unprocessed) content always wins and the window stays a
-  // contiguous newest-N slice - the oldest context drops first. A capped
-  // message is at most NEW_MESSAGE_CHAR_CAP < budget, so the newest message
-  // always fits.
+  const perMessage: WindowMessagePieces[] = fresh.map((m) => {
+    const raw = toUtterances(m);
+    const capChars = m.tsMsgId > cursor ? NEW_MESSAGE_CHAR_CAP : SEEN_MESSAGE_CHAR_CAP;
+    return { tsMsgId: m.tsMsgId, type: m.type, direction: m.direction, raw, capped: capUtterances(raw, capChars), capChars };
+  });
   const included = new Set<string>();
   let windowChars = 0;
   for (let k = perMessage.length - 1; k >= 0; k -= 1) {
-    const size = perMessage[k]!.utterances.reduce((n, u) => n + u.text.length, 0);
+    const size = perMessage[k]!.capped.reduce((n, u) => n + u.text.length, 0);
     if (windowChars + size > WINDOW_CHAR_BUDGET) break;
     windowChars += size;
     included.add(perMessage[k]!.tsMsgId);
   }
-  const transcript = perMessage
-    .filter((p) => included.has(p.tsMsgId))
-    .flatMap((p) => p.utterances);
-  // Spec Layer 3: any unknown-speaker (Speaker N) call line demotes the whole
-  // run to suggest-only in apply.
+  const transcript = perMessage.filter((p) => included.has(p.tsMsgId)).flatMap((p) => p.capped);
   const hasInferredRoleContent = transcript.some((u) => u.speaker === 'unknown');
+  // A failed upgrade keeps the LIGHT window already assembled above: it built
+  // successfully from the same data, so retaining it degrades nothing.
+  const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
+    cursor, fetchedCount: newestFirst.length, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
+    ...(newestTsMsgId !== undefined && { newestTsMsgId }),
+  }));
+  if (fullWindow !== undefined) draft.window = fullWindow;
 
-  const result = await driver.extract({ transcript, profile: toProfile(contact) });
-  await applyExtraction(applyDeps, {
-    contact,
-    conversationId,
-    cursorTsMsgId: newestTsMsgId,
-    result,
-    hasInferredRoleContent,
+  const profile = toProfile(contact);
+  const profileFields = draftPiece(logger, draft, () => profileFieldNames(profile));
+  if (profileFields !== undefined) draft.profileFieldsPopulated = profileFields;
+  const call = await driver.extract({ transcript, profile });
+  draft.driver = call.meta.driver;
+  if (call.meta.model !== undefined) draft.model = call.meta.model;
+  if (call.meta.promptFingerprint !== undefined) draft.promptFingerprint = call.meta.promptFingerprint;
+  if (call.meta.usage !== undefined) draft.usage = call.meta.usage;
+  if (call.meta.rawText !== undefined) draft.rawText = call.meta.rawText;
+  const warnUnexplained = (target: DecisionTarget): void => {
+    logger.warn({ conversationId, target }, 'ai run log: unexplained dropped decision');
+  };
+  if (!call.ok) {
+    const failureDecisions = draftPiece(logger, draft, () => buildDecisions({
+      ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,
+      applyDecisions: [], onUnexplained: warnUnexplained,
+    }));
+    if (failureDecisions !== undefined) draft.decisions = failureDecisions;
+    draft.notedLines = 0;
+    return failed(call.failure, new Error(call.message));
+  }
+  draft.rawResult = call.result;
+
+  // applyExtraction guards its known effects. An unexpected throw is intentionally
+  // left to runDueExtractions' per-row backstop, which keeps the same draft.
+  try {
+    await deps.aiRuns.beginFinalization(draft.runId, draft.startedAt);
+  } catch (err) {
+    // The marker only protects optional observability linkage; extraction must continue.
+    logger.warn({ conversationId, runId: draft.runId, err }, 'ai run finalization marker failed (best-effort)');
+  }
+  const applyOutcome = await applyExtraction(applyDeps, {
+    contact, conversationId, cursorTsMsgId: newestTsMsgId, result: call.result, hasInferredRoleContent,
+    runId: draft.runId,
   });
-  // Keep the cursor MONOTONIC: a voice-triggered run's newestTsMsgId can be OLDER
-  // than the current cursor (the call row predates a cursor an SMS run already
-  // advanced), and complete() writes the cursor unconditionally - advancing to
-  // max(newest, cursor) prevents a regression that would make a later SMS run
-  // re-examine already-processed messages.
-  const nextCursor = newestTsMsgId > cursor ? newestTsMsgId : cursor;
-  await repo.complete(conversationId, nextCursor, nowIso);
+  // The most damaging site: applyExtraction has ALREADY committed the contact
+  // write. A throw here used to skip completeOrFail below, so the cursor never
+  // advanced, the backstop burned an attempt, and the next poll re-billed the
+  // model for the same window. recordRun defaults absent decisions to {}.
+  const appliedDecisions = draftPiece(logger, draft, () => buildDecisions({
+    ops: parseExtractionOps(call.meta.rawText), rawTextPresent: call.meta.rawText !== undefined,
+    applyDecisions: applyOutcome.decisions, onUnexplained: warnUnexplained,
+  }));
+  if (appliedDecisions !== undefined) draft.decisions = appliedDecisions;
+  draft.notedLines = applyOutcome.notedLines;
+  draft.displaced = applyOutcome.displaced;
+  const nextCursor = newestTsMsgId !== undefined && newestTsMsgId > cursor ? newestTsMsgId : cursor;
+  const completeFailure = await completeOrFail(nextCursor);
+  if (completeFailure) return completeFailure;
   logger.info({ conversationId }, 'extraction run complete');
-  return 'processed';
+  const touched = applyOutcome.wrote.length > 0 || applyOutcome.suggested.length > 0 || applyOutcome.notedLines > 0;
+  return { record: true, outcome: touched ? 'applied' : 'no_op' };
+}
+
+/** The single, strictly best-effort run-record write. */
+async function recordRun(deps: ExtractionJobDeps, outcome: RunOutcome, draft: RunDraft): Promise<void> {
+  try {
+    const finishedAt = deps.now();
+    const durationMs = Math.max(0, Date.parse(finishedAt) - Date.parse(draft.startedAt));
+    const record: AiRunRecordInput = {
+      runId: draft.runId,
+      startedAt: draft.startedAt,
+      finishedAt,
+      durationMs,
+      conversationId: draft.conversationId,
+      ...(draft.contactId !== undefined && { contactId: draft.contactId }),
+      trigger: draft.trigger,
+      outcome,
+      ...(draft.skipReason !== undefined && { skipReason: draft.skipReason }),
+      ...(draft.error !== undefined && { error: {
+        kind: draft.error.kind, message: draft.error.message,
+        attempts: draft.error.attempts ?? 0, parked: draft.error.parked ?? false,
+      } }),
+      driver: draft.driver ?? deps.driver.kind,
+      ...(draft.model !== undefined && { model: draft.model }),
+      ...(draft.promptFingerprint !== undefined && { promptFingerprint: draft.promptFingerprint }),
+      ...(draft.usage !== undefined && { usage: draft.usage }),
+      ...(draft.window !== undefined && { window: draft.window }),
+      ...(draft.profileFieldsPopulated !== undefined && { profileFieldsPopulated: draft.profileFieldsPopulated }),
+      ...(draft.rawText !== undefined && { rawText: draft.rawText }),
+      ...(draft.rawResult !== undefined && { rawResult: draft.rawResult }),
+      decisions: draft.decisions ?? {},
+      notedLines: draft.notedLines ?? 0,
+    };
+    await deps.aiRuns.putRun(record);
+  } catch (err) {
+    deps.logger.warn(
+      { conversationId: draft.conversationId, runId: draft.runId, err },
+      'ai run log write failed (best-effort - extraction unaffected)',
+    );
+  }
+}
+
+/**
+ * Stamp superseded on every earlier run whose pending suggestion this run
+ * displaced. This belongs in the job, not apply.ts, so a run-log failure cannot
+ * turn a successful suggestion replacement into a suggestion failure.
+ */
+async function stampSuperseded(deps: ExtractionJobDeps, draft: RunDraft): Promise<void> {
+  for (const { target, runId, createdAt } of draft.displaced) {
+    if (!isDecisionTarget(target)) continue;
+    try {
+      // Inside the per-item backstop: this was the run log's last unguarded
+      // clock read, and stampSuperseded's call site is itself unguarded, so a
+      // throw here escaped the whole poll loop. Now per-item rather than one
+      // shared value - no invariant depends on the stamps being equal.
+      const at = deps.now();
+      await deps.aiRuns.setVerdict(runId, target, 'superseded', { at, expectedVerdict: 'pending', freshSuggestionCreatedAt: createdAt });
+    } catch (err) {
+      deps.logger.warn(
+        { conversationId: draft.conversationId, runId, target, err },
+        'ai run superseded stamp failed (best-effort)',
+      );
+    }
+  }
 }
 
 /**
@@ -399,29 +601,53 @@ export async function runDueExtractions(
   logger.info({ count: dueRows.length }, 'extraction poll: processing due rows');
 
   for (const row of dueRows) {
+    // The only statement that used to sit outside the per-row backstop. A clock
+    // or uuid fault here has no runId to record under and never claimed the
+    // row, so the honest outcome is to skip THIS row and let the next poll
+    // retry it - never to abort the rest of the batch. Deliberately NOT counted
+    // as `failed` and NOT routed through repo.fail(): the row was never
+    // claimed, so burning an attempt for an observability fault is exactly the
+    // anti-pattern the draft helpers exist to prevent.
+    let draft: RunDraft;
     try {
-      const outcome = await processRow(row, nowIso, deps);
-      if (outcome === 'processed') processed += 1;
+      draft = newRunDraft(row, deps.now());
     } catch (err) {
+      logger.error(
+        { conversationId: row.conversationId, err },
+        'extraction poll: run draft allocation failed - row skipped',
+      );
+      continue;
+    }
+    let result: ProcessRowResult;
+    try {
+      result = await processRow(row, nowIso, deps, draft);
+    } catch (err) {
+      if (draft.error === undefined) {
+        draft.error = { kind: 'repo', message: err instanceof Error ? err.message : String(err) };
+      }
+      result = { record: true, outcome: 'failed' };
+    }
+    if (!result.record) continue;
+
+    const { outcome } = result;
+    if (outcome === 'applied' || outcome === 'no_op') processed += 1;
+    if (outcome === 'failed') {
       failed += 1;
-      // The driver or apply threw (incl. ExtractionRefusedError). Re-arm with
-      // exponential backoff off the CURRENT attempt count, or PARK once the
-      // next attempt would reach MAX_EXTRACTION_ATTEMPTS. Isolated per row.
       const attempts = row.attempts ?? 0;
-      const nextDueAt =
-        attempts + 1 >= MAX_EXTRACTION_ATTEMPTS
-          ? null
-          : new Date(
-              Date.parse(nowIso) + Math.min(config.aiExtractionDebounceMs * 2 ** attempts, MAX_BACKOFF_MS),
-            ).toISOString();
-      const message = err instanceof Error ? err.message : String(err);
-      logger.error({ conversationId: row.conversationId, attempts, parked: nextDueAt === null }, 'extraction poll: row failed');
+      const parked = attempts + 1 >= MAX_EXTRACTION_ATTEMPTS;
+      const nextDueAt = parked ? null : new Date(
+        Date.parse(nowIso) + Math.min(config.aiExtractionDebounceMs * 2 ** attempts, MAX_BACKOFF_MS),
+      ).toISOString();
+      logger.error({ conversationId: row.conversationId, attempts, parked }, 'extraction poll: row failed');
+      if (draft.error !== undefined) draft.error = { ...draft.error, attempts, parked };
       try {
-        await repo.fail(row.conversationId, message, nextDueAt);
+        await repo.fail(row.conversationId, draft.error?.message ?? 'unknown', nextDueAt);
       } catch (failErr) {
         logger.error({ conversationId: row.conversationId, err: failErr }, 'extraction poll: fail() write errored');
       }
     }
+    await recordRun(deps, outcome, draft);
+    await stampSuperseded(deps, draft);
   }
 
   return { processed, failed };

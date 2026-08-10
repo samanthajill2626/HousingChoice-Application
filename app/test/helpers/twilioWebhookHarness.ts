@@ -3,7 +3,7 @@
 // signed-form-POST builder that computes REAL HMAC-SHA1 X-Twilio-Signature
 // values with the twilio package — signature verification is exercised for
 // real, never mocked out.
-import { createHash } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { Readable } from 'node:stream';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import type { Express, Router } from 'express';
@@ -35,7 +35,22 @@ import {
   type ContactPhone,
   type ContactsRepo,
 } from '../../src/repos/contactsRepo.js';
-import type { ExtractionRepo, SuggestionItem } from '../../src/repos/extractionRepo.js';
+import {
+  SuggestionDismissedError,
+  type ExtractionRepo,
+  type SuggestionItem,
+} from '../../src/repos/extractionRepo.js';
+import {
+  runExpiresAt,
+  type AiRunRecord,
+  type AiRunsRepo,
+} from '../../src/repos/aiRunsRepo.js';
+import { normalizeSuggestionValue } from '../../src/services/extraction/schema.js';
+import type { Verdict } from '../../src/services/extraction/runTypes.js';
+import type {
+  SuggestionResolutionItem,
+  SuggestionResolutionRepo,
+} from '../../src/repos/suggestionResolutionRepo.js';
 import {
   DEFAULT_ORG_SETTINGS,
   type OrgSettings,
@@ -135,6 +150,8 @@ import {
   type FakeUsersRepo,
 } from './authSession.js';
 import { createLogCapture, type LogCapture } from './logCapture.js';
+import { createSuggestionResolutionFake } from './suggestionResolutionFake.js';
+import type { SuggestionResolutionHooks } from '../../src/services/suggestionResolution.js';
 
 export const ORIGIN_SECRET = 'test-origin-secret';
 export const AUTH_TOKEN = 'test-twilio-auth-token';
@@ -260,6 +277,11 @@ export interface FakeWorld {
    *  schedule path keeps asserting via opts.extractionRepo. */
   extractionSchedules: { conversationId: string; channel: string; dueAt: string }[];
   extractionRepo: ExtractionRepo;
+  /** In-memory AI run-log seam shared by suggestion resolution routes. */
+  aiRuns: AiRunsRepo;
+  /** Durable suggestion-resolution protocol rows, absent from pending lists. */
+  suggestionResolutions: Map<string, SuggestionResolutionItem>;
+  suggestionResolutionRepo: SuggestionResolutionRepo;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -836,6 +858,17 @@ export function createFakeWorld(): FakeWorld {
         .sort((a, b) => (a.tsMsgId < b.tsMsgId ? 1 : -1))
         .slice(0, opts.limit ?? 50);
     },
+    async getByTsMsgId(conversationId, tsMsgId) {
+      return messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+    },
+    async getManyByTsMsgIds(conversationId, tsMsgIds) {
+      const wanted = new Set(tsMsgIds);
+      return new Map(
+        messages
+          .filter((m) => m.conversationId === conversationId && wanted.has(m.tsMsgId))
+          .map((m) => [m.tsMsgId, m]),
+      );
+    },
     async annotateMessage(conversationId, tsMsgId, annotations) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       if (!item) throw new Error(`annotateMessage: no message ${conversationId}/${tsMsgId}`);
@@ -939,6 +972,18 @@ export function createFakeWorld(): FakeWorld {
     const id = phoneRefId(phone);
     const idx = contacts.findIndex((c) => c.contactId === id);
     if (idx >= 0) contacts.splice(idx, 1);
+  };
+  // The pointer row as suggestionResolutionRepo.ts:789-803 reads it. `undefined`
+  // means NO pointer row, which is never a conflict (every primary number is in
+  // that state by design). A row that is not a well-formed phone_ref is a
+  // conflict there, so it reports an owner no contactId can equal.
+  const NOT_A_POINTER_OWNER = 'phone-ref-malformed:';
+  const fakePointerOwner = (phone: string): string | undefined => {
+    const pointer = contacts.find((c) => c.contactId === phoneRefId(phone));
+    if (pointer === undefined) return undefined;
+    return pointer.phone_ref === true && typeof pointer.phone_ref_owner === 'string'
+      ? pointer.phone_ref_owner
+      : NOT_A_POINTER_OWNER;
   };
   const fakeRequireContact = (contactId: string): ContactItem => {
     const contact = contacts.find(
@@ -1096,6 +1141,9 @@ export function createFakeWorld(): FakeWorld {
     async addPhone(contactId, { phone, label }) {
       const contact = fakeRequireContact(contactId);
       const phones = fakeSeededPhones(contact);
+      // The REAL addPhone's already-attached early return does NO pointer work
+      // (contactsRepo.ts) - the double must not either, or a fake that repairs
+      // pointers hides a repo that does not (F6).
       if (phones.some((p) => p.phone === phone)) {
         if (!Array.isArray(contact.phones)) contact.phones = phones;
         return contact;
@@ -2435,6 +2483,18 @@ export function createFakeWorld(): FakeWorld {
     },
     async putSuggestion(s) {
       const itemId = `sugg#${s.ownerContactId}#${s.target}`;
+      const prior = suggestions.get(itemId);
+      // F7b: the PERMANENT-dismissal writer fence. The real repo checks the
+      // dismissal row inside the same transaction as the CAS replacement
+      // (extractionRepo.ts:437-445), so a dismissed value can never be written
+      // back. Without it here, apply.ts's `dismissed_before` drop branch
+      // (services/extraction/apply.ts:691-696) was unreachable through the
+      // harness and every test that thought it exercised the fence was passing
+      // on a writer that simply accepted the value.
+      const normalizedValue = normalizeSuggestionValue(s.target, s.suggestedValue);
+      if (dismissals.has(`${s.ownerContactId}#${s.target}#${normalizedValue}`)) {
+        throw new SuggestionDismissedError();
+      }
       const item: SuggestionItem = {
         itemId,
         ownerContactId: s.ownerContactId,
@@ -2445,11 +2505,15 @@ export function createFakeWorld(): FakeWorld {
         ...(s.reason !== undefined && { reason: s.reason }),
         conversationId: s.conversationId,
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
+        ...(s.runId !== undefined && { runId: s.runId }),
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
+        revision: randomUUID(),
+        // extractionRepo.ts:371 - stored, so readers never recompute it.
+        _normalizedValue: normalizedValue,
       };
       suggestions.set(itemId, item);
-      return { ...item };
+      return { item: { ...item }, ...(prior !== undefined && { displaced: prior }) };
     },
     async getSuggestion(contactId, target) {
       const hit = suggestions.get(`sugg#${contactId}#${target}`);
@@ -2469,11 +2533,84 @@ export function createFakeWorld(): FakeWorld {
     async deleteSuggestion(contactId, target) {
       suggestions.delete(`sugg#${contactId}#${target}`);
     },
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
+      const itemId = `sugg#${contactId}#${target}`;
+      const current = suggestions.get(itemId);
+      if (
+        current === undefined ||
+        (revision !== undefined
+          ? current.revision !== revision
+          : current.revision !== undefined || current.createdAt !== createdAt || current.runId !== runId)
+      ) return false;
+      suggestions.delete(itemId);
+      return true;
+    },
+    async restoreSuggestionIfAbsent(suggestion) {
+      if (suggestions.has(suggestion.itemId)) return false;
+      suggestions.set(suggestion.itemId, { ...suggestion });
+      return true;
+    },
     async listPending(opts = {}) {
       return [...suggestions.values()]
         .sort((a, b) => (a.createdAt < b.createdAt ? 1 : -1))
         .slice(0, opts.limit ?? 50)
         .map((s) => ({ ...s }));
+    },
+  };
+  // F7b: a double that can DISAGREE. The previous one returned `true` from
+  // beginFinalization forever, never merged a marker, and always answered
+  // `undefined` from getRun - so the double-finalization fence
+  // (aiRunsRepo.ts:170-185) and the marker/verdict merge (aiRunsRepo.ts:196-230)
+  // were untestable through this seam.
+  const aiRunMarkers = new Map<string, Record<string, { verdict: Verdict; at: string; by?: string }>>();
+  const aiRunRows = new Map<string, AiRunRecord>();
+  const aiRuns: AiRunsRepo = {
+    async beginFinalization(runId) {
+      // aiRunsRepo.ts:176 - `attribute_not_exists(itemId)`: exactly one begin
+      // per run, and the loser learns it lost.
+      if (aiRunMarkers.has(runId)) return false;
+      aiRunMarkers.set(runId, {});
+      return true;
+    },
+    async putRun(input) {
+      const record: AiRunRecord = {
+        ...input,
+        itemId: `run#${input.runId}`,
+        expires_at: runExpiresAt(input.startedAt),
+      };
+      // aiRunsRepo.ts:202-210 - a terminal verdict banked on the marker while
+      // the run was in flight wins over the draft's `pending`, then the marker
+      // is consumed by the same transaction.
+      const marker = aiRunMarkers.get(input.runId);
+      const merged: AiRunRecord = marker === undefined ? record : {
+        ...record,
+        decisions: Object.fromEntries(
+          Object.entries(record.decisions).map(([target, decision]) => {
+            const terminal = marker[target];
+            return [target, decision?.verdict === 'pending' && terminal !== undefined
+              ? {
+                  ...decision,
+                  verdict: terminal.verdict,
+                  verdictAt: terminal.at,
+                  ...(terminal.by !== undefined && { verdictBy: terminal.by }),
+                }
+              : decision];
+          }),
+        ),
+      };
+      aiRunMarkers.delete(input.runId);
+      aiRunRows.set(input.runId, merged);
+      return merged;
+    },
+    async getRun(runId) {
+      const stored = aiRunRows.get(runId);
+      return stored === undefined ? undefined : { ...stored };
+    },
+    async listByEntity() {
+      return { entries: [] };
+    },
+    async setVerdict() {
+      return true;
     },
   };
 
@@ -2668,6 +2805,27 @@ export function createFakeWorld(): FakeWorld {
     },
   };
 
+  const suggestionResolutionFake = createSuggestionResolutionFake({
+    contactsRepo,
+    extractionRepo,
+    auditRepo,
+    activityEventsRepo,
+    phonePointers: {
+      put: fakePutPointer,
+      remove: fakeDeletePointer,
+      owner: fakePointerOwner,
+    },
+    // release()'s conditional restore, mirroring the Put at
+    // suggestionResolutionRepo.ts:1024-1029 (attribute_not_exists(itemId)).
+    suggestionRows: {
+      putIfAbsent(suggestion) {
+        if (suggestions.has(suggestion.itemId)) return false;
+        suggestions.set(suggestion.itemId, { ...suggestion });
+        return true;
+      },
+    },
+  });
+
   return {
     conversations,
     messages,
@@ -2738,6 +2896,9 @@ export function createFakeWorld(): FakeWorld {
     suggestions,
     extractionSchedules,
     extractionRepo,
+    aiRuns,
+    suggestionResolutions: suggestionResolutionFake.items,
+    suggestionResolutionRepo: suggestionResolutionFake.repo,
   };
 }
 
@@ -2749,6 +2910,10 @@ export interface HarnessOptions {
   /** Env overrides merged into the default test env (set a key to '' to unset… use delete semantics below). */
   env?: Record<string, string | undefined>;
   world?: FakeWorld;
+  suggestionResolutionHooks?: SuggestionResolutionHooks;
+  suggestionResolutionNow?: () => string;
+  suggestionResolutionLeaseId?: () => string;
+  suggestionResolutionLeaseMs?: number;
   /** Omit the media store (simulates MEDIA_BUCKET unset). */
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
@@ -2894,6 +3059,20 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // conversation-fact-extraction (T8): the review API (suggestions router) +
       // the contact-PATCH provenance-clear share this in-memory suggestion store.
       extractionRepo: world.extractionRepo,
+      aiRunsRepo: world.aiRuns,
+      suggestionResolutionRepo: world.suggestionResolutionRepo,
+      ...(opts.suggestionResolutionHooks !== undefined && {
+        suggestionResolutionHooks: opts.suggestionResolutionHooks,
+      }),
+      ...(opts.suggestionResolutionNow !== undefined && {
+        suggestionResolutionNow: opts.suggestionResolutionNow,
+      }),
+      ...(opts.suggestionResolutionLeaseId !== undefined && {
+        suggestionResolutionLeaseId: opts.suggestionResolutionLeaseId,
+      }),
+      ...(opts.suggestionResolutionLeaseMs !== undefined && {
+        suggestionResolutionLeaseMs: opts.suggestionResolutionLeaseMs,
+      }),
       ...(opts.toursNow !== undefined && { toursNow: opts.toursNow }),
       ...(opts.placementsNow !== undefined && { placementsNow: opts.placementsNow }),
       // M1.8a: resolve the share-broadcast audience against the SAME world

@@ -8,7 +8,8 @@
 // append dedupe on the same provider SID, status-machine no-regress, and the
 // SID → location pointer lookup.
 import { randomUUID } from 'node:crypto';
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
+import { DeleteCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
@@ -218,6 +219,62 @@ describe.skipIf(!reachable)('messaging repos against DynamoDB Local (throwaway p
 
       const older = await messages.listByConversation(convId, { before: keys[0] });
       expect(older.map((m) => m.tsMsgId)).not.toContain(keys[0]);
+    });
+
+    it('getByTsMsgId point-gets one message by its exact key', async () => {
+      await messages.append(outbound(convId, 'SMpoint1', '2026-06-12T10:07:00.000Z', 'find by key'));
+
+      expect((await messages.getByTsMsgId(convId, '2026-06-12T10:07:00.000Z#SMpoint1'))?.body).toBe('find by key');
+    });
+
+    it('getByTsMsgId returns undefined for a deleted or unknown message', async () => {
+      expect(await messages.getByTsMsgId(convId, '2026-06-12T10:08:00.000Z#SMgone1')).toBeUndefined();
+
+      await messages.append(outbound(convId, 'SMdeleted1', '2026-06-12T10:08:00.000Z', 'delete me'));
+      await doc.send(
+        new DeleteCommand({
+          TableName: tableName('messages', testEnv),
+          Key: { conversationId: convId, tsMsgId: '2026-06-12T10:08:00.000Z#SMdeleted1' },
+        }),
+      );
+      expect(await messages.getByTsMsgId(convId, '2026-06-12T10:08:00.000Z#SMdeleted1')).toBeUndefined();
+    });
+
+    it('getManyByTsMsgIds batches reads and keys the result by tsMsgId', async () => {
+      await messages.append(outbound(convId, 'SMbatch1', '2026-06-12T10:09:00.000Z', 'one'));
+      await messages.append(outbound(convId, 'SMbatch2', '2026-06-12T10:10:00.000Z', 'two'));
+
+      const got = await messages.getManyByTsMsgIds(convId, [
+        '2026-06-12T10:09:00.000Z#SMbatch1',
+        '2026-06-12T10:10:00.000Z#SMbatch2',
+        '2026-06-12T10:11:00.000Z#SMgone2',
+      ]);
+
+      expect(got.get('2026-06-12T10:09:00.000Z#SMbatch1')?.body).toBe('one');
+      expect(got.get('2026-06-12T10:10:00.000Z#SMbatch2')?.body).toBe('two');
+      expect(got.has('2026-06-12T10:11:00.000Z#SMgone2')).toBe(false);
+    });
+
+    it('getManyByTsMsgIds handles an empty list without an SDK call', async () => {
+      const send = vi.spyOn(doc, 'send');
+
+      expect((await messages.getManyByTsMsgIds(convId, [])).size).toBe(0);
+      expect(send).not.toHaveBeenCalled();
+
+      send.mockRestore();
+    });
+
+    it('getManyByTsMsgIds chunks past the 100-key BatchGetItem limit', async () => {
+      const ids = Array.from({ length: 120 }, (_, i) => {
+        const hour = 11 + Math.floor(i / 60);
+        const minute = i % 60;
+        return `2026-06-12T${String(hour).padStart(2, '0')}:${String(minute).padStart(2, '0')}:00.000Z#SMchunk${i}`;
+      });
+      for (const [i, tsMsgId] of ids.entries()) {
+        await messages.append(outbound(convId, `SMchunk${i}`, tsMsgId.slice(0, 24), tsMsgId));
+      }
+
+      expect((await messages.getManyByTsMsgIds(convId, ids)).size).toBe(120);
     });
   });
 

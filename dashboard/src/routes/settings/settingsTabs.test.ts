@@ -18,12 +18,13 @@ describe('settingsTabs', () => {
       'notifications',
       'voice',
       'system',
+      'ai-runs',
       'numbers',
     ]);
     // `numbers` (Phone numbers) is NOT admin-only: OUR one business number is
     // read-only and visible to everyone; the pool inventory inside the section
     // carries its own role gate.
-    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system']);
+    expect(SETTINGS_TABS.filter((t) => t.adminOnly).map((t) => t.id)).toEqual(['team', 'system', 'ai-runs']);
   });
 
   it('visibleTabs(true) returns all tabs (admin sees Team + System)', () => {
@@ -33,6 +34,7 @@ describe('settingsTabs', () => {
       'notifications',
       'voice',
       'system',
+      'ai-runs',
       'numbers',
     ]);
   });

@@ -172,6 +172,14 @@ export interface SystemFlags {
   /** Outbound messaging driver as displayed. `mock` = the twilio driver
    *  redirected to a fake host (local `--mock` loop); never appears deployed. */
   messagingDriver: 'twilio' | 'console' | 'mock';
+  /** Whether the conversation-fact-extraction poll runs in this env. */
+  aiExtractionEnabled: boolean;
+  /** The extraction driver in use, distinct from the messaging driver above. */
+  aiExtractionDriver: 'anthropic' | 'console' | 'fake';
+  /** The model id the Anthropic driver would call. */
+  aiExtractionModel: string;
+  /** sha256(system prompt + EXTRACTION_SCHEMA), first 12 hex. */
+  aiExtractionPromptFingerprint: string;
   /** OUR one business number (BUSINESS_PHONE_NUMBER), E.164 - what this app is
    *  configured to send FROM. OPTIONAL: the backend OMITS the key when the env
    *  has no number - it is never `null` (a `null` would also break the
@@ -186,6 +194,118 @@ export interface SystemFlags {
    *  must also be attached to the Messaging Service and covered by the A2P
    *  campaign, neither of which this payload checks. */
   businessPhoneNumber?: string;
+}
+
+// --- AI run log (/api/ai-runs) ---------------------------------------------
+// Mirrors app/src/routes/aiRuns.ts and the stored AiRunRecord shape. This package
+// cannot import server types, so keep this duplicated wire contract in sync.
+
+export type AiRunOutcome = 'applied' | 'no_op' | 'skipped' | 'failed';
+export type AiRunScope =
+  | 'global'
+  | `outcome#${AiRunOutcome}`
+  | `conversations#${string}`
+  | `contacts#${string}`;
+
+export type AiRunTrigger = 'sms' | 'voice' | 'triage' | 'email';
+export type AiRunDriver = 'anthropic' | 'console' | 'fake';
+export type AiRunDecisionOutcome = 'wrote' | 'suggested' | 'dropped' | 'no_finding' | 'not_addressed';
+export type AiRunVerdict =
+  | 'auto_applied' | 'pending' | 'accepted' | 'dismissed' | 'superseded'
+  | 'superseded_by_human_edit' | 'not_presented';
+
+export interface AiRunListRowLive {
+  runId: string;
+  sortKey: string;
+  expired: false;
+  startedAt: string;
+  durationMs: number;
+  conversationId: string;
+  contactId?: string;
+  trigger: AiRunTrigger;
+  outcome: AiRunOutcome;
+  skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
+  errorKind?: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo';
+  driver: AiRunDriver;
+  model?: string;
+  decisionCounts: Record<string, number>;
+  notedLines: number;
+}
+
+export type AiRunListRow = AiRunListRowLive | { runId: string; sortKey: string; expired: true };
+
+export interface AiRunListPage {
+  runs: AiRunListRow[];
+  nextBefore?: string;
+}
+
+export interface AiRunDecision {
+  proposedOp: 'write' | 'suggest' | 'none' | 'absent';
+  proposedValue?: string;
+  coercedValue?: unknown;
+  previousValue?: string;
+  reason?: string;
+  demotedFrom?: 'write';
+  outcome: AiRunDecisionOutcome;
+  dropReason?: string;
+  verdict: AiRunVerdict;
+  verdictAt?: string;
+  verdictBy?: string;
+}
+
+/** One window message as the DETAIL endpoint returns it. */
+export interface AiRunWindowMessage {
+  tsMsgId: string;
+  type: string;
+  direction: string;
+  tier: 'new' | 'seen';
+  capChars?: number;
+  truncated?: boolean;
+  chars?: number;
+  hash?: string;
+  /** Hash of the current canonical rendering against the immutable stored evidence. */
+  hashStatus?: 'match' | 'mismatch' | 'unavailable';
+  available: boolean;
+  text?: string;
+}
+
+/** The stored run, exactly as the server holds it. */
+export interface AiRunRecordView {
+  itemId?: string;
+  runId: string;
+  startedAt: string;
+  finishedAt: string;
+  durationMs: number;
+  conversationId: string;
+  contactId?: string;
+  trigger: AiRunTrigger;
+  outcome: AiRunOutcome;
+  skipReason?: 'no_contact' | 'ineligible_type' | 'no_new_client' | 'empty_window';
+  error?: { kind: 'refusal' | 'parse' | 'driver' | 'complete' | 'repo'; message: string; attempts: number; parked: boolean };
+  driver: AiRunDriver;
+  model?: string;
+  promptFingerprint?: string;
+  usage?: { inputTokens: number; outputTokens: number };
+  window?: {
+    detail: 'light' | 'full'; cursor: string; newestTsMsgId?: string; hasInferredRoleContent?: boolean;
+    totalChars?: number; windowCappedAtLimit: boolean;
+    windowParams?: { newMessageCharCap: number; seenMessageCharCap: number; windowCharBudget: number; maxTranscriptMessages: number; maxTranscriptAgeDays: number; truncationMarker: string };
+    messages: Array<Omit<AiRunWindowMessage, 'available' | 'text'>>;
+    excluded: Array<{ tsMsgId: string; cause: 'age_30d' | 'char_budget' }>;
+    noContent?: string[];
+  };
+  profileFieldsPopulated?: string[];
+  rawText?: string;
+  rawResult?: unknown;
+  decisions: Partial<Record<string, AiRunDecision>>;
+  notedLines: number;
+  expires_at?: number;
+}
+
+/** GET /api/ai-runs/:runId - the rehydrated window rides alongside the stored run. */
+export interface AiRunDetailResponse {
+  run: AiRunRecordView;
+  window: { messages: AiRunWindowMessage[] };
 }
 
 /** A CloudWatch alarm's state (DescribeAlarms StateValue, mapped). */
@@ -1063,6 +1183,64 @@ export function sendNowErrorMessage(code: string): string {
   return SEND_NOW_ERROR_COPY[code] ?? "Couldn't send that just now - please try again.";
 }
 
+/**
+ * Every `{ error }` code the AI-suggestion accept/dismiss routes can answer with
+ * (400, 404 and 409 alike), mapped to copy a navigator can act on. `ApiError
+ * .message` is the RAW machine code, so it must never be rendered - route every
+ * accept or dismiss failure through `suggestionResolutionErrorMessage()`.
+ * Unknown codes fall back to the generic retry sentence, so a newer server can
+ * never put a snake_case token in front of staff.
+ *
+ * The three codes the server flags `retryable` (in progress / lost / retry
+ * exhausted) read as transient because a retry is SAFE - every effect behind
+ * them is idempotent, and the same click usually works a moment later. They do
+ * NOT all mean nothing was written: `suggestion_resolution_lost` is thrown when
+ * the token can no longer prove its domain transaction committed (the
+ * `suggestion_resolution_lost` throw in `applyJournal`, named rather than cited
+ * by line so an insert above it cannot silently repoint this reference), which
+ * covers a committed-then-lost acknowledgement as well as pre-commit
+ * contention, so its copy says the outcome is unconfirmed rather than claiming
+ * nothing changed.
+ */
+const SUGGESTION_RESOLUTION_ERROR_COPY: Readonly<Record<string, string>> = {
+  // The identity this page sent is unusable - its copy of the suggestion is
+  // stale or malformed, and a reload rebuilds it.
+  invalid_suggestion_identity: 'This page is out of date - reload it and review the suggestion again.',
+  // Contact type is set by triage, never by accepting a chip.
+  accept_type_via_triage: 'Set the contact type with the triage buttons instead.',
+  invalid_suggestion_value:
+    'That value could not be used, so nothing changed - set the field by hand instead.',
+  // Not a snake_case code: the phone route answers with this whole sentence.
+  'phone is not a valid phone number': 'That is not a usable phone number, so nothing changed.',
+  unknown_target: 'This app does not know how to apply that suggestion.',
+  no_pending_suggestion: 'That suggestion is no longer pending - the list now shows its real state.',
+  contact_not_found: 'That contact is gone, so nothing changed.',
+  // Word for word the copy this surface has always shown for a phone conflict.
+  phone_in_use: 'That number already belongs to another contact.',
+  suggestion_resolution_in_progress:
+    'That suggestion is being resolved right now - try again in a moment.',
+  suggestion_already_resolved:
+    'That suggestion was already accepted or dismissed - the list now shows its real state.',
+  suggestion_replaced:
+    'That suggestion changed since this page loaded - refresh and review the new one.',
+  // The fenced write was refused: the field had already been changed by hand, so
+  // the accept applied nothing. Say that plainly and promise nothing else.
+  suggestion_field_edited:
+    'Someone changed that field after the AI suggested it, so nothing was applied.',
+  // The one retryable code whose effect MAY have landed: the token could not
+  // prove its transaction committed, and a committed-then-lost acknowledgement
+  // reaches here too. Never claim nothing changed - send them to the value.
+  suggestion_resolution_lost:
+    'We could not confirm whether that saved - reload to see the current value, then try again in a moment.',
+  suggestion_resolution_retry_exhausted:
+    'That suggestion was too busy to resolve - try again in a moment.',
+};
+
+/** Staff-facing copy for a failed suggestion accept/dismiss, given its code. */
+export function suggestionResolutionErrorMessage(code: string): string {
+  return SUGGESTION_RESOLUTION_ERROR_COPY[code] ?? 'Something went wrong - please try again.';
+}
+
 /** Escalation flag (doc §7.1): a failed send on an active placement → a human calls. */
 export interface PlacementAttention {
   reason: string;
@@ -1382,6 +1560,8 @@ export interface FieldSource {
 export interface SuggestionItem {
   itemId: string;
   ownerContactId: string;
+  /** Immutable server-minted identity for resolution fencing. */
+  revision?: string;
   /** One of the eight ExtractableField values, or 'status' | 'phone' | 'type' | 'address'. */
   target: string;
   currentValue?: string;
@@ -1392,7 +1572,15 @@ export interface SuggestionItem {
   reason?: string;
   conversationId: string;
   tsMsgId?: string;
+  /** The ai_runs runId that produced this suggestion (admin run log). */
+  runId?: string;
   createdAt: string;
+}
+
+export interface SuggestionRequestIdentity {
+  revision?: string;
+  createdAt: string;
+  runId?: string;
 }
 
 // --- Contact creation / vocabulary (extensible create flow) ------------------

@@ -570,6 +570,39 @@ export const TABLES: readonly TableSpec[] = [
     ],
     ttlAttribute: 'expires_at',
   },
+  {
+    // NEW in ai-run-log (README deviation): the durable record of every
+    // conversation-fact-extraction run. Two disjoint row kinds share the key:
+    //   run#<runId>                          the full run record
+    //   ptr#<entityKey>#<startedAt>#<runId>  an adjacency pointer
+    // byEntity is TRULY sparse - only ptr# rows carry entityKey/sortKey, so a
+    // run# row never appears in the index. entityKey is either a LITERAL SCOPE
+    // TOKEN ('global', 'outcome#<outcome>') or the `<table>#<id>` convention
+    // audit_events uses ('conversations#<id>', 'contacts#<id>'); both forms
+    // coexist here by design. sortKey is `<startedAt ISO>#<runId>`, so a scope
+    // reads newest-first with ScanIndexForward false and a date range is a
+    // BETWEEN. Reads are Query(byEntity) then ONE BatchGetItem - never a Scan.
+    //
+    // Why a separate table (design 5.1): adding run# rows to ai_extraction
+    // would force table-wide TTL onto a table holding PERMANENT dismissal
+    // tombstones and extraction cursors, which survive only by lacking
+    // expires_at.
+    //
+    // TTL: 90 days on BOTH row kinds. DynamoDB TTL is asynchronous and may lag
+    // up to 48h, unordered, so a pointer can outlive its run# row - readers
+    // render that entry as expired rather than erroring.
+    baseName: 'ai_runs',
+    hashKey: { name: 'itemId', type: 'S' },
+    gsis: [
+      {
+        indexName: 'byEntity',
+        hashKey: { name: 'entityKey', type: 'S' },
+        rangeKey: { name: 'sortKey', type: 'S' },
+        sparse: true,
+      },
+    ],
+    ttlAttribute: 'expires_at',
+  },
 ] as const;
 
 /** Lookup by base name; throws on unknown names so typos fail fast. */

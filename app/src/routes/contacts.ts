@@ -85,8 +85,18 @@ import {
   createContactVocabularyRepo,
   type ContactVocabularyRepo,
 } from '../repos/contactVocabularyRepo.js';
-import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
-import { PROVENANCE_FIELDS } from '../services/extraction/schema.js';
+import {
+  createExtractionRepo,
+  type ExtractionRepo,
+  type SuggestionItem,
+} from '../repos/extractionRepo.js';
+import { createAiRunsRepo, type AiRunsRepo } from '../repos/aiRunsRepo.js';
+import { PROVENANCE_FIELDS, normalizeSuggestionValue } from '../services/extraction/schema.js';
+import {
+  contactAddressToParts,
+  formatAddressParts,
+} from '../services/extraction/address.js';
+import { isDecisionTarget } from '../services/extraction/runTypes.js';
 
 export interface ContactsRouterDeps {
   logger?: Logger;
@@ -120,6 +130,7 @@ export interface ContactsRouterDeps {
    * in tests (a no-network fake); defaults to the real repo.
    */
   extractionRepo?: ExtractionRepo;
+  aiRunsRepo?: AiRunsRepo;
   /**
    * Kill switch for the triage re-extraction hook (config.aiExtractionEnabled):
    * a triage flip to tenant schedules an immediate 'triage' extraction run so
@@ -145,6 +156,17 @@ interface ContactMediaItem {
   /** ISO 8601 — the source message's provider_ts (the sort key). */
   at: string;
   conversationId: string;
+}
+
+function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown): boolean {
+  const comparable = pending.target === 'address'
+    ? formatAddressParts(contactAddressToParts(applied))
+    : typeof applied === 'string' || typeof applied === 'number' || typeof applied === 'boolean'
+      ? String(applied)
+      : undefined;
+  return comparable !== undefined
+    && normalizeSuggestionValue(pending.target, comparable)
+      === normalizeSuggestionValue(pending.target, pending.suggestedValue);
 }
 
 /**
@@ -816,6 +838,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   const placementDeadlines =
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const aiRuns = deps.aiRunsRepo ?? createAiRunsRepo({ logger: deps.logger });
   const aiExtractionEnabled = deps.aiExtractionEnabled ?? loadConfig().aiExtractionEnabled;
   const events = deps.events ?? appEvents;
 
@@ -1304,6 +1327,18 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       }
     }
 
+    // Snapshot exact pending identities before the contact write. A failed read
+    // means this request has no safe identity to delete after the write.
+    const pendingByField = new Map<string, SuggestionItem>();
+    for (const f of parsed.changedFields) {
+      try {
+        const pending = await extraction.getSuggestion(contactId, f);
+        if (pending !== undefined) pendingByField.set(f, pending);
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'extraction getSuggestion (human edit) failed (best-effort)');
+      }
+    }
+
     let updated;
     try {
       updated = await contacts.update(contactId, parsed.patch);
@@ -1315,14 +1350,35 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
       throw err;
     }
 
-    // conversation-fact-extraction (T8): a human edit supersedes any pending AI
-    // suggestion for the same field (and a `type` change supersedes the type
-    // recommendation). Best-effort - a suggestion-store hiccup never fails the PATCH.
-    for (const f of parsed.changedFields) {
+    // Resolve only identities retained before contacts.update. A suggestion
+    // created or replaced during the update remains pending and unstamped.
+    const verdictAt = new Date().toISOString();
+    for (const [f, pending] of pendingByField) {
+      let deleted = false;
       try {
-        await extraction.deleteSuggestion(contactId, f);
+        deleted = await extraction.deleteSuggestionIfCurrent(contactId, f, pending.createdAt, pending.runId, pending.revision);
       } catch (err) {
-        log.warn({ err, contactId, field: f }, 'extraction deleteSuggestion (human edit) failed (best-effort)');
+        log.warn({ err, contactId, field: f }, 'extraction conditional delete (human edit) failed (best-effort)');
+      }
+      if (!deleted || pending.runId === undefined || !isDecisionTarget(f)) continue;
+      // The value comparison is CONFINED to `type` (frozen design 7.3): a human
+      // triaging a contact to `landlord` after the model suggested `tenant` has
+      // REJECTED that suggestion, so `type` must be judged on VALUE. For the
+      // other eleven targets a PATCH is a human edit that supersedes the
+      // suggestion regardless of value - generalizing the equality rule would
+      // record edits that merely coincide with the model as acceptances and
+      // corrupt the accuracy record this feature exists to produce.
+      const verdict = f === 'type' && suggestionMatchesAppliedValue(pending, parsed.patch[f])
+        ? 'accepted'
+        : 'superseded_by_human_edit';
+      try {
+        await aiRuns.setVerdict(pending.runId, f, verdict, {
+          at: verdictAt, expectedVerdict: 'pending',
+          freshSuggestionCreatedAt: pending.createdAt,
+          ...(req.user?.userId !== undefined && { by: req.user.userId }),
+        });
+      } catch (err) {
+        log.warn({ err, contactId, field: f }, 'ai run verdict stamp failed (best-effort)');
       }
     }
 

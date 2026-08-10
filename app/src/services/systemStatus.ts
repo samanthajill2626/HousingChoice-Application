@@ -33,6 +33,7 @@ import {
 } from '../adapters/cloudwatch.js';
 import { isPushConfigured, type AppConfig } from '../lib/config.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import { extractionPromptFingerprint } from './extraction/prompt.js';
 
 /** The error window the dashboard offers (default 24h). */
 export type SystemErrorWindow = '1h' | '24h' | '7d';
@@ -79,6 +80,14 @@ export interface SystemFlags {
   pushConfigured: boolean;
   /** The outbound messaging driver as displayed (twilio | console | mock). */
   messagingDriver: MessagingDriverDisplay;
+  /** Whether the conversation-fact-extraction poll runs in this env. */
+  aiExtractionEnabled: boolean;
+  /** The extraction driver in use, distinct from the messaging driver above. */
+  aiExtractionDriver: AppConfig['extractionDriver'];
+  /** The model id the Anthropic driver would call. */
+  aiExtractionModel: string;
+  /** sha256(system prompt + EXTRACTION_SCHEMA), first 12 hex. */
+  aiExtractionPromptFingerprint: string;
   /**
    * OUR one business number (BUSINESS_PHONE_NUMBER), E.164. OPTIONAL and
    * OMITTED when unconfigured - never `null`, so every flag value stays a
@@ -156,6 +165,10 @@ export function createSystemStatusService(deps: SystemStatusServiceDeps): System
         relayLiveProvisioning: config.relayLiveProvisioning,
         pushConfigured: isPushConfigured(config),
         messagingDriver: messagingDriverDisplay(config),
+        aiExtractionEnabled: config.aiExtractionEnabled,
+        aiExtractionDriver: config.extractionDriver,
+        aiExtractionModel: config.aiExtractionModel,
+        aiExtractionPromptFingerprint: extractionPromptFingerprint(),
         // OMITTED (not null) when unconfigured: this payload is asserted to
         // carry primitives only, and `typeof null === 'object'`.
         ...(config.businessPhoneNumber !== undefined && {

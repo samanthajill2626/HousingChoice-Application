@@ -18,12 +18,17 @@
 // present only while a suggestion is pending).
 //
 // PII: never log message bodies or phone numbers. Log only ids/counts.
-import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { randomUUID } from 'node:crypto';
+import {
+  ConditionalCheckFailedException,
+  TransactionCanceledException,
+} from '@aws-sdk/client-dynamodb';
 import {
   DeleteCommand,
   GetCommand,
   PutCommand,
   QueryCommand,
+  TransactWriteCommand,
   type QueryCommandInput,
   UpdateCommand,
 } from '@aws-sdk/lib-dynamodb';
@@ -31,6 +36,7 @@ import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import type { ExtractionAddressParts } from '../adapters/extraction.js';
+import { normalizeSuggestionValue } from '../services/extraction/schema.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 // ---------------------------------------------------------------------------
@@ -80,10 +86,30 @@ export interface SuggestionItem {
   reason?: string;
   conversationId: string;
   tsMsgId?: string;
+  /** Opaque ai_runs id of the extraction that created this suggestion. */
+  runId?: string;
+  /** Immutable identity stamped on production writes; absent only on legacy rows. */
+  revision?: string;
+  /** Hidden normalized value used only by the dismissal/writer transaction. */
+  _normalizedValue?: string;
   /** byPending GSI hash key (fixed 'pending'); present while pending (sparse). */
   _pendingPartition?: 'pending';
   /** ISO - byPending GSI range key (newest-first). */
   createdAt: string;
+}
+
+/** What putSuggestion hands back: the row it wrote, plus the row it replaced. */
+export interface PutSuggestionResult {
+  item: SuggestionItem;
+  displaced?: SuggestionItem;
+}
+
+/** The permanent dismissal tombstone won the atomic suggestion-writer fence. */
+export class SuggestionDismissedError extends Error {
+  constructor() {
+    super('suggestion value was permanently dismissed');
+    this.name = 'SuggestionDismissedError';
+  }
 }
 
 export interface ExtractionRepo {
@@ -123,11 +149,15 @@ export interface ExtractionRepo {
    */
   putSuggestion(
     s: Omit<SuggestionItem, 'itemId' | '_pendingPartition' | 'createdAt'> & { createdAt?: string },
-  ): Promise<SuggestionItem>;
+  ): Promise<PutSuggestionResult>;
   getSuggestion(contactId: string, target: string): Promise<SuggestionItem | undefined>;
   /** All pending suggestions for one contact (byOwner GSI). */
   listSuggestionsByContact(contactId: string): Promise<SuggestionItem[]>;
   deleteSuggestion(contactId: string, target: string): Promise<void>;
+  /** Delete only the exact version a resolver read; false means it was replaced. */
+  deleteSuggestionIfCurrent(contactId: string, target: string, createdAt: string, runId?: string, revision?: string): Promise<boolean>;
+  /** Restore a claimed suggestion only if a newer writer has not replaced it. */
+  restoreSuggestionIfAbsent(suggestion: SuggestionItem): Promise<boolean>;
   /** All pending suggestions, newest-first (byPending GSI). Powers the Today count. */
   listPending(opts?: { limit?: number }): Promise<SuggestionItem[]>;
   /**
@@ -329,6 +359,7 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
     },
 
     async putSuggestion(s) {
+      const normalizedValue = normalizeSuggestionValue(s.target, s.suggestedValue);
       const item: SuggestionItem = {
         itemId: suggId(s.ownerContactId, s.target),
         ownerContactId: s.ownerContactId,
@@ -337,18 +368,122 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         conversationId: s.conversationId,
         _pendingPartition: 'pending',
         createdAt: s.createdAt ?? new Date().toISOString(),
+        revision: randomUUID(),
+        _normalizedValue: normalizedValue,
         // Optional fields - undefined is dropped by the document client's
         // removeUndefinedValues, keeping the item clean.
         ...(s.currentValue !== undefined && { currentValue: s.currentValue }),
         ...(s.suggestedAddress !== undefined && { suggestedAddress: s.suggestedAddress }),
         ...(s.reason !== undefined && { reason: s.reason }),
         ...(s.tsMsgId !== undefined && { tsMsgId: s.tsMsgId }),
+        ...(s.runId !== undefined && { runId: s.runId }),
       };
-      // No ConditionExpression: a re-put on the same (contact, target) REPLACES
-      // (latest wins).
-      await doc.send(new PutCommand({ TableName: table, Item: item }));
-      log.debug({ contactId: s.ownerContactId, target: s.target }, 'suggestion upserted');
-      return item;
+      // Atomic permanent-dismissal writer fence. The condition-check and the
+      // CAS replacement share one transaction, so a dismissal can never cross
+      // an unconditional Put and leave the rejected value visible. A conflict
+      // is reread consistently and retried; `displaced` is therefore the exact
+      // row this successful transaction replaced, not a stale preflight read.
+      let displaced: SuggestionItem | undefined;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        const [{ Item: currentRaw }, { Item: dismissalRaw }] = await Promise.all([
+          doc.send(new GetCommand({
+            TableName: table,
+            Key: { itemId: suggId(s.ownerContactId, s.target) },
+            ConsistentRead: true,
+          })),
+          doc.send(new GetCommand({
+            TableName: table,
+            Key: { itemId: dismId(s.ownerContactId, s.target, normalizedValue) },
+            ConsistentRead: true,
+          })),
+        ]);
+        if (dismissalRaw !== undefined) throw new SuggestionDismissedError();
+        const current = currentRaw as SuggestionItem | undefined;
+        displaced = current;
+
+        let conditionExpression: string;
+        let expressionAttributeNames: Record<string, string> | undefined;
+        let expressionAttributeValues: Record<string, unknown> | undefined;
+        if (current === undefined) {
+          conditionExpression = 'attribute_not_exists(itemId)';
+        } else if (current.revision !== undefined) {
+          conditionExpression = '#revision = :revision';
+          expressionAttributeNames = { '#revision': 'revision' };
+          expressionAttributeValues = { ':revision': current.revision };
+        } else if (current.runId === undefined) {
+          conditionExpression =
+            'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)';
+          expressionAttributeNames = {
+            '#revision': 'revision',
+            '#createdAt': 'createdAt',
+            '#runId': 'runId',
+          };
+          expressionAttributeValues = { ':createdAt': current.createdAt };
+        } else {
+          conditionExpression =
+            'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId';
+          expressionAttributeNames = {
+            '#revision': 'revision',
+            '#createdAt': 'createdAt',
+            '#runId': 'runId',
+          };
+          expressionAttributeValues = {
+            ':createdAt': current.createdAt,
+            ':runId': current.runId,
+          };
+        }
+
+        try {
+          await doc.send(new TransactWriteCommand({
+            TransactItems: [
+              {
+                ConditionCheck: {
+                  TableName: table,
+                  Key: { itemId: dismId(s.ownerContactId, s.target, normalizedValue) },
+                  ConditionExpression: 'attribute_not_exists(itemId)',
+                },
+              },
+              {
+                Put: {
+                  TableName: table,
+                  Item: item,
+                  ConditionExpression: conditionExpression,
+                  ...(expressionAttributeNames !== undefined && {
+                    ExpressionAttributeNames: expressionAttributeNames,
+                  }),
+                  ...(expressionAttributeValues !== undefined && {
+                    ExpressionAttributeValues: expressionAttributeValues,
+                  }),
+                },
+              },
+            ],
+          }));
+          log.debug({ contactId: s.ownerContactId, target: s.target }, 'suggestion upserted');
+          return { item, ...(displaced !== undefined && { displaced }) };
+        } catch (err) {
+          const [{ Item: liveRaw }, { Item: liveDismissal }] = await Promise.all([
+            doc.send(new GetCommand({
+              TableName: table,
+              Key: { itemId: suggId(s.ownerContactId, s.target) },
+              ConsistentRead: true,
+            })),
+            doc.send(new GetCommand({
+              TableName: table,
+              Key: { itemId: dismId(s.ownerContactId, s.target, normalizedValue) },
+              ConsistentRead: true,
+            })),
+          ]);
+          if (liveDismissal !== undefined) throw new SuggestionDismissedError();
+          const live = liveRaw as SuggestionItem | undefined;
+          // Unknown outcome recovery: our immutable revision is live, so the
+          // transaction committed even though the client did not observe it.
+          if (live?.revision === item.revision) {
+            return { item, ...(displaced !== undefined && { displaced }) };
+          }
+          if (!(err instanceof TransactionCanceledException)) throw err;
+        }
+      }
+      throw new Error('suggestion write contention exceeded retry budget');
     },
 
     async getSuggestion(contactId, target) {
@@ -399,6 +534,50 @@ export function createExtractionRepo(deps: RepoDeps = {}): ExtractionRepo {
         new DeleteCommand({ TableName: table, Key: { itemId: suggId(contactId, target) } }),
       );
       log.debug({ contactId, target }, 'suggestion deleted');
+    },
+
+    async deleteSuggestionIfCurrent(contactId, target, createdAt, runId, revision) {
+      const conditionExpression = revision !== undefined
+        ? '#revision = :revision'
+        : runId === undefined
+          ? 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND attribute_not_exists(#runId)'
+          : 'attribute_not_exists(#revision) AND #createdAt = :createdAt AND #runId = :runId';
+      const expressionAttributeNames: Record<string, string> = revision !== undefined
+        ? { '#revision': 'revision' }
+        : { '#createdAt': 'createdAt', '#runId': 'runId', '#revision': 'revision' };
+      const expressionAttributeValues: Record<string, unknown> = revision !== undefined
+        ? { ':revision': revision }
+        : { ':createdAt': createdAt, ...(runId !== undefined && { ':runId': runId }) };
+      try {
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { itemId: suggId(contactId, target) },
+            ConditionExpression: conditionExpression,
+            ExpressionAttributeNames: expressionAttributeNames,
+            ExpressionAttributeValues: expressionAttributeValues,
+          }),
+        );
+        log.debug({ contactId, target }, 'suggestion conditionally deleted');
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async restoreSuggestionIfAbsent(suggestion) {
+      try {
+        await doc.send(new PutCommand({
+          TableName: table,
+          Item: suggestion,
+          ConditionExpression: 'attribute_not_exists(itemId)',
+        }));
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
     },
 
     async listPending(opts) {

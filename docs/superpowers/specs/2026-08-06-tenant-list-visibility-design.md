@@ -95,11 +95,14 @@ untouched until the retire issue removes it).
   canonical spellings above (free text still accepted - a new authority is typed and saved
   as-is).
 - **The `agency` field on tenants** (the gate ruling's second half): a new optional string on
-  the contact - PATCH-allowlisted server-side alongside `housingAuthority` (the one backend
-  addition, ~10 lines in `app/src/routes/contacts.ts` plus the dashboard type mirror), an edit-
-  form input with a datalist of the four known agencies (`HUD VASH`, `Claratel`, `Hope Atlanta`,
-  `Step Up`; free text accepted, same idiom as the authority input), and an "Agency" row in the
-  tenant file's Details card. No GSI, no facet, no row chip - the FIELD, not a filter.
+  the contact - PATCH-allowlisted server-side following the `housingAuthority` block at
+  `contacts.ts:520-525` (string accepted, `changedFields` tracked; deliberately NOT added to the
+  `PROVENANCE_FIELDS` gate at `:850` - no extraction writes it), plus the dashboard type mirror,
+  an edit-form input with a datalist of the four known agencies (`HUD VASH`, `Claratel`,
+  `Hope Atlanta`, `Step Up`; free text accepted, same idiom as the authority input), and an
+  "Agency" row in the tenant file's Details card. No GSI, no facet, no row chip - the FIELD, not
+  a filter. Name-collision sweep: clean (nothing in the repo reads or writes a contact field
+  named `agency`).
 - **The unit `accepted_authorities` consolidation** (section 8): one list field replaces
   `jurisdiction` + `accepted_programs` across the PATCH allowlist, both unit forms, the
   properties-list facet, the property detail, the public flyer's "Accepts:" line, similar-unit
@@ -124,9 +127,9 @@ filed at the gate on Cameron's ruling; section 8's seed change switches the FIEL
 fixes the VALUES); an agency FACET or row chip (the field ships, the filter does not -
 ask-first if she wants it); historical mixed-value cleanup in `housingAuthority`
 (operations-side data work, not feature work); tenant-to-unit authority MATCHING (the new unit
-field enables it; building it is its own feature); dropping the dead `byJurisdiction` GSI from
-the table schema (infrastructure - recorded as owed tf cleanup in the drift issue, done only on
-an explicit ask).
+field enables it; building it is its own feature). The `byJurisdiction` GSI schema removal IS in
+scope (section 8); only the `terraform apply` that realizes it stays an owed post-merge op on
+explicit ask.
 
 ## 4. Data - one small backend addition
 
@@ -321,17 +324,21 @@ the new field.
 
 | Surface | Change |
 | --- | --- |
-| `unitFields.ts` allowlist (the unit PATCH) | Add `accepted_authorities: 'string[]'`; REMOVE `jurisdiction` and `accepted_programs` from the writable set. Unknown keys already no-op for stale clients (the established field-move pattern, `contacts.ts:307`) |
+| `unitFields.ts` allowlist (the unit PATCH) | Add `accepted_authorities: 'string[]'`; retire `jurisdiction` and `accepted_programs` as writable. CORRECTION (targeted review): unlike the contact route, the unit parser REJECTS unknown keys with a 400 (`unitFields.ts:130-134`), so a hard removal would fail a stale cached dashboard bundle's save. The two legacy keys become explicit ACCEPT-AND-IGNORE tombstones (parsed, discarded, commented) for the transition; the tombstones die with `retire-humanize-authority` |
 | `UnitCreateForm` / `ListingEditForm` | The single "Housing authority" input AND the "Accepted programs" comma input are replaced by ONE "Housing authorities" comma-separated input (the exact idiom `accepted_programs` uses today: split on comma, trim, drop empties), placeholder `e.g. Atlanta (AHA), DCA` |
 | Import unit writer (`apply.ts:790-793`) | `jurisdiction = value` becomes `accepted_authorities = [canonical]`, routed through the same `housingAuthorityFor` canonicalizer the contact side uses (the workbook column comes from the founder's authority-named "Voucher Type" data) |
 | Seeds (`cast.ts` x5, `lean.ts` x2, `live.ts` x3, `matrix.ts` x8) | `jurisdiction: X` becomes `accepted_authorities: [X]` - FIELD switch only; the slug VALUES are normalized by `retire-humanize-authority`, not here |
 | e2e `steps.ts:816-828` (`seedAvailableUnit`) + `:1440-1458` (the create-form step) + the ~14 specs seeding `jurisdiction` | Mechanical follow: the dev seam takes `accepted_authorities`, the form step fills the new list input |
-| `GET /api/units?jurisdiction=` + `listByJurisdiction` (`units.ts:400-408`, `unitsRepo.ts:313,545`) | REMOVED - verified zero callers (the dashboard never passes it and walks pages client-side; no app-internal caller). The `byJurisdiction` GSI stays in `tables.ts` untouched (schema change = infrastructure; it simply goes sparse as the attribute stops being written; owed tf cleanup recorded in the drift issue) |
+| `GET /api/units?jurisdiction=` + `listByJurisdiction` (`units.ts:400-408`, `unitsRepo.ts:313,545`) | REMOVED - zero PRODUCTION callers (the dashboard never passes it and walks pages client-side; no app-internal caller). Three TEST-SIDE references go with it, enumerated so the typecheck gate does not ambush the builder: `unitsRepo.integration.test.ts:147-149` (deleted), the schema tests' GSI lists, and `twilioWebhookHarness.ts:1402` (the units-repo stub implements the interface - removing the method leaves an excess property that fails `npm run typecheck`) |
+| Tests pinning the REMOVED fields (invariant-rule completion) | `publicIntake.test.ts:322-330` asserts the flyer's EXACT key list (carries `accepted_programs` - becomes `accepted_authorities`); `listingFormat.test.ts:70` pins jurisdiction in the area phrase (assertion inverts); `ListingDetail` / `ListingEditForm` / `UnitCreateForm` / `FlyerPage` tests seed or assert the old fields and follow their surfaces |
+| The `byJurisdiction` GSI (`tables.ts:109`) | REMOVED from the schema in this feature (Cameron's ruling: DESIGNING an infra change is feature work; only APPLYING it needs the explicit ask). Full reference sweep confirmed dead: the repo method above, two schema tests (`tables.test.ts:150-154`, `genTables.test.ts:181`), one `unitsRepo` integration test, and the GENERATED tfvars (`infra/envs/{dev,prod}/tables.auto.tfvars.json`, written by `gen-tables.ts` from `tables.ts` - regenerate, commit both). OWED POST-MERGE OP: `terraform apply` on dev (and prod at its gate) to drop the index - non-destructive, a GSI is a projection. Stale local lanes keep a harmless extra index; fresh lanes create without it |
 | `ListingsList` authority facet | Derives from `authoritiesOf(unit)` - a unit now appears under EACH authority it accepts. Grouping reuses section 5's normalized-key rule |
 | `ListingDetail` | The `Jurisdiction` KV and the programs display become one "Housing authorities" row (the synthesized list, joined) |
 | `listingFormat.ts:53` (`buildListingFacts`) | `jurisdiction` DROPS out of the address/area phrase - it was an issuer name in an area slot; `unit.area` alone carries the area |
 | `toUnitFlyer` (`unitFields.ts:252`) + the PUBLIC flyer "Accepts:" line (`FlyerPage.tsx:253-254`) + `publicApi.ts:36` | The flyer projects `accepted_authorities` (synthesized) instead of `accepted_programs`. USER-VISIBLE on a public page: "Accepts: HCV, VASH" becomes "Accepts: Atlanta (AHA), DCA" - a deliberate improvement (it now answers the tenant's actual question: will this unit take MY voucher) |
-| `similarUnits.ts:94-120` (the programs-overlap score) | Same overlap logic over `authoritiesOf()` instead of `accepted_programs` - authority overlap is the truer similarity signal under the model |
+| `similarUnits.ts:94-120` (the programs-overlap score) | Same overlap logic over `authoritiesOf()` instead of `accepted_programs`. Cameron's ruling: the program list WAS the authority list all along, so this is a rename, not a semantic change. DELIBERATE side effect of synthesis, stated: the score is DORMANT today (no seed writes `accepted_programs`) and becomes live for every unit, since every seeded/imported unit synthesizes at least one authority - similar-unit rankings shift in demo worlds |
+| The flyer "Accepts:" line dormancy | Same always-on effect: today the line is hidden for every seeded unit (empty programs); post-feature every unit with an authority shows it on the PUBLIC flyer. Dev/demo flyers show raw slug values until `retire-humanize-authority` normalizes seeds; real units show the founder's spellings |
+| One authority, two spellings across import generations | The cutover import (pre-feature `main`) wrote `jurisdiction` as the RAW trimmed cell value; the post-feature import writes canonical spellings. `Atlanta Housing` (raw) and `Atlanta (AHA)` (canonical) do NOT normalize together, so the properties facet can show one authority as two chips until unit values are cleaned - operations-side data cleanup, per the gate ruling, accepted and stated |
 | Types (`unitsRepo.ts` `UnitItem` + the dashboard mirror) | Add `accepted_authorities?: string[]`; `jurisdiction` stays typed as a LEGACY read-only field with a comment pointing here |
 | `units.ts:5` route doc comment | Drop `jurisdiction=` from the query-param list |
 

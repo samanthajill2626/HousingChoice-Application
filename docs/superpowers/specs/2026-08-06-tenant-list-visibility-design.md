@@ -32,11 +32,16 @@ This section is authoritative for every naming decision below. Recorded in full 
   jurisdiction ("is this unit in authority X's area?") and acceptance ("does this landlord take
   X's vouchers?") are two different questions. Landlords themselves have no authority.
 
-**What this feature does with that model:** the tenant facet is `contact.housingAuthority`,
-single-valued - the model says that is the right shape. Agencies are NOT modelled here (no field
-exists); the agency entity, the unit multi-authority acceptance, and the extraction-vocabulary
-split it implies all live in the drift issue. The build DOES add the taxonomy to
-`documentation/GLOSSARY.md` (housing authority + agency), per the glossary rule.
+**What this feature does with that model - stated honestly.** The model says every tenant HAS
+exactly one authority. It does NOT say the `housingAuthority` FIELD holds one: the field is a
+single slot fed from a column that mixed both kinds, and the importer maps agency spellings
+(`HUD VASH`, `Claratel`, `Hope Atlanta`, `Step Up`) into it verbatim-canonically. So a tenant who
+is "AHA and HUD VASH" may have stored `HUD VASH` - and filtering by `Atlanta (AHA)` misses them.
+This feature facets over the field as it exists and DISCLOSES the gap in the UI: a muted line
+under the authority facet reads "Some tenants may have an agency recorded here instead of their
+housing authority." Fixing the field (the agency entity + caseworker link, unit multi-authority
+acceptance, the extraction-vocabulary split) lives in the drift issue. The build DOES add the
+taxonomy to `documentation/GLOSSARY.md` (housing authority + agency), per the glossary rule.
 
 **The live vocabulary.** The merged import (`app/src/lib/import/apply.ts:327-366`) normalizes
 the founder's tenant-side "voucher program" column onto canonical spellings
@@ -69,14 +74,19 @@ Deliberate divergence, stated: the regex requires an underscore, so a single low
 - A datalist-backed authority input on the contact edit form offering the eight authority-kind
   canonical spellings above (free text still accepted - a new authority is typed and saved
   as-is).
-- All three authority placeholders change from slug examples to `e.g. Atlanta (AHA)`
-  (`ContactEditForm`, `UnitCreateForm`, `ListingEditForm`) - the app must stop teaching staff to
-  type slugs while the display path stops humanizing free text.
+- All three authority placeholders drop their slug examples, but to KIND-APPROPRIATE values:
+  the contact form gets `e.g. Atlanta (AHA)` (an issuer name - the field is the voucher issuer),
+  while the two unit forms (`UnitCreateForm`, `ListingEditForm`) get `e.g. DeKalb County` (a
+  place name - `unit.jurisdiction` is the AREA question, and `listingFormat.ts:53` joins it into
+  an address phrase where "123 Main St, Atlanta (AHA)" would read wrong).
 - `ListingsList` switches from bare `humanizeAuthority` to the shared `authorityLabel` (explicit:
   its two tests seeded with slugs keep passing; a free-text jurisdiction now renders as typed).
-- The two authority detail-readers join the display rule: `TenantFile.tsx:144` and
-  `ContactDetail.tsx:706` render through `authorityLabel` (two-line change; closes the
-  list-vs-detail disagreement for slug worlds).
+- ALL FOUR raw authority readers join the display rule: `TenantFile.tsx:144`,
+  `ContactDetail.tsx:706`, `ListingDetail.tsx:727` (the Jurisdiction KV), and
+  `listingFormat.ts:53` (`buildListingFacts`) render through `authorityLabel` - one line each.
+  Two alone would REOPEN the list-vs-detail disagreement on the unit side the moment
+  `ListingsList` joins the shared helper: properties list "Atlanta Housing", property detail
+  `atlanta_housing`, one click apart.
 - GLOSSARY entries: housing authority, agency.
 
 **Out, by founder/Cameron decision.** Agency modelling (field, entity, caseworker link); the
@@ -94,7 +104,7 @@ authority acceptance; seed normalization and deleting `humanizeAuthority` (drift
 | Field | Shape | Notes |
 | --- | --- | --- |
 | `contact.voucherSize` | number (bedrooms) | `0` = Studio. PATCH accepts 0..12 |
-| `contact.housingAuthority` | string | `byHousingAuthority` GSI hash; canonical spellings post-import; 17 of 629 imported contacts carry one (founder-data gap, not code) |
+| `contact.housingAuthority` | string | `byHousingAuthority` GSI hash; canonical spellings post-import. Coverage: in-repo measurements CONFLICT (a 2026-08-06 run measured 17 of 629; the 2026-08-09 table comment says 533 of 666 populated, ~450 one Atlanta spelling). Expected high post-cutover; re-measure at the next import run rather than trusting either number |
 | `contact.porting` | boolean | Informational; = voucher moving between authorities |
 
 `GET /api/contacts` returns whole items (no projection), and `useContacts` already walks every
@@ -108,15 +118,25 @@ Rendered - and APPLIED - only when `filter === 'tenant'`. Facet params present o
 are inert: they filter nothing and no control renders. Follows `ListingsList` (chips,
 `aria-pressed`, per-facet Clear).
 
-- **Voucher size** - multi-select chips, BUCKETED by `voucherSizeLabel`
-  (`broadcastFormat.ts:35-39`): `Studio`, `1-BR`, `2-BR`, `3-BR`, `4+ BR`. The `4+ BR` chip
-  selects every size >= 4. Bucket membership: `min(voucherSize, 4)`.
-- **Housing authority** - multi-select chips. **Facet key = display label** (post
-  `authorityLabel`): stored values sharing a label merge into ONE chip with summed counts, and
-  selecting it matches every stored value mapping to that label. (Without this, seed
-  `atlanta_housing` and a typed `Atlanta Housing` render two identical-looking chips - split
-  counts the founder cannot tell apart, and a Playwright strict-mode collision; `selectors.md`
-  documents that exact bug class.)
+- **Voucher size** - multi-select chips, a FIXED five-bucket set (`Studio`, `1-BR`, `2-BR`,
+  `3-BR`, `4+ BR`, labels from `voucherSizeLabel`, `broadcastFormat.ts:35-39`) plus
+  `Not recorded`. Fixed, not derived: buckets are a closed enumeration and stable chips scan
+  better; an empty bucket is handled by the zero-count rule. `4+ BR` selects every size >= 4;
+  membership is `min(voucherSize, 4)`.
+- **Housing authority** - multi-select chips, options DERIVED from loaded data (open
+  vocabulary). **Facet key = the NORMALIZED label**: `authorityLabel(value)` then trim, collapse
+  internal whitespace, and case-fold. Stored values sharing a normalized key merge into ONE chip
+  with summed counts, and selecting it matches all of them; the chip displays the most frequent
+  raw spelling among its members (ties broken by sort order, deterministic). Byte-identical
+  merging alone is not enough - the PATCH path stores strings untrimmed, so `Atlanta (AHA)` with
+  a trailing space and `atlanta housing` vs `Atlanta Housing` would otherwise render
+  indistinguishable duplicate chips with split counts (and a Playwright strict-mode collision;
+  `selectors.md` documents that bug class). The importer already trims/folds on its side
+  (`housingAuthorityFor`); this rule is the read-side equivalent, and the edit form additionally
+  trims + collapses whitespace before PATCHing (section 7).
+  Directly under this facet renders a muted disclosure line: "Some tenants may have an agency
+  recorded here instead of their housing authority." (section 2's field-vs-model gap - the facet
+  must not present agency values as authorities without saying so).
 - **Porting** - single toggle chip. Label and title match the existing placement chip
   (`PlacementRow.tsx:41-45`: text `Porting`, title `Tenant is porting`).
 
@@ -127,19 +147,22 @@ render a permanently dead toggle). An authority is recorded when it is a non-emp
 
 **Rendering rules.** The two value facets ALWAYS render on the Tenants view once loaded. Each
 carries a final `Not recorded (N)` option (sentinel `__none__` in the URL) - without it,
-selecting any authority silently excludes the mostly-unrecorded post-cutover population. When a
-facet has ZERO recorded values it renders a muted explanatory line ("No housing authorities
-recorded yet") instead of chips - the promised control must not silently vanish on day-1 data.
-Porting alone hides unless some tenant has `porting === true` (a toggle with nothing to match is
-dead UI).
+selecting any value silently excludes the unrecorded population, whatever its size (coverage is
+genuinely uncertain - section 4). When a facet has ZERO recorded values it renders a muted
+explanatory line instead of chips ("No housing authorities recorded yet" / "No voucher sizes
+recorded yet") - the promised control must not silently vanish. Porting alone hides unless some
+tenant has `porting === true` (a toggle with nothing to match is dead UI).
 
 **Counts - standard faceted-search semantics.** A facet's counts reflect every OTHER active
 facet and the search query, but not its own selection: a chip's number always states what
 clicking it does. OR within a facet (a second chip ADDS its rows), AND across facets; empty
 selection = unconstrained. The OPTION LIST derives once from the full loaded set and never
 re-derives as facets change (chips must not vanish mid-interaction; pinned by test). An
-unselected chip whose contextual count is 0 renders disabled with `(0)`; a selected chip is
-always clickable (deselection must never lock).
+unselected chip whose contextual count is 0 renders inert with `(0)`: `aria-disabled="true"` on
+an ENABLED button (it stays in the tab order so keyboard/screen-reader users can reach the
+explanation), click a no-op, plus a muted `.chipDisabled` visual variant (`ListingsList`'s chips
+have no disabled styling to inherit - this is new CSS). A selected chip is always clickable
+(deselection must never lock).
 
 **Layout.** The control block sits between the filter tabs and the search box, wraps at narrow
 width (`flex-wrap`, as `ListingsList.controls`), and follows the search input's
@@ -173,17 +196,28 @@ NARROW (<=560px container):
   `4+ BR`. The bucket label belongs to the filter chip (a control); the row is a fact and
   `TenantFile` one click away already says `6 BR`. This deliberately narrows the earlier
   "one label everywhere" call to controls only - flagged for the human at the spec gate.
-- Facts and authority join with a middot rendered as `&middot;` with spaces
-  (`3 BR &middot; Dekalb County Housing`) - a hyphen separator collides with `voucherSizeLabel`'s
-  internal hyphen, and the approved mockup used middots. The facts are ONE text span (one
-  accessible-name token stream; nothing needs `aria-hidden`). Missing values collapse: only-size
-  reads `3 BR`; only-authority reads the name alone; neither = no facts span. The separator
-  never leads or trails.
-- **Wide pane:** the facts span is the only `.meta` chip allowed to shrink
-  (`min-width: 0`, ellipsis, much higher `flex-shrink` than `.name`, full value in `title`) -
-  five unshrinkable chips would otherwise crush the ellipsizing name in the pane band just above
-  560px, the exact failure the container query was written to prevent. Sacrifice order: facts
-  truncate first, name second.
+- Facts and authority join with a middot with spaces (`3 BR &middot; Dekalb County Housing`) - a
+  hyphen separator collides with `voucherSizeLabel`'s internal hyphen, and the approved mockup
+  used middots. ASCII-construction rule (the convention `selectors.md` already records for the
+  em dash): source and tests build the separator with the backslash-u escape for U+00B7, never a
+  literal middot character - the ASCII gate covers new code and test lines. The facts are ONE text span
+  (one accessible-name token stream; nothing needs `aria-hidden`). Missing values collapse:
+  only-size reads `3 BR`; only-authority reads the name alone; neither = no facts span. The
+  separator never leads or trails.
+- **Wide pane:** five unshrinkable chips would crush the ellipsizing name in the pane band just
+  above 560px - the exact failure the container query was written to prevent. The fix has THREE
+  required declarations, all scoped to tenant rows (the naive version - a shrinkable facts span
+  alone - cannot fire: `.meta` is `flex: 0 0 auto`, so a shrinkable CHILD never receives
+  compression, and `flex-shrink` only arbitrates between siblings, so "facts shrink before the
+  name" is not expressible across two containers):
+  1. `.meta` becomes `flex: 0 4 auto; min-width: 0` - shrinkable, never growing, biased to give
+     before the name;
+  2. the facts span gets `min-width: 0; overflow: hidden; text-overflow: ellipsis;
+     white-space: nowrap` - inside `.meta` it is the only compressible child, so all of `.meta`'s
+     compression lands on it (kind/phone/status keep `flex: 0 0 auto`);
+  3. `.name` keeps `flex: 1 1 auto` and gains a floor, `min-width: 16ch` (starting value; tune in
+     live QA) - the backstop that pins the sacrifice order: facts truncate first, name second.
+  The facts span carries the full value in `title`.
 - **Narrow pane:** the name wraps in full instead of truncating (`ListingsList.module.css:292-299`
   idiom). Density tightens to `var(--sp-2) var(--sp-3)` padding / `var(--sp-1)` row gap -
   **scoped to the tenant ROUTE** (`filter === 'tenant'`), not the row type, so no view ever
@@ -207,6 +241,9 @@ Replace the bare input (`ContactEditForm.tsx:481-488`) with the established data
 - `<datalist>` of the eight authority-kind canonical spellings (section 2). Agency-kind values
   are deliberately excluded - the form must stop feeding the model gap.
 - Free text fully accepted; the datalist suggests, never constrains.
+- The form TRIMS and collapses internal whitespace before PATCHing (the importer already does
+  this on its side via `housingAuthorityFor`; the human write path currently has no equivalent,
+  which is half of how indistinguishable duplicate chips arise - section 5).
 - Datalist id from `useId()` (the module-constant collision is a documented fix at
   `CustomFieldsEditor.tsx:22-24`).
 - The `autoComplete="off"` attribute on the current input is DROPPED (whether it suppresses
@@ -227,14 +264,20 @@ Replace the bare input (`ContactEditForm.tsx:481-488`) with the established data
 | `humanizeAuthority` (moved) | Lifted from `ListingsList.tsx:36-42` unchanged; consumed ONLY via `authorityLabel`. |
 | `ContactsList` (edited) | URL state; renders `TenantFilters` on the tenant view; threads `filter` into `Row`; facts span; `noMatches` conditional. |
 | `ContactEditForm` (edited) | Section 7 input. |
-| `ListingsList`, `TenantFile`, `ContactDetail` (edited) | Switch authority rendering to `authorityLabel` (one line each). |
+| `ListingsList`, `TenantFile`, `ContactDetail`, `ListingDetail`, `listingFormat` (edited) | Switch authority/jurisdiction rendering to `authorityLabel` (one line each; all six readers agree afterward). |
 
 ## 9. URL state
 
-Params, absent when unset - **repeated params, not comma-joined** (authority labels may contain
-commas; `searchParams.getAll` is the reader): `voucher` (bucket keys `0|1|2|3|4plus|__none__`),
-`ha` (authority labels or `__none__`), `porting` (presence-only; `?porting=false` is treated as
-absent).
+Params, absent when unset - **repeated params, not comma-joined** (no CANONICAL value contains
+a comma, but passthrough values can - the founder's raw cells demonstrably do, e.g.
+`"dca, department of community affairs"` - and `searchParams.getAll` handles both): `voucher`
+(bucket keys `0|1|2|3|4plus|__none__`), `ha` (NORMALIZED facet keys per section 5, or
+`__none__`), `porting` (presence-only; `?porting=false` is treated as absent).
+
+The `voucher` key `0` (Studio) is matched by STRING comparison against the literal key set -
+never numeric coercion or truthiness, which would drop Studio from a shared or reloaded link
+while every in-memory test stays green (the same falsy-zero class section 5 hardens one layer
+down). The component round-trip test includes `?voucher=0`.
 
 - Writes use `{ replace: true }` (matches `FlyerPage.tsx:129`, the only existing writer; Back
   leaves the page rather than walking chip toggles) and MERGE the query string (`?phone=` must
@@ -243,21 +286,29 @@ absent).
 - **Only the Tenants tab link carries facet params.** Other tabs keep bare paths, and facets
   never apply off the tenant view (section 5) - so a carried param can neither silently filter
   Landlords nor survive as invisible state. Re-clicking the active Tenants tab preserves state
-  (the round-1 silent-reset fix, now bounded).
+  (the round-1 silent-reset fix, now bounded). Consequence, deliberate and stated: navigating
+  Tenants -> Landlords -> Tenants CLEARS the facets - the URL is the only state carrier, and
+  leaving the view drops it. Cross-navigation persistence would need session storage, which is
+  out of scope.
 
 ## 10. Testing and verification
 
-- **Unit** (`tenantFacets`): bucketing incl. `min(v,4)` and Studio=0 pinned; label-merge (slug +
-  typed same label = one option, summed counts, both match on select); counts vs other-facets+
-  query; OR/AND; Not-recorded; zero-recorded empty state; porting `=== true`; option-list
-  stability; unknown URL values; sentinel round-trip.
+- **Unit** (`tenantFacets`): bucketing incl. `min(v,4)` and Studio=0 pinned; key normalization
+  (slug + typed same label merge; trailing-space variant merges; case variant merges; display
+  spelling = most frequent member); counts vs other-facets+query; OR/AND; Not-recorded;
+  zero-recorded empty state per facet; porting `=== true`; fixed-five voucher buckets vs derived
+  authority options (each pinned per its own rule); unknown URL values; sentinel round-trip;
+  `voucher=0` string-matched (never coerced).
 - **Unit** (`authorityLabel`): slug humanizes; `'Step Up'` passes through unchanged; single
   lowercase token passes through.
 - **Component**: controls on Tenants only; facts on tenant rows only (not landlord, not
-  deleted); kind/phone/status retained; URL round-trip; active-tab preservation; other tabs
-  bare; edit-form datalist renders the eight values and free text still PATCHes; `noMatches`
-  precedence. Structure/class assertions only - layout is live-QA's job. Accessibility-first
-  selectors; add the new controls to `e2e/support/selectors.md`.
+  deleted); kind/phone/status retained; URL round-trip INCLUDING `?voucher=0`; active-tab
+  preservation; other tabs bare; the authority disclosure line renders; zero-count chips are
+  `aria-disabled` yet focusable; edit-form datalist renders the eight values, free text still
+  PATCHes, and the PATCHed value is trimmed; `noMatches` precedence. Structure/class assertions
+  only - layout is live-QA's job. Accessibility-first selectors; add the new controls to
+  `e2e/support/selectors.md`, including the middot construction rule (backslash-u escape for
+  U+00B7 in specs/tests, mirroring the em-dash convention already recorded there).
 - **e2e**: lean holds ONE tenant, so the spec creates its own tenants via
   `e2e/scenarios/steps.ts:581-647` (`voucherSize`/`housingAuthority` supported): apply a facet,
   list narrows, reload, filter survives. New spec file (none exists for the contacts list).

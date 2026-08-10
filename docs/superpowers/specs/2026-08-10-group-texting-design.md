@@ -770,9 +770,71 @@ mainline; import mission owns the RUN). This feature ships:
   redeploy - remedy is roll-forward, documented.
 - Cutover continuity: imported groups continue on the ported number because
   identity is the shared roster + exclusion set; handset threads merge by
-  participant set (spike, odds-and-ends). First outbound per group lazily
+  participant set (spike, odds-and-ends). ensureGroupRail covers any group
+  still rail-less at cutover per the hardened invariant; historically-worded
   creates its rail.
 - MMS-enabled campaign approval precedes real outbound (Cameron's gate).
 - Follow-up issues filed by this spec: `twilio-standard-optout-double-reply`,
   `group-mms-including-pool-numbers`, outbound group media, and (if naming
   Option B is chosen) the post-cutover relay-label rename.
+
+
+## 15. Delta-2 amendments (external review round 2 - AUTHORITATIVE over
+earlier sections where they conflict)
+
+1. Cross-check input filter: the events endpoint processes ONLY
+   carrier-sourced inbound (`Source === 'SMS'` AND author is an external
+   member address); API/SDK-sourced events are counted and ignored. Our
+   outbound posts do NOT set X-Twilio-Webhook-Enabled (spike A3/F3:
+   delivery receipts flow without it; the header would only add our own
+   onMessageAdded echoes).
+2. Receipts pipeline: (a) an unknown IMxx is parked briefly and re-tried
+   (bounded) before the drop+counter - a receipt can beat the message
+   append; (b) status transitions write CHILD FIELDS (status, errorCode,
+   deliveredAt) under the prior-status condition, never a whole-slot
+   replace, so the targeted sid write cannot be clobbered (concurrent
+   same-member test required); (c) each outbound message row SNAPSHOTS the
+   CHxx + MB->member map at send time, so late receipts stay mappable
+   across rail recreation; (d) send-intent semantics are PARITY with
+   existing 1:1/relay sends (no exactly-once guarantee exists anywhere in
+   the app; a lost response + staff re-click can duplicate on every path)
+   - follow-up issue `exactly-once-send-intent` filed, out of scope.
+3. Rail creation: ONE authoritative `ensureGroupRail` service used by
+   detection, migration, and send-time recovery. The claim carries an
+   OWNER TOKEN + generation; finalize (writing CHxx/map) is CONDITIONAL on
+   still owning the claim, so an expired claimant cannot overwrite a new
+   claimant's rail. Additionally, ANY group inbound filed onto a thread
+   with no active rail (re-)enqueues ensureGroupRail (idempotent) -
+   closing the create->enqueue crash window. Tests: fencing takeover,
+   crash-after-create/before-enqueue.
+4. Migration convergence: the bulk runner CONVERGES every expected
+   imported id to the full end-state (type group_text + every member
+   `group_participation_at` stamp + active CH + verified MB map) on EVERY
+   run - "already-converted" never skips the remaining steps. Conversion's
+   type transition is the conditional-write + loser-reread form with a
+   concurrent test (bulk vs inbound auto-convert race). The retract
+   contact delete is CONDITIONED on
+   `attribute_not_exists(group_participation_at)` (atomic guard replacing
+   read-then-delete).
+5. Due-discovery without a GSI: cross-check pending events and (if
+   addendum (b) requires it) parked classic DLRs live in ONE queryable
+   synthetic partition with deadline-prefixed sort keys, plus the
+   point-readable per-IM dedupe marker; the T6.3 poller Queries the
+   deadline range - never a table scan. TTL is cleanup only, NEVER the
+   alarm mechanism; expiry-overdue items alarm from the sweep.
+6. Member keys for group_text delivery/attribution are PHONE-SCOPED
+   (`phone#<E164>`), with contactId carried as metadata for display -
+   `relayMemberKey`'s contactId preference would collapse two numbers of
+   one contact into one slot (test: one contact, two member numbers).
+7. Group sends refuse when any member's contact is soft-DELETED (parity
+   with sendMessage's fence), naming the member; the thread view surfaces
+   the state.
+8. A 21610 receipt performs idempotent, number-scoped suppression
+   bookkeeping + audit (the spec 4.4 promise; the syssid marker suppresses
+   the classic path that would otherwise have done it). Test: receipt-only
+   suppression then START restoration.
+9. The per-send staleness alarm fires when ANY slot is non-terminal past
+   the deadline (the seeded map is never empty, so an empty-map condition
+   would be dead code).
+10. The nav badge group read follows the SAME accepted full-partition-walk
+    contract as section 4.2 (no O(BADGE_LIMIT) claim).

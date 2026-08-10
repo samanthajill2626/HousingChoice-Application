@@ -503,3 +503,50 @@ ticket, MMS campaign gate. All Cameron-executed. No schema ops.
 - Never touch the live stack (:5174/:8080); hermetic lanes only.
 - T7.1 carries an inline VERIFY note (second-write status field) - resolve
   it while implementing, record in the slice report.
+
+
+## Delta-2 corrections (external review round 2 - AUTHORITATIVE overrides;
+read WITH the tasks they amend; spec section 15 is the contract)
+
+- T5.1/T5.2: do NOT set X-Twilio-Webhook-Enabled on outbound posts
+  (receipts flow without it - spike A3/F3; the header would add our own
+  onMessageAdded echoes to the cross-check).
+- T5.2: additional refusal - any member whose contact is soft-deleted
+  (parity with sendMessage.ts:275 fence), naming the member; GroupTextView
+  surfaces the state. Send-intent = parity with existing sends (no
+  exactly-once; issue `exactly-once-send-intent` filed).
+- T5.3: unknown-IM park-and-retry before drop; status transitions as CHILD
+  FIELD writes under the prior-status condition (whole-slot replace is
+  forbidden - it clobbers the targeted sid write; concurrent same-member
+  test); per-message CHxx+MB map SNAPSHOT at send; 21610 receipts perform
+  idempotent number-scoped suppression bookkeeping + audit (test:
+  receipt-only suppression then START); delivery/attribution member keys
+  are PHONE-SCOPED (phone#<E164>, contactId as metadata; test: one
+  contact with two member numbers).
+- T6.1 -> becomes `ensureGroupRail` (single authoritative service; all
+  three callers route through it; claim = owner token + generation;
+  conditional finalize; expired-claimant cannot overwrite; rail-less
+  inbound re-enqueues ensure - closes the create->enqueue crash window;
+  fencing-takeover + crash-matrix tests).
+- T6.2/T6.4: pending events + parked DLRs live in ONE queryable synthetic
+  deadline partition (deadline-prefixed SKs) + point-readable dedupe
+  markers; the T6.3 poller queries the deadline range (never a scan); TTL
+  is cleanup only; overdue items alarm from the sweep. Explicit parked-DLR
+  repository + drain + fake callback + tests if addendum (b) keeps the
+  parking path.
+- T6.4: staleness alarm = ANY slot non-terminal past deadline (never
+  empty-map, which is unreachable).
+- T7.3/T7.4: conditional type transition with concurrent (bulk vs inbound)
+  test; the bulk runner CONVERGES every expected id to
+  type+stamps+rail+map on every run - already-converted never skips
+  remaining steps; crash tests after each durable step. Retract delete
+  conditioned on attribute_not_exists(group_participation_at).
+- T4.1: badge group read = the accepted full-partition-walk contract (no
+  O(BADGE_LIMIT) claim).
+- T6.2: process ONLY Source==='SMS' + external-author events; count and
+  ignore API/SDK; fake emits both kinds.
+- T3.4/T8.3 test wording: assert group_participation_at PRESENT +
+  consent_method ABSENT + proactive gates still refuse (not "no consent
+  stamp").
+- Mission block cutover line = the full hardened invariant (active rail +
+  verified map + zero unresolved failures or explicit adjudication).

@@ -1691,6 +1691,10 @@ export interface Contact {
   company?: string;
   /** Tenant housing authority (camelCase — the byHousingAuthority GSI key). */
   housingAuthority?: string;
+  /** The helper organization a tenant works with (Hope Atlanta, HUD VASH, ...) -
+   *  NOT a housing authority. Distinct dimension; no GSI, no facet. Declared
+   *  first-class so it does not fall through the index signature as `unknown`. */
+  agency?: string;
   /** Eligibility intake (free-text answers + a boolean LIF flag). */
   pets?: string;
   evictions?: string;
@@ -1741,6 +1745,9 @@ export interface ContactPatch {
   notes?: string;
   company?: string;
   housingAuthority?: string;
+  /** The tenant's helper organization (see Contact.agency). PATCH-allowlisted
+   *  app-side alongside housingAuthority; deliberately NOT a provenance field. */
+  agency?: string;
   pets?: string;
   evictions?: string;
   tenure?: string;
@@ -1827,7 +1834,18 @@ export interface UnitItem {
   status_source?: TransitionSource;
   /** The accepted contract rent, written on the move OUT of awaiting_rent_acceptance. */
   final_rent?: number;
+  /** LEGACY - read-only. The pre-consolidation single authority string. No longer
+   *  writable: `accepted_authorities` below replaced it, and reads go through
+   *  `authoritiesOf` (routes/listing/listingFormat.ts), which synthesizes this
+   *  value into a one-item list. See spec section 8:
+   *  docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md. */
   jurisdiction?: string;
+  /** The authorities whose vouchers this unit accepts - ONE list replacing BOTH
+   *  `jurisdiction` and `accepted_programs` (spec section 8). At least one entry
+   *  on a new write, chosen by the landlord. Read via `authoritiesOf` so legacy
+   *  units synthesize instead of needing a backfill. Mirrors
+   *  app/src/repos/unitsRepo.ts UnitItem.accepted_authorities. */
+  accepted_authorities?: string[];
   /** Structured street address, or a plain string on pre-contract dev records. */
   address?: Address | string;
   accepted_programs?: string[];

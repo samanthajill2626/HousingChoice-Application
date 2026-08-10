@@ -523,6 +523,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     patch['housingAuthority'] = v;
     changedFields.push('housingAuthority');
   }
+  // Tenant agency (edit form) - the helper org that assists the tenant (Hope Atlanta,
+  // HUD VASH, Claratel, Step Up). Taxonomy: an agency is NOT a housing authority; the
+  // authority above issues the voucher. A plain stored string - no GSI, no facet, and
+  // deliberately NOT in PROVENANCE_FIELDS because nothing machine-writes it.
+  if ('agency' in b) {
+    const v = b['agency'];
+    if (typeof v !== 'string') return { error: 'agency must be a string' };
+    patch['agency'] = v;
+    changedFields.push('agency');
+  }
   // Structured postal address (edit form). Every part optional; we store only the
   // non-empty parts (a SET-merge replaces the whole address object).
   if ('address' in b) {

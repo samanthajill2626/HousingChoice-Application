@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
+import { BLANK } from './Card.js';
 import type { CommsMediaItem } from './media.js';
 import type { PlacementItem, Contact, RelayGroupRow, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
 
@@ -51,12 +52,15 @@ describe('TenantFile', () => {
       relayGroupsPending?: boolean;
       relayGroups?: RelayGroupRow[];
       onSendProperty?: () => void;
+      // Per-test fixture override (the LandlordFile helper below does the same).
+      // Never mutate the shared `contact` - other assertions depend on it.
+      contact?: Contact;
     } = {},
   ) {
     return render(
       <MemoryRouter>
         <TenantFile
-          contact={contact}
+          contact={opts.contact ?? contact}
           phones={[{ phone: '+14040100007', primary: true }]}
           placements={[TENANT_CASE]}
           tours={opts.tours ?? []}
@@ -77,6 +81,30 @@ describe('TenantFile', () => {
     expect(screen.getByText('2 BR')).toBeInTheDocument();
     expect(screen.getByText('(404) 010-0007')).toBeInTheDocument();
     expect(screen.getByText('Active')).toBeInTheDocument();
+  });
+
+  it('renders an Agency row in Details from the first-class contact.agency field', () => {
+    // The agency (helper org) is a DIFFERENT dimension from the housing
+    // authority that issues the voucher - both show, one under the other.
+    renderIt({ contact: { ...contact, agency: 'Hope Atlanta' } });
+    expect(screen.getByText('Agency')).toBeInTheDocument();
+    expect(screen.getByText('Hope Atlanta')).toBeInTheDocument();
+  });
+
+  it('renders the Agency row blank when no agency is recorded', () => {
+    renderIt();
+    // The KV row is one wrapper holding a key span and a value span.
+    expect(screen.getByText('Agency').parentElement).toHaveTextContent(BLANK);
+  });
+
+  it('renders the Agency row blank when the agency was recorded then CLEARED', () => {
+    // A cleared agency reaches the server as '' (the edit form sends
+    // collapseOrgInput('')) and persists: unlike housingAuthority, `agency` has no
+    // GSI, so '' is a legal stored attribute. '' is not nullish, so a `??` here
+    // would render an empty cell between two em-dashed siblings. The unit-side
+    // twin (routes/listing/ListingDetail.tsx) uses `|| BLANK` for the same reason.
+    renderIt({ contact: { ...contact, agency: '' } });
+    expect(screen.getByText('Agency').parentElement).toHaveTextContent(BLANK);
   });
 
   it('renders REAL placements linking to the placement route', () => {

@@ -1109,10 +1109,19 @@ export async function setUnitPhotoCover(unitId: string, entry: string): Promise<
 /** GET /api/contacts - the records list (the Contacts list views' source). The
  *  server REQUIRES a `type` filter (unless an exact `phone` lookup is given), so
  *  callers fetch one type at a time; the "all Contacts" view fans out per type
- *  and merges. First page only (the server pages via nextCursor) - the list
- *  views note this transitional limitation. */
+ *  and merges. Returns ONE page; `nextCursor` continues the walk. The list views'
+ *  hook (routes/contacts/useContacts.ts) and usePlacements walk EVERY page; the
+ *  typeahead candidate lists read only the first. */
 export function getContacts(
-  params: { type?: ContactType; status?: string; cursor?: string; deleted?: boolean } = {},
+  params: {
+    type?: ContactType;
+    status?: string;
+    cursor?: string;
+    deleted?: boolean;
+    /** Page size, 1..MAX_PAGE_LIMIT (100) - the server REJECTS anything outside
+     *  that range with a 400, it does not clamp it. Omitted = 50. */
+    limit?: string;
+  } = {},
   signal?: AbortSignal,
 ): Promise<ContactsPage> {
   return request<ContactsPage>('/api/contacts', {
@@ -1120,6 +1129,7 @@ export function getContacts(
       type: params.type,
       status: params.status,
       cursor: params.cursor,
+      limit: params.limit,
       // ?deleted=true ? the Deleted view (only soft-deleted); omit otherwise.
       ...(params.deleted === true && { deleted: 'true' }),
     },

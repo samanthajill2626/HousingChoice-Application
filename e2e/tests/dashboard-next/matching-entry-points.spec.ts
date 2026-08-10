@@ -66,7 +66,7 @@ async function createUnitViaApi(
     data: {
       landlordId: 'contact-landlord-0001',
       beds: 2,
-      jurisdiction: 'atlanta_housing',
+      accepted_authorities: ['atlanta_housing'],
       address: { line1, city: 'Atlanta', state: 'GA', zip: '30314' },
       rent_min: 1500,
       rent_max: 1600,

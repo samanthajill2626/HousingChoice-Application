@@ -250,8 +250,10 @@ export function FlyerPage(): React.JSX.Element {
         )}
       </ul>
 
-      {flyer.accepted_programs.length > 0 && (
-        <p className={styles.programs}>Accepts: {flyer.accepted_programs.join(', ')}</p>
+      {/* Which authorities' vouchers this home takes - the tenant's actual
+          question. Absent authorities hide the line entirely (spec section 8). */}
+      {flyer.accepted_authorities.length > 0 && (
+        <p className={styles.authorities}>Accepts: {flyer.accepted_authorities.join(', ')}</p>
       )}
 
       <dl className={styles.details}>

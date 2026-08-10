@@ -13,6 +13,7 @@ import {
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Modal } from '../contact/Modal.js';
+import { authoritiesOf } from './listingFormat.js';
 import styles from './ListingEditForm.module.css';
 
 export interface ListingEditFormProps {
@@ -31,7 +32,11 @@ function numStr(v: unknown): string {
 }
 
 export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps): React.JSX.Element {
-  const [jurisdiction, setJurisdiction] = useState(str(unit.jurisdiction));
+  // ONE comma-separated authorities input (spec section 8), prefilled from the
+  // SYNTHESIZED list: a legacy unit that only carries `jurisdiction` shows that
+  // value here, so the first real edit migrates it into `accepted_authorities`.
+  const initialAuthorities = authoritiesOf(unit).join(', ');
+  const [authorities, setAuthorities] = useState(initialAuthorities);
   const [beds, setBeds] = useState(numStr(unit.beds));
   const [baths, setBaths] = useState(numStr(unit.baths));
   const [rentMin, setRentMin] = useState(numStr(unit.rent_min));
@@ -51,8 +56,6 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
           ? 'No'
           : '',
   );
-  const initialPrograms = (unit.accepted_programs ?? []).join(', ');
-  const [programs, setPrograms] = useState(initialPrograms);
   const [tourProcess, setTourProcess] = useState(str(unit.tour_process));
   const [tourType, setTourType] = useState<string>(str(unit.tour_type));
   const [applicationProcess, setApplicationProcess] = useState(str(unit.application_process));
@@ -107,7 +110,6 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
 
   function buildPatch(): Record<string, unknown> | null {
     const patch: Record<string, unknown> = {};
-    if (jurisdiction !== str(unit.jurisdiction)) patch['jurisdiction'] = jurisdiction;
     if (utilities !== str(unit.utilities)) patch['utilities'] = utilities;
     if (videoUrl !== str(unit.video_url)) patch['video_url'] = videoUrl;
     // same_day_rta — a boolean toggle; send when it differs from the stored value.
@@ -149,15 +151,19 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
       return null;
     }
 
-    // Accepted programs — comma-separated; normalize (trim, drop empties) and
-    // send the array only when the normalized form changed.
-    const normPrograms = programs
+    // Housing authorities - comma-separated; normalize (trim, drop empties) and
+    // send the array only when the normalized form changed. The baseline is the
+    // SYNTHESIZED list, so a legacy `jurisdiction` value that the operator leaves
+    // untouched stays put instead of being re-sent, and the retired
+    // `jurisdiction` / `accepted_programs` keys are never written again (both are
+    // server-side tombstones - app/src/lib/unitFields.ts).
+    const normAuthorities = authorities
       .split(',')
-      .map((p) => p.trim())
+      .map((a) => a.trim())
       .filter(Boolean);
-    const initNorm = (unit.accepted_programs ?? []).map((p) => p.trim()).filter(Boolean);
-    if (JSON.stringify(normPrograms) !== JSON.stringify(initNorm)) {
-      patch['accepted_programs'] = normPrograms;
+    const initNorm = authoritiesOf(unit).map((a) => a.trim()).filter(Boolean);
+    if (JSON.stringify(normAuthorities) !== JSON.stringify(initNorm)) {
+      patch['accepted_authorities'] = normAuthorities;
     }
 
     // Address: if ANY part changed, send the whole object (the server keeps only
@@ -217,12 +223,12 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
         </p>
         <div className={styles.row}>
           <label className={styles.field}>
-            <span className={styles.label}>Housing authority</span>
+            <span className={styles.label}>Housing authorities</span>
             <input
               className={styles.input}
-              value={jurisdiction}
-              onChange={(e) => setJurisdiction(e.target.value)}
-              placeholder="e.g. ga_dca"
+              value={authorities}
+              onChange={(e) => setAuthorities(e.target.value)}
+              placeholder="e.g. Atlanta (AHA), DCA"
               autoComplete="off"
             />
           </label>
@@ -410,17 +416,6 @@ export function ListingEditForm({ unit, onClose, onSaved }: ListingEditFormProps
             value={leaseTerms}
             onChange={(e) => setLeaseTerms(e.target.value)}
             placeholder="e.g. 12-month minimum, month-to-month after"
-            autoComplete="off"
-          />
-        </label>
-
-        <label className={styles.field}>
-          <span className={styles.label}>Accepted vouchers / programs</span>
-          <input
-            className={styles.input}
-            value={programs}
-            onChange={(e) => setPrograms(e.target.value)}
-            placeholder="Comma-separated, e.g. HCV, VASH"
             autoComplete="off"
           />
         </label>

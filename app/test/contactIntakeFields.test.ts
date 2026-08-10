@@ -72,3 +72,85 @@ describe('contact intake fields (pets/evictions/tenure/lifEligible)', () => {
     expect(created.body.contact.lifEligible).toBe(false);
   });
 });
+
+// The tenant `agency` field (tenant-list-visibility spec sections 2 + 4): the helper
+// org a tenant works with, DISTINCT from the housing authority that issues the
+// voucher. Edit-only by design - the create dialog does not collect it.
+describe('contact agency field (PATCH allowlist)', () => {
+  it('PATCH persists agency and GET returns it', async () => {
+    const { app } = makeWebhookHarness();
+    // Create a contact to triage/patch.
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', firstName: 'Pat', lastName: 'Q' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ agency: 'Hope Atlanta' })
+      .expect(200);
+
+    const got = await request(app)
+      .get(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .expect(200);
+    expect(got.body.contact.agency).toBe('Hope Atlanta');
+  });
+
+  it('tracks agency in changedFields (the audit event records it)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', firstName: 'Pat', lastName: 'Q' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    // TWO fields on purpose: with `agency` alone, dropping it from changedFields
+    // would leave the PATCH with no tracked field at all, which the parser
+    // reports as its generic 400 - so the test would fail for the wrong reason.
+    // Alongside firstName the write still succeeds and round-trips (the test
+    // above), and ONLY the audit row under-reports.
+    await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ agency: 'Hope Atlanta', firstName: 'Patrice' })
+      .expect(200);
+
+    const audit = world.auditEvents.find(
+      (e) => e.event_type === 'contact_updated' && e.entityKey === `contacts#${id}`,
+    );
+    expect(audit?.payload).toMatchObject({
+      fields: expect.arrayContaining(['agency', 'firstName']),
+    });
+  });
+
+  it('rejects a non-string agency', async () => {
+    const { app } = makeWebhookHarness();
+    const created = await request(app)
+      .post('/api/contacts')
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ type: 'tenant', firstName: 'Pat', lastName: 'Q' })
+      .expect(201);
+    const id = created.body.contact.contactId;
+
+    // The MESSAGE matters: an unrecognized key falls through to the parser's
+    // generic 'no updatable fields supplied' 400, which would mask the allowlist.
+    const rejected = await request(app)
+      .patch(`/api/contacts/${id}`)
+      .set('x-origin-verify', ORIGIN_SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ agency: 7 })
+      .expect(400);
+    expect(rejected.body.error).toMatch(/agency must be a string/);
+  });
+});

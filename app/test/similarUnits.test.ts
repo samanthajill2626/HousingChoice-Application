@@ -1,6 +1,6 @@
 // BE5/C6 unit tests — the PURE ranking fn rankSimilarUnits(target, candidates).
 // Determinism (same inputs → same order + matchPct), exclusion of self +
-// non-available, beds/area/rent/programs scoring, top-N cap, stable tie-break.
+// non-available, beds/area/rent/authorities scoring, top-N cap, stable tie-break.
 import { describe, expect, it } from 'vitest';
 import { rankSimilarUnits } from '../src/lib/similarUnits.js';
 import type { UnitItem } from '../src/repos/unitsRepo.js';
@@ -20,7 +20,7 @@ const target = unit('target', {
   area: 'North',
   subzone: 'North-A',
   payment_standard: 1500,
-  accepted_programs: ['HCV', 'VASH'],
+  accepted_authorities: ['HCV', 'VASH'],
 });
 
 describe('rankSimilarUnits (BE5/C6)', () => {
@@ -44,7 +44,7 @@ describe('rankSimilarUnits (BE5/C6)', () => {
       area: 'North',
       subzone: 'North-A',
       payment_standard: 1500,
-      accepted_programs: ['HCV', 'VASH'],
+      accepted_authorities: ['HCV', 'VASH'],
     });
     // `few` matches only ONE dimension (off-by-one beds → 0.5) so it scores
     // >0% (still rankable after the 0%-drop) but far below `all`.
@@ -53,7 +53,7 @@ describe('rankSimilarUnits (BE5/C6)', () => {
       area: 'South',
       subzone: 'South-Z',
       payment_standard: 3000,
-      accepted_programs: ['OTHER'],
+      accepted_authorities: ['OTHER'],
     });
     const out = rankSimilarUnits(target, [few, all]);
     expect(out[0]!.unitId).toBe('all');
@@ -101,12 +101,42 @@ describe('rankSimilarUnits (BE5/C6)', () => {
     expect(pct['rent-mid']!).toBeGreaterThan(pct['rent-mid-far']!);
   });
 
-  it('accepted_programs uses Jaccard overlap', () => {
-    const full = unit('prog-full', { beds: 2, accepted_programs: ['HCV', 'VASH'] }); // 1.0
-    const half = unit('prog-half', { beds: 2, accepted_programs: ['HCV', 'OTHER'] }); // 1/3
-    const none = unit('prog-none', { beds: 2, accepted_programs: ['X', 'Y'] }); // 0
+  it('accepted_authorities uses Jaccard overlap', () => {
+    // The ids sort in the REVERSE of the expected order, so this ordering can
+    // only come from the scores - never from the unitId tie-break, which would
+    // put a-none first if the authority dimension stopped discriminating.
+    const full = unit('z-full', { beds: 2, accepted_authorities: ['HCV', 'VASH'] }); // 1.0
+    const half = unit('m-half', { beds: 2, accepted_authorities: ['HCV', 'OTHER'] }); // 1/3
+    const none = unit('a-none', { beds: 2, accepted_authorities: ['X', 'Y'] }); // 0
     const out = rankSimilarUnits(target, [none, half, full]);
-    expect(out.map((u) => u.unitId)).toEqual(['prog-full', 'prog-half', 'prog-none']);
+    expect(out.map((u) => u.unitId)).toEqual(['z-full', 'm-half', 'a-none']);
+    // beds 1.0 * 0.35 + Jaccard * 0.20: 0.55 / 0.4167 / 0.35 -> 55 / 42 / 35.
+    expect(out.map((u) => u.matchPct)).toEqual([55, 42, 35]);
+  });
+
+  it('synthesizes the set: a legacy jurisdiction scores against a new-field target', () => {
+    // Read-time synthesis (spec section 8, authoritiesOf) - there is NO backfill,
+    // so a stored legacy `jurisdiction` string must still score against a target
+    // that carries the new list. Ids sort against the expected order again.
+    const authTarget = unit('auth-target', {
+      beds: 2,
+      accepted_authorities: ['Atlanta (AHA)', 'DCA'],
+    });
+    const legacy = unit('z-legacy', { beds: 2, jurisdiction: 'Atlanta (AHA)' });
+    const other = unit('a-other', { beds: 2, jurisdiction: 'Fulton County' });
+    // A STORED empty list means "cleared" and must never resurrect the legacy
+    // value (the authoritiesOf rule this inherits).
+    const cleared = unit('m-cleared', {
+      beds: 2,
+      accepted_authorities: [],
+      jurisdiction: 'Atlanta (AHA)',
+    });
+    const out = rankSimilarUnits(authTarget, [other, cleared, legacy]);
+    expect(out.map((u) => u.unitId)).toEqual(['z-legacy', 'a-other', 'm-cleared']);
+    // beds 1.0 * 0.35 + 1-of-2 overlap (0.5) * 0.20 = 0.45; no overlap = 0.35.
+    expect(out.map((u) => u.matchPct)).toEqual([45, 35, 35]);
+    // The summary renders the SYNTHESIZED value, not the retired field.
+    expect(out[0]!.summary).toContain('Accepts Atlanta (AHA)');
   });
 
   it('caps to top N (default 5) and respects opts.limit', () => {
@@ -147,13 +177,13 @@ describe('rankSimilarUnits (BE5/C6)', () => {
 
   it('drops 0%-match candidates (no empty-summary noise card)', () => {
     // Shares NO scored dimension with the target: beds far off (≥2), different
-    // area/subzone, far rent, disjoint programs → final matchPct 0 → excluded.
+    // area/subzone, far rent, disjoint authorities -> final matchPct 0 -> excluded.
     const zero = unit('zero-match', {
       beds: 9,
       area: 'South',
       subzone: 'South-Z',
       payment_standard: 9000,
-      accepted_programs: ['NONE'],
+      accepted_authorities: ['NONE'],
     });
     const real = unit('real-match', { beds: 2, area: 'North', subzone: 'North-A' });
     const out = rankSimilarUnits(target, [zero, real]);
@@ -171,7 +201,7 @@ describe('rankSimilarUnits (BE5/C6)', () => {
           area: 'North',
           subzone: 'North-A',
           payment_standard: 1500,
-          accepted_programs: ['HCV', 'VASH'],
+          accepted_authorities: ['HCV', 'VASH'],
         }),
         unit('beds-only', { beds: 2 }), // no area/rent/programs scored, but beds led
         unit('off-beds', { beds: 3 }), // off-by-one beds only
@@ -193,7 +223,7 @@ describe('rankSimilarUnits (BE5/C6)', () => {
         area: 'North',
         subzone: 'North-A',
         payment_standard: 1500,
-        accepted_programs: ['HCV', 'VASH'],
+        accepted_authorities: ['HCV', 'VASH'],
       }),
     ]);
     expect(out[0]!.summary).toContain('2 bed');

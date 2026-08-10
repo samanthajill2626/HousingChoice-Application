@@ -162,7 +162,7 @@ a different name, not a gap to build** — the audit's job is to find the mappin
   listing_send + tenant still `searching`. The original guidance ("don't invent a Tours
   feature") described the pre-tours state and is superseded by the tours suite below.
 - **Set up an available property via the API:** `POST /api/units { landlordId, beds,
-  jurisdiction, address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
+  accepted_authorities:['atlanta_housing'], address:{line1,city,state,zip} }` starts a unit in `setup` (status is NOT a
   writable create field; `address` MUST be an object), then `PATCH /api/units/:id/listing-status
   { toStatus:'available', source:'manual' }` publishes it (only `available` is shareable).
   Set a tenant to searching via `PATCH /api/contacts/:id/tenant-status { toStatus, source }`.

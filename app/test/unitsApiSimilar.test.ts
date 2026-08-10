@@ -31,7 +31,7 @@ describe('GET /api/units/:id/similar (BE5/C6)', () => {
       area: 'North',
       subzone: 'North-A',
       payment_standard: 1500,
-      accepted_programs: ['HCV', 'VASH'],
+      accepted_authorities: ['HCV', 'VASH'],
     });
     // Best match across all dims.
     seedUnit(world, 'u-best', {
@@ -39,7 +39,7 @@ describe('GET /api/units/:id/similar (BE5/C6)', () => {
       area: 'North',
       subzone: 'North-A',
       payment_standard: 1500,
-      accepted_programs: ['HCV', 'VASH'],
+      accepted_authorities: ['HCV', 'VASH'],
     });
     // Weak match.
     seedUnit(world, 'u-weak', { beds: 5, area: 'South', subzone: 'South-Z' });
@@ -82,7 +82,7 @@ describe('GET /api/units/:id/similar (BE5/C6)', () => {
       area: 'North',
       subzone: 'North-A',
       payment_standard: 1500,
-      accepted_programs: ['HCV', 'VASH'],
+      accepted_authorities: ['HCV', 'VASH'],
     });
     // Seed MORE available units than one notional DynamoDB page (the legacy
     // default cap was 50) — all weak matches (off beds, different area).
@@ -101,7 +101,7 @@ describe('GET /api/units/:id/similar (BE5/C6)', () => {
       area: 'North',
       subzone: 'North-A',
       payment_standard: 1500,
-      accepted_programs: ['HCV', 'VASH'],
+      accepted_authorities: ['HCV', 'VASH'],
     });
 
     const res = await request(app)

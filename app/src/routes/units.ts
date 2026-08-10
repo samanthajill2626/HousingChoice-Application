@@ -2,7 +2,7 @@
 // the /api mount (app.ts). VAs maintain properties day-to-day, so NO admin gate
 // (same posture as contacts triage).
 //
-//   GET   /api/units?status=&jurisdiction=&landlordId=&limit=&cursor=
+//   GET   /api/units?status=&landlordId=&limit=&cursor=
 //                                  → { units, nextCursor }
 //   POST  /api/units  { unit fields }            → 201 { unit }
 //   GET   /api/units/:unitId                      → { unit } | 404
@@ -216,7 +216,7 @@ const UNIT_PHOTO_PRESIGN_BATCH_MAX = 20;
 /**
  * BE5/C6: the cap on how many `available` units the similar-properties endpoint
  * will sweep before ranking. The ranker is O(candidates) and the result is a
- * top-N panel, so 500 is a generous bound on a single jurisdiction's open
+ * top-N panel, so 500 is a generous bound on a single market's open
  * inventory. If MORE than this remain, we stop and log.warn (the ranker ran on
  * a prefix of the available set — never silent truncation).
  */
@@ -364,9 +364,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   }
 
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
-  // order landlordId > status > jurisdiction (each a single-partition Query);
-  // with no filter, a paginated Scan (repo.list). This keeps every list read a
-  // bounded operation.
+  // order landlordId > status (each a single-partition Query); with no filter, a
+  // paginated Scan (repo.list). This keeps every list read a bounded operation.
   router.get('/', async (req, res) => {
     const limit = parseLimit(req.query['limit']);
     if (limit === undefined) {
@@ -397,15 +396,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     const landlordId = req.query['landlordId'];
     const status = req.query['status'];
-    const jurisdiction = req.query['jurisdiction'];
 
     let page: UnitsPage;
     if (typeof landlordId === 'string' && landlordId.length > 0) {
       page = await units.listByLandlord(landlordId, opts);
     } else if (typeof status === 'string' && status.length > 0) {
       page = await units.listByStatus(status, opts);
-    } else if (typeof jurisdiction === 'string' && jurisdiction.length > 0) {
-      page = await units.listByJurisdiction(jurisdiction, opts);
     } else {
       page = await units.list(opts);
     }
@@ -1257,6 +1253,24 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
     const validation = validateUnitBody(req.body, 'update');
     if (!validation.ok) {
       res.status(400).json({ error: validation.error });
+      return;
+    }
+    // A TRUE no-op save (spec section 8). An ok-but-EMPTY validated field set is
+    // reachable only through the retired `jurisdiction` / `accepted_programs`
+    // tombstones - a truly empty body is still the 400 above - i.e. a stale cached
+    // dashboard bundle saving nothing but dead keys. Calling units.update here
+    // would stamp `updated_at` and append a bare "Property updated" activity row
+    // for a change that did not happen, so return the unchanged unit instead. The
+    // normal path gets its 404 from update's attribute_exists condition; this early
+    // return has to re-establish it explicitly or an unknown unit would 200.
+    if (Object.keys(validation.fields).length === 0) {
+      const existing = await units.getById(unitId);
+      if (existing === undefined) {
+        res.status(404).json({ error: 'unit_not_found' });
+        return;
+      }
+      log.info({ unitId, actor: req.user?.userId }, 'unit patch was a no-op (retired fields only)');
+      res.json({ unit: existing });
       return;
     }
     // D1 delete-on-removal (the raw E5 seam): `media` is PATCH-writable and a

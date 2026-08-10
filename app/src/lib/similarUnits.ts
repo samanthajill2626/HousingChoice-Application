@@ -8,10 +8,11 @@
 //   beds  0.35  — the heaviest signal (a 2-bed seeker wants 2-beds)
 //   area  0.25  — same subzone (1.0) > same area (0.6) > neither (0)
 //   rent  0.20  — payment_standard (or rent_min..rent_max midpoint) proximity
-//   prog  0.20  — Jaccard overlap of accepted HCV program sets
+//   auth  0.20  - Jaccard overlap of the accepted-authority sets
 // A dimension the TARGET doesn't specify contributes 0 (it can't discriminate).
 // matchPct = round(score * 100). Ordering: matchPct DESC, tie-break unitId ASC.
 import type { Address } from './address.js';
+import { authoritiesOf } from './unitFields.js';
 import type { UnitItem, UnitStatus } from '../repos/unitsRepo.js';
 
 /**
@@ -35,7 +36,7 @@ export interface RankSimilarOptions {
 const WEIGHT_BEDS = 0.35;
 const WEIGHT_AREA = 0.25;
 const WEIGHT_RENT = 0.2;
-const WEIGHT_PROGRAMS = 0.2;
+const WEIGHT_AUTHORITIES = 0.2;
 
 const DEFAULT_LIMIT = 5;
 
@@ -89,10 +90,19 @@ function scoreRent(target: UnitItem, c: UnitItem): number {
   return 1 - (rel - 0.1) / (0.4 - 0.1);
 }
 
-/** programs: Jaccard overlap |A∩B| / |A∪B| of the two program sets. */
-function scorePrograms(target: UnitItem, c: UnitItem): number {
-  const a = new Set((target.accepted_programs ?? []).filter((p) => typeof p === 'string'));
-  const b = new Set((c.accepted_programs ?? []).filter((p) => typeof p === 'string'));
+/**
+ * authorities: Jaccard overlap (intersection / union) of the two accepted-
+ * authority sets, read through `authoritiesOf` so a legacy unit that stores only
+ * `jurisdiction` still scores (spec section 8 - read-time synthesis, no
+ * backfill). Cameron's ruling: the old program list WAS the authority list all
+ * along, so this is a rename of the dimension, not a change to how it scores.
+ * DELIBERATE consequence: the dimension was dormant while nothing wrote
+ * `accepted_programs` and is now live for every unit that has an authority, so
+ * similar-unit rankings shift in seeded/demo worlds.
+ */
+function scoreAuthorities(target: UnitItem, c: UnitItem): number {
+  const a = new Set(authoritiesOf(target));
+  const b = new Set(authoritiesOf(c));
   if (a.size === 0 || b.size === 0) return 0;
   let intersection = 0;
   for (const p of a) if (b.has(p)) intersection += 1;
@@ -102,12 +112,12 @@ function scorePrograms(target: UnitItem, c: UnitItem): number {
 
 /**
  * Compose a short, deterministic human summary from the dimensions that scored
- * high — e.g. "2 bed - Same area - Accepts HCV, VASH". Always leads with the
- * candidate's bed count (the primary signal) when known.
+ * high - e.g. "2 bed - Same area - Accepts Atlanta (AHA), DCA". Always leads with
+ * the candidate's bed count (the primary signal) when known.
  */
 function buildSummary(
   c: UnitItem,
-  scores: { beds: number; area: number; rent: number; programs: number },
+  scores: { beds: number; area: number; rent: number; authorities: number },
 ): string {
   const parts: string[] = [];
   if (typeof c.beds === 'number') {
@@ -116,9 +126,10 @@ function buildSummary(
   if (scores.area >= 1) parts.push('Same subzone');
   else if (scores.area > 0) parts.push('Same area');
   if (scores.rent >= 1) parts.push('Similar rent');
-  if (scores.programs > 0 && Array.isArray(c.accepted_programs) && c.accepted_programs.length > 0) {
-    const programs = c.accepted_programs.filter((p) => typeof p === 'string');
-    if (programs.length > 0) parts.push(`Accepts ${programs.join(', ')}`);
+  if (scores.authorities > 0) {
+    // The SYNTHESIZED list, so a legacy `jurisdiction`-only unit still renders.
+    const authorities = authoritiesOf(c);
+    if (authorities.length > 0) parts.push(`Accepts ${authorities.join(', ')}`);
   }
   // Never emit an empty-summary card: when no dimension part accumulated (e.g.
   // an available unit with no comparable attributes), fall back to a neutral,
@@ -149,13 +160,13 @@ export function rankSimilarUnits(
       beds: scoreBeds(target, c),
       area: scoreArea(target, c),
       rent: scoreRent(target, c),
-      programs: scorePrograms(target, c),
+      authorities: scoreAuthorities(target, c),
     };
     const score =
       scores.beds * WEIGHT_BEDS +
       scores.area * WEIGHT_AREA +
       scores.rent * WEIGHT_RENT +
-      scores.programs * WEIGHT_PROGRAMS;
+      scores.authorities * WEIGHT_AUTHORITIES;
     const matchPct = Math.round(score * 100);
 
     // A 0% match shares NO scored dimension with the target — it is not

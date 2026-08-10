@@ -194,6 +194,92 @@
   white-space: nowrap;
 }
 
+/* --- Tenant facts row (spec section 6) ------------------------------------- */
+
+/* The facts span (voucher size + housing authority). Five unshrinkable chips
+ * would crush the ellipsizing name in the pane band just above 560px, so the
+ * sacrifice order is explicit: .meta becomes shrinkable and this span is its ONLY
+ * compressible child (kind/phone/status/Porting and the StatusBadge all keep
+ * flex: 0 0 auto), so it absorbs the WHOLE deficit on its own.
+ *
+ * What the mechanism does NOT do, stated so nobody reads a guarantee into it:
+ * .factsRow .name below is `flex: 1 0 auto` - shrink factor ZERO - so the name
+ * gives nothing EVER, at any width. It is not "held back until the facts are
+ * exhausted"; it simply never participates in shrinking, and it ellipsizes only
+ * when its own content passes its 55cqw cap. And once this span is compressed to
+ * 0 the row has no give LEFT: everything still on the line - the name and .meta's
+ * other chips alike - is unshrinkable, and .row does not wrap above 560px, so any
+ * further deficit overflows .meta's box rather than being absorbed anywhere by
+ * anything. The `overflow: hidden` on .factsRow .meta below
+ * CONTAINS that overflow inside the row card; it does not cure it. Measurements
+ * and the cap-vs-shrink decision live in
+ * docs/issues/tenant-row-longname-midpane-overflow.md.
+ *
+ * Scoped PER-ROW (.factsRow), not per-route: facts render on the All view too,
+ * where the same crush would otherwise survive. Only the DENSITY rules below are
+ * route-scoped (.tenantList) - a list that mixed densities would read as a bug,
+ * whereas mixed shrink behavior is invisible. */
+.facts {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+}
+
+/* Porting: the SHIPPED placement chip's treatment (PlacementRow.module.css:61-70),
+ * so one concept is never spelled two ways - and the purple family clears AA at
+ * this size, which the amber warning token does not. */
+.porting {
+  flex: 0 0 auto;
+  padding: 1px var(--sp-2);
+  border-radius: var(--radius-pill);
+  background: var(--c-evt-purple-bg);
+  border: 1px solid var(--c-evt-purple-border);
+  color: var(--c-evt-purple-text);
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-medium);
+  white-space: nowrap;
+}
+
+/* NOTE: 55cqw measures the .page query container (the only container-type in this
+ * file), i.e. roughly 57-58% of the row box - the starting value is tuned in live
+ * QA. The @container block BELOW must stay after this rule: identical
+ * specificity, so source order decides. */
+.factsRow .name {
+  flex: 1 0 auto;
+  max-width: 55cqw;
+}
+
+/* The auto margin RE-ESTABLISHES the trailing edge the base `.name { flex: 1 1
+ * auto }` used to provide by growing. Above, .name is `flex: 1 0 auto` with a
+ * cap, and per Flexbox 9.7 an item that hits its max-width during flexible-
+ * length resolution FREEZES, so leftover space would otherwise collect after the
+ * last chip and a short-named tenant row would sit ragged next to the flush
+ * landlord rows (spec section 6: ".meta (right-aligned)"). An auto main-axis
+ * margin resolves in 9.5 step 12, AFTER flexible lengths, so it takes exactly
+ * what .name could not grow into and is a no-op when there is no leftover. Not
+ * testable in jsdom (no layout, no container queries), hence live-QA only. */
+.factsRow .meta {
+  flex: 0 1 auto;
+  min-width: 0;
+  margin-left: auto;
+  /* CONTAINMENT, not a cure. Once .facts is compressed to 0 (see the note above)
+   * the trailing chips render OUTSIDE the row's rounded border - measured live at
+   * a 612px pane with a 41-character name, where the Porting chip's right edge
+   * lands at 899 against a row card ending at 876. Clipping keeps the border
+   * intact and the escape invisible; the actual sizing decision (whether the
+   * 55cqw cap is right) belongs to
+   * docs/issues/tenant-row-longname-midpane-overflow.md, not to a magic number
+   * re-tuned here. Harmless in the normal case: .facts keeps its OWN
+   * overflow: hidden + text-overflow: ellipsis, so the ellipsis is still drawn by
+   * .facts, and this clip does nothing until the row is already past its limit. */
+  overflow: hidden;
+}
+
 /* Tight content pane (phones, and the narrow pane just above the nav breakpoint):
  * stack the meta chips below the name so the name gets a full line instead of the
  * unshrinkable kind/phone/status crushing it to a few characters. */
@@ -205,6 +291,33 @@
   .meta {
     flex: 1 1 100%;
     flex-wrap: wrap;
+  }
+  /* Tighter density for the tenant ROUTE only (never per row type: /contacts
+   * interleaves all three types in one list and must not mix densities). */
+  .tenantList .row {
+    padding: var(--sp-2) var(--sp-3);
+  }
+  .tenantList .rowItem {
+    margin-bottom: var(--sp-1);
+  }
+  /* Stacked, the name is the row's identity: it wraps in full instead of
+   * truncating, and the cap is off. */
+  .factsRow .name {
+    flex: 1 1 100%;
+    max-width: none;
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+  }
+  /* Stacked, .meta owns its own line and sits UNDER the name (spec section 6's
+   * narrow skeleton), so the wide-pane trailing-edge margin is switched off.
+   * With `flex: 1 1 100%` the line's free space is 0, so an auto margin would
+   * already resolve to 0 (Flexbox 9.5 step 12 distributes only POSITIVE free
+   * space) - this states it outright rather than leaning on that arithmetic,
+   * and jsdom cannot assert either way. */
+  .factsRow .meta {
+    flex: 1 1 100%;
+    margin-left: 0;
   }
 }
 

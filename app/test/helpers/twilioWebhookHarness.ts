@@ -1484,13 +1484,6 @@ export function createFakeWorld(): FakeWorld {
           }),
       };
     },
-    async listByJurisdiction(jurisdiction, opts = {}) {
-      const items = [...units.values()]
-        .filter((u) => u.jurisdiction === jurisdiction)
-        .filter((u) => (opts.deleted === true ? isUnitDeleted(u) : !isUnitDeleted(u)))
-        .slice(0, opts.limit ?? 50);
-      return { items };
-    },
     async listByProperty(propertyId, opts = {}) {
       // Mirror the sparse byProperty GSI: only units carrying propertyId index.
       const items = [...units.values()]

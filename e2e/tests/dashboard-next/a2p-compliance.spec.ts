@@ -339,7 +339,7 @@ test.describe('A2P §8.3 — broadcast consent fence', () => {
     const created = await page.request.post(`${NEXT}/api/units`, {
       data: {
         landlordId: landlord,
-        jurisdiction: 'atlanta_housing',
+        accepted_authorities: ['atlanta_housing'],
         beds: 2,
         rent_min: 1500,
         rent_max: 1600,

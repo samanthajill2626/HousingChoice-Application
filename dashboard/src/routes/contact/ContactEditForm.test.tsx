@@ -506,4 +506,131 @@ describe('ContactEditForm', () => {
     expect('relationships' in patch).toBe(false);
     expect('customFields' in patch).toBe(false);
   });
+
+  // --- Authority + agency org inputs (tenant-list-visibility Task 11) --------
+  // The suggestion VALUES are spelled out here on purpose: importing the
+  // constant would make the assertion vacuous, and a wrong spelling splits the
+  // byHousingAuthority broadcast audience. Source of truth:
+  // app/src/lib/import/apply.ts CANONICAL_AUTHORITY.
+
+  /** The <datalist> an input's `list` attribute points at. */
+  function datalistFor(input: HTMLElement): HTMLDataListElement {
+    const id = input.getAttribute('list');
+    expect(id).toBeTruthy();
+    const el = document.getElementById(id as string);
+    expect(el).not.toBeNull();
+    return el as HTMLDataListElement;
+  }
+
+  function optionValues(list: HTMLDataListElement): string[] {
+    return Array.from(list.querySelectorAll('option')).map((o) => o.value);
+  }
+
+  it('authority input suggests the eight canonical spellings via a datalist', () => {
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    const input = screen.getByLabelText(/Housing authority/i);
+    expect(optionValues(datalistFor(input))).toEqual([
+      'Atlanta (AHA)',
+      'Jonesboro (JHA)',
+      'Dekalb County Housing',
+      'DCA',
+      'Fulton County',
+      'Clayton County',
+      'East Point',
+      'McDonough',
+    ]);
+    // The datalist suggests; it never constrains. No autoComplete attribute
+    // (whether it suppresses list= suggestions is browser-dependent).
+    expect(input).not.toHaveAttribute('autocomplete');
+  });
+
+  it('the authority datalist still accepts brand-new free text', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, housingAuthority: 'Brand New Authority' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/Housing authority/i), 'Brand New Authority');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ housingAuthority: 'Brand New Authority' }),
+      ),
+    );
+  });
+
+  it('agency input is tenant-only and suggests the four known agencies', () => {
+    const { unmount } = render(
+      <ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />,
+    );
+    const input = screen.getByLabelText(/^Agency$/i);
+    expect(optionValues(datalistFor(input))).toEqual([
+      'HUD VASH',
+      'Claratel',
+      'Hope Atlanta',
+      'Step Up',
+    ]);
+    expect(input).not.toHaveAttribute('autocomplete');
+    unmount();
+
+    render(<ContactEditForm contact={LANDLORD} onClose={vi.fn()} onSaved={vi.fn()} />);
+    expect(screen.queryByLabelText(/^Agency$/i)).toBeNull();
+  });
+
+  it('PATCHes a changed agency with interior whitespace collapsed', async () => {
+    const user = userEvent.setup();
+    updateContact.mockResolvedValue({ ...TENANT, agency: 'Hope Atlanta' });
+    render(<ContactEditForm contact={TENANT} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/^Agency$/i), '  Hope   Atlanta ');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() =>
+      expect(updateContact).toHaveBeenCalledWith(
+        'k1',
+        expect.objectContaining({ agency: 'Hope Atlanta' }),
+      ),
+    );
+  });
+
+  it('an untouched authority NEVER reaches the PATCH (provenance protection)', async () => {
+    // housingAuthority is a server-side PROVENANCE field: merely INCLUDING the
+    // key nulls its _source, consumes any pending AI suggestion and stamps the
+    // ai_run superseded. Stray whitespace in the STORE must not make an
+    // untouched field look changed. LOCAL fixture - the shared TENANT carries no
+    // housingAuthority and adding one would break the exact-patch test above.
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta  (AHA) ' };
+    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/First name/i), 'X'); // dirty something else
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('housingAuthority' in sent).toBe(false); // collapse-one-side would re-send it
+    expect(sent).toMatchObject({ firstName: 'TashaX' });
+  });
+
+  it('a whitespace-ONLY authority edit is also a no-op (same effective value)', async () => {
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, housingAuthority: 'Atlanta (AHA)' };
+    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/Housing authority/i), ' '); // trailing space only
+    await user.type(screen.getByLabelText(/First name/i), 'X');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('housingAuthority' in sent).toBe(false); // raw-vs-raw would re-send it
+    expect(sent).toMatchObject({ firstName: 'TashaX' });
+  });
+
+  it('an untouched agency does not ride the PATCH either', async () => {
+    const user = userEvent.setup();
+    const stored: Contact = { ...TENANT, agency: 'Hope  Atlanta' };
+    updateContact.mockResolvedValue({ ...stored, firstName: 'TashaX' });
+    render(<ContactEditForm contact={stored} onClose={vi.fn()} onSaved={vi.fn()} />);
+    await user.type(screen.getByLabelText(/First name/i), 'X');
+    await user.click(screen.getByRole('button', { name: /^Save$/i }));
+    await waitFor(() => expect(updateContact).toHaveBeenCalled());
+    const sent = updateContact.mock.calls[0]?.[1] as Record<string, unknown>;
+    expect('agency' in sent).toBe(false);
+  });
 });

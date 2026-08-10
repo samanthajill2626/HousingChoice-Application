@@ -304,7 +304,7 @@ const LANDLORD_BOOLEAN_FIELDS = [
 
 // NOTE (2026-07-10): the landlord preference fields (accepts_programs /
 // lease_terms / pet_policy) and expected_rent MOVED to the UNIT (GLOSSARY —
-// they are per-property facts: accepted_programs / lease_terms / pets /
+// they are per-property facts: accepted_authorities / lease_terms / pets /
 // rent_min-rent_max on UnitItem). The contact parsers no longer accept them;
 // unknown keys are ignored, so a stale client sending them simply no-ops.
 
@@ -522,6 +522,16 @@ function parseTriageBody(body: unknown): TriagePatch | { error: string } {
     if (typeof v !== 'string') return { error: 'housingAuthority must be a string' };
     patch['housingAuthority'] = v;
     changedFields.push('housingAuthority');
+  }
+  // Tenant agency (edit form) - the helper org that assists the tenant (Hope Atlanta,
+  // HUD VASH, Claratel, Step Up). Taxonomy: an agency is NOT a housing authority; the
+  // authority above issues the voucher. A plain stored string - no GSI, no facet, and
+  // deliberately NOT in PROVENANCE_FIELDS because nothing machine-writes it.
+  if ('agency' in b) {
+    const v = b['agency'];
+    if (typeof v !== 'string') return { error: 'agency must be a string' };
+    patch['agency'] = v;
+    changedFields.push('agency');
   }
   // Structured postal address (edit form). Every part optional; we store only the
   // non-empty parts (a SET-merge replaces the whole address object).

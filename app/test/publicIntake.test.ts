@@ -271,7 +271,6 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       baths: 1,
       area: 'Westside',
       subzone: 'Zone 4',
-      accepted_programs: ['GHV'],
       rent_min: 1400,
       rent_max: 1600,
       payment_standard: 1700,
@@ -307,7 +306,11 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
       area: 'Westside',
       subzone: 'Zone 4',
       voucher_size: 2,
-      accepted_programs: ['GHV'],
+      // SYNTHESIZED from the fixture's legacy `jurisdiction: 'DCA'` (spec section
+      // 8): the flyer now publishes the accepted-authorities list, and on a legacy
+      // unit that list IS the old jurisdiction value - deliberate, so the public
+      // "Accepts:" line is not blank for every pre-feature unit.
+      accepted_authorities: ['DCA'],
       listing_link: 'https://example.com/listing/1',
       rent_min: 1400,
       rent_max: 1600,
@@ -321,7 +324,7 @@ describe('GET /public/units/:unitId/flyer — shareable view only', () => {
     // and NOTHING beyond it (address/deposit/pets/etc. are public now).
     expect(Object.keys(flyer).sort()).toEqual(
       [
-        'accepted_programs',
+        'accepted_authorities',
         'area',
         'baths',
         'beds',

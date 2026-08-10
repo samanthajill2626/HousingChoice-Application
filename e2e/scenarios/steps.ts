@@ -813,7 +813,14 @@ export class Scenario {
    * `landlordId` defaults to the seeded landlord; tour scenarios pass their own
    * fresh landlord so the tour-relay auto-resolve finds a landlord WITH a phone.
    */
-  seedAvailableUnit(opts: { beds: number; jurisdiction?: string; landlordId?: string }): Promise<Unit> {
+  seedAvailableUnit(opts: {
+    beds: number;
+    /** The authorities whose vouchers this property accepts - the unit's ONE
+     *  authority field (spec section 8), which replaced the legacy single
+     *  string. Default `['atlanta_housing']`, matching the lean seed world. */
+    accepted_authorities?: string[];
+    landlordId?: string;
+  }): Promise<Unit> {
     return step(`Setup: an available ${opts.beds}-BR property to send`, async () => {
       seq += 1;
       // Run-unique street number (same rationale as freshContact): `seq` alone
@@ -825,7 +832,7 @@ export class Scenario {
       const created = await this.page.request.post(`${NEXT}/api/units`, {
         data: {
           landlordId: opts.landlordId ?? SEEDED_LANDLORD,
-          jurisdiction: opts.jurisdiction ?? 'atlanta_housing',
+          accepted_authorities: opts.accepted_authorities ?? ['atlanta_housing'],
           beds: opts.beds,
           rent_min: 1500,
           rent_max: 1600,
@@ -1437,7 +1444,9 @@ export class Scenario {
       baths?: number;
       voucherSizeAccepted?: number;
       listingLink?: string;
-      jurisdiction?: string;
+      /** Fills the form's ONE comma-separated "Housing authorities" input
+       *  (spec section 8; the old single "Housing authority" input is gone). */
+      accepted_authorities?: string[];
       /** The onboarding call's EXPECTED RENT — a per-property fact (moved off
        *  the contact 2026-07-10): fills Rent min AND max. Default 1400/1500. */
       expectedRent?: number;
@@ -1455,7 +1464,13 @@ export class Scenario {
       await expect(dialog).toBeVisible();
 
       // Fill the intake fields.
-      await dialog.getByLabel('Housing authority').fill(opts.jurisdiction ?? 'atlanta_housing');
+      // The form's single comma-separated authorities input. NOTE: the old
+      // `getByLabel('Housing authority')` kept matching the renamed plural label
+      // (getByLabel substring-matches), so this line is updated deliberately
+      // rather than because a test went red.
+      await dialog
+        .getByLabel('Housing authorities')
+        .fill((opts.accepted_authorities ?? ['atlanta_housing']).join(', '));
       await dialog.getByLabel('Beds').fill(String(opts.beds));
       await dialog.getByLabel('Baths').fill(String(opts.baths ?? 2));
       await dialog.getByLabel('Rent min').fill(String(opts.expectedRent ?? 1400));

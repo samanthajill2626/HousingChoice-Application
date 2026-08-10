@@ -93,6 +93,15 @@ describe('useContacts', () => {
     }
   });
 
+  it('asks for the server-max page size so the walk halves its round trips', async () => {
+    // ONE empty page: a rejecting or hanging mock would leave this green over the
+    // hook's error path instead of its success path.
+    getContacts.mockResolvedValue(page());
+    render(<Probe filter="tenant" />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+    expect((getContacts.mock.calls[0]?.[0] as { limit?: string }).limit).toBe('100');
+  });
+
   it('goes to the error state when a fetch fails', async () => {
     getContacts.mockRejectedValue(new Error('boom'));
     render(<Probe filter="tenant" />);

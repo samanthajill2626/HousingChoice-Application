@@ -14,6 +14,15 @@ import { Button, Spinner, StatusBadge } from '../../ui/index.js';
 import { contactDisplayName, formatPhone, humanize } from '../contact/format.js';
 import { CONTACT_TYPE_LABEL, displayKind } from '../contact/contactProfile.js';
 import { ContactCreateForm } from '../contact/ContactCreateForm.js';
+import { TenantFilters } from './TenantFilters.js';
+import {
+  applySelection,
+  applyToParams,
+  buildFacets,
+  factsLine,
+  parseSelection,
+  type TenantSelection,
+} from './tenantFacets.js';
 import { useContacts, type ContactsFilter } from './useContacts.js';
 import styles from './ContactsList.module.css';
 
@@ -50,6 +59,17 @@ function statusLabel(status: string | undefined): string {
   return humanize(status);
 }
 
+/** An unconstrained selection - used to derive the SELECTION-INDEPENDENT
+ *  authority option keys (see `validAuthorityKeys`). */
+const NO_SELECTION: TenantSelection = {
+  voucher: new Set<string>(),
+  ha: new Set<string>(),
+  porting: false,
+};
+
+/** "No search query active", for that same selection-independent derivation. */
+const MATCH_ALL = (): boolean => true;
+
 /** The lowercased haystack a row is searched against (name + phone). */
 function searchKey(contact: Contact): string {
   return [
@@ -63,12 +83,27 @@ function searchKey(contact: Contact): string {
     .toLowerCase();
 }
 
-function Row({ contact }: { contact: Contact }): React.JSX.Element {
+function Row({
+  contact,
+  showFacts,
+}: {
+  contact: Contact;
+  /** Tenant rows outside the Deleted view carry the eligibility facts. */
+  showFacts: boolean;
+}): React.JSX.Element {
   const name = contactDisplayName(contact.firstName, contact.lastName, contact.phone);
   const phone = formatPhone(contact.phone);
+  const facts = showFacts ? factsLine(contact) : null;
+  const porting = showFacts && contact.porting === true;
   return (
     <li className={styles.rowItem}>
-      <Link to={`/contacts/${contact.contactId}`} className={styles.row}>
+      <Link
+        to={`/contacts/${contact.contactId}`}
+        // .factsRow keys the wide-pane sacrifice order, so it goes on whenever ANY
+        // chip was added - a porting-only tenant still gains a fourth unshrinkable
+        // chip. PER-ROW, not per-route: facts render on /contacts (All) too.
+        className={`${styles.row} ${facts !== null || porting ? styles.factsRow : ''}`}
+      >
         <span className={styles.name}>{name}</span>
         {/* Meta chips grouped so on a tight content pane they wrap to their own
          *  line below the name instead of crushing it (container query in CSS). */}
@@ -79,6 +114,18 @@ function Row({ contact }: { contact: Contact }): React.JSX.Element {
             <StatusBadge kind="tenant" status={contact.status} />
           ) : statusLabel(contact.status) ? (
             <span className={styles.status}>{statusLabel(contact.status)}</span>
+          ) : null}
+          {/* ONE text span (one accessible-name token stream, nothing hidden), the
+           *  only compressible child of .meta, with the full value on `title`. */}
+          {facts !== null ? (
+            <span className={styles.facts} title={facts}>
+              {facts}
+            </span>
+          ) : null}
+          {porting ? (
+            <span className={styles.porting} title="Tenant is porting">
+              Porting
+            </span>
           ) : null}
         </span>
       </Link>
@@ -94,7 +141,7 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   // The component stays MOUNTED across the four filter routes (same element
   // position), so a mount-time-only read would miss later deep-links; the
   // effect re-seeds whenever the param value changes.
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
   const phoneParam = searchParams.get('phone') ?? '';
   const [query, setQuery] = useState(phoneParam);
   useEffect(() => {
@@ -103,11 +150,69 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
   const [createOpen, setCreateOpen] = useState(false);
   const navigate = useNavigate();
 
+  // The facet controls render - and APPLY - on the Tenants view only. Facet
+  // params on any other view are inert: they filter nothing and no control shows.
+  const isTenantView = filter === 'tenant';
+
+  // An UNCONSTRAINED probe of the loaded tenants, used only to prune the parsed
+  // selection below. All three signals it supplies - the authority option keys,
+  // `voucherEmpty`, `showPorting` - are selection-INDEPENDENT by construction, so
+  // this one pass serves the prune and no second one is needed.
+  const facetProbe = useMemo(() => buildFacets(contacts, NO_SELECTION, MATCH_ALL), [contacts]);
+  const validAuthorityKeys = useMemo(
+    () => new Set(facetProbe.authority.map((o) => o.key)),
+    [facetProbe],
+  );
+  // THE INVARIANT: a selection the user can neither see nor clear must not
+  // filter. Three ways a selection goes invisible, all pruned here - before BOTH
+  // applySelection and the count-bearing buildFacets, since a phantom left in
+  // the selection also zeroes the OTHER facets' counts:
+  //   - a ghost `ha` key (a stale link, or a hand-typed non-normalized `?ha=DCA`
+  //     when the URL contract is the NORMALIZED key) matches nobody. Spec
+  //     section 10: unknown values drop INDIVIDUALLY and a stale link never
+  //     empties the list;
+  //   - any `voucher` key while `voucherEmpty` - the muted explanatory line
+  //     REPLACES all five chips plus Not recorded, and the per-facet Clear with
+  //     them, so nothing is lit and nothing can unset it;
+  //   - `porting` while no tenant is porting - the whole group hides (a toggle
+  //     with nothing to match is dead UI). Reachable in ONE session: filter by
+  //     Porting, resolve that tenant's port, come Back.
+  // Left unpruned, each filters to zero rows with no chip lit, no Clear, and
+  // every other chip click re-serializing the phantom (spec section 5: a
+  // selected chip is always clickable - deselection must never lock).
+  // The URL is deliberately NOT rewritten on mount; the next interaction
+  // re-serializes the pruned selection.
+  const selection = useMemo<TenantSelection>(() => {
+    const parsed = parseSelection(searchParams);
+    const ha = new Set<string>();
+    for (const key of parsed.ha) if (validAuthorityKeys.has(key)) ha.add(key);
+    return {
+      ha,
+      voucher: facetProbe.voucherEmpty ? new Set<string>() : parsed.voucher,
+      porting: facetProbe.showPorting ? parsed.porting : false,
+    };
+  }, [searchParams, validAuthorityKeys, facetProbe]);
+
+  const q = query.trim().toLowerCase();
   const visible = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (!q) return contacts;
-    return contacts.filter((c) => searchKey(c).includes(q));
-  }, [contacts, query]);
+    const queried = q ? contacts.filter((c) => searchKey(c).includes(q)) : contacts;
+    return isTenantView ? applySelection(queried, selection) : queried;
+  }, [contacts, q, isTenantView, selection]);
+
+  // Counts are contextual (the query + the other facets), so the query predicate
+  // goes IN rather than the already-filtered rows.
+  const facets = useMemo(
+    () => buildFacets(contacts, selection, (c) => (q ? searchKey(c).includes(q) : true)),
+    [contacts, selection, q],
+  );
+
+  /** Serialize a new selection, MERGING the query string (`?phone=` survives). */
+  function updateSelection(next: TenantSelection): void {
+    const params = new URLSearchParams(searchParams);
+    applyToParams(params, next);
+    // Replace, not push: Back leaves the page rather than walking chip toggles.
+    setSearchParams(params, { replace: true });
+  }
 
   const heading = HEADING[filter];
 
@@ -137,7 +242,16 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
         {FILTERS.map((f) => (
           <Link
             key={f.filter}
-            to={f.to}
+            // ONLY the Tenants tab carries facet params, and only while the Tenants
+            // view is active - so a carried param can neither silently filter
+            // another audience nor survive as invisible state. Re-clicking the
+            // active tab preserves the facets; leaving the view drops them (the URL
+            // is the only state carrier - spec section 10).
+            to={
+              f.filter === 'tenant'
+                ? { pathname: f.to, search: isTenantView ? searchParams.toString() : '' }
+                : f.to
+            }
             className={`${styles.filter} ${f.filter === filter ? styles.filterActive : ''}`}
             {...(f.filter === filter && { 'aria-current': 'page' })}
           >
@@ -145,6 +259,10 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
           </Link>
         ))}
       </nav>
+
+      {isTenantView && status === 'ready' ? (
+        <TenantFilters model={facets} selection={selection} onChange={updateSelection} />
+      ) : null}
 
       <div className={styles.search}>
         <label className={styles.searchLabel} htmlFor="contacts-search">
@@ -178,13 +296,28 @@ export function ContactsList({ filter }: ContactsListProps): React.JSX.Element {
 
       {status === 'ready' && contacts.length > 0 ? (
         visible.length > 0 ? (
-          <ul className={styles.rows} aria-label={heading}>
+          <ul
+            className={`${styles.rows} ${isTenantView ? styles.tenantList : ''}`}
+            aria-label={heading}
+          >
             {visible.map((contact) => (
-              <Row key={contact.contactId} contact={contact} />
+              <Row
+                key={contact.contactId}
+                contact={contact}
+                showFacts={contact.type === 'tenant' && filter !== 'deleted'}
+              />
             ))}
           </ul>
         ) : (
-          <p className={styles.noMatches}>No matches for &ldquo;{query.trim()}&rdquo;.</p>
+          <p className={styles.noMatches}>
+            {/* The query message wins when both are active. Entity quotes, never
+             *  literal curly ones - every new line here stays ASCII. */}
+            {query.trim() ? (
+              <>No matches for &ldquo;{query.trim()}&rdquo;.</>
+            ) : (
+              'No tenants match the selected filters.'
+            )}
+          </p>
         )
       ) : null}
 

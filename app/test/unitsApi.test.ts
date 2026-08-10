@@ -1,5 +1,5 @@
 // M1.5 unit tests: the units CRUD endpoints —
-//   GET   /api/units?status=&jurisdiction=&landlordId=&limit=&cursor=
+//   GET   /api/units?status=&landlordId=&limit=&cursor=
 //   POST  /api/units
 //   GET   /api/units/:unitId
 //   PATCH /api/units/:unitId
@@ -236,7 +236,7 @@ describe('structured address (lib/address.ts)', () => {
 });
 
 describe('GET /api/units — list/filter', () => {
-  it('filters by landlordId, status, and jurisdiction, else lists all', async () => {
+  it('filters by landlordId and status, else lists all', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { landlordId: 'll-A', status: 'available', jurisdiction: 'DCA' });
     seedUnit(world, 'unit-2', { landlordId: 'll-A', status: 'occupied', jurisdiction: 'Fulton' });
@@ -254,12 +254,6 @@ describe('GET /api/units — list/filter', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(byStatus.body.units.map((u: UnitItem) => u.unitId).sort()).toEqual(['unit-1', 'unit-3']);
-
-    const byJur = await request(app)
-      .get('/api/units?jurisdiction=Fulton')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE);
-    expect(byJur.body.units.map((u: UnitItem) => u.unitId)).toEqual(['unit-2']);
 
     const all = await request(app)
       .get('/api/units')

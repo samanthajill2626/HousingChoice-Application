@@ -2,7 +2,7 @@
 // the /api mount (app.ts). VAs maintain properties day-to-day, so NO admin gate
 // (same posture as contacts triage).
 //
-//   GET   /api/units?status=&jurisdiction=&landlordId=&limit=&cursor=
+//   GET   /api/units?status=&landlordId=&limit=&cursor=
 //                                  → { units, nextCursor }
 //   POST  /api/units  { unit fields }            → 201 { unit }
 //   GET   /api/units/:unitId                      → { unit } | 404
@@ -364,9 +364,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   }
 
   // GET /api/units — filtered list. Exactly one filter is honored, in priority
-  // order landlordId > status > jurisdiction (each a single-partition Query);
-  // with no filter, a paginated Scan (repo.list). This keeps every list read a
-  // bounded operation.
+  // order landlordId > status (each a single-partition Query); with no filter, a
+  // paginated Scan (repo.list). This keeps every list read a bounded operation.
   router.get('/', async (req, res) => {
     const limit = parseLimit(req.query['limit']);
     if (limit === undefined) {
@@ -397,15 +396,12 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
 
     const landlordId = req.query['landlordId'];
     const status = req.query['status'];
-    const jurisdiction = req.query['jurisdiction'];
 
     let page: UnitsPage;
     if (typeof landlordId === 'string' && landlordId.length > 0) {
       page = await units.listByLandlord(landlordId, opts);
     } else if (typeof status === 'string' && status.length > 0) {
       page = await units.listByStatus(status, opts);
-    } else if (typeof jurisdiction === 'string' && jurisdiction.length > 0) {
-      page = await units.listByJurisdiction(jurisdiction, opts);
     } else {
       page = await units.list(opts);
     }

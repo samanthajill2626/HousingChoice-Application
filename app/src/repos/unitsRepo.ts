@@ -3,7 +3,7 @@
 //
 // Items stay FLEXIBLE documents — only keys + GSI key attributes are
 // contractual (lib/tables.ts): PK unitId, plus the byLandlord (landlordId),
-// byStatus (status) and byJurisdiction (jurisdiction) GSIs. Everything else
+// byStatus (status) and byProperty (propertyId) GSIs. Everything else
 // (rents, beds, the never-standardized per-unit tour/application processes)
 // is a free-form attribute, so schema churn during the build needs no
 // migration — exactly the §5 posture.
@@ -327,8 +327,6 @@ export interface UnitsRepo {
   listByLandlord(landlordId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /** All units in a status via the byStatus GSI. */
   listByStatus(status: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
-  /** All units in a jurisdiction via the byJurisdiction GSI. */
-  listByJurisdiction(jurisdiction: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /** All units in a property group via the sparse byProperty GSI (BE3). */
   listByProperty(propertyId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /**
@@ -558,10 +556,6 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
 
     async listByStatus(status, opts = {}) {
       return queryIndex('byStatus', 'status', status, opts);
-    },
-
-    async listByJurisdiction(jurisdiction, opts = {}) {
-      return queryIndex('byJurisdiction', 'jurisdiction', jurisdiction, opts);
     },
 
     async listByProperty(propertyId, opts = {}) {

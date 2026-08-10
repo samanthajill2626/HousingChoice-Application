@@ -86,6 +86,32 @@ describe('buildFacets', () => {
     expect(opt.label).toBe('Atlanta (AHA)');
     expect(opt.count).toBe(3);
   });
+  it('displays the MAJORITY spelling even when it does NOT sort first', () => {
+    // The fixture above cannot tell "most frequent" from "sorted-first": its
+    // majority spelling is ALSO the ASCII-first one. This one can. Sort order is
+    // ['DEKALB  County Housing', 'DeKalb County Housing', 'dekalb_county_housing']
+    // ('E'=69 < 'e'=101, then 'D'=68 < 'd'=100), so the count-2 spelling sits in
+    // the MIDDLE and each degradation of displaySpelling yields a DIFFERENT
+    // string: sorted-first gives the shouted variant, sorted-last the slug, and
+    // folding to the key gives 'dekalb county housing'. Doubles as the
+    // slug-plus-prose option-merge pin, and mirrors the fixture family the
+    // properties list uses for this same exported helper
+    // (routes/listings/ListingsList.test.tsx).
+    const m = buildFacets(
+      [
+        t({ housingAuthority: 'DeKalb County Housing' }),
+        t({ housingAuthority: 'DeKalb County Housing' }),
+        t({ housingAuthority: 'DEKALB  County Housing' }),
+        t({ housingAuthority: 'dekalb_county_housing' }),
+      ],
+      emptySel(),
+      all,
+    );
+    expect(m.authority.map((o) => o.key)).toEqual(['dekalb county housing', NONE_KEY]);
+    const opt = m.authority.find((o) => o.key === 'dekalb county housing')!;
+    expect(opt.label).toBe('DeKalb County Housing');
+    expect(opt.count).toBe(4);
+  });
   it('breaks a display-spelling tie deterministically by sort order', () => {
     const m = buildFacets(
       [t({ housingAuthority: 'DCA' }), t({ housingAuthority: 'dca' })],

@@ -97,6 +97,16 @@ describe('TenantFile', () => {
     expect(screen.getByText('Agency').parentElement).toHaveTextContent(BLANK);
   });
 
+  it('renders the Agency row blank when the agency was recorded then CLEARED', () => {
+    // A cleared agency reaches the server as '' (the edit form sends
+    // collapseOrgInput('')) and persists: unlike housingAuthority, `agency` has no
+    // GSI, so '' is a legal stored attribute. '' is not nullish, so a `??` here
+    // would render an empty cell between two em-dashed siblings. The unit-side
+    // twin (routes/listing/ListingDetail.tsx) uses `|| BLANK` for the same reason.
+    renderIt({ contact: { ...contact, agency: '' } });
+    expect(screen.getByText('Agency').parentElement).toHaveTextContent(BLANK);
+  });
+
   it('renders REAL placements linking to the placement route', () => {
     renderIt();
     const placementLinks = screen.getAllByRole('link', { name: /1450 Joseph Blvd/ });

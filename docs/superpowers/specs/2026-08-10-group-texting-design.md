@@ -184,10 +184,20 @@ per-member suppression (4.4).
   `GET /api/conversations?status=open` (api.ts:1562 - the 50-row page four
   dashboard hooks consume) never see group threads by construction; and
   inboundEmail's `status !== 'open'` not-1:1 check excludes groups for
-  free. `touchLastActivity` gains an optional status-value parameter
-  (default `'open'`; the 1:1 path is byte-identical); all group-path
-  writers pass `'group_open'`. Readers of the group partition treat a query
-  error as LOUD (ERROR + surfaced failure state), never best-effort-empty.
+  free. PARTITION SAFETY IS A REPO-LEVEL GUARANTEE (plan-r2): every writer
+  that would set `status='open'` blindly (touchLastActivity - called from
+  inbound AND the outbound send path api.ts:1501 - and any future caller)
+  is guarded IN THE REPO: the status write carries ConditionExpression
+  `#type <> :group_text`, retrying without the status clause on failure, so
+  NO call site can ever flip a group thread out of its partition (silent
+  unrecoverable loss otherwise). The 1:1 path is the same single write plus
+  a condition that always passes - behavior unchanged. Because `status` is
+  a bare string in both type declarations, the plan carries a full
+  enumeration of status-literal comparisons with per-site rulings. Readers
+  of the group partition treat a query error as LOUD (ERROR + surfaced
+  failure state), never best-effort-empty. Unread visibility: under the
+  inbox unread filter the group source returns ALL unread group threads
+  (no top-50 cap), and the nav unread badge includes group unread.
 - `participant_phone` / `participant_email`: ABSENT. Group threads are
   reached via the group_open partition, conversationId, or the participants roster -
   never byParticipantPhone.
@@ -343,10 +353,12 @@ Created via a new `groupConversationsPort` adapter (vendor calls in
 `app/src/adapters`, services depend on the port), at three moments:
 
 - MIGRATION: the conversion bulk run creates each converted group's
-  Conversation (silent - spike F3; nothing is posted). Failures (a member
-  Twilio rejects - 50407-class, or a >9 roster) do NOT fail the conversion:
-  the thread converts rail-less, the failure lands in the migration report,
-  and the thread view shows the inbound-only banner.
+  Conversation SYNCHRONOUSLY per row (plan-r2: an async enqueue could not
+  put 50407-class outcomes in the migration report, which is the point of
+  eager rails). Silent - spike F3; nothing is posted. Failures (a member
+  Twilio rejects, or a >9 roster) do NOT fail the conversion: the thread
+  converts rail-less, the failure lands in the per-row report, and the
+  thread view shows the inbound-only banner.
 - DETECTION: an async job enqueued at group-thread creation creates the rail
   (keeps the webhook fast; the rail exists before any human could reply).
 - SEND-TIME BACKSTOP: if the rail is missing at composer send, create it

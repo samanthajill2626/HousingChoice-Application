@@ -73,9 +73,14 @@ CHECKPOINT: typecheck + npm test + FULL npm run e2e. Commit.
 
 T2.1 app/src/repos/conversationsRepo.ts: `'group_text'` in ConversationType
   (:39); fields `twilio_conversation_sid?`, `twilio_participant_map?`
-  (MBxx->memberKey record); `touchLastActivity` gains optional
-  `statusValue` param (default 'open' - byte-identical 1:1 path; unit test
-  asserts the default call's UpdateExpression is unchanged). New methods:
+  (MBxx->memberKey record); `touchLastActivity` REPO-LEVEL PARTITION GUARD
+  (plan-r2): the status write carries ConditionExpression
+  `#type <> :group_text`; on ConditionalCheckFailedException retry WITHOUT
+  the status clause (last_activity/preview only). Every call site -
+  including the outbound send path app/src/routes/api.ts:1501 - is safe
+  automatically; no statusValue parameter. Red-first test: a group
+  thread's status survives touchLastActivity; 1:1 test: expression
+  unchanged apart from the always-passing condition. New methods:
   `createGroupTextThread(...)` (conditional create; status 'group_open'),
   `listGroupTexts({cursor,limit})` (byLastActivity Query, partition
   'group_open', newest-first; query error -> ERROR log + THROW, never
@@ -83,9 +88,17 @@ T2.1 app/src/repos/conversationsRepo.ts: `'group_text'` in ConversationType
   `setTwilioConversation(convId, chxx, map)`. Unit tests incl. loud-error
   and pagination.
 T2.2 dashboard/src/api/types.ts:408 union + :431 ConversationSummary
-  passthrough notes + :2558 inbox row `kind` union gains 'group_text'.
-  Typecheck-visible sites compile; SILENT sites get explicit rulings +
-  tests in T4.6 (buildToday ONE_TO_ONE etc. - listed there).
+  passthrough notes + :2558 inbox row `kind` union AND the server row-kind
+  union app/src/routes/inbox.ts:73 gain 'group_text'. Typecheck-visible
+  sites compile; SILENT sites get explicit rulings + tests in T4.5.
+T2.6 STATUS-LITERAL SWEEP (plan-r2: `status` is a bare string in both
+  declarations, so 'group_open' is typecheck-invisible): grep app/src +
+  dashboard/src for status comparisons against 'open'/'connecting'/
+  'closed' (`status ===`, `!==`, switch cases, Query values) and produce a
+  per-site ruling table in the slice report; add tests where a ruling
+  changes behavior. Known intended effects to confirm: inboundEmail
+  not1to1 (group excluded), api.ts:1562 'open' page (group excluded),
+  today.ts:514 (excluded), relay status displays (unaffected).
 T2.3 app/src/services/groupIdentity.ts: `groupIdentity(from, others)` ->
   { roster, conversationId } - normalizes EVERY input via the importer's
   `normalizeToE164`, applies the exclusion set (business number + cached
@@ -108,17 +121,18 @@ T7.1 app/src/lib/import/apply.ts `upsertConversation` group path:
   reduced expression skipping relay_status, participants,
   import_connect_requested, imported_from, imported_at). NOTE the function
   issues TWO writes - the main UpdateCommand (:723-731) and the guarded
-  last_activity_at advance (:736-750, CCFE swallowed) - the guard wraps
-  the MAIN write only; the second write's status... the advance also
-  updates `status`? VERIFY while implementing: if the second write touches
-  `status`, it must not overwrite 'group_open' (add the same type
-  condition). Tests: unit incl. simulated-CCFE concurrent case +
+  last_activity_at advance (:736-750, CCFE swallowed). The second write
+  touches ONLY last_activity_at (verified plan-r2) - safe as-is; note in
+  the slice report that a re-run can advance group threads'
+  last_activity_at and thus reorder the group partition (accepted).
+  Tests: unit incl. simulated-CCFE concurrent case +
   local-dynamo integration: detected thread survives re-run byte-identical
   on protected fields.
 T7.2 `retractImported` (apply.ts:425-470): contact delete refuses when the
   contact carries the detection origin marker OR appears on any group_text
-  roster (roster check via listGroupTexts scan of participants - bounded,
-  migration-time only); reports skip reason. Tests: both refusal paths +
+  roster - the roster check walks the ENTIRE group_open partition with
+  full pagination (plan-r2: correctness over bound; migration-time cost
+  acceptable); reports skip reason. Tests: both refusal paths +
   clean-delete case.
 T7.3 app/src/services/groupConvert.ts
   `convertConnectingRelayGroupToGroupText(conversationId, opts)` per spec 9:
@@ -132,10 +146,11 @@ T7.3 app/src/services/groupConvert.ts
 T7.4 Bulk entry point (script per import-mission convention): receives
   ownNumbers, performs the EITHER-DIRECTION set-equality parity check
   against the runtime exclusion set BEFORE any conversion (refuse all on
-  mismatch), converts each, enqueues rail creation per converted thread
-  (no-op until S6 registers the handler - acceptable: the bulk runner is
-  only EXECUTED at migration, after the full branch is built), per-row
-  results. Unit test over fixtures.
+  mismatch), converts each, and creates rails SYNCHRONOUSLY per converted
+  row (plan-r2: per-row 50407-class outcomes must land in the migration
+  report). The rail step depends on S5's adapter, so T7.4 lands the
+  conversion+parity+reporting skeleton with the rail step as a NAMED
+  INJECTION POINT, wired by S6 task T6.6(c); per-row results. Unit test over fixtures.
 Gates; commit.
 
 ## S3 - Inbound detection (spec 5, 4.4)
@@ -183,27 +198,33 @@ directly to S4.)
 
 T4.1 Server inbox third source: app/src/routes/inbox.ts - merge top-50 from
   listGroupTexts into page one (truncated -> "Showing latest 50 group
-  texts - view all" affordance data), row kind 'group_text',
-  derived title from roster, unread count; `filter=groups` in InboxFilter
-  (:69) + allowlist (:127-134, :702-712); groups filter pages ONLY the
-  group partition (contact pager off), namespaced cursor tag, server 400
-  on tag/filter mismatch. Unit tests: row shape, filter, cursor 400,
-  truncation flag.
+  texts - view all" affordance data), row kind 'group_text' (server union
+  :73), derived title from roster, unread count; `filter=groups` in
+  InboxFilter (:69) + allowlist (:127-134, :702-712); groups filter pages
+  ONLY the group partition (contact pager off), namespaced cursor tag,
+  server 400 on tag/filter mismatch. UNREAD RULING (plan-r2): under
+  `filter=unread` the group source returns ALL unread group threads
+  (partition walk, no 50-cap), and the dashboard nav unread badge
+  (UnreadContext) includes group unread - tests for both. Unit tests: row
+  shape, filters, cursor 400, truncation flag.
 T4.2 Dashboard inbox: dashboard/src/api/types.ts:2548 InboxFilter union;
   dashboard/src/routes/inbox/inboxFilters.ts:12-16 INBOX_FILTERS tab
   ("Groups") + :19 emptyCopy case; Inbox.tsx state; useInbox.ts:54 rowKey
   ('g:'+conversationId), :185-196 markRead group branch (conversation
   mark-read route), InboxRow.tsx:31,34 deep link to /conversations/:id for
   group_text + "Group text" chip. Component tests per site.
+T4.0 Renderer extraction (real cross-file refactor, own task, plan-r2):
+  extract `relaySenderLabel` (dashboard/src/routes/contact/Timeline.tsx:286,
+  module-private) and the presence-based per-member delivery renderers
+  (Timeline.tsx:489-507) into shared modules; Timeline.tsx consumes the
+  extracted versions (snapshot tests pin unchanged relay rendering).
 T4.3 GroupTextView + read path: api.ts group_text branches on the header
   (:1575), messages (:1589), mark-read (:1789) routes; new
   dashboard/src/routes/conversation/useGroupThread.ts (modeled on
   useRelayThread incl. SSE refetch); GroupTextView rendering per spec 11
-  (member panel + suppression chips from contact opt-out, sender chips via
-  relaySenderLabel EXTRACTED from
-  dashboard/src/routes/contact/Timeline.tsx:286 into a shared module,
-  per-member delivery chips REUSING the extracted presence-based renderers
-  (Timeline.tsx:489-507) - state this reuse, header unmasked affordance,
+  (member panel + suppression chips from contact opt-out, sender chips +
+  per-member delivery chips via the T4.0 extracted shared renderers,
+  header unmasked affordance,
   >9 banner + member 1:1 links, composer placeholder until S5).
   ConversationDetail.tsx:132-146 becomes a three-way branch. Component
   tests per element; accessibility-first selectors.
@@ -216,9 +237,10 @@ T4.5 READER/SENDER SWEEP - every site below gets an explicit ruling and,
   - app/src/routes/inbox.ts:309 contact unread SUM - UNREACHABLE for
     group_text (conversationsForContact resolves by participant phone/email
     which groups lack) - DOCUMENT in code comment, no test possible.
-  - app/src/routes/inbox.ts:374-401 rowForConversation - group rows come
-    from the third source; add explicit group_text skip (like relay :378)
-    with test.
+  - app/src/routes/inbox.ts:374-401 rowForConversation - UNREACHABLE for
+    group threads by construction (status='group_open' keeps them out of
+    the 'open' partition the pager reads); DOCUMENT with a comment, no
+    tautological test (plan-r2).
   - app/src/routes/contactTimeline.ts:839 + contacts.ts:1164 - unreachable
     by construction (same reason); comment only.
   - dashboard/src/routes/placements/usePlacementChannels.ts:117 AND
@@ -323,27 +345,40 @@ T6.3 Periodic jobs, wired like the four existing worker pollers
   (app/src/routes/dev.ts pattern): daily liveness sweep ("cross-check
   channel quiet" WARN) + 7-day heartbeat WARN. Unit tests with fake clock
   + tick-endpoint tests.
-T6.4 Per-send staleness check: jobs.enqueue runAt +10min (within the 720s
-  SQS DelaySeconds bound? 600s = 10min exactly at the bound - VERIFY
-  jobs.ts MAX; if over, use the scheduler path or a 9-minute delay) ->
-  ERROR if delivery_recipients still empty. Unit test + __dev tick.
+T6.4 Per-send staleness check: jobs.enqueue runAt +600s (verified within
+  JOBS_SQS_MAX_DELAY_SECONDS = 720, jobs.ts:47) -> ERROR if
+  delivery_recipients still empty. The `__dev` seam INVOKES THE CHECK
+  FUNCTION DIRECTLY for a given message id (plan-r2: a delayed enqueue has
+  no due row to tick; the endpoint bypasses the timer, prod keeps the
+  enqueue). Unit test + seam test.
 T6.5 RUNBOOK ops checklist (spec 14) written; executed by Cameron at
   merge/cutover.
+T6.6 WIRING TASKS (plan-r2: these edit S3/S5/S7-committed files - explicit
+  tasks with tests, not parentheticals): (a) T3.3 thread-create enqueues
+  groupRail.create; (b) T5.2 backstop calls the port directly; (c) T7.4's
+  bulk-runner rail injection point calls the port synchronously per row
+  and folds outcomes into the report; (d) T3.3 ingestion updates
+  group_railed_inbound_last_at. Each with a unit test; re-run the touched
+  slices' test files after wiring.
 Gates; commit.
 
 ## S8 - Dev seams, fake Twilio, seeds, e2e (spec 12) [FULL-E2E CHECKPOINT]
 
 T8.0 Log-assertion seam: dev-only in-memory ring buffer of WARN+ERROR
   structured lines exposed at GET /__dev/logtail (mounted with the other
-  __dev routes; structurally absent in deployed envs). Unit test.
+  __dev routes; structurally absent in deployed envs). Works in hermetic
+  lanes because jobs run IN-PROCESS with the app there (app/src/index.ts:
+  64-93); the deployed app/worker split is irrelevant to a dev-only seam
+  (plan-r2). Unit test.
 T8.1 fake-twilio: inbound group MMS injection (OtherRecipients indexed +
   multi + media); minimal Conversations API surface (create conversation/
   participants, post message -> fan-out to fake phones + onDeliveryUpdated
   POST to the receipts route); 21610 per-member simulation for STOPped
   fake phones; fake-phones UI group-send seam (send a group text to the
   business number from the fake handset UI).
-T8.2 Seeds: full profile +2 group_text threads; lean +1 group_text and +1
-  connecting relay_group (conversion fixture). Verification method: RUN
+T8.2 Seeds: full profile +2 group_text threads; app/src/lib/seed/live.ts
+  +1 group_text demo thread (invariant-8 surface, plan-r2); lean +1
+  group_text and +1 connecting relay_group (conversion fixture). Verification method: RUN
   the full e2e suite - it is the enumerator of perturbed assertions - plus
   targeted review of first-page/row-order/Today assertions (the connecting
   row enters the relay inbox source; expect inbox-order effects).

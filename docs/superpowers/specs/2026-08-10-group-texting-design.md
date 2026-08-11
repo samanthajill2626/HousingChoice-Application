@@ -712,12 +712,27 @@ mainline; import mission owns the RUN). This feature ships:
 
 ## 13. Invariants (plan enumerates every surface per the standing rule)
 
-1. A group-origin inbound is never filed as a 1:1. Exactly THREE
-   exceptions, all alarmed/marked and extraction-suppressed: the fail-open
-   tripwire path, the corrupt-shape branch of 5.3(c), and the
-   collapsed-roster (<2 outside members) rule of section 5 - which files
-   1:1 because it semantically IS 1:1, but still carries the extraction
-   marker since the body may reference other parties.
+1. A group-origin inbound is never filed as a 1:1. Exactly FIVE exceptions
+   (the count was THREE when this was written; fix waves 2 and 4 MARKED and
+   ALARMED two more paths that were previously filing 1:1 silently, which
+   grew the list rather than weakening the rule). All five are alarmed,
+   marked with `group_ambiguous_origin`, and extraction-suppressed:
+   (a) the fail-open tripwire path (`group_envelope_missing`);
+   (b) the corrupt-shape branch of 5.3(c);
+   (c) the collapsed-roster (<2 outside members) rule of section 5 - which
+       files 1:1 because it semantically IS 1:1, but still carries the
+       extraction marker since the body may reference other parties;
+   (d) an envelope-bearing inbound that reaches a number detection does not
+       own - a pool number or another org number (A6's deliberate
+       relay-preserving fall-through, `group_envelope_off_business_number`),
+       or any number at all while BUSINESS_PHONE_NUMBER is unset and
+       detection is structurally off (`group_detection_unconfigured`);
+   (e) an envelope-bearing inbound intercepted into the sender's 1:1 because
+       its pool number's every group is CLOSED
+       (`group_envelope_via_closed_relay_group`).
+   (d) and (e) are ROUTING decisions that predate this feature and are
+   deliberately unchanged (invariant 6); what fix waves 2 and 4 changed is
+   that the filing is no longer silent.
 2. The 1:1-classified inbound path gains no new I/O and no new persisted
    side effects; behavior is unchanged.
 3. No inbound is ever lost: every webhook inbound persists somewhere even
@@ -735,7 +750,14 @@ mainline; import mission owns the RUN). This feature ships:
    "not relay_group" reader silently treats group_text as a 1:1 - each one
    either handles or explicitly excludes it. Group delivery outcomes never
    dispatch through relay status handlers or relay metrics.
-7. Group sends honor the SMS kill switch inside the adapter.
+7. Group SENDS honor the SMS kill switch inside the adapter; rail CREATION
+   is silent and deliberately not gated. Creating a Conversation and
+   attaching participants transmits nothing to any handset (spike F3), so it
+   emits no unregistered-A2P traffic - and gating it would leave threads
+   rail-less at cutover for no compliance benefit. Stated here because a
+   reader checking the invariant against the code will otherwise find a
+   `createConversationWithParticipants` that runs freely with
+   SMS_SENDING_ENABLED=false and assume it is a bug.
 8. Every mutation surface of group state (detection create, conversion,
    lazy rail create, receipts, suppression, SEEDS - cast.ts, matrix.ts,
    live.ts - and dev seams) and every reader/renderer (inbox sources,
@@ -747,9 +769,12 @@ mainline; import mission owns the RUN). This feature ships:
 
 - Dev + prod, in order: `GROUP_IDENTITY_EXCLUDED_NUMBERS` env values set (from the import plan's
   `ownNumbers`; BEFORE detection deploys - identity depends on it), deploy,
-  Conversations default-service webhook config (receipts URL),
-  account-global Conversations webhook config (cross-check URL), support
-  ticket (8), reseed where applicable. (No schema change: v6 removed the
+  Conversations default-service webhook config (ONE URL carrying BOTH the
+  `onDeliveryUpdated` and `onMessageAdded` filters), support ticket (8),
+  reseed where applicable. There is NO account-global webhook step: 16.1
+  amendment 3 deleted it, because configuring the service scope silences the
+  global scope entirely (proved live) - following the old step would have
+  silently killed the cross-check guardrail. (No schema change: v6 removed the
   GSI - group threads use the existing byLastActivity 'group_open'
   partition.)
 - Migration run (import mission) invokes the conversion bulk entry point
@@ -762,7 +787,8 @@ mainline; import mission owns the RUN). This feature ships:
   verifies zero remaining `relay_group#connecting` rows. PREFLIGHT: before
   the migration window, a production capability check (create+delete one
   test group conversation on the prod account) and a SIGNED WEBHOOK CANARY
-  against the exact configured receipts + cross-check URLs. COST NOTE:
+  against the exact configured Conversations webhook URL (one URL; see
+  above). COST NOTE:
   Twilio counts users assigned to conversations as active - the imported
   rosters plausibly exceed the 200-user free tier (order $10-20/month;
   budgeted, not discovered). ROLLBACK CONTRACT (RUNBOOK): conversion is
@@ -922,7 +948,13 @@ AMENDMENTS (binding on S5):
    NO LONGER NEEDED for group texting.
 4. Section 7's status-callback interplay paragraph is superseded in full.
 5. The e2e assertion "no unknown-SID ERROR from a group send" is retained and
-   is now trivially satisfiable - keep it as a regression pin.
+   is now trivially satisfiable - keep it as a regression pin. LABEL IT AS
+   WHAT IT IS: with classic callbacks proven not to fire for Conversations
+   sends, nothing in the lane produces the input that would break it, so it
+   pins a regression in the FAKE (someone adding classic status callbacks to
+   a Conversations fan-out leg), NOT coverage of the app's unknown-SID path.
+   A later reader must not mistake it for the latter and delete the app-side
+   care it appears to prove.
 6. The per-send staleness alarm (15.9) becomes MORE important, not less: it is
    now the ONLY detector of a dead receipts webhook, since no second delivery
    channel exists.

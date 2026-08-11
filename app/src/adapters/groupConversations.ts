@@ -349,13 +349,29 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
         );
         return { conversation: toConversationRef(created), participants: attached, failures: [] };
       } catch (err) {
-        // The bulk create is all-or-nothing: ONE rail-ineligible member fails
-        // the whole request with no per-member detail. Fall back to individual
-        // adds so the report can NAME the member Twilio refused (spec 6.1).
+        // A UNIQUENAME CONFLICT IS NOT A PARTICIPANT PROBLEM. The fallback
+        // below re-creates under the SAME UniqueName and fails identically, so
+        // falling through would cost a round trip and - worse - leave a
+        // "falling back to individual participant adds" breadcrumb for what is
+        // actually "this rail already exists". Re-throw and let
+        // ensureGroupRail's adopt-by-UniqueName handle it on the retry, which
+        // is the same end state the fallback reached anyway.
+        const code = twilioErrorCode(err);
+        if (code === '50353' || twilioStatus(err) === 409) {
+          this.log.warn(
+            { event: 'group_rail_unique_name_conflict', errorCode: code },
+            'group rail create refused: the UniqueName is already taken - a concurrent claimant created this rail',
+          );
+          throw err;
+        }
+        // Otherwise the bulk create is all-or-nothing: ONE rail-ineligible
+        // member fails the whole request with no per-member detail. Fall back to
+        // individual adds so the report can NAME the member Twilio refused
+        // (spec 6.1).
         this.log.warn(
           {
             event: 'group_rail_bulk_create_failed',
-            errorCode: twilioErrorCode(err),
+            errorCode: code,
             memberCount: input.members.length,
           },
           'group rail bulk create failed - falling back to individual participant adds',
@@ -479,9 +495,21 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
   }
 
   async fetchParticipants(conversationSid: string): Promise<GroupParticipantRef[]> {
+    // ONE OVER THE CAP, deliberately. Listing exactly MAX_RAIL_PARTICIPANTS
+    // would silently TRUNCATE a rail that somehow holds more (a hand-edited
+    // Conversation, a future cap change), and the caller would then read the
+    // short map as an MB-map "mismatch" - the safe direction, but a diagnosis
+    // that names the wrong cause. Reading one extra makes the over-cap case
+    // detectable, and says so.
     const list = await this.client.conversations.v1
       .conversations(conversationSid)
-      .participants.list({ limit: MAX_RAIL_PARTICIPANTS });
+      .participants.list({ limit: MAX_RAIL_PARTICIPANTS + 1 });
+    if (list.length > MAX_RAIL_PARTICIPANTS) {
+      this.log.warn(
+        { event: 'group_rail_over_cap', conversationSid, participantCount: list.length },
+        'group rail holds more participants than the documented cap - the map may be incomplete',
+      );
+    }
     return list.map(toParticipantRef);
   }
 }

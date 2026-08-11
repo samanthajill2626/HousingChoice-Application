@@ -208,6 +208,46 @@ describe('TwilioGroupConversationsDriver.createConversationWithParticipants', ()
 // every retry adopted the same Conversation by UniqueName, re-read the same
 // incomplete list, and recorded `rail_failed` again - against a cutover gate
 // that requires ZERO unresolved rail failures over 132 real threads.
+describe('TwilioGroupConversationsDriver.createConversationWithParticipants refusals', () => {
+  it('re-throws a UNIQUENAME CONFLICT instead of blaming the participants', async () => {
+    // The fallback re-creates under the SAME UniqueName and fails identically,
+    // so falling through cost a round trip and left a "falling back to
+    // individual participant adds" breadcrumb for what is really "this rail
+    // already exists". ensureGroupRail's adopt handles it on the retry.
+    const f = fakeConversationsClient({
+      bulkCreate: vi.fn().mockRejectedValue(Object.assign(new Error('taken'), { code: 50353 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await expect(driver.createConversationWithParticipants(CREATE_INPUT)).rejects.toThrow('taken');
+    expect(f.conversationCreate).not.toHaveBeenCalled();
+  });
+
+  it('reads ONE participant over the cap so an over-cap rail is detectable, not silently truncated', async () => {
+    const overCap = Array.from({ length: 11 }, (_unused, i) => ({
+      sid: `MB${i}`,
+      messagingBinding: { address: `+1617555${String(i).padStart(4, '0')}` },
+    }));
+    const f = fakeConversationsClient({
+      participantList: vi.fn().mockResolvedValue(overCap),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    const out = await driver.fetchParticipants('CHrail1');
+
+    expect(f.participantList.mock.calls[0]?.[0]).toEqual({ limit: 11 });
+    expect(out).toHaveLength(11);
+  });
+});
+
 describe('TwilioGroupConversationsDriver.addParticipants', () => {
   it('attaches ADDRESS-ONLY participants - never a second projected address', async () => {
     const f = fakeConversationsClient();

@@ -1623,12 +1623,12 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // WHY ITS OWN ROUTE: /relay-groups/:id/members 404s for a non-relay thread
   // (positive type guard, deliberately), and the two pieces of state that matter
   // here cannot be derived client-side anyway:
-  //   • SUPPRESSION is NUMBER-SCOPED. The contact flag is authoritative for a
+  //   - SUPPRESSION is NUMBER-SCOPED. The contact flag is authoritative for a
   //     member's PRIMARY number only; on a secondary number it says nothing, and
   //     that number's own 1:1 thread flag is the answer. Reading "contact opted
   //     out" alone would libel a member who only silenced another number - so
   //     this reads through the ONE suppression seam (services/numberSuppression).
-  //   • DELETED is a soft-delete flag on the contact record.
+  //   - DELETED is a soft-delete flag on the contact record.
   // Roster membership itself is immutable (written once at creation, spec 4.2).
   router.get('/conversations/:conversationId/group-members', async (req, res) => {
     const { conversationId } = req.params;

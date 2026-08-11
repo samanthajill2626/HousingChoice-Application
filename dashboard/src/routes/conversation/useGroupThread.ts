@@ -1,14 +1,14 @@
-// useGroupThread — the NATIVE group-text view's left-pane data hook. Modeled on
+// useGroupThread - the NATIVE group-text view's left-pane data hook. Modeled on
 // useRelayThread (a single fixed conversationId fed to
 // GET /api/conversations/:id/messages, mapped into the chronological
 // TimelineItem[] the shared <Timeline> renders) with two deliberate differences:
 //
-//   • NO scheduled bucket. useRelayThread also fetches
+//   - NO scheduled bucket. useRelayThread also fetches
 //     GET /api/conversations/:id/scheduled, which returns `{ scheduled: [] }`
 //     for any non-relay thread (200, not an error) - so calling it here would be
 //     one wasted request per thread open. Group threads have no automated sends
 //     in v1 (spec 10), so the "Upcoming" section is structurally empty.
-//   • NO optimistic-send trio yet. S4 ships the READ path; the composer (and
+//   - NO optimistic-send trio yet. S4 ships the READ path; the composer (and
 //     with it the optimistic bubble) is S5's - see GroupTextView's send seam.
 //
 // SSE: message.persisted / conversation.updated schedule the same debounced
@@ -23,7 +23,7 @@ import { buildRelayItems } from './useRelayThread.js';
 
 export type GroupThreadStatus = 'loading' | 'ready' | 'error';
 
-/** Debounce window (ms) for SSE-triggered refetches — coalesces a burst of
+/** Debounce window (ms) for SSE-triggered refetches - coalesces a burst of
  *  message/conversation events into one refetch (matches useRelayThread). */
 const REFETCH_DEBOUNCE_MS = 300;
 

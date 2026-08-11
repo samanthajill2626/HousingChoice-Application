@@ -188,7 +188,7 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
 interface GroupThreadRow {
   conversationId: string;
   memberCount: number;
-  /** ISO 8601 — the conversation's last_activity_at. */
+  /** ISO 8601 - the conversation's last_activity_at. */
   lastActivityAt: string;
   otherMemberNames: string[];
 }
@@ -206,7 +206,7 @@ interface RelayGroupRow {
   status: 'open' | 'closed' | 'connecting';
   poolNumber?: string;
   memberCount: number;
-  /** ISO 8601 — the conversation's last_activity_at. */
+  /** ISO 8601 - the conversation's last_activity_at. */
   lastActivityAt: string;
   owner: RelayOwner;
   tag?: string;
@@ -1157,7 +1157,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   });
 
   // GET /api/contacts/:contactId/group-threads
-  //   → { groups: GroupThreadRow[], truncated: boolean }
+  //   -> { groups: GroupThreadRow[], truncated: boolean }
   // The contact page's "Group threads" card: every NATIVE group text whose
   // roster includes this contact. Same shape of problem as the relay card - there
   // is no member->conversation index and this feature does not add one - so it

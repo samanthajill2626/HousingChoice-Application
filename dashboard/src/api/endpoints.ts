@@ -759,7 +759,7 @@ export async function getConversationMembers(
   return res.members;
 }
 
-/** GET /api/conversations/:id/group-members → { members }. A NATIVE group text's
+/** GET /api/conversations/:id/group-members -> { members }. A NATIVE group text's
  *  roster with per-member suppression + deleted state (unwrapped). 404
  *  group_text_not_found for a relay / 1:1 / missing id.
  *

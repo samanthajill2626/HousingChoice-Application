@@ -458,7 +458,7 @@ export interface ConversationsPage {
  *  services/numberSuppression.ts `NumberSuppressionScope`. */
 export type NumberSuppressionScope = 'primary' | 'secondary' | 'no_contact';
 
-/** GET /api/conversations/:id/group-members → { members }. One member of a
+/** GET /api/conversations/:id/group-members -> { members }. One member of a
  *  NATIVE group text. MIRRORS app/src/routes/api.ts `GroupMemberRow`.
  *
  *  `suppressed` is NUMBER-scoped, resolved server-side through the one

@@ -1,4 +1,4 @@
-// GroupTextView — the NATIVE group text thread (/conversations/:id where the
+// GroupTextView - the NATIVE group text thread (/conversations/:id where the
 // header's type is 'group_text'). Same two-pane shell as the relay group view,
 // but a different product: this is a REAL carrier group chat that already exists
 // on everyone's handset, so it has no pool number, no masking, no lifecycle, and
@@ -99,10 +99,10 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
     };
   }, [conversationId]);
 
-  // Viewing the thread marks it read — the inbox unread badge clears once seen.
+  // Viewing the thread marks it read - the inbox unread badge clears once seen.
   useEffect(() => {
     void markConversationRead(conversationId).catch(() => {
-      /* best-effort — a failed mark-read must not break the view */
+      /* best-effort - a failed mark-read must not break the view */
     });
   }, [conversationId]);
 

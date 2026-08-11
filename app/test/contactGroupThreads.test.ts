@@ -1,5 +1,5 @@
-// Route tests — GET /api/contacts/:contactId/group-threads
-//   → { groups: GroupThreadRow[], truncated: boolean }.
+// Route tests - GET /api/contacts/:contactId/group-threads
+//   -> { groups: GroupThreadRow[], truncated: boolean }.
 // The contact page's "Group threads" card. Runs on the shared in-memory world,
 // authed via the real sealed session cookie next to the origin secret. Covers:
 //   - membership matched by roster contactId AND by any of the contact's numbers

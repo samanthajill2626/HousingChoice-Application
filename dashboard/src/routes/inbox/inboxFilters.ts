@@ -8,7 +8,7 @@ export interface InboxFilterTab {
   label: string;
 }
 
-/** Tab order, left→right. 'all' is the default (first). "Groups" is the plural
+/** Tab order, left->right. 'all' is the default (first). "Groups" is the plural
  *  CATEGORY (native group texts), deliberately not the product label "Group
  *  text" - a tab is a place, not a thing. */
 export const INBOX_FILTERS: InboxFilterTab[] = [

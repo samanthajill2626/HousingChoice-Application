@@ -482,7 +482,7 @@ function MessageBubble({
   // Multi-party attribution: who authored this message ("Team" or a member's
   // name), resolved through the SHARED resolver so a relay bubble and a native
   // group_text bubble render identically. Undefined on a 1:1 bubble (no
-  // relay_sender_key) → no attribution line.
+  // relay_sender_key) -> no attribution line.
   const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster);
   const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
 

@@ -1,4 +1,4 @@
-// GroupThreadsCard — the "Group threads" card shared by TenantFile and
+// GroupThreadsCard - the "Group threads" card shared by TenantFile and
 // LandlordFile: the NATIVE group texts this contact is a member of
 // (GET /api/contacts/:id/group-threads via the useContactFile slice).
 //
@@ -20,7 +20,7 @@ export interface GroupThreadsCardProps {
   truncated?: boolean;
 }
 
-/** The thread-view route for a group text — its own conversationId. */
+/** The thread-view route for a group text - its own conversationId. */
 export function groupThreadLink(g: GroupThreadRow): string {
   return `/conversations/${g.conversationId}`;
 }

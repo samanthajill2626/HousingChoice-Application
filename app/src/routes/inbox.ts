@@ -103,7 +103,7 @@ export interface InboxRow {
    *  non-contact rows. */
   deleted?: boolean;
   // --- multi-party rows (relay_group AND group_text) ---------------------------
-  conversationId?: string; // the conversation id → route /conversations/:conversationId
+  conversationId?: string; // the conversation id -> route /conversations/:conversationId
   // --- relay_group ONLY --------------------------------------------------------
   /** The RELAY group's lifecycle status (D9: connecting = awaiting its number).
    *  DELIBERATELY ABSENT on a `group_text` row: a native carrier group has no

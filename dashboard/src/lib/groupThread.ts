@@ -1,4 +1,4 @@
-// groupThread — the roster-derived title for a NATIVE group text.
+// groupThread - the roster-derived title for a NATIVE group text.
 //
 // A group_text carries no stored display name, no operator tag and no pool
 // number (spec 4.2), so its title is derived from the roster every time it is

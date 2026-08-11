@@ -24,9 +24,9 @@ const CHANNEL_LABEL: Record<InboxChannel, string> = {
   email: 'Email',
 };
 
-/** The deep-link target: contact rows → the contact page; the two MULTI-PARTY
- *  kinds (relay_group, group_text) → the conversation view; unknown rows → the
- *  Contacts ▸ Unknown triage list, deep-linked with the number.
+/** The deep-link target: contact rows -> the contact page; the two MULTI-PARTY
+ *  kinds (relay_group, group_text) -> the conversation view; unknown rows -> the
+ *  Contacts > Unknown triage list, deep-linked with the number.
  *  The trailing return is the UNKNOWN case, so an unhandled kind would silently
  *  link to `/contacts/unknown?phone=` (empty) - a wrong-surface link that looks
  *  like it worked. Every kind is handled above it on purpose. */

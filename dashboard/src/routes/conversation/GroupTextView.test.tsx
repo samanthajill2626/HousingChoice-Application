@@ -1,4 +1,4 @@
-// GroupTextView — the NATIVE group-text thread view, exercised THROUGH
+// GroupTextView - the NATIVE group-text thread view, exercised THROUGH
 // ConversationDetail so the type dispatch is covered by the same tests (the
 // dangerous failure this replaces was a silent redirect, not a crash).
 import { act, render, screen, waitFor, within } from '@testing-library/react';

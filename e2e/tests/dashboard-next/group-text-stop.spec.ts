@@ -1,0 +1,210 @@
+import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
+import {
+  registerParty,
+  sendGroupAsParty,
+  listConversations,
+  setDeliveryOutcome,
+} from '../../fixtures/fakeTwilio.js';
+import { conversationIdForGroup, contactIdForPhone } from '../../../app/src/lib/import/ids.js';
+
+// SPEC 3 - STOP on a group text, scoped to the person who sent it.
+//
+// The rule this proves is the one most likely to be got wrong, and getting it
+// wrong is an A2P violation in one direction and a silenced room in the other:
+// a STOP from one member suppresses THAT PERSON, on THAT NUMBER. It does not
+// suppress the group thread, and it does not stop the other members hearing
+// from us. Twilio's own service sends the confirmation; the app deliberately
+// sends no keyword copy on a group path, so there is no reply to assert here.
+//
+// Both suppression SCOPES are covered, because the words differ and the wrong
+// words libel someone: a STOP from a contact's PRIMARY number reads
+// "Opted out"; a STOP from a SECOND number they own reads "This number opted
+// out" - the person is still reachable, one of their handsets is not.
+const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
+
+// FULL-profile cast contact with TWO numbers - the only seeded person who has
+// one, and the reason the secondary case reseeds.
+const MONIQUE_ID = 'contact-cast-searching-tenant';
+const MONIQUE_SECOND = '+15550100105';
+
+async function devLogin(page: Page): Promise<void> {
+  await page.goto(`${NEXT}/`);
+  await page.getByRole('button', { name: /Continue as dev user/i }).click();
+  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
+}
+
+async function reseed(request: APIRequestContext, profile: 'lean' | 'full'): Promise<void> {
+  const res = await request.post(`/__dev/reseed?profile=${profile}`);
+  if (!res.ok()) throw new Error(`reseed(${profile}) failed: ${res.status()}`);
+}
+
+/** Wait for the rail, so a send is never refused for the wrong reason. */
+async function awaitRail(request: APIRequestContext, conversationId: string): Promise<void> {
+  await expect
+    .poll(
+      async () => (await listConversations(request)).some((c) => c.uniqueName === conversationId),
+      { timeout: 20_000, message: 'the group rail was never created' },
+    )
+    .toBe(true);
+}
+
+test('a group STOP suppresses the SENDER on their primary number, not the thread; START restores', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const stamp = `${Date.now()}`.slice(-6);
+  const ANA = `+1555082${stamp.slice(-4)}`;
+  const BEN = `+1555083${stamp.slice(-4)}`;
+  const CAL = `+1555084${stamp.slice(-4)}`;
+  const conversationId = conversationIdForGroup([ANA, BEN, CAL]);
+
+  await registerParty(request, { label: `Ana ${stamp}`, role: 'tenant', number: ANA });
+  await registerParty(request, { label: `Ben ${stamp}`, role: 'tenant', number: BEN });
+  await sendGroupAsParty(request, {
+    from: ANA,
+    otherRecipients: [BEN, CAL],
+    body: `Opening the group ${stamp}`,
+  });
+  await awaitRail(request, conversationId);
+
+  // BEN stops - on the group thread, in front of everyone.
+  await sendGroupAsParty(request, { from: BEN, otherRecipients: [ANA, CAL], body: 'STOP' });
+
+  await devLogin(page);
+  await page.goto(`${NEXT}/conversations/${conversationId}`);
+  const members = page.getByRole('list', { name: 'Group members' });
+  await expect(members).toBeVisible({ timeout: 15_000 });
+
+  // 1) The chip, on the PRIMARY-number wording. Ben's contact was minted from
+  //    this very number, so it IS his primary and the flat "Opted out" is the
+  //    true statement.
+  await expect
+    .poll(async () => (await members.getByText('Opted out').count()) > 0, {
+      timeout: 15_000,
+      message: 'the suppression chip never appeared on the member panel',
+    })
+    .toBe(true);
+  await expect(members.getByText('This number opted out')).toHaveCount(0);
+
+  // 2) THE GROUP THREAD IS NOT SUPPRESSED. One member's STOP silencing the
+  //    room would be the loudest possible over-application of the rule.
+  const composer = page.getByRole('textbox', { name: 'Reply message' });
+  await expect(composer).toBeEnabled();
+  await expect(page.getByRole('status').filter({ hasText: /opted out/ })).toBeVisible();
+
+  // 3) The next send PARTIALLY delivers: Ben's carrier drops it (21610), the
+  //    other two get it, and the rollup says so without painting a suppression
+  //    as a hard failure.
+  await setDeliveryOutcome(request, {
+    partyNumber: BEN,
+    profile: { kind: 'fail', failState: 'undelivered', errorCode: '21610' },
+  });
+  const partial = `Still on for Saturday ${stamp}`;
+  await composer.fill(partial);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByText(partial)).toBeVisible({ timeout: 15_000 });
+  // Two reachable members, both delivered - the opted-out leg is excluded from
+  // the count rather than counted as a failure. Reloaded rather than waited on:
+  // per-member receipts arrive on the Conversations webhook and do not push the
+  // open thread, so the rollup is refetch-driven.
+  await expect
+    .poll(
+      async () => {
+        await page.reload();
+        // Wait for the thread to actually render before counting - `count()`
+        // takes a snapshot with no auto-wait, so counting straight after a
+        // reload measures an empty SPA every time.
+        await page.getByText(partial).waitFor({ timeout: 15_000 });
+        return page.getByText('Delivered 2/2').count();
+      },
+      { timeout: 60_000, message: 'the delivery rollup never finalized around the opted-out leg' },
+    )
+    .toBeGreaterThan(0);
+
+  // 4) Ben's OWN 1:1 is flagged. This is where the suppression has to live: a
+  //    proactive send to him is refused, by the same gate that would refuse it
+  //    if he had stopped in a 1:1.
+  await page.goto(`${NEXT}/contacts/${contactIdForPhone(BEN)}`);
+  const oneToOne = page.getByRole('textbox', { name: 'Reply message' });
+  await expect(oneToOne).toBeVisible({ timeout: 10_000 });
+  await oneToOne.fill(`should be refused ${stamp}`);
+  await page.getByRole('button', { name: 'Send' }).click();
+  await expect(page.getByRole('alert')).toContainText(/Do-Not-Contact/i);
+
+  // 5) START restores him - the chip goes, on the same surface it appeared on.
+  await sendGroupAsParty(request, { from: BEN, otherRecipients: [ANA, CAL], body: 'START' });
+  await page.goto(`${NEXT}/conversations/${conversationId}`);
+  await expect(page.getByRole('list', { name: 'Group members' })).toBeVisible({ timeout: 15_000 });
+  await expect
+    .poll(
+      async () => {
+        await page.reload();
+        const list = page.getByRole('list', { name: 'Group members' });
+        await list.waitFor({ timeout: 15_000 });
+        return list.getByText('Opted out').count();
+      },
+      { timeout: 30_000, message: 'the suppression chip never cleared after START' },
+    )
+    .toBe(0);
+});
+
+test.describe('the SECOND-number case (full profile)', () => {
+  test.afterAll(async ({ request }) => {
+    // Every other spec in the suite assumes lean. Restoring it is not optional.
+    await reseed(request, 'lean');
+  });
+
+  test('a STOP from a contact SECOND number says so - the person stays reachable', async ({
+    page,
+    request,
+  }) => {
+    test.slow();
+    await reseed(request, 'full');
+
+    const stamp = `${Date.now()}`.slice(-6);
+    const OTHER = `+1555085${stamp.slice(-4)}`;
+    const THIRD = `+1555086${stamp.slice(-4)}`;
+    const conversationId = conversationIdForGroup([MONIQUE_SECOND, OTHER, THIRD]);
+
+    await registerParty(request, {
+      label: `Monique second ${stamp}`,
+      role: 'tenant',
+      number: MONIQUE_SECOND,
+    });
+    await sendGroupAsParty(request, {
+      from: MONIQUE_SECOND,
+      otherRecipients: [OTHER, THIRD],
+      body: `From my other phone ${stamp}`,
+    });
+    await sendGroupAsParty(request, {
+      from: MONIQUE_SECOND,
+      otherRecipients: [OTHER, THIRD],
+      body: 'STOP',
+    });
+
+    await devLogin(page);
+    await page.goto(`${NEXT}/conversations/${conversationId}`);
+    const members = page.getByRole('list', { name: 'Group members' });
+    await expect(members).toBeVisible({ timeout: 15_000 });
+
+    // The SCOPED words. Rendering the flat "Opted out" here would tell staff
+    // that Monique cannot be texted at all, which is false and would cost a
+    // placement.
+    await expect
+      .poll(async () => members.getByText('This number opted out').count(), {
+        timeout: 15_000,
+        message: 'the secondary-scope chip never appeared',
+      })
+      .toBe(1);
+    await expect(members.getByText('Opted out', { exact: true })).toHaveCount(0);
+
+    // And her PRIMARY number is untouched: the 1:1 thread on it still sends.
+    await page.goto(`${NEXT}/contacts/${MONIQUE_ID}`);
+    const composer = page.getByRole('textbox', { name: 'Reply message' });
+    await expect(composer).toBeVisible({ timeout: 10_000 });
+    await composer.fill(`still reachable ${stamp}`);
+    await page.getByRole('button', { name: 'Send' }).click();
+    await expect(page.getByText(`still reachable ${stamp}`)).toBeVisible({ timeout: 15_000 });
+  });
+});

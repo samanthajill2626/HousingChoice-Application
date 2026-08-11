@@ -134,11 +134,118 @@ export async function registerParty(
 
 export async function sendAsParty(
   request: APIRequestContext,
-  input: { from: string; body?: string; to?: string; mediaUrls?: string[] },
+  input: {
+    from: string;
+    body?: string;
+    to?: string;
+    mediaUrls?: string[];
+    /**
+     * Force the provider SID prefix. The fake otherwise derives it from media
+     * presence alone, so `MM` with `NumMedia=0` - the group-texting TRIPWIRE
+     * shape (adjudication A28) - has no other way to exist.
+     */
+    sidShape?: 'SM' | 'MM';
+  },
 ): Promise<string> {
   const res = await request.post(`${FAKE_BASE}/control/send-as-party`, { data: input });
   if (!res.ok()) throw new Error(`send-as-party failed: ${res.status()}`);
   return (await res.json()).sid as string;
+}
+
+// --- Native carrier group texting (group-texting spec 5.1 / 7) --------------
+//
+// DISTINCT FROM `sendAsParty` + `to: <pool>`, which is a RELAY group leg. A
+// carrier group text goes to the BUSINESS number like any 1:1 and is
+// distinguished only by the undocumented `OtherRecipients` envelope. Everything
+// here says "carrier group" so no helper reads ambiguously against relay.
+
+export interface SendGroupAsPartyInput {
+  from: string;
+  /** The OTHER handsets on the thread. */
+  otherRecipients: string[];
+  body?: string;
+  mediaUrls?: string[];
+  /** `indexed` (the live shape, default) or `single` (the bare defensive key). */
+  otherRecipientsShape?: 'indexed' | 'single';
+  /** Force the provider SID prefix - the tripwire needs MM with NumMedia=0. */
+  sidShape?: 'SM' | 'MM';
+  /**
+   * Set false to suppress the Conversations `onMessageAdded` the fake would
+   * otherwise fire when the sender is on a rail. This is the ONLY way to
+   * manufacture the guardrail's target failure: a classic inbound that the
+   * Conversations channel never reported.
+   */
+  railEvent?: boolean;
+}
+
+/** Inject an inbound CARRIER group text. Returns the classic provider SID plus
+ *  the rail ids when the roster already had a Conversations rail. */
+export async function sendGroupAsParty(
+  request: APIRequestContext,
+  input: SendGroupAsPartyInput,
+): Promise<{ sid: string; conversationSid?: string; conversationMessageSid?: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/send-group-as-party`, { data: input });
+  if (!res.ok()) throw new Error(`send-group-as-party failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { sid: string; conversationSid?: string };
+}
+
+export interface FakeConversation {
+  /** CHxx. */
+  sid: string;
+  /** Our conversationId. */
+  uniqueName?: string;
+  state: string;
+  participants: { sid: string; address?: string; projectedAddress?: string }[];
+  messages: {
+    sid: string;
+    author?: string;
+    body?: string;
+    index: number;
+    source: 'API' | 'SMS';
+    legs?: { participantSid: string; address: string; channelMessageSid: string; state: string }[];
+  }[];
+}
+
+/** The rails the fake currently holds - the proof a thread got a Conversation. */
+export async function listConversations(request: APIRequestContext): Promise<FakeConversation[]> {
+  const res = await request.get(`${FAKE_BASE}/control/conversations`);
+  if (!res.ok()) throw new Error(`conversations failed: ${res.status()}`);
+  return (await res.json()).conversations as FakeConversation[];
+}
+
+/** Fire an `onMessageAdded` with NO classic counterpart - the guardrail's target
+ *  failure, and the only way to produce it. `source: 'API'` exercises the
+ *  cross-check's `Source === 'SMS'` filter for real. */
+export async function injectConversationEvent(
+  request: APIRequestContext,
+  input: {
+    conversationSid?: string;
+    uniqueName?: string;
+    author?: string;
+    body?: string;
+    source?: 'SMS' | 'API' | 'SDK';
+    messageSid?: string;
+  },
+): Promise<{ messageSid: string; conversationSid: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/conversations/inject-event`, { data: input });
+  if (!res.ok()) throw new Error(`inject-event failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { messageSid: string; conversationSid: string };
+}
+
+/**
+ * Arm the NEXT message to one handset with a delivery outcome. ONE control API
+ * serves both a 1:1 send and a carrier-group leg, so this is also how a
+ * per-member 21610 (a STOPped handset) is simulated on a group send.
+ */
+export async function setDeliveryOutcome(
+  request: APIRequestContext,
+  input: {
+    partyNumber: string;
+    profile: { kind: 'normal' | 'stall' | 'fail'; failState?: string; errorCode?: string };
+  },
+): Promise<void> {
+  const res = await request.post(`${FAKE_BASE}/control/delivery-outcome`, { data: input });
+  if (!res.ok()) throw new Error(`delivery-outcome failed: ${res.status()}`);
 }
 
 export async function listThreads(request: APIRequestContext): Promise<FakeThread[]> {

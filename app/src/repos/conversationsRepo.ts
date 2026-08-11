@@ -259,6 +259,16 @@ export interface ConversationItem {
    * successful finalize.
    */
   rail_creating?: { token: string; at: string };
+  /**
+   * `group_text` only: the last rail-creation FAILURE ({at, reason}). Written by
+   * ensureGroupRail when Twilio refused the roster (a 50407-class member), when
+   * the conversation came back closed/failed, or when the participant map did
+   * not cover the roster. It is a REPORT, not a fence - a later successful
+   * ensure simply stamps the sid; the record stays as the reason this thread was
+   * inbound-only for a while, and the migration report reads the same reason
+   * string live.
+   */
+  rail_failed?: { at: string; reason: string };
   [key: string]: unknown;
 }
 
@@ -807,6 +817,39 @@ export interface ConversationsRepo {
     cursor?: string | undefined;
     limit?: number | undefined;
   }): Promise<{ items: ConversationItem[]; nextCursor?: string; truncated: boolean }>;
+  /**
+   * FENCED rail claim (spec 6.1 / 15.3): take the `rail_creating` claim BEFORE
+   * any Twilio call, carrying an OWNER TOKEN and its timestamp.
+   *
+   * The write is conditional on the row existing AND the claim being FREE -
+   * absent, or older than `expiredBefore`. An expired claim is deliberately
+   * RE-CLAIMABLE: a claimant that crashed between claim and finalize must never
+   * strand a thread rail-less against the hardened cutover gate. Safety does not
+   * rest on the expiry (a clock is not a lock) but on setTwilioConversation,
+   * which is fenced on the token - so a resurrected claimant loses the finalize
+   * rather than clobbering the new claimant's rail.
+   *
+   * The LOSER gets `{claimed: false, item}` - the freshly re-read row, so it can
+   * see whether the winner already stamped a sid. `item` is absent only when the
+   * row is gone.
+   */
+  claimRailCreation(
+    conversationId: string,
+    claim: { token: string; at: string },
+    expiredBefore: string,
+  ): Promise<{ claimed: boolean; item?: ConversationItem }>;
+  /**
+   * Record a rail-creation failure and RELEASE the claim, both conditional on
+   * the caller still owning it. Releasing matters: without it a failed attempt
+   * would block every retry until the expiry window elapsed, and the migration
+   * runner is expected to be re-run immediately. Never throws on a lost fence.
+   */
+  recordRailFailure(
+    conversationId: string,
+    reason: string,
+    at: string,
+    claimToken: string,
+  ): Promise<void>;
   /**
    * FENCED rail finalize: stamp `twilio_conversation_sid` + the MBxx -> member
    * key map and CLEAR the `rail_creating` claim, CONDITIONAL on the caller still
@@ -2039,6 +2082,53 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         }),
         truncated: items.length < limit && exclusiveStartKey !== undefined,
       };
+    },
+
+    async claimRailCreation(conversationId, claim, expiredBefore) {
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET #rc = :claim',
+            // FREE means absent or expired. `<=` (not `<`) so a claim stamped at
+            // exactly the boundary is re-claimable rather than sticky.
+            ConditionExpression:
+              'attribute_exists(conversationId) AND ' +
+              '(attribute_not_exists(#rc) OR #rc.#at <= :expiredBefore)',
+            ExpressionAttributeNames: { '#rc': 'rail_creating', '#at': 'at' },
+            ExpressionAttributeValues: { ':claim': claim, ':expiredBefore': expiredBefore },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        return { claimed: true, item: Attributes as ConversationItem };
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // LOSER RE-READS (spec 6.1): the winner may already have stamped a sid,
+        // in which case the loser has nothing to do and nothing to report.
+        const item = await getById(conversationId);
+        return { claimed: false, ...(item !== undefined && { item }) };
+      }
+    },
+
+    async recordRailFailure(conversationId, reason, at, claimToken) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET rail_failed = :failed REMOVE #rc',
+            ConditionExpression: 'attribute_exists(conversationId) AND #rc.#tok = :token',
+            ExpressionAttributeNames: { '#rc': 'rail_creating', '#tok': 'token' },
+            ExpressionAttributeValues: { ':failed': { at, reason }, ':token': claimToken },
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Someone else owns the claim now (or the row is gone). Their outcome is
+        // the live one; ours is stale by definition.
+        log.warn({ conversationId }, 'group text rail failure record lost its claim');
+      }
     },
 
     async setTwilioConversation(conversationId, twilioConversationSid, participantMap, claimToken) {

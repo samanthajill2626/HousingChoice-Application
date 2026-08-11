@@ -376,4 +376,130 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
       expect(reread?.twilio_conversation_sid).toBeUndefined();
     });
   });
+
+  // T6.1. The claim is the ONLY thing standing between three callers
+  // (detection's job, the migration runner, the send backstop) and three rails,
+  // so its ConditionExpression is proven against real DynamoDB rather than a
+  // fake that could drift from it.
+  describe('claimRailCreation + recordRailFailure', () => {
+    const NOW = '2026-08-11T12:00:00.000Z';
+    const EXPIRED_BEFORE = '2026-08-11T11:55:00.000Z';
+
+    it('claims a free row, and a CONCURRENT second claimant loses and re-reads', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-60', phone: '+15550100080' }],
+      });
+
+      const first = await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-1', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      const second = await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-2', at: NOW },
+        EXPIRED_BEFORE,
+      );
+
+      expect(first.claimed).toBe(true);
+      expect(second.claimed).toBe(false);
+      // The loser gets the row it lost to - that is how it discovers whether the
+      // winner already stamped a sid.
+      expect(second.item?.rail_creating).toMatchObject({ token: 'token-1' });
+    });
+
+    it('an EXPIRED claim is re-claimable, and the dead claimant is then fenced out of the finalize', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-61', phone: '+15550100081' }],
+      });
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'dead', at: '2026-08-11T11:00:00.000Z' },
+        EXPIRED_BEFORE,
+      );
+
+      const takeover = await conversations.claimRailCreation(
+        conversationId,
+        { token: 'alive', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      expect(takeover.claimed).toBe(true);
+
+      // The crashed claimant wakes up and tries to finalize its orphan rail.
+      const late = await conversations.setTwilioConversation(
+        conversationId,
+        'CH44444444444444444444444444444444',
+        {},
+        'dead',
+      );
+      expect(late).toBeUndefined();
+
+      const winner = await conversations.setTwilioConversation(
+        conversationId,
+        'CH55555555555555555555555555555555',
+        { MB1: 'phone#+15550100081' },
+        'alive',
+      );
+      expect(winner?.twilio_conversation_sid).toBe('CH55555555555555555555555555555555');
+    });
+
+    it('a missing row cannot be claimed', async () => {
+      const outcome = await conversations.claimRailCreation(
+        nextId(),
+        { token: 'token-x', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      expect(outcome.claimed).toBe(false);
+      expect(outcome.item).toBeUndefined();
+    });
+
+    it('recordRailFailure stamps the reason and RELEASES the claim so a retry is immediate', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-62', phone: '+15550100082' }],
+      });
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-f', at: NOW },
+        EXPIRED_BEFORE,
+      );
+
+      await conversations.recordRailFailure(conversationId, 'landline member', NOW, 'token-f');
+
+      const reread = await conversations.getById(conversationId);
+      expect(reread?.rail_failed).toMatchObject({ reason: 'landline member', at: NOW });
+      expect(reread?.rail_creating).toBeUndefined();
+      // Released means re-claimable RIGHT NOW, not after the expiry window.
+      const retry = await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-g', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      expect(retry.claimed).toBe(true);
+    });
+
+    it('recordRailFailure by a non-owner writes nothing', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-63', phone: '+15550100083' }],
+      });
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'owner', at: NOW },
+        EXPIRED_BEFORE,
+      );
+
+      await conversations.recordRailFailure(conversationId, 'stale reason', NOW, 'not-the-owner');
+
+      const reread = await conversations.getById(conversationId);
+      expect(reread?.rail_failed).toBeUndefined();
+      expect(reread?.rail_creating).toMatchObject({ token: 'owner' });
+    });
+  });
 });

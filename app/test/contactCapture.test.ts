@@ -198,6 +198,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     listGroupTexts: async () => {
       throw new Error('listGroupTexts: not used in this suite');
     },
+    claimRailCreation: async () => {
+      throw new Error('claimRailCreation: not used in this suite');
+    },
+    recordRailFailure: async () => {
+      throw new Error('recordRailFailure: not used in this suite');
+    },
     setTwilioConversation: async () => {
       throw new Error('setTwilioConversation: not used in this suite');
     },

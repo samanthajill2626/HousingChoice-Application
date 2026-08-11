@@ -742,6 +742,24 @@ export function createFakeWorld(): FakeWorld {
       };
     },
 
+    async claimRailCreation(conversationId, claim, expiredBefore) {
+      const conv = conversations.get(conversationId);
+      if (!conv) return { claimed: false };
+      // Models the real ConditionExpression: the claim is FREE when absent or
+      // older than the expiry window (re-claimable), never otherwise.
+      const held = conv.rail_creating;
+      if (held !== undefined && held.at > expiredBefore) return { claimed: false, item: conv };
+      conv.rail_creating = { ...claim };
+      return { claimed: true, item: conv };
+    },
+
+    async recordRailFailure(conversationId, reason, at, claimToken) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.rail_creating?.token !== claimToken) return;
+      conv.rail_failed = { at, reason };
+      delete conv.rail_creating;
+    },
+
     async setTwilioConversation(conversationId, sid, participantMap, claimToken) {
       const conv = conversations.get(conversationId);
       if (!conv || conv.rail_creating?.token !== claimToken) return undefined;

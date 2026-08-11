@@ -19,6 +19,7 @@ import { registerMissedCallAutoTextJobHandler } from './missedCallAutoText.js';
 import { registerVoiceTranscriptJobHandlers } from './voiceTranscript.js';
 import { registerRelayWarmJobHandler } from './relayWarm.js';
 import { registerRelayNumberReadyJobHandler } from './relayNumberReady.js';
+import { registerGroupRailJobHandler } from './groupRail.js';
 
 export interface RegisterJobHandlersDeps {
   /** The shared A2P token bucket — every throttled outbound handler draws from it. */
@@ -47,4 +48,9 @@ export function registerAllJobHandlers(deps: RegisterJobHandlersDeps): void {
   registerVoiceTranscriptJobHandlers();
   registerRelayWarmJobHandler();
   registerRelayNumberReadyJobHandler();
+  // Native group texting: a Conversations rail CREATE (a Conversation plus its
+  // participants). Spike F3 proved that transmits nothing to any handset, so it
+  // draws no A2P token - the outbound post that follows is metered by the send
+  // path, not by this handler.
+  registerGroupRailJobHandler();
 }

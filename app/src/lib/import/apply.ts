@@ -62,6 +62,20 @@ const IMPORT_STATUS_SOURCE: TransitionSource = 'import';
  */
 const GROUP_TEXT_TYPE = 'group_text';
 
+/**
+ * The byLastActivity partition native group threads live in
+ * (conversationsRepo's GROUP_TEXT_STATUS). Local literal for the same reason as
+ * GROUP_TEXT_TYPE; a test pins it against the repo's exported constant.
+ */
+const GROUP_TEXT_STATUS_PARTITION = 'group_open';
+
+/**
+ * `contacts.origin` written by group-text detection when it mints a member stub
+ * for a silent participant (group-texting spec section 5). Such a contact was
+ * never import-owned and must survive a `drop`.
+ */
+const GROUP_DETECTION_ORIGIN = 'group_detection';
+
 export interface ApplyOptions {
   doc: DynamoDBDocumentClient;
   plan: PlanResult;
@@ -132,6 +146,11 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const contactIdByPhone = new Map<string, string>();
   /** row_keys the founder dropped — their threads and messages are skipped too. */
   const droppedPhones = new Set<string>();
+  /**
+   * Every contactId a native group_text roster references, read ONCE per run and
+   * only when a retract is actually about to happen (see the drop branch below).
+   */
+  let groupRosterIds: Set<string> | undefined;
 
   const people = plan.merge.people;
   /** Free-field authority values written verbatim (no canonical spelling). */
@@ -148,7 +167,12 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       // this person and she dropped them in a later review, leaving the row
       // behind means "drop" quietly did nothing — and she would have no way to
       // tell. So remove what the import created, and only that.
-      if (!dryRun) await retractImported(doc, person, warnings, env);
+      // Built LAZILY and exactly once: a run with no drops must not pay a
+      // partition walk, and a dry run never reads it at all (it never deletes).
+      if (!dryRun) {
+        groupRosterIds ??= await groupTextRosterContactIds(doc, table('conversations'));
+        await retractImported(doc, person, warnings, env, groupRosterIds);
+      }
       continue;
     }
 
@@ -417,12 +441,25 @@ export function splitReviewedName(raw: string): { firstName: string; lastName: s
  *
  * Group threads are never dismantled: their history belongs to the other members
  * too. The person is reported instead.
+ *
+ * NATIVE GROUP TEXTS (group-texting spec section 9). A contact referenced by a
+ * group_text roster is NOT deletable: every member chip, delivery slot and
+ * suppression record in those threads keys on the contactId, so removing it
+ * would orphan history that belongs to the other members. Three layers, in
+ * order of how early they can answer:
+ *   1. the detection origin marker (the contact was never import-owned),
+ *   2. the roster set walked once per run (covers every member, imported or not),
+ *   3. an ATOMIC ConditionExpression on the delete itself
+ *      (`attribute_not_exists(group_participation_at)`), which is what closes
+ *      the read-then-delete race against live detection.
+ * Every refusal is reported, never thrown.
  */
 async function retractImported(
   doc: DynamoDBDocumentClient,
   person: MergedPerson,
   warnings: string[],
   env: NodeJS.ProcessEnv,
+  groupRosterContactIds: ReadonlySet<string>,
 ): Promise<void> {
   const contactsTable = tableName('contacts', env);
   const conversationsTable = tableName('conversations', env);
@@ -433,10 +470,53 @@ async function retractImported(
   );
   if (!existing.Item) return; // never imported, or already retracted
 
+  // Checked BEFORE the import-provenance rule so the operator is told the real
+  // reason: a detection stub also fails that rule, but "we did not create it"
+  // hides the fact that this person is in a live group conversation.
+  if (existing.Item.origin === GROUP_DETECTION_ORIGIN) {
+    warnings.push(
+      `${person.rowKey} (${person.phone}) is marked drop but their contact record was created by ` +
+        `group text detection, not by the import — left untouched (GROUP MEMBER).`,
+    );
+    return;
+  }
+
   if (existing.Item.imported_from !== IMPORT_SOURCE) {
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but its contact record was not created ` +
         `by the import — left untouched.`,
+    );
+    return;
+  }
+
+  if (groupRosterContactIds.has(person.contactId)) {
+    warnings.push(
+      `${person.rowKey} (${person.phone}) is marked drop but they are on a native group text ` +
+        `roster — the contact was KEPT (GROUP MEMBER). Deleting it would orphan their member ` +
+        `chips and delivery records in a conversation that belongs to the other members too.`,
+    );
+    return;
+  }
+
+  // ATOMIC GUARD. The roster set above was read before this loop started, so a
+  // group thread created since then would slip past it; the condition is
+  // evaluated by DynamoDB at delete time and cannot be raced. Deliberately
+  // FIRST, before any message/thread deletion, so a refusal leaves nothing
+  // half-retracted.
+  try {
+    await doc.send(
+      new DeleteCommand({
+        TableName: contactsTable,
+        Key: { contactId: person.contactId },
+        ConditionExpression: 'attribute_not_exists(group_participation_at)',
+      }),
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    warnings.push(
+      `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
+        `while this import was running — the contact was KEPT (GROUP MEMBER) and their thread ` +
+        `was left untouched.`,
     );
     return;
   }
@@ -474,10 +554,47 @@ async function retractImported(
       );
     }
   }
+}
 
-  await doc.send(
-    new DeleteCommand({ TableName: contactsTable, Key: { contactId: person.contactId } }),
-  );
+/**
+ * Every contactId referenced by a native group_text roster, from ONE full
+ * pagination pass of the `group_open` byLastActivity partition.
+ *
+ * Read once per run and consulted per drop candidate: the alternative (a query
+ * per candidate) would be hundreds of queries for the same answer. A failure
+ * here is LOUD - an empty result is indistinguishable from "no group threads
+ * exist", and treating a read error as empty would silently un-guard every
+ * delete this run performs.
+ */
+async function groupTextRosterContactIds(
+  doc: DynamoDBDocumentClient,
+  conversationsTable: string,
+): Promise<Set<string>> {
+  const ids = new Set<string>();
+  let startKey: Record<string, unknown> | undefined;
+  do {
+    const page = await doc.send(
+      new QueryCommand({
+        TableName: conversationsTable,
+        IndexName: 'byLastActivity',
+        KeyConditionExpression: '#s = :status',
+        ExpressionAttributeNames: { '#s': 'status', '#p': 'participants' },
+        ExpressionAttributeValues: { ':status': GROUP_TEXT_STATUS_PARTITION },
+        ProjectionExpression: '#p',
+        ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+      }),
+    );
+    for (const item of page.Items ?? []) {
+      const members = (item.participants ?? []) as { contactId?: unknown }[];
+      for (const member of members) {
+        if (typeof member.contactId === 'string' && member.contactId.length > 0) {
+          ids.add(member.contactId);
+        }
+      }
+    }
+    startKey = page.LastEvaluatedKey;
+  } while (startKey !== undefined);
+  return ids;
 }
 
 // ---------------------------------------------------------------------------

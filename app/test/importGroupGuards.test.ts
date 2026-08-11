@@ -14,6 +14,8 @@ import { runApply } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { conversationIdForGroup } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
+import { GROUP_TEXT_STATUS } from '../src/repos/conversationsRepo.js';
+import { contactIdForPhone } from '../src/lib/import/ids.js';
 import { PHONES, writeFixture } from './importFixture.js';
 
 const fixture = writeFixture();
@@ -196,6 +198,12 @@ describe('import upsertConversation - group_text type guard (T7.1)', () => {
     for (const c of oneToOne) expect(c.input.ConditionExpression).toBeUndefined();
   });
 
+  it('pins the local group_open literal against the repo constant', () => {
+    // apply.ts keeps the partition name as a local literal rather than importing
+    // the repo (H10). This is the drift alarm for that decision.
+    expect(GROUP_TEXT_STATUS).toBe('group_open');
+  });
+
   it('still rethrows a non-CCFE failure from the group upsert', async () => {
     const { doc } = stubDoc((cmd) => {
       if (
@@ -209,5 +217,164 @@ describe('import upsertConversation - group_text type guard (T7.1)', () => {
     await expect(
       runApply({ doc, plan, review: cleanReview(), importedAt }),
     ).rejects.toThrow('ProvisionedThroughputExceededException');
+  });
+});
+
+describe('import retractImported - group member guard (T7.2)', () => {
+  const DROPPED_PHONE = PHONES.groupTenant;
+  const DROPPED_CONTACT_ID = contactIdForPhone(DROPPED_PHONE);
+  const droppedRowKey = plan.merge.people.find((p) => p.phone === DROPPED_PHONE)!.rowKey;
+
+  /** The clean review with exactly one person marked drop. */
+  const reviewDropping = (...phones: string[]): ReturnType<typeof parseWorkbook> => {
+    const review = cleanReview();
+    const targets = new Set(phones.length > 0 ? phones : [DROPPED_PHONE]);
+    for (const row of review.contacts.values()) {
+      if (typeof row.phone === 'string' && targets.has(row.phone)) row.drop = 'Y';
+    }
+    return review;
+  };
+
+  interface RetractWorld {
+    /** Extra attributes merged onto the dropped person's stored contact. */
+    contact?: Record<string, unknown>;
+    /** contactIds the group_open partition walk should report. */
+    rosterContactIds?: string[];
+    /** Throw instead of answering the group partition query. */
+    rosterFails?: boolean;
+    /** Make the guarded contact delete lose its condition. */
+    deleteLoses?: boolean;
+  }
+
+  function retractStub(world: RetractWorld = {}): {
+    doc: DynamoDBDocumentClient;
+    sent: RecordedCommand[];
+  } {
+    return stubDoc((cmd) => {
+      const tableName = String(cmd.input.TableName ?? '');
+      if (cmd.name === 'QueryCommand' && cmd.input.IndexName === 'byLastActivity') {
+        if (world.rosterFails) throw new Error('ProvisionedThroughputExceededException');
+        return {
+          Items: [
+            { participants: (world.rosterContactIds ?? []).map((contactId) => ({ contactId })) },
+          ],
+        };
+      }
+      if (
+        cmd.name === 'GetCommand' &&
+        tableName.includes('contacts') &&
+        (cmd.input.Key as { contactId?: string }).contactId === DROPPED_CONTACT_ID
+      ) {
+        return {
+          Item: {
+            contactId: DROPPED_CONTACT_ID,
+            phone: DROPPED_PHONE,
+            imported_from: 'quo-airtable-import',
+            ...world.contact,
+          },
+        };
+      }
+      if (
+        world.deleteLoses &&
+        cmd.name === 'DeleteCommand' &&
+        tableName.includes('contacts') &&
+        (cmd.input.Key as { contactId?: string }).contactId === DROPPED_CONTACT_ID
+      ) {
+        throw ccfe();
+      }
+      return undefined;
+    });
+  }
+
+  const contactDeletes = (sent: RecordedCommand[]): RecordedCommand[] =>
+    sent.filter(
+      (c) =>
+        c.name === 'DeleteCommand' &&
+        String(c.input.TableName ?? '').includes('contacts') &&
+        (c.input.Key as { contactId?: string }).contactId === DROPPED_CONTACT_ID,
+    );
+
+  const partitionWalks = (sent: RecordedCommand[]): RecordedCommand[] =>
+    sent.filter((c) => c.name === 'QueryCommand' && c.input.IndexName === 'byLastActivity');
+
+  it('deletes a dropped contact under an atomic group_participation_at guard', async () => {
+    const { doc, sent } = retractStub();
+    const report = await runApply({ doc, plan, review: reviewDropping(), importedAt });
+
+    const deletes = contactDeletes(sent);
+    expect(deletes).toHaveLength(1);
+    expect(deletes[0]!.input.ConditionExpression).toBe(
+      'attribute_not_exists(group_participation_at)',
+    );
+    expect(report.warnings.filter((w) => w.includes('GROUP MEMBER'))).toHaveLength(0);
+  });
+
+  it('refuses a contact group text detection created, and says which reason applies', async () => {
+    // origin is checked BEFORE the import-provenance rule: a detection stub
+    // fails both, and "we did not create it" would hide the real reason.
+    const { doc, sent } = retractStub({ contact: { origin: 'group_detection' } });
+    const report = await runApply({ doc, plan, review: reviewDropping(), importedAt });
+
+    expect(contactDeletes(sent)).toHaveLength(0);
+    const warning = report.warnings.find((w) => w.includes(droppedRowKey));
+    expect(warning).toContain('GROUP MEMBER');
+    expect(warning).toContain('detection');
+  });
+
+  it('refuses a contact a native group text roster references', async () => {
+    const { doc, sent } = retractStub({ rosterContactIds: [DROPPED_CONTACT_ID] });
+    const report = await runApply({ doc, plan, review: reviewDropping(), importedAt });
+
+    expect(contactDeletes(sent)).toHaveLength(0);
+    const warning = report.warnings.find((w) => w.includes(droppedRowKey));
+    expect(warning).toContain('KEPT (GROUP MEMBER)');
+  });
+
+  it('reports rather than throws when the delete loses its condition mid-run', async () => {
+    // The race the atomic guard exists for: detection stamped
+    // group_participation_at after the roster walk read the partition.
+    const { doc, sent } = retractStub({ deleteLoses: true });
+    const report = await runApply({ doc, plan, review: reviewDropping(), importedAt });
+
+    const warning = report.warnings.find((w) => w.includes(droppedRowKey));
+    expect(warning).toContain('GROUP MEMBER');
+    expect(warning).toContain('while this import was running');
+    // Nothing half-retracted: the guarded delete runs FIRST, so a refusal leaves
+    // the person's own thread and messages alone.
+    const messageDeletes = sent.filter(
+      (c) => c.name === 'DeleteCommand' && String(c.input.TableName ?? '').includes('messages'),
+    );
+    expect(messageDeletes).toHaveLength(0);
+  });
+
+  it('walks the group partition once per run, and only when something is dropped', async () => {
+    const noDrops = retractStub();
+    await runApply({ doc: noDrops.doc, plan, review: cleanReview(), importedAt });
+    expect(partitionWalks(noDrops.sent)).toHaveLength(0);
+
+    const twoDrops = retractStub();
+    await runApply({
+      doc: twoDrops.doc,
+      plan,
+      review: reviewDropping(DROPPED_PHONE, PHONES.landlord),
+      importedAt,
+    });
+    expect(partitionWalks(twoDrops.sent)).toHaveLength(1);
+  });
+
+  it('never reads the group partition on a dry run', async () => {
+    const { doc, sent } = retractStub();
+    await runApply({ doc, plan, review: reviewDropping(), importedAt, dryRun: true });
+    expect(partitionWalks(sent)).toHaveLength(0);
+    expect(contactDeletes(sent)).toHaveLength(0);
+  });
+
+  it('fails LOUDLY when the group partition read fails', async () => {
+    // Treating the error as "no group threads" would silently un-guard every
+    // delete in the run - the exact failure the guard exists to prevent.
+    const { doc } = retractStub({ rosterFails: true });
+    await expect(runApply({ doc, plan, review: reviewDropping(), importedAt })).rejects.toThrow(
+      'ProvisionedThroughputExceededException',
+    );
   });
 });

@@ -571,6 +571,80 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(conv.Item!.status).toBe('group_open');
   });
 
+  it('refuses to drop a contact a native group text roster references', async () => {
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const memberId = contactIdForPhone(PHONES.groupTenant);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Put({
+        TableName: table('conversations'),
+        Item: {
+          conversationId: conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]),
+          type: 'group_text',
+          status: 'group_open',
+          last_activity_at: '2026-09-01T00:00:00.000Z',
+          created_at: '2026-07-25T10:00:00.000Z',
+          ai_mode: 'manual',
+          participants: [
+            { contactId: memberId, phone: PHONES.groupTenant },
+            { contactId: contactIdForPhone(PHONES.landlord), phone: PHONES.landlord },
+          ],
+        },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.groupTenant)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const contact = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: memberId } }),
+    );
+    expect(contact.Item).toBeDefined();
+    expect(report.warnings.some((w) => w.includes('KEPT (GROUP MEMBER)'))).toBe(true);
+  });
+
+  it('refuses to drop a contact stamped as a group member after the roster walk', async () => {
+    // THE RACE. The roster walk runs once at the start of the drop pass, so a
+    // thread created after it would be invisible; the ConditionExpression on the
+    // delete is evaluated by DynamoDB and cannot be raced.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const memberId = contactIdForPhone(PHONES.groupTenant);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    // No group_open row exists - only the consent-basis stamp, exactly the state
+    // a detection that landed between the walk and the delete would leave.
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: memberId },
+        UpdateExpression: 'SET group_participation_at = :at',
+        ExpressionAttributeValues: { ':at': '2026-08-12T00:00:00.000Z' },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.groupTenant)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const contact = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: memberId } }),
+    );
+    expect(contact.Item).toBeDefined();
+    expect(report.warnings.some((w) => w.includes('while this import was running'))).toBe(true);
+    // Nothing half-retracted: their own thread history is still there.
+    expect(await countMessages(conversationIdFor1to1(PHONES.groupTenant))).toBeGreaterThan(0);
+  });
+
   it('writes nothing on a dry run', async () => {
     for (const t of TABLES) {
       await deleteTableIfExists(client, table(t));

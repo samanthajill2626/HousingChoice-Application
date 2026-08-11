@@ -210,7 +210,7 @@ const ANONYMOUS_JOINED_LABEL = 'A new member';
  * the WHOLE group — the new member's first contact on this number (leading
  * brand + trailing STOP fold in like the intro) doubling as the join notice
  * for everyone else. E.g. "Tenant Place LLC. Carol Brown joined this group
- * text. You're now connected with Alice, Bob, and Carol Brown on this number.
+ * chat. You're now connected with Alice, Bob, and Carol Brown on this number.
  * Reply here and everyone in the group sees it. Reply STOP to opt out."
  */
 export function composeMemberAddedBody(

@@ -980,8 +980,8 @@ export function createUnitsRouter(deps: UnitsRouterDeps = {}): Router {
   // Add (or update) a roster contact → { unit } (with contacts). The ROUTE
   // resolves the contact's denormalized name/company (so the roster row is
   // self-describing); the repo maintains the single-primaryContact invariant and
-  // keeps the primary_contact scalar (the property's default contact - group
-  // texts and masked calls) consistent. 404 unknown unit /
+  // keeps the primary_contact scalar (the property's default contact - relay
+  // groups and masked calls) consistent. 404 unknown unit /
   // unknown contact; 400 bad role / primaryContact; audit unit_contact_added.
   router.post('/:unitId/contacts', async (req: AuthedRequest, res) => {
     const unitId = String(req.params['unitId'] ?? '');

@@ -1,5 +1,5 @@
-// PlacementConversation tests - the placement page's channel switcher: the group
-// text plus ONE 1:1 tab per person on `channels.people` (keyed by contactId,
+// PlacementConversation tests - the placement page's channel switcher: the relay
+// group plus ONE 1:1 tab per person on `channels.people` (keyed by contactId,
 // labelled with the display name), each 1:1 being the SHARED person-centric comms
 // pane (ContactCommsTab -> ContactCommsPane). It mirrors TourConversation.test.tsx:
 // render the component DIRECTLY with a hand-built `channels` stub (the real

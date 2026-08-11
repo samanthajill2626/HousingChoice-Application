@@ -1,5 +1,5 @@
-// RosterConfirmDialog - the last thing an operator reads before a REAL group
-// text goes out (contact-rosters spec 6.3 pre-open / 6.4 add-to-live-group).
+// RosterConfirmDialog - the last thing an operator reads before a REAL relay
+// group goes out (contact-rosters spec 6.3 pre-open / 6.4 add-to-live-group).
 // Both confirms are the SAME shape because they answer the same question:
 // exactly what will be sent, and to exactly whom.
 //

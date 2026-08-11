@@ -1,5 +1,5 @@
-// TourConversation - the tour page's LEFT pane: a channel switcher over the group
-// text plus ONE 1:1 tab per person the page put on this tour (`channels.people`,
+// TourConversation - the tour page's LEFT pane: a channel switcher over the relay
+// group plus ONE 1:1 tab per person the page put on this tour (`channels.people`,
 // keyed by contactId and labelled with that person's DISPLAY NAME - no role
 // words, no PM/Landlord branch: the page owns WHO is on the tour, this component
 // only renders them). The initial tab is Group when the tour already has a group

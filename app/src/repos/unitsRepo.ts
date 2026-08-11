@@ -57,8 +57,8 @@ export const SHAREABLE_STATUSES: ReadonlySet<string> = SHAREABLE;
  * imports the same shape). A unit has a many-to-many roster of the people who
  * own/manage it: the landlord, a property manager, the owner, or anyone else
  * relevant. At most one entry across the roster is `primaryContact: true` (the ☎
- * primary — the property's default contact: the person we put on the group
- * text and reach by a masked call; see unitsRepo.addContact, which keeps
+ * primary — the property's default contact: the person we put on the relay
+ * group and reach by a masked call; see unitsRepo.addContact, which keeps
  * `primary_contact` consistent with it). `name`/`company` are DENORMALIZED at
  * write time (the route resolves them from the contact) so the roster row is
  * self-describing without a join.

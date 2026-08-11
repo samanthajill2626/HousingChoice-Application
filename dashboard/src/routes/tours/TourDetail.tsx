@@ -367,8 +367,8 @@ function TourDetailLoaded({
   // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
   // answers 202 with the ROSTER - nothing is opened, so there is no tour to
   // apply and no thread id to mount. Committing the returned payload is the
-  // whole handling: its `pending` row is what the card and the [Open group
-  // text] control render as "Opens at 8:00 AM - quiet hours".
+  // whole handling: its `pending` row is what the card and the [Open relay
+  // group] control render as "Opens at 8:00 AM - quiet hours".
   // `force` is the dialog's "Send now anyway" (and the pending banner's
   // "Send now"), which opens immediately despite the window.
   const runOpenGroup = async (force: boolean): Promise<void> => {

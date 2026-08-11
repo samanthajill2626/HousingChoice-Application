@@ -161,6 +161,11 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       res.status(404).json({ error: 'conversation_not_found' });
       return;
     }
+    // T4.5 RULING - group_text: `getOwner` is relay-only, and the `groupUsable`
+    // test below requires a pool_number, which a group text NEVER carries
+    // (invariant 13.6). A group thread therefore answers `{scheduled: []}` -
+    // structurally true today (nothing schedules onto a group thread) and the
+    // right answer for S5 to extend rather than a relay owner lookup.
     const owner = conversation.type === 'relay_group' ? getOwner(conversation) : { type: null };
     const groupUsable =
       conversation.status !== 'closed' &&
@@ -383,6 +388,11 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
       return;
     }
     const conversation = await conversations.getById(conversationId);
+    // T4.5 RULING - group_text: POSITIVE type guard, so a native group text 404s
+    // here by design (invariant 13.6). CLOSE IS A RELAY-ONLY LIFECYCLE: a relay
+    // group closes because its masked number is released back to the pool, and a
+    // carrier group has no such number - "a different set of people is a
+    // different thread" (spec 4.2), so there is nothing to close.
     if (!conversation || conversation.type !== 'relay_group') {
       res.status(404).json({ error: 'relay_group_not_found' });
       return;
@@ -531,6 +541,10 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const { conversationId } = req.params;
     mergeContext({ conversationId });
     const conversation = await conversations.getById(conversationId);
+    // T4.5 RULING - group_text: POSITIVE type guard, so a native group text 404s
+    // here by design (invariant 13.6). The close-nag exists to reclaim an idle
+    // POOL NUMBER; a group text holds none and never closes, so it is never
+    // nagged and there is no nag to defer.
     if (!conversation || conversation.type !== 'relay_group') {
       res.status(404).json({ error: 'relay_group_not_found' });
       return;

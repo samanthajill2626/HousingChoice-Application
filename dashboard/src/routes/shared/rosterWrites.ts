@@ -117,8 +117,8 @@ export function pendingActionNote(action: RosterPendingAction): string {
     : `${verb} at ${clock} - quiet hours`;
 }
 
-/** WHO/WHAT a notice is about, mid-sentence ("Alicia Grant" / "the group
- *  text"). Also the dismiss control's subject, so the two never disagree. */
+/** WHO/WHAT a notice is about, mid-sentence ("Alicia Grant" / "the relay
+ *  group"). Also the dismiss control's subject, so the two never disagree. */
 export function skippedActionSubject(row: RosterSkippedAction): string {
   if (row.kind === 'open_group') return 'the relay group';
   return row.name ?? 'that contact';

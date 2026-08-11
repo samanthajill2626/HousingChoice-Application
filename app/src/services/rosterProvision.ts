@@ -447,8 +447,8 @@ export async function openTourGroup(
   }
 
   // ...and a person milestone on the feed of everyone WHO IS IN THE GROUP.
-  // Roster-driven, NOT dual-party (lib/personEvents explains the split): "Group
-  // text opened" asserts membership of this conversation, so it follows
+  // Roster-driven, NOT dual-party (lib/personEvents explains the split): "Relay
+  // group opened" asserts membership of this conversation, so it follows
   // `members` - the roster we just provisioned - the same way
   // added_to_group_text follows the member it names. The pin fires even on the
   // `connecting` path (no pool number yet): parity, not a new claim.

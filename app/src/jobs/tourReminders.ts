@@ -684,8 +684,8 @@ async function processReminderRow(
   const { tour, conversation: conv } = target;
 
   // D7 REMINDER COUPLING (contact-rosters): this rung is GROUP-ELIGIBLE but fell
-  // back to the tenant 1:1, and the tour has a PENDING open_group - the group
-  // text is confirmed, just held until quiet-end. Sending 1:1 now would deliver
+  // back to the tenant 1:1, and the tour has a PENDING open_group - the relay
+  // group is confirmed, just held until quiet-end. Sending 1:1 now would deliver
   // the reminder to the tenant alone, minutes before the group it belongs in
   // exists. Leave the rung UNCLAIMED (the ladder's existing "wait" idiom: it
   // re-lists next tick, and the open applies within one tick of quiet-end).
@@ -869,6 +869,11 @@ export async function resolveUsableGroup(
   const groupThreadId = tour.groupThreadId;
   if (typeof groupThreadId !== 'string' || groupThreadId.length === 0) return undefined;
 
+  // T4.5 RULING - group_text: POSITIVE `type === 'relay_group'`. A tour's
+  // `groupThreadId` only ever points at a relay group (rosterProvision is the
+  // one writer and it provisions relay groups), but if one ever pointed at a
+  // native group text this falls back to the tenant 1:1 with the WARN below -
+  // never sends a relay reminder onto a carrier group (invariant 13.6).
   const conv = await deps.conversationsRepo.getById(groupThreadId);
   if (!conv || conv.type !== 'relay_group' || conv.status === 'closed') {
     log.warn(

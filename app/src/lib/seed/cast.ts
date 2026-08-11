@@ -1290,8 +1290,8 @@ const pmManagedProperty = {
     voucher_size_accepted: [2, 3],
     pets: 'Cats OK',
     tour_process: 'Text the property manager to arrange a showing.',
-    // The PM is the property's PRIMARY CONTACT - the person put on the group
-    // text and reached by a masked call. The scalar mirrors the flagged row.
+    // The PM is the property's PRIMARY CONTACT - the person put on the relay
+    // group and reached by a masked call. The scalar mirrors the flagged row.
     contacts: [
       { contactId: C_PM_OWNER, role: 'owner', primaryContact: false, name: 'Delia Okonkwo', company: 'Okonkwo Family Holdings' },
       { contactId: C_PM_MANAGER, role: 'pm', primaryContact: true, name: 'Rafael Duarte', company: 'Peachtree Property Management' },

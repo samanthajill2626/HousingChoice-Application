@@ -211,6 +211,195 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
     expect(second).toEqual({ deduped: true, tsMsgId: first.tsMsgId });
   });
 
+  // The whole reason updateRecipientDeliveryStatus stopped rebuilding the slot:
+  // it read the slot, then SET the entire map entry from that value, so any
+  // targeted field written between the Get and the Update vanished. The group
+  // receipts path does exactly that - the status transition for one leg and the
+  // sid-if-absent write for a duplicate receipt overlap constantly.
+  //
+  // Reproducing a lost update is inherently racy, so this fires eight
+  // independent pairs concurrently. Under the old whole-slot replace the sid is
+  // lost whenever the sid write lands inside the read-modify-write window;
+  // under child-field writes both ALWAYS survive, which is what makes this a
+  // stable regression pin rather than a flake.
+  it('a concurrent sid write and status transition on the SAME member both survive', async () => {
+    const conversationId = `group-${randomUUID().slice(0, 8)}`;
+    const memberKey = 'phone#+16175550111';
+    const rounds = 8;
+    const sids: string[] = [];
+
+    for (let i = 0; i < rounds; i += 1) {
+      const providerSid = nextSid();
+      sids.push(providerSid);
+      await messages.append({
+        conversationId,
+        providerSid,
+        providerTs: `2026-09-05T10:0${i}:00.000Z`,
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'race',
+        deliveryStatus: 'queued',
+        deliveryRecipients: { [memberKey]: { status: 'queued' } },
+      });
+    }
+
+    await Promise.all(
+      sids.flatMap((providerSid, i) => {
+        const tsMsgId = `2026-09-05T10:0${i}:00.000Z#${providerSid}`;
+        return [
+          messages.setRecipientDeliverySid(conversationId, tsMsgId, memberKey, `SM-${i}`),
+          messages.updateRecipientDeliveryStatus(
+            conversationId,
+            tsMsgId,
+            memberKey,
+            'sent',
+            undefined,
+            { context: 'group' },
+          ),
+        ];
+      }),
+    );
+
+    for (let i = 0; i < rounds; i += 1) {
+      const stored = await messages.getByProviderSid(sids[i] as string);
+      const slot = stored?.delivery_recipients?.[memberKey];
+      expect(slot?.sid).toBe(`SM-${i}`);
+      expect(slot?.status).toBe('sent');
+    }
+  });
+
+  it('records the channel SID only when the slot has none - a duplicate receipt never overwrites it', async () => {
+    const conversationId = `group-${randomUUID().slice(0, 8)}`;
+    const memberKey = 'phone#+16175550222';
+    const providerSid = nextSid();
+    const providerTs = '2026-09-06T10:00:00.000Z';
+    await messages.append({
+      conversationId,
+      providerSid,
+      providerTs,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'dup',
+      deliveryStatus: 'queued',
+      deliveryRecipients: { [memberKey]: { status: 'queued' } },
+    });
+    const tsMsgId = `${providerTs}#${providerSid}`;
+
+    expect(await messages.setRecipientDeliverySid(conversationId, tsMsgId, memberKey, 'SMfirst')).toBe(
+      true,
+    );
+    expect(await messages.setRecipientDeliverySid(conversationId, tsMsgId, memberKey, 'SMsecond')).toBe(
+      false,
+    );
+    const stored = await messages.getByProviderSid(providerSid);
+    expect(stored?.delivery_recipients?.[memberKey]?.sid).toBe('SMfirst');
+    // A slot that does not exist is a false, not a dangling-path crash.
+    expect(await messages.setRecipientDeliverySid(conversationId, tsMsgId, 'phone#+1999', 'SMx')).toBe(
+      false,
+    );
+  });
+
+  it('leaves the relay log lines BYTE-IDENTICAL and labels only the group ones', async () => {
+    const relayCapture = createLogCapture();
+    const labelled = createMessagesRepo({
+      doc,
+      env: testEnv,
+      logger: createLogger({ level: 'info', destination: relayCapture.stream }),
+    });
+    const conversationId = `group-${randomUUID().slice(0, 8)}`;
+    const memberKey = 'phone#+16175550333';
+    const providerSid = nextSid();
+    const providerTs = '2026-09-07T10:00:00.000Z';
+    await labelled.append({
+      conversationId,
+      providerSid,
+      providerTs,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'labels',
+      deliveryStatus: 'queued',
+      deliveryRecipients: { [memberKey]: { status: 'queued' } },
+    });
+    const tsMsgId = `${providerTs}#${providerSid}`;
+
+    // RELAY (no opts): every message must read exactly as it did before S5.
+    await labelled.updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, 'delivered');
+    await labelled.updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, 'sent');
+    await labelled.updateRecipientDeliveryStatus(conversationId, tsMsgId, 'phone#+1000', 'sent');
+    const relayMessages = relayCapture.lines.map((l) => l['msg']);
+    expect(relayMessages).toContain('relay recipient delivery updated');
+    expect(relayMessages).toContain('relay recipient delivery status transition skipped (would regress)');
+    expect(relayMessages).toContain('relay recipient delivery status for unknown recipient slot ignored');
+    expect(relayMessages.some((m) => typeof m === 'string' && m.startsWith('group '))).toBe(false);
+
+    // GROUP: the same events, labelled, so a group problem is greppable.
+    const groupSid = nextSid();
+    const groupTs = '2026-09-07T11:00:00.000Z';
+    await labelled.append({
+      conversationId,
+      providerSid: groupSid,
+      providerTs: groupTs,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'labels',
+      deliveryStatus: 'queued',
+      deliveryRecipients: { [memberKey]: { status: 'queued' } },
+    });
+    await labelled.updateRecipientDeliveryStatus(
+      conversationId,
+      `${groupTs}#${groupSid}`,
+      memberKey,
+      'delivered',
+      undefined,
+      { context: 'group' },
+    );
+    expect(relayCapture.lines.map((l) => l['msg'])).toContain('group recipient delivery updated');
+  });
+
+  it('parks receipts per participant, coalesces forward-only, and drains by delete', async () => {
+    const messageSid = nextSid();
+    const expiresAt = Math.floor(Date.now() / 1000) + 24 * 60 * 60;
+
+    expect(
+      await messages.parkGroupReceipt(
+        {
+          messageSid,
+          participantSid: 'MBann',
+          status: 'delivered',
+          channelMessageSid: 'SMann',
+          parkedAt: '2026-09-08T10:00:00.000Z',
+        },
+        { rank: 2, expiresAt },
+      ),
+    ).toBe(true);
+    // A LATER, LOWER-ranked receipt for the same slot must not win.
+    expect(
+      await messages.parkGroupReceipt(
+        { messageSid, participantSid: 'MBann', status: 'sent', parkedAt: '2026-09-08T10:00:01.000Z' },
+        { rank: 1, expiresAt },
+      ),
+    ).toBe(false);
+    await messages.parkGroupReceipt(
+      { messageSid, participantSid: 'MBmarcus', status: 'sent', parkedAt: '2026-09-08T10:00:02.000Z' },
+      { rank: 1, expiresAt },
+    );
+
+    const parked = await messages.listParkedGroupReceipts(messageSid);
+    expect(parked).toHaveLength(2);
+    expect(parked.find((p) => p.participantSid === 'MBann')).toMatchObject({
+      status: 'delivered',
+      channelMessageSid: 'SMann',
+    });
+
+    await messages.deleteParkedGroupReceipt(messageSid, 'MBann');
+    await messages.deleteParkedGroupReceipt(messageSid, 'MBann');
+    expect(await messages.listParkedGroupReceipts(messageSid)).toHaveLength(1);
+  });
+
   it('keeps the due partition out of a conversation listing (marker partitions never collide)', async () => {
     const conversationId = `group-${randomUUID().slice(0, 8)}`;
     await appendGroupSend({

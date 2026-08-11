@@ -190,6 +190,23 @@ export interface MessageDueRow {
   attributes: Record<string, unknown>;
 }
 
+/**
+ * A group delivery receipt held until its message row exists (spec 15.2a). The
+ * status is the RAW Conversations value: the park is a transport, and mapping
+ * it twice would bake this slice's vocabulary into stored data.
+ */
+export interface ParkedGroupReceipt {
+  /** IMxx - the Conversations message the receipt is about. */
+  messageSid: string;
+  /** MBxx - which participant this leg went to. */
+  participantSid: string;
+  status: string;
+  errorCode?: string;
+  /** The per-member carrier SID (SMxx). */
+  channelMessageSid?: string;
+  parkedAt: string;
+}
+
 /** A due row as the sweep reads it back. */
 export interface GroupDueRow {
   partition: string;
@@ -897,10 +914,21 @@ export interface MessagesRepo {
     delivery: RelayRecipientDelivery,
   ): Promise<void>;
   /**
-   * Apply a delivery-callback transition to ONE recipient slot of a relay
-   * source message: forward-only (same machine as updateDeliveryStatus),
-   * keyed by memberKey, found via the relaysid pointer. Returns false (no-op)
-   * when the slot is unknown or the transition would regress.
+   * Apply a delivery-callback transition to ONE recipient slot of a multi-party
+   * source message: forward-only (same machine as updateDeliveryStatus), keyed
+   * by memberKey. Returns false (no-op) when the slot is unknown or the
+   * transition would regress.
+   *
+   * WRITES CHILD FIELDS, never the whole slot (spec 15.2b). It used to SET the
+   * entire `delivery_recipients.<memberKey>` map from a value read moments
+   * earlier, which silently discarded any field written in between - and the
+   * group receipts path writes `sid` for one member while another member's
+   * status transition is in flight. The prior-status ConditionExpression is
+   * unchanged, so the forward-only guarantee is exactly what it was.
+   *
+   * `opts.sid` records the per-member channel SID (Twilio SMxx) alongside the
+   * transition. `opts.context` labels the log lines: it defaults to 'relay' so
+   * the relay caller's lines stay byte-identical.
    */
   updateRecipientDeliveryStatus(
     conversationId: string,
@@ -908,6 +936,22 @@ export interface MessagesRepo {
     memberKey: string,
     status: DeliveryStatus,
     errorCode?: string,
+    opts?: { sid?: string; context?: 'relay' | 'group' },
+  ): Promise<boolean>;
+  /**
+   * Record the per-member channel SID on a slot ONLY IF it has none yet - the
+   * targeted write that keeps a DUPLICATE receipt useful. A redelivered receipt
+   * carries the same SMxx but its status transition is rejected as a regression,
+   * so without this the sid would be lost whenever the first delivery of a
+   * receipt raced the append. Conditional on absence, so it can never overwrite
+   * a sid already recorded. Returns false when the slot is missing or already
+   * has one.
+   */
+  setRecipientDeliverySid(
+    conversationId: string,
+    tsMsgId: string,
+    memberKey: string,
+    sid: string,
   ): Promise<boolean>;
   /**
    * Write the relaysid pointer for a per-recipient fan-out send: `{ PK:
@@ -950,6 +994,25 @@ export interface MessagesRepo {
    */
   listDueRows(partition: string, throughIso: string, limit?: number): Promise<GroupDueRow[]>;
   /**
+   * PARK a group delivery receipt whose IMxx has no message row yet (spec
+   * 15.2a): the receipt genuinely can beat the send's own append. Keyed
+   * IMxx + ParticipantSid, because ONE posted message produces a receipt per
+   * participant and a second member's receipt must not overwrite the first's.
+   *
+   * FORWARD-ONLY COALESCING WITHIN A SLOT: `rank` is the caller's ordering of
+   * the status (queued < sent < terminal); the write is conditional on the
+   * parked rank being no further ahead, so a late `sent` can never overwrite a
+   * parked `delivered`. Returns false when the condition rejected it.
+   */
+  parkGroupReceipt(
+    receipt: ParkedGroupReceipt,
+    opts: { rank: number; expiresAt: number },
+  ): Promise<boolean>;
+  /** Every parked receipt for one IMxx (one per participant), or []. */
+  listParkedGroupReceipts(messageSid: string): Promise<ParkedGroupReceipt[]>;
+  /** Consume one parked receipt. Idempotent - a re-drain deletes nothing. */
+  deleteParkedGroupReceipt(messageSid: string, participantSid: string): Promise<void>;
+  /**
    * Resolve one due row (delete it). Idempotent: deleting an already-deleted row
    * is a no-op, so a sweep that crashes mid-batch can rerun safely. A base-table
    * partition has no sparse-index trick to fall back on - the row must actually
@@ -988,6 +1051,21 @@ function relaySidPk(providerSid: string): string {
 /** Marker partition key for a system (non-conversation) send's provider SID. */
 function sysSidPk(providerSid: string): string {
   return `syssid#${providerSid}`;
+}
+
+/**
+ * Marker partition for a group delivery receipt that arrived before its message
+ * (spec 15.2a). One partition per IMxx, one sort key per ParticipantSid - the
+ * same pointer-partition convention as sid#/job#/relaysid#, so listByConversation
+ * can never see these.
+ */
+function groupReceiptPk(messageSid: string): string {
+  return `groupreceipt#${messageSid}`;
+}
+
+/** Sort key for a parked group receipt, per PARTICIPANT. */
+function parkedParticipantSk(participantSid: string): string {
+  return `parked#${participantSid}`;
 }
 
 /** Pointer partition key for a PARKED SES event (email-channel B5, plan F12). */
@@ -1775,7 +1853,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
     },
 
-    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode) {
+    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode, opts) {
+      // Defaults to 'relay' so the four log strings below stay BYTE-IDENTICAL
+      // for the one pre-existing caller (webhooks/twilio.ts).
+      const label = opts?.context ?? 'relay';
       const { Item } = await doc.send(
         new GetCommand({ TableName: table, Key: { conversationId, tsMsgId } }),
       );
@@ -1784,7 +1865,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       if (!slot) {
         log.warn(
           { conversationId, tsMsgId, status },
-          'relay recipient delivery status for unknown recipient slot ignored',
+          `${label} recipient delivery status for unknown recipient slot ignored`,
         );
         return false;
       }
@@ -1792,42 +1873,84 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       if (!allowed.includes(slot.status)) {
         log.info(
           { conversationId, tsMsgId, status, currentStatus: slot.status },
-          'relay recipient delivery status transition skipped (would regress)',
+          `${label} recipient delivery status transition skipped (would regress)`,
         );
         return false;
       }
       const now = new Date().toISOString();
-      const next: RelayRecipientDelivery = {
-        ...slot,
-        status,
-        ...(errorCode !== undefined && { errorCode }),
-        ...(status === 'delivered' && { deliveredAt: now }),
-      };
+      // CHILD-FIELD writes (spec 15.2b). The old whole-slot `SET
+      // delivery_recipients.#mk = :d` rebuilt the slot from a value read a
+      // moment earlier, so a targeted sid write that landed in between was
+      // silently discarded. DynamoDB has no conditional SET inside one
+      // expression, so the clauses are assembled by hand - the same shape
+      // updateDeliveryStatus already uses.
+      const sets = ['delivery_recipients.#mk.#st = :s'];
+      const names: Record<string, string> = { '#mk': memberKey, '#st': 'status' };
+      const values: Record<string, unknown> = { ':s': status, ':prev': slot.status };
+      if (errorCode !== undefined) {
+        sets.push('delivery_recipients.#mk.#ec = :e');
+        names['#ec'] = 'errorCode';
+        values[':e'] = errorCode;
+      }
+      if (status === 'delivered') {
+        sets.push('delivery_recipients.#mk.#da = :da');
+        names['#da'] = 'deliveredAt';
+        values[':da'] = now;
+      }
+      if (opts?.sid !== undefined) {
+        sets.push('delivery_recipients.#mk.#sid = :sid');
+        names['#sid'] = 'sid';
+        values[':sid'] = opts.sid;
+      }
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId, tsMsgId },
-            UpdateExpression: 'SET delivery_recipients.#mk = :d',
+            UpdateExpression: `SET ${sets.join(', ')}`,
             // Guard the read-modify-write: only commit if the slot is still on
             // the status we just read (forward-only under concurrent callbacks).
             ConditionExpression: 'delivery_recipients.#mk.#st = :prev',
-            ExpressionAttributeNames: { '#mk': memberKey, '#st': 'status' },
-            ExpressionAttributeValues: { ':d': next, ':prev': slot.status },
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: values,
           }),
         );
       } catch (err) {
         if (err instanceof ConditionalCheckFailedException) {
           log.info(
             { conversationId, tsMsgId, status },
-            'relay recipient delivery status transition lost a race (regressed)',
+            `${label} recipient delivery status transition lost a race (regressed)`,
           );
           return false;
         }
         throw err;
       }
-      log.info({ conversationId, tsMsgId, status, errorCode }, 'relay recipient delivery updated');
+      log.info({ conversationId, tsMsgId, status, errorCode }, `${label} recipient delivery updated`);
       return true;
+    },
+
+    async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId, tsMsgId },
+            UpdateExpression: 'SET delivery_recipients.#mk.#sid = :sid',
+            // The slot must exist and must NOT already carry a sid. Both halves
+            // matter: without the first this creates a dangling path error,
+            // without the second a redelivered receipt could overwrite the sid
+            // a later leg recorded.
+            ConditionExpression:
+              'attribute_exists(delivery_recipients.#mk) AND attribute_not_exists(delivery_recipients.#mk.#sid)',
+            ExpressionAttributeNames: { '#mk': memberKey, '#sid': 'sid' },
+            ExpressionAttributeValues: { ':sid': sid },
+          }),
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
     },
 
     async putRelaySidPointer(providerSid, ref) {
@@ -1929,6 +2052,76 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     async deleteDueRow(partition, sortKey) {
       await doc.send(
         new DeleteCommand({ TableName: table, Key: { conversationId: partition, tsMsgId: sortKey } }),
+      );
+    },
+
+    async parkGroupReceipt(receipt, opts) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: groupReceiptPk(receipt.messageSid),
+              tsMsgId: parkedParticipantSk(receipt.participantSid),
+              message_sid: receipt.messageSid,
+              participant_sid: receipt.participantSid,
+              status: receipt.status,
+              ...(receipt.errorCode !== undefined && { error_code: receipt.errorCode }),
+              ...(receipt.channelMessageSid !== undefined && {
+                channel_message_sid: receipt.channelMessageSid,
+              }),
+              parked_at: receipt.parkedAt,
+              rank: opts.rank,
+              // CLEANUP ONLY (spec 15.5). The drain is the authoritative
+              // consume; this just stops an unclaimed park accruing forever.
+              expires_at: opts.expiresAt,
+            },
+            // Forward-only within the slot: `<=` keeps a redelivery of the same
+            // status idempotent while refusing a late lower-ranked one.
+            ConditionExpression: 'attribute_not_exists(tsMsgId) OR #r <= :r',
+            ExpressionAttributeNames: { '#r': 'rank' },
+            ExpressionAttributeValues: { ':r': opts.rank },
+          }),
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async listParkedGroupReceipts(messageSid) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'conversationId = :p',
+          ExpressionAttributeValues: { ':p': groupReceiptPk(messageSid) },
+        }),
+      );
+      return (Items ?? []).map((raw) => {
+        const item = raw as Record<string, unknown>;
+        return {
+          messageSid,
+          participantSid: String(item['participant_sid'] ?? ''),
+          status: String(item['status'] ?? ''),
+          ...(typeof item['error_code'] === 'string' && { errorCode: item['error_code'] }),
+          ...(typeof item['channel_message_sid'] === 'string' && {
+            channelMessageSid: item['channel_message_sid'],
+          }),
+          parkedAt: typeof item['parked_at'] === 'string' ? item['parked_at'] : '',
+        };
+      });
+    },
+
+    async deleteParkedGroupReceipt(messageSid, participantSid) {
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: {
+            conversationId: groupReceiptPk(messageSid),
+            tsMsgId: parkedParticipantSk(participantSid),
+          },
+        }),
       );
     },
   };

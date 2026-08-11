@@ -7,9 +7,16 @@ import { loadConfig } from '../../lib/config.js';
 import { createTwilioWebhookRouter, type TwilioWebhookDeps } from './twilio.js';
 import { createTwilioVoiceRouter, type TwilioVoiceWebhookDeps } from './voice.js';
 import { createTwilioEventsRouter } from './twilioEvents.js';
+import {
+  createTwilioConversationsRouter,
+  type TwilioConversationsWebhookDeps,
+} from './twilioConversations.js';
 import { createSesWebhookRouter, type SesWebhookDeps } from './ses.js';
 
-export type WebhooksRouterDeps = TwilioWebhookDeps & TwilioVoiceWebhookDeps & SesWebhookDeps;
+export type WebhooksRouterDeps = TwilioWebhookDeps &
+  TwilioVoiceWebhookDeps &
+  SesWebhookDeps &
+  TwilioConversationsWebhookDeps;
 
 export function createWebhooksRouter(deps: WebhooksRouterDeps = {}): Router {
   const router = Router();
@@ -21,6 +28,12 @@ export function createWebhooksRouter(deps: WebhooksRouterDeps = {}): Router {
   // Mounts BEFORE the /twilio prefix (like /twilio/voice) so /twilio/events is
   // owned by the events router, not swallowed by the messaging router's /twilio.
   router.use('/twilio/events', createTwilioEventsRouter(deps));
+  // Twilio Conversations (native group texting): the ONE service-scoped
+  // PostWebhookUrl, carrying BOTH onDeliveryUpdated and onMessageAdded. Mounts
+  // BEFORE the /twilio prefix for the same reason as the two above - the
+  // messaging router would otherwise swallow /twilio/conversations and 404
+  // every group delivery receipt.
+  router.use('/twilio/conversations', createTwilioConversationsRouter(deps));
   router.use('/twilio', createTwilioWebhookRouter(deps));
   // SES inbound (email-channel B4): DEV-GATED. There is NO existing conditional-
   // mount precedent - both twilio routers are ALWAYS mounted (review F15). We

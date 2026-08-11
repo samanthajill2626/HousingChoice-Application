@@ -66,6 +66,7 @@ interface Fakes {
   audits: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   emitted: { event: AppEventName; payload: unknown }[];
   railCalls: string[];
+  drained: string[];
   touched: { previewText: string | undefined; ts: string }[];
   send: ReturnType<typeof createGroupSendService>;
 }
@@ -110,6 +111,7 @@ function makeFakes(
     audits: [] as Fakes['audits'],
     emitted: [] as Fakes['emitted'],
     railCalls: [] as string[],
+    drained: [] as string[],
     touched: [] as Fakes['touched'],
   };
 
@@ -171,6 +173,15 @@ function makeFakes(
     },
     events,
     rail,
+    // Injected so this suite stays in memory: the default receipts service is
+    // built over the real repos and would reach for DynamoDB on every send.
+    receipts: {
+      applyReceipt: async () => ({ outcome: 'dropped', reason: 'not used in this suite' }),
+      drainParked: async (providerSid: string) => {
+        fakes.drained.push(providerSid);
+        return 0;
+      },
+    },
     now: () => NOW,
   });
 
@@ -252,6 +263,12 @@ describe('groupSend - the happy path', () => {
     const expiresAtMs = Number(attrs['expires_at']) * 1000;
     const deadlineMs = Date.parse(String(attrs['deadline_at']));
     expect(expiresAtMs - deadlineMs).toBeGreaterThan(7 * 24 * 60 * 60 * 1000);
+  });
+
+  it('drains receipts parked against its own IMxx - a receipt CAN beat the append', async () => {
+    const f = makeFakes();
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.drained).toEqual(['IMposted1']);
   });
 
   it('touches last activity, audits the send, and emits both SSE events', async () => {

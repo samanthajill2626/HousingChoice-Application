@@ -220,6 +220,10 @@ function makeFakes(
     // Group-texting deadline partition (S5) - unreachable from this 1:1 suite.
     listDueRows: async () => [],
     deleteDueRow: async () => {},
+    setRecipientDeliverySid: async () => false,
+    parkGroupReceipt: async () => true,
+    listParkedGroupReceipts: async () => [],
+    deleteParkedGroupReceipt: async () => {},
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {

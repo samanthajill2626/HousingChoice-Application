@@ -46,6 +46,11 @@ import {
   type AiRunsRepo,
 } from '../../src/repos/aiRunsRepo.js';
 import { normalizeSuggestionValue } from '../../src/services/extraction/schema.js';
+import {
+  createGroupReceiptsService,
+  type GroupReceiptsService,
+} from '../../src/services/groupReceipts.js';
+import type { ConversationsCrossCheck } from '../../src/routes/webhooks/twilioConversations.js';
 import type { Verdict } from '../../src/services/extraction/runTypes.js';
 import type {
   SuggestionResolutionItem,
@@ -72,6 +77,7 @@ import {
   type MessageItem,
   type MessagesRepo,
   type ParkedEmailEvent,
+  type ParkedGroupReceipt,
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
@@ -311,6 +317,11 @@ export function createFakeWorld(): FakeWorld {
   >();
   // System-send SID markers (syssid#), providerSid -> kind.
   const systemSidMarkers = new Map<string, string>();
+  // Group texting (S5): parked delivery receipts, IMxx -> (MBxx -> receipt).
+  const parkedGroupReceipts = new Map<
+    string,
+    Map<string, { receipt: ParkedGroupReceipt; rank: number }>
+  >();
   const contacts: ContactItem[] = [];
   const flagWrites: FakeWorld['flagWrites'] = [];
   const optOutSets: FakeWorld['optOutSets'] = [];
@@ -1015,7 +1026,7 @@ export function createFakeWorld(): FakeWorld {
       if (!item) throw new Error(`setRecipientDelivery: no message ${conversationId}/${tsMsgId}`);
       item.delivery_recipients = { ...(item.delivery_recipients ?? {}), [memberKey]: delivery };
     },
-    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode) {
+    async updateRecipientDeliveryStatus(conversationId, tsMsgId, memberKey, status, errorCode, opts) {
       const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
       const slot = item?.delivery_recipients?.[memberKey];
       if (!item || !slot) return false;
@@ -1025,9 +1036,40 @@ export function createFakeWorld(): FakeWorld {
         status,
         ...(errorCode !== undefined && { errorCode }),
         ...(status === 'delivered' && { deliveredAt: new Date().toISOString() }),
+        // Group texting (S5): the real repo records the per-member channel SID
+        // alongside the transition, as a CHILD field.
+        ...(opts?.sid !== undefined && { sid: opts.sid }),
       };
       item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: next };
       return true;
+    },
+    // Group texting (S5): the sid-IF-ABSENT write that keeps a duplicate receipt
+    // useful. Models the real repo's condition, absence included.
+    async setRecipientDeliverySid(conversationId, tsMsgId, memberKey, sid) {
+      const item = messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId);
+      const slot = item?.delivery_recipients?.[memberKey];
+      if (!item || !slot) return false;
+      if (slot.sid !== undefined) return false;
+      item.delivery_recipients = { ...item.delivery_recipients, [memberKey]: { ...slot, sid } };
+      return true;
+    },
+    // Group texting (S5): the parked-receipt partition, keyed IMxx + MBxx with
+    // forward-only coalescing WITHIN a slot - the real repo's ConditionExpression
+    // modelled, so a test cannot pass while production would regress a slot.
+    async parkGroupReceipt(receipt, opts) {
+      const slots = parkedGroupReceipts.get(receipt.messageSid) ?? new Map();
+      const existing = slots.get(receipt.participantSid);
+      if (existing !== undefined && existing.rank > opts.rank) return false;
+      slots.set(receipt.participantSid, { receipt: { ...receipt }, rank: opts.rank });
+      parkedGroupReceipts.set(receipt.messageSid, slots);
+      return true;
+    },
+    async listParkedGroupReceipts(messageSid) {
+      const slots = parkedGroupReceipts.get(messageSid);
+      return slots === undefined ? [] : [...slots.values()].map((v) => ({ ...v.receipt }));
+    },
+    async deleteParkedGroupReceipt(messageSid, participantSid) {
+      parkedGroupReceipts.get(messageSid)?.delete(participantSid);
     },
     async putRelaySidPointer(providerSid, ref) {
       if (!relaySidPointers.has(providerSid)) relaySidPointers.set(providerSid, ref);
@@ -3086,6 +3128,12 @@ export interface HarnessOptions {
   withoutMediaStore?: boolean;
   /** Unknown-SID retry window for /status (tests shrink the default 2500ms). */
   statusUnknownSidRetryDelayMs?: number;
+  /** Native group texting (S5): replace the Conversations receipts pipeline. */
+  groupReceipts?: GroupReceiptsService;
+  /** Unknown-IMxx retry window for the group receipts path (default 250ms). */
+  groupReceiptRetryDelayMs?: number;
+  /** Native group texting (S6 seam): observe onMessageAdded forwarding. */
+  groupCrossCheck?: ConversationsCrossCheck;
   /** SSE heartbeat override for /api/events tests (default 25s). */
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
@@ -3334,6 +3382,23 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // enqueue seam are in-memory, so a group inbound touches no AWS.
       poolNumbersRepo: world.poolNumbersRepo,
       groupRailEnqueuer: world.groupRailEnqueuer,
+      // Native group texting (S5): the Conversations webhook's two halves. The
+      // receipts service defaults to the world's messages/conversations/contacts
+      // fakes, so a delivery receipt never reaches DynamoDB; the cross-check is
+      // S6's and is only injected by tests that assert the seam.
+      groupReceipts:
+        opts.groupReceipts ??
+        createGroupReceiptsService({
+          logger: createLogger({ level: 'info', destination: capture.stream }),
+          messagesRepo: world.messagesRepo,
+          conversationsRepo: world.conversationsRepo,
+          contactsRepo: world.contactsRepo,
+          auditRepo: world.auditRepo,
+          ...(opts.groupReceiptRetryDelayMs !== undefined && {
+            unknownMessageRetryDelayMs: opts.groupReceiptRetryDelayMs,
+          }),
+        }),
+      ...(opts.groupCrossCheck !== undefined && { crossCheck: opts.groupCrossCheck }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

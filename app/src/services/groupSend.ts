@@ -57,6 +57,7 @@ import {
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
 import { groupMemberKey } from './groupMembers.js';
+import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
 import { hasActiveGroupRail, RAIL_STEP_NOT_WIRED, type GroupRailEnsurer } from './groupRail.js';
 import { ConversationNotFoundError, SendRefusedError, SmsSendingDisabledError } from './sendMessage.js';
 
@@ -151,6 +152,8 @@ export interface GroupSendServiceDeps {
   events?: EventBus;
   /** The ONE authoritative rail path (S6/T6.1); not wired until then. */
   rail?: GroupRailEnsurer;
+  /** Drains receipts that beat this send's own append (spec 15.2a). */
+  receipts?: GroupReceiptsService;
   /** Clock seam (the staleness deadline). */
   now?: () => Date;
 }
@@ -178,6 +181,9 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
   const audit = deps.auditRepo ?? createAuditRepo({ ...(deps.logger !== undefined && { logger: deps.logger }) });
   const events = deps.events ?? appEvents;
   const rail = deps.rail ?? RAIL_STEP_NOT_WIRED;
+  const receipts =
+    deps.receipts ??
+    createGroupReceiptsService({ ...(deps.logger !== undefined && { logger: deps.logger }) });
   const now = deps.now ?? ((): Date => new Date());
 
   return async function groupSend(input) {
@@ -316,6 +322,20 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
         expiresAt: Math.floor((at.getTime() + GROUP_DUE_CLEANUP_MS) / 1000),
       }),
     });
+
+    // (7b) Drain any receipt that beat the append. Twilio can deliver an
+    // `onDeliveryUpdated` for this IMxx before the transaction above commits,
+    // and such a receipt parks itself rather than being dropped - this is where
+    // it gets applied. Best-effort: a drain failure must not fail a send that
+    // already left, and the receipt is still parked for the next attempt.
+    try {
+      await receipts.drainParked(posted.messageSid);
+    } catch (err) {
+      log.error(
+        { err, conversationId, providerSid: posted.messageSid },
+        'group send: draining parked delivery receipts failed (the send itself succeeded)',
+      );
+    }
 
     // (8) Inbox touch + audit trail (ids only, never the body).
     const touched = await conversations.touchLastActivity(conversationId, body, posted.dateCreated);

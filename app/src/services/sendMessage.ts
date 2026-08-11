@@ -53,6 +53,15 @@ export class SendRefusedError extends Error {
       | 'manual_mode'
       | 'relay_not_supported'
       | 'group_text_not_supported'
+      // Native group texting (S5): the group send service's own refusals. They
+      // live in this union so the ONE `instanceof SendRefusedError` catch in the
+      // send route keeps mapping every refusal to a status code.
+      | 'not_a_group_text'
+      | 'group_roster_empty'
+      | 'group_too_many_members'
+      | 'group_member_deleted'
+      | 'group_member_no_consent'
+      | 'group_rail_unavailable'
       | 'sms_sending_disabled',
   ) {
     super(message);

@@ -155,6 +155,16 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   // A native group text handed to the 1:1 send wrapper. Its own code, so the
   // dashboard never has to read a relay refusal to mean a group one.
   group_text_not_supported: 409,
+  // Native group send refusals (S5). All 409: each one is a state the staff
+  // member can see and act on from the thread view - too many members, a
+  // deleted member to restore, a member with no consent basis, or a thread with
+  // no Conversations rail behind it yet.
+  not_a_group_text: 409,
+  group_roster_empty: 409,
+  group_too_many_members: 409,
+  group_member_deleted: 409,
+  group_member_no_consent: 409,
+  group_rail_unavailable: 409,
   // A2P kill-switch (pre-A2P): SMS sending disabled → 503 (matches the relay
   // provisioning kill-switch's 503 posture).
   sms_sending_disabled: 503,

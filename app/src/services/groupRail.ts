@@ -64,3 +64,64 @@ export function hasActiveGroupRail(item: Pick<ConversationItem, 'twilio_conversa
     typeof item.twilio_conversation_sid === 'string' && item.twilio_conversation_sid.length > 0
   );
 }
+
+// ---------------------------------------------------------------------------
+// The SYNCHRONOUS ensure seam (S5/T5.2 send-time backstop + S7 migration)
+// ---------------------------------------------------------------------------
+//
+// S7 declared this seam inside `lib/import/convertGroups.ts` because the
+// migration was its first consumer. The send path is the second, and a service
+// reaching into the import subsystem for a rail type is the wrong direction, so
+// the declarations moved HERE - beside the enqueue seam they are the sibling of
+// - and convertGroups re-exports them unchanged. Same names, same shapes, same
+// default: nothing about the migration contract changed.
+
+export interface GroupRailRequest {
+  conversationId: string;
+  /** The roster the rail must contain. */
+  members: ConversationParticipant[];
+}
+
+export interface GroupRailResult {
+  /**
+   * `created` - a new Conversations rail now backs this thread.
+   * `existing` - a rail was already attached and its participant map verified.
+   * `failed` - the rail could not be established; `reason` says why (this is
+   *   where a 50407-class Twilio refusal surfaces).
+   * `unavailable` - no rail service is wired into this run at all. Distinct
+   *   from `failed`: nothing was attempted, so the run is INCOMPLETE rather
+   *   than broken.
+   */
+  status: 'created' | 'existing' | 'failed' | 'unavailable';
+  twilioConversationSid?: string;
+  reason?: string;
+  /** The MBxx -> member key map of the ensured rail, when one is available. */
+  participantMap?: Record<string, string>;
+}
+
+/**
+ * THE INJECTION POINT S6 BINDS TO. `ensureGroupRail` is the one authoritative
+ * rail path (spec 15.3); its consumers never talk to Twilio and never touch an
+ * adapter. T6.6(b)/(c) pass an adapter over the real service.
+ *
+ * It is called SYNCHRONOUSLY and must be idempotent: the migration calls it for
+ * every expected id on every run, including ones converted long ago, and the
+ * send path calls it whenever a thread turns out to be rail-less. It must not
+ * throw for an ordinary rail failure (return `failed` with a reason); callers
+ * catch a thrown error and treat it as `failed` anyway, so a bad row can never
+ * abort the migration of the other 131 or crash a send with a stack trace.
+ */
+export interface GroupRailEnsurer {
+  ensureGroupRail(request: GroupRailRequest): Promise<GroupRailResult>;
+}
+
+/**
+ * The default until S6 lands: records the gap instead of pretending the step
+ * succeeded. A migration run under this ensurer is deliberately INCOMPLETE, and
+ * a send through it is refused rather than posted into a rail that is not there.
+ */
+export const RAIL_STEP_NOT_WIRED: GroupRailEnsurer = {
+  async ensureGroupRail() {
+    return { status: 'unavailable', reason: 'rail step not wired yet (S6 task T6.6(c))' };
+  },
+};

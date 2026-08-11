@@ -1044,6 +1044,15 @@ export function createFakeWorld(): FakeWorld {
       const kind = systemSidMarkers.get(providerSid);
       return kind === undefined ? undefined : { kind };
     },
+    // Group-texting deadline partition (S5): the webhook path never writes or
+    // reads a due row - throw so an accidental call is loud rather than a
+    // plausible empty answer.
+    async listDueRows() {
+      throw new Error('listDueRows: not used by the webhook harness');
+    },
+    async deleteDueRow() {
+      throw new Error('deleteDueRow: not used by the webhook harness');
+    },
   };
 
   // BE1/C1: the fake mirrors the real repo's phone invariants — phones[] seeded

@@ -181,12 +181,14 @@ export const TABLES: readonly TableSpec[] = [
     rangeKey: { name: 'tsMsgId', type: 'S' },
     gsis: [],
     stream: 'NEW_AND_OLD_IMAGES', // feeds side effects (doc §5)
-    // TTL (adv M3): the ONLY messages items carrying `expires_at` are the F12
-    // parked SES events (`emailevent#<sesId>`, a 7d backstop) - real
-    // conversation messages never set it (verified: putParkedEmailEvent is the
-    // sole writer), so enabling TTL reaps only an orphan parked event the
-    // post-send consumer never claimed (e.g. a bounce for a send this stack
-    // never made), closing the unbounded-accrual gap.
+    // TTL (adv M3): real conversation messages NEVER set `expires_at`. The
+    // items that do are all short-lived bookkeeping rows in their own pointer
+    // partitions, each with its own authoritative consume step - TTL is only the
+    // backstop that closes the unbounded-accrual gap when a consume never comes:
+    //   - F12 parked SES events (`emailevent#<sesId>`, 7d)
+    //   - group-texting due rows (`groupdue#pending`, 30d) and parked group
+    //     receipts (`groupreceipt#<IMxx>`), where the horizon is deliberately far
+    //     past the alarm deadline - spec 15.5: TTL is NEVER the alarm mechanism.
     ttlAttribute: 'expires_at',
   },
   {

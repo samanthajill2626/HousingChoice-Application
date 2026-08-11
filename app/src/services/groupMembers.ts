@@ -28,6 +28,22 @@ import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type { ConversationParticipant } from '../repos/conversationsRepo.js';
 
 /**
+ * The member key for a `group_text` delivery/attribution slot (spec 15.6,
+ * plan T3.4a): ALWAYS `phone#<E164>`, NEVER `relayMemberKey`.
+ *
+ * `relayMemberKey` prefers the contactId, so one contact owning TWO member
+ * numbers would collapse into a single slot - one delivery outcome for two
+ * handsets, and one sender chip for two people's messages. The contactId still
+ * travels, as roster DISPLAY metadata on the participant.
+ *
+ * S3 declared this inside the webhook router; it moved here in S5 so the send
+ * service and the receipts route can use it without importing a route module.
+ */
+export function groupMemberKey(e164: string): string {
+  return `phone#${e164}`;
+}
+
+/**
  * `contacts.origin` on a stub minted by group detection. The import's
  * `retractImported` refuses to delete a contact carrying this marker (T7.2
  * reads exactly this string), so the founder's workbook `drop` column can never

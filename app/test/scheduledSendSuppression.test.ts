@@ -235,6 +235,9 @@ function makeSendFakes(
     getRelaySidPointer: async () => undefined,
     putSystemSidMarker: async () => {},
     getSystemSidMarker: async () => undefined,
+    // Group-texting deadline partition (S5) - unreachable from this suite.
+    listDueRows: async () => [],
+    deleteDueRow: async () => {},
   };
   const auditRepo: AuditRepo = {
     append: async () => {},

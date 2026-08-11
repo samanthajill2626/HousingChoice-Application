@@ -35,56 +35,29 @@ import {
   type GroupConvertResult,
 } from '../../services/groupConvert.js';
 import type { GroupExclusionSet } from '../../services/groupIdentity.js';
+import {
+  RAIL_STEP_NOT_WIRED,
+  type GroupRailEnsurer,
+  type GroupRailRequest,
+  type GroupRailResult,
+} from '../../services/groupRail.js';
 
 // ---------------------------------------------------------------------------
 // The rail injection point (wired by S6's T6.6(c))
 // ---------------------------------------------------------------------------
 
-export interface GroupRailRequest {
-  conversationId: string;
-  /** The post-conversion roster - the members the rail must contain. */
-  members: ConversationParticipant[];
-}
-
-export interface GroupRailResult {
-  /**
-   * `created` - a new Conversations rail now backs this thread.
-   * `existing` - a rail was already attached and its participant map verified.
-   * `failed` - the rail could not be established; `reason` says why (this is
-   *   where a 50407-class Twilio refusal surfaces).
-   * `unavailable` - no rail service is wired into this run at all. Distinct
-   *   from `failed`: nothing was attempted, so the run is INCOMPLETE rather
-   *   than broken.
-   */
-  status: 'created' | 'existing' | 'failed' | 'unavailable';
-  twilioConversationSid?: string;
-  reason?: string;
-}
-
-/**
- * THE INJECTION POINT S6 BINDS TO. `ensureGroupRail` is the one authoritative
- * rail path (spec 15.3); this module never talks to Twilio and never touches an
- * adapter. T6.6(c) passes an adapter over the real service as `rail`.
- *
- * It is called SYNCHRONOUSLY, once per converged row, and must be idempotent:
- * every run calls it for every expected id, including ones converted long ago.
- * It must not throw for an ordinary rail failure (return `failed` with a
- * reason); a thrown error is caught and recorded as `failed` anyway, so a bad
- * row can never abort the migration of the other 131.
- */
-export interface GroupRailEnsurer {
-  ensureGroupRail(request: GroupRailRequest): Promise<GroupRailResult>;
-}
-
-/**
- * The default until S6 lands: records the gap per row instead of pretending the
- * step succeeded. A run under this ensurer is deliberately INCOMPLETE.
- */
-export const RAIL_STEP_NOT_WIRED: GroupRailEnsurer = {
-  async ensureGroupRail() {
-    return { status: 'unavailable', reason: 'rail step not wired yet (S6 task T6.6(c))' };
-  },
-};
+// The seam itself now lives in `services/groupRail.ts`, beside the detection
+// ENQUEUE seam it is the sibling of, because the migration is no longer its only
+// consumer (T5.2's send-time backstop calls the same ensurer, and a service
+// reaching into the import subsystem for a rail type is the wrong direction).
+// Re-exported here unchanged so every existing importer and this module's own
+// contract are untouched: same names, same shapes, same not-wired default.
+export {
+  RAIL_STEP_NOT_WIRED,
+  type GroupRailEnsurer,
+  type GroupRailRequest,
+  type GroupRailResult,
+} from '../../services/groupRail.js';
 
 // ---------------------------------------------------------------------------
 // Parity

@@ -164,6 +164,105 @@ export function buildTsMsgId(providerTs: string, providerSid: string): string {
   return `${providerTs}#${providerSid}`;
 }
 
+/**
+ * The rail a group send went out on, snapshotted onto the message row.
+ * `participantMap` is MBxx -> member key (`phone#<E164>`, spec 15.6).
+ */
+export interface GroupRailSnapshot {
+  conversationSid: string;
+  participantMap: Record<string, string>;
+}
+
+/**
+ * One row in a synthetic DEADLINE partition on the messages table (spec 15.5).
+ * `sortKey` MUST start with the ISO 8601 deadline so a sweep can Query the
+ * overdue range lexicographically; `attributes` carries the non-key payload
+ * (kind, ref pointers, and - as CLEANUP ONLY - an `expires_at` horizon far past
+ * the deadline). TTL IS enabled on this table, so a due row that carried a
+ * short `expires_at` would be reaped BEFORE its own alarm: TTL is never the
+ * alarm mechanism.
+ */
+export interface MessageDueRow {
+  /** Synthetic partition key, e.g. GROUP_DUE_PARTITION. */
+  partition: string;
+  /** `<ISO deadline>#<kind>#<id>`. */
+  sortKey: string;
+  attributes: Record<string, unknown>;
+}
+
+/** A due row as the sweep reads it back. */
+export interface GroupDueRow {
+  partition: string;
+  sortKey: string;
+  /** Discriminator, e.g. GROUP_SEND_DUE_KIND. */
+  kind: string;
+  /** ISO 8601 instant this row became actionable. */
+  deadlineAt: string;
+  /** The message the row is about. */
+  ref: { conversationId: string; tsMsgId: string };
+  providerSid?: string;
+}
+
+/**
+ * The ONE synthetic partition every group deadline row lives in. A fixed bucket
+ * (not per-day) keeps due-discovery to a single Query; at this feature's scale
+ * (132 threads, one row per send, deleted as soon as it is resolved) the
+ * partition never holds more than a handful of live rows. Pointer/marker
+ * partitions like this never collide with real conversation partitions, so
+ * listByConversation cannot see them.
+ */
+export const GROUP_DUE_PARTITION = 'groupdue#pending';
+
+/** Due-row discriminator for the per-send group delivery-staleness check. */
+export const GROUP_SEND_DUE_KIND = 'group_send_staleness';
+
+/**
+ * How long after a group send its delivery receipts must have landed before the
+ * staleness sweep alarms. Ten minutes: long enough that ordinary carrier
+ * latency never trips it, short enough that a dead receipts webhook is noticed
+ * the same morning it breaks.
+ */
+export const GROUP_SEND_STALENESS_MS = 10 * 60 * 1000;
+
+/**
+ * Cleanup horizon for a due row: far past the alarm deadline, so DynamoDB TTL
+ * (best-effort, up to 48h late) can only ever reap a row the sweep already had
+ * every chance to act on. 30 days.
+ */
+export const GROUP_DUE_CLEANUP_MS = 30 * 24 * 60 * 60 * 1000;
+
+/** Deadline-prefixed sort key for a group send's staleness row. */
+export function groupSendDueSortKey(deadlineIso: string, providerSid: string): string {
+  return `${deadlineIso}#${GROUP_SEND_DUE_KIND}#${providerSid}`;
+}
+
+/**
+ * Build the staleness due row for a group send. `deadlineAt` MUST already be
+ * normalized (`new Date(x).toISOString()`) - the sort key is compared
+ * LEXICOGRAPHICALLY, so `...00Z` and `...00.000Z` must collapse to one form.
+ */
+export function buildGroupSendDueRow(input: {
+  conversationId: string;
+  tsMsgId: string;
+  providerSid: string;
+  deadlineAt: string;
+  /** Epoch SECONDS (DynamoDB TTL). Cleanup only - never the alarm. */
+  expiresAt?: number;
+}): MessageDueRow {
+  return {
+    partition: GROUP_DUE_PARTITION,
+    sortKey: groupSendDueSortKey(input.deadlineAt, input.providerSid),
+    attributes: {
+      due_kind: GROUP_SEND_DUE_KIND,
+      deadline_at: input.deadlineAt,
+      ref_conversationId: input.conversationId,
+      ref_tsMsgId: input.tsMsgId,
+      provider_sid: input.providerSid,
+      ...(input.expiresAt !== undefined && { expires_at: input.expiresAt }),
+    },
+  };
+}
+
 export interface NewMessage {
   conversationId: string;
   /** Provider message SID (Twilio SMxxx/MMxxx) — the idempotency key. */
@@ -222,6 +321,26 @@ export interface NewMessage {
    * field too. Absent on 1:1 messages.
    */
   deliveryRecipients?: Record<string, RelayRecipientDelivery>;
+  /**
+   * Native group texting (spec 15.2c): the rail SNAPSHOT for an OUTBOUND group
+   * send - the CHxx this message was posted into, plus the MBxx -> member-key
+   * map as it stood at send time. A per-member delivery receipt carries only an
+   * MBxx, and recreating a rail mints NEW MBxx values, so resolving a late
+   * receipt against the thread's CURRENT map would mis-attribute or silently
+   * drop it. Written in the SAME transaction as the message row, so it can never
+   * be missing for a message that exists. Absent on every other message.
+   */
+  groupRailSnapshot?: GroupRailSnapshot;
+  /**
+   * A DUE-ROW written in the SAME transaction as this message (spec 15.5): one
+   * item in a synthetic, deadline-prefixed partition that a periodic sweep
+   * Queries (the messages table has NO GSI, so due-discovery must be a partition
+   * Query, never a scan). The group send path uses it for the per-send
+   * delivery-staleness alarm, which after spec 16.2 is the ONLY detector of a
+   * dead receipts webhook - so it must not have a crash window between the send
+   * and its own scheduling. Absent on every other message.
+   */
+  dueRow?: MessageDueRow;
   /**
    * Share-broadcast id (M1.8a): when set, the persisted message is tagged with
    * `broadcast_id` so the delivery-status callback rollup can resolve which
@@ -421,6 +540,18 @@ export interface MessageItem {
    * 1:1 messages (the single `delivery_status` is unchanged for those).
    */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
+  /**
+   * Native group texting (spec 15.2c): the CHxx this OUTBOUND group message was
+   * posted into, snapshotted at send time. See NewMessage.groupRailSnapshot.
+   */
+  group_conversation_sid?: string;
+  /**
+   * Native group texting (spec 15.2c): MBxx -> member key, snapshotted at send
+   * time. A receipt resolves its member through THIS map first and only falls
+   * back to the thread's current map, so a rail recreation cannot orphan the
+   * receipts of messages sent before it.
+   */
+  group_participant_map?: Record<string, string>;
   /**
    * Share-broadcast id (M1.8a): set on an outbound broadcast send so the
    * delivery-status callback can roll delivered/failed into the broadcast's
@@ -727,9 +858,15 @@ export interface MessagesRepo {
    * a parked Bounce and silently lose the suppression) with an `expires_at`
    * (epoch seconds) TTL backstop. Idempotent UPSERT: a redelivery of the SAME
    * event type overwrites the identical item (harmless). The authoritative
-   * cleanup is deleteParkedEmailEvent (the consume), NOT the TTL - the messages
-   * table has no TTL configured today; expires_at is forward-compatible (reaps
-   * only if/when TTL is enabled on the table).
+   * cleanup is deleteParkedEmailEvent (the consume), NOT the TTL.
+   *
+   * CORRECTED 2026-08-11 (group-texting A12): TTL **is** enabled on the messages
+   * table, in dev AND prod (`ttl_attribute: "expires_at"` in both tfvars, and
+   * dynamoAdmin enables it on local table creation). This comment previously
+   * claimed the opposite. Anything written here WILL be reaped once `expires_at`
+   * passes - best-effort, up to 48h late - so `expires_at` must always be a
+   * CLEANUP horizon far past whatever deadline actually matters, never the
+   * mechanism something is waiting on.
    */
   putParkedEmailEvent(event: ParkedEmailEvent, opts: { receivedAt: string; expiresAt: number }): Promise<void>;
   /** ALL parked events for a sesMessageId (m4: one per eventType), or [] when
@@ -802,6 +939,23 @@ export interface MessagesRepo {
   putSystemSidMarker(providerSid: string, kind: string): Promise<void>;
   /** The system-send marker for a provider SID, or undefined. */
   getSystemSidMarker(providerSid: string): Promise<{ kind: string } | undefined>;
+
+  // --- Group texting: the deadline partition (spec 15.5) --------------------
+
+  /**
+   * Due rows whose deadline has passed, oldest first - the sweep's ONLY
+   * discovery mechanism (the messages table has no GSI, so this is a Query over
+   * a deadline-prefixed sort-key range, never a scan). `throughIso` MUST be a
+   * normalized ISO 8601 instant: sort keys are compared LEXICOGRAPHICALLY.
+   */
+  listDueRows(partition: string, throughIso: string, limit?: number): Promise<GroupDueRow[]>;
+  /**
+   * Resolve one due row (delete it). Idempotent: deleting an already-deleted row
+   * is a no-op, so a sweep that crashes mid-batch can rerun safely. A base-table
+   * partition has no sparse-index trick to fall back on - the row must actually
+   * go, or it alarms forever.
+   */
+  deleteDueRow(partition: string, sortKey: string): Promise<void>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -930,6 +1084,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.deliveryRecipients !== undefined && {
           delivery_recipients: message.deliveryRecipients,
         }),
+        // Native group texting: the rail snapshot rides the SAME item as the
+        // seeded delivery map, so a late receipt can never find a message row
+        // without the map that makes its MBxx resolvable.
+        ...(message.groupRailSnapshot !== undefined && {
+          group_conversation_sid: message.groupRailSnapshot.conversationSid,
+          group_participant_map: message.groupRailSnapshot.participantMap,
+        }),
         ...(message.broadcastId !== undefined && { broadcast_id: message.broadcastId }),
         // Manual retry (dashboard Retry button): stamp retry_of AT APPEND so the
         // new message carries its lineage atomically — no annotate-after race. The
@@ -1015,6 +1176,29 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
                           tsMsgId: 'ptr',
                           ref_conversationId: message.conversationId,
                           ref_tsMsgId: tsMsgId,
+                        },
+                        ConditionExpression: 'attribute_not_exists(tsMsgId)',
+                      },
+                    },
+                  ]
+                : []),
+              // Native group texting (spec 15.5): a deadline row in the synthetic
+              // due partition, written ATOMICALLY with the message. A
+              // post-append enqueue would leave a crash window in which a send
+              // exists with nothing watching its receipts - and after spec 16.2
+              // this sweep is the ONLY detector of a dead receipts webhook.
+              // A redelivered send fails this condition too, which the
+              // TransactionCanceledException branch below correctly reports as a
+              // DEDUPE, not as a due-row failure.
+              ...(message.dueRow !== undefined
+                ? [
+                    {
+                      Put: {
+                        TableName: table,
+                        Item: {
+                          conversationId: message.dueRow.partition,
+                          tsMsgId: message.dueRow.sortKey,
+                          ...message.dueRow.attributes,
                         },
                         ConditionExpression: 'attribute_not_exists(tsMsgId)',
                       },
@@ -1706,6 +1890,46 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
       if (!Item) return undefined;
       return { kind: (Item as { kind?: string }).kind ?? 'unknown' };
+    },
+
+    async listDueRows(partition, throughIso, limit = DEFAULT_PAGE_LIMIT) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'conversationId = :p AND tsMsgId <= :through',
+          ExpressionAttributeValues: {
+            ':p': partition,
+            // Sort keys are `<ISO deadline>#<kind>#<id>`. '~' (0x7E) sorts after
+            // the '#' separator, so `<now>~` includes every row whose deadline is
+            // exactly `now` and excludes every LATER deadline (the difference
+            // shows up inside the ISO prefix).
+            ':through': `${throughIso}~`,
+          },
+          Limit: limit,
+          ScanIndexForward: true,
+        }),
+      );
+      return (Items ?? []).map((raw) => {
+        const item = raw as Record<string, unknown>;
+        return {
+          partition,
+          sortKey: String(item['tsMsgId']),
+          kind: typeof item['due_kind'] === 'string' ? item['due_kind'] : 'unknown',
+          deadlineAt: typeof item['deadline_at'] === 'string' ? item['deadline_at'] : '',
+          ref: {
+            conversationId:
+              typeof item['ref_conversationId'] === 'string' ? item['ref_conversationId'] : '',
+            tsMsgId: typeof item['ref_tsMsgId'] === 'string' ? item['ref_tsMsgId'] : '',
+          },
+          ...(typeof item['provider_sid'] === 'string' && { providerSid: item['provider_sid'] }),
+        };
+      });
+    },
+
+    async deleteDueRow(partition, sortKey) {
+      await doc.send(
+        new DeleteCommand({ TableName: table, Key: { conversationId: partition, tsMsgId: sortKey } }),
+      );
     },
   };
 }

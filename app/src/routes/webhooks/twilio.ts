@@ -75,7 +75,7 @@ import {
   parseOtherRecipients,
 } from '../../services/groupEnvelope.js';
 import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
-import { resolveGroupMembers } from '../../services/groupMembers.js';
+import { groupMemberKey, resolveGroupMembers } from '../../services/groupMembers.js';
 import {
   GROUP_RAIL_ENQUEUE_NOT_WIRED,
   hasActiveGroupRail,
@@ -163,19 +163,6 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
  * newest (never a crash), and a sender in several CLOSED groups on one number
  * routes to the newest for provenance.
  */
-/**
- * The member key for a `group_text` delivery/attribution slot (spec 15.6,
- * plan T3.4a): ALWAYS `phone#<E164>`, NEVER `relayMemberKey`.
- *
- * `relayMemberKey` prefers the contactId, so one contact owning TWO member
- * numbers would collapse into a single slot - one delivery outcome for two
- * handsets, and one sender chip for two people's messages. The contactId still
- * travels, as roster DISPLAY metadata on the participant.
- */
-export function groupMemberKey(e164: string): string {
-  return `phone#${e164}`;
-}
-
 /**
  * Seen keys for the delivery-error DEGRADATION logs (the arms that flag nothing
  * and only report: sms_unreachable with no contact, and the 21610 arms). Twilio

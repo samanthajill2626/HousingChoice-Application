@@ -52,6 +52,7 @@ import {
 } from '../../src/services/groupReceipts.js';
 import type { GroupSendService } from '../../src/services/groupSend.js';
 import type { ConversationsCrossCheck } from '../../src/routes/webhooks/twilioConversations.js';
+import { createGroupCrossCheck } from '../../src/services/groupCrossCheck.js';
 import type { Verdict } from '../../src/services/extraction/runTypes.js';
 import type {
   SuggestionResolutionItem,
@@ -78,6 +79,10 @@ import {
   type MessageItem,
   type MessagesRepo,
   type ParkedEmailEvent,
+  groupCrossCheckDueSortKey,
+  GROUP_CROSSCHECK_DUE_KIND,
+  GROUP_DUE_PARTITION,
+  type GroupDueRow,
   type ParkedGroupReceipt,
   type PendingCrossCheckEvent,
 } from '../../src/repos/messagesRepo.js';
@@ -1115,11 +1120,19 @@ export function createFakeWorld(): FakeWorld {
     // Group-texting deadline partition (S5): the webhook path never writes or
     // reads a due row - throw so an accidental call is loud rather than a
     // plausible empty answer.
-    async listDueRows() {
-      throw new Error('listDueRows: not used by the webhook harness');
+    // The deadline partition, modelled (T6.2/T6.3). The wiring suite drives a
+    // real sweep over rows the real cross-check wrote through this same fake, so
+    // a silent [] here would let "the classic filing matched the event" pass
+    // against a ledger that never had anything in it.
+    async listDueRows(_partition, throughIso, limit = 50) {
+      return [...crossCheckDueRows.values()]
+        .filter((row) => row.deadlineAt <= throughIso)
+        .sort((a, b) => (a.sortKey < b.sortKey ? -1 : 1))
+        .slice(0, limit)
+        .map((row) => ({ ...row }));
     },
-    async deleteDueRow() {
-      throw new Error('deleteDueRow: not used by the webhook harness');
+    async deleteDueRow(_partition, sortKey) {
+      crossCheckDueRows.delete(sortKey);
     },
 
     // T6.2's cross-check ledger. MODELLED (not thrown), because T6.6(d) wires
@@ -1147,11 +1160,27 @@ export function createFakeWorld(): FakeWorld {
         a.deadlineAt < b.deadlineAt ? -1 : 1,
       );
       crossCheckPending.set(event.pairKey, pending);
+      const sortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
+      crossCheckDueRows.set(sortKey, {
+        partition: GROUP_DUE_PARTITION,
+        sortKey,
+        kind: GROUP_CROSSCHECK_DUE_KIND,
+        deadlineAt: event.deadlineAt,
+        ref: { conversationId: event.pairKey, tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}` },
+        providerSid: event.messageSid,
+        conversationSid: event.conversationSid,
+        author: event.author,
+      });
     },
     async takeCrossCheckPending(pairKey) {
       const pending = crossCheckPending.get(pairKey) ?? [];
       const oldest = pending.shift();
       crossCheckPending.set(pairKey, pending);
+      if (oldest !== undefined) {
+        crossCheckDueRows.delete(
+          groupCrossCheckDueSortKey(oldest.deadlineAt, oldest.messageSid),
+        );
+      }
       return oldest;
     },
     async putCrossCheckCredit(pairKey, filedAt) {
@@ -1159,11 +1188,12 @@ export function createFakeWorld(): FakeWorld {
       credits.push(filedAt);
       crossCheckCredits.set(pairKey, credits);
     },
-    async resolveCrossCheckPending(pairKey, messageSid) {
+    async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {
       const pending = (crossCheckPending.get(pairKey) ?? []).filter(
         (p) => p.messageSid !== messageSid,
       );
       crossCheckPending.set(pairKey, pending);
+      crossCheckDueRows.delete(groupCrossCheckDueSortKey(deadlineAt, messageSid));
     },
   };
 
@@ -3102,6 +3132,7 @@ export function createFakeWorld(): FakeWorld {
     },
   };
   const crossCheckMarkers = new Set<string>();
+  const crossCheckDueRows = new Map<string, GroupDueRow>();
   const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
   const crossCheckCredits = new Map<string, string[]>();
   const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
@@ -3219,8 +3250,10 @@ export interface HarnessOptions {
   groupSendService?: GroupSendService;
   /** Unknown-IMxx retry window for the group receipts path (default 250ms). */
   groupReceiptRetryDelayMs?: number;
-  /** Native group texting (S6 seam): observe onMessageAdded forwarding. */
+  /** Native group texting (T6.2): replace the cross-check to observe forwarding. */
   groupCrossCheck?: ConversationsCrossCheck;
+  /** Mark the injected cross-check as a deliberate GAP (the not-wired counter). */
+  groupCrossCheckWired?: boolean;
   /** SSE heartbeat override for /api/events tests (default 25s). */
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
@@ -3324,6 +3357,15 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
   // users repo that knows BOTH the 'va' and 'admin' test users so authed
   // requests (incl. the M1.4 admin surfaces) stay authed.
   const fakeUsers = makeFakeUsersRepo([testUserItem(), adminUserItem()]);
+  // ONE cross-check over the world's fakes, shared by both halves of the match:
+  // the Conversations route (events) and the inbound webhook (classic filings).
+  // They must be the same instance, or a test could never see them meet.
+  const worldCrossCheck = createGroupCrossCheck({
+    messagesRepo: world.messagesRepo,
+    settingsRepo: world.settingsRepo,
+    businessNumber: OUR_NUMBER,
+    logger: createLogger({ destination: capture.stream }),
+  });
   const app = buildApp({
     config,
     logger: createLogger({ level: 'info', destination: capture.stream }),
@@ -3472,6 +3514,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // enqueue seam are in-memory, so a group inbound touches no AWS.
       poolNumbersRepo: world.poolNumbersRepo,
       groupRailEnqueuer: world.groupRailEnqueuer,
+      // T6.6(d). The cross-check runs over the WORLD's messages repo (which
+      // models the ledger), so an inbound-webhook test exercises the real
+      // service without reaching for DynamoDB.
+      groupCrossCheck: worldCrossCheck,
       // Native group texting (S5): the Conversations webhook's two halves. The
       // receipts service defaults to the world's messages/conversations/contacts
       // fakes, so a delivery receipt never reaches DynamoDB; the cross-check is
@@ -3488,7 +3534,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
             unknownMessageRetryDelayMs: opts.groupReceiptRetryDelayMs,
           }),
         }),
-      ...(opts.groupCrossCheck !== undefined && { crossCheck: opts.groupCrossCheck }),
+      crossCheck: opts.groupCrossCheck ?? worldCrossCheck,
+      ...(opts.groupCrossCheckWired !== undefined && {
+        crossCheckWired: opts.groupCrossCheckWired,
+      }),
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

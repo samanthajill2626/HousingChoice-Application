@@ -76,11 +76,9 @@ import {
 } from '../../services/groupEnvelope.js';
 import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
 import { groupMemberKey, resolveGroupMembers } from '../../services/groupMembers.js';
-import {
-  GROUP_RAIL_ENQUEUE_NOT_WIRED,
-  hasActiveGroupRail,
-  type GroupRailEnqueuer,
-} from '../../services/groupRail.js';
+import { hasActiveGroupRail, type GroupRailEnqueuer } from '../../services/groupRail.js';
+import { createGroupRailEnqueuer } from '../../jobs/groupRail.js';
+import { createGroupCrossCheck, type GroupCrossCheck } from '../../services/groupCrossCheck.js';
 import { convertConnectingRelayGroupToGroupText } from '../../services/groupConvert.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNumbersRepo.js';
 import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../../repos/settingsRepo.js';
@@ -249,11 +247,16 @@ export interface TwilioWebhookDeps {
   poolNumbersRepo?: Pick<PoolNumbersRepo, 'listActive'>;
   /**
    * The group-text RAIL seam (spec 6.1 DETECTION). Detection ENQUEUES rail
-   * creation rather than calling Twilio inline (the 5s webhook budget). S6
-   * injects the real enqueuer at T6.6(a)/(d); until then the default records
-   * `unavailable` - nothing attempted - and the thread stays inbound-only.
+   * creation rather than calling Twilio inline (the 5s webhook budget).
+   * Defaults to the real `groupRail.ensure` producer (T6.6(a)).
    */
   groupRailEnqueuer?: GroupRailEnqueuer;
+  /**
+   * The guardrail cross-check (T6.6(d)). Filing a group inbound onto a RAILED
+   * thread is the classic half of the (rail, author) match, so this call is what
+   * keeps a healthy channel from alarming. Defaults to the real service.
+   */
+  groupCrossCheck?: Pick<GroupCrossCheck, 'recordClassicInbound'>;
 }
 
 /** Default wait before the one unknown-SID retry in /status (see above). */
@@ -298,7 +301,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const events = deps.events ?? appEvents;
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
   const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
-  const groupRail = deps.groupRailEnqueuer ?? GROUP_RAIL_ENQUEUE_NOT_WIRED;
+  const groupRail = deps.groupRailEnqueuer ?? createGroupRailEnqueuer({ logger: log });
+  const groupCrossCheck = deps.groupCrossCheck ?? createGroupCrossCheck({ logger: log });
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -1458,6 +1462,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           'group railed-inbound liveness stamp failed - message persisted, cross-check high-water mark stale',
         );
       }
+      // T6.6(d): this filing is the CLASSIC half of the cross-check's
+      // (rail, author) match. Without it every Conversations event would sit
+      // unmatched and alarm at its grace deadline - i.e. a perfectly healthy
+      // channel would look like the failure the guardrail exists to detect.
+      // recordClassicInbound never throws; a bookkeeping problem is its own WARN.
+      await groupCrossCheck.recordClassicInbound({
+        conversationSid: thread.twilio_conversation_sid as string,
+        memberKey: groupMemberKey(From),
+        providerSid: MessageSid,
+      });
     }
 
     log.info(

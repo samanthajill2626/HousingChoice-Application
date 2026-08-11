@@ -33,6 +33,7 @@ import {
   createGroupReceiptsService,
   type GroupReceiptsService,
 } from '../../services/groupReceipts.js';
+import { createGroupCrossCheck } from '../../services/groupCrossCheck.js';
 
 /**
  * A carrier-sourced `onMessageAdded` event, handed to the guardrail cross-check.
@@ -67,9 +68,11 @@ export interface ConversationsCrossCheck {
 }
 
 /**
- * The default until S6/T6.2 lands: counts the event and says so. NOT a silent
- * no-op - "the cross-check is not wired" and "the cross-check saw nothing" are
- * different worlds, and only one of them is a guardrail failure.
+ * An explicitly UNWIRED cross-check. Kept after T6.2 shipped because "the
+ * cross-check is not wired" and "the cross-check saw nothing" are different
+ * worlds and only one of them is a guardrail failure: a caller that genuinely
+ * has no cross-check passes this and gets the counter, rather than a silent
+ * no-op that looks like health.
  */
 export const CROSS_CHECK_NOT_WIRED: ConversationsCrossCheck = {
   async recordConversationEvent() {
@@ -82,9 +85,9 @@ export interface TwilioConversationsWebhookDeps {
   logger?: Logger;
   /** The receipts pipeline; default-constructed over the real repos. */
   groupReceipts?: GroupReceiptsService;
-  /** S6/T6.2's cross-check. */
+  /** The guardrail cross-check (T6.2). Defaults to the real service. */
   crossCheck?: ConversationsCrossCheck;
-  /** True once S6 wires a real cross-check, so the route stops counting gaps. */
+  /** False marks the injected cross-check as a deliberate gap (counter only). */
   crossCheckWired?: boolean;
 }
 
@@ -102,8 +105,14 @@ export function createTwilioConversationsRouter(
   const receipts =
     deps.groupReceipts ??
     createGroupReceiptsService({ ...(deps.logger !== undefined && { logger: deps.logger }) });
-  const crossCheck = deps.crossCheck ?? CROSS_CHECK_NOT_WIRED;
-  const crossCheckWired = deps.crossCheckWired ?? deps.crossCheck !== undefined;
+  // T6.6: the real cross-check is the DEFAULT now. The Source/author filter and
+  // the whole ledger live in the service - this route forwards every
+  // onMessageAdded verbatim, because deciding what to count is reconciliation
+  // policy, not transport.
+  const crossCheck =
+    deps.crossCheck ??
+    createGroupCrossCheck({ config, ...(deps.logger !== undefined && { logger: deps.logger }) });
+  const crossCheckWired = deps.crossCheckWired ?? true;
 
   const router = Router();
   const verifySignature: RequestHandler = twilioSignatureMiddleware({

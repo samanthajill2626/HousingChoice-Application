@@ -37,6 +37,7 @@ import {
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
+import { createGroupRailService } from '../src/services/groupRail.js';
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -163,6 +164,11 @@ try {
     conversationsRepo,
     contactsRepo,
     expected,
+    // T6.6(c): the rail step, SYNCHRONOUS per row. This is the whole point of
+    // eager rails - a 50407-class refusal (a landline in a roster, a number
+    // Twilio will not attach) lands in THIS report, at the migration window,
+    // instead of surfacing weeks later as a staff reply that will not send.
+    rail: createGroupRailService({ config }),
     ownNumbers: plan.quo.ownNumbers,
     exclusions: {
       businessPhoneNumber: config.businessPhoneNumber,

@@ -58,7 +58,7 @@ import {
 } from '../repos/messagesRepo.js';
 import { groupMemberKey } from './groupMembers.js';
 import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
-import { hasActiveGroupRail, RAIL_STEP_NOT_WIRED, type GroupRailEnsurer } from './groupRail.js';
+import { createGroupRailService, hasActiveGroupRail, type GroupRailEnsurer } from './groupRail.js';
 import { ConversationNotFoundError, SendRefusedError, SmsSendingDisabledError } from './sendMessage.js';
 
 /**
@@ -150,7 +150,7 @@ export interface GroupSendServiceDeps {
   contactsRepo?: Pick<ContactsRepo, 'findByPhone'>;
   auditRepo?: Pick<AuditRepo, 'append'>;
   events?: EventBus;
-  /** The ONE authoritative rail path (S6/T6.1); not wired until then. */
+  /** The ONE authoritative rail path (T6.1). Defaults to the real service. */
   rail?: GroupRailEnsurer;
   /** Drains receipts that beat this send's own append (spec 15.2a). */
   receipts?: GroupReceiptsService;
@@ -180,7 +180,15 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
     deps.contactsRepo ?? createContactsRepo({ ...(deps.logger !== undefined && { logger: deps.logger }) });
   const audit = deps.auditRepo ?? createAuditRepo({ ...(deps.logger !== undefined && { logger: deps.logger }) });
   const events = deps.events ?? appEvents;
-  const rail = deps.rail ?? RAIL_STEP_NOT_WIRED;
+  // T6.6(b): the send-time BACKSTOP is live. Eager creation at detection and
+  // migration is the normal path; this covers the thread that slipped through -
+  // and it is the same ensureGroupRail those two call, never a second create.
+  const rail =
+    deps.rail ??
+    createGroupRailService({
+      config,
+      ...(deps.logger !== undefined && { logger: deps.logger }),
+    });
   const receipts =
     deps.receipts ??
     createGroupReceiptsService({ ...(deps.logger !== undefined && { logger: deps.logger }) });

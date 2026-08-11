@@ -12,9 +12,10 @@
 import { describe, expect, it } from 'vitest';
 import { makeWebhookHarness, signedTwilioPost } from './helpers/twilioWebhookHarness.js';
 import type { GroupReceiptsService } from '../src/services/groupReceipts.js';
-import type {
-  ConversationsCrossCheck,
-  ConversationsMessageAddedEvent,
+import {
+  CROSS_CHECK_NOT_WIRED,
+  type ConversationsCrossCheck,
+  type ConversationsMessageAddedEvent,
 } from '../src/routes/webhooks/twilioConversations.js';
 
 const WARN = 40;
@@ -141,10 +142,24 @@ describe('POST /webhooks/twilio/conversations - dispatch', () => {
   });
 
   it('says so, once, when onMessageAdded arrives with no cross-check wired (not a silent no-op)', async () => {
-    const { app, capture } = makeWebhookHarness();
+    // T6.6 made the real cross-check the DEFAULT, so "unwired" is now something
+    // a caller declares. The counter still matters: "no cross-check is running"
+    // and "the cross-check saw nothing" are different worlds, and only one of
+    // them is a guardrail failure.
+    const { app, capture } = makeWebhookHarness({
+      groupCrossCheck: CROSS_CHECK_NOT_WIRED,
+      groupCrossCheckWired: false,
+    });
     const res = await signedTwilioPost(app, PATH, MESSAGE_ADDED_PARAMS);
     expect(res.status).toBe(200);
     expect(capture.lines.some((l) => l['event'] === 'group_crosscheck_not_wired')).toBe(true);
+  });
+
+  it('the REAL cross-check is wired by default - no gap counter on an ordinary event', async () => {
+    const { app, capture } = makeWebhookHarness();
+    const res = await signedTwilioPost(app, PATH, MESSAGE_ADDED_PARAMS);
+    expect(res.status).toBe(200);
+    expect(capture.lines.some((l) => l['event'] === 'group_crosscheck_not_wired')).toBe(false);
   });
 
   it('ACKS an unrecognized EventType with a WARN + counter, never a 500 that Twilio would retry forever', async () => {

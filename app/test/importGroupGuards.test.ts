@@ -252,12 +252,6 @@ describe('import upsertConversation - group_text type guard (T7.1)', () => {
     expect(report.conversations.groupRosterDropsKept).toBe(0);
   });
 
-  it('pins the local group_open literal against the repo constant', () => {
-    // apply.ts keeps the partition name as a local literal rather than importing
-    // the repo (H10). This is the drift alarm for that decision.
-    expect(GROUP_TEXT_STATUS).toBe('group_open');
-  });
-
   it('still rethrows a non-CCFE failure from the group upsert', async () => {
     const { doc } = stubDoc((cmd) => {
       if (
@@ -351,6 +345,10 @@ describe('import retractImported - group member guard (T7.2)', () => {
   const partitionWalks = (sent: RecordedCommand[]): RecordedCommand[] =>
     sent.filter((c) => c.name === 'QueryCommand' && c.input.IndexName === 'byLastActivity');
 
+  /** The `:status` value a walk actually queried (the whole point of the walk). */
+  const walkedStatus = (cmd: RecordedCommand): unknown =>
+    (cmd.input.ExpressionAttributeValues as Record<string, unknown> | undefined)?.[':status'];
+
   it('deletes a dropped contact under an atomic group_participation_at guard', async () => {
     const { doc, sent } = retractStub();
     const report = await runApply({ doc, plan, review: reviewDropping(), importedAt });
@@ -414,6 +412,22 @@ describe('import retractImported - group member guard (T7.2)', () => {
       importedAt,
     });
     expect(partitionWalks(twoDrops.sent)).toHaveLength(1);
+  });
+
+  it('walks THE group_open partition - the queried :status is the repo constant', async () => {
+    // The value, not just the index name. `retractImported` reads group rosters
+    // by KEY CONDITION on `status`, so querying any other partition returns zero
+    // rosters and silently un-guards every contact delete in the run. apply.ts
+    // now imports GROUP_TEXT_STATUS rather than repeating the literal (there is
+    // no second copy left to drift), and this pins the wire value that reaches
+    // DynamoDB either way.
+    const { doc, sent } = retractStub();
+    await runApply({ doc, plan, review: reviewDropping(), importedAt });
+
+    const walks = partitionWalks(sent);
+    expect(walks).toHaveLength(1);
+    expect(walkedStatus(walks[0]!)).toBe(GROUP_TEXT_STATUS);
+    expect(walkedStatus(walks[0]!)).toBe('group_open');
   });
 
   it('never reads the group partition on a dry run', async () => {

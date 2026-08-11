@@ -39,6 +39,7 @@ import {
 import { tableName } from '../config.js';
 import type { TransitionSource } from '../statusModel.js';
 import type { ContactType } from '../../repos/contactsRepo.js';
+import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
 import { normalizeAddress } from './addresses.js';
 import type { CsvRow } from './csv.js';
@@ -55,19 +56,23 @@ const IMPORT_STATUS_SOURCE: TransitionSource = 'import';
 /**
  * The native group-text conversation type (group-texting spec section 4.2).
  *
- * A local literal on purpose: this module imports no conversation types today
- * (only `ContactType`), and pulling `conversationsRepo` in for one string would
- * drag the whole repo layer into the import lib. The value is pinned by the
- * guard tests on both sides.
+ * A local literal, but one that cannot drift silently: the wire assertion in
+ * importGroupGuards.test.ts pins the exact `:groupText` value the guarded
+ * upsert binds, so changing this string fails that test.
  */
 const GROUP_TEXT_TYPE = 'group_text';
 
-/**
- * The byLastActivity partition native group threads live in
- * (conversationsRepo's GROUP_TEXT_STATUS). Local literal for the same reason as
- * GROUP_TEXT_TYPE; a test pins it against the repo's exported constant.
+/*
+ * The byLastActivity partition native group threads live in is
+ * conversationsRepo's GROUP_TEXT_STATUS, imported at the top of this file.
+ *
+ * It used to be a private local literal here, mirroring GROUP_TEXT_TYPE. That
+ * was wrong: nothing compared the two, and `retractImported` uses the value as
+ * a KeyConditionExpression binding. A drifted literal would query an empty
+ * partition, find zero group rosters, and silently un-guard every contact
+ * delete in an import run - the exact failure the guard exists to prevent. A
+ * duplicate that cannot drift needs no alarm, so the duplicate is gone.
  */
-const GROUP_TEXT_STATUS_PARTITION = 'group_open';
 
 /**
  * `contacts.origin` written by group-text detection when it mints a member stub
@@ -640,7 +645,7 @@ async function groupTextRosterContactIds(
         IndexName: 'byLastActivity',
         KeyConditionExpression: '#s = :status',
         ExpressionAttributeNames: { '#s': 'status', '#p': 'participants' },
-        ExpressionAttributeValues: { ':status': GROUP_TEXT_STATUS_PARTITION },
+        ExpressionAttributeValues: { ':status': GROUP_TEXT_STATUS },
         ProjectionExpression: '#p',
         ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
       }),

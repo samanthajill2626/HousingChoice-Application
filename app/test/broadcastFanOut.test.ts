@@ -292,6 +292,29 @@ describe('broadcast.send (M1.8a)', () => {
     expect(bcast.status).toBe('sent');
   });
 
+  // group-texting A8, consumer 4 of 6 (broadcastFanOut.ts). The fence reads the
+  // ONE hasSmsConsent predicate, so the distinct group basis leaves it untouched.
+  it('skips a SILENT GROUP MEMBER (group_participation_at is not consent)', async () => {
+    const ok = seedTenant(world, { contactId: 'c-ok', firstName: 'Ok', phone: '+15550100001' });
+    const groupOnly = seedTenant(world, {
+      contactId: 'c-groupmember',
+      phone: '+15550100002',
+      consent_method: undefined,
+      group_participation_at: '2026-08-10T12:00:00.000Z',
+    });
+    seedUnit(world);
+    seedBroadcast(world, [ok, groupOnly]);
+
+    wireHandler(world, logger, { acquire: vi.fn(async () => {}) } as unknown as TokenBucket);
+    await enqueueImmediate(BROADCAST_SEND_JOB, { broadcastId: 'bcast-1' });
+    await outbound.settle();
+
+    expect(world.sent.map((s) => s.to)).toEqual([ok.phone]);
+    const bcast = world.broadcasts.get('bcast-1')!;
+    expect(bcast.stats.skipped_no_consent).toBe(1);
+    expect(bcast.recipients['c-groupmember']?.errorCode).toBe('no_consent');
+  });
+
   it('100-recipient broadcast trickles through the bucket (injected clock) and completes', async () => {
     const tenants: ContactItem[] = [];
     for (let i = 0; i < 100; i++) {

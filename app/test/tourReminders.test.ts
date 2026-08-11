@@ -2318,6 +2318,33 @@ describe.skipIf(!reachable)('tourReminders against DynamoDB Local', () => {
     expect(after?.skippedAt).toBeUndefined();
   });
 
+  // group-texting A8, consumer 2 of 6 (tourReminders.ts). A silent group member
+  // carries group_participation_at and no consent_method - still no_consent.
+  it('force-send refuses a SILENT GROUP MEMBER (group_participation_at is not consent)', async () => {
+    const rig = createGroupTestRig();
+    const spy = makeForceSendSpy();
+    const deps = { ...rig.deps, sendMessageService: spy.service, settingsRepo: stubSettingsRepo() };
+    seedForceTenant(rig.world, {
+      contactId: 'contact-force-group',
+      phone: '+15550220016',
+      convId: 'conv-force-group',
+      now: SEEDED_AT,
+      consent: false,
+    });
+    const member = rig.world.contacts.find((c) => c.contactId === 'contact-force-group')!;
+    member.group_participation_at = '2026-08-10T12:00:00.000Z';
+    const { tour, row } = await seedForceTour({
+      tenantId: 'contact-force-group',
+      unitId: 'unit-force-group',
+      kind: 'day_before',
+    });
+
+    const result = await forceSendReminder(row.reminderId, tour.tourId, FORCE_NOW, true, deps);
+
+    expect(result).toEqual({ outcome: 'refused', reason: 'no_consent' });
+    expect(spy.sent).toHaveLength(0);
+  });
+
   // ---------------------------------------------------------------------------
   // Send now 6 - JIT consent: automated: false makes the consent gate apply
   // ---------------------------------------------------------------------------

@@ -14,11 +14,16 @@
 //
 // PII (doc 9): this helper adds only `suppressedCount`; whatever the caller
 // passes is the caller's responsibility (ids and counts only).
-import { logger as defaultLogger, type Logger } from './logger.js';
+import { logger as defaultLogger } from './logger.js';
+
+/** The one method this helper needs - narrow so a test fake is two lines. */
+export interface WarnSink {
+  warn(fields: Record<string, unknown>, message: string): void;
+}
 
 export interface RateLimitedWarnOptions {
   /** Destination logger (the router's correlated child in production). */
-  logger?: Pick<Logger, 'warn'>;
+  logger?: WarnSink;
   /** Minimum gap between emitted WARNs, in milliseconds. */
   intervalMs: number;
   /** Injectable clock (tests); `Date.now` otherwise. */

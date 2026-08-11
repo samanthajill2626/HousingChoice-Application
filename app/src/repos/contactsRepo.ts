@@ -205,6 +205,15 @@ export interface ContactItem {
    */
   group_participation_at?: string;
   /**
+   * How a non-import, non-auto-capture record came to exist. Today the only
+   * value is `'group_detection'` (services/groupMembers.ts), the marker the
+   * import's `retractImported` refuses to delete a contact through. Distinct
+   * from `capture_source`, which `consentMethodFromCaptureSource` maps back to
+   * a CONSENT METHOD - overloading that field would smuggle consent in by the
+   * back door for exactly the members the group ruling keeps consent-less.
+   */
+  origin?: string;
+  /**
    * Staff-set tenant voucher expiration (ISO 8601) — the SOURCE of the
    * `voucher_expiration` placement deadline (placement-deadline-model §6). Set via
    * the contact create/triage API (allowlisted, canonicalized like consent_at);

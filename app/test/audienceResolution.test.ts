@@ -190,6 +190,27 @@ describe('audience resolution (M1.8a)', () => {
     expect(byId).toEqual({ with: true, without: false });
   });
 
+  // group-texting A8, consumer 5 of 6 (audienceResolution.ts - staff display 1).
+  it('shows has_consent FALSE for a silent group member (group_participation_at is not consent)', async () => {
+    const items = [
+      tenant({
+        contactId: 'groupmember',
+        phone: '+15551230003',
+        group_participation_at: '2026-08-10T12:00:00.000Z',
+      }),
+      tenant({
+        contactId: 'both',
+        phone: '+15551230004',
+        group_participation_at: '2026-08-10T12:00:00.000Z',
+        consent_method: 'inbound_text',
+      }),
+    ];
+    const resolve = createAudienceResolutionService({ contactsRepo: fakeContacts(items), logger });
+    const out = await resolve({ contact_type: 'tenant', ...ALWAYS_EXCLUDE });
+    const byId = Object.fromEntries(out.contacts.map((c) => [c.contactId, c.has_consent]));
+    expect(byId).toEqual({ groupmember: false, both: true });
+  });
+
   it('combines housing_authority + bedroomSize', async () => {
     const items = [
       tenant({ contactId: 'a2', housingAuthority: 'HA-A', voucherSize: 2 }),

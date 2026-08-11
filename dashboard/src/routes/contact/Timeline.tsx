@@ -3,7 +3,7 @@
 // bubbles (full body, no truncation; inbound white / outbound light-blue),
 // collapsed call cards (transcript behind a <details> disclosure, never auto-
 // shown), and milestone pins (kind→color; they LINK OUT via refType/refId and
-// never inline content — esp. group-text content). A "Comms only" toggle hides
+// never inline content - esp. relay-group content). A "Comms only" toggle hides
 // milestones; a reply box notes the target number and sends to the resolved
 // conversation (disabled with a tooltip when none is resolvable). Message bodies
 // render as TEXT (React escapes) — never dangerouslySetInnerHTML. Accessibility-
@@ -300,7 +300,7 @@ function relaySenderLabel(
 }
 
 /** The GROUP composer footer: a reply relays to EVERY member, so the line names
- *  the whole roster ("everyone in this group text (Ann, Marcus)") instead of a
+ *  the whole roster ("everyone in this relay group (Ann, Marcus)") instead of a
  *  single number. A member with no resolved name falls back to their formatted
  *  phone; an empty/unloaded roster (best-effort fetch) keeps the honest
  *  "everyone" line with no list. */
@@ -311,14 +311,14 @@ function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): Reac
   });
   return (
     <>
-      Reply sends to <strong>everyone in this group text</strong>
+      Reply sends to <strong>everyone in this relay group</strong>
       {names.length > 0 ? <> ({names.join(', ')})</> : null}
     </>
   );
 }
 
 /** Milestone kind → pin color variant (the mockup's neutral / amber / purple /
- *  green markers). number_added = amber; group-text add/remove/open = purple;
+ *  green markers). number_added = amber; relay-group add/remove/open = purple;
  *  the positive outcome-ish ones = green; everything else neutral (including
  *  tour_converted - the placement_opened pin beside it carries the same news). */
 function milestoneVariant(type: TimelineMilestoneType): string {
@@ -485,7 +485,7 @@ function MessageBubble({
 
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
-  // so staff know the group text didn't reach everyone. Absent on 1:1 messages.
+  // so staff know the relay group didn't reach everyone. Absent on 1:1 messages.
   const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
     (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
   ).length;

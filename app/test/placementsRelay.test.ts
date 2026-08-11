@@ -372,7 +372,7 @@ describe('placement-scoped relay provisioning (M1.10c)', () => {
       expect(pins).toHaveLength(1);
       expect(pins[0]).toMatchObject({
         type: 'placement_group_opened',
-        label: 'Group text opened',
+        label: 'Relay group opened',
         refType: 'placement',
         refId: placementId,
       });

@@ -1,7 +1,7 @@
 // TenantFile — the right pane for a tenant contact (§B2). Stacked cards:
 // Details (voucher size, housing authority, current address, phone numbers,
 // status) - Preferences & notes - Properties sent (C4) - Tours - Placements - Group
-// texts - Media (C5). Placements + Tours + Properties-sent + Group texts are REAL
+// texts - Media (C5). Placements + Tours + Properties-sent + Relay groups are REAL
 // (/api/placements, /api/tours?tenantId=, /api/contacts/:id/listings-sent,
 // /api/contacts/:id/relay-groups); Preferences are manual-now (pending until the
 // gleaning slice). Each list row links to its detail route.
@@ -56,7 +56,7 @@ export interface TenantFileProps {
   listingsSent: ListingSendRow[];
   /** Relay-membership slice status (panel degrades to pending on 404). */
   relayGroupsPending: boolean;
-  /** The group texts (relay threads) this contact is a member of. */
+  /** The relay groups (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
   /** Pending AI suggestions for this contact (conversation-fact-extraction). A
    *  chip renders under a field only when a suggestion for that target is present

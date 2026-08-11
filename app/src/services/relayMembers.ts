@@ -153,7 +153,7 @@ export async function addMemberToRelay(
         status: 409,
         error: 'group_connecting',
         message:
-          'This group text is still connecting to its number. Add members once it is connected.',
+          'This relay group is still connecting to its number. Add members once it is connected.',
       },
     };
   }
@@ -207,8 +207,8 @@ export async function addMemberToRelay(
             status: 409,
             error: 'phone_conflict_on_number',
             message:
-              'This person already has a group text history on this number. Start a new ' +
-              'group text with them instead.',
+              'This person already has a relay group history on this number. Start a new ' +
+              'relay group with them instead.',
           },
         };
       }
@@ -239,7 +239,7 @@ export async function addMemberToRelay(
       await activityEvents.record({
         contactId: member.contactId,
         type: 'added_to_group_text',
-        label: 'Added to group text',
+        label: 'Added to relay group',
         refType: 'conversation',
         refId: conversationId,
       });
@@ -309,7 +309,7 @@ export async function removeMemberFromRelay(
         status: 409,
         error: 'group_connecting',
         message:
-          'This group text is still connecting to its number. Remove members once it is connected.',
+          'This relay group is still connecting to its number. Remove members once it is connected.',
       },
     };
   }
@@ -363,7 +363,7 @@ export async function removeMemberFromRelay(
       await activityEvents.record({
         contactId: removedMember.contactId,
         type: 'removed_from_group_text',
-        label: 'Removed from group text',
+        label: 'Removed from relay group',
         refType: 'conversation',
         refId: conversationId,
       });

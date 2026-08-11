@@ -1,7 +1,7 @@
 // TourActionsMenu - the tour header kebab. A popover menu (outside-click + Escape
 // close) mirroring ContactActionsMenu, holding the STATUS-BRANCH actions that
 // aren't the one guided primary CTA: Reschedule, Cancel, Mark no-show, and Open
-// group text. Each item is shown only when its guard passes (the parent computes
+// relay group. Each item is shown only when its guard passes (the parent computes
 // the guards from the tour status); an item that needs input opens a Modal that
 // the parent owns. When no item qualifies the parent renders nothing (no empty
 // kebab).
@@ -21,10 +21,10 @@ export interface TourActionsMenuProps {
   /** Send the manual no-show check-in (tour start passed; scheduled or no_show). */
   canSendNoShowCheckin: boolean;
   onSendNoShowCheckin: () => void;
-  /** Open group text (no group yet + tour not dead). */
+  /** Open relay group (no group yet + tour not dead). */
   canOpenGroup: boolean;
   onOpenGroup: () => void;
-  /** Why the group text cannot be opened RIGHT NOW even though the tour could
+  /** Why the relay group cannot be opened RIGHT NOW even though the tour could
    *  otherwise take one - today: fewer than two reachable roster members
    *  (contact-rosters spec 6.2). The item stays VISIBLE and DISABLED carrying
    *  this reason, instead of failing at click time with the route's
@@ -136,7 +136,7 @@ export function TourActionsMenu({
               {...(openGroupDisabledReason !== undefined && { title: openGroupDisabledReason })}
               onClick={() => run(onOpenGroup)}
             >
-              Open group text
+              Open relay group
             </button>
           ) : null}
           {canCancel ? (

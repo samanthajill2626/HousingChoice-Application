@@ -8,7 +8,7 @@ import { fakeUrl } from '../../support/urls.js';
 // the hermetic lane and proves the tier-3 (connect-when-ready) path the whole
 // feature exists for:
 //
-//   1. A group text for a pair with NO reusable active number and NO fresh spare
+//   1. A relay group for a pair with NO reusable active number and NO fresh spare
 //      is created CONNECTING - no pool number, and the auto-intro is NOT sent.
 //   2. The dashboard renders a distinct "Connecting" state and the composer stays
 //      usable (a team send is HELD, not refused).

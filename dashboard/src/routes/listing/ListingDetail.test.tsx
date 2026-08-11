@@ -1309,7 +1309,7 @@ describe('ListingDetail - Contacts card edit mode', () => {
     const dialog = screen.getByRole('dialog', { name: /Remove the primary contact\?/i });
     expect(
       within(dialog).getByText(
-        'James Porter becomes the primary contact - calls and new group texts for this property will go to them.',
+        'James Porter becomes the primary contact - calls and new relay groups for this property will go to them.',
       ),
     ).toBeInTheDocument();
     expect(removeUnitContact).not.toHaveBeenCalled();

@@ -548,7 +548,7 @@ export interface ConversationsRepo {
   /**
    * List the relay_group conversations in ONE status partition ('open' |
    * 'closed'), newest-activity-first — the inbox relay rows + the contact
-   * "Group texts" read (GET /api/contacts/:id/relay-groups). There is NO
+   * "Relay groups" read (GET /api/contacts/:id/relay-groups). There is NO
    * member→conversation index (a relay's participant_phone is the POOL number;
    * rosters live in the un-indexed participants list), so this queries the
    * SPARSE byRelayStatus GSI (relay_status = `relay_group#<status>`, written on

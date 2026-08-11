@@ -107,7 +107,7 @@ test('landlord-led: interest → group negotiation → booked → group reminder
   await flow.teamOpensTourGroup();
   await flow.expectGroupIntros([tenant, owner]);
 
-  // Membership shows on BOTH contact files (the "Group texts" card): the
+  // Membership shows on BOTH contact files (the "Relay groups" card): the
   // tenant's file names the owner, the owner's file names the tenant — each
   // row linking to the owning tour's detail page.
   await flow.expectGroupOnContactFile(owner);
@@ -208,7 +208,7 @@ test('self-guided: windows 1:1 (no group) → booked → 1:1 reminders → ID ga
   // and the Guidance card leads with the bolded ID-gate rule.
   await flow.expectSelfGuidedTourPage();
 
-  // No mutual meeting time means usually NO group thread. The 'Open group text'
+  // No mutual meeting time means usually NO group thread. The 'Open relay group'
   // button still shows (an admin MAY hand-create one), so assert NON-EXISTENCE:
   // no groupThreadId on the tour + no pool-number traffic to the tenant.
   await flow.expectNoTourGroup();
@@ -356,7 +356,7 @@ test('page arc: create -> book (CTA modal) -> group tab fans out -> tenant 1:1 -
   // The Activity card tells the whole story (group opened, booked, toured,
   // outcome, converted). Order-independent presence check.
   await flow.expectTourActivityRows([
-    'Group text opened',
+    'Relay group opened',
     'Tour scheduled',
     'Tour took place',
     'Outcome recorded',

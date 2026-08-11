@@ -488,7 +488,7 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     await world.activityEventsRepo.record({
       contactId: 'c-case',
       type: 'removed_from_group_text',
-      label: 'Removed from group text',
+      label: 'Removed from relay group',
       refType: 'conversation',
       refId: 'conv-live',
       at: '2026-07-15T04:00:00.000Z',
@@ -519,7 +519,7 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     await world.activityEventsRepo.record({
       contactId: 'c-case',
       type: 'removed_from_group_text',
-      label: 'Removed from group text',
+      label: 'Removed from relay group',
       refType: 'conversation',
       refId: 'conv-live',
       at: '2026-07-15T04:00:00.000Z', // AFTER the deferral was confirmed
@@ -584,7 +584,7 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     await world.activityEventsRepo.record({
       contactId: 'c-case',
       type: 'removed_from_group_text',
-      label: 'Removed from group text',
+      label: 'Removed from relay group',
       refType: 'conversation',
       refId: 'conv-live',
       at: '2026-07-14T18:00:00.000Z', // BEFORE the deferral was confirmed

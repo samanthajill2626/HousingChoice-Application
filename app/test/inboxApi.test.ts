@@ -404,7 +404,7 @@ describe('relay-group exclusion from the contact fan-out (spec M3 pin)', () => {
     // Both of the person's threads (phone AND email) are read...
     expect(world.conversations.get('conv-1to1')?.unread_count).toBe(0);
     expect(world.conversations.get('conv-email')?.unread_count).toBe(0);
-    // ...and the group text they are in keeps its unread: viewing a 1:1 tab must
+    // ...and the relay group they are in keeps its unread: viewing a 1:1 tab must
     // never clear the Group tab's dot.
     expect(world.conversations.get('conv-group')?.unread_count).toBe(6);
   });

@@ -60,7 +60,7 @@ test('has an ad-hoc number button that calls onAddAdHoc', async () => {
   expect(onAddAdHoc).toHaveBeenCalledTimes(1);
 });
 
-// ---- "Group texts" section (traffic-inferred relay groups) -------------------
+// ---- "Relay groups" section (traffic-inferred relay groups) -------------------
 
 const groups: GroupSnapshot[] = [
   {
@@ -80,7 +80,7 @@ const groups: GroupSnapshot[] = [
   },
 ];
 
-test('renders a Group texts section: one row per group with formatted pool + member count', () => {
+test('renders a Relay groups section: one row per group with formatted pool + member count', () => {
   render(
     <RosterRail
       personas={personas}
@@ -94,13 +94,13 @@ test('renders a Group texts section: one row per group with formatted pool + mem
       onSelectGroup={() => {}}
     />,
   );
-  expect(screen.getByRole('heading', { name: /group texts/i })).toBeInTheDocument();
+  expect(screen.getByRole('heading', { name: /relay groups/i })).toBeInTheDocument();
   const row = screen.getByRole('button', { name: /\(555\) 016-0001/ });
   expect(row).toHaveTextContent('2 members');
   expect(screen.getByRole('button', { name: /\(555\) 016-0002/ })).toHaveTextContent('1 member');
 });
 
-test('renders NO Group texts section when there are no groups', () => {
+test('renders NO Relay groups section when there are no groups', () => {
   render(
     <RosterRail
       personas={personas}
@@ -114,7 +114,7 @@ test('renders NO Group texts section when there are no groups', () => {
       onSelectGroup={() => {}}
     />,
   );
-  expect(screen.queryByRole('heading', { name: /group texts/i })).not.toBeInTheDocument();
+  expect(screen.queryByRole('heading', { name: /relay groups/i })).not.toBeInTheDocument();
 });
 
 test('clicking a group row calls onSelectGroup with the pool number (not onSelect)', async () => {

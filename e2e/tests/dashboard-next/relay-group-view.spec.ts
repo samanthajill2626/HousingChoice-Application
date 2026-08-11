@@ -5,7 +5,7 @@ import { MESSAGE_CATALOG } from '../../../app/src/messages/catalog.js';
 
 // Relay-group conversation view (/conversations/:conversationId) — spec §10.
 // Drives the real dashboard + API against the hermetic lane stack and proves the
-// group view end-to-end: open from the Inbox AND from a contact's Group-texts
+// group view end-to-end: open from the Inbox AND from a contact's Relay-groups
 // card, read the transcript, post a team reply and assert the FAN-OUT in the
 // fake-phones outbox, manage the roster (add by contact search + by raw phone,
 // then remove), and close the group (composer hard-disables).
@@ -72,7 +72,7 @@ test('Inbox: a relay group appears as a group row and opens the conversation vie
   await expect(page.getByRole('heading', { name: 'Inbox' })).toBeVisible();
 
   // The live relay group renders as a group row (glyph + member-name label +
-  // "Group text" chip). Headroom for the feed fetch under full-suite load.
+  // "Relay group" chip). Headroom for the feed fetch under full-suite load.
   const row = page.getByRole('link', { name: new RegExp(INBOX_LABEL) });
   await expect(row).toBeVisible({ timeout: 15_000 });
 
@@ -80,16 +80,16 @@ test('Inbox: a relay group appears as a group row and opens the conversation vie
   await expect(page).toHaveURL(new RegExp(`/conversations/${CONV_ID}$`));
 
   // Group view header: identity band + Open status pill.
-  await expect(page.getByText('Group text').first()).toBeVisible();
+  await expect(page.getByText('Relay group').first()).toBeVisible();
   await expect(page.getByText(INBOX_LABEL)).toBeVisible();
   await expect(page.getByText('Open').first()).toBeVisible();
 });
 
-test('Contact Group-texts card: a member row opens the conversation view', async ({ page }) => {
+test('Contact Relay-groups card: a member row opens the conversation view', async ({ page }) => {
   await devLogin(page);
   await page.goto(`${NEXT}/contacts/${DIANA_ID}`);
 
-  // Diana's "Group texts" card lists the group by the OTHER member ("With Gloria
+  // Diana's "Relay groups" card lists the group by the OTHER member ("With Gloria
   // Mensah"), linking to the conversation view (no longer the owner page).
   const cardRow = page.getByRole('link', { name: new RegExp(CARD_LABEL) });
   await expect(cardRow).toBeVisible({ timeout: 15_000 });
@@ -155,7 +155,7 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await expect(list.getByText('Leon Abara')).toBeVisible();
   // The join is ANNOUNCED in the thread (2026-07-14 visibility rule): an
   // "Automated" bubble naming the new member appears via the SSE refetch.
-  await expect(page.getByText('Leon Abara joined this group text', { exact: false })).toBeVisible({
+  await expect(page.getByText('Leon Abara joined this group chat', { exact: false })).toBeVisible({
     timeout: 15_000,
   });
 
@@ -166,7 +166,7 @@ test('Roster: add by contact search + by raw phone, then remove', async ({ page 
   await expect(list.getByRole('listitem')).toHaveCount(4);
   // A phone-only member has no name — the join notice uses the neutral label.
   await expect(
-    page.getByText('A new member joined this group text', { exact: false }),
+    page.getByText('A new member joined this group chat', { exact: false }),
   ).toBeVisible({ timeout: 15_000 });
 
   // --- Remove a member (× → confirm) → roster shrinks ------------------------

@@ -12,10 +12,10 @@ import { APP_NUMBER } from '../../scenarios/steps.js';
 //     State "active", an open group, retirement "-" because an open group is not
 //     retirement-eligible); expanding the row reveals the group row, which links
 //     to its conversation thread; following the link lands on the group view.
-//     An admin sees BOTH blocks: "Our number" and "Group text numbers".
+//     An admin sees BOTH blocks: "Our number" and "Relay group numbers".
 //   - VA/default: the "Phone numbers" tab IS visible and the route is NOT
 //     guarded any more - a VA lands on /settings/numbers, sees OUR one business
-//     number, and sees NOTHING of the pool: no "Group text numbers" block, no
+//     number, and sees NOTHING of the pool: no "Relay group numbers" block, no
 //     table, and no /api/pool-numbers request is ever fired (that route stays
 //     admin-only on the server - this is UX gating, not the security boundary).
 // The lean profile the harness boots seeds ZERO pool numbers, so the created
@@ -94,7 +94,7 @@ test.describe('Settings - Phone numbers (admin path)', () => {
     await expect(page.getByText(formatPhoneDisplay(APP_NUMBER))).toBeVisible();
 
     // BLOCK 2 - the admin-only pool inventory.
-    await expect(page.getByRole('heading', { name: 'Group text numbers', level: 3 })).toBeVisible();
+    await expect(page.getByRole('heading', { name: 'Relay group numbers', level: 3 })).toBeVisible();
 
     // The pool number's row: formatted number, State "active" (the raw lowercase
     // lifecycle value), an open group, and retirement "-" (an open group is never
@@ -123,7 +123,7 @@ test.describe('Settings - Phone numbers (admin path)', () => {
     // Following it lands on the group thread view (URL + a stable group-view signal).
     await groupLink.click();
     await expect(page).toHaveURL(new RegExp(`/conversations/${group.conversationId}$`));
-    await expect(page.getByText('Group text').first()).toBeVisible({ timeout: 15_000 });
+    await expect(page.getByText('Relay group').first()).toBeVisible({ timeout: 15_000 });
   });
 });
 
@@ -166,11 +166,11 @@ test.describe('Settings - Phone numbers (VA path)', () => {
     // table (the "People burned" column is unique to it), its error alert, or
     // its "no numbers yet" empty state (which would be a false claim, not just
     // a leak). The whole block is gated, not merely the table.
-    await expect(section.getByRole('heading', { name: 'Group text numbers' })).toHaveCount(0);
+    await expect(section.getByRole('heading', { name: 'Relay group numbers' })).toHaveCount(0);
     await expect(section.getByRole('columnheader', { name: 'People burned' })).toHaveCount(0);
     await expect(section.getByRole('table')).toHaveCount(0);
     await expect(section.getByRole('alert')).toHaveCount(0);
-    await expect(section.getByText(/No group text numbers yet/)).toHaveCount(0);
+    await expect(section.getByText(/No relay group numbers yet/)).toHaveCount(0);
 
     // ...and no admin-only request was ever fired (the server would 403 it; the
     // UI must not ask in the first place).

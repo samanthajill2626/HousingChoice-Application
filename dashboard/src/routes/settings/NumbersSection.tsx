@@ -3,7 +3,7 @@
 //   1. "Our number" - OUR one business number (env-sourced, read-only), shown
 //      to EVERY authenticated user. It is what this app texts and calls from;
 //      it is printed on public flyers, so it is not a contact's PII.
-//   2. "Group text numbers" - the ADMIN-ONLY relay pool inventory. A read-only
+//   2. "Relay group numbers" - the ADMIN-ONLY relay pool inventory. A read-only
 //      table of every pool number: state, group counts, burn count, last
 //      activity / last-closed stamps, and a retirement countdown that MIRRORS
 //      the gated sweep exactly. Each number expands into its group history
@@ -223,7 +223,7 @@ export function NumbersSection(): React.JSX.Element {
       </h2>
       <OurNumber status={settingsStatus} number={businessPhoneNumber} />
 
-      <h3 className={styles.blockHeading}>Group text numbers</h3>
+      <h3 className={styles.blockHeading}>Relay group numbers</h3>
       <p className={styles.lede}>
         Every relay number the pool holds - its usage history, burn count, and
         retirement eligibility. Read-only: retirement runs as the gated sweep.
@@ -235,13 +235,13 @@ export function NumbersSection(): React.JSX.Element {
         </div>
       ) : status === 'error' ? (
         <div role="alert" className={styles.errorBlock}>
-          <p>Couldn't load the group text numbers.</p>
+          <p>Couldn't load the relay group numbers.</p>
           <Button variant="secondary" size="sm" onClick={retry}>
             Retry
           </Button>
         </div>
       ) : numbers.length === 0 ? (
-        <p className={styles.empty}>No group text numbers yet - a number is provisioned with the first group text.</p>
+        <p className={styles.empty}>No relay group numbers yet - a number is provisioned with the first relay group.</p>
       ) : (
         <>
           <ul className={styles.counts} aria-label="Pool number counts">
@@ -270,7 +270,7 @@ export function NumbersSection(): React.JSX.Element {
           </div>
 
           {visible.length === 0 ? (
-            <p className={styles.empty}>No group text numbers match this filter.</p>
+            <p className={styles.empty}>No relay group numbers match this filter.</p>
           ) : (
             <div className={styles.tableWrap}>
               <table className={styles.table}>

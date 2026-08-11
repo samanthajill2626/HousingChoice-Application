@@ -2,7 +2,7 @@
 // queue from useToday() as grouped sections of white row cards (who - why - an
 // optional red urgency chip - a "Placement - Touring"-style tag - an amber attention
 // dot), each row a link to its placement/contact/conversation. A distinct
-// "Group texts to close" section (relay-number-lifecycle D5) leads the ready
+// "Relay groups to close" section (relay-number-lifecycle D5) leads the ready
 // content: each still-open relay group whose 28-day close-nag is due, with Close /
 // Keep-open actions. Empty groups are skipped; loading shows a Spinner, error an
 // inline message, all-empty (no items AND no nags) a friendly "all caught up"
@@ -82,7 +82,7 @@ function nagOpenHref(nag: RelayCloseNag): string {
   return `/conversations/${nag.conversationId}`;
 }
 
-/** One "close this still-open group text?" row (D5). The pool number is display
+/** One "close this still-open relay group?" row (D5). The pool number is display
  *  DATA (precedent: the opted-out Today card shows a phone). Close -> the existing
  *  close endpoint (final message + keeps the number); Keep open -> the 28-day
  *  defer. Either success dismisses the row (the server also drops it next refetch). */
@@ -123,8 +123,8 @@ function RelayCloseNagRow({
           <span className={styles.who}>{number}</span>
           <span className={styles.why}>
             {who !== null
-              ? `Group text for ${who} is still open - close it?`
-              : 'Group text is still open - close it?'}
+              ? `Relay group for ${who} is still open - close it?`
+              : 'Relay group is still open - close it?'}
           </span>
         </span>
         <span className={styles.nagActions}>
@@ -184,8 +184,8 @@ export function Today(): React.JSX.Element {
 
       {status === 'ready' && hasNags ? (
         <section className={styles.group}>
-          <h2 className={styles.groupHeading}>Group texts to close</h2>
-          <ul className={styles.rows} aria-label="Group texts to close">
+          <h2 className={styles.groupHeading}>Relay groups to close</h2>
+          <ul className={styles.rows} aria-label="Relay groups to close">
             {relayCloseNags.map((nag) => (
               <RelayCloseNagRow
                 key={nag.conversationId}

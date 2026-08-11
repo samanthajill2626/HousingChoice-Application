@@ -1,5 +1,5 @@
 // GET /api/pool-numbers - the admin-only, read-only pool-number inventory
-// (group text numbers). Asserts: the requireRole('admin') gate (VA -> 403), the
+// (relay group numbers). Asserts: the requireRole('admin') gate (VA -> 403), the
 // pool-record -> groups join (open/closed counts + newest-first order), the
 // burnedCount (Set-size / absent), the retire mirror boundaries (injected clock),
 // per-group label precedence + closedAt semantics, and two PII invariants
@@ -366,7 +366,7 @@ describe('GET /api/pool-numbers - warming numbers', () => {
 });
 
 describe('GET /api/pool-numbers - group label precedence', () => {
-  it('names > tag > "Group text"', async () => {
+  it('names > tag > "Relay group"', async () => {
     const world = createFakeWorld();
     const pn = '+15551230200';
     const withNames = await seedGroup(world, pn, {
@@ -394,7 +394,7 @@ describe('GET /api/pool-numbers - group label precedence', () => {
     expect(byId(withNames.conversationId)?.label).toBe('With Alice & Bob');
     expect(byId(withNames.conversationId)?.memberCount).toBe(2);
     expect(byId(withTag.conversationId)?.label).toBe('Maple St lease-up');
-    expect(byId(bare.conversationId)?.label).toBe('Group text');
+    expect(byId(bare.conversationId)?.label).toBe('Relay group');
   });
 });
 

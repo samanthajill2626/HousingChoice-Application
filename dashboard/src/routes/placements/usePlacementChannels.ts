@@ -1,9 +1,9 @@
 // usePlacementChannels - resolves the placement's conversation channels (the
-// group text + ONE 1:1 per person on the placement) and keeps their unread dots
+// relay group + ONE 1:1 per person on the placement) and keeps their unread dots
 // live via `conversation.updated`. Structural mirror of
 // tours/useTourChannels.ts - only the channel SOURCES differ:
 //
-//   - group  = placement.group_thread (absent until [Open group text] provisions
+//   - group  = placement.group_thread (absent until [Open relay group] provisions
 //              it via provisionPlacementRelay) -> {conversationId, unread}: ONE
 //              relay thread the Group tab mounts.
 //   - people = one channel per PersonChannelInput the CALLER passes

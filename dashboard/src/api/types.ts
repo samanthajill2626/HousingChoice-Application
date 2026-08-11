@@ -66,7 +66,7 @@ export interface AdminUserView {
   inbound_voice_line?: boolean;
 }
 
-// --- Settings > Phone numbers: the group text pool (admin-only inventory) ----
+// --- Settings > Phone numbers: the relay group pool (admin-only inventory) ----
 // Copied verbatim from the backend wire shape (app/src/routes/poolNumbersAdmin.ts).
 // The dashboard is a separate package and cannot import from app/src, so these
 // are duplicated; keep them in sync with the router when the shape changes.
@@ -369,7 +369,7 @@ export interface TodayItem {
   tag?: string; // "Placement - Touring"
   attention?: boolean;
 }
-/** One "close this still-open group text?" nag on the Today queue (D5). Built
+/** One "close this still-open relay group?" nag on the Today queue (D5). Built
  *  server-side from open relay groups whose 28-day close-nag is due. A SEPARATE
  *  list from `items` (not a TodayItem). Mirrors the app wire shape verbatim. */
 export interface RelayCloseNag {
@@ -859,7 +859,7 @@ export type RosterMemberRole =
   | 'added'
   | 'removed_contact';
 
-/** Whether the GROUP TEXT can reach this member (the send path's own view). */
+/** Whether the RELAY GROUP can reach this member (the send path's own view). */
 export type RosterReachability = 'reachable' | 'no_phone' | 'opted_out';
 
 export interface RosterMemberView {
@@ -906,7 +906,7 @@ export type RosterActionSkipReason =
 /**
  * One change confirmed inside QUIET HOURS and waiting for the window to end
  * (spec 5.3 / 6.5). A pending `add_member` is deliberately NOT in `members`:
- * membership defers WITH the message (D7), so nobody joins a group text before
+ * membership defers WITH the message (D7), so nobody joins a relay group before
  * the group has been told.
  */
 export interface RosterPendingAction {
@@ -1130,7 +1130,7 @@ export const REMINDER_SKIP_REASON_LABELS: Readonly<
   quiet_hours_superseded: 'superseded by a later reminder',
   past_event: 'would land after the tour starts',
   tenant_not_on_roster: "tenant not on this tour's roster",
-  roster_unavailable: "couldn't read who is on the group text - gave up after an hour",
+  roster_unavailable: "couldn't read who is on the relay group - gave up after an hour",
   invalid_schedule: 'schedule unusable',
 };
 
@@ -1417,7 +1417,7 @@ export type ConsentMethod =
 /** Outbound delivery state machine (doc §7.1). `sent` is NOT `delivered`. */
 export type DeliveryStatus =
   // 'queued_pending' (relay number buying strategy T7) is a PRE-queued hold: a
-  // team message composed on a `connecting` group text (its number is still
+  // team message composed on a `connecting` relay group (its number is still
   // warming / A2P-registering) is persisted with this state and sent to nobody
   // until the group connects, when it flushes into the normal queued -> ... path.
   | 'queued_pending'
@@ -2258,7 +2258,7 @@ export interface ContactMediaItem {
   conversationId: string;
 }
 
-// --- Relay-group memberships (the contact file's "Group texts" card) --------
+// --- Relay-group memberships (the contact file's "Relay groups" card) --------
 // Copied verbatim from the backend wire shape (routes/contacts.ts
 // RelayGroupRow — GET /api/contacts/:id/relay-groups). One row per relay_group
 // thread whose roster includes this contact (matched server-side by contactId

@@ -327,7 +327,7 @@ describe('PlacementConversation - group tab', () => {
       }),
     );
 
-    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute(
+    expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute(
       'aria-selected',
       'true',
     );
@@ -337,17 +337,17 @@ describe('PlacementConversation - group tab', () => {
     expect(getContactTimeline).not.toHaveBeenCalled();
   });
 
-  it('with no thread yet, [Open group text] provisions the relay and injects its id', async () => {
+  it('with no thread yet, [Open relay group] provisions the relay and injects its id', async () => {
     // Group provisioning stays PAGE-LOCAL on the placement side (the tour page
     // delegates to a parent onOpenGroup): provisionPlacementRelay, then inject
     // the fresh id on the GROUP key so the relay thread mounts at once.
     const channels = makeChannels();
     renderConvo(baseProps({ channels }));
 
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
-    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
+    expect(screen.getByText('No relay group yet')).toBeInTheDocument();
 
-    await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
     await waitFor(() => expect(provisionPlacementRelay).toHaveBeenCalledWith('p1'));
     await waitFor(() =>
       expect(channels.setGroupConversationId).toHaveBeenCalledWith('g-new'),

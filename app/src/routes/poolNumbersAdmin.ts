@@ -1,4 +1,4 @@
-// Group text numbers - the admin-only, READ-ONLY pool-number inventory
+// Relay group numbers - the admin-only, READ-ONLY pool-number inventory
 // (spec docs/superpowers/specs/2026-07-18-pool-numbers-admin-design.md sec 3).
 //
 //   GET /api/pool-numbers -> { numbers: PoolNumberRow[] }
@@ -95,7 +95,7 @@ const LIFECYCLE_RANK: Record<PoolNumberLifecycleState, number> = {
  * prefix (admin view - no "self" to exclude); (2) the placement_tag, read
  * DEFENSIVELY via the index signature (it is written by createRelayGroup but not
  * declared on ConversationItem - mirrors inbox.ts / contacts.ts); (3) the literal
- * 'Group text'. No pool-number rung - the number is the parent row's own column.
+ * 'Relay group'. No pool-number rung - the number is the parent row's own column.
  */
 function serverLabel(conv: ConversationItem): string {
   const names = (conv.participants ?? [])
@@ -104,7 +104,7 @@ function serverLabel(conv: ConversationItem): string {
   if (names.length > 0) return `With ${names.join(' & ')}`;
   const tag = conv['placement_tag'];
   if (typeof tag === 'string' && tag.length > 0) return tag;
-  return 'Group text';
+  return 'Relay group';
 }
 
 /**

@@ -351,7 +351,7 @@ export interface RunDueTourRemindersDeps {
   /**
    * Message persistence for the GROUP route: sendRelayAnnouncement stores each
    * rung as a system announcement in the relay thread (founder decision
-   * 2026-07-14: everything sent into a group text must be visible in its
+   * 2026-07-14: everything sent into a relay group must be visible in its
    * dashboard thread) and records per-member delivery slots on it.
    */
   messagesRepo: MessagesRepo;
@@ -895,7 +895,7 @@ export async function resolveUsableGroup(
  * Send one reminder rung into the tour's masked group: claim ONCE, then hand
  * the rung to sendRelayAnnouncement — the relay.intro chain. It persists the
  * rung as a SYSTEM announcement in the thread (founder decision 2026-07-14:
- * everything sent into a group text must be visible in its dashboard thread),
+ * everything sent into a relay group must be visible in its dashboard thread),
  * then sends per member FROM the pool number with opt-out suppression, A2P
  * pacing, and per-member delivery slots. sendMessageService is unusable here
  * (it throws RelaySendNotSupportedError for relay_group threads) and the

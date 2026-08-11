@@ -20,7 +20,7 @@
 // scheme GET /api/conversations uses.
 //
 // relay_group conversations are a SECOND row source (kind='relay_group'):
-// masked group-text threads carry last_activity_at / status / unread_count /
+// masked relay-group threads carry last_activity_at / status / unread_count /
 // last_message_preview just like a 1:1, so they are folded into the same feed
 // (queried via conversationsRepo.listRelayGroups, NOT the contact pager) and
 // merge-sorted by last_activity_at. To keep paging split-proof they are emitted
@@ -513,7 +513,7 @@ export async function aggregateInbox(
    * Build the relay_group row for one relay conversation. Relay groups are the
    * SECOND row source (queried via listRelayGroups, not the contact pager).
    * Label precedence mirrors the dashboard's GroupTextsCard.groupLabel: other
-   * member names → operator tag → formatted pool number → "Group text".
+   * member names -> operator tag -> formatted pool number -> "Relay group".
    *
    * PII: the returned row carries names/preview to the authed client (like the
    * contact rows); log lines stay counts/IDs only.
@@ -533,7 +533,7 @@ export async function aggregateInbox(
     } else if (typeof conv.pool_number === 'string' && conv.pool_number.length > 0) {
       label = formatPhoneForDisplay(conv.pool_number) ?? conv.pool_number;
     } else {
-      label = 'Group text';
+      label = 'Relay group';
     }
 
     const preview =

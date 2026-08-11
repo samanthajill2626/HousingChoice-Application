@@ -174,7 +174,7 @@ describe('App shell', () => {
   });
 });
 
-// ---- Relay groups (Group texts) ----------------------------------------------
+// ---- Relay groups (Relay groups) ----------------------------------------------
 
 const relayGroup: GroupSnapshot = {
   poolNumber: '+15550160001',

@@ -1181,9 +1181,9 @@ export async function getContactMedia(
   return res.media;
 }
 
-/** GET /api/contacts/:id/relay-groups — the contact's group-text (relay)
+/** GET /api/contacts/:id/relay-groups - the contact's relay-group
  *  memberships, open + closed, newest-activity-first. 404s on a backend
- *  without the route → the "Group texts" card renders its pending state. */
+ *  without the route -> the "Relay groups" card renders its pending state. */
 export async function getContactRelayGroups(
   contactId: string,
   signal?: AbortSignal,
@@ -1600,7 +1600,7 @@ export function deleteBroadcast(broadcastId: string): Promise<{ deleted: true }>
   });
 }
 
-// --- Settings > Phone numbers: the group text pool (/api/pool-numbers) -------
+// --- Settings > Phone numbers: the relay group pool (/api/pool-numbers) -------
 // The ADMIN-ONLY pool-number inventory (the other half of that section, OUR one
 // business number, rides on /api/settings and is visible to everyone).
 // requireRole('admin') upstream; a VA gets 403.
@@ -1883,7 +1883,7 @@ export async function getPlacementRoster(
 //
 //   PLAN  (`.../roster/members`, `.../roster/reset`)  - no thread exists yet.
 //         Silent: nothing has been sent, the roster is only a plan. These
-//         REFUSE with 409 `thread_exists` the moment a group text exists, and
+//         REFUSE with 409 `thread_exists` the moment a relay group exists, and
 //         THE DASHBOARD MUST NEVER AUTO-RESUBMIT THAT EDIT through the live
 //         endpoints - a silent plan edit would escalate into a `member_added`
 //         text nobody confirmed. Refetch, surface the live state, and let the
@@ -1979,7 +1979,7 @@ export async function removeTourRosterLiveMember(
   );
 }
 
-/** GET /api/tours/:tourId/roster/preview-open - what opening the group text
+/** GET /api/tours/:tourId/roster/preview-open - what opening the relay group
  *  would send: the server-composed intro body, per-member deliverability, the
  *  distinct reachable count, and the quiet state. 409 relay_already_provisioned
  *  once a thread exists - refetch, never dialog. */

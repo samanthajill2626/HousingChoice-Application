@@ -85,7 +85,7 @@ describe('InboxRow', () => {
     expect(screen.getByText('Call')).toBeInTheDocument();
   });
 
-  it('renders a relay_group row with a Group text chip, linking to the conversation view', () => {
+  it('renders a relay_group row with a Relay group chip, linking to the conversation view', () => {
     renderRow(
       mkRow({
         kind: 'relay_group',
@@ -101,7 +101,7 @@ describe('InboxRow', () => {
     );
     const link = screen.getByRole('link', { name: /With Keisha & Lars/ });
     expect(link).toHaveAttribute('href', '/conversations/conv-g1');
-    expect(screen.getByText('Group text')).toBeInTheDocument();
+    expect(screen.getByText('Relay group')).toBeInTheDocument();
     expect(within(link).getByText(/See you at 3/)).toBeInTheDocument();
   });
 

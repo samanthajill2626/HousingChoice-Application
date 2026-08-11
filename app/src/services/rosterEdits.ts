@@ -64,14 +64,14 @@ export type RosterEditOutcome = { ok: true } | { ok: false; refusal: RosterEditR
 export const ROSTER_THREAD_EXISTS: RosterEditRefusal = {
   status: 409,
   error: 'thread_exists',
-  message: 'This group text is already open. Edit its members from the live group.',
+  message: 'This relay group is already open. Edit its members from the live group.',
 };
 
 /** No thread yet: the roster is a PLAN, edited through the plan endpoints. */
 export const ROSTER_NO_THREAD: RosterEditRefusal = {
   status: 409,
   error: 'no_thread',
-  message: 'This roster has no group text yet, so there is nothing to change live.',
+  message: 'This roster has no relay group yet, so there is nothing to change live.',
 };
 
 /**
@@ -493,7 +493,7 @@ export async function resolveRosterCandidate(
       refusal: {
         status: 400,
         error: 'contact_unreachable',
-        message: 'This contact has no phone number, so they cannot join a group text.',
+        message: 'This contact has no phone number, so they cannot join a relay group.',
       },
     };
   }

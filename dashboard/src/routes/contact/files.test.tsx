@@ -230,12 +230,12 @@ describe('TenantFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
-  it('shows "No group texts yet." when the relay slice is ready but empty', () => {
+  it('shows "No relay groups yet." when the relay slice is ready but empty', () => {
     renderIt({ relayGroupsPending: false, relayGroups: [] });
-    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
+    expect(screen.getByText('No relay groups yet.')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows (relay memberships) linking to the conversation view', () => {
+  it('renders Relay-groups rows (relay memberships) linking to the conversation view', () => {
     renderIt({
       relayGroupsPending: false,
       relayGroups: [
@@ -384,7 +384,7 @@ describe('LandlordFile', () => {
     expect(screen.getByText('Requested')).toBeInTheDocument();
   });
 
-  it('renders Group-texts rows — a closed group links to its conversation view', () => {
+  it('renders Relay-groups rows - a closed group links to its conversation view', () => {
     renderIt({
       relayGroups: [
         {

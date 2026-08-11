@@ -113,7 +113,7 @@ export interface PlacementItem {
   /** The placement's relay group conversationId (set when the relay is set up). */
   group_thread?: string;
   /**
-   * contact-rosters (spec D1): the roster PLAN - who this placement's group text
+   * contact-rosters (spec D1): the roster PLAN - who this placement's relay group
    * will open with. ABSENT is the normal state and means "resolve from the
    * property" (tenant + the unit's primaryContact). Inherited from a plan-only
    * tour at conversion (D4), materialized on the first human edit, and CONSUMED

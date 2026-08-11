@@ -1,4 +1,4 @@
-// Opening a tour's / placement's group text - the ONE implementation of
+// Opening a tour's / placement's relay group - the ONE implementation of
 // "provision the relay group for this owner" (contact-rosters Task 13).
 //
 // Extracted VERBATIM from the two route bodies (routes/tours.ts POST
@@ -457,7 +457,7 @@ export async function openTourGroup(
     {
       members,
       type: 'tour_group_opened',
-      label: 'Group text opened',
+      label: 'Relay group opened',
       refType: 'tour',
       refId: tourId,
     },
@@ -546,7 +546,7 @@ async function describeThinPlacementRoster(
 /**
  * The placement twin of `tourOpenGuard`, minus the pointer check (which needs a
  * conversation READ - an OPEN or CONNECTING relay is what blocks a re-open, a
- * closed one does not). A terminal placement gets no new group text.
+ * closed one does not). A terminal placement gets no new relay group.
  */
 export function placementOpenGuard(item: PlacementItem): RosterOpenRefusal | undefined {
   if (TERMINAL_STAGES.has(item.stage)) {
@@ -554,7 +554,7 @@ export function placementOpenGuard(item: PlacementItem): RosterOpenRefusal | und
       status: 409,
       body: {
         error: 'placement_not_active',
-        detail: `cannot open a group text on a ${item.stage} placement`,
+        detail: `cannot open a relay group on a ${item.stage} placement`,
       },
     };
   }
@@ -723,7 +723,7 @@ export async function openPlacementGroup(
     {
       members,
       type: 'placement_group_opened',
-      label: 'Group text opened',
+      label: 'Relay group opened',
       refType: 'placement',
       refId: placementId,
     },

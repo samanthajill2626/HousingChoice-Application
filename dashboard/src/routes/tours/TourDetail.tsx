@@ -234,7 +234,7 @@ function TourDetailLoaded({
   const [actionError, setActionError] = useState<string | null>(null);
   // "Send no-show check-in" seed handed to TourConversation (nonce bumps per click).
   const [noShowSeed, setNoShowSeed] = useState<{ body: string; nonce: number } | null>(null);
-  // The "Also close the group text?" ask, opened AFTER a terminal outcome saves.
+  // The "Also close the relay group?" ask, opened AFTER a terminal outcome saves.
   const [closeAsk, setCloseAsk] = useState<{ conversationId: string; memberSummary: string } | null>(
     null,
   );
@@ -259,19 +259,19 @@ function TourDetailLoaded({
   const canSendNoShowCheckin =
     startPassed && (tour.status === 'scheduled' || tour.status === 'no_show');
   // The ROSTER's own gate: fewer than two reachable members and there is nothing
-  // to open a group text with. Say so on a DISABLED control (the People card
+  // to open a relay group with. Say so on a DISABLED control (the People card
   // already carries the reason) instead of failing at click time with the
   // route's 400 relay_member_unresolvable - the route keeps its guard regardless.
   const rosterTooThin = roster.roster !== null && !roster.roster.canOpenGroup;
   const canOpenGroup =
     tour.groupThreadId === undefined && tour.status !== 'canceled' && tour.status !== 'closed';
   const openGroupBlocked = canOpenGroup && rosterTooThin;
-  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // Said ONCE for this page: the left pane's [Open relay group] button AND the
   // header kebab's menu item are the same click, so they carry the same reason
   // and the same disabled state (spec 6.2 - the reason on a disabled control
   // rather than a click-time 400 relay_member_unresolvable).
   const openGroupBlockedReason = openGroupBlocked
-    ? 'Not enough people to open a group text - two reachable members are needed'
+    ? 'Not enough people to open a relay group - two reachable members are needed'
     : undefined;
   // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
   // again would silently supersede it with a new dueAt, so the control says
@@ -336,7 +336,7 @@ function TourDetailLoaded({
       });
   };
 
-  // Opening a group text SENDS the intro to real people, so it confirms first
+  // Opening a relay group SENDS the intro to real people, so it confirms first
   // (spec 6.3): fetch the server-composed preview, show it, and provision only
   // on confirm. Shared by the header kebab AND the left-pane empty state.
   //
@@ -353,7 +353,7 @@ function TourDetailLoaded({
       if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
         roster.refetch();
       } else {
-        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open relay group');
       }
     } finally {
       setBusy(false);
@@ -395,7 +395,7 @@ function TourDetailLoaded({
     setActionError(null);
     void runOpenGroup(true)
       .catch((err: unknown) => {
-        setActionError(err instanceof ApiError ? err.message : 'Failed to open group text');
+        setActionError(err instanceof ApiError ? err.message : 'Failed to open relay group');
       })
       .finally(() => setBusy(false));
   };
@@ -470,7 +470,7 @@ function TourDetailLoaded({
         );
       }
     } else {
-      // not-a-fit closed the TOUR, not the group text - offer to close the group.
+      // not-a-fit closed the TOUR, not the relay group - offer to close the group.
       void maybeAskCloseGroup();
     }
   };
@@ -744,9 +744,9 @@ function TourDetailLoaded({
       ) : null}
       {openPreview !== null ? (
         <RosterConfirmDialog
-          title="Open the group text?"
+          title="Open the relay group?"
           preview={openPreview}
-          confirmLabel="Open group text"
+          confirmLabel="Open relay group"
           deferLabel="Open"
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}

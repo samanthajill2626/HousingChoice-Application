@@ -583,7 +583,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     ...(tour.roster !== undefined && { roster: tour.roster }),
     ...(tour.rosterVersion !== undefined && { rosterVersion: tour.rosterVersion }),
     // Carried so a lost MATERIALIZE can tell "someone else materialized first"
-    // from "a group text just opened" (the latter is 409 thread_exists).
+    // from "a relay group just opened" (the latter is 409 thread_exists).
     ...(tour.groupThreadId !== undefined && { groupThreadId: tour.groupThreadId }),
   });
 
@@ -746,7 +746,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     const announce = conversation.status !== 'closed';
 
     // QUIET-HOURS DEFERRAL (D7): only an ANNOUNCING add defers, and membership
-    // defers WITH the message - nobody joins a group text before the group is
+    // defers WITH the message - nobody joins a relay group before the group is
     // told. `?force=send_now` is the dialog's "Send now anyway".
     if (announce && !isForceSendNow(req)) {
       const quiet = await quietHoursState();
@@ -1229,7 +1229,7 @@ export function createToursRouter(deps: ToursRouterDeps = {}): Router {
     // move-forward, which continues into a placement and keeps the thread) -
     // arms the 28-day close-nag (set-if-absent) on the group so a forgotten
     // group still surfaces on Today even if the operator dismissed the inline
-    // "Also close the group text?" ask. Best-effort - never fails the patch.
+    // "Also close the relay group?" ask. Best-effort - never fails the patch.
     const tourWentCanceled = effectiveStatus === 'canceled' && currentStatus !== 'canceled';
     const tourNotAFit =
       newMoveForward === false || (outcomeNewlySet && newOutcome === 'not_a_fit');

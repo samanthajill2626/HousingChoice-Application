@@ -267,14 +267,14 @@ describe('Timeline', () => {
       id: 'ms-group-open',
       at: '2026-06-08T08:00:00',
       type: 'tour_group_opened',
-      label: 'Group text opened',
+      label: 'Relay group opened',
       refType: 'tour',
       refId: 't1',
     };
     renderTimeline({ items: [groupOpened] });
-    const link = screen.getByRole('link', { name: 'Group text opened' });
+    const link = screen.getByRole('link', { name: 'Relay group opened' });
     expect(link).toHaveAttribute('href', '/tours/t1');
-    // Same purple family as added_to_group_text - a group-text membership cue.
+    // Same purple family as added_to_group_text - a relay-group membership cue.
     expect(link.parentElement?.className).toContain('purple');
   });
 
@@ -475,7 +475,7 @@ describe('Timeline', () => {
     });
     const foot = screen.getByText(/Reply sends to/);
     expect(foot).toHaveTextContent(
-      'Reply sends to everyone in this group text (Ann, (404) 555-0122)',
+      'Reply sends to everyone in this relay group (Ann, (404) 555-0122)',
     );
     // The single-target copy (incl. the replyToPhone prop the helper passes) is gone.
     expect(foot).not.toHaveTextContent(/\(470\) 555-0148/);
@@ -485,7 +485,7 @@ describe('Timeline', () => {
   it('a relay GROUP with an unloaded roster keeps the honest "everyone" line, no list', () => {
     renderTimeline({ items: [], relayRoster: [] });
     expect(screen.getByText(/Reply sends to/)).toHaveTextContent(
-      'Reply sends to everyone in this group text',
+      'Reply sends to everyone in this relay group',
     );
     expect(screen.getByText(/Reply sends to/)).not.toHaveTextContent('(');
   });
@@ -885,7 +885,7 @@ describe('Timeline relay-group annotations', () => {
     expect(chip).toHaveAttribute('title', expect.stringContaining('error 30005'));
   });
 
-  it('surfaces the A2P-unregistered code (30034) on the rollup — the group-text bug now shows WHY', () => {
+  it('surfaces the A2P-unregistered code (30034) on the rollup - the relay-group bug now shows WHY', () => {
     const bothFailed: TimelineItem = {
       ...RELAY_OUT,
       delivery_recipients: {

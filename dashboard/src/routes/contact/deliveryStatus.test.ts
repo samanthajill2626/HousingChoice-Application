@@ -61,7 +61,7 @@ describe('presentRelayDelivery', () => {
   });
 
   it('surfaces the A2P-unregistered code (30034) and dedupes repeated codes across legs', () => {
-    // Both intro legs bounce 30034 (the group-text bug): one reason, not two.
+    // Both intro legs bounce 30034 (the relay-group bug): one reason, not two.
     expect(
       presentRelayDelivery([
         { status: 'undelivered', errorCode: '30034' },

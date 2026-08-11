@@ -1,7 +1,7 @@
 // Relay-group SYSTEM ANNOUNCEMENTS — the one chain behind every app-authored
 // group send (the relay.intro welcome + the tour-reminder group rungs).
 //
-// Founder decision 2026-07-14: everything sent into a group text MUST be
+// Founder decision 2026-07-14: everything sent into a relay group MUST be
 // visible in its dashboard thread. Announcements previously sent per-member
 // provider messages and persisted NOTHING, so the thread showed an empty
 // timeline while members' phones received texts. This service persists the

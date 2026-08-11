@@ -593,7 +593,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       auditRepo: audit,
     }),
   );
-  // Group text numbers - admin-only READ-ONLY pool-number inventory
+  // Relay group numbers - admin-only READ-ONLY pool-number inventory
   // (GET /api/pool-numbers; requireRole admin inside the router). Reads the pool
   // repo (listByState) + each number's byPoolNumber group history; the retire
   // block mirrors services/poolNumbers.ts retireEligible.

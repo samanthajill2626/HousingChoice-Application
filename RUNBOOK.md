@@ -90,6 +90,23 @@ A new table or GSI lands in a real env via **`npm run plan -- <env>` + `npm run 
 NOT via `deploy:<env>` (which only rolls the app image). **Apply the schema BEFORE deploying the code
 that reads/writes it**, or the new endpoints 500 against a missing table/index.
 
+### Relay label rename: MIXED activity history on dev/prod (2026-08-10, no action)
+
+The group-texting S1 slice renamed relay's staff copy from "Group text" to
+**"Relay group"** (the native carrier type now owns "Group text"; see
+`documentation/GLOSSARY.md`). Three of those strings are PERSISTED into
+`activity_events` rows at write time, not rendered from a map:
+`'Group text opened'` (rosterProvision), `'Added to group text'` and
+`'Removed from group text'` (relayMembers). Renaming the writers changes FUTURE
+rows only, so **existing dev and prod rows keep their old text**: a contact's
+Timeline can show "Group text opened" on an old pin and "Relay group opened" on
+a new one. This is deliberate - no back-compat display shim and no backfill
+(the founder reads these as history, not as a live label). The TOUR page is
+different: it maps the event TYPE to a label at render time
+(`tourActivityFormat.ts`), so tour Activity rows re-label retroactively and the
+two surfaces will disagree about the same old event. Expected; not a bug.
+Reseeded environments (all e2e lanes, any dev wipe) show the new text only.
+
 ### AI extraction run log (owed post-merge operation)
 
 The admin-only forensic log is at `/settings/ai-runs`. It retains each `ai_runs` envelope for 90 days;
@@ -304,7 +321,7 @@ npm run wipe:dev -- --yes   # EXECUTE (destructive): actually deletes, then rest
 
 ### Pool-number audit (Twilio ↔ pool_numbers reconciliation)
 
-Relay/group-text numbers live in two places: Twilio (the purchased numbers, attached to
+Relay group numbers live in two places: Twilio (the purchased numbers, attached to
 our Messaging Service) and the `hc-<env>-pool_numbers` table (the app's routing +
 lifecycle record). A wipe empties the table but leaves the Twilio side untouched, so the
 numbers become invisible to the app (inbound relay SMS stops routing; the next relay
@@ -536,7 +553,7 @@ number warms, so the readiness gate is live before it is needed):**
    the very first warmed number's registration event has somewhere to land.
 
 **Verify a live event.** With the sink `active` and `RELAY_LIVE_PROVISIONING` on,
-warm a number (open a relay group text for a fresh pair, or let the buffer refill)
+warm a number (open a relay group for a fresh pair, or let the buffer refill)
 and confirm it promotes `warming -> active`: watch the `pool_numbers` item flip
 `lifecycle_state`, or watch a `connecting` group open + its intro deliver, or read
 the **Twilio Console -> Monitor -> Event Streams** delivery logs for the
@@ -947,7 +964,7 @@ If a ladder seems dead in a deployed env: check the worker service is running (o
 both polls), then look for `… poll error` lines in the worker logs.
 
 - **Roster deferred actions** (`pendingRosterActions` table, `jobs/rosterActions.ts`): quiet-hours
-  deferral for the tour/placement People card (contact-rosters). A group-text OPEN or a live-thread
+  deferral for the tour/placement People card (contact-rosters). A relay-group OPEN or a live-thread
   ADD confirmed during org quiet hours writes a pending row (deterministic PK
   `tour#<id>#open` / `tour#<id>#add#<contactId>`, placement mirrors) due at quiet-end instead of
   sending; the worker poll (same `WORKER_POLL_INTERVAL_MS` cadence as the ladders above) claims the

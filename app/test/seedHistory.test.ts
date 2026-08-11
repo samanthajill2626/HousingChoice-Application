@@ -498,7 +498,7 @@ describe('seed history — contact activity milestones (Task 2, §4.6)', () => {
     expect(requested).toBeDefined();
     const rows = tourMilestones(requested!);
     expect(rows.map((r) => r.type)).toEqual(['tour_group_opened']);
-    expect(rows[0]!.label).toBe('Group text opened');
+    expect(rows[0]!.label).toBe('Relay group opened');
     expect(rows[0]!.refType).toBe('tour');
 
     const bare = TOURS.find((t) => t['status'] === 'requested' && t['groupThreadId'] === undefined);

@@ -44,7 +44,7 @@ export interface ContactFileState {
   // delete this field + its fetch below + getContactMedia usage + the media
   // assertions in useContactFile.test.tsx. Left in deliberately for now.
   media: Slice<ContactMediaItem>;
-  /** The contact's group-text (relay) memberships — the "Group texts" card.
+  /** The contact's relay-group memberships - the "Relay groups" card.
    *  404 (a backend without the route) → 'pending', mirroring the C4/C5 slices. */
   relayGroups: Slice<RelayGroupRow>;
 }

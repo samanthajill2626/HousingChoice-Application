@@ -28,7 +28,7 @@ export interface DeliveryPresentation {
 
 const STATUS_PRESENTATION: Record<DeliveryStatus, DeliveryPresentation> = {
   // `queued_pending` (connect-when-ready hold, T7) = composed on a `connecting`
-  // group text and held: no number to send from yet, so it goes to nobody until
+  // relay group and held: no number to send from yet, so it goes to nobody until
   // the group connects and it flushes. A neutral, non-failure "Queued" cue that
   // says WHEN it will send - it is a deliberate hold, not a stall.
   queued_pending: {
@@ -87,7 +87,7 @@ export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresen
   const total = fanned.length;
   if (failed > 0) {
     // Surface the failed legs' error code(s) so the chip is debuggable (the 30034
-    // group-text bug read as a bare "0/2 - 2 failed" with no code). Distinct
+    // relay-group bug read as a bare "0/2 - 2 failed" with no code). Distinct
     // reasons joined; a repeated code collapses to one.
     const reasons = Array.from(
       new Set(

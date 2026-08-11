@@ -2,7 +2,7 @@
 //   - the header: title ("Placement - <tenant> -> <property>"), stage pill,
 //     date-vocabulary facts line, the "Advance to <next stage>" primary CTA
 //     (next ladder rung; absent at the terminal stages), and the kebab actions
-//     (Move to... / Set follow-up / Open group text [group-gated] / Mark lost)
+//     (Move to... / Set follow-up / Open relay group [group-gated] / Mark lost)
 //   - the existing gated transition pipeline still fires from the kebab's
 //     "Move to..." picker (outcome / final rent / inspection date / determined
 //     rent / move-in ready gates) + the in-place StageData/Paperwork recorders
@@ -34,7 +34,7 @@ const getConversations = vi.fn();
 const getConversation = vi.fn();
 const markConversationRead = vi.fn();
 const provisionPlacementRelay = vi.fn();
-// [Open group text] previews the server-composed intro first (spec 6.3).
+// [Open relay group] previews the server-composed intro first (spec 6.3).
 const previewPlacementRosterOpen = vi.fn();
 // The 1:1 tabs are contact-keyed panes now: every render mounts
 // useContactTimeline for the active party, and viewing an unread 1:1 tab marks
@@ -293,7 +293,7 @@ describe('PlacementDetail - header', () => {
     expect(screen.queryByRole('button', { name: /^Advance to/ })).not.toBeInTheDocument();
   });
 
-  it('the kebab exposes Move to... + Set follow-up + Open group text + Mark lost', async () => {
+  it('the kebab exposes Move to... + Set follow-up + Open relay group + Mark lost', async () => {
     const user = userEvent.setup();
     renderAt();
     await waitLoaded();
@@ -301,17 +301,17 @@ describe('PlacementDetail - header', () => {
     // "Move to..." IS the existing gated stage StatusMenu.
     expect(screen.getByRole('button', { name: /Placement stage/i })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Set follow-up' })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'Open group text' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Open relay group' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Mark lost' })).toBeInTheDocument();
   });
 
-  it('hides Open group text once a group thread exists', async () => {
+  it('hides Open relay group once a group thread exists', async () => {
     const user = userEvent.setup();
     getPlacement.mockResolvedValue({ ...CASE, group_thread: 'g1' });
     renderAt();
     await waitLoaded();
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    expect(screen.queryByRole('menuitem', { name: 'Open group text' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Open relay group' })).not.toBeInTheDocument();
     // The other actions still show.
     expect(screen.getByRole('menuitem', { name: 'Mark lost' })).toBeInTheDocument();
   });
@@ -322,15 +322,15 @@ describe('PlacementDetail - header', () => {
     renderAt();
     await waitLoaded();
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
 
-    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    const dialog = await screen.findByRole('dialog', { name: 'Open the relay group?' });
     expect(previewPlacementRosterOpen).toHaveBeenCalledWith('c1');
     expect(
       within(dialog).getByText('Hi - this is Housing Choice connecting you about this placement.'),
     ).toBeInTheDocument();
     expect(provisionPlacementRelay).not.toHaveBeenCalled();
-    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await user.click(within(dialog).getByRole('button', { name: 'Open relay group' }));
     await waitFor(() =>
       expect(provisionPlacementRelay).toHaveBeenCalledWith('c1', { force: false }),
     );
@@ -355,15 +355,15 @@ describe('PlacementDetail - header', () => {
     renderAt();
     await waitLoaded();
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    await user.click(screen.getByRole('menuitem', { name: 'Open group text' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
-    await user.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the relay group?' });
+    await user.click(within(dialog).getByRole('button', { name: 'Open relay group' }));
 
     expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
     expect(getConversation).not.toHaveBeenCalledWith('g1');
   });
 
-  it("the KEBAB's [Open group text] is disabled by the same too-thin roster", async () => {
+  it("the KEBAB's [Open relay group] is disabled by the same too-thin roster", async () => {
     // Spec 6.2 asks for the reason on a DISABLED control instead of a click-time
     // 400 relay_member_unresolvable - the kebab is a third way to that click, so
     // it obeys the same gate as the pane button and the card note.
@@ -373,12 +373,12 @@ describe('PlacementDetail - header', () => {
     await waitLoaded();
     await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    const item = await screen.findByRole('menuitem', { name: 'Open group text' });
+    const item = await screen.findByRole('menuitem', { name: 'Open relay group' });
     // Still VISIBLE (an absent control teaches nothing), disabled, with the why.
     await waitFor(() => expect(item).toBeDisabled());
     expect(item).toHaveAttribute(
       'title',
-      'Not enough people to open a group text - two reachable members are needed',
+      'Not enough people to open a relay group - two reachable members are needed',
     );
     await user.click(item);
     expect(previewPlacementRosterOpen).not.toHaveBeenCalled();
@@ -399,7 +399,7 @@ describe('PlacementDetail - header', () => {
     await waitLoaded();
     await waitFor(() => expect(getPlacementRoster).toHaveBeenCalled());
     await user.click(screen.getByRole('button', { name: 'More actions' }));
-    expect(await screen.findByRole('menuitem', { name: 'Open group text' })).toBeEnabled();
+    expect(await screen.findByRole('menuitem', { name: 'Open relay group' })).toBeEnabled();
   });
 });
 
@@ -816,7 +816,7 @@ describe('PlacementDetail', () => {
   });
 });
 
-describe('PlacementDetail - close the group text after a terminal move (relay number lifecycle)', () => {
+describe('PlacementDetail - close the relay group after a terminal move (relay number lifecycle)', () => {
   const OPEN_GROUP = {
     conversationId: 'g1',
     type: 'relay_group',
@@ -827,7 +827,7 @@ describe('PlacementDetail - close the group text after a terminal move (relay nu
     ],
   };
 
-  it('marking a placement lost with an open group offers to close the group text', async () => {
+  it('marking a placement lost with an open group offers to close the relay group', async () => {
     const user = userEvent.setup();
     transitionPlacement.mockResolvedValue({ ...CASE, stage: 'lost', group_thread: 'g1' });
     getConversation.mockResolvedValue(OPEN_GROUP);
@@ -841,11 +841,11 @@ describe('PlacementDetail - close the group text after a terminal move (relay nu
     await user.click(within(lostModal).getByRole('button', { name: 'Mark lost' }));
     // Once lost saves + the group is confirmed open, the ask dialog appears.
     await screen.findByRole('dialog', {
-      name: /Also close the group text with Tasha & Larry\?/i,
+      name: /Also close the relay group with Tasha & Larry\?/i,
     });
   });
 
-  it('advancing to moved_in with an open group offers to close the group text', async () => {
+  it('advancing to moved_in with an open group offers to close the relay group', async () => {
     const user = userEvent.setup();
     getPlacement.mockResolvedValue({ ...CASE, stage: 'awaiting_move_in' });
     transitionPlacement.mockResolvedValue({ ...CASE, stage: 'moved_in', group_thread: 'g1' });
@@ -854,7 +854,7 @@ describe('PlacementDetail - close the group text after a terminal move (relay nu
     await waitLoaded();
     // awaiting_move_in -> moved_in has no gate: the move fires directly.
     await chooseStage(user, 'moved_in');
-    await screen.findByRole('dialog', { name: /Also close the group text/i });
+    await screen.findByRole('dialog', { name: /Also close the relay group/i });
   });
 
   it('a non-terminal move NEVER offers to close the group', async () => {
@@ -869,7 +869,7 @@ describe('PlacementDetail - close the group text after a terminal move (relay nu
     await user.click(within(dialog).getByRole('button', { name: 'Confirm move' }));
     await waitFor(() => expect(transitionPlacement).toHaveBeenCalled());
     expect(getConversation).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Also close the relay group/i })).not.toBeInTheDocument();
   });
 
   it('skips the ask when the placement has no linked group', async () => {
@@ -884,7 +884,7 @@ describe('PlacementDetail - close the group text after a terminal move (relay nu
     await user.click(within(lostModal).getByRole('button', { name: 'Mark lost' }));
     await waitFor(() => expect(transitionPlacement).toHaveBeenCalled());
     expect(getConversation).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Also close the relay group/i })).not.toBeInTheDocument();
   });
 });
 

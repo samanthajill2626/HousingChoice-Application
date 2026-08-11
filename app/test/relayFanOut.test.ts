@@ -466,7 +466,7 @@ describe('relay.fanOut (M1.7)', () => {
     }
   });
 
-  // Founder decision 2026-07-14: everything sent into a group text must be
+  // Founder decision 2026-07-14: everything sent into a relay group must be
   // visible in its dashboard thread — the intro persists as a SYSTEM row.
   it('relay.intro PERSISTS one system announcement row with per-member delivery slots', async () => {
     seedRelay(world);
@@ -541,7 +541,7 @@ describe('relay.fanOut (M1.7)', () => {
     // as Alice/Bob's join notice).
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB, CAROL].sort());
     expect(world.sent.every((s) => s.from === POOL)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Carol joined this group text.');
+    expect(world.sent[0]!.body).toContain('Carol joined this group chat.');
     expect(world.sent[0]!.body).toContain('Alice, Bob, and Carol');
 
     // Persisted once as a system announcement with a slot per member.
@@ -561,7 +561,7 @@ describe('relay.fanOut (M1.7)', () => {
     });
     await outbound.settle();
 
-    expect(world.sent[0]!.body).toContain('A new member joined this group text.');
+    expect(world.sent[0]!.body).toContain('A new member joined this group chat.');
   });
 });
 
@@ -593,14 +593,14 @@ describe('relay body/intro composition (M1.7)', () => {
     const body = composeMemberAddedBody('Carol Brown', ['Alice', 'Bob', 'Carol Brown']);
     expect(body.startsWith('Tenant Place LLC.')).toBe(true);
     expect(body.endsWith('Reply STOP to opt out.')).toBe(true);
-    expect(body).toContain('Carol Brown joined this group text.');
+    expect(body).toContain('Carol Brown joined this group chat.');
     expect(body).toContain("You're now connected with Alice, Bob, and Carol Brown");
     // No name (phone-only member) → neutral label, NEVER a phone.
     expect(composeMemberAddedBody(undefined, ['Alice', undefined])).toContain(
-      'A new member joined this group text.',
+      'A new member joined this group chat.',
     );
     expect(composeMemberAddedBody('  ', ['Alice'])).toContain(
-      'A new member joined this group text.',
+      'A new member joined this group chat.',
     );
   });
 });

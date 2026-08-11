@@ -2,7 +2,7 @@
 //
 // The property page's Contacts card is the ROSTER EDITOR (contact-rosters spec
 // 6.1 / D9). It is the ONE place a property's PRIMARY CONTACT is set, and the
-// primary contact is who a tour or placement puts on the group text and reaches
+// primary contact is who a tour or placement puts on the relay group and reaches
 // by masked call whenever nobody has overridden that tour's own roster.
 //
 // This spec is the end-to-end proof that the editor and the resolver are the
@@ -227,7 +227,7 @@ test.describe('Property roster editor - the Contacts card sets the primary conta
     await expect(dialog).toBeVisible();
     await expect(
       dialog.getByText(
-        `${owner.name} becomes the primary contact - calls and new group texts for this property will go to them.`,
+        `${owner.name} becomes the primary contact - calls and new relay groups for this property will go to them.`,
       ),
     ).toBeVisible();
     await dialog.getByRole('button', { name: 'Remove contact' }).click();

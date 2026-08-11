@@ -133,7 +133,7 @@ export function PlacementDetail(): React.JSX.Element {
   // The "Set follow-up" kebab action + the Deadlines-and-nudges card's Set/Change
   // controls open the shared FollowUpModal (below) via this open-state.
   const [followUpOpen, setFollowUpOpen] = useState(false);
-  // The "Also close the group text?" ask, opened AFTER a terminal move saves.
+  // The "Also close the relay group?" ask, opened AFTER a terminal move saves.
   // The pre-open confirm's server-composed preview (spec 6.3). Non-null == the
   // dialog is up; nothing is provisioned until the operator confirms.
   const [openPreview, setOpenPreview] = useState<RosterPreview | null>(null);
@@ -299,7 +299,7 @@ export function PlacementDetail(): React.JSX.Element {
   // server-side), then inject the new conversationId so the group tab mounts at
   // once. Shared by the header kebab; the left-pane empty state has its OWN
   // button (both hit the same channels instance).
-  // Opening a group text SENDS the intro to real people, so it confirms first
+  // Opening a relay group SENDS the intro to real people, so it confirms first
   // (spec 6.3): fetch the server-composed preview and provision only on confirm.
   // A 409 relay_already_provisioned means someone else just opened it - refetch
   // the roster and NEVER open a dialog we could only fail.
@@ -313,7 +313,7 @@ export function PlacementDetail(): React.JSX.Element {
         if (err instanceof ApiError && err.code === 'relay_already_provisioned') {
           roster.refetch();
         } else {
-          setError('Could not open the group text. Please try again.');
+          setError('Could not open the relay group. Please try again.');
         }
       })
       .finally(() => setBusy(false));
@@ -324,7 +324,7 @@ export function PlacementDetail(): React.JSX.Element {
   // TWO successful outcomes (spec D7): inside quiet hours the server DEFERS and
   // answers 202 with the ROSTER - nothing is opened, so there is no conversation
   // id to mount. Committing the returned payload is the whole handling: its
-  // `pending` row is what the card and the [Open group text] control render as
+  // `pending` row is what the card and the [Open relay group] control render as
   // "Opens at 8:00 AM - quiet hours". `force` is "Send now anyway".
   const runOpenGroup = useCallback(
     async (force: boolean): Promise<void> => {
@@ -346,7 +346,7 @@ export function PlacementDetail(): React.JSX.Element {
     setBusy(true);
     setError(null);
     void runOpenGroup(true)
-      .catch(() => setError('Could not open the group text. Please try again.'))
+      .catch(() => setError('Could not open the relay group. Please try again.'))
       .finally(() => setBusy(false));
   }, [busy, runOpenGroup]);
 
@@ -385,7 +385,7 @@ export function PlacementDetail(): React.JSX.Element {
         .then((updated) => {
           setPlacement(updated);
           // Terminal moves (lost = terminal-fail, moved_in = terminal-success) ask
-          // whether to also close the linked group text.
+          // whether to also close the linked relay group.
           if (updated.stage === 'lost' || updated.stage === 'moved_in') {
             void askCloseGroupIfOpen(updated);
           }
@@ -456,19 +456,19 @@ export function PlacementDetail(): React.JSX.Element {
   const nextStage: PlacementStage | undefined =
     TERMINAL_STAGES.has(placement.stage) || stageIdx < 0 ? undefined : PLACEMENT_STAGES[stageIdx + 1];
 
-  // Open group text is a kebab action ONLY until a group exists (then the group
+  // Open relay group is a kebab action ONLY until a group exists (then the group
   // tab shows the thread).
   const canOpenGroup = placement.group_thread === undefined;
   // The ROSTER's own gate: fewer than two reachable members and there is nothing
-  // to open a group text with (spec 6.2). The People card carries the reason.
+  // to open a relay group with (spec 6.2). The People card carries the reason.
   const openGroupBlocked =
     canOpenGroup && roster.roster !== null && !roster.roster.canOpenGroup;
-  // Said ONCE for this page: the left pane's [Open group text] button AND the
+  // Said ONCE for this page: the left pane's [Open relay group] button AND the
   // header kebab's menu item are the same click, so they carry the same reason
   // and the same disabled state (spec 6.2 - the reason on a disabled control
   // rather than a click-time 400 relay_member_unresolvable).
   const openGroupBlockedReason = openGroupBlocked
-    ? 'Not enough people to open a group text - two reachable members are needed'
+    ? 'Not enough people to open a relay group - two reachable members are needed'
     : undefined;
   // An open already confirmed and DEFERRED to quiet-end (spec 6.5). Opening
   // again would silently supersede it with a new dueAt, so the control says
@@ -739,9 +739,9 @@ export function PlacementDetail(): React.JSX.Element {
       ) : null}
       {openPreview !== null ? (
         <RosterConfirmDialog
-          title="Open the group text?"
+          title="Open the relay group?"
           preview={openPreview}
-          confirmLabel="Open group text"
+          confirmLabel="Open relay group"
           deferLabel="Open"
           onConfirm={runOpenGroup}
           onClose={() => setOpenPreview(null)}
@@ -754,7 +754,7 @@ export function PlacementDetail(): React.JSX.Element {
 /** The placement header kebab (mirrors tours/TourActionsMenu's popover: outside-
  *  click + Escape close). Holds the branch actions that are not the one guided
  *  "Advance" CTA: "Move to..." (the EXISTING gated stage StatusMenu - a move runs
- *  the same requestMove pipeline), Set follow-up, Open group text (shown only
+ *  the same requestMove pipeline), Set follow-up, Open relay group (shown only
  *  until a group exists), and Mark lost. Reuses the tour kebab's CSS module. */
 function PlacementActionsMenu({
   stage,
@@ -770,7 +770,7 @@ function PlacementActionsMenu({
   onMove: (toStage: PlacementStage) => void;
   canOpenGroup: boolean;
   onOpenGroup: () => void;
-  /** Why the group text cannot be opened right now even though the placement
+  /** Why the relay group cannot be opened right now even though the placement
    *  could otherwise take one - today: fewer than two reachable roster members
    *  (spec 6.2). The item stays VISIBLE and DISABLED carrying this reason,
    *  instead of failing at click time with 400 relay_member_unresolvable. */
@@ -849,7 +849,7 @@ function PlacementActionsMenu({
               {...(openGroupDisabledReason !== undefined && { title: openGroupDisabledReason })}
               onClick={() => run(onOpenGroup)}
             >
-              Open group text
+              Open relay group
             </button>
           ) : null}
           <button

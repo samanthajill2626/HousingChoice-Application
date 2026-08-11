@@ -68,7 +68,7 @@ export const APP_NUMBER = '+15550009999';
  * app's business number. Relay-group traffic fails this in both directions (a
  * fan-out leg's `from` is the pool; a member's group send's `to` is the pool)
  * and belongs ONLY in the GroupPanel transcript: the 1:1 pane and its unread
- * rule filter on this predicate so group texts don't show up twice (2026-07-07
+ * rule filter on this predicate so relay groups don't show up twice (2026-07-07
  * UX decision, revising spec §3's "badged in the 1:1 too" simplification). The
  * raw `threads` state stays UNFILTERED — it mirrors `GET /control/threads`,
  * which the e2e scenario steps assert pool legs INTO.

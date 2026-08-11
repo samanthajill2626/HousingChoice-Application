@@ -45,8 +45,8 @@ export function InboxRow({
   const unread = row.unreadCount > 0;
   const isRelay = row.kind === 'relay_group';
   // The channel/kind chip: contact/unknown rows show the latest item's channel
-  // (Text/Photo/Call); a relay_group row has no channel — show "Group text".
-  const kindLabel = isRelay ? 'Group text' : row.channel ? CHANNEL_LABEL[row.channel] : '';
+  // (Text/Photo/Call); a relay_group row has no channel - show "Relay group".
+  const kindLabel = isRelay ? 'Relay group' : row.channel ? CHANNEL_LABEL[row.channel] : '';
 
   // Swipe-to-reveal (mobile). Keyboard/pointer users reach the same buttons via
   // Tab (focus-within reveals them in CSS); swipe is an ADDITIONAL affordance.

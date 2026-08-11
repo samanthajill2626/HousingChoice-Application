@@ -1693,20 +1693,20 @@ export class Scenario {
     return step('Team opens the masked relay group on the tour', async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
       // With no group yet the initial channel tab is Tenant; switch to the Group
-      // tab to reach its in-place empty state with the [Open group text] button
+      // tab to reach its in-place empty state with the [Open relay group] button
       // (the same action the header kebab offers).
-      await this.page.getByRole('tab', { name: 'Group text' }).click();
+      await this.page.getByRole('tab', { name: 'Relay group' }).click();
       // Opening SENDS the intro to real people, so it confirms first
       // (contact-rosters spec 6.3): the click shows the server-composed preview
-      // and the dialog's own [Open group text] is what provisions.
-      await this.page.getByRole('button', { name: 'Open group text' }).click();
-      const confirm = this.page.getByRole('dialog', { name: 'Open the group text?' });
+      // and the dialog's own [Open relay group] is what provisions.
+      await this.page.getByRole('button', { name: 'Open relay group' }).click();
+      const confirm = this.page.getByRole('dialog', { name: 'Open the relay group?' });
       await expect(confirm).toBeVisible({ timeout: 15_000 });
       const [res] = await Promise.all([
         this.page.waitForResponse(
           (r) => /\/api\/tours\/[^/]+\/relay$/.test(r.url()) && r.request().method() === 'POST',
         ),
-        confirm.getByRole('button', { name: 'Open group text' }).click(),
+        confirm.getByRole('button', { name: 'Open relay group' }).click(),
       ]);
       expect(res.status(), await res.text()).toBe(201);
       const { tour: updated, conversation } = (await res.json()) as {
@@ -1734,12 +1734,12 @@ export class Scenario {
       tour.poolNumber = poolNumber as string;
       tour.groupThreadId = conversation.conversationId;
       // The empty state is replaced by the live group transcript (the composer),
-      // so the [Open group text] button is gone. The intro fan-out to each member
+      // so the [Open relay group] button is gone. The intro fan-out to each member
       // is asserted separately (expectGroupIntros).
       await expect(
-        this.page.getByRole('button', { name: 'Open group text' }),
+        this.page.getByRole('button', { name: 'Open relay group' }),
       ).toHaveCount(0, { timeout: 10_000 });
-      // Everything sent into a group text is VISIBLE in its dashboard thread
+      // Everything sent into a relay group is VISIBLE in its dashboard thread
       // (2026-07-14): the intro persists as an "Automated" bubble, appearing
       // via the SSE refetch once the intro job lands.
       await expect(this.page.getByText(/You're now connected with/)).toBeVisible({
@@ -1758,11 +1758,11 @@ export class Scenario {
   expectGroupOnContactFile(other: Contact, contactId?: string): Promise<void> {
     const tour = this.requireActiveTourGroup();
     const id = contactId ?? this.requireActiveContactId();
-    return step('Team sees the group text on the contact file (Group texts card)', async () => {
+    return step('Team sees the relay group on the contact file (Relay groups card)', async () => {
       await this.page.goto(`${NEXT}/contacts/${id}`);
       const card = this.page
         .locator('section')
-        .filter({ has: this.page.getByRole('heading', { name: 'Group texts' }) });
+        .filter({ has: this.page.getByRole('heading', { name: 'Relay groups' }) });
       await expect(card).toBeVisible();
       // The row's accessible name is "With <other member(s)> · <count> members";
       // anchor on the named-for-the-other-member label, then assert the link
@@ -1906,7 +1906,7 @@ export class Scenario {
   }
 
   /** [App→Team] The group rung is VISIBLE in the DASHBOARD group thread
-   *  (2026-07-14: everything sent into a group text shows in its thread) — an
+   *  (2026-07-14: everything sent into a relay group shows in its thread) - an
    *  "Automated" bubble carrying the rung body on the conversation view. */
   expectReminderVisibleInGroupThread(kind: ReminderKind): Promise<void> {
     const groupThreadId = this.requireActiveTourGroup().groupThreadId;
@@ -2273,7 +2273,7 @@ export class Scenario {
   }
 
   /** [App] NO group thread EXISTS for this tour (self-guided default; the
-   *  'Open group text' button still shows because an admin MAY hand-create
+   *  'Open relay group' button still shows because an admin MAY hand-create
    *  one, so the assert is on existence: no groupThreadId + no intro reached
    *  the tenant from any pool number). */
   expectNoTourGroup(): Promise<void> {
@@ -2313,7 +2313,7 @@ export class Scenario {
     const pool = this.requireActiveTourGroup().poolNumber;
     return step(`Team sends in the group tab: "${body}"`, async () => {
       await this.page.goto(`${NEXT}/tours/${tour.tourId}`);
-      await this.page.getByRole('tab', { name: 'Group text' }).click();
+      await this.page.getByRole('tab', { name: 'Relay group' }).click();
       await this.page.getByRole('textbox', { name: 'Reply message' }).fill(body);
       await this.page.getByRole('button', { name: 'Send', exact: true }).click();
       // Optimistic echo in the transcript (the sent bubble).

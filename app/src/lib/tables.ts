@@ -339,7 +339,7 @@ export const TABLES: readonly TableSpec[] = [
   {
     // NEW in BE2/C2 (NOT in the doc §5 9-table model — new-dashboard build): the
     // person-centric activity-event log. Each row is one milestone (a case
-    // opened/closed, a stage change, a property sent, a number added, group-text
+    // opened/closed, a stage change, a property sent, a number added, relay-group
     // membership, …) for a contact, so the contact-timeline endpoint can MERGE
     // these with the contact's messages/calls into one chronological feed.
     //
@@ -440,7 +440,7 @@ export const TABLES: readonly TableSpec[] = [
   },
   {
     // NEW in contact-rosters (spec 5.3): deferred roster actions - an
-    // "open the group text" or "add this member" the operator confirmed during
+    // "open the relay group" or "add this member" the operator confirmed during
     // QUIET HOURS, held until dueAt (quiet-end) and applied by the poller.
     //
     // PK actionId is DETERMINISTIC (`${ownerType}#${ownerId}#open` /

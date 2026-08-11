@@ -5,7 +5,7 @@ webhooks. The app's real Twilio driver is pointed at it (never real Twilio), so
 messaging and voice flows can be driven end-to-end on a laptop and in the e2e
 suite. It ships a **fake-phones web UI** (the seeded personas as little phones)
 for interactively sending inbound SMS/MMS and now for driving **relay groups**
-(masked group texts).
+(masked, pool-number-fronted group threads).
 
 It runs two ways:
 
@@ -33,7 +33,7 @@ The web UI talks to a small control API on the same port; the useful bits:
   fan-out). The fake-phones GroupPanel does exactly this from its member picker.
 - `POST /control/reset` — clear threads **and** groups (personas persist).
 
-## Relay groups (masked group texts)
+## Relay groups (masked, pool-number-fronted)
 
 A relay group is a masked thread fronted by a **pool number**: members text the
 pool, the app fans each message out to the *other* members from the pool number,
@@ -88,7 +88,7 @@ Drive the interactive relay path once after any change to this area:
 
 1. `npm run dev -- --local --mock --seeded`, then open the fake phones at
    http://localhost:8889 and the dashboard at http://localhost:5174.
-2. **Group visible at startup:** the **"Group texts"** section of the fake-phones
+2. **Group visible at startup:** the **"Relay groups"** section of the fake-phones
    roster rail shows the live group (pool `+15550160001`, 2 members) with no
    manual action — the boot replay populated it.
 3. **Reply as a member:** open the group, pick **Diana** in the member picker,

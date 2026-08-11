@@ -1,8 +1,8 @@
-// useTourChannels - resolves the tour's conversation channels (the group text +
+// useTourChannels - resolves the tour's conversation channels (the relay group +
 // ONE 1:1 per person on the tour) and keeps their unread dots live via
 // `conversation.updated`.
 //
-//   - group  = tour.groupThreadId (absent until [Open group text] provisions it)
+//   - group  = tour.groupThreadId (absent until [Open relay group] provisions it)
 //              -> {conversationId, unread}: ONE relay thread the Group tab mounts.
 //   - people = one channel per PersonChannelInput the CALLER passes
 //              ({contactId, label}) -> {unread} on top: the SUM of unread across

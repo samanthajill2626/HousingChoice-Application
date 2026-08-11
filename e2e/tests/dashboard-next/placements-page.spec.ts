@@ -122,7 +122,7 @@ test('mobile: chip filter works, no kebab, row navigates to the detail', async (
 // (Now card, Deadlines and nudges, People, facts, History) RIGHT, with an
 // "Advance to <next>" header CTA that drives the SAME gated pipeline.
 
-test('hub: opens the group text from the empty state (button disappears, thread mounts)', async ({
+test('hub: opens the relay group from the empty state (button disappears, thread mounts)', async ({
   page,
 }) => {
   await devLoginAndReset(page);
@@ -141,19 +141,19 @@ test('hub: opens the group text from the empty state (button disappears, thread 
   await page.goto(`${NEXT}/placements/${placementId}`);
 
   // The comms pane's Group tab shows the empty state until a group is provisioned.
-  await page.getByRole('tab', { name: 'Group text' }).click();
-  await expect(page.getByText('No group text yet')).toBeVisible();
+  await page.getByRole('tab', { name: 'Relay group' }).click();
+  await expect(page.getByText('No relay group yet')).toBeVisible();
 
-  // Open the group text -> the empty-state button provisions the masked relay and
+  // Open the relay group -> the empty-state button provisions the masked relay and
   // mounts the fresh thread; the button (and empty state) disappear.
-  const openBtn = page.getByRole('button', { name: 'Open group text' });
+  const openBtn = page.getByRole('button', { name: 'Open relay group' });
   await openBtn.click();
   // Opening sends the intro, so it confirms first (contact-rosters spec 6.3).
-  const confirm = page.getByRole('dialog', { name: 'Open the group text?' });
+  const confirm = page.getByRole('dialog', { name: 'Open the relay group?' });
   await expect(confirm).toBeVisible({ timeout: 15_000 });
-  await confirm.getByRole('button', { name: 'Open group text' }).click();
+  await confirm.getByRole('button', { name: 'Open relay group' }).click();
   await expect(openBtn).toHaveCount(0, { timeout: 15_000 });
-  await expect(page.getByText('No group text yet')).toHaveCount(0);
+  await expect(page.getByText('No relay group yet')).toHaveCount(0);
   // The group transcript mounted: its composer (a "Reply message" box) is present.
   await expect(page.getByRole('textbox', { name: 'Reply message' })).toBeVisible({ timeout: 15_000 });
 });

@@ -1,8 +1,8 @@
 // LandlordFile — the right pane for a landlord contact (§B3). Same shell as the
 // tenant file; the cards center on the units they own: Details (role/company) -
 // Notes - Properties (their units, with status) - Tours on their properties -
-// Placements on their units - Group texts - Media. Properties + Placements + Tours +
-// Group texts are REAL (from /api/units + /api/placements + /api/tours?unitId= +
+// Placements on their units - Relay groups - Media. Properties + Placements + Tours +
+// Relay groups are REAL (from /api/units + /api/placements + /api/tours?unitId= +
 // /api/contacts/:id/relay-groups). Notes are free text only — the structured
 // preferences (accepted programs / lease terms / pet policy) and expected rent
 // are PER-PROPERTY facts on the unit (moved 2026-07-10; GLOSSARY).
@@ -48,7 +48,7 @@ export interface LandlordFileProps {
   units: UnitItem[];
   /** Relay-membership slice status (panel degrades to pending on 404). */
   relayGroupsPending: boolean;
-  /** The group texts (relay threads) this contact is a member of. */
+  /** The relay groups (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];

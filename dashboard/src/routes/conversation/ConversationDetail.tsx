@@ -303,12 +303,12 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         ) {
           // W1: this person is already burned on this group's number (another
           // group's history), so they cannot be added here - surface the
-          // server's actionable "start a new group text" copy.
+          // server's actionable "start a new relay group" copy.
           const serverMsg = (err.body as { message?: unknown } | null)?.message;
           setAddError(
             typeof serverMsg === 'string' && serverMsg.length > 0
               ? serverMsg
-              : 'This person already has a group text history on this number. Start a new group text with them instead.',
+              : 'This person already has a relay group history on this number. Start a new relay group with them instead.',
           );
         } else {
           setAddError("Couldn't add that member. Please try again.");
@@ -348,13 +348,13 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
       .catch((err: unknown) => {
         // AF-3: surface the server's actionable copy when reopen is refused
         // because the pool number was retired/released - a generic error would
-        // hide the "start a new group text instead" guidance.
+        // hide the "start a new relay group instead" guidance.
         if (err instanceof ApiError && err.status === 409 && err.code === 'pool_number_released') {
           const serverMsg = (err.body as { message?: unknown } | null)?.message;
           setActionError(
             typeof serverMsg === 'string' && serverMsg.length > 0
               ? serverMsg
-              : 'This group text cannot be reopened: its number was retired after long inactivity. Start a new group text instead.',
+              : 'This relay group cannot be reopened: its number was retired after long inactivity. Start a new relay group instead.',
           );
           return;
         }
@@ -371,7 +371,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
   const identityFacts =
     memberNames.length > 0
       ? `With ${memberNames.join(' & ')}`
-      : formatPhoneDisplay(header.pool_number) || 'Group text';
+      : formatPhoneDisplay(header.pool_number) || 'Relay group';
 
   return (
     <div className={shell.page}>
@@ -381,7 +381,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
         </Link>
         <div className={shell.identity}>
           <div className={shell.nameRow}>
-            <span className={shell.name}>Group text</span>
+            <span className={shell.name}>Relay group</span>
             <span className={`${styles.statusPill} ${statusPillClass}`}>{statusLabel}</span>
           </div>
           <div className={styles.facts}>{identityFacts}</div>
@@ -593,7 +593,7 @@ function RelayGroupView({ conversationId, header, onHeader }: RelayGroupViewProp
           }
         >
           <p>
-            <strong>{memberDisplayName(removing)}</strong> will be removed from this group text and
+            <strong>{memberDisplayName(removing)}</strong> will be removed from this relay group and
             will no longer receive its messages.
           </p>
         </Modal>

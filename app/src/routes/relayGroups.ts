@@ -489,8 +489,8 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
           res.status(409).json({
             error: 'pool_number_released',
             message:
-              'This group text cannot be reopened: its number was retired after long ' +
-              'inactivity. Start a new group text instead.',
+              'This relay group cannot be reopened: its number was retired after long ' +
+              'inactivity. Start a new relay group instead.',
           });
           return;
         }

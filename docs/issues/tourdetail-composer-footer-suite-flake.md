@@ -17,9 +17,9 @@ files were byte-identical to main (so main-side, not branch-induced):
       > TourDetail - three-channel switcher
       > composer footer: the group tab names the WHOLE roster; 1:1 tabs show the reply number
     Expected element to have text content:
-      Reply sends to everyone in this group text (Ann, Marcus)
+      Reply sends to everyone in this relay group (Ann, Marcus)
     Received:
-      Reply sends to everyone in this group text
+      Reply sends to everyone in this relay group
 
 The roster names arrive asynchronously and the footer occasionally renders
 before they do under full-suite load.

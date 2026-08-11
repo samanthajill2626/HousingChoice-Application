@@ -312,7 +312,7 @@ runWithContext(bootContext, () => {
 // Pending-roster-action poll (contact-rosters Task 13): the same stateless 60s
 // cadence as the two polls above (state is the DynamoDB pendingRosterActions
 // rows). Applies the roster changes an operator confirmed during quiet hours -
-// opening a group text, adding a member - now that the window has passed, on the
+// opening a relay group, adding a member - now that the window has passed, on the
 // same claim-and-skip discipline. Deps are built once, lazily imported like the
 // blocks above; .unref()'d so it never holds the process open on shutdown.
 {

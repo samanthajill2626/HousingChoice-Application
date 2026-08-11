@@ -833,7 +833,7 @@ export function createContactTimelineRouter(deps: ContactTimelineRouterDeps = {}
     // their phone numbers AND email addresses, so an email-only thread's
     // messages appear in the merged timeline. relay_group threads front a pool
     // number (never the contact's real phone/email), so they are excluded -
-    // group-text activity surfaces as milestones, never inlined content.
+    // relay-group activity surfaces as milestones, never inlined content.
     const convById = new Map<string, ConversationItem>();
     for (const conv of await conversationsForContact(contact, conversations)) {
       if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1

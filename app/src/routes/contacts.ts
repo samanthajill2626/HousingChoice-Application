@@ -171,7 +171,7 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
 
 /**
  * Wire shape (VERBATIM — the frontend imports identical field names). One
- * relay-group membership row for the contact page's "Group texts" card: the
+ * relay-group membership row for the contact page's "Relay groups" card: the
  * thread + its open/closed status, the pool number fronting it (absent once
  * closed — close clears it), roster size, last activity, the owning entity
  * (tour/placement — the dashboard's link target, from getOwner()), the
@@ -1065,7 +1065,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   });
 
   // GET /api/contacts/:contactId/relay-groups → { groups: RelayGroupRow[] }.
-  // The contact page's "Group texts" card: every relay_group thread whose
+  // The contact page's "Relay groups" card: every relay_group thread whose
   // roster includes this contact — by roster contactId OR any of the contact's
   // numbers — open AND closed, newest-activity-first. There is NO
   // member→conversation index (a relay's participant_phone is the POOL number;
@@ -1140,7 +1140,7 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
   // the contact's 1:1 conversations (ALL their numbers), newest-first. Reuses the
   // timeline's cross-phone resolution (contactPhones → findByParticipantPhone →
   // dedupe conversationIds) and EXCLUDES relay_group threads (those front a pool
-  // number, never the contact's real 1:1 — group-text media is never inlined).
+  // number, never the contact's real 1:1 - relay-group media is never inlined).
   // 404 unknown contact / phone-pointer id (mirrors BE1's GET). Returns [] for a
   // contact with no media (never a 404 for "no media"). NO URL is generated —
   // the frontend fetches bytes via GET /api/messages/:sid/media/:idx using s3Key.

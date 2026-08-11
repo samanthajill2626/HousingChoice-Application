@@ -35,7 +35,7 @@ const getContactTimeline = vi.fn();
 // The People card AND the 1:1 tab set both read the resolved roster now
 // (contact-rosters Task 8) - one payload, one source.
 const getTourRoster = vi.fn();
-// [Open group text] is a REAL send now: it previews the server-composed intro
+// [Open relay group] is a REAL send now: it previews the server-composed intro
 // first and provisions only after the confirm (contact-rosters spec 6.3).
 const previewTourRosterOpen = vi.fn();
 const patchTour = vi.fn();
@@ -396,16 +396,16 @@ describe('TourDetail - kebab guards', () => {
     expect(screen.getByRole('menuitem', { name: 'Reschedule' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Cancel tour' })).toBeInTheDocument();
     expect(screen.getByRole('menuitem', { name: 'Mark no-show' })).toBeInTheDocument();
-    expect(screen.queryByRole('menuitem', { name: 'Open group text' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('menuitem', { name: 'Open relay group' })).not.toBeInTheDocument();
   });
 
-  it('requested: Cancel + Open group text; NO Reschedule, NO Mark no-show', async () => {
+  it('requested: Cancel + Open relay group; NO Reschedule, NO Mark no-show', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'requested', scheduledAt: undefined }));
     renderDetail();
     await waitLoaded();
     await openKebab();
     expect(screen.getByRole('menuitem', { name: 'Cancel tour' })).toBeInTheDocument();
-    expect(screen.getByRole('menuitem', { name: 'Open group text' })).toBeInTheDocument();
+    expect(screen.getByRole('menuitem', { name: 'Open relay group' })).toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Reschedule' })).not.toBeInTheDocument();
     expect(screen.queryByRole('menuitem', { name: 'Mark no-show' })).not.toBeInTheDocument();
   });
@@ -627,7 +627,7 @@ describe('TourDetail - Book / Reschedule / Record outcome modals', () => {
   });
 });
 
-describe('TourDetail - close the group text after a terminal outcome (relay number lifecycle)', () => {
+describe('TourDetail - close the relay group after a terminal outcome (relay number lifecycle)', () => {
   const OPEN_GROUP = {
     conversationId: 'g1',
     type: 'relay_group',
@@ -638,7 +638,7 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
     ],
   };
 
-  it('recording "not a fit" on a tour WITH an open group offers to close the group text', async () => {
+  it('recording "not a fit" on a tour WITH an open group offers to close the relay group', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'toured', groupThreadId: 'g1' }));
     patchTour.mockResolvedValue(
       makeTour({ status: 'closed', groupThreadId: 'g1', outcome: 'not_a_fit', moveForward: false }),
@@ -652,9 +652,9 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
     // The ask dialog appears once the outcome saved + the group is confirmed open,
     // named for the members.
     const dialog = await screen.findByRole('dialog', {
-      name: /Also close the group text with Ann & Lon\?/i,
+      name: /Also close the relay group with Ann & Lon\?/i,
     });
-    expect(within(dialog).getByRole('button', { name: 'Close group text' })).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'Close relay group' })).toBeInTheDocument();
     expect(within(dialog).getByRole('button', { name: 'Keep it open' })).toBeInTheDocument();
   });
 
@@ -675,7 +675,7 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
     await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
     await waitFor(() => expect(navigateSpy).toHaveBeenCalledWith('/placements/plc-1'));
     expect(
-      screen.queryByRole('dialog', { name: /Also close the group text/i }),
+      screen.queryByRole('dialog', { name: /Also close the relay group/i }),
     ).not.toBeInTheDocument();
   });
 
@@ -692,10 +692,10 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
       expect(screen.queryByRole('dialog', { name: /Record outcome/i })).not.toBeInTheDocument(),
     );
     expect(getConversation).not.toHaveBeenCalled();
-    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Also close the relay group/i })).not.toBeInTheDocument();
   });
 
-  it('canceling a tour WITH an open group offers to close the group text', async () => {
+  it('canceling a tour WITH an open group offers to close the relay group', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: 'g1' }));
     patchTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: 'g1' }));
     getConversation.mockResolvedValue(OPEN_GROUP);
@@ -710,7 +710,7 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
     const cancelDialog = screen.getByRole('dialog', { name: /Cancel tour\?/i });
     await userEvent.click(within(cancelDialog).getByRole('button', { name: 'Cancel tour' }));
     // The cancel saved; because the group is still open the ask dialog appears.
-    await screen.findByRole('dialog', { name: /Also close the group text/i });
+    await screen.findByRole('dialog', { name: /Also close the relay group/i });
   });
 
   it('skips the ask when the linked group is already closed', async () => {
@@ -725,7 +725,7 @@ describe('TourDetail - close the group text after a terminal outcome (relay numb
     await userEvent.click(screen.getByRole('radio', { name: 'No - not a fit' }));
     await userEvent.click(screen.getByRole('button', { name: 'Save decision' }));
     await waitFor(() => expect(getConversation).toHaveBeenCalledWith('g1'));
-    expect(screen.queryByRole('dialog', { name: /Also close the group text/i })).not.toBeInTheDocument();
+    expect(screen.queryByRole('dialog', { name: /Also close the relay group/i })).not.toBeInTheDocument();
   });
 });
 
@@ -994,7 +994,7 @@ describe('TourDetail - channel switcher', () => {
     renderDetail();
     await waitLoaded();
     expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
-    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'false');
+    expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute('aria-selected', 'false');
     // Let all the channel fetches settle; the active tab must NOT have moved.
     await waitFor(() => expect(getConversations).toHaveBeenCalled());
     expect(screen.getByRole('tab', { name: /Ann Tenant/ })).toHaveAttribute('aria-selected', 'true');
@@ -1005,7 +1005,7 @@ describe('TourDetail - channel switcher', () => {
     getConversations.mockResolvedValue({ conversations: [conv('g1', 'tenant-1', 0, 'relay_group')], nextCursor: null });
     renderDetail();
     await waitLoaded();
-    expect(screen.getByRole('tab', { name: 'Group text' })).toHaveAttribute('aria-selected', 'true');
+    expect(screen.getByRole('tab', { name: 'Relay group' })).toHaveAttribute('aria-selected', 'true');
   });
 
   it('shows an unread dot on a non-active channel and loads ONLY the active tab feed', async () => {
@@ -1170,7 +1170,7 @@ describe('TourDetail - channel switcher', () => {
     // Group tab (initial): a reply relays to EVERY member — the footer says so
     // and lists the roster (never the old "this contact" single-target copy).
     expect(await screen.findByText(/Reply sends to/)).toHaveTextContent(
-      'Reply sends to everyone in this group text (Ann, Marcus)',
+      'Reply sends to everyone in this relay group (Ann, Marcus)',
     );
     // Tenant 1:1 tab: the footer names the tenant's number (the contact-page
     // pattern). Byte-for-byte the contact page's own copy now that the shared
@@ -1247,7 +1247,7 @@ describe('TourDetail - tour milestones interleave into the conversation panes', 
     renderDetail();
     await waitLoaded();
     const transcript = screen.getByRole('region', { name: /Communications/i });
-    const pin = await within(transcript).findByRole('link', { name: 'Group text opened' });
+    const pin = await within(transcript).findByRole('link', { name: 'Relay group opened' });
     expect(pin).toHaveAttribute('href', '/conversations/g1');
   });
 });
@@ -1328,18 +1328,18 @@ describe('TourDetail - just-in-time consent gate (1:1 tabs)', () => {
 });
 
 describe('TourDetail - conversation empty states', () => {
-  it('group with no thread shows "No group text yet" + Open group text (confirm, then createTourRelay)', async () => {
+  it('group with no thread shows "No relay group yet" + Open relay group (confirm, then createTourRelay)', async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
     createTourRelay.mockResolvedValue({ deferred: false, tour: makeTour({ groupThreadId: 'g-new' }) });
     renderDetail();
     await waitLoaded();
     // Switch to the Group tab (self-guided defaults to Tenant).
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
-    expect(screen.getByText('No group text yet')).toBeInTheDocument();
-    await userEvent.click(screen.getByRole('button', { name: 'Open group text' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
+    expect(screen.getByText('No relay group yet')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('button', { name: 'Open relay group' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the relay group?' });
     expect(createTourRelay).not.toHaveBeenCalled();
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Open relay group' }));
     await waitFor(() =>
       expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: false }),
     );
@@ -1364,9 +1364,9 @@ describe('TourDetail - conversation empty states', () => {
     getTour.mockResolvedValue(makeTour({ status: 'canceled', groupThreadId: undefined }));
     renderDetail();
     await waitLoaded();
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
-    expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled();
-    expect(screen.getByText(/a group text cannot be opened/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
+    expect(screen.getByRole('button', { name: 'Open relay group' })).toBeDisabled();
+    expect(screen.getByText(/a relay group cannot be opened/i)).toBeInTheDocument();
   });
 });
 
@@ -1465,9 +1465,9 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     renderDetail();
     await waitLoaded();
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
 
-    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    const dialog = await screen.findByRole('dialog', { name: 'Open the relay group?' });
     expect(previewTourRosterOpen).toHaveBeenCalledWith('tour-abc');
     expect(
       within(dialog).getByText(
@@ -1477,7 +1477,7 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     expect(within(dialog).getByText('2 recipients will receive this.')).toBeInTheDocument();
     // NOTHING is provisioned until the operator confirms.
     expect(createTourRelay).not.toHaveBeenCalled();
-    await userEvent.click(within(dialog).getByRole('button', { name: 'Open group text' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Open relay group' }));
     await waitFor(() =>
       expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: false }),
     );
@@ -1515,8 +1515,8 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     renderDetail();
     await waitLoaded();
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
-    const dialog = await screen.findByRole('dialog', { name: 'Open the group text?' });
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
+    const dialog = await screen.findByRole('dialog', { name: 'Open the relay group?' });
     await userEvent.click(within(dialog).getByRole('button', { name: `Open at ${clock}` }));
 
     await waitFor(() =>
@@ -1525,12 +1525,12 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     // The pending state is on the card, straight from the 202 payload...
     expect(await screen.findByText(`Opens at ${clock} - quiet hours`)).toBeInTheDocument();
     // ...and NOTHING was opened: the group pane still has no thread.
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
-    expect(screen.getByText('No group text yet')).toBeInTheDocument();
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
+    expect(screen.getByText('No relay group yet')).toBeInTheDocument();
     expect(getConversationMessages).not.toHaveBeenCalledWith('g-new', expect.anything());
   });
 
-  it('"Send the group text now" on a pending open FORCES the provision through', async () => {
+  it('"Send the relay group now" on a pending open FORCES the provision through', async () => {
     const quietEndsAt = '2026-08-05T12:00:00.000Z';
     getTour.mockResolvedValue(makeTour({ status: 'requested', groupThreadId: undefined }));
     getTourRoster.mockResolvedValue(
@@ -1544,13 +1544,13 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     });
     renderDetail();
     await waitLoaded();
-    await userEvent.click(await screen.findByRole('button', { name: 'Send the group text now' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Send the relay group now' }));
     await waitFor(() => expect(createTourRelay).toHaveBeenCalledWith('tour-abc', { force: true }));
     // No preview, no dialog - the operator already confirmed this send once.
     expect(previewTourRosterOpen).not.toHaveBeenCalled();
   });
 
-  it('DISABLES [Open group text] with the pending reason while an open is deferred', async () => {
+  it('DISABLES [Open relay group] with the pending reason while an open is deferred', async () => {
     const quietEndsAt = '2026-08-05T12:00:00.000Z';
     const clock = new Date(quietEndsAt).toLocaleTimeString('en-US', {
       hour: 'numeric',
@@ -1564,9 +1564,9 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     );
     renderDetail();
     await waitLoaded();
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Open relay group' })).toBeDisabled(),
     );
     // The control carries the SAME sentence the card does - one fact, one phrasing.
     expect(screen.getAllByText(`Opens at ${clock} - quiet hours`).length).toBeGreaterThan(1);
@@ -1583,31 +1583,31 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     await waitLoaded();
     await waitFor(() => expect(getTourRoster).toHaveBeenCalledTimes(1));
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    await userEvent.click(screen.getByRole('menuitem', { name: 'Open group text' }));
+    await userEvent.click(screen.getByRole('menuitem', { name: 'Open relay group' }));
 
     await waitFor(() => expect(getTourRoster).toHaveBeenCalledTimes(2));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(createTourRelay).not.toHaveBeenCalled();
   });
 
-  it("disables [Open group text] with the roster's reason when too few members are reachable", async () => {
+  it("disables [Open relay group] with the roster's reason when too few members are reachable", async () => {
     getTour.mockResolvedValue(makeTour({ status: 'scheduled', groupThreadId: undefined }));
     getTourRoster.mockResolvedValue(makeRoster({ canOpenGroup: false }));
     renderDetail();
     await waitLoaded();
-    await userEvent.click(screen.getByRole('tab', { name: 'Group text' }));
+    await userEvent.click(screen.getByRole('tab', { name: 'Relay group' }));
     await waitFor(() =>
-      expect(screen.getByRole('button', { name: 'Open group text' })).toBeDisabled(),
+      expect(screen.getByRole('button', { name: 'Open relay group' })).toBeDisabled(),
     );
     expect(
       screen.getAllByText(
-        'Not enough people to open a group text - two reachable members are needed',
+        'Not enough people to open a relay group - two reachable members are needed',
       ).length,
     ).toBeGreaterThan(0);
     expect(previewTourRosterOpen).not.toHaveBeenCalled();
   });
 
-  it("the KEBAB's [Open group text] is disabled by the same too-thin roster", async () => {
+  it("the KEBAB's [Open relay group] is disabled by the same too-thin roster", async () => {
     // Spec 6.2 asks for the reason on a DISABLED control instead of a click-time
     // 400 relay_member_unresolvable - the kebab is a third way to that click, so
     // it obeys the same gate as the pane button and the card note.
@@ -1617,12 +1617,12 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     await waitLoaded();
     await waitFor(() => expect(getTourRoster).toHaveBeenCalled());
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    const item = await screen.findByRole('menuitem', { name: 'Open group text' });
+    const item = await screen.findByRole('menuitem', { name: 'Open relay group' });
     // Still VISIBLE (an absent control teaches nothing), disabled, with the why.
     await waitFor(() => expect(item).toBeDisabled());
     expect(item).toHaveAttribute(
       'title',
-      'Not enough people to open a group text - two reachable members are needed',
+      'Not enough people to open a relay group - two reachable members are needed',
     );
     await userEvent.click(item);
     expect(previewTourRosterOpen).not.toHaveBeenCalled();
@@ -1643,7 +1643,7 @@ describe('TourDetail - pre-open confirm + roster editing', () => {
     await waitLoaded();
     await waitFor(() => expect(getTourRoster).toHaveBeenCalled());
     await userEvent.click(screen.getByRole('button', { name: 'More actions' }));
-    expect(await screen.findByRole('menuitem', { name: 'Open group text' })).toBeEnabled();
+    expect(await screen.findByRole('menuitem', { name: 'Open relay group' })).toBeEnabled();
   });
 
   it("the People card edits the roster and suggests the property's other contacts", async () => {

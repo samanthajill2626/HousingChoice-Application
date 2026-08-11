@@ -1,7 +1,7 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
 
 // Mobile composer layout — regression cover for "the reply box gets squished on
-// mobile when the reply is long" (tour / placement group text, and every other
+// mobile when the reply is long" (tour / placement relay group, and every other
 // page that mounts the shared <Timeline> composer).
 //
 // TWO defects, both only reachable at phone widths:
@@ -63,7 +63,7 @@ test.afterAll(async ({ request }) => {
   expect(res.ok(), `lean restore reseed failed: ${res.status()}`).toBeTruthy();
 });
 
-test('mobile group text: a long reply grows the box instead of squishing it', async ({ page }) => {
+test('mobile relay group: a long reply grows the box instead of squishing it', async ({ page }) => {
   await page.setViewportSize(PHONE);
   await devLogin(page);
   await page.goto(`${NEXT}/tours/${TOUR_ID}`);
@@ -90,7 +90,7 @@ test('mobile group text: a long reply grows the box instead of squishing it', as
   expect(clipped, 'the draft is clipped inside the reply box').toBe(false);
 });
 
-test('mobile group text: the whole composer stays inside the pane', async ({ page }) => {
+test('mobile relay group: the whole composer stays inside the pane', async ({ page }) => {
   await page.setViewportSize(PHONE);
   await devLogin(page);
   await page.goto(`${NEXT}/tours/${TOUR_ID}`);
@@ -116,7 +116,7 @@ test('mobile group text: the whole composer stays inside the pane', async ({ pag
 
   // The group note names every member, so at phone width it takes its own line
   // UNDER the controls rather than squeezing them mid-row.
-  const note = page.getByText('everyone in this group text');
+  const note = page.getByText('everyone in this relay group');
   await expect(note).toBeVisible();
   const noteBox = await note.boundingBox();
   expect(noteBox!.y).toBeGreaterThan(sendBox!.y);

@@ -195,12 +195,12 @@ describe('Today - relay close-nag card (D5)', () => {
     renderToday();
     // Its own section (not "all caught up", even though items is empty). Exact
     // string name: the heading is a bare label (no count chip).
-    expect(screen.getByRole('heading', { name: 'Group texts to close' })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Relay groups to close' })).toBeInTheDocument();
     expect(screen.queryByText(/all caught up/i)).not.toBeInTheDocument();
     // Pool number is display DATA (formatted), plus the close-it copy with members.
     expect(screen.getByText('(555) 019-0001')).toBeInTheDocument();
     expect(
-      screen.getByText(/Group text for Ann & Marcus is still open - close it\?/i),
+      screen.getByText(/Relay group for Ann & Marcus is still open - close it\?/i),
     ).toBeInTheDocument();
     // Open deep-links the owning tour.
     expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/tours/tour-1');
@@ -250,7 +250,7 @@ describe('Today - relay close-nag card (D5)', () => {
     };
     renderToday();
     expect(
-      screen.getByText(/Group text for Maple St tour is still open - close it\?/i),
+      screen.getByText(/Relay group for Maple St tour is still open - close it\?/i),
     ).toBeInTheDocument();
     // No owner -> Open falls back to the conversation.
     expect(screen.getByRole('link', { name: 'Open' })).toHaveAttribute('href', '/conversations/g1');

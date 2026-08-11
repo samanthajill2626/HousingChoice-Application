@@ -726,8 +726,8 @@ describe('today action-queue API (BE6/C7)', () => {
       refType: 'contact',
       refId: 'c-optout',
       who: 'Opted Out',
-      why: 'Opted out of a group text — not receiving messages',
-      tag: 'Group text',
+      why: 'Opted out of a relay group - not receiving messages',
+      tag: 'Relay group',
       attention: true,
     });
   });
@@ -814,7 +814,7 @@ describe('today action-queue API (BE6/C7)', () => {
       refType: 'contact',
       refId: 'c-secondary',
       who: 'Second Number',
-      tag: 'Group text',
+      tag: 'Relay group',
       attention: true,
     });
   });

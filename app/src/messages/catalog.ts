@@ -229,7 +229,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
   // Member added to an EXISTING group: announced to the WHOLE group (the new
   // member's first contact on this number, so brand + trailing opt-out fold in
-  // exactly like the intro). {joined} = "<Name> joined this group text." and
+  // exactly like the intro). {joined} = "<Name> joined this group chat." and
   // {members} = the connection sentence, both computed in code
   // (jobs/relayFanOut.ts composeMemberAddedBody).
   'relay.member_added': {
@@ -250,7 +250,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'sms',
     vars: ['name'],
   },
-  // Final message sent to every member when a group text is CLOSED (spec 4.5):
+  // Final message sent to every member when a relay group is CLOSED (spec 4.5):
   // the group is closed, and texting this number still reaches the team (true
   // under the closed-group->1:1 interception). No tokens. editable:true so an
   // operator can override it via the existing catalog machinery (resolveWith-

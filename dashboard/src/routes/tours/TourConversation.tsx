@@ -26,7 +26,7 @@
 //
 // The active tab lazily mounts ONE pane: only the active channel fetches (we
 // never fetch every tab up front). Empty states render in place: the group offers
-// [Open group text]; a 1:1 whose contact record failed to load says so (the pane
+// [Open relay group]; a 1:1 whose contact record failed to load says so (the pane
 // requires a LOADED Contact), and a contact with no thread yet gets a live
 // composer that creates the conversation on the first send.
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
@@ -66,7 +66,7 @@ export interface TourConversationProps {
    *  the page header banner. */
   onOpenGroup: () => void;
   openGroupBusy: boolean;
-  /** Why [Open group text] is unavailable RIGHT NOW even though the tour could
+  /** Why [Open relay group] is unavailable RIGHT NOW even though the tour could
    *  otherwise take one - today: the roster has fewer than two reachable
    *  members (contact-rosters spec 6.2). Present -> the control is disabled and
    *  carries this sentence, instead of failing at click time with the route's
@@ -143,11 +143,11 @@ export function TourConversation({
   // pin-heavy person feed is exactly where an operator reaches for it (spec A-M2).
   const [commsOnly, setCommsOnly] = useState(false);
 
-  // The rail: the group text, then one tab per person - label verbatim from the
+  // The rail: the relay group, then one tab per person - label verbatim from the
   // channel (the page resolved the display name; no role word is derived here).
   const people = channels.people;
   const tabs: ChannelTab[] = [
-    { key: GROUP_KEY, label: 'Group text', unread: channels.group.unread },
+    { key: GROUP_KEY, label: 'Relay group', unread: channels.group.unread },
     ...people.map((p) => ({ key: p.contactId, label: p.label, unread: p.unread })),
   ];
 
@@ -224,9 +224,9 @@ export function TourConversation({
             />
           ) : (
             <div className={styles.channelEmpty}>
-              <p className={styles.emptyTitle}>No group text yet</p>
+              <p className={styles.emptyTitle}>No relay group yet</p>
               <p className={styles.emptyNote}>
-                Open a masked group text with the tenant and landlord to coordinate the visit.
+                Open a masked relay group with the tenant and landlord to coordinate the visit.
               </p>
               <Button
                 size="sm"
@@ -234,14 +234,14 @@ export function TourConversation({
                 onClick={onOpenGroup}
                 disabled={openGroupBusy || groupDead || openGroupDisabledReason !== undefined}
               >
-                {openGroupBusy ? 'Opening...' : 'Open group text'}
+                {openGroupBusy ? 'Opening...' : 'Open relay group'}
               </Button>
               {openGroupDisabledReason !== undefined && !groupDead ? (
                 <p className={styles.emptyNote}>{openGroupDisabledReason}</p>
               ) : null}
               {groupDead ? (
                 <p className={styles.emptyNote}>
-                  This tour is {tour.status} - a group text cannot be opened.
+                  This tour is {tour.status} - a relay group cannot be opened.
                 </p>
               ) : null}
             </div>
@@ -407,7 +407,7 @@ export function ChannelTabRail({
   );
 }
 
-/** The group-text transcript: the relay thread + roster + closed state, mirroring
+/** The relay-group transcript: the relay thread + roster + closed state, mirroring
  *  ConversationDetail's left pane. Sending is hard-disabled when the group is
  *  closed. Mounts only while the Group tab is active (lazy fetch). */
 function GroupChannel({

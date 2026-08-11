@@ -63,7 +63,7 @@ const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
   landlord_1to1: 'Landlord',
   partner_1to1: 'Partner',
   unknown_1to1: 'Unknown',
-  relay_group: 'Group',
+  relay_group: 'Relay group',
 };
 
 const HOUR_MS = 3_600_000;

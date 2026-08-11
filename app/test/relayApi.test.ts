@@ -868,7 +868,7 @@ describe('relay-group API (M1.7)', () => {
     expect(typeof res.body.tsMsgId).toBe('string');
 
     // The thread carries the PERSISTED intro announcement (2026-07-14:
-    // everything sent into a group text is visible in its thread) plus the
+    // everything sent into a relay group is visible in its thread) plus the
     // team message stored ONCE — never N outbound copies of the team send.
     const onThread = world.messages.filter((m) => m.conversationId === id);
     expect(onThread.filter((m) => m.relay_sender_key === 'system')).toHaveLength(1);
@@ -909,13 +909,13 @@ describe('relay-group API (M1.7)', () => {
     // Announced to BOTH members (Bob's welcome doubles as Alice's notice).
     expect(world.sent.map((s) => s.to).sort()).toEqual([ALICE, BOB].sort());
     expect(world.sent.every((s) => s.from === poolNumber)).toBe(true);
-    expect(world.sent[0]!.body).toContain('Bob joined this group text.');
+    expect(world.sent[0]!.body).toContain('Bob joined this group chat.');
     // Persisted in the thread: the intro row + ONE join-notice row.
     const systemRows = world.messages.filter(
       (m) => m.conversationId === id && m.relay_sender_key === 'system',
     );
     expect(systemRows).toHaveLength(2);
-    expect(systemRows.some((m) => (m.body ?? '').includes('Bob joined this group text.'))).toBe(true);
+    expect(systemRows.some((m) => (m.body ?? '').includes('Bob joined this group chat.'))).toBe(true);
 
     // Idempotent re-add: no new announcement, no new sends.
     world.sent.length = 0;
@@ -964,7 +964,7 @@ describe('relay-group API (M1.7)', () => {
         .send({ phone: CAROL });
       expect(add.status).toBe(409);
       expect(add.body.error).toBe('phone_conflict_on_number');
-      expect(add.body.message).toMatch(/new group text/i);
+      expect(add.body.message).toMatch(/new relay group/i);
       // Roster unchanged (CAROL not added); burn set unchanged (no partial add).
       const g1After = await world.conversationsRepo.getById(id1);
       expect((g1After!.participants ?? []).map((p) => p.phone)).toEqual([ALICE, BOB]);

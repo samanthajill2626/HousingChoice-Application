@@ -203,6 +203,16 @@ export interface NewMessage {
    */
   viaClosedGroup?: string;
   /**
+   * Native group texting (spec 5.4): this message was filed into a 1:1 thread by
+   * a FAIL-OPEN group path - the envelope tripwire, the corrupt-shape branch, or
+   * the collapsed-roster rule - so its body MAY be carrier-group content that
+   * references other parties. AI fact extraction filters marked messages out of
+   * every transcript window it builds (jobs/extraction.ts), because attributing
+   * possibly-group content to this contact as 1:1 facts is exactly the harm.
+   * Absent on every ordinary message.
+   */
+  groupAmbiguousOrigin?: boolean;
+  /**
    * Relay group (M1.7): SEED the per-recipient delivery map on the SOURCE
    * message at append time. The fan-out's setRecipientDelivery is a CHILD-ONLY
    * SET (DynamoDB forbids seeding a map and a child in one expression), so the
@@ -398,6 +408,12 @@ export interface MessageItem {
    * "via the closed group chat" provenance badge off it. Absent otherwise.
    */
   via_closed_group?: string;
+  /**
+   * Native group texting (spec 5.4): filed 1:1 by a fail-open group path, so the
+   * body may be carrier-group content. AI fact extraction EXCLUDES these from
+   * every transcript window (jobs/extraction.ts). See NewMessage.groupAmbiguousOrigin.
+   */
+  group_ambiguous_origin?: boolean;
   /**
    * Relay group (M1.7): per-recipient delivery state for the fan-out of THIS
    * (inbound source) message to the other members, keyed by member key. The
@@ -908,6 +924,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         ...(message.relaySenderKey !== undefined && { relay_sender_key: message.relaySenderKey }),
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         ...(message.viaClosedGroup !== undefined && { via_closed_group: message.viaClosedGroup }),
+        ...(message.groupAmbiguousOrigin === true && { group_ambiguous_origin: true }),
         // Seed the per-recipient delivery map (possibly empty) so the fan-out's
         // child-only setRecipientDelivery has a parent map to write into.
         ...(message.deliveryRecipients !== undefined && {

@@ -410,6 +410,26 @@ async function processRow(
   } catch (err) {
     return failed('repo', err);
   }
+  // Group texting (spec 5.4 / T3.7): messages filed 1:1 by a FAIL-OPEN group
+  // path (the envelope tripwire, the corrupt-shape branch, the collapsed
+  // roster) carry `group_ambiguous_origin`. Their bodies may be group content,
+  // so they must never be attributed to this contact as 1:1 facts. The filter
+  // sits on the fetched page BECAUSE that is the single funnel: chronological,
+  // fresh, agedOutTsMsgIds, newestTsMsgId, hasNewClient, perMessage, the
+  // transcript and BOTH run-window builders all derive from it. Filtering any
+  // later would still let a marked message trigger (and bill) a run.
+  //
+  // `fetchedCount` deliberately keeps the RAW page size: it feeds
+  // windowCappedAtLimit, which means "the READ hit the limit, there may be
+  // unseen history" - a claim about the query, not about the window.
+  const fetchedCount = newestFirst.length;
+  newestFirst = newestFirst.filter((m) => m.group_ambiguous_origin !== true);
+  if (newestFirst.length !== fetchedCount) {
+    logger.debug(
+      { conversationId, excludedCount: fetchedCount - newestFirst.length },
+      'extraction: excluded possibly-group-origin messages from the transcript window',
+    );
+  }
   const cutoff = new Date(Date.parse(nowIso) - MAX_TRANSCRIPT_AGE_DAYS * DAY_MS).toISOString();
   const chronological = [...newestFirst].reverse();
   const fresh = chronological.filter((m) => m.created_at >= cutoff);
@@ -417,7 +437,7 @@ async function processRow(
   const newestTsMsgId = fresh[fresh.length - 1]?.tsMsgId;
   const lightWindow = draftPiece(logger, draft, () => buildLightRunWindow({
     cursor,
-    fetchedCount: newestFirst.length,
+    fetchedCount,
     agedOutTsMsgIds,
     messages: fresh.map((m) => ({ tsMsgId: m.tsMsgId, type: m.type, direction: m.direction })),
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
@@ -460,7 +480,7 @@ async function processRow(
   // A failed upgrade keeps the LIGHT window already assembled above: it built
   // successfully from the same data, so retaining it degrades nothing.
   const fullWindow = draftPiece(logger, draft, () => buildFullRunWindow({
-    cursor, fetchedCount: newestFirst.length, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
+    cursor, fetchedCount, agedOutTsMsgIds, perMessage, included, hasInferredRoleContent,
     ...(newestTsMsgId !== undefined && { newestTsMsgId }),
   }));
   if (fullWindow !== undefined) draft.window = fullWindow;

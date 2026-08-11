@@ -783,6 +783,9 @@ export function createFakeWorld(): FakeWorld {
         ...(message.receivedOnClosedThread === true && { received_on_closed_thread: true }),
         // Relay number lifecycle: preserve the closed-group interception provenance.
         ...(message.viaClosedGroup !== undefined && { via_closed_group: message.viaClosedGroup }),
+        // Native group texting (T3.7): preserve the fail-open filing marker that
+        // keeps a possibly-group message out of every AI transcript window.
+        ...(message.groupAmbiguousOrigin === true && { group_ambiguous_origin: true }),
         // Relay group (M1.7): preserve the seeded per-recipient delivery map so
         // the fan-out's child-only setRecipientDelivery has a parent to write
         // into (mirrors the real repo's append passthrough).

@@ -13,7 +13,9 @@ import {
   type UnitStatus,
 } from '../../api/index.js';
 import { Button, Spinner } from '../../ui/index.js';
+import { displaySpelling, normalizeAuthorityKey } from '../contacts/tenantFacets.js';
 import {
+  authoritiesOf,
   formatBedsBaths,
   formatRent,
   shortAddress,
@@ -30,7 +32,7 @@ const STATUS_OPTIONS: { value: StatusFilter; label: string }[] = [
   ...LISTING_STATUSES.map((s) => ({ value: s, label: LISTING_STATUS_LABELS[s] })),
 ];
 
-/** Humanize a jurisdiction slug for the filter chips: tokens ≤3 chars become
+/** Humanize an authority slug for the filter chips: tokens <= 3 chars become
  *  acronyms, longer ones are title-cased — 'atlanta_housing' → "Atlanta Housing",
  *  'ga_dca' → "GA DCA". */
 function humanizeAuthority(slug: string): string {
@@ -80,27 +82,44 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
   const [creating, setCreating] = useState(false);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
-  // Multi-select of housing authorities (unit.jurisdiction). EMPTY = no filter →
-  // show every authority (the "cleared" state).
+  // Multi-select of housing authorities, holding NORMALIZED keys (one key per
+  // authority, however its spellings vary). EMPTY = no filter -> show every
+  // authority (the "cleared" state).
   const [selectedHAs, setSelectedHAs] = useState<Set<string>>(new Set());
 
-  // The housing authorities present in the loaded listings — the multi-select
-  // options (distinct `jurisdiction` values, sorted).
+  // The housing authorities present in the loaded listings - the multi-select
+  // options. Each unit contributes EVERY authority it accepts (`authoritiesOf`,
+  // which synthesizes a legacy `jurisdiction` string), and spellings collapse by
+  // normalized key, so one authority is one chip no matter how import
+  // generations spelled it (spec section 8, reusing section 5's rule). The chip
+  // shows the most frequent RAW spelling; the key is what the filter matches.
   const housingAuthorities = useMemo(() => {
-    const set = new Set<string>();
+    const spellingsByKey = new Map<string, Map<string, number>>();
     for (const u of units) {
-      if (typeof u.jurisdiction === 'string' && u.jurisdiction) set.add(u.jurisdiction);
+      for (const raw of authoritiesOf(u)) {
+        const key = normalizeAuthorityKey(raw);
+        if (key.length === 0) continue; // whitespace-only: no chip to show
+        const spellings = spellingsByKey.get(key) ?? new Map<string, number>();
+        spellings.set(raw, (spellings.get(raw) ?? 0) + 1);
+        spellingsByKey.set(key, spellings);
+      }
     }
-    return [...set].sort();
+    // Sorted on the normalized key - the case-folded label - so the order is
+    // case-insensitive alphabetical and platform-independent.
+    return [...spellingsByKey.entries()]
+      .map(([key, spellings]) => ({ key, display: displaySpelling(spellings) }))
+      .sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
   }, [units]);
 
   const visible = useMemo(() => {
     const q = query.trim().toLowerCase();
     return units.filter((u) => {
       if (statusFilter !== 'all' && u.status !== statusFilter) return false;
+      // List-aware: a unit matches when ANY authority it accepts normalizes to a
+      // selected key.
       if (
         selectedHAs.size > 0 &&
-        !(typeof u.jurisdiction === 'string' && selectedHAs.has(u.jurisdiction))
+        !authoritiesOf(u).some((raw) => selectedHAs.has(normalizeAuthorityKey(raw)))
       ) {
         return false;
       }
@@ -173,16 +192,16 @@ export function ListingsList({ deleted = false }: ListingsListProps): React.JSX.
               </span>
               <div className={styles.chips} role="group" aria-labelledby="ha-filter-label">
                 {housingAuthorities.map((ha) => {
-                  const on = selectedHAs.has(ha);
+                  const on = selectedHAs.has(ha.key);
                   return (
                     <button
-                      key={ha}
+                      key={ha.key}
                       type="button"
                       className={`${styles.chip} ${on ? styles.chipOn : ''}`}
                       aria-pressed={on}
-                      onClick={() => toggleHA(ha)}
+                      onClick={() => toggleHA(ha.key)}
                     >
-                      {humanizeAuthority(ha)}
+                      {humanizeAuthority(ha.display)}
                     </button>
                   );
                 })}

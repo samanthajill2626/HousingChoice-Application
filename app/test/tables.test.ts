@@ -147,11 +147,14 @@ describe('tables.ts — the table contract', () => {
     expect(gsiNames(t)).toEqual(['byPhone', 'byEmail', 'byTypeStatus', 'byHousingAuthority']);
   });
 
-  it('units: PK unitId; GSIs byLandlord, byStatus, byJurisdiction, byProperty (sparse, BE3)', () => {
+  it('units: PK unitId; GSIs byLandlord, byStatus, byProperty (sparse, BE3)', () => {
     const t = spec('units');
     expect(t.hashKey.name).toBe('unitId');
     expect(t.rangeKey).toBeUndefined();
-    expect(gsiNames(t)).toEqual(['byLandlord', 'byStatus', 'byJurisdiction', 'byProperty']);
+    // byJurisdiction is GONE (spec section 8): the single `jurisdiction` string it
+    // hashed is retired in favor of the `accepted_authorities` list, and nothing
+    // queried the index.
+    expect(gsiNames(t)).toEqual(['byLandlord', 'byStatus', 'byProperty']);
     const byProperty = t.gsis.find((g) => g.indexName === 'byProperty');
     expect(byProperty?.hashKey.name).toBe('propertyId');
     expect(byProperty?.rangeKey).toBeUndefined();

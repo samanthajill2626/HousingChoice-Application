@@ -3,16 +3,17 @@
 //
 // Items stay FLEXIBLE documents — only keys + GSI key attributes are
 // contractual (lib/tables.ts): PK unitId, plus the byLandlord (landlordId),
-// byStatus (status) and byJurisdiction (jurisdiction) GSIs. Everything else
+// byStatus (status) and byProperty (propertyId) GSIs. Everything else
 // (rents, beds, the never-standardized per-unit tour/application processes)
 // is a free-form attribute, so schema churn during the build needs no
 // migration — exactly the §5 posture.
 //
 // NO GEOCODING (kickoff "no geocoding — out of scope"): `address` is a
 // STRUCTURED postal address (lib/address.ts Address: line1/line2/city/state/zip,
-// all optional) and `jurisdiction` is a plain string the operator sets; §5's
-// "geocoded address" is intentionally NOT implemented here (README deviation
-// row). The Address type is reused for tenant/contact addresses later.
+// all optional) and `accepted_authorities` is a plain operator-set list of
+// strings; section 5's "geocoded address" is intentionally NOT implemented here
+// (README deviation row). The Address type is reused for tenant/contact
+// addresses later.
 import { randomUUID } from 'node:crypto';
 import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
 import {
@@ -119,15 +120,33 @@ export interface UnitItem {
   landlordId: string;
   /** byStatus GSI: lifecycle status (UNIT_STATUSES). */
   status: string;
-  /** byJurisdiction GSI: the primary HCV jurisdiction string (free text, no geocoding). */
+  /**
+   * LEGACY - read-only. The pre-consolidation single jurisdiction string (free
+   * text, no geocoding). No longer writable: `accepted_authorities` below
+   * replaced it, and reads go through `authoritiesOf` (lib/unitFields.ts), which
+   * synthesizes this value into a one-item list. See spec section 8:
+   * docs/superpowers/specs/2026-08-06-tenant-list-visibility-design.md.
+   */
   jurisdiction?: string;
+  /**
+   * The authorities whose vouchers this unit accepts - ONE list replacing BOTH
+   * `jurisdiction` and `accepted_programs` (spec section 8). At least one entry
+   * on a new write, chosen by the landlord. Read via `authoritiesOf` so legacy
+   * units synthesize instead of needing a backfill.
+   */
+  accepted_authorities?: string[];
   /**
    * Structured postal address (lib/address.ts) — NO geocoding (out of scope,
    * kickoff). All sub-fields optional. Legacy dev units may still hold a plain
    * string here; reads tolerate both (see units route / frontend display).
    */
   address?: Address;
-  /** HCV programs this unit accepts (e.g. GHV, Step Up); §13 question pending. */
+  /**
+   * LEGACY - read-only. The dissolved "program" concept (HCV / Section 8 / VASH
+   * are program-type labels, NOT authorities), superseded by
+   * `accepted_authorities` (spec section 8). No longer writable and no longer
+   * rendered; stored values stay on the document untouched.
+   */
   accepted_programs?: string[];
   beds?: number;
   baths?: number;
@@ -309,8 +328,6 @@ export interface UnitsRepo {
   listByLandlord(landlordId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /** All units in a status via the byStatus GSI. */
   listByStatus(status: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
-  /** All units in a jurisdiction via the byJurisdiction GSI. */
-  listByJurisdiction(jurisdiction: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /** All units in a property group via the sparse byProperty GSI (BE3). */
   listByProperty(propertyId: string, opts?: ListUnitsOpts): Promise<UnitsPage>;
   /**
@@ -540,10 +557,6 @@ export function createUnitsRepo(deps: RepoDeps = {}): UnitsRepo {
 
     async listByStatus(status, opts = {}) {
       return queryIndex('byStatus', 'status', status, opts);
-    },
-
-    async listByJurisdiction(jurisdiction, opts = {}) {
-      return queryIndex('byJurisdiction', 'jurisdiction', jurisdiction, opts);
     },
 
     async listByProperty(propertyId, opts = {}) {

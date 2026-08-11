@@ -146,8 +146,9 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
 
 - **Landlord preferences + expected rent live on the UNIT** (2026-07-10,
   reversing the 2026-07-02 contact-level-defaults design). Accepted
-  vouchers/programs, lease terms, pet policy, and expected rent are
-  PER-PROPERTY facts: `accepted_programs` / `lease_terms` / `pets` /
+  authorities (`accepted_programs` until 2026-08-10 - see **accepted
+  authorities** below), lease terms, pet policy, and expected rent are
+  PER-PROPERTY facts: `accepted_authorities` / `lease_terms` / `pets` /
   `rent_min`-`rent_max` on `UnitItem`. The landlord CONTACT no longer models
   them (`accepts_programs` / `lease_terms` / `pet_policy` / `expected_rent`
   were removed from `ContactItem` and the contact parsers ignore them); its
@@ -255,6 +256,47 @@ path mis-named itself `scheduleStuckNudge` / "stuck nudge" — that is gone.)
   `CannotRemovePrimaryLandlordError` / `cannot_remove_primary_landlord`: the old
   "primary landlord" wording collided with the primary contact, which is exactly
   the ambiguity this pair of names removes.
+
+- **housing authority** (tenant-list-visibility, 2026-08-10) - the org that ISSUES
+  a tenant's voucher: it determines the rent and pays the landlord. Atlanta (AHA),
+  Jonesboro (JHA), Dekalb County Housing, Fulton County, Clayton County, East
+  Point, McDonough - plus **DCA**, Georgia's statewide authority covering 120+
+  counties. A tenant has EXACTLY ONE (`contact.housingAuthority`, the
+  `byHousingAuthority` GSI hash), and **porting** is that voucher moving between
+  authorities (the informational `contact.porting` flag). "Voucher program" is NOT
+  a separate dimension - it dissolved into this term on 2026-08-10, because the
+  founder's tenant-side "voucher program" column was recording the
+  authority-or-agency mix all along. Values are FREE TEXT with canonical spellings
+  (`CANONICAL_AUTHORITY`, `app/src/lib/import/apply.ts`); staff see them exactly as
+  stored. Distinct from an **agency** (below) - the old data shoehorned both
+  kinds into this one field, which is what
+  `docs/issues/housing-authority-free-text-drift.md` tracks.
+
+- **agency** (tenant-list-visibility, 2026-08-10) - a helper org that exists to get
+  a tenant a voucher or help them use one: Hope Atlanta, HUD VASH, Claratel, Step
+  Up. NOT a housing authority, and the two COEXIST - a tenant can be HUD VASH AND
+  AHA, or just AHA, or HUD VASH AND DCA - so it is its own optional field
+  (`contact.agency`, PATCH-allowlisted, no GSI and no facet; staff see it as the
+  "Agency" row on a tenant's Details card). Case workers in this app are tied to
+  agencies (authority-employed caseworkers are outside our workflow), and a UNIT is
+  never tied to an agency. The agency ENTITY plus the caseworker-to-agency link are
+  still owed on the drift issue; this feature ships the plain string field only.
+
+- **accepted authorities** (tenant-list-visibility, 2026-08-10) - the authorities
+  whose vouchers a property takes: `unit.accepted_authorities`, a string LIST with
+  at least one entry, chosen by the landlord. It REPLACED both `unit.jurisdiction`
+  (a single string that could not hold the plural) and `unit.accepted_programs`
+  (old-vocabulary program labels - `HCV`, `Section 8`, `VASH` - retired with the
+  field, never folded in). Staff and landlords see ONE "Housing authorities"
+  input/row; tenants see it as the flyer's "Accepts:" line. Jurisdiction ("is the
+  unit in authority X's area?") and acceptance ("does this landlord take X's
+  vouchers?") are two distinct QUESTIONS but explicitly ONE field (Cameron,
+  2026-08-10): the two-question framing is how staff reason about FILLING the list,
+  not two things to store, so there is deliberately no jurisdiction field beside it.
+  Legacy documents are read through `authoritiesOf(unit)`, which synthesizes
+  `[jurisdiction]` when the list is absent - no backfill; the two retired keys are
+  accept-and-ignore tombstones on the unit PATCH until
+  `docs/issues/retire-humanize-authority.md` closes.
 
 ---
 

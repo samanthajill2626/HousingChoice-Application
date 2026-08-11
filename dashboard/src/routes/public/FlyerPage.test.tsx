@@ -34,7 +34,7 @@ const FLYER: PublicFlyer = {
   area: 'Decatur',
   subzone: 'Oakhurst',
   voucher_size: 3,
-  accepted_programs: ['HCV', 'VASH'],
+  accepted_authorities: ['Atlanta (AHA)', 'DCA'],
   listing_link: 'https://external.example/listing/1',
   rent_min: 1800,
   rent_max: 2000,
@@ -111,6 +111,24 @@ describe('FlyerPage', () => {
     // The public variant's CTA is the intake form; NO tap-to-text link.
     expect(screen.getByLabelText(/first name/i)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: /text us/i })).toBeNull();
+  });
+
+  it('renders the Accepts line from the projected authorities', async () => {
+    // The public "Accepts:" line answers the tenant's actual question ("will this
+    // home take MY voucher"): it lists the unit's accepted AUTHORITIES, not the
+    // retired program-type labels (spec section 8).
+    getFlyer.mockResolvedValue(FLYER);
+    renderPage();
+
+    expect(await screen.findByText(/Accepts: Atlanta \(AHA\), DCA/)).toBeInTheDocument();
+  });
+
+  it('hides the Accepts line when no authority is recorded', async () => {
+    getFlyer.mockResolvedValue({ ...FLYER, accepted_authorities: [] });
+    renderPage();
+
+    await screen.findByText('88 Sycamore St', { exact: false });
+    expect(screen.queryByText(/Accepts:/)).toBeNull();
   });
 
   it('submit swaps ONLY the CTA to a thank-you; the info stays', async () => {

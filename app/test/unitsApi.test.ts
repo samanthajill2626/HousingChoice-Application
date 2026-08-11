@@ -1,5 +1,5 @@
 // M1.5 unit tests: the units CRUD endpoints —
-//   GET   /api/units?status=&jurisdiction=&landlordId=&limit=&cursor=
+//   GET   /api/units?status=&landlordId=&limit=&cursor=
 //   POST  /api/units
 //   GET   /api/units/:unitId
 //   PATCH /api/units/:unitId
@@ -43,7 +43,7 @@ describe('POST /api/units — create', () => {
       .set('cookie', TEST_SESSION_COOKIE)
       .send({
         landlordId: 'contact-ll-9',
-        jurisdiction: 'Fulton',
+        accepted_authorities: ['Fulton County'],
         beds: 3,
         rent_min: 1700,
         address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
@@ -53,7 +53,7 @@ describe('POST /api/units — create', () => {
     expect(res.body.unit).toMatchObject({
       landlordId: 'contact-ll-9',
       status: 'setup',
-      jurisdiction: 'Fulton',
+      accepted_authorities: ['Fulton County'],
       beds: 3,
       rent_min: 1700,
       address: { line1: '12 Peachtree St', line2: 'Apt 4', city: 'Atlanta', state: 'GA', zip: '30303' },
@@ -96,7 +96,7 @@ describe('POST /api/units — create', () => {
       { landlordId: 'c', beds: 'three' }, // beds not a number
       { landlordId: 'c', rent_min: -5 }, // negative
       { landlordId: 'c', status: 'sold' }, // status is NOT CRUD-writable (§8) → unknown field 400
-      { landlordId: 'c', accepted_programs: [1, 2] }, // not string[]
+      { landlordId: 'c', accepted_authorities: [1, 2] }, // not string[]
       { landlordId: 'c', address: 'just a string' }, // address must be an object now
       { landlordId: 'c', address: { line1: '1 Main', country: 'US' } }, // unknown address key
       { landlordId: 'c', address: { zip: 30303 } }, // address sub-field not a string
@@ -111,6 +111,29 @@ describe('POST /api/units — create', () => {
     }
     expect(world.units.size).toBe(0);
     expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('ACCEPTS and DISCARDS the tombstoned legacy keys (201; neither is stored)', async () => {
+    // Spec section 8: `jurisdiction` and `accepted_programs` are retired, but the
+    // parser rejects unknown keys - so a stale cached dashboard bundle still
+    // sending them must not fail its save. They are accepted and dropped.
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .post('/api/units')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({
+        landlordId: 'contact-ll-1',
+        jurisdiction: 'DCA',
+        accepted_programs: ['HCV'],
+        beds: 2,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.unit.beds).toBe(2); // the still-writable field landed
+    const stored = world.units.get(res.body.unit.unitId)!;
+    expect('jurisdiction' in stored).toBe(false);
+    expect('accepted_programs' in stored).toBe(false);
   });
 
   it('accepts voucher_size_accepted (a stored number, distinct from beds) and GET returns it', async () => {
@@ -213,7 +236,7 @@ describe('structured address (lib/address.ts)', () => {
 });
 
 describe('GET /api/units — list/filter', () => {
-  it('filters by landlordId, status, and jurisdiction, else lists all', async () => {
+  it('filters by landlordId and status, else lists all', async () => {
     const { app, world } = makeWebhookHarness();
     seedUnit(world, 'unit-1', { landlordId: 'll-A', status: 'available', jurisdiction: 'DCA' });
     seedUnit(world, 'unit-2', { landlordId: 'll-A', status: 'occupied', jurisdiction: 'Fulton' });
@@ -231,12 +254,6 @@ describe('GET /api/units — list/filter', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE);
     expect(byStatus.body.units.map((u: UnitItem) => u.unitId).sort()).toEqual(['unit-1', 'unit-3']);
-
-    const byJur = await request(app)
-      .get('/api/units?jurisdiction=Fulton')
-      .set('x-origin-verify', SECRET)
-      .set('cookie', TEST_SESSION_COOKIE);
-    expect(byJur.body.units.map((u: UnitItem) => u.unitId)).toEqual(['unit-2']);
 
     const all = await request(app)
       .get('/api/units')
@@ -456,6 +473,42 @@ describe('PATCH /api/units/:unitId', () => {
       .set('x-origin-verify', SECRET)
       .set('cookie', TEST_SESSION_COOKIE)
       .send({ rent_max: 1900 });
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'unit_not_found' });
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('a tombstoned-only PATCH is a TRUE no-op: 200, updated_at UNCHANGED, no activity row', async () => {
+    // Spec section 8: the retired keys validate ok with an EMPTY field set, so the
+    // route must NOT call units.update - an update stamps updated_at and appends a
+    // bare "Property updated" activity row for a save that changed nothing.
+    const { app, world } = makeWebhookHarness();
+    seedUnit(world, 'unit-noop');
+
+    const res = await request(app)
+      .patch('/api/units/unit-noop')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ jurisdiction: 'Fulton County', accepted_programs: ['HCV'] });
+
+    expect(res.status).toBe(200);
+    expect(res.body.unit.unitId).toBe('unit-noop');
+    expect(res.body.unit.updated_at).toBe('2026-06-12T09:00:00.000Z');
+    const stored = world.units.get('unit-noop')!;
+    expect(stored.updated_at).toBe('2026-06-12T09:00:00.000Z');
+    expect(stored.jurisdiction).toBe('DCA'); // the discarded key never overwrote it
+    expect(stored.accepted_programs).toBeUndefined();
+    expect(world.auditEvents).toHaveLength(0);
+  });
+
+  it('a tombstoned-only PATCH on an unknown unit still 404s (the no-op path keeps the 404)', async () => {
+    const { app, world } = makeWebhookHarness();
+    const res = await request(app)
+      .patch('/api/units/nope')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ jurisdiction: 'Fulton County' });
+
     expect(res.status).toBe(404);
     expect(res.body).toEqual({ error: 'unit_not_found' });
     expect(world.auditEvents).toHaveLength(0);

@@ -1059,10 +1059,17 @@ async function upsertUnit(
     sets.push('bathrooms = :baths');
     values[':baths'] = baths;
   }
-  const jurisdiction = (row.housing_authority ?? '').trim();
-  if (jurisdiction) {
-    sets.push('jurisdiction = :jurisdiction');
-    values[':jurisdiction'] = jurisdiction;
+  // The unit's accepted authorities (spec section 8): ONE list field, canonically
+  // spelled through the SAME normalizer the contact side uses. The workbook cell
+  // is the founder's authority-named "Voucher Type", so a raw write would spell
+  // one authority two ways ("Atlanta Housing" here, "Atlanta (AHA)" on her
+  // tenants) and split it into two chips in the properties facet. The retired
+  // `jurisdiction` string is not written; legacy rows are synthesized at read
+  // time (authoritiesOf).
+  const authority = housingAuthorityFor(row.housing_authority);
+  if (authority !== undefined) {
+    sets.push('accepted_authorities = :acceptedAuthorities');
+    values[':acceptedAuthorities'] = [authority];
   }
   const notes = (row.notes ?? '').trim();
   if (notes) {

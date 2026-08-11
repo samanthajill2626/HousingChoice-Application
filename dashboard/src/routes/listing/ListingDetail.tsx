@@ -2,7 +2,7 @@
 // near-black header band (address - status badge - facts - "?? Send to
 // tenants" + Edit + ?) over a two-column body and a full-width Photos gallery:
 //   LEFT  - a small hero image - a flyer line (View flyer ? + Copy public link)
-//           - Property details (with Accepted vouchers as a BULLETED list) - Tour
+//           - Property details (incl. the Housing authorities row) - Tour
 //           & application process - Activity.
 //   RIGHT - Contacts roster - Sent to tenants - Placements on this property - Related
 //           properties - Similar properties.
@@ -40,7 +40,7 @@ import {
   setListingStatus,
   type ListingStatus,
 } from '../../api/index.js';
-import { Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
+import { BLANK, Card, CardAction, CollapsibleRows, EmptyRow, KV, NotesText, PendingPanel, Row, SendRosterRow, responseClass } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { Modal } from '../contact/Modal.js';
 import { PlacementCreateForm } from '../placements/PlacementCreateForm.js';
@@ -52,6 +52,7 @@ import { tenantName } from '../placements/placementsFormat.js';
 import { ListingActionsMenu } from './ListingActionsMenu.js';
 import { ListingEditForm } from './ListingEditForm.js';
 import {
+  authoritiesOf,
   buildListingFacts,
   describeUnitActivity,
   formatBedsBaths,
@@ -279,7 +280,10 @@ export function ListingDetail(): React.JSX.Element {
   const landlordOfRecord = contactsUnit?.landlordId ?? unit.landlordId;
   const landlordName = contactRows.find((r) => r.primaryContact)?.company ?? contactRows[0]?.company;
   const facts = buildListingFacts(unit, landlordName);
-  const programs = unit.accepted_programs ?? [];
+  // The authorities whose vouchers this property accepts - ONE synthesized list
+  // (spec section 8) behind the single "Housing authorities" detail row that
+  // replaced the old Jurisdiction KV and the accepted-vouchers bulleted list.
+  const authorities = authoritiesOf(unit);
   // The gallery renders resolved display media (presign-per-read). The server
   // attaches `mediaDisplay` alongside the raw `media`; on an older response with
   // only `media`, derive it (legacy absolute URLs pass through, bare keys become
@@ -724,7 +728,7 @@ export function ListingDetail(): React.JSX.Element {
               <KV k="Rent" v={formatRent(unit.rent_min, unit.rent_max) || '—'} />
               <KV k="Payment standard" v={formatMoney(unit.payment_standard) || '—'} />
               <KV k="Deposit" v={formatMoney(unit.deposit) || '—'} />
-              <KV k="Jurisdiction" v={unit.jurisdiction ?? '—'} />
+              <KV k="Housing authorities" v={authorities.join(', ') || BLANK} />
               <KV k="Tenant-paid utilities" v={unit.utilities ?? '—'} />
               <KV k="Accessibility" v={unit.accessibility ?? '—'} />
               <KV k="Pets" v={unit.pets ?? '—'} />
@@ -749,20 +753,6 @@ export function ListingDetail(): React.JSX.Element {
                   )
                 }
               />
-            </div>
-            <div className={styles.vouchers}>
-              <span className={styles.vouchersLabel} id={`vouchers-${unit.unitId}`}>
-                Accepted vouchers
-              </span>
-              {programs.length > 0 ? (
-                <ul className={styles.vouchersList} aria-labelledby={`vouchers-${unit.unitId}`}>
-                  {programs.map((p) => (
-                    <li key={p}>{p}</li>
-                  ))}
-                </ul>
-              ) : (
-                <EmptyRow>None recorded yet.</EmptyRow>
-              )}
             </div>
           </Card>
 

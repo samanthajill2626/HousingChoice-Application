@@ -71,6 +71,12 @@ describe('UnitCreateForm', () => {
     expect(screen.getByLabelText('Voucher size accepted')).toBeInTheDocument();
     expect(screen.getByLabelText('Public listing link')).toBeInTheDocument();
     expect(screen.getByLabelText('Street address')).toBeInTheDocument();
+    // ONE comma-separated authorities input replaces the retired single
+    // "Housing authority" field and the "Accepted vouchers / programs" list
+    // (spec section 8).
+    expect(screen.getByLabelText('Housing authorities')).toBeInTheDocument();
+    expect(screen.queryByLabelText('Housing authority')).toBeNull();
+    expect(screen.queryByLabelText(/Accepted vouchers/i)).toBeNull();
   });
 
   // ── 2: with landlordId set, the landlord side is locked read-only ──
@@ -125,6 +131,26 @@ describe('UnitCreateForm', () => {
     });
     expect(body['address']).toMatchObject({ line1: '55 Elm Ct NW' });
     expect(onCreated).toHaveBeenCalledWith(created);
+  });
+
+  // -- 4b: the comma-separated authorities input becomes accepted_authorities --
+  it('splits the Housing authorities input into accepted_authorities and never sends the retired keys', async () => {
+    const user = userEvent.setup();
+    createUnit.mockResolvedValue(newUnit());
+    setup({ landlordId: 'contact-landlord-0001' });
+
+    await screen.findByRole('dialog', { name: 'New property' });
+    await fill(user, 'Housing authorities', 'Atlanta (AHA), DCA');
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
+
+    await waitFor(() => expect(createUnit).toHaveBeenCalled());
+    const body = createUnit.mock.calls[0]?.[0] as Record<string, unknown>;
+    expect(body).toEqual({
+      landlordId: 'contact-landlord-0001',
+      accepted_authorities: ['Atlanta (AHA)', 'DCA'],
+    });
+    expect(body).not.toHaveProperty('jurisdiction');
+    expect(body).not.toHaveProperty('accepted_programs');
   });
 
   // ── 5: empty optional fields are omitted from the body ──

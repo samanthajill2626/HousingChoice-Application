@@ -51,7 +51,9 @@ export function UnitCreateForm({
   const [landlordPick, setLandlordPick] = useState<ContactSearchValue>({ name: '' });
 
   // Property fields (mirror ListingEditForm; all optional on create).
-  const [jurisdiction, setJurisdiction] = useState('');
+  // ONE comma-separated authorities input replaces the retired single
+  // `jurisdiction` field and the `accepted_programs` list (spec section 8).
+  const [authorities, setAuthorities] = useState('');
   const [beds, setBeds] = useState('');
   const [baths, setBaths] = useState('');
   const [rentMin, setRentMin] = useState('');
@@ -63,7 +65,6 @@ export function UnitCreateForm({
   const [notes, setNotes] = useState('');
   const [leaseTerms, setLeaseTerms] = useState('');
   const [pets, setPets] = useState('');
-  const [programs, setPrograms] = useState('');
   const [listingLink, setListingLink] = useState('');
   const [videoUrl, setVideoUrl] = useState('');
   const [applicationFee, setApplicationFee] = useState('');
@@ -146,7 +147,6 @@ export function UnitCreateForm({
       const v = value.trim();
       if (v) body[key] = v;
     };
-    addStr('jurisdiction', jurisdiction);
     addStr('utilities', utilities);
     addStr('accessibility', accessibility);
     addStr('notes', notes);
@@ -169,12 +169,14 @@ export function UnitCreateForm({
     if (!addNumber(body, 'application_fee', applicationFee, 'Application fee')) return null;
     if (!addNumber(body, 'voucher_size_accepted', voucherSize, 'Voucher size accepted')) return null;
 
-    // Accepted programs — comma-separated; send the array only when non-empty.
-    const normPrograms = programs
+    // Housing authorities - comma-separated; send the array only when non-empty.
+    // The retired `jurisdiction` / `accepted_programs` keys are never written
+    // again (both are server-side tombstones - app/src/lib/unitFields.ts).
+    const normAuthorities = authorities
       .split(',')
-      .map((p) => p.trim())
+      .map((a) => a.trim())
       .filter(Boolean);
-    if (normPrograms.length > 0) body['accepted_programs'] = normPrograms;
+    if (normAuthorities.length > 0) body['accepted_authorities'] = normAuthorities;
 
     // Address — send the object only when at least one part is filled. The server
     // keeps only the non-empty parts.
@@ -295,12 +297,12 @@ export function UnitCreateForm({
 
         <div className={styles.row}>
           <label className={styles.field}>
-            <span className={styles.label}>Housing authority</span>
+            <span className={styles.label}>Housing authorities</span>
             <input
               className={styles.input}
-              value={jurisdiction}
-              onChange={(e) => setJurisdiction(e.target.value)}
-              placeholder="e.g. ga_dca"
+              value={authorities}
+              onChange={(e) => setAuthorities(e.target.value)}
+              placeholder="e.g. Atlanta (AHA), DCA"
               autoComplete="off"
             />
           </label>
@@ -432,17 +434,6 @@ export function UnitCreateForm({
             value={leaseTerms}
             onChange={(e) => setLeaseTerms(e.target.value)}
             placeholder="e.g. 12-month minimum, month-to-month after"
-            autoComplete="off"
-          />
-        </label>
-
-        <label className={styles.field}>
-          <span className={styles.label}>Accepted vouchers / programs</span>
-          <input
-            className={styles.input}
-            value={programs}
-            onChange={(e) => setPrograms(e.target.value)}
-            placeholder="Comma-separated, e.g. HCV, VASH"
             autoComplete="off"
           />
         </label>

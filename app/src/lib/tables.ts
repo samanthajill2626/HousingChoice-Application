@@ -106,7 +106,6 @@ export const TABLES: readonly TableSpec[] = [
     gsis: [
       { indexName: 'byLandlord', hashKey: { name: 'landlordId', type: 'S' } },
       { indexName: 'byStatus', hashKey: { name: 'status', type: 'S' } },
-      { indexName: 'byJurisdiction', hashKey: { name: 'jurisdiction', type: 'S' } },
       // BE3/C3 (new-dashboard): the property/building group siblings index. A
       // `property` is the PARENT of units (a duplex/building) — NOT a single
       // dwelling (GLOSSARY); units in the same building share a `propertyId`.

@@ -41,17 +41,46 @@ export function statusLabel(status: string): string {
   return LISTING_STATUS_LABELS[status as ListingStatus] ?? humanize(status);
 }
 
-/** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End, Atlanta
+/**
+ * Read-time synthesis of a unit's accepted authorities (spec section 8) - there
+ * is NO backfill, so every stored legacy unit keeps working. The new
+ * `accepted_authorities` list wins whenever it is stored, INCLUDING when it is
+ * empty (an empty stored list means "cleared"; falling back there would resurrect
+ * the old jurisdiction value the operator just removed). Otherwise a legacy
+ * non-empty `jurisdiction` string synthesizes a one-item list; otherwise [].
+ *
+ * SOURCE OF TRUTH: app/src/lib/unitFields.ts `authoritiesOf`. This is a HAND
+ * mirror - no cross-workspace import exists, so nothing guards the two
+ * mechanically (accepted, recorded in docs/issues/housing-authority-free-text-drift.md).
+ * Change one, change the other, and keep both test suites in step.
+ *
+ * The parameter is typed with `unknown` fields, exactly as the app helper is: a
+ * `UnitItem` is a flexible wire document (`[key: string]: unknown`), so a stored
+ * value can be malformed regardless of what the interface declares.
+ */
+export function authoritiesOf(unit: {
+  accepted_authorities?: unknown;
+  jurisdiction?: unknown;
+}): string[] {
+  const list = unit.accepted_authorities;
+  if (Array.isArray(list)) return list.filter((a): a is string => typeof a === 'string');
+  const legacy = unit.jurisdiction;
+  return typeof legacy === 'string' && legacy.length > 0 ? [legacy] : [];
+}
+
+/** The header facts subline: "2 BR - 1 BA - $1,400-1,600/mo - West End
  *  - Porter Properties". Only present parts are joined. `landlordName` is the
- *  resolved landlord/company, appended last when known. */
+ *  resolved landlord/company, appended last when known. The AREA slot carries
+ *  `unit.area` alone: the legacy `jurisdiction` was an issuer name in an area
+ *  slot and dropped out with the accepted-authorities consolidation (spec
+ *  section 8). */
 export function buildListingFacts(unit: UnitItem, landlordName?: string): string {
   const parts: string[] = [];
   if (typeof unit.beds === 'number') parts.push(`${unit.beds} BR`);
   if (typeof unit.baths === 'number') parts.push(`${unit.baths} BA`);
   const rent = formatRent(unit.rent_min, unit.rent_max);
   if (rent) parts.push(`${rent}/mo`);
-  const area = [unit.area, unit.jurisdiction].filter((p) => typeof p === 'string' && p).join(', ');
-  if (area) parts.push(area);
+  if (typeof unit.area === 'string' && unit.area) parts.push(unit.area);
   if (landlordName) parts.push(landlordName);
   return parts.join(' - ');
 }

@@ -114,7 +114,7 @@ async function createAvailableUnit(
   const res = await request.post(`${NEXT}/api/units`, {
     data: {
       landlordId,
-      jurisdiction: 'atlanta_housing',
+      accepted_authorities: ['atlanta_housing'],
       beds: 2,
       rent_min: 1500,
       rent_max: 1600,

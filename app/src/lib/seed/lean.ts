@@ -178,7 +178,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       // 'manual' here would disagree with §7 AND block the first derived write.)
       status: 'under_application', // byStatus
       status_source: 'derived', // §8 provenance — derivation-permitting
-      jurisdiction: 'atlanta_housing', // byJurisdiction
+      accepted_authorities: ['atlanta_housing'], // accepted authorities (spec section 8)
       address: '1450 Joseph E. Boone Blvd NW, Atlanta, GA 30314',
       beds: 2,
       rent_min: 1650,
@@ -201,7 +201,7 @@ export const SEED: Record<string, Record<string, unknown>[]> & {
       status: 'occupied',
       status_source: 'manual',
       final_rent: 1975,
-      jurisdiction: 'ga_dca',
+      accepted_authorities: ['ga_dca'],
       address: '88 Sycamore St, Decatur, GA 30030',
       beds: 3,
       rent_min: 1975,

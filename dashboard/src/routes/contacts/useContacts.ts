@@ -12,13 +12,21 @@ import { useEffect, useState } from 'react';
 import { getContacts, type Contact, type ContactType } from '../../api/index.js';
 
 /** Page-walk bound: a hard stop so a pathological/looping cursor can never spin
- *  forever (40 pages × the server's 50/page = 2000 records per type — far past
- *  Phase-1 scale). Hitting it WARNS — never a silent truncation. */
+ *  forever (40 pages x the requested 100/page = 4000 records per type - far past
+ *  Phase-1 scale). Hitting it WARNS - never a silent truncation. */
 const MAX_PAGES = 40;
 
-/** Fetch every page of one contact type (nextCursor walk, bounded). */
+/** The server's MAX_PAGE_LIMIT. Asking for it halves the round trips a list view
+ *  needs (the default page is 50). It is the CEILING, not a hint: the server
+ *  accepts 1..100 and 400s anything outside that (`parseLimit`,
+ *  app/src/routes/contacts.ts), so raising this value breaks every contacts list
+ *  view on first load. */
+const PAGE_LIMIT = '100';
+
+/** Fetch every page of one contact type (nextCursor walk, bounded). The page size
+ *  is REQUIRED here so a future caller cannot silently fall back to the default. */
 async function getAllContactPages(
-  params: { type: ContactType; deleted: boolean },
+  params: { type: ContactType; deleted: boolean; limit: string },
   signal: AbortSignal,
 ): Promise<Contact[]> {
   const out: Contact[] = [];
@@ -77,7 +85,9 @@ export function useContacts(filter: ContactsFilter): ContactsState {
       try {
         const deleted = filter === 'deleted';
         const perType = await Promise.all(
-          TYPES_FOR[filter].map((type) => getAllContactPages({ type, deleted }, signal)),
+          TYPES_FOR[filter].map((type) =>
+            getAllContactPages({ type, deleted, limit: PAGE_LIMIT }, signal),
+          ),
         );
         if (signal.aborted) return;
         // Merge the per-type lists, de-duping on contactId (a contact only ever

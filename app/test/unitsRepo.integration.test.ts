@@ -1,7 +1,7 @@
 // M1.5 integration tests against DynamoDB Local — the units repo: create
 // (generated id), getById, SET-merge update (no-overwrite of unset fields +
-// conditional 404), and each of the three GSIs (byLandlord, byStatus,
-// byJurisdiction) plus the unfiltered Scan list.
+// conditional 404), and the byLandlord / byStatus GSIs plus the unfiltered Scan
+// list.
 //
 // Self-skipping like the other integration suites: when nothing answers at
 // DYNAMODB_ENDPOINT (default http://localhost:8000) the suite is skipped so
@@ -129,12 +129,12 @@ describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)
     );
   });
 
-  it('lists via each GSI and the unfiltered Scan', async () => {
+  it('lists via the byLandlord and byStatus GSIs and the unfiltered Scan', async () => {
     const landlordId = `contact-ll-gsi-${randomUUID().slice(0, 6)}`;
-    const jurisdiction = `JUR-${randomUUID().slice(0, 6)}`;
+    const authority = `AUTH-${randomUUID().slice(0, 6)}`;
     const status = `st-${randomUUID().slice(0, 6)}`; // unique status partition
-    await units.create({ landlordId, status, jurisdiction, beds: 1 });
-    await units.create({ landlordId, status, jurisdiction, beds: 2 });
+    await units.create({ landlordId, status, accepted_authorities: [authority], beds: 1 });
+    await units.create({ landlordId, status, accepted_authorities: [authority], beds: 2 });
 
     const byLandlord = await units.listByLandlord(landlordId);
     expect(byLandlord.items).toHaveLength(2);
@@ -143,10 +143,6 @@ describe.skipIf(!reachable)('unitsRepo against DynamoDB Local (throwaway prefix)
     const byStatus = await units.listByStatus(status);
     expect(byStatus.items).toHaveLength(2);
     expect(byStatus.items.every((u) => u.status === status)).toBe(true);
-
-    const byJurisdiction = await units.listByJurisdiction(jurisdiction);
-    expect(byJurisdiction.items).toHaveLength(2);
-    expect(byJurisdiction.items.every((u) => u.jurisdiction === jurisdiction)).toBe(true);
 
     // The unfiltered Scan sees everything (at least our six creates in this suite).
     const all = await units.list({ limit: 100 });

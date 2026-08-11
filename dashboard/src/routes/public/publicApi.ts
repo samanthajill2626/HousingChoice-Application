@@ -33,7 +33,10 @@ export interface PublicFlyer {
   area: string | null;
   subzone: string | null;
   voucher_size: number | null;
-  accepted_programs: string[];
+  /** The authorities whose vouchers this unit accepts - synthesized server-side
+   *  from `accepted_authorities`, falling back to a legacy `jurisdiction` value
+   *  (spec section 8; app/src/lib/unitFields.ts `authoritiesOf`). */
+  accepted_authorities: string[];
   listing_link: string | null;
   rent_min: number | null;
   rent_max: number | null;

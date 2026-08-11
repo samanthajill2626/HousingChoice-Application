@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { UnitActivityEvent, UnitItem } from '../../api/index.js';
 import {
+  authoritiesOf,
   buildListingFacts,
   formatBedsBaths,
   formatMoney,
@@ -56,6 +57,25 @@ describe('statusLabel', () => {
   });
 });
 
+describe('authoritiesOf', () => {
+  // Hand-mirror of app/src/lib/unitFields.ts authoritiesOf - these assertions are
+  // the app suite's (app/test/unitFields.test.ts) restated on the dashboard copy,
+  // because no cross-workspace import exists to guard the two mechanically.
+  it('prefers the new list, synthesizes a legacy jurisdiction, else []', () => {
+    expect(authoritiesOf({ accepted_authorities: ['DCA'], jurisdiction: 'old' })).toEqual(['DCA']);
+    expect(authoritiesOf({ jurisdiction: 'atlanta_housing' })).toEqual(['atlanta_housing']);
+    expect(authoritiesOf({})).toEqual([]);
+  });
+  it('a STORED empty list means "cleared" and still wins over the legacy value', () => {
+    expect(authoritiesOf({ accepted_authorities: [], jurisdiction: 'legacy' })).toEqual([]);
+  });
+  it('keeps only string members; a malformed value falls back to the legacy string', () => {
+    expect(authoritiesOf({ accepted_authorities: ['DCA', 7, null] })).toEqual(['DCA']);
+    expect(authoritiesOf({ accepted_authorities: 'not-a-list', jurisdiction: 'j' })).toEqual(['j']);
+    expect(authoritiesOf({ jurisdiction: '' })).toEqual([]);
+  });
+});
+
 describe('buildListingFacts', () => {
   it('joins present facts plus the landlord name last', () => {
     const u: UnitItem = {
@@ -67,10 +87,13 @@ describe('buildListingFacts', () => {
       rent_min: 1400,
       rent_max: 1600,
       area: 'West End',
+      // Deliberately still stored: `jurisdiction` is an issuer name, so it no
+      // longer joins the AREA phrase (spec section 8). `unit.area` alone carries
+      // the area, and this fixture proves the legacy value is ignored here.
       jurisdiction: 'Atlanta',
     };
     expect(buildListingFacts(u, 'Porter Properties')).toBe(
-      '2 BR - 1 BA - $1,400-1,600/mo - West End, Atlanta - Porter Properties',
+      '2 BR - 1 BA - $1,400-1,600/mo - West End - Porter Properties',
     );
   });
   it('omits absent parts and the landlord when unknown', () => {

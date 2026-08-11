@@ -92,7 +92,7 @@ describe('structured landlord fields', () => {
 
 // MOVED TO THE UNIT (2026-07-10): expected_rent + the preference defaults
 // (accepts_programs / lease_terms / pet_policy) are per-property facts now
-// (rent_min-rent_max / accepted_programs / lease_terms / pets on UnitItem).
+// (rent_min-rent_max / accepted_authorities / lease_terms / pets on UnitItem).
 // The contact parsers treat them like any other unknown key — silently
 // ignored, never persisted — so a stale client sending them cannot resurrect
 // contact-level copies.

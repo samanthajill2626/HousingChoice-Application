@@ -6,6 +6,7 @@
 //   - a re-run does NOT revert work done in the app after the import
 //   - `drop` in the workbook excludes a person and their traffic
 //   - a STOP sender imports suppressed
+//   - an applied unit records its authorities as a canonical list
 //
 // Self-skipping like the other integration suites: without DynamoDB Local at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green offline.
@@ -16,9 +17,10 @@ import { tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
+import { normalizeAddress } from '../src/lib/import/addresses.js';
 import { housingAuthorityFor, runApply, splitReviewedName } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
-import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone } from '../src/lib/import/ids.js';
+import { conversationIdFor1to1, conversationIdForGroup, contactIdForPhone, unitIdForAddress } from '../src/lib/import/ids.js';
 import { parseWorkbook } from '../src/lib/import/workbook.js';
 import { OUR_NUMBER, PHONES, writeFixture } from './importFixture.js';
 
@@ -211,6 +213,28 @@ describe.skipIf(!reachable)('import:apply', () => {
       }),
     );
     expect(item.Item!.housingAuthority).toBe('Hope Atlanta');
+  });
+
+  it('writes an applied unit a canonical accepted_authorities list, never jurisdiction', async () => {
+    // Spec section 8: the unit-side field is the accepted-authorities LIST, and
+    // the founder's raw "Voucher Type" cell goes through the SAME canonicalizer
+    // the contact side uses - so the properties facet and the tenants facet group
+    // one authority under one spelling instead of two. The retired `jurisdiction`
+    // string is never written again.
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    // The unit key is derived exactly as upsertUnit derives it, from the reviewed
+    // row - not hardcoded, so a change to either helper surfaces here.
+    const row = [...cleanReview().units.values()].find((r) => (r.housing_authority ?? '') !== '')!;
+    expect(row.housing_authority).toBe('Atlanta Housing'); // the RAW Airtable cell
+    const unitId = unitIdForAddress(normalizeAddress((row.address ?? '').trim()));
+
+    const stored = await doc.send(
+      new GetCommand({ TableName: table('units'), Key: { unitId } }),
+    );
+    expect(stored.Item).toBeDefined();
+    expect(stored.Item!.accepted_authorities).toEqual(['Atlanta (AHA)']);
+    expect(stored.Item!.jurisdiction).toBeUndefined();
   });
 
   it('folds two Quo conversations for one phone into a single thread', async () => {

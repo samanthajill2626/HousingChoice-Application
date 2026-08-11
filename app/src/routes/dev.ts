@@ -664,6 +664,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   };
   router.post('/__dev/relay/replay-intros', async (_req, res) => {
     const { conversationsRepo, enqueueIntro } = relayReplayDeps();
+    // listRelayGroups reads the sparse byRelayStatus GSI, which a native group
+    // text never writes (spec 4.2) - so this dev replay is relay-scoped by the
+    // reader itself and can never touch a group thread.
     const { items } = await conversationsRepo.listRelayGroups('open');
     let replayed = 0;
     let skipped = 0;

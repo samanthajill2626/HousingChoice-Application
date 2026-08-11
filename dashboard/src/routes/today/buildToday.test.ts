@@ -367,3 +367,40 @@ describe('buildTodayFromSources', () => {
     expect(items[1]?.urgency).toBe('');
   });
 });
+
+describe('buildTodayFromSources - native group texts are OUT of Today', () => {
+  it('never surfaces a group_text thread, however unread', () => {
+    // Spec 11: v1 treats group threads as inbox + thread-view only. An intake
+    // exclusion, so no later rule (ONE_TO_ONE, participantContactId) can readmit
+    // one - participantContactId would name roster member #1 as "who".
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({
+          conversationId: 'gt-1',
+          type: 'group_text',
+          unread_count: 9,
+          participants: [
+            { contactId: 'c-ann', phone: '+14045550111' },
+            { contactId: 'c-marcus', phone: '+14045550112' },
+          ],
+          preview: 'Saturday works',
+        }),
+      ],
+      NOW,
+    );
+    expect(items).toEqual([]);
+  });
+
+  it('still surfaces the 1:1 threads beside it', () => {
+    const items = buildTodayFromSources(
+      [],
+      [
+        convOf({ conversationId: 'gt-1', type: 'group_text', unread_count: 9 }),
+        convOf({ conversationId: 'c-1', type: 'tenant_1to1', unread_count: 1, preview: 'hi' }),
+      ],
+      NOW,
+    );
+    expect(items.map((i) => i.refId)).toEqual(['unknown?phone=%2B14040100007']);
+  });
+});

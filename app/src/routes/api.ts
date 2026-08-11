@@ -152,6 +152,9 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   manual_mode: 409,
   breaker_open: 429,
   relay_not_supported: 409,
+  // A native group text handed to the 1:1 send wrapper. Its own code, so the
+  // dashboard never has to read a relay refusal to mean a group one.
+  group_text_not_supported: 409,
   // A2P kill-switch (pre-A2P): SMS sending disabled → 503 (matches the relay
   // provisioning kill-switch's 503 posture).
   sms_sending_disabled: 503,

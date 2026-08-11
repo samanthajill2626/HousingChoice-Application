@@ -302,6 +302,10 @@ export function createRelayGroupsRouter(deps: RelayGroupsRouterDeps = {}): Route
     const { conversationId } = req.params;
     mergeContext({ conversationId });
     const conversation = await conversations.getById(conversationId);
+    // POSITIVE type guard: this router speaks for relay groups ONLY, so a native
+    // group text 404s here by design (invariant 13.6). That is exactly why the
+    // group thread view reads its roster from the conversation header and its
+    // member state from /conversations/:id/group-members, never from this route.
     if (!conversation || conversation.type !== 'relay_group') {
       res.status(404).json({ error: 'relay_group_not_found' });
       return;

@@ -19,6 +19,16 @@
 // is the opaque base64url of the raw byLastActivity LastEvaluatedKey — the same
 // scheme GET /api/conversations uses.
 //
+// There are THREE row sources. The contact pager is the first; the two below are
+// merged additively onto page one (see aggregateInbox), and neither can collide
+// with a contact row because both key by conversationId.
+//
+// group_text conversations are the THIRD row source (kind='group_text'): native
+// carrier group threads, read from the `group_open` partition via
+// conversationsRepo.listGroupTexts. They are CAPPED on page one and have their
+// own `groups` filter, which pages the whole partition through a namespaced
+// cursor - see the merge block and GROUP_PAGE_ONE_LIMIT.
+//
 // relay_group conversations are a SECOND row source (kind='relay_group'):
 // masked relay-group threads carry last_activity_at / status / unread_count /
 // last_message_preview just like a 1:1, so they are folded into the same feed
@@ -72,9 +82,9 @@ export type InboxFilter = 'all' | 'unread' | 'unknown' | 'groups';
 export type InboxChannel = 'sms' | 'mms' | 'call' | 'email';
 
 export interface InboxRow {
-  // `group_text` (native carrier groups) is declared in S2 so the server and
-  // dashboard unions agree; the rows are BUILT in S4 (its own source, filter and
-  // renderers). Nothing emits this kind yet.
+  // `group_text` = a NATIVE carrier group thread, the THIRD row source. It
+  // reuses conversationId/name/unreadCount/preview/lastActivityAt and omits
+  // channel/direction/status/owner/phone.
   kind: 'contact' | 'unknown' | 'relay_group' | 'group_text';
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
@@ -394,6 +404,13 @@ export async function aggregateInbox(
       // so a mixed contact's unread SUM + newest-conversation choice include
       // email-only threads. The feed shows OPEN 1:1s only (relay groups are the
       // separate row source).
+      // A NATIVE GROUP TEXT CAN NEVER APPEAR HERE, for two independent reasons,
+      // and both are worth naming: conversationsForContact resolves only via
+      // findByParticipantPhone / findByParticipantEmail, and a group thread
+      // writes NEITHER key; and the `status === 'open'` clause below excludes
+      // the `group_open` partition anyway. So group unread never enters a
+      // contact's unread SUM - which is the correct product answer too (its
+      // unread belongs to the group row, and no 1:1 mark-read could clear it).
       const all = await conversationsForContact(contact, conversations);
       list = all.filter((c) => c.status === 'open' && c.type !== 'relay_group');
     } catch (err) {

@@ -717,6 +717,35 @@ describe('tier 6: known-contact threading', () => {
     expect(w.createOrGetByParticipantEmail).not.toHaveBeenCalled();
   });
 
+  it('never threads inbound mail onto a MULTI-PARTY conversation', async () => {
+    // Both multi-party types are named explicitly. `status !== 'open'` already
+    // excludes a native group text (it lives in the group_open partition), but a
+    // guard that depends on a partition choice made elsewhere is one refactor
+    // away from silently threading a member's email into a group transcript.
+    const w = makeWorld({
+      contact: { phone: '+15550100001', phones: [{ phone: '+15550100001', primary: true }] },
+      conversations: [
+        {
+          conversationId: 'conv-group',
+          participant_email: 'alice@example.com',
+          type: 'group_text',
+          status: 'group_open',
+        } as Partial<ConversationItem>,
+        {
+          conversationId: 'conv-relay',
+          participant_email: 'alice@example.com',
+          type: 'relay_group',
+          status: 'open',
+        } as Partial<ConversationItem>,
+      ],
+    });
+    const out = await ingestInboundEmail(notice(), w.deps);
+    expect(out.outcome).toBe('threaded');
+    expect(w.appended[0]!.conversationId).not.toBe('conv-group');
+    expect(w.appended[0]!.conversationId).not.toBe('conv-relay');
+    expect(w.createOrGetByParticipantEmail).toHaveBeenCalled();
+  });
+
   it('creates via createOrGetByParticipantEmail with {contactId, displayName} when the contact has no open 1:1', async () => {
     const w = makeWorld({});
     const out = await ingestInboundEmail(notice(), w.deps);

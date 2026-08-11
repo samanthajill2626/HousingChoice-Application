@@ -173,6 +173,29 @@ export function groupMemberKey(e164: string): string {
   return `phone#${e164}`;
 }
 
+/**
+ * Seen provider SIDs for the sms_unreachable DEGRADATION logs (the two arms that
+ * flag nothing and only report). Twilio redelivers a status callback until it is
+ * acked, and a group leg has no contact to flag, so without this one undeliverable
+ * message could log the same line dozens of times and swamp the signal.
+ *
+ * Bounded FIFO: this is a log-noise damper, not a correctness mechanism, so
+ * forgetting the oldest sids is fine - the worst case is one extra line.
+ */
+const UNREACHABLE_LOGGED_SIDS = new Set<string>();
+const UNREACHABLE_LOGGED_MAX = 500;
+
+/** Run `emit` at most once per provider SID (within the bound above). */
+function logUnreachableOnce(providerSid: string, emit: () => void): void {
+  if (UNREACHABLE_LOGGED_SIDS.has(providerSid)) return;
+  if (UNREACHABLE_LOGGED_SIDS.size >= UNREACHABLE_LOGGED_MAX) {
+    const oldest = UNREACHABLE_LOGGED_SIDS.values().next().value;
+    if (oldest !== undefined) UNREACHABLE_LOGGED_SIDS.delete(oldest);
+  }
+  UNREACHABLE_LOGGED_SIDS.add(providerSid);
+  emit();
+}
+
 function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
   const aC = a.created_at ?? '';
   const bC = b.created_at ?? '';
@@ -1902,6 +1925,23 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — an unreachable SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
+            // NATIVE GROUP TEXTS ARE REACHABLE HERE. A classic status callback
+            // for a group leg in the pre-marker window resolves to the GROUP
+            // thread, which carries NO participant_phone - so the lookup below
+            // finds no contact and the whole case degrades to a log line. That
+            // outcome is CORRECT (there is no single member to flag: a group
+            // failure says nothing about any one number), but it is a distinct
+            // situation from "we have a number and no contact record", so it
+            // says so and logs ONCE per sid instead of on every redelivery.
+            if (conversation?.type === 'group_text') {
+              logUnreachableOnce(MessageSid, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  'sms_unreachable on a group_text thread - no single member to flag (group legs report per-recipient)',
+                );
+              });
+              break;
+            }
             const convPhone = conversation?.participant_phone;
             const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
             if (contact && convPhone === contact.phone) {
@@ -1912,7 +1952,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 'sms_unreachable on a non-primary attached number — contact flag NOT set (number-scoped)',
               );
             } else {
-              log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, 'sms_unreachable: no contact record to flag');
+              logUnreachableOnce(MessageSid, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  'sms_unreachable: no contact record to flag',
+                );
+              });
             }
             break;
           }

@@ -432,6 +432,47 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       }
     });
 
+    it('30005 on a NATIVE GROUP TEXT flags nobody and logs once per sid', async () => {
+      // Reachable: a classic status callback for a group leg in the pre-marker
+      // window resolves to the GROUP thread, which has no participant_phone.
+      // Flagging nothing is correct (a group failure says nothing about any one
+      // member's number), but Twilio redelivers status callbacks - so the
+      // degradation must not log the same line on every redelivery.
+      const { app, world, capture } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+      const group = await world.conversationsRepo.createGroupTextThread({
+        conversationId: 'gt-status-1',
+        members: [
+          { contactId: 'contact-T', phone: TENANT_PHONE },
+          { contactId: 'contact-O', phone: '+15550100009' },
+        ],
+      });
+      await world.messagesRepo.append({
+        conversationId: group.item.conversationId,
+        providerSid: 'SMgroupleg1',
+        providerTs: '2026-06-12T10:00:00.000Z',
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'group body',
+        deliveryStatus: 'queued',
+      });
+
+      const params = statusParams({
+        MessageSid: 'SMgroupleg1',
+        MessageStatus: 'failed',
+        ErrorCode: '30005',
+      });
+      await signedTwilioPost(app, STATUS_PATH, params);
+      await signedTwilioPost(app, STATUS_PATH, params);
+
+      expect(world.flagWrites).toHaveLength(0);
+      const lines = capture.lines.filter((l) =>
+        String(l['msg']).includes('sms_unreachable on a group_text thread'),
+      );
+      expect(lines).toHaveLength(1);
+    });
+
     it('30007 (carrier filtering) is a terminal ERROR (via the delivery_failed marker) and never retries', async () => {
       const { app, world, capture } = makeWebhookHarness();
       const seeded = await seedOutbound(world, 'SMout0001');

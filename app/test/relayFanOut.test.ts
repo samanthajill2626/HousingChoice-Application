@@ -169,6 +169,28 @@ describe('relay.fanOut (M1.7)', () => {
     expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
   });
 
+  it('does NOT fan out a thread with no pool number (a native group text can never reach the relay path)', async () => {
+    // Belt to the status gate's braces. A native group_text carries NO
+    // pool_number, ever (spec 4.2), and it is never enqueued here - but if one
+    // ever were, this guard is what stops the fan-out from addressing an
+    // undefined number instead of the members' handsets.
+    const conv = seedRelay(world);
+    const source = seedSource(world, 'hello everyone', 'c-alice');
+    delete (conv as { pool_number?: string }).pool_number;
+    world.conversations.set(conv.conversationId, conv);
+
+    await enqueueImmediate(RELAY_FANOUT_JOB, {
+      relayConversationId: 'conv-relay-1',
+      sourceTsMsgId: source.tsMsgId,
+      senderKey: 'c-alice',
+    });
+    await outbound.settle();
+
+    expect(world.sent).toHaveLength(0);
+    const stored = world.messages.find((m) => m.tsMsgId === source.tsMsgId)!;
+    expect(Object.keys(stored.delivery_recipients ?? {})).toHaveLength(0);
+  });
+
   it('does NOT relay to an opted-out member — marks the slot failed/contact_opted_out, still sends the others', async () => {
     seedRelay(world);
     // Bob STOP'd — contact-level sms_opt_out set. Relay must skip him.

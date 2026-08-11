@@ -511,6 +511,12 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // contact) to one item, preferring the conversation (the actionable target).
     const emittedUnknownPhones = new Set<string>();
     {
+      // NATIVE GROUP TEXTS ARE STRUCTURALLY ABSENT from this read: they live in
+      // the `group_open` partition, and this Query asks for `open`. That is the
+      // whole point of the separate partition - 132 group threads would have
+      // blown this hard-capped 100-row read and pushed real work off Today.
+      // Spec 11 also keeps them out of Today deliberately (inbox + thread view
+      // only in v1), so there is nothing to add here.
       const page = await conversations.listByLastActivity({ status: 'open', limit: GROUP_FETCH_LIMIT });
       warnIfCapped('conversations', page.items.length);
       for (const conv of page.items) {
@@ -591,6 +597,8 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
             });
           }
         } else if (
+          // A POSITIVE allowlist: every multi-party type (relay_group above,
+          // group_text unreachable here) falls out deliberately.
           conv.type === 'tenant_1to1' ||
           conv.type === 'landlord_1to1' ||
           conv.type === 'partner_1to1'
@@ -695,6 +703,9 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // relay opt-out attention item above); LOGS stay counts/IDs only.
     const relayCloseNags: RelayCloseNagItem[] = [];
     {
+      // listRelayGroups reads the SPARSE byRelayStatus GSI. A native group text
+      // never writes `relay_status` (spec 4.2 forbids it outright), so it cannot
+      // appear here and no group thread is ever close-nagged - it has no close.
       const { items: openGroups, truncated } = await conversations.listRelayGroups('open');
       if (truncated) {
         log.warn(

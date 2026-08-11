@@ -18,6 +18,7 @@ import {
   ContactOptedOutError,
   ConversationNotFoundError,
   ManualModeError,
+  GroupTextSendNotSupportedError,
   RelaySendNotSupportedError,
   SendRefusedError,
   SmsSendingDisabledError,
@@ -366,6 +367,21 @@ describe('sendMessage service', () => {
     await expect(f.service({ conversationId: 'conv-1', body: 'x' })).rejects.toBeInstanceOf(
       RelaySendNotSupportedError,
     );
+    expect(f.sent).toHaveLength(0);
+    expect(f.appended).toHaveLength(0);
+  });
+
+  it('refuses a native group_text with its OWN error, never the relay one', async () => {
+    // Before the explicit case a group thread fell through to the no-phone check
+    // and threw the RELAY error - a misleading message from an accidental path,
+    // pointing whoever read it at relay code that is not involved.
+    const f = makeFakes({
+      conversation: { type: 'group_text', status: 'group_open', participant_phone: undefined },
+    });
+    const err = await f.service({ conversationId: 'conv-1', body: 'x' }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(GroupTextSendNotSupportedError);
+    expect(err).not.toBeInstanceOf(RelaySendNotSupportedError);
+    expect((err as GroupTextSendNotSupportedError).code).toBe('group_text_not_supported');
     expect(f.sent).toHaveLength(0);
     expect(f.appended).toHaveLength(0);
   });

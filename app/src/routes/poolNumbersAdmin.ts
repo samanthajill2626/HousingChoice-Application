@@ -128,6 +128,11 @@ function toGroupRow(conv: ConversationItem): PoolNumberGroupRow {
     label: serverLabel(conv),
     memberCount: (conv.participants ?? []).length,
     // status is typed `string`; relay_group values are exactly 'open' | 'closed'.
+    // UNCHECKED CAST, safe by the READER: every row here comes from a
+    // pool-number lookup, and only relay threads carry a pool_number (a native
+    // group text never does, spec 4.2), so a `group_open` value cannot reach it.
+    // If this reader ever widens, narrow at runtime - do not widen the cast, or
+    // the admin page will confidently report a status the row does not have.
     status: conv.status as 'open' | 'closed',
     createdAt: conv.created_at,
     ...(closedAt !== undefined && { closedAt }),

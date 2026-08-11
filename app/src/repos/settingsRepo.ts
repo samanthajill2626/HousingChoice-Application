@@ -38,6 +38,24 @@ export const ORG_SETTINGS_ENTITY_KEY = `settings#${ORG_SETTINGS_ID}`;
 export const GROUP_IDENTITY_FINGERPRINT_ID = 'group_identity_fingerprint';
 
 /**
+ * Liveness records for the group-texting cross-check (spec 8.2). Both hold ONE
+ * ISO instant and nothing else:
+ *  - `group_railed_inbound_last_at` - the newest classic-webhook inbound filed
+ *    onto a RAILED group thread (written by detection, T3.3);
+ *  - `group_crosscheck_last_event_at` - the newest carrier-sourced Conversations
+ *    event the cross-check endpoint accepted (written by S6).
+ * The daily sweep WARNs when the first advanced while the second did not, which
+ * is what "the monitor is dead" looks like from the outside.
+ */
+export const GROUP_RAILED_INBOUND_LAST_AT_ID = 'group_railed_inbound_last_at';
+export const GROUP_CROSSCHECK_LAST_EVENT_AT_ID = 'group_crosscheck_last_event_at';
+
+/** The two liveness record ids - a closed union, NOT a generic named-record API. */
+export type GroupTimestampRecordId =
+  | typeof GROUP_RAILED_INBOUND_LAST_AT_ID
+  | typeof GROUP_CROSSCHECK_LAST_EVENT_AT_ID;
+
+/**
  * The founder-editable settings (CO2). Defaults are CO2's copy, applied by
  * getOrgSettings() when no item exists yet (a fresh stack reads sane values
  * without an admin first having to PUT them).
@@ -124,6 +142,14 @@ export interface SettingsRepo {
    * refuses to start). Never throws on a lost race; only on a corrupt record.
    */
   claimGroupIdentityFingerprint(hash: string): Promise<GroupFingerprintClaim>;
+  /**
+   * Advance a group liveness record (spec 8.2). MONOTONIC: an older instant
+   * losing a race is a no-op, never a rewind - the sweep compares two
+   * high-water marks, so moving one backwards would manufacture a false alarm.
+   */
+  putGroupTimestamp(id: GroupTimestampRecordId, at: string): Promise<void>;
+  /** The stored instant for a group liveness record, or undefined. */
+  getGroupTimestamp(id: GroupTimestampRecordId): Promise<string | undefined>;
 }
 
 export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
@@ -268,6 +294,33 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
         }
         return stored === hash ? { outcome: 'matched' } : { outcome: 'mismatch', storedHash: stored };
       }
+    },
+
+    async putGroupTimestamp(id, at) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { settingId: id },
+            UpdateExpression: 'SET recorded_at = :at',
+            // Monotonic: only ever move the high-water mark FORWARD.
+            ConditionExpression: 'attribute_not_exists(recorded_at) OR recorded_at < :at',
+            ExpressionAttributeValues: { ':at': at },
+          }),
+        );
+      } catch (err) {
+        // A newer instant is already stored - the expected outcome under
+        // concurrency, not a failure.
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+    },
+
+    async getGroupTimestamp(id) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: { settingId: id } }),
+      );
+      const at = (Item as { recorded_at?: unknown } | undefined)?.recorded_at;
+      return typeof at === 'string' && at.length > 0 ? at : undefined;
     },
   };
 }

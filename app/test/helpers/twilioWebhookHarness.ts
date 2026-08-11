@@ -129,7 +129,11 @@ import {
   type UpsertPendingInput,
 } from '../../src/repos/pendingRosterActionsRepo.js';
 import { type PoolNumbersService } from '../../src/services/poolNumbers.js';
-import { type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
+import { type PoolNumberItem, type PoolNumbersRepo } from '../../src/repos/poolNumbersRepo.js';
+import type {
+  GroupRailEnqueueRequest,
+  GroupRailEnqueuer,
+} from '../../src/services/groupRail.js';
 import {
   type PushNotification,
   type PushService,
@@ -283,6 +287,14 @@ export interface FakeWorld {
   /** Durable suggestion-resolution protocol rows, absent from pending lists. */
   suggestionResolutions: Map<string, SuggestionResolutionItem>;
   suggestionResolutionRepo: SuggestionResolutionRepo;
+  /** Group-texting liveness records (spec 8.2), keyed by settingId. */
+  groupTimestamps: Map<string, string>;
+  /** Active relay pool numbers the group exclusion-set read sees (spec 4.1). */
+  activePoolNumbers: string[];
+  poolNumbersRepo: Pick<PoolNumbersRepo, 'listActive'>;
+  /** Every group-rail enqueue the webhook attempted (S3 seam; S6 wires the job). */
+  groupRailEnqueues: GroupRailEnqueueRequest[];
+  groupRailEnqueuer: GroupRailEnqueuer;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1419,6 +1431,8 @@ export function createFakeWorld(): FakeWorld {
   // In-memory org settings (M1.4): starts at the CO2 defaults; putOrgSettings
   // merges a partial patch (field-level) exactly like the real repo.
   const settings: OrgSettings = { ...DEFAULT_ORG_SETTINGS };
+  /** Group-texting liveness records (spec 8.2), keyed by settingId. */
+  const groupTimestamps = new Map<string, string>();
   const settingsRepo: SettingsRepo = {
     async getOrgSettings() {
       return { ...settings };
@@ -1449,6 +1463,16 @@ export function createFakeWorld(): FakeWorld {
       // The fingerprint is a DEPLOYED-stack boot guard; no webhook path touches
       // it. Throw so an accidental call is loud rather than silently "created".
       throw new Error('claimGroupIdentityFingerprint: not used in the webhook harness');
+    },
+    // Group liveness high-water marks (group-texting spec 8.2). MONOTONIC like
+    // the real repo, so a test cannot pass while production would rewind one.
+    async putGroupTimestamp(id, at) {
+      const stored = groupTimestamps.get(id);
+      if (stored !== undefined && stored >= at) return;
+      groupTimestamps.set(id, at);
+    },
+    async getGroupTimestamp(id) {
+      return groupTimestamps.get(id);
     },
   };
 
@@ -2922,6 +2946,23 @@ export function createFakeWorld(): FakeWorld {
     },
   });
 
+  // Native group texting: the exclusion-set pool read + the rail enqueue seam.
+  // Both are in-memory, so a group inbound never reaches DynamoDB or a job queue.
+  const activePoolNumbers: string[] = [];
+  const poolNumbersRepo: Pick<PoolNumbersRepo, 'listActive'> = {
+    async listActive() {
+      return activePoolNumbers.map((poolNumber) => ({ poolNumber }) as PoolNumberItem);
+    },
+  };
+  const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
+  const groupRailEnqueuer: GroupRailEnqueuer = {
+    async enqueueGroupRail(request) {
+      groupRailEnqueues.push(request);
+      // S3 ships the SEAM only - S6 replaces this with the real job enqueue.
+      return { status: 'unavailable', reason: 'group rail job not wired yet (S6 task T6.6(a)/(d))' };
+    },
+  };
+
   return {
     conversations,
     messages,
@@ -2995,6 +3036,11 @@ export function createFakeWorld(): FakeWorld {
     aiRuns,
     suggestionResolutions: suggestionResolutionFake.items,
     suggestionResolutionRepo: suggestionResolutionFake.repo,
+    groupTimestamps,
+    activePoolNumbers,
+    poolNumbersRepo,
+    groupRailEnqueues,
+    groupRailEnqueuer,
   };
 }
 
@@ -3258,6 +3304,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       // ai_extraction table; a test may pass opts.extractionRepo (a spy) to OBSERVE
       // the schedule call.
       extractionRepo: opts.extractionRepo ?? world.extractionRepo,
+      // Native group texting (S3): the exclusion-set pool read and the rail
+      // enqueue seam are in-memory, so a group inbound touches no AWS.
+      poolNumbersRepo: world.poolNumbersRepo,
+      groupRailEnqueuer: world.groupRailEnqueuer,
       ...(opts.statusUnknownSidRetryDelayMs !== undefined && {
         statusUnknownSidRetryDelayMs: opts.statusUnknownSidRetryDelayMs,
       }),

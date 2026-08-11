@@ -69,6 +69,22 @@ import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import { applyNumberSuppression } from '../../services/numberSuppression.js';
 import {
+  isMissingEnvelopeGroupShape,
+  parseOtherRecipients,
+} from '../../services/groupEnvelope.js';
+import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
+import { resolveGroupMembers } from '../../services/groupMembers.js';
+import {
+  GROUP_RAIL_ENQUEUE_NOT_WIRED,
+  hasActiveGroupRail,
+  type GroupRailEnqueuer,
+} from '../../services/groupRail.js';
+import { convertConnectingRelayGroupToGroupText } from '../../services/groupConvert.js';
+import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNumbersRepo.js';
+import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../../repos/settingsRepo.js';
+import { createRateLimitedWarn } from '../../lib/rateLimitedWarn.js';
+import { normalizeToE164 } from '../../lib/phone.js';
+import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
 } from '../../jobs/retrySend.js';
@@ -144,6 +160,19 @@ function conversationTypeFor(contact: ContactItem | undefined): ConversationType
  * newest (never a crash), and a sender in several CLOSED groups on one number
  * routes to the newest for provenance.
  */
+/**
+ * The member key for a `group_text` delivery/attribution slot (spec 15.6,
+ * plan T3.4a): ALWAYS `phone#<E164>`, NEVER `relayMemberKey`.
+ *
+ * `relayMemberKey` prefers the contactId, so one contact owning TWO member
+ * numbers would collapse into a single slot - one delivery outcome for two
+ * handsets, and one sender chip for two people's messages. The contactId still
+ * travels, as roster DISPLAY metadata on the participant.
+ */
+export function groupMemberKey(e164: string): string {
+  return `phone#${e164}`;
+}
+
 function byNewestCreated(a: ConversationItem, b: ConversationItem): number {
   const aC = a.created_at ?? '';
   const bC = b.created_at ?? '';
@@ -195,6 +224,19 @@ export interface TwilioWebhookDeps {
    * deps (index.ts) thread it in; the real service by default. Injectable in tests.
    */
   poolNumbersService?: PoolNumbersService;
+  /**
+   * Pool-number inventory (native group texting): the cached exclusion-set read
+   * that keeps a relay number out of a derived group roster. Read-only here;
+   * the real repo by default, injectable in tests.
+   */
+  poolNumbersRepo?: Pick<PoolNumbersRepo, 'listActive'>;
+  /**
+   * The group-text RAIL seam (spec 6.1 DETECTION). Detection ENQUEUES rail
+   * creation rather than calling Twilio inline (the 5s webhook budget). S6
+   * injects the real enqueuer at T6.6(a)/(d); until then the default records
+   * `unavailable` - nothing attempted - and the thread stays inbound-only.
+   */
+  groupRailEnqueuer?: GroupRailEnqueuer;
 }
 
 /** Default wait before the one unknown-SID retry in /status (see above). */
@@ -238,6 +280,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     deps.placementDeadlinesRepo ?? createPlacementDeadlinesRepo({ logger: deps.logger });
   const events = deps.events ?? appEvents;
   const extraction = deps.extractionRepo ?? createExtractionRepo({ logger: deps.logger });
+  const poolNumbers = deps.poolNumbersRepo ?? createPoolNumbersRepo({ logger: deps.logger });
+  const groupRail = deps.groupRailEnqueuer ?? GROUP_RAIL_ENQUEUE_NOT_WIRED;
 
   // (M1.10c) Failed-send escalation (doc §7.1): a delivery failure on a
   // placement-linked conversation (a relay/placement thread carries
@@ -852,6 +896,348 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   }
 
   // ---------------------------------------------------------------------
+  // NATIVE GROUP TEXT detection (group-texting spec 5).
+  //
+  // A carrier group text to the business number arrives at THIS webhook looking
+  // exactly like a 1:1 except for the undocumented `OtherRecipients{N}` params.
+  // Everything below turns that envelope into a native `group_text` thread.
+  // ---------------------------------------------------------------------
+
+  /** How long the pool-number list is reused before re-reading (spec 4.1). */
+  const GROUP_EXCLUSION_CACHE_TTL_MS = 60_000;
+  /** Minimum gap between tripwire WARNs (spec 8.1 - the signal is the RATE). */
+  const GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS = 5 * 60_000;
+
+  let poolNumberCache: { at: number; numbers: string[] } | undefined;
+  const warnEnvelopeMissing = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+
+  /**
+   * The exclusion set group identity subtracts (spec 4.1): our business number,
+   * every relay pool number, and the deploy-fixed config list.
+   *
+   * `groupIdentity` is deliberately PURE, so assembling this is the caller's
+   * job. The pool list is the only part that needs I/O; it is cached because it
+   * changes on the order of weeks and this runs on every group inbound.
+   * STALE-IF-ERROR: a refresh failure reuses the last good list rather than
+   * silently shrinking the exclusion set, which would fork every id derived
+   * while the read is broken.
+   */
+  async function groupExclusions(): Promise<GroupExclusionSet> {
+    const now = Date.now();
+    if (poolNumberCache === undefined || now - poolNumberCache.at >= GROUP_EXCLUSION_CACHE_TTL_MS) {
+      try {
+        const active = await poolNumbers.listActive();
+        poolNumberCache = { at: now, numbers: active.map((p) => p.poolNumber) };
+      } catch (err) {
+        log.error(
+          { err, hadCache: poolNumberCache !== undefined },
+          'group identity: pool-number read failed - reusing the last known list for the exclusion set',
+        );
+        // Keep the stale entry but do not re-stamp `at`, so the next inbound retries.
+        poolNumberCache ??= { at: 0, numbers: [] };
+      }
+    }
+    return {
+      businessPhoneNumber: config.businessPhoneNumber,
+      poolNumbers: poolNumberCache.numbers,
+      configuredNumbers: config.groupIdentityExcludedNumbers,
+    };
+  }
+
+  /** Best-effort rail (re-)enqueue. NEVER crashes the webhook (spec 15.3). */
+  async function ensureRailEnqueued(
+    thread: ConversationItem,
+    reason: 'created' | 'rail_missing',
+    providerSid: string,
+  ): Promise<void> {
+    if (reason === 'rail_missing' && hasActiveGroupRail(thread)) return;
+    try {
+      const outcome = await groupRail.enqueueGroupRail({
+        conversationId: thread.conversationId,
+        members: thread.participants ?? [],
+        reason,
+      });
+      if (outcome.status !== 'enqueued') {
+        log.warn(
+          {
+            providerSid,
+            conversationId: thread.conversationId,
+            railStatus: outcome.status,
+            reason: outcome.reason,
+          },
+          'group rail not enqueued - the thread is inbound-only until a rail exists',
+        );
+      }
+    } catch (err) {
+      log.error(
+        { err, providerSid, conversationId: thread.conversationId },
+        'group rail enqueue threw - message persisted, thread stays inbound-only',
+      );
+    }
+  }
+
+  /**
+   * The outcome of classifying + filing ONE group-envelope inbound.
+   *
+   * `handled: false` means "this message belongs in the sender's 1:1 after all"
+   * - the collapsed-roster rule and the corrupt-shape branch (spec 13.1's two
+   * non-tripwire exceptions). The caller then runs the ordinary 1:1 pipeline
+   * with the extraction marker set; NOTHING is persisted here in that case, so
+   * the message can never land twice.
+   */
+  interface GroupInboundOutcome {
+    handled: boolean;
+  }
+
+  async function handleGroupInbound(msg: {
+    MessageSid: string;
+    From: string;
+    To: string;
+    Body: string | undefined;
+    OptOutType: string | undefined;
+    params: WebhookParams;
+    others: string[];
+  }): Promise<GroupInboundOutcome> {
+    const { MessageSid, From, To, Body, params } = msg;
+    const identity = groupIdentity(From, To, msg.others, await groupExclusions(), { logger: log });
+
+    // (i) CORRUPT ENVELOPE: an address we cannot canonicalize. Deriving an id
+    // from the survivors would give a 3-person group the id of a 2-person one -
+    // a silently WRONG thread. File 1:1, mark, and say so loudly.
+    if (identity.unparseable.length > 0) {
+      log.error(
+        { event: 'group_envelope_unparseable', providerSid: MessageSid, unparseableCount: identity.unparseable.length },
+        'group envelope carries an address that is not a valid phone number - filed to the sender 1:1, NOT as a group',
+      );
+      return { handled: false };
+    }
+
+    // (ii) COLLAPSED ROSTER (spec 5.1): fewer than two outside members after
+    // exclusion. Us-plus-one-person IS a 1:1, so filing it there is also the
+    // semantically right answer - but the body may name the other parties, so
+    // it still carries the extraction marker.
+    if (identity.collapsed) {
+      log.warn(
+        { event: 'group_roster_collapsed', providerSid: MessageSid, rosterSize: identity.roster.length },
+        'group envelope collapsed to fewer than two outside members - filed to the sender 1:1 (semantically a 1:1)',
+      );
+      return { handled: false };
+    }
+
+    // (iii) Resolve the thread at the derived id. THREE legal shapes.
+    const existing = await conversations.getById(identity.conversationId);
+    let thread: ConversationItem;
+    if (existing === undefined) {
+      // (a) NOT FOUND -> create. Members first: every ConversationParticipant
+      // carries a REQUIRED contactId, and the stubs must NOT go through
+      // captureContact (adjudication A7 - it would stamp consent_method).
+      const resolution = await resolveGroupMembers(identity.roster, {
+        contactsRepo: contacts,
+        logger: log,
+      });
+      const { item, created } = await conversations.createGroupTextThread({
+        conversationId: identity.conversationId,
+        members: resolution.members,
+        ...(Body !== undefined && Body.length > 0 && { preview: Body }),
+      });
+      thread = item;
+      // Created -> enqueue the rail. Adopted (lost the create race) -> the
+      // winner already enqueued, so only heal a genuinely rail-less thread.
+      await ensureRailEnqueued(thread, created ? 'created' : 'rail_missing', MessageSid);
+    } else if (existing.type === 'group_text') {
+      // (b) FOUND, already native. Re-enqueue the rail when there is none: this
+      // is what closes the create-then-crash-before-enqueue window (spec 15.3).
+      thread = existing;
+      await ensureRailEnqueued(thread, 'rail_missing', MessageSid);
+    } else if (
+      existing.type === 'relay_group' &&
+      existing.status === 'connecting' &&
+      !(typeof existing.pool_number === 'string' && existing.pool_number.length > 0)
+    ) {
+      // (c) FOUND, an IMPORTED row nobody converted yet -> AUTO-CONVERT inline
+      // (Cameron's gate ruling). Called WITHOUT ownNumbers: exclusion-set parity
+      // belongs to the bulk migration entry, which has the import context; this
+      // caller is guarded by boot validation plus the identity fingerprint.
+      const converted = await convertConnectingRelayGroupToGroupText(identity.conversationId, {
+        conversationsRepo: conversations,
+        contactsRepo: contacts,
+        logger: log,
+      });
+      if (converted.outcome === 'refused') {
+        log.error(
+          { event: 'group_autoconvert_refused', providerSid: MessageSid, conversationId: identity.conversationId, refusal: converted.refusal },
+          'inline auto-convert refused an imported group row - filed to the sender 1:1, never guessed',
+        );
+        return { handled: false };
+      }
+      const reread = await conversations.getById(identity.conversationId);
+      if (reread === undefined || reread.type !== 'group_text') {
+        log.error(
+          { event: 'group_autoconvert_unreadable', providerSid: MessageSid, conversationId: identity.conversationId },
+          'inline auto-convert reported success but the thread does not read back as a group text - filed to the sender 1:1',
+        );
+        return { handled: false };
+      }
+      thread = reread;
+      log.warn(
+        { event: 'group_autoconvert_self_heal', providerSid: MessageSid, conversationId: identity.conversationId, outcome: converted.outcome },
+        'inbound group message SELF-HEALED an unconverted imported relay row into a native group text (the migration should have done this before go-live)',
+      );
+      await ensureRailEnqueued(thread, 'rail_missing', MessageSid);
+    } else {
+      // ANY OTHER SHAPE: an open/connected relay group with a pool number at a
+      // DERIVED GROUP ID. The importer cannot produce this, so it means the row
+      // is corrupt or an id collided. Never guess - file 1:1 and alarm.
+      log.error(
+        { event: 'group_id_wrong_shape', providerSid: MessageSid, conversationId: identity.conversationId, foundType: existing.type, foundStatus: existing.status },
+        'the derived group id resolves to a thread that is neither a group text nor a convertible imported row - filed to the sender 1:1',
+      );
+      return { handled: false };
+    }
+
+    // --- From here the message IS a group message -------------------------
+    mergeContext({ conversationId: thread.conversationId });
+
+    // T3.4a: group member keys are PHONE-SCOPED, ALWAYS. relayMemberKey prefers
+    // contactId, which would collapse two numbers of ONE contact into a single
+    // delivery/attribution slot (spec 15.6) - so it is deliberately not used.
+    const senderKey = groupMemberKey(normalizeToE164(From) ?? From);
+    const senderContact = await contacts.findByPhone(From);
+    // Author honesty: only a reviewed contact type claims tenant/landlord.
+    const author =
+      senderContact?.type === 'landlord' ||
+      senderContact?.type === 'tenant' ||
+      senderContact?.type === 'partner'
+        ? senderContact.type
+        : 'unknown';
+
+    const mediaUrls = parseInboundMediaUrls(params);
+    const providerTs = new Date().toISOString();
+    // Dedupe rides the EXISTING MessageSid sid-pointer transaction. The relay
+    // idiom (use appended.tsMsgId directly) is correct here: the repo returns
+    // the FIRST delivery's tsMsgId from the pointer, and there is no
+    // partial-mirror recovery to do - group media mirrors in one pass.
+    //
+    // NO `deliveryRecipients` seed: the relay path seeds an empty map because a
+    // fan-out job writes per-recipient child fields into the SOURCE message. A
+    // carrier group needs no fan-out (the carrier already delivered to every
+    // handset), so an inbound group message has no per-recipient delivery map.
+    const appended = await messages.append({
+      conversationId: thread.conversationId,
+      providerSid: MessageSid,
+      providerTs,
+      type: mediaUrls.length > 0 ? 'mms' : 'sms',
+      direction: 'inbound',
+      author,
+      deliveryStatus: 'delivered',
+      relaySenderKey: senderKey,
+      ...(Body !== undefined && Body.length > 0 && { body: Body }),
+      ...(mediaUrls.length > 0 && { mediaUrls }),
+    });
+
+    // Media (T3.6): the SHARED mirror, under the GROUP conversationId.
+    if (!appended.deduped) {
+      await mirrorInboundMedia({
+        mediaUrls,
+        messageSid: MessageSid,
+        conversationId: thread.conversationId,
+        tsMsgId: appended.tsMsgId,
+        params,
+      });
+    }
+
+    // Sender attribution across a second handset - the same touch a 1:1 does
+    // (it is sender attribution, not a 1:1-ism). Best-effort.
+    if (senderContact) {
+      try {
+        await contacts.touchPhoneLastSeen(senderContact.contactId, From, providerTs);
+      } catch (err) {
+        log.error(
+          { err, providerSid: MessageSid },
+          'phone lastSeenAt touch failed - message persisted, lastSeenAt stale',
+        );
+      }
+    }
+
+    // Inbox touch + unread + SSE, on the GROUP conversationId. touchLastActivity
+    // takes NO special parameters: S2's repo guard keeps the row in its own
+    // `group_open` byLastActivity partition.
+    let touched: ConversationItem | undefined;
+    try {
+      if (!appended.deduped) await conversations.incrementUnread(thread.conversationId);
+      touched = await conversations.touchLastActivity(
+        thread.conversationId,
+        Body || undefined,
+        providerTs,
+      );
+    } catch (err) {
+      log.error(
+        { err, providerSid: MessageSid },
+        'group touchLastActivity/unread failed - message persisted, inbox stale',
+      );
+    }
+    if (!appended.deduped) {
+      events.emit('message.persisted', {
+        conversationId: thread.conversationId,
+        tsMsgId: appended.tsMsgId,
+        direction: 'inbound',
+        deliveryStatus: 'delivered',
+      });
+      if (touched) events.emit('conversation.updated', toConversationUpdatedEvent(touched));
+    }
+
+    // Keywords (spec 4.4): the SHARED seam runs on EVERY group inbound, because
+    // the plain-inbound contact-level consent stamp for the SENDER lives there.
+    // The target conversation is a THUNK - the sender's 1:1 is materialized ONLY
+    // if an opt-out/opt-in actually needs a target, never for plain inbound and
+    // never for HELP. `suppressReply` because the app SENDS NOTHING on group
+    // keywords in v1; suppression is scoped to the sender (contact + their own
+    // 1:1), NEVER the group thread.
+    await processInboundKeywords({
+      conversation: async () =>
+        conversations.createOrGetByParticipantPhone(From, conversationTypeFor(senderContact)),
+      effectiveContact: senderContact,
+      From,
+      Body,
+      OptOutType: msg.OptOutType,
+      MessageSid,
+      auditContext: { groupConversationId: thread.conversationId, via: 'group_text' },
+      suppressReply: true,
+    });
+
+    // Cross-check liveness (spec 8.2): record that a RAILED group thread took
+    // classic-webhook inbound. Paired with the cross-check endpoint's own
+    // high-water mark, that is what makes "the monitor went quiet" detectable.
+    if (hasActiveGroupRail(thread)) {
+      try {
+        await settings.putGroupTimestamp(GROUP_RAILED_INBOUND_LAST_AT_ID, providerTs);
+      } catch (err) {
+        log.warn(
+          { err, providerSid: MessageSid },
+          'group railed-inbound liveness stamp failed - message persisted, cross-check high-water mark stale',
+        );
+      }
+    }
+
+    log.info(
+      {
+        providerSid: MessageSid,
+        direction: 'inbound',
+        conversationId: thread.conversationId,
+        memberCount: (thread.participants ?? []).length,
+        bodyLength: Body?.length ?? 0,
+        mediaCount: mediaUrls.length,
+        deduped: appended.deduped,
+      },
+      'twilio inbound group message processed',
+    );
+    return { handled: true };
+  }
+
+  // ---------------------------------------------------------------------
   // Inbound message webhook — pipeline order per doc §7.1.
   // ---------------------------------------------------------------------
   router.post('/sms', verifySignature, async (req, res) => {
@@ -969,6 +1355,68 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
     }
 
+    // (1.75) NATIVE GROUP TEXT detection (group-texting spec 5). Sits AFTER both
+    // echo drops and ALL relay routing, and BEFORE any 1:1 I/O - the envelope
+    // read below is pure property access on an already-parsed body, so an
+    // envelope-less inbound reaches (2) with a byte-identical call sequence
+    // (invariant 13.2).
+    //
+    // GATED ON THE BUSINESS NUMBER (adjudication A6). Spec 5 puts this "in the
+    // main-number branch", and the gate is what makes that true: the relay block
+    // above FALLS THROUGH when every group on a pool number is closed, so
+    // without it a group-origin inbound addressed to a POOL number would mint a
+    // native thread and quietly change relay behavior (invariant 13.6).
+    const others = parseOtherRecipients(params);
+    const onBusinessNumber =
+      To !== undefined &&
+      config.businessPhoneNumber !== undefined &&
+      To === config.businessPhoneNumber;
+    // Set when a fail-open path files a possibly-group message into a 1:1
+    // thread. AI fact extraction excludes marked messages from every transcript
+    // window it builds (spec 5.4).
+    let groupAmbiguousOrigin = false;
+    if (others.length > 0 && onBusinessNumber) {
+      const outcome = await handleGroupInbound({
+        MessageSid,
+        From,
+        To: To as string,
+        Body,
+        OptOutType,
+        params,
+        others,
+      });
+      if (outcome.handled) {
+        // The app SENDS NOTHING on a group inbound in v1 (spec 4.4), including
+        // on keywords: Twilio's standard opt-out auto-reply answers the sender
+        // 1:1 (issue twilio-standard-optout-double-reply owns that coupling).
+        res.type('text/xml').send(EMPTY_TWIML);
+        return;
+      }
+      // Collapsed roster or corrupt shape: fall through to the 1:1 pipeline
+      // below, MARKED. Nothing was persisted above, so no double-filing.
+      groupAmbiguousOrigin = true;
+    } else if (others.length > 0 && To !== undefined && config.businessPhoneNumber === undefined) {
+      // Detection is structurally off without a configured business number. Say
+      // so - silence here looks identical to "no group texts are arriving".
+      log.warn(
+        { event: 'group_detection_unconfigured', providerSid: MessageSid },
+        'a group envelope arrived but BUSINESS_PHONE_NUMBER is unset - group detection is OFF, filing as 1:1',
+      );
+    } else if (onBusinessNumber && isMissingEnvelopeGroupShape(MessageSid, params)) {
+      // (1.8) TRIPWIRE (spec 8.1). An MM-prefixed SID with no media and no
+      // envelope is what a SILENTLY REMOVED `OtherRecipients` contract looks
+      // like from in here. FAIL OPEN - file as a 1:1, never lose a message -
+      // and WARN, deliberately NOT error: a subject-only 1:1 MMS legitimately
+      // matches this shape, and the ERROR channel feeds the production alarm.
+      // Rate-limited because if the contract really did disappear, EVERY group
+      // inbound matches at once and the flood would bury the signal.
+      groupAmbiguousOrigin = true;
+      warnEnvelopeMissing(
+        { event: 'group_envelope_missing', providerSid: MessageSid },
+        'MM-shaped inbound with no media and no OtherRecipients envelope - filed as 1:1 (possible group-detection outage)',
+      );
+    }
+
     // (2) Resolve contact + conversation. Unknown phones still get a
     // conversation (auto-capture of contacts is M1.2).
     const contact = await contacts.findByPhone(From);
@@ -1003,6 +1451,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Inbound messages are received by definition; the outbound delivery
       // machine never transitions them.
       deliveryStatus: 'delivered',
+      // Fail-open group filing (spec 5.4): this message MAY be carrier-group
+      // content, so AI fact extraction must not attribute it to this contact.
+      ...(groupAmbiguousOrigin && { groupAmbiguousOrigin: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });

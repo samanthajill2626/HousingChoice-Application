@@ -473,6 +473,10 @@ export interface GroupMemberRow {
   name?: string;
   suppressed: boolean;
   suppressionScope: NumberSuppressionScope;
+  /** A read behind this member FAILED server-side, so `suppressed` is the
+   *  absence of an answer, not a `false`. Render it as UNKNOWN - never as
+   *  "reachable". */
+  suppressionUnknown?: boolean;
   /** Present/true for a soft-deleted contact (group sends refuse; spec 15.7). */
   deleted?: boolean;
 }
@@ -868,8 +872,8 @@ export interface TourActivityEvent {
  * open; `default` = the property's primary contact + the tenant; `unavailable` =
  * a thread pointer is set but the conversation could NOT be read. An
  * `unavailable` roster is NEVER silently re-resolved into the default - the card
- * says so and offers a retry, because being wrong about who is on a live group
- * text outranks "never show an error".
+ * says so and offers a retry, because being wrong about who is on a live relay
+ * group outranks "never show an error".
  */
 export type RosterSource = 'participants' | 'plan' | 'default' | 'unavailable';
 
@@ -924,8 +928,8 @@ export type RosterActionSkipReason =
   | 'member_no_longer_on_roster'
   /** The roster lost its second reachable member. */
   | 'roster_too_thin'
-  /** Live relay-number provisioning is off in this environment, so no group
-   *  text can be opened (the pre-A2P posture). */
+  /** Live relay-number provisioning is off in this environment, so no relay
+   *  group can be opened (the pre-A2P posture). */
   | 'provisioning_unavailable'
   /** Only when migration to the converted placement failed. */
   | 'converted';
@@ -2318,6 +2322,13 @@ export interface GroupThreadRow {
   conversationId: string;
   memberCount: number;
   lastActivityAt: string; // ISO
+  /**
+   * The row's LABEL, derived SERVER-SIDE by the one group-title rule that also
+   * titles the inbox row and the thread header (app/src/lib/groupTitle.ts).
+   * Optional on the wire only so a card rendered against an older backend
+   * degrades to the local fallback instead of a blank row.
+   */
+  title?: string;
   /** The OTHER members' resolved display names (known names only - no phones). */
   otherMemberNames: string[];
 }

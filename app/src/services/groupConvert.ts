@@ -25,7 +25,7 @@
 // rather than reported as "already done".
 //
 // PII (doc 9): logs conversationId + counts only - never a member phone.
-import { contactIdForPhone } from '../lib/import/ids.js';
+import { contactIdForPhone, conversationIdForGroup } from '../lib/import/ids.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import type { ContactsRepo } from '../repos/contactsRepo.js';
 import type {
@@ -39,7 +39,11 @@ export type GroupConvertRefusal =
   | 'not_found'
   | 'not_a_relay_group'
   | 'not_connecting'
-  | 'has_pool_number';
+  | 'has_pool_number'
+  | 'roster_id_mismatch'
+  /** The conversion THREW (transient repo failure). Only the bulk runner mints
+   *  this one - it isolates a throwing row rather than losing the report. */
+  | 'threw';
 
 export interface GroupConvertOptions {
   conversationsRepo: ConversationsRepo;
@@ -93,6 +97,11 @@ const REFUSAL_SENTENCE: Record<GroupConvertRefusal, string> = {
   not_a_relay_group: 'the thread is not a relay group',
   not_connecting: 'the relay group is not in the connecting state (it was connected or closed)',
   has_pool_number: 'the relay group already fronts a pool number, so it is a real relay thread',
+  roster_id_mismatch:
+    'its stored roster does not hash back to its own conversation id, so the roster does not ' +
+    'describe this group - convert it only after a human decides which side is right ' +
+    '(a workbook `drop` on a group member is the known producer)',
+  threw: 'the conversion threw',
 };
 
 function refuse(conversationId: string, refusal: GroupConvertRefusal): GroupConvertResult {
@@ -110,12 +119,38 @@ function refuse(conversationId: string, refusal: GroupConvertRefusal): GroupConv
   };
 }
 
-/** The three preconditions, in the order they are reported. */
+/**
+ * THE IDENTITY INVARIANT, checked (invariant 13.5).
+ *
+ * A group thread's conversationId IS uuidv5 over its sorted roster, so the
+ * roster stored on the row must hash back to the row's own id. Nothing else in
+ * the system compares the two, and they can genuinely diverge: the importer
+ * derives the id from ALL participants but writes a roster filtered by the
+ * founder's workbook `drop` column, so one dropped member leaves a short roster
+ * under a full-set id.
+ *
+ * Converting such a row propagates the lie - detection then adopts the short
+ * roster and a real member of the carrier group has no chip, no attribution, no
+ * stub, and no slot in the Conversations rail.
+ *
+ * REFUSE, NEVER REPAIR. Re-keying the roster to match the id invents members;
+ * re-keying the id to match the roster changes THREAD IDENTITY and orphans
+ * every message already filed under it. Both are migration-grade decisions, so
+ * this is a reported refusal the founder adjudicates against the workbook.
+ */
+function rosterMatchesId(conversationId: string, members: readonly ConversationParticipant[]): boolean {
+  return conversationIdForGroup(members.map((m) => m.phone)) === conversationId;
+}
+
+/** The preconditions, in the order they are reported. */
 function precondition(item: ConversationItem): GroupConvertRefusal | undefined {
   if (item.type !== 'relay_group') return 'not_a_relay_group';
   if (item.status !== 'connecting') return 'not_connecting';
   if (typeof item.pool_number === 'string' && item.pool_number.length > 0) {
     return 'has_pool_number';
+  }
+  if (!rosterMatchesId(item.conversationId, (item.participants ?? []) as ConversationParticipant[])) {
+    return 'roster_id_mismatch';
   }
   return undefined;
 }
@@ -143,6 +178,50 @@ function backfillRoster(members: readonly ConversationParticipant[]): {
 }
 
 /**
+ * Fill every missing `name` in a roster from the member's contact record.
+ *
+ * Best-effort by construction: a read failure or an absent contact leaves the
+ * entry nameless and the title falls back to the formatted number, exactly as
+ * it does for a member nobody has ever named. Never OVERWRITES a stored name -
+ * a roster snapshot a human curated outranks a lookup.
+ */
+async function backfillRosterNames(
+  members: readonly ConversationParticipant[],
+  contactsRepo: Pick<ContactsRepo, 'getById'>,
+  log: Logger,
+): Promise<{ members: ConversationParticipant[]; backfilled: number }> {
+  let backfilled = 0;
+  const out: ConversationParticipant[] = [];
+  for (const member of members) {
+    const existing = typeof member.name === 'string' ? member.name.trim() : '';
+    if (existing.length > 0 || member.contactId.length === 0) {
+      out.push(member);
+      continue;
+    }
+    let name: string | undefined;
+    try {
+      const contact = await contactsRepo.getById(member.contactId);
+      const first = typeof contact?.firstName === 'string' ? contact.firstName.trim() : '';
+      const last = typeof contact?.lastName === 'string' ? contact.lastName.trim() : '';
+      const joined = [first, last].filter((p) => p.length > 0).join(' ');
+      name = joined.length > 0 ? joined : undefined;
+    } catch (err) {
+      log.warn(
+        { err, contactId: member.contactId },
+        'group text conversion: member name lookup failed - the roster entry stays nameless (title falls back to the number)',
+      );
+    }
+    if (name === undefined) {
+      out.push(member);
+      continue;
+    }
+    backfilled += 1;
+    out.push({ ...member, name });
+  }
+  return { members: out, backfilled };
+}
+
+/**
  * Everything that must be true AFTER the type transition, re-applied on EVERY
  * call: the roster backfill and the per-member consent-basis stamps.
  *
@@ -158,6 +237,7 @@ async function converge(
   at: string,
 ): Promise<GroupConvertResult> {
   const { conversationsRepo, contactsRepo } = opts;
+  const log = opts.logger ?? defaultLogger;
   let roster = (item.participants ?? []) as ConversationParticipant[];
   let contactIdsBackfilled = 0;
 
@@ -166,11 +246,21 @@ async function converge(
   // converted by an older build, or one whose transition wrote a roster we have
   // since learned more about.
   const filled = backfillRoster(roster);
-  if (filled.backfilled > 0) {
-    const updated = await conversationsRepo.backfillGroupTextRoster(conversationId, filled.members);
+
+  // NAMES, TOO. An imported roster carries no `name` at all (apply.ts writes
+  // `{contactId, phone}`), and the group title is DERIVED FROM THE ROSTER by
+  // lib/groupTitle.ts - so without this every migrated group renders as a row
+  // of phone numbers in the inbox and on the contact card while the thread view
+  // (which re-resolves names from the contact record) shows the real names. One
+  // derivation, fed one roster: the fix is to give the roster its names here,
+  // where we are already reading every member contact anyway.
+  const named = await backfillRosterNames(filled.members, contactsRepo, log);
+
+  if (filled.backfilled > 0 || named.backfilled > 0) {
+    const updated = await conversationsRepo.backfillGroupTextRoster(conversationId, named.members);
     // A lost condition means the row stopped being a group thread under us,
     // which nothing in v1 does; keep the roster we know about.
-    roster = (updated?.participants as ConversationParticipant[] | undefined) ?? filled.members;
+    roster = (updated?.participants as ConversationParticipant[] | undefined) ?? named.members;
     contactIdsBackfilled = filled.backfilled;
   }
 

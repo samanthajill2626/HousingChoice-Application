@@ -449,6 +449,33 @@ describe('GET /api/conversations/:conversationId/group-members', () => {
     expect(res.body.members[0]).toMatchObject({ deleted: true });
   });
 
+  it('reports suppression UNKNOWN when the contact read fails, never "not suppressed"', async () => {
+    // Group reads are LOUD by contract. A contact whose opt-out came from the
+    // manual DNC toggle or from the import carries ONLY the contact flag - no
+    // conversation flag to fall back on - so swallowing a findByPhone failure
+    // turns an opted-out member into a green light on the exact screen staff
+    // use to decide whether to text a group.
+    const { app, world } = makeWebhookHarness();
+    await seedGroup(world);
+    const realFindByPhone = world.contactsRepo.findByPhone.bind(world.contactsRepo);
+    world.contactsRepo.findByPhone = (async (phone: string) => {
+      if (phone === '+14045550111') throw new Error('DynamoDB unavailable');
+      return realFindByPhone(phone);
+    }) as typeof world.contactsRepo.findByPhone;
+
+    const res = await get(app, 'gt-1');
+
+    expect(res.status).toBe(200);
+    // The roster is NOT blanked - the member is present, and honest.
+    expect(res.body.members).toHaveLength(2);
+    expect(res.body.members[0]).toMatchObject({
+      phone: '+14045550111',
+      suppressionUnknown: true,
+    });
+    // The healthy member says nothing of the sort.
+    expect(res.body.members[1].suppressionUnknown).toBeUndefined();
+  });
+
   it('404s for a relay group and for a 1:1 (this surface speaks for group texts only)', async () => {
     const { app, world } = makeWebhookHarness();
     seedConversation(world, 'conv-1');

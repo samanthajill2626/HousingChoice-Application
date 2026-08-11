@@ -15,6 +15,7 @@ import { makeWebhookHarness, ORIGIN_SECRET, type FakeWorld } from './helpers/twi
 import { TEST_SESSION_COOKIE } from './helpers/authSession.js';
 import { phoneRefId } from '../src/repos/contactsRepo.js';
 import type { ConversationParticipant } from '../src/repos/conversationsRepo.js';
+import { groupThreadLabel } from '../src/lib/groupTitle.js';
 
 const TENANT = 'c-tenant';
 const PHONE_A = '+15550100001';
@@ -75,12 +76,35 @@ describe('GET /api/contacts/:id/group-threads', () => {
           conversationId: 'gt-1',
           memberCount: 2,
           lastActivityAt: '2026-06-17T10:00:00.000Z',
-          // Self is excluded - the label names who ELSE is in the thread.
+          // Self is excluded - the label names who ELSE is in the thread, and
+          // it comes from the ONE server-side derivation the inbox row and the
+          // thread header also use (lib/groupTitle.ts).
+          title: 'With Marcus',
           otherMemberNames: ['Marcus Landlord'],
         },
       ],
       truncated: false,
     });
+  });
+
+  it('titles a NAMELESS roster (every migrated group) exactly as the inbox row does', async () => {
+    // The migration shape: an imported roster carries no `name`. The card used
+    // to derive its own label over `otherMemberNames` and rendered a bare
+    // "Group text" here while the very same thread showed real names in its
+    // header. One thread must not carry three different names.
+    seedContact();
+    await seedGroup('gt-nameless', [
+      { contactId: TENANT, phone: PHONE_A },
+      { contactId: 'c-other', phone: OTHER_PHONE },
+    ]);
+
+    const res = await authedGet(`/api/contacts/${TENANT}/group-threads`);
+
+    expect(res.status).toBe(200);
+    const row = res.body.groups[0];
+    expect(row.otherMemberNames).toEqual([]);
+    expect(row.title).toBe(groupThreadLabel([{ contactId: 'c-other', phone: OTHER_PHONE }]));
+    expect(row.title).not.toBe('Group text');
   });
 
   it('matches a SECONDARY number whose roster entry carries no contactId', async () => {

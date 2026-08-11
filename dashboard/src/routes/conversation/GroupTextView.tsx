@@ -222,7 +222,14 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
                         {formatPhoneDisplay(m.phone) || m.phone}
                       </span>
                     ) : null}
-                    {m.suppressed ? (
+                    {/* UNKNOWN outranks the suppression chip. A read behind this
+                        member failed server-side, so `suppressed:false` is the
+                        absence of an answer - saying nothing here would read as
+                        "reachable", which is the false negative that matters on
+                        the screen staff use to decide whether to text a group. */}
+                    {m.suppressionUnknown === true ? (
+                      <span className={styles.memberFlag}>Opt-out state unknown</span>
+                    ) : m.suppressed ? (
                       <span className={styles.memberFlag}>{suppressionLabel(m)}</span>
                     ) : null}
                     {m.deleted ? <span className={styles.memberFlag}>Deleted</span> : null}

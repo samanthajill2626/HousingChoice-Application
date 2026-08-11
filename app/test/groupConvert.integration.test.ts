@@ -14,7 +14,7 @@ import { getTableSpec } from '../src/lib/tables.js';
 import { createContactsRepo } from '../src/repos/contactsRepo.js';
 import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
 import { convertConnectingRelayGroupToGroupText } from '../src/services/groupConvert.js';
-import { contactIdForPhone } from '../src/lib/import/ids.js';
+import { contactIdForPhone, conversationIdForGroup } from '../src/lib/import/ids.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -36,9 +36,18 @@ if (!reachable) {
   );
 }
 
-const MEMBER_A = '+15550100008';
-const MEMBER_B = '+15550100004';
 const AT = '2026-08-17T12:00:00.000Z';
+
+/** One imported group's fixture. The conversationId IS uuidv5 over the sorted
+ *  roster (invariant 13.5) and conversion now REFUSES a row whose stored roster
+ *  does not hash back to its own id, so every fixture derives its id from the
+ *  members it seeds - which is also what a real imported row looks like. Each
+ *  case gets its OWN member pair because these tests share one table. */
+interface GroupFixture {
+  id: string;
+  memberA: string;
+  memberB: string;
+}
 
 describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against DynamoDB Local', () => {
   const testEnv = { TABLE_PREFIX: `hc-test-${randomUUID().slice(0, 8)}-` };
@@ -52,18 +61,23 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
   const contactsTable = tableName('contacts', testEnv);
 
   let seq = 0;
-  const nextId = (): string => `gc-test-${++seq}-${randomUUID().slice(0, 8)}`;
+  const nextGroup = (): GroupFixture => {
+    const n = ++seq;
+    const memberA = `+1555010${2000 + n * 2}`;
+    const memberB = `+1555010${2001 + n * 2}`;
+    return { id: conversationIdForGroup([memberA, memberB]), memberA, memberB };
+  };
 
   /** The row exactly as the importer writes it, plus whatever the case needs. */
   const seedImportedGroup = async (
-    conversationId: string,
+    group: GroupFixture,
     over: Record<string, unknown> = {},
   ): Promise<void> => {
     await doc.send(
       new PutCommand({
         TableName: conversationsTable,
         Item: {
-          conversationId,
+          conversationId: group.id,
           type: 'relay_group',
           status: 'connecting',
           relay_status: 'relay_group#connecting',
@@ -71,8 +85,8 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
           created_at: '2026-07-25T10:00:00.000Z',
           ai_mode: 'manual',
           participants: [
-            { contactId: '', phone: MEMBER_A },
-            { contactId: '', phone: MEMBER_B },
+            { contactId: '', phone: group.memberA },
+            { contactId: '', phone: group.memberB },
           ],
           imported_from: 'quo-airtable-import',
           imported_at: '2026-08-05T00:00:00.000Z',
@@ -114,23 +128,23 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
   }, 60_000);
 
   it('strips every relay-only field in the same write as the type flip', async () => {
-    const id = nextId();
-    await seedImportedGroup(id, {
+    const g = nextGroup();
+    await seedImportedGroup(g, {
       participants_version: 3,
-      relay_opted_out_members: { 'phone#+15550100008': { at: AT } },
+      relay_opted_out_members: { [`phone#${g.memberA}`]: { at: AT } },
       close_nag_next_at: '2026-09-01T00:00:00.000Z',
       close_announced_at: '2026-08-01T00:00:00.000Z',
       participant_phone: '+15550199999',
       placementId: 'placement-1',
       owner: { type: 'placement', id: 'placement-1' },
     });
-    await seedContact(MEMBER_A);
-    await seedContact(MEMBER_B);
+    await seedContact(g.memberA);
+    await seedContact(g.memberB);
 
-    const result = await convertConnectingRelayGroupToGroupText(id, opts);
+    const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
     expect(result.outcome).toBe('converted');
 
-    const stored = await readConversation(id);
+    const stored = await readConversation(g.id);
     expect(stored.type).toBe('group_text');
     expect(stored.status).toBe('group_open');
     for (const relayOnly of [
@@ -151,49 +165,49 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
     // a re-run, and it is not a relay mechanism.
     expect(stored.imported_from).toBe('quo-airtable-import');
     expect(stored.participants).toEqual([
-      { contactId: contactIdForPhone(MEMBER_A), phone: MEMBER_A },
-      { contactId: contactIdForPhone(MEMBER_B), phone: MEMBER_B },
+      { contactId: contactIdForPhone(g.memberA), phone: g.memberA },
+      { contactId: contactIdForPhone(g.memberB), phone: g.memberB },
     ]);
   });
 
   it('lets exactly one of two concurrent converters win, and the loser converges', async () => {
     // Bulk migration vs inbound auto-convert on the same thread at the same
     // instant. Both callers must end up reporting a converged thread.
-    const id = nextId();
-    await seedImportedGroup(id);
-    await seedContact(MEMBER_A);
-    await seedContact(MEMBER_B);
+    const g = nextGroup();
+    await seedImportedGroup(g);
+    await seedContact(g.memberA);
+    await seedContact(g.memberB);
 
     const [left, right] = await Promise.all([
-      convertConnectingRelayGroupToGroupText(id, opts),
-      convertConnectingRelayGroupToGroupText(id, opts),
+      convertConnectingRelayGroupToGroupText(g.id, opts),
+      convertConnectingRelayGroupToGroupText(g.id, opts),
     ]);
 
     const outcomes = [left.outcome, right.outcome].sort();
     expect(outcomes).toEqual(['already_converted', 'converted']);
-    const stored = await readConversation(id);
+    const stored = await readConversation(g.id);
     expect(stored.type).toBe('group_text');
     expect(stored.relay_status).toBeUndefined();
     // Whoever lost still finished the job: the stamp exists exactly once.
     const contact = await doc.send(
       new GetCommand({
         TableName: contactsTable,
-        Key: { contactId: contactIdForPhone(MEMBER_A) },
+        Key: { contactId: contactIdForPhone(g.memberA) },
       }),
     );
     expect(contact.Item!.group_participation_at).toBe(AT);
   });
 
   it('never rewrites an existing group_participation_at', async () => {
-    const id = nextId();
-    await seedImportedGroup(id);
-    const contactId = await seedContact(MEMBER_A);
-    await seedContact(MEMBER_B);
+    const g = nextGroup();
+    await seedImportedGroup(g);
+    const contactId = await seedContact(g.memberA);
+    await seedContact(g.memberB);
     expect(await contactsRepo.stampGroupParticipation(contactId, '2026-01-01T00:00:00.000Z')).toBe(
       'stamped',
     );
 
-    const result = await convertConnectingRelayGroupToGroupText(id, opts);
+    const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
     expect(result.membersAlreadyStamped).toBeGreaterThanOrEqual(1);
     const contact = await doc.send(
       new GetCommand({ TableName: contactsTable, Key: { contactId } }),
@@ -202,20 +216,13 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
   });
 
   it('reports a missing contact rather than creating one', async () => {
-    // Its own phones: the suite shares tables, and MEMBER_A/MEMBER_B already
-    // have contacts from the cases above.
-    const known = '+15550100301';
-    const orphan = '+15550100302';
-    const id = nextId();
-    await seedImportedGroup(id, {
-      participants: [
-        { contactId: '', phone: known },
-        { contactId: '', phone: orphan },
-      ],
-    });
+    const g = nextGroup();
+    const known = g.memberA;
+    const orphan = g.memberB;
+    await seedImportedGroup(g);
     await seedContact(known);
 
-    const result = await convertConnectingRelayGroupToGroupText(id, opts);
+    const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
     expect(result.membersMissing).toEqual([contactIdForPhone(orphan)]);
     const contact = await doc.send(
       new GetCommand({
@@ -227,18 +234,46 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
   });
 
   it('refuses a connected relay group and leaves the row untouched', async () => {
-    const id = nextId();
-    await seedImportedGroup(id, {
+    const g = nextGroup();
+    await seedImportedGroup(g, {
       status: 'open',
       relay_status: 'relay_group#open',
       pool_number: '+15550199999',
     });
 
-    const result = await convertConnectingRelayGroupToGroupText(id, opts);
+    const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
     expect(result.outcome).toBe('refused');
-    const stored = await readConversation(id);
+    const stored = await readConversation(g.id);
     expect(stored.type).toBe('relay_group');
     expect(stored.status).toBe('open');
     expect(stored.pool_number).toBe('+15550199999');
+  });
+
+  it('REFUSES a row whose stored roster does not hash back to its own id, and writes nothing', async () => {
+    // The workbook-`drop` shape: the importer derives the id from ALL
+    // participants but writes a roster filtered by the founder's drops, so the
+    // row lands under a 3-person id carrying a 2-person roster. Converting it
+    // would propagate the lie into detection, whose own sender could then be a
+    // non-member of the thread its message lands on.
+    const g = nextGroup();
+    const dropped = '+15550109999';
+    const fullSetId = conversationIdForGroup([g.memberA, g.memberB, dropped]);
+    await seedImportedGroup({ ...g, id: fullSetId });
+    await seedContact(g.memberA);
+    await seedContact(g.memberB);
+
+    const result = await convertConnectingRelayGroupToGroupText(fullSetId, opts);
+    expect(result.outcome).toBe('refused');
+    expect(result.refusal).toBe('roster_id_mismatch');
+    expect(result.refusedReason).toContain('does not hash back');
+
+    // NOTHING was written - not the type flip, not the contactId backfill.
+    const stored = await readConversation(fullSetId);
+    expect(stored.type).toBe('relay_group');
+    expect(stored.status).toBe('connecting');
+    expect(stored.participants).toEqual([
+      { contactId: '', phone: g.memberA },
+      { contactId: '', phone: g.memberB },
+    ]);
   });
 });

@@ -104,6 +104,32 @@ describe('isMemberSuppressed - per-phone 1:1 flag (BE1 scope)', () => {
     );
   });
 
+  it('ignores group_text rows returned by the phone query (invariant 13.6)', async () => {
+    // The last surviving "not relay_group" reader. Harmless only while the
+    // byParticipantPhone GSI is sparse against group rows; the moment anything
+    // gives a group thread a participant_phone (a "primary member"
+    // denormalization, a GSI widening), an sms_opt_out written on a MULTI-PARTY
+    // thread would read as this member's own suppression and silently mute them
+    // from every relay announcement and intro. Its twin numberSuppression.ts
+    // carries the identical clause.
+    const world = createFakeWorld();
+    world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE });
+    const now = new Date().toISOString();
+    world.conversations.set('conv-gt', {
+      conversationId: 'conv-gt',
+      participant_phone: ALICE,
+      status: 'group_open',
+      last_activity_at: now,
+      type: 'group_text',
+      ai_mode: 'manual',
+      created_at: now,
+      sms_opt_out: true,
+    });
+    expect(await isMemberSuppressed(world.contactsRepo, world.conversationsRepo, member)).toBe(
+      false,
+    );
+  });
+
   it('not suppressed when neither store is flagged', async () => {
     const world = createFakeWorld();
     world.contacts.push({ contactId: 'c-a', type: 'tenant', phone: ALICE });

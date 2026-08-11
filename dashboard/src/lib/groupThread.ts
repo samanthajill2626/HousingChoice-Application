@@ -4,11 +4,12 @@
 // number (spec 4.2), so its title is derived from the roster every time it is
 // rendered: member FIRST names, else their formatted numbers.
 //
-// MIRROR: app/src/routes/inbox.ts `groupThreadLabel` derives the same title
-// server-side for the inbox row. Two copies exist because the thread-header
-// route is a raw passthrough that hands down no label, and the dashboard cannot
-// import from app/src. Change both together - the inbox row and the thread
-// header naming one conversation two different things is the failure to avoid.
+// MIRROR: app/src/lib/groupTitle.ts `groupThreadLabel` is THE derivation - it
+// titles the inbox row AND the contact card's rows server-side. This copy exists
+// only because the thread-header route is a raw passthrough that hands down no
+// label and the dashboard cannot import from app/src. Those are the only two
+// copies; change them together - one conversation carrying different names on
+// different screens is the failure to avoid.
 import { formatPhoneDisplay } from './phone.js';
 
 /** How many roster names a title spells out before it summarizes. A nine-member

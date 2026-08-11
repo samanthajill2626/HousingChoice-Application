@@ -221,6 +221,15 @@ export interface GroupMemberRow {
   /** Which record answered: the contact's own flag ('primary'), this number's
    *  1:1 thread ('secondary'), or a number with no contact at all. */
   suppressionScope: NumberSuppressionScope;
+  /**
+   * A read behind this member FAILED, so `suppressed: false` is NOT an answer -
+   * it is the absence of one. Group reads are LOUD by contract, and a false
+   * negative here is the worst kind: a contact whose opt-out came from the DNC
+   * toggle or the import carries ONLY the contact flag, so a failed contact
+   * read makes an opted-out member look sendable on the exact screen staff use
+   * to decide whether to text the group.
+   */
+  suppressionUnknown?: boolean;
   /** Present/true only for a soft-deleted contact (sends refuse; spec 15.7). */
   deleted?: boolean;
 }
@@ -1647,10 +1656,23 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       // second (presence of the key is the switch - `{contact: undefined}` means
       // "there is none", not "look it up").
       let contact: ContactItem | undefined;
+      // A FAILED READ IS NOT AN ANSWER. Either read failing makes
+      // `suppressed:false` a guess, and the route must not hand a guess to the
+      // one screen staff use to decide whether to text a group - a contact
+      // whose opt-out came from the DNC toggle or the import has ONLY the
+      // contact flag, so a swallowed findByPhone failure reads as "not
+      // suppressed" for somebody who is. Keep the roster (an unreadable member
+      // must not blank the panel) and mark the member UNKNOWN so the chip and
+      // the send-time gate can both be honest about it.
+      let suppressionUnknown = false;
       try {
         contact = await contacts.findByPhone(m.phone);
       } catch (err) {
-        log.warn({ err, conversationId }, 'group members: contact lookup failed (best-effort)');
+        suppressionUnknown = true;
+        log.error(
+          { err, conversationId },
+          'group members: contact lookup failed - member reported with suppression UNKNOWN, never as not-suppressed',
+        );
       }
       let suppression: NumberSuppressionState;
       try {
@@ -1660,9 +1682,11 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
           { contact },
         );
       } catch (err) {
-        // Best-effort: an unreadable flag must not blank the roster. The chip is
-        // simply absent - it never claims "not suppressed" from a failed read.
-        log.warn({ err, conversationId }, 'group members: suppression read failed (best-effort)');
+        suppressionUnknown = true;
+        log.error(
+          { err, conversationId },
+          'group members: suppression read failed - member reported with suppression UNKNOWN, never as not-suppressed',
+        );
         suppression = { suppressed: false, scope: 'no_contact' };
       }
       const first = typeof contact?.firstName === 'string' ? contact.firstName : '';
@@ -1677,6 +1701,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         ...(name.length > 0 && { name }),
         suppressed: suppression.suppressed,
         suppressionScope: suppression.scope,
+        ...(suppressionUnknown && { suppressionUnknown: true }),
         ...(contact !== undefined && isDeleted(contact) && { deleted: true }),
       });
     }

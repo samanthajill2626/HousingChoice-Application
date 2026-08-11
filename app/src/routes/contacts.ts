@@ -23,6 +23,7 @@ import {
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { mergeContext } from '../lib/context.js';
 import { normalizeToE164 } from '../lib/phone.js';
+import { groupThreadLabel } from '../lib/groupTitle.js';
 import { parseRole, parseRelationships, parseCustomFields } from '../lib/contactProfile.js';
 import {
   LANDLORD_STATUS_LABELS,
@@ -190,6 +191,12 @@ interface GroupThreadRow {
   memberCount: number;
   /** ISO 8601 - the conversation's last_activity_at. */
   lastActivityAt: string;
+  /**
+   * The row's LABEL, from the ONE group-title derivation (lib/groupTitle.ts)
+   * that also titles the inbox row and the thread header. Server-derived so all
+   * three surfaces cannot drift apart again.
+   */
+  title: string;
   otherMemberNames: string[];
 }
 
@@ -1200,12 +1207,20 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     for (const conv of items) {
       const roster = conv.participants ?? [];
       if (!roster.some(isSelf)) continue;
+      const others = roster.filter((p) => !isSelf(p));
       groups.push({
         conversationId: conv.conversationId,
         memberCount: roster.length,
         lastActivityAt: conv.last_activity_at,
-        otherMemberNames: roster
-          .filter((p) => !isSelf(p))
+        // THE title, from the ONE derivation (lib/groupTitle.ts) the inbox row
+        // and the thread header also use - over the OTHER members, since this
+        // card is read from inside one member's own file. The card used to make
+        // up its own rule over `otherMemberNames`, which rendered "Group text"
+        // for every migrated (nameless) roster while the same thread showed
+        // real names in its header. `otherMemberNames` stays on the wire for
+        // the count/tooltip surfaces; the LABEL comes from here.
+        title: groupThreadLabel(others),
+        otherMemberNames: others
           .map((p) => p.name)
           .filter((n): n is string => typeof n === 'string' && n.length > 0),
       });

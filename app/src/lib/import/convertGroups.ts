@@ -243,7 +243,16 @@ export async function runConvertGroups(
     if (seen.has(group.conversationId)) continue;
     seen.add(group.conversationId);
 
-    const converted = await convertConnectingRelayGroupToGroupText(group.conversationId, {
+    // PER-ROW ISOLATION, the same posture the rail step below has (and for the
+    // same reason). Every repo call inside the conversion is unguarded, so one
+    // DynamoDB throttle or 5xx anywhere in the 132 x (1 + N members) calls used
+    // to throw out of this loop, past the script's parity-only catch, and the
+    // operator got a stack trace INSTEAD OF THE REPORT - on a step that runs
+    // once, on cutover day, against 132 real threads. The run is convergent so
+    // a re-run heals the data; what a re-run cannot recover is the record of
+    // which rows converted, which were refused, and why. THE REPORT IS THE
+    // CUTOVER GATE (spec 14), so it must survive any single row.
+    const converted = await convertRow(group.conversationId, {
       conversationsRepo,
       contactsRepo,
       at,
@@ -298,7 +307,10 @@ export async function runConvertGroups(
   }
 
   const totals = {
-    expected: rows.length,
+    // The number of ids the EXPORT says must exist, never the number of rows we
+    // got round to processing. `rows.length` shrinks silently when `seen`
+    // dedupes, and it would equal itself on a run that derived nothing.
+    expected: expected.length,
     converted: rows.filter((r) => r.outcome === 'converted').length,
     alreadyConverted: rows.filter((r) => r.outcome === 'already_converted').length,
     refused: rows.filter((r) => r.outcome === 'refused').length,
@@ -312,10 +324,51 @@ export async function runConvertGroups(
     railsUnavailable: rows.filter((r) => r.rail === 'unavailable').length,
   };
 
+  // An EMPTY expected set is not a complete migration - it is a run that
+  // derived no ids at all, which on cutover day means the export was read
+  // wrong. Reporting "COMPLETE: every expected group thread is a native group
+  // text with a rail" for zero threads is the worst possible answer.
   const complete =
-    totals.refused === 0 && totals.railsFailed === 0 && totals.railsUnavailable === 0;
+    rows.length > 0 &&
+    totals.refused === 0 &&
+    totals.railsFailed === 0 &&
+    totals.railsUnavailable === 0;
+  if (rows.length === 0) {
+    warnings.push(
+      'the expected-id set was EMPTY - nothing was converted. Check the export the ids were derived from.',
+    );
+  }
   log.info({ ...totals, complete }, 'group text migration run finished');
   return { rows, totals, warnings, complete };
+}
+
+/**
+ * A conversion that THROWS is a REFUSED ROW, never a failed run. The refusal
+ * carries the error text so the report says what actually broke, and the row is
+ * still counted - `complete` is false while any row is refused, so a run that
+ * hit a throttle can never report the cutover invariant as satisfied.
+ */
+async function convertRow(
+  conversationId: string,
+  opts: Parameters<typeof convertConnectingRelayGroupToGroupText>[1],
+): Promise<GroupConvertResult> {
+  try {
+    return await convertConnectingRelayGroupToGroupText(conversationId, opts);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      conversationId,
+      outcome: 'refused',
+      refusal: 'threw',
+      refusedReason: `${conversationId} was NOT converted: the conversion threw - ${detail}.`,
+      importConnectRequested: false,
+      contactIdsBackfilled: 0,
+      membersStamped: 0,
+      membersAlreadyStamped: 0,
+      membersMissing: [],
+      members: [],
+    };
+  }
 }
 
 /**

@@ -53,6 +53,7 @@ import {
   type EventBus,
 } from '../lib/events.js';
 import { formatPhoneForDisplay } from '../lib/phone.js';
+import { groupThreadLabel } from '../lib/groupTitle.js';
 import { STAGE_LABELS } from '../lib/statusModel.js';
 import {
   createPlacementsRepo,
@@ -281,36 +282,11 @@ function unreadOf(conv: ConversationItem): number {
   return typeof conv.unread_count === 'number' ? conv.unread_count : 0;
 }
 
-/** How many roster names a group title spells out before it summarizes. A nine
- *  member carrier group would otherwise render an unreadable inbox row. */
-const GROUP_TITLE_NAMES = 3;
-
-/**
- * The roster-derived title for a native group thread (spec 4.2: "headers render
- * a DERIVED name from the roster - member first names, else formatted numbers").
- * A group_text carries NO stored display name, NO operator tag and NO pool
- * number, so relayRowFor's precedence chain collapses to this one rule.
- *
- * MIRROR: dashboard/src/lib/groupThread.ts `groupThreadLabel` derives the same
- * title client-side for the thread view + contact card (the thread header route
- * is a raw passthrough and cannot hand one down). Change both together.
- */
-export function groupThreadLabel(
-  participants: readonly ConversationParticipant[] | undefined,
-): string {
-  const parts: string[] = [];
-  for (const p of participants ?? []) {
-    const name = typeof p.name === 'string' ? p.name.trim() : '';
-    // First name only - a group title is a glance, not a directory entry.
-    const first = name.length > 0 ? (name.split(/\s+/)[0] ?? '') : '';
-    const label = first.length > 0 ? first : (formatPhoneForDisplay(p.phone) ?? p.phone);
-    if (label.length > 0) parts.push(label);
-  }
-  if (parts.length === 0) return 'Group text';
-  const shown = parts.slice(0, GROUP_TITLE_NAMES);
-  const rest = parts.length - shown.length;
-  return rest > 0 ? `With ${shown.join(' & ')} +${rest} more` : `With ${shown.join(' & ')}`;
-}
+// The roster-derived group title now lives in lib/groupTitle.ts - ONE
+// derivation for the inbox row, the contact card and (via its documented
+// dashboard mirror) the thread header. Re-exported because the S4 tests and
+// the e2e assertions bind to it here.
+export { groupThreadLabel };
 
 /** The latest message's channel/direction/preview, derived (never stored). */
 interface DerivedLatest {

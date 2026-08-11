@@ -729,7 +729,13 @@ describe('tier 6: known-contact threading', () => {
           conversationId: 'conv-group',
           participant_email: 'alice@example.com',
           type: 'group_text',
-          status: 'group_open',
+          // DELIBERATELY OFF-PARTITION. A `group_open` fixture is excluded by
+          // the `status !== 'open'` clause alone, so the type guard this test
+          // exists to pin would be asserted by NOTHING - the test passed with
+          // the `group_text` clause deleted. `status: 'open'` is not a state
+          // v1 writes; it is the defense-in-depth case the guard's own comment
+          // names (a partition choice made elsewhere is one refactor away).
+          status: 'open',
         } as Partial<ConversationItem>,
         {
           conversationId: 'conv-relay',

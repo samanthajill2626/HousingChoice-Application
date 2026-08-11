@@ -25,9 +25,21 @@ export function groupThreadLink(g: GroupThreadRow): string {
   return `/conversations/${g.conversationId}`;
 }
 
-/** A row's label: the OTHER members' names, else a plain fallback. Names only -
- *  the row never renders a phone (the card's PII posture, matching relay's). */
+/**
+ * A row's label: THE server-derived group title, the same rule that titles the
+ * inbox row and the thread header (app/src/lib/groupTitle.ts).
+ *
+ * This card used to derive its own, over `otherMemberNames` alone - which meant
+ * every roster without stored names (i.e. all 132 migrated groups) rendered a
+ * bare "Group text" here while the very same thread showed its members' real
+ * names in its header. One thread, three names, is the failure to avoid.
+ *
+ * The local fallback survives only for a payload from a backend that predates
+ * `title`; it must never be the normal path.
+ */
 export function groupThreadCardLabel(g: GroupThreadRow): string {
+  const title = g.title?.trim() ?? '';
+  if (title.length > 0) return title;
   if (g.otherMemberNames.length > 0) return `With ${g.otherMemberNames.join(' & ')}`;
   return 'Group text';
 }

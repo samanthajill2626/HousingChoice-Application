@@ -88,6 +88,9 @@ function world(rows: ConversationItem[]): World {
   } as unknown as ConversationsRepo;
 
   const contactsRepo = {
+    async getById(contactId: string) {
+      return contacts.get(contactId);
+    },
     async stampGroupParticipation(contactId: string, at: string) {
       const contact = contacts.get(contactId);
       if (!contact) return 'missing' as const;
@@ -400,5 +403,89 @@ describe('runConvertGroups', () => {
     const report = await runConvertGroups({ ...w.base, expected: [one, one], rail });
     expect(report.rows).toHaveLength(1);
     expect(rail.calls).toHaveLength(1);
+  });
+});
+
+describe('runConvertGroups: the report survives a bad row', () => {
+  it('isolates a THROWING row as a refusal and finishes the run', async () => {
+    // The rail step beside it is explicitly hardened against exactly this ("one
+    // bad thread must not stop the other 131"); the conversion step was not, so
+    // ONE DynamoDB throttle anywhere in the 132 x (1 + N members) calls threw
+    // out of the whole run, past the script's parity-only catch, and the
+    // operator got a stack trace INSTEAD OF THE REPORT - on a step that runs
+    // once, on cutover day. THE REPORT IS THE CUTOVER GATE (spec 14).
+    const rows = [importedRow(MEMBERS[0]), importedRow(MEMBERS[1])];
+    const w = world(rows);
+    const doomed = rows[1]!.conversationId;
+    const realGetById = w.base.conversationsRepo.getById.bind(w.base.conversationsRepo);
+    w.base.conversationsRepo.getById = (async (id: string) => {
+      if (id === doomed) throw new Error('ProvisionedThroughputExceededException');
+      return realGetById(id);
+    }) as typeof w.base.conversationsRepo.getById;
+
+    const report = await runConvertGroups({ ...w.base, expected: expectedFor(rows) });
+
+    // BOTH rows are in the report - the healthy one converted, the bad one told
+    // the operator what broke.
+    expect(report.rows).toHaveLength(2);
+    expect(report.rows[0]?.outcome).toBe('converted');
+    expect(report.rows[1]?.outcome).toBe('refused');
+    expect(report.rows[1]?.refusedReason).toContain('ProvisionedThroughputExceeded');
+    expect(report.complete).toBe(false);
+    expect(w.conversations.get(rows[0]!.conversationId)?.type).toBe('group_text');
+  });
+
+  it('counts `expected` from the EXPORT, not from the rows it got through', async () => {
+    const rows = [importedRow(MEMBERS[0])];
+    const w = world(rows);
+    const dup = expectedFor(rows)[0]!;
+
+    const report = await runConvertGroups({ ...w.base, expected: [dup, { ...dup }] });
+
+    // `seen` dedupes the second copy, so one row was processed - but the export
+    // named two ids, and the report must say so.
+    expect(report.rows).toHaveLength(1);
+    expect(report.totals.expected).toBe(2);
+  });
+
+  it('never reports COMPLETE for an EMPTY expected set', async () => {
+    const w = world([]);
+
+    const report = await runConvertGroups({ ...w.base, expected: [] });
+
+    expect(report.complete).toBe(false);
+    expect(report.warnings.some((warning) => warning.includes('EMPTY'))).toBe(true);
+  });
+
+  it('REFUSES a row whose stored roster does not hash back to its own id', async () => {
+    // The workbook-`drop` shape: the importer derives the id from ALL
+    // participants but writes a roster filtered by the founder's drops.
+    const row = importedRow(MEMBERS[0]);
+    row.conversationId = conversationIdForGroup([...MEMBERS[0], '+15550109999']);
+    const w = world([row]);
+
+    const report = await runConvertGroups({ ...w.base, expected: expectedFor([row]) });
+
+    expect(report.rows[0]?.outcome).toBe('refused');
+    expect(report.rows[0]?.refusedReason).toContain('does not hash back');
+    expect(report.complete).toBe(false);
+    // NOTHING was written.
+    expect(w.conversations.get(row.conversationId)?.type).toBe('relay_group');
+  });
+
+  it('backfills member NAMES so a migrated roster does not render as phone numbers', async () => {
+    // Imported rosters carry no `name`, and the group title is DERIVED from the
+    // roster - so without this every migrated group reads as a row of numbers in
+    // the inbox and on the contact card while the thread view shows real names.
+    const row = importedRow(MEMBERS[0]);
+    const w = world([row]);
+    const first = w.contacts.get(contactIdForPhone(MEMBERS[0][0]))!;
+    first.firstName = 'Marcus';
+    first.lastName = 'Landlord';
+
+    await runConvertGroups({ ...w.base, expected: expectedFor([row]) });
+
+    const roster = w.conversations.get(row.conversationId)?.participants ?? [];
+    expect(roster.find((m) => m.phone === MEMBERS[0][0])?.name).toBe('Marcus Landlord');
   });
 });

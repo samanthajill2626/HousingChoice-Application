@@ -78,6 +78,14 @@ export interface GroupConvertResult {
   importConnectRequested: boolean;
   /** Roster entries whose empty `contactId` this call filled in. */
   contactIdsBackfilled: number;
+  /**
+   * Roster entries whose missing `name` this call filled in from the member's
+   * contact record. Counted separately from `contactIdsBackfilled` because it
+   * is the LARGEST data change the migration makes - an imported roster carries
+   * no names at all, and the group title is derived from the roster - and the
+   * report is the cutover gate, so it cannot be invisible in it.
+   */
+  namesBackfilled: number;
   /** Member contacts this call stamped with `group_participation_at`. */
   membersStamped: number;
   /** Member contacts that were already stamped (convergence, not work). */
@@ -112,6 +120,7 @@ function refuse(conversationId: string, refusal: GroupConvertRefusal): GroupConv
     refusedReason: `${conversationId} was NOT converted: ${REFUSAL_SENTENCE[refusal]}.`,
     importConnectRequested: false,
     contactIdsBackfilled: 0,
+    namesBackfilled: 0,
     membersStamped: 0,
     membersAlreadyStamped: 0,
     membersMissing: [],
@@ -238,6 +247,24 @@ async function converge(
 ): Promise<GroupConvertResult> {
   const { conversationsRepo, contactsRepo } = opts;
   const log = opts.logger ?? defaultLogger;
+
+  // THE ROSTER/ID INVARIANT IS A PROPERTY OF THE ROW, NOT OF THE TRANSITION.
+  // It used to be checked only in `precondition`, which the already-converted
+  // early return skips - so a `group_text` whose roster does not hash back to
+  // its own id (written by a build that predates the check, by a partially-run
+  // earlier migration, or by any future producer) converged happily, was
+  // counted `already_converted`, warned nothing, and let `complete` stay TRUE.
+  // The migration report IS the hard cutover gate (spec 14), so it must never
+  // report COMPLETE over a corrupt row. Spec 15.4 says convergence re-runs the
+  // remaining steps on EVERY pass; this is one of them. Refusing here also
+  // refuses the runtime inline auto-convert, which shares this function.
+  if (!rosterMatchesId(conversationId, (item.participants ?? []) as ConversationParticipant[])) {
+    log.error(
+      { conversationId, outcome, rosterSize: (item.participants ?? []).length },
+      'group text convergence: the stored roster does not hash back to this thread id - REFUSED, a human must adjudicate which side is right',
+    );
+    return refuse(conversationId, 'roster_id_mismatch');
+  }
   let roster = (item.participants ?? []) as ConversationParticipant[];
   let contactIdsBackfilled = 0;
 
@@ -280,6 +307,7 @@ async function converge(
     outcome,
     importConnectRequested: item.import_connect_requested === true,
     contactIdsBackfilled,
+    namesBackfilled: named.backfilled,
     membersStamped,
     membersAlreadyStamped,
     membersMissing,

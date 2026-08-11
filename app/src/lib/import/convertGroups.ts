@@ -187,6 +187,8 @@ export interface GroupConversionRow {
   refusedReason?: string;
   importConnectRequested: boolean;
   contactIdsBackfilled: number;
+  /** Roster entries this run gave a `name` (see GroupConvertResult). */
+  namesBackfilled: number;
   membersStamped: number;
   membersAlreadyStamped: number;
   /** contactIds on the roster with no contact record behind them. */
@@ -198,13 +200,26 @@ export interface GroupConversionRow {
 
 export interface GroupConversionReport {
   rows: GroupConversionRow[];
+  /**
+   * THE REPORT'S ARITHMETIC CLOSES, in two lines the operator can check by eye:
+   *   expected  = processed + duplicateIds
+   *   processed = converted + alreadyConverted + refused
+   * A gate whose totals do not tie out is not a gate, and `expected` counts the
+   * ids the EXPORT says must exist while every other total counts the rows we
+   * actually walked - the two differ exactly by the `seen` dedupe.
+   */
   totals: {
     expected: number;
+    /** Rows actually walked - `expected` minus the duplicate ids. */
+    processed: number;
+    /** Expected entries skipped because the same id appeared earlier. */
+    duplicateIds: number;
     converted: number;
     alreadyConverted: number;
     refused: number;
     connectRequested: number;
     contactIdsBackfilled: number;
+    namesBackfilled: number;
     membersStamped: number;
     membersMissing: number;
     railsCreated: number;
@@ -266,6 +281,7 @@ export async function runConvertGroups(
       ...(converted.refusedReason !== undefined && { refusedReason: converted.refusedReason }),
       importConnectRequested: converted.importConnectRequested,
       contactIdsBackfilled: converted.contactIdsBackfilled,
+      namesBackfilled: converted.namesBackfilled,
       membersStamped: converted.membersStamped,
       membersAlreadyStamped: converted.membersAlreadyStamped,
       membersMissing: converted.membersMissing,
@@ -309,13 +325,19 @@ export async function runConvertGroups(
   const totals = {
     // The number of ids the EXPORT says must exist, never the number of rows we
     // got round to processing. `rows.length` shrinks silently when `seen`
-    // dedupes, and it would equal itself on a run that derived nothing.
+    // dedupes, and it would equal itself on a run that derived nothing - so the
+    // two counts below make the difference explicit rather than leaving the
+    // operator to reconcile `expected` against outcome totals that cannot sum
+    // to it (`expected = processed + duplicateIds`).
     expected: expected.length,
+    processed: rows.length,
+    duplicateIds: expected.length - rows.length,
     converted: rows.filter((r) => r.outcome === 'converted').length,
     alreadyConverted: rows.filter((r) => r.outcome === 'already_converted').length,
     refused: rows.filter((r) => r.outcome === 'refused').length,
     connectRequested: rows.filter((r) => r.importConnectRequested).length,
     contactIdsBackfilled: rows.reduce((n, r) => n + r.contactIdsBackfilled, 0),
+    namesBackfilled: rows.reduce((n, r) => n + r.namesBackfilled, 0),
     membersStamped: rows.reduce((n, r) => n + r.membersStamped, 0),
     membersMissing: rows.reduce((n, r) => n + r.membersMissing.length, 0),
     railsCreated: rows.filter((r) => r.rail === 'created').length,
@@ -336,6 +358,16 @@ export async function runConvertGroups(
   if (rows.length === 0) {
     warnings.push(
       'the expected-id set was EMPTY - nothing was converted. Check the export the ids were derived from.',
+    );
+  }
+  if (totals.duplicateIds > 0) {
+    // Said out loud rather than left as a silent gap between `expected` and the
+    // outcome totals: the same conversationId listed twice means two workbook
+    // group rows derived one thread, which is a question about the export.
+    warnings.push(
+      `${totals.duplicateIds} expected id(s) appeared more than once and were converged ONCE - ` +
+        `${totals.processed} of ${totals.expected} entries were processed. Two workbook rows ` +
+        'deriving the same conversation id means the same carrier group is listed twice.',
     );
   }
   log.info({ ...totals, complete }, 'group text migration run finished');
@@ -363,6 +395,7 @@ async function convertRow(
       refusedReason: `${conversationId} was NOT converted: the conversion threw - ${detail}.`,
       importConnectRequested: false,
       contactIdsBackfilled: 0,
+      namesBackfilled: 0,
       membersStamped: 0,
       membersAlreadyStamped: 0,
       membersMissing: [],

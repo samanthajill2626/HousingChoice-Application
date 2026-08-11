@@ -488,4 +488,79 @@ describe('runConvertGroups: the report survives a bad row', () => {
     const roster = w.conversations.get(row.conversationId)?.participants ?? [];
     expect(roster.find((m) => m.phone === MEMBERS[0][0])?.name).toBe('Marcus Landlord');
   });
+
+  it('COUNTS the name backfill - the largest data change the run makes', async () => {
+    // The report IS the cutover gate, and the name backfill touches every one of
+    // the 132 rosters. A counter that does not exist cannot be reconciled.
+    const row = importedRow(MEMBERS[0]);
+    const w = world([row]);
+    for (const phone of MEMBERS[0]) {
+      w.contacts.get(contactIdForPhone(phone))!.firstName = 'Ada';
+    }
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor([row]),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.rows[0]?.namesBackfilled).toBe(2);
+    expect(report.totals.namesBackfilled).toBe(2);
+  });
+
+  it('reports ZERO names backfilled when every member is nameless', async () => {
+    const row = importedRow(MEMBERS[0]);
+    const w = world([row]);
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor([row]),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.totals.namesBackfilled).toBe(0);
+  });
+
+  it('the totals RECONCILE on a duplicated expected id, and say so', async () => {
+    // `expected` counts the ids the EXPORT says must exist; every other total
+    // counts the rows walked, and the `seen` dedupe makes those differ. The
+    // printed report invites the operator to reconcile them, so the difference
+    // has to be a NAMED number rather than a silent gap.
+    const rows = MEMBERS.map((m) => importedRow(m));
+    const w = world(rows);
+    const expected = [
+      ...expectedFor(rows),
+      { conversationId: rows[0]!.conversationId, rowKey: 'GRP-0003' },
+    ];
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected,
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.totals.expected).toBe(3);
+    expect(report.totals.duplicateIds).toBe(1);
+    expect(report.totals.processed).toBe(2);
+    expect(report.totals.expected).toBe(report.totals.processed + report.totals.duplicateIds);
+    expect(
+      report.totals.converted + report.totals.alreadyConverted + report.totals.refused,
+    ).toBe(report.totals.processed);
+    expect(report.warnings.some((line) => line.includes('appeared more than once'))).toBe(true);
+  });
+
+  it('reports no duplicates and a closing sum on an ordinary run', async () => {
+    const rows = MEMBERS.map((m) => importedRow(m));
+    const w = world(rows);
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor(rows),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.totals.duplicateIds).toBe(0);
+    expect(report.totals.processed).toBe(report.totals.expected);
+    expect(report.warnings.some((line) => line.includes('appeared more than once'))).toBe(false);
+  });
 });

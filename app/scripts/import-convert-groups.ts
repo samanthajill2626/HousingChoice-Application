@@ -183,11 +183,17 @@ try {
 }
 
 console.log('\n=== import:convert-groups complete ===');
+// The arithmetic ties out by eye, in both directions:
+//   expected  = processed + duplicate ids
+//   processed = converted + already converted + REFUSED
 console.log(`  expected groups        : ${report.totals.expected}`);
+console.log(`    duplicate ids        : ${report.totals.duplicateIds}`);
+console.log(`  processed              : ${report.totals.processed}`);
 console.log(`    converted this run   : ${report.totals.converted}`);
 console.log(`    already converted    : ${report.totals.alreadyConverted}`);
 console.log(`    REFUSED              : ${report.totals.refused}`);
 console.log(`  contactIds backfilled  : ${report.totals.contactIdsBackfilled}`);
+console.log(`  member names backfilled: ${report.totals.namesBackfilled}`);
 console.log(`  members stamped        : ${report.totals.membersStamped}`);
 console.log(`  members with no record : ${report.totals.membersMissing}`);
 console.log(`  rails created          : ${report.totals.railsCreated}`);

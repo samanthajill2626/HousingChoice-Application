@@ -152,6 +152,9 @@ console.log(`  conversations written   : ${report.conversations.written}`);
 console.log(`    relay groups          : ${report.conversations.groups}`);
 console.log(`    flagged connect-day-1 : ${report.conversations.connectedDayOne}`);
 console.log(`    dropped by review     : ${report.conversations.droppedGroups}`);
+console.log(
+  `    drops KEPT on a group : ${report.conversations.groupRosterDropsKept} (a group roster is its thread identity - see the warnings)`,
+);
 // Print the reconciliation, not just the total, so a short count is never left
 // looking like data loss (spec §5).
 const unroutable = plan.threads.unroutable;

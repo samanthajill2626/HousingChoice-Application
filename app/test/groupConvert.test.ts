@@ -222,6 +222,34 @@ describe('convertConnectingRelayGroupToGroupText', () => {
     ]);
   });
 
+  it('REFUSES an ALREADY-CONVERTED row whose roster does not hash back to its id', async () => {
+    // The roster/id invariant is a property of the ROW, not of the type
+    // TRANSITION. Checked only in `precondition`, it was skipped entirely by the
+    // already-converted early return - so a corrupt `group_text` converged
+    // happily, was counted `already_converted`, warned nothing, and let the
+    // migration report (the hard cutover gate) say COMPLETE over it.
+    const w = world(
+      {
+        ...importedGroupRow(),
+        type: 'group_text',
+        status: 'group_open',
+        // The id is uuidv5 over [MEMBER_A, MEMBER_B]; this roster is short.
+        participants: [{ contactId: contactIdForPhone(MEMBER_B), phone: MEMBER_B }],
+      },
+      bothMembers,
+    );
+
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    expect(result.outcome).toBe('refused');
+    expect(result.refusal).toBe('roster_id_mismatch');
+    // Convergence wrote NOTHING for it: no stamps, no roster rewrite.
+    expect(w.stamps).toHaveLength(0);
+    expect(w.conversations.get(GROUP_ID)!.participants).toEqual([
+      { contactId: contactIdForPhone(MEMBER_B), phone: MEMBER_B },
+    ]);
+  });
+
   it('REPORTS import_connect_requested rather than refusing on it', async () => {
     const w = world(importedGroupRow({ import_connect_requested: true }), bothMembers);
     const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);

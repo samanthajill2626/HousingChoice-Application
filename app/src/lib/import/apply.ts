@@ -108,6 +108,13 @@ export interface ApplyReport {
     connectedDayOne: number;
     /** Groups the founder marked drop=Y - thread AND messages skipped. */
     droppedGroups: number;
+    /**
+     * Members marked drop=Y who were KEPT on a group roster. A group thread's
+     * conversationId is derived from its full member set, so truncating the
+     * roster would leave a row that cannot describe its own thread; the drop is
+     * reported here (and in `warnings`) instead of applied.
+     */
+    groupRosterDropsKept: number;
   };
   messages: { written: number };
   calls: { written: number };
@@ -153,7 +160,13 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 
   const report: ApplyReport = {
     contacts: { written: 0, skippedDropped: 0, statusPreserved: 0 },
-    conversations: { written: 0, groups: 0, connectedDayOne: 0, droppedGroups: 0 },
+    conversations: {
+      written: 0,
+      groups: 0,
+      connectedDayOne: 0,
+      droppedGroups: 0,
+      groupRosterDropsKept: 0,
+    },
     messages: { written: 0 },
     calls: { written: 0 },
     units: { written: 0, skippedDropped: 0 },
@@ -259,11 +272,45 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
     const connectDayOne = groupRow !== undefined && wantsDayOneConnect(groupRow);
     if (connectDayOne) report.conversations.connectedDayOne += 1;
 
+    // A GROUP ROSTER IS NEVER TRUNCATED BY A WORKBOOK `drop`.
+    //
+    // A group thread's IDENTITY IS ITS FULL SORTED ROSTER (the conversationId is
+    // uuidv5 over it - lib/import/ids.ts), so writing a roster with a member
+    // filtered out produces a row that cannot describe its own thread: the
+    // conversion refuses it (`roster_id_mismatch`), the runtime inline
+    // auto-convert refuses it through the same precondition, and every inbound
+    // to that carrier group then scatters into individual 1:1s. This line was
+    // the ONE known producer of that state.
+    //
+    // It also contradicts the policy this same file already enforces for the
+    // same decision: `retractImported` refuses to delete a dropped contact who
+    // sits on a group roster, because "deleting it would orphan their member
+    // chips and delivery records in a conversation that belongs to the other
+    // members too". A `drop` is a statement about a CONTACT RECORD, and post
+    // conversion it is already inert for group members (adjudication A27). So
+    // the roster keeps them, and the drop is REPORTED rather than applied - the
+    // founder sees the adjudication instead of a wall of refusals on cutover
+    // day. 1:1 threads keep today's semantics exactly.
+    const droppedOnGroupRoster = thread.isGroup
+      ? thread.participants.filter((p) => droppedPhones.has(p))
+      : [];
+    if (droppedOnGroupRoster.length > 0) {
+      report.conversations.groupRosterDropsKept += droppedOnGroupRoster.length;
+      warnings.push(
+        `${thread.conversationId}: ${droppedOnGroupRoster.length} member(s) marked drop are on a ` +
+          `GROUP roster - they were KEPT ON THE GROUP ROSTER. A group thread's identity IS its ` +
+          `full member set, so removing one would leave a roster that cannot describe its own ` +
+          `thread. The contact records are handled by the drop rules as usual; drop the whole ` +
+          `group row to remove the thread itself.`,
+      );
+    }
+    const roster = thread.isGroup ? thread.participants : live;
+
     if (!dryRun) {
       await upsertConversation(doc, conversationsTable, {
         conversationId: thread.conversationId,
         isGroup: thread.isGroup,
-        participants: live.map((phone) => ({
+        participants: roster.map((phone) => ({
           contactId: contactIdByPhone.get(phone) ?? '',
           phone,
         })),

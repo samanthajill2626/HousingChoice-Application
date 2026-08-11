@@ -198,6 +198,60 @@ describe('import upsertConversation - group_text type guard (T7.1)', () => {
     for (const c of oneToOne) expect(c.input.ConditionExpression).toBeUndefined();
   });
 
+  it('a workbook `drop` NEVER truncates a GROUP roster - it is reported instead', async () => {
+    // A group thread's IDENTITY IS ITS FULL SORTED ROSTER, so a roster written
+    // with one member filtered out cannot describe its own thread: conversion
+    // refuses it (`roster_id_mismatch`), the runtime inline auto-convert refuses
+    // it through the same precondition, and every inbound to that carrier group
+    // scatters into 1:1s with an ERROR. This line was the only known PRODUCER of
+    // that state, and it contradicted the policy the same file already enforces
+    // in `retractImported` (a dropped contact on a group roster is KEPT).
+    const review = cleanReview();
+    for (const row of review.contacts.values()) {
+      if (row.phone === PHONES.groupTenant) row.drop = 'Y';
+    }
+    const { doc, sent } = stubDoc();
+
+    const report = await runApply({ doc, plan, review, importedAt });
+
+    const participants = groupUpdates(sent)[0]!.ExpressionAttributeValues as Record<
+      string,
+      { contactId: string; phone: string }[]
+    >;
+    expect(participants[':participants']!.map((p) => p.phone).sort()).toEqual(
+      [PHONES.groupTenant, PHONES.landlord].sort(),
+    );
+    // Counted and said out loud, so the founder adjudicates instead of hitting a
+    // wall of refusals on cutover day.
+    expect(report.conversations.groupRosterDropsKept).toBe(1);
+    expect(
+      report.warnings.some((w) => w.includes('KEPT ON THE GROUP ROSTER')),
+    ).toBe(true);
+  });
+
+  it('leaves 1:1 drop semantics exactly as they were', async () => {
+    // The rule changes for GROUP rosters only. A dropped participant of a 1:1
+    // thread still drops out of that thread's participants.
+    const review = cleanReview();
+    for (const row of review.contacts.values()) {
+      if (row.phone === PHONES.tenantBusy) row.drop = 'Y';
+    }
+    const { doc, sent } = stubDoc();
+
+    const report = await runApply({ doc, plan, review, importedAt });
+
+    const oneToOneWrites = sent.filter(
+      (c) =>
+        c.name === 'UpdateCommand' &&
+        String(c.input.UpdateExpression ?? '').includes('participant_phone = :participantPhone'),
+    );
+    for (const c of oneToOneWrites) {
+      const values = c.input.ExpressionAttributeValues as Record<string, unknown>;
+      expect(values[':participantPhone']).not.toBe(PHONES.tenantBusy);
+    }
+    expect(report.conversations.groupRosterDropsKept).toBe(0);
+  });
+
   it('pins the local group_open literal against the repo constant', () => {
     // apply.ts keeps the partition name as a local literal rather than importing
     // the repo (H10). This is the drift alarm for that decision.

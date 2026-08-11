@@ -17,6 +17,16 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Login | sign-in affordance | `getByText('Sign in with Google')` |
 | Inbox | heading | `getByRole('heading', { name: 'Inbox' })` |
 | Inbox | a conversation row | `getByRole('link').filter({ hasText: <preview/name> })` |
+| Inbox | filter tabs | `getByRole('tab', { name: 'All'\|'Unread'\|'Unknown'\|'Groups' })` - the active tab carries `aria-selected="true"`. The filter is a URL param, so `/inbox?filter=groups` is a real deep link |
+| Inbox | a NATIVE group-text row | the row link filtered by its derived title (`With <FirstName> & <FirstName>`), beside the chip `getByText('Group text')`. `Relay group` is the chip on a masked relay row - the two are different products |
+| Inbox | group truncation affordance | `getByRole('link', { name: 'See all group texts' })` - rendered only when the server withholds group rows; the sentence beside it is `Showing the latest <n> group texts.` (no total by design) |
+| Group text thread | header | `getByText('Group text')` for the name band + `getByText(/Everyone in this group text sees everyone's real number/)` - the unmasked affordance |
+| Group text thread | member panel | `getByRole('list', { name: 'Group members' })`; a known member is a link to their contact page, an unknown-number member is plain text |
+| Group text thread | suppression chip | `getByText('Opted out')` (the member's PRIMARY number) or `getByText('This number opted out')` (a secondary number) - never both for one member |
+| Group text thread | deleted member | `getByText('Deleted')` in the member panel |
+| Group text thread | read-only note | `getByRole('note')` - the composer is REPLACED, so there is no `Reply message` textbox and no `Send` button on this surface until the group send ships |
+| Group text thread | over-cap banner | `getByRole('status')` containing `more than the 9 a group send can reach` |
+| Contact page | Group threads card | `getByRole('heading', { name: 'Group threads' })` - the NATIVE card; the RELAY card beside it is `Relay groups` (S1 renamed it off "Group texts") |
 | Public form | fields | `getByLabel('First name'|'Last name'|'Phone')` |
 | Public form | submit | `getByRole('button', { name: 'Sign me up' })` |
 | Public form | success | `getByText("Thanks, we'll text you!")` |

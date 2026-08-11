@@ -217,6 +217,11 @@ if (mockRedirect) {
   // number as a relay POOL leg (fake-twilio/src/engine/engine.ts:294), so a
   // real number here registers a spurious relay group for every 1:1 send.
   childEnv.BUSINESS_PHONE_NUMBER = '+15550009999';
+  // The hermetic org has no numbers beyond that one. Assert it explicitly (the
+  // literal `none`) so the group-identity boot check stays quiet instead of
+  // warning on every mock boot, and so a real .env.dev list can never leak into
+  // the mock lane's derived group ids.
+  childEnv.GROUP_IDENTITY_EXCLUDED_NUMBERS = 'none';
 
   // ONLY-IF-ABSENT — respect live .env.dev creds/token; the fake inherits
   // TWILIO_AUTH_TOKEN from childEnv either way, so signatures still match.

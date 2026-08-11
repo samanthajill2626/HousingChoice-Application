@@ -214,6 +214,15 @@ export interface AppConfig {
    */
   businessPhoneNumber: string | undefined;
   /**
+   * The org's OTHER numbers (E.164, from GROUP_IDENTITY_EXCLUDED_NUMBERS),
+   * subtracted from a carrier group's outside roster before the group thread id
+   * is derived (spec 4.1 - services/groupIdentity.ts). Part of the IDENTITY
+   * contract and fixed at deploy: changing it re-mints ids, which is a
+   * migration-grade decision (deployed stacks hold a settings fingerprint that
+   * refuses a silent change). Empty ONLY via the deliberate `none` literal.
+   */
+  groupIdentityExcludedNumbers: string[];
+  /**
    * S3 bucket inbound MMS media is mirrored into (MEDIA_BUCKET) —
    * Terraform-managed in AWS (the s3_media module's bucket). Unset locally:
    * media mirroring is skipped with a log instead.
@@ -1169,6 +1178,55 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     );
   }
 
+  // Native group texting (spec 4.1): the org's OTHER numbers, excluded from a
+  // carrier group's outside roster before the thread id is derived. This is part
+  // of the IDENTITY contract, fixed at DEPLOY - a number missing from the list
+  // mints divergent ids for every group it appears in, and a stale/typo'd extra
+  // silently subtracts a real member from every roster containing them. Same
+  // three-tier posture as BUSINESS_PHONE_NUMBER above, plus the `none` literal:
+  // an org with no extra numbers must SAY so, because empty-by-omission is the
+  // dangerous default. The business number itself is excluded separately (it is
+  // its own config value) and pool numbers come from the byPoolNumber cache.
+  const groupExcludedRaw = (env.GROUP_IDENTITY_EXCLUDED_NUMBERS ?? '').trim();
+  const groupExcludedDeclaredNone = groupExcludedRaw.toLowerCase() === 'none';
+  const groupIdentityExcludedNumbers = groupExcludedDeclaredNone
+    ? []
+    : groupExcludedRaw
+        .split(',')
+        .map((n) => n.trim())
+        .filter((n) => n.length > 0);
+  for (const number of groupIdentityExcludedNumbers) {
+    // Tier 1: a PRESENT but malformed entry throws everywhere. A silently
+    // dropped entry is worse than a boot failure - it changes every id we mint.
+    if (!/^\+[1-9]\d{1,14}$/.test(number)) {
+      throw new Error(
+        `GROUP_IDENTITY_EXCLUDED_NUMBERS entries must be E.164 (+1...), got: ${number}`,
+      );
+    }
+  }
+  const groupExclusionUnset = !groupExcludedDeclaredNone && groupIdentityExcludedNumbers.length === 0;
+  // Tier 2: non-production twilio stacks WARN (the hermetic lanes inject `none`;
+  // local LIVE-mode dev reads the real .env.dev, where a stale/renamed key would
+  // otherwise degrade in silence on the one stack that texts real people).
+  if (messagingDriver === 'twilio' && groupExclusionUnset) {
+    logger.warn(
+      'GROUP_IDENTITY_EXCLUDED_NUMBERS is unset with MESSAGING_DRIVER=twilio - carrier group ids ' +
+        'will be derived with NO extra org numbers excluded. Set the org numbers, or the literal ' +
+        '`none` to assert there are none.',
+    );
+  }
+  // Tier 3: a deployed stack must be un-misconfigurable. Detection minting ids
+  // against a silently-empty exclusion list is unrecoverable per group thread.
+  if (messagingDriver === 'twilio' && nodeEnv === 'production' && groupExclusionUnset) {
+    throw new Error(
+      'GROUP_IDENTITY_EXCLUDED_NUMBERS is required when MESSAGING_DRIVER=twilio and ' +
+        'NODE_ENV=production - it is part of the group-thread identity contract, so an empty ' +
+        'value by omission would mint divergent ids for every carrier group. Set the org numbers ' +
+        '(comma-separated E.164), or the literal `none` to assert there are none. Refusing to ' +
+        'start without it.',
+    );
+  }
+
   // Web Push VAPID (M1.4) — operator-managed, optional everywhere (push is a
   // feature, not core; unconfigured = 503/no-op, never a boot failure). The
   // ONLY validation: when a subject IS set it must be a mailto:/https: URI
@@ -1223,6 +1281,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): AppConfig {
     publicBaseUrl: env.PUBLIC_BASE_URL,
     sendBreakerMaxPerMinute,
     businessPhoneNumber,
+    groupIdentityExcludedNumbers,
     mediaBucket: env.MEDIA_BUCKET,
     mediaS3Endpoint: mediaS3Endpoint !== undefined && mediaS3Endpoint.length > 0 ? mediaS3Endpoint : undefined,
     sseMaxConnections,

@@ -35,6 +35,9 @@ const prodBase = {
   // A real (non-mock) twilio config must carry the Event Streams webhook secret.
   TWILIO_EVENTS_WEBHOOK_SECRET: 'evsecret',
   BUSINESS_PHONE_NUMBER: '+15555550100',
+  // Native group texting: a production twilio stack must declare the org's other
+  // numbers (or the literal `none`) or config refuses to start.
+  GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
 };
 
 describe('relayLiveProvisioning resolution', () => {

@@ -73,6 +73,9 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
         CF_ORIGIN_SECRET: 's',
         MESSAGING_DRIVER: undefined,
         BUSINESS_PHONE_NUMBER: '+15550009999',
+        // Native group texting: a production twilio stack must declare the org's
+        // other numbers (or `none`) or config refuses to start.
+        GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
       }).messagingDriver,
     ).toBe('twilio');
   });
@@ -91,7 +94,15 @@ describe('driver factory (MESSAGING_DRIVER)', () => {
   });
 
   it('fail-fasts when twilio runs in production with an unconfigured BUSINESS_PHONE_NUMBER (echo defense 1)', () => {
-    const prodTwilio = { ...TWILIO_ENV, ...JOB_DELIVERY_ENV, NODE_ENV: 'production', CF_ORIGIN_SECRET: 's' };
+    const prodTwilio = {
+      ...TWILIO_ENV,
+      ...JOB_DELIVERY_ENV,
+      NODE_ENV: 'production',
+      CF_ORIGIN_SECRET: 's',
+      // Group-identity exclusion list declared, so THIS suite still isolates the
+      // BUSINESS_PHONE_NUMBER gate (config throws on that one first regardless).
+      GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
+    };
     expect(() => loadConfig(prodTwilio)).toThrow(/BUSINESS_PHONE_NUMBER/);
     // Configured → boots.
     expect(loadConfig({ ...prodTwilio, BUSINESS_PHONE_NUMBER: '+15550009999' }).businessPhoneNumber).toBe(

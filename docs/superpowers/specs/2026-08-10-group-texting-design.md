@@ -771,12 +771,12 @@ mainline; import mission owns the RUN). This feature ships:
 - Cutover continuity: imported groups continue on the ported number because
   identity is the shared roster + exclusion set; handset threads merge by
   participant set (spike, odds-and-ends). ensureGroupRail covers any group
-  still rail-less at cutover per the hardened invariant; historically-worded
-  creates its rail.
+  still rail-less at cutover per the hardened invariant.
 - MMS-enabled campaign approval precedes real outbound (Cameron's gate).
 - Follow-up issues filed by this spec: `twilio-standard-optout-double-reply`,
-  `group-mms-including-pool-numbers`, outbound group media, and (if naming
-  Option B is chosen) the post-cutover relay-label rename.
+  `group-mms-including-pool-numbers`, `group-text-tour-placement-attachment`,
+  `exactly-once-send-intent`, and outbound group media. (Naming Option A
+  shipped; no rename follow-up exists.)
 
 
 ## 15. Delta-2 amendments (external review round 2 - AUTHORITATIVE over

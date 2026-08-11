@@ -106,7 +106,27 @@ test('a dashboard reply reaches every handset once, with per-member delivery and
 
   // 2) The per-member delivery rollup finalizes green once every receipt lands.
   //    This is the ONLY delivery signal a Conversations send produces.
-  await expect(page.getByText(`Delivered ${3}/${3}`)).toBeVisible({ timeout: 20_000 });
+  //
+  //    RELOAD-POLLED, not waited on. Group delivery receipts arrive on the
+  //    Conversations webhook and emit NO SSE event, so nothing pushes the open
+  //    thread: a bare `toBeVisible` here was passing only because the post-send
+  //    `message.persisted` refetch happened to land after the fake's delivery
+  //    ladder, a margin of about a hundred milliseconds. The rollup is
+  //    refetch-driven, so the spec has to drive the refetch - the same pattern
+  //    the STOP spec uses for its own `Delivered 2/2`.
+  await expect
+    .poll(
+      async () => {
+        await page.reload();
+        // `count()` takes a snapshot with no auto-wait, so wait for the thread
+        // to have rendered before counting - otherwise every sample measures an
+        // empty SPA.
+        await page.getByText(reply).waitFor({ timeout: 15_000 });
+        return page.getByText(`Delivered ${3}/${3}`).count();
+      },
+      { timeout: 60_000, message: 'the per-member delivery rollup never finalized' },
+    )
+    .toBeGreaterThan(0);
 
   // 3) NO unknown-provider-SID error. Checked over the whole window, not just
   //    for this conversation, because the failure mode is a stray callback

@@ -72,9 +72,12 @@ explicitly instead of left in conflict:
 1. `npm run perf:pages -- hermetic --scale=10` starts an isolated e2e lane,
    replaces that lane's data with a deterministic performance dataset, profiles
    the route registry, writes a report, and tears down only the stack it started.
-2. The scale factor grows contacts, properties, placements, tours,
-   conversations, messages, and broadcasts proportionally. Per-entity CLI
-   overrides can replace the derived counts.
+2. The scale factor grows the entity counts - contacts, properties, placements,
+   tours, conversations, and broadcasts - proportionally. Per-entity densities
+   (messages per conversation, recipients per broadcast) are scale-invariant
+   defaults; the total message and recipient volumes grow with their parent
+   counts, not with the density. Per-entity CLI overrides can replace any
+   derived count or density.
 3. `npm run perf:pages -- local --base-url=http://localhost:5174` refuses unless
    `/__dev/ping` proves a local stack with an `hc-local-` table prefix. It uses an
    existing admin dev user and refuses to auto-provision one.
@@ -251,10 +254,21 @@ The deployed login is Google OAuth, and Google can refuse sign-in inside an
 automation-controlled browser. The runner therefore accepts
 `--browser-channel=chrome` to run the headed login and the measured session in
 installed Chrome instead of bundled Chromium; storage state remains
-memory-only either way. Even so, hosted-dev ships unverified: the pre-merge
-smoke is hermetic-only, so the first real hosted-dev run is the human's, and if
-Google refuses both browser channels, D4 must be re-decided on that evidence
-rather than patched around.
+memory-only either way. The chrome channel has a one-time Windows prerequisite
+this repo already documents: `npx playwright install chrome` from an
+Administrator terminal (`e2e/README.md`), and the channel is a local-human-only
+path - CI and agents stay on bundled Chromium. The docs state the prerequisite
+up front so the human does not discover it only after OAuth has already
+refused.
+
+Even so, hosted-dev ships unverified: the pre-merge smoke is hermetic-only, so
+the first real hosted-dev run is the human's, and if Google refuses both
+browser channels, D4 must be re-decided on that evidence rather than patched
+around. The same caveat applies to local mode, whose TTY gate deliberately
+forecloses any automated end-to-end exercise: section 15.1's unit tests of the
+loopback/port/prefix guards, `requireExisting`, and `--login-email` are the
+ONLY pre-merge evidence for local mode, and the first end-to-end local run is
+the human's.
 
 ## 6. Read-only request firewall
 
@@ -554,9 +568,9 @@ Per sample, collect when available:
   never mistaken for the app scaling well. The caps differ per hook: contacts
   truncate at 40 pages x 100 records per type; listings at 40 pages x the
   server's default 50-row page (2,000 units - the hook sends no limit); the
-  placements page runs three independent 50-page walks (placements, tenant
-  contacts, units) and truncates when ANY of them caps, the contact and unit
-  walks at 50 x 50 = 2,500 records each;
+  placements page runs five independent 50-page limit-less walks (placements,
+  plus deleted and live variants of both tenant contacts and units) and
+  truncates when ANY of the five caps, each at 50 x 50 = 2,500 records;
 - readiness or skip reason.
 
 Chromium DevTools Protocol network events provide encoded transfer size without
@@ -616,9 +630,14 @@ and paths are not stored.
 The redactor has adversarial tests for E.164 phone values, email addresses, URL
 encoded values, opaque cursor values, UUIDs, arbitrary slug-like IDs, and unknown
 endpoints. A final artifact scan fails the run if common phone/email/cookie/token
-patterns are found, or if any path segment matches the repository's entity-ID
-shapes (`unit-`, `contact-`, `perf-` prefixes, UUIDs, and ULID-like tokens) -
-raw entity IDs are not phone/email-shaped, so they need their own scan pattern.
+patterns are found, or on the repository's entity-ID shapes - raw entity IDs are
+not phone/email-shaped, so they need their own scan patterns. Those patterns
+match FULL ID shapes (`unit-<digits>`, `contact-<type>-<digits>`, `perf-`
+namespace tokens, UUIDs, ULID-like tokens), never bare prefixes, and the known
+sanitized template literals and `:placeholder` tokens are exempt - otherwise the
+scan would reject its own `/unit-media/:unitId/:mediaKey` output, quarantining
+every run that measures `/listings/:unitId`. A test asserts that every template
+in the registry passes the final scan.
 
 ### 10.3 Artifact location and files
 
@@ -653,9 +672,15 @@ At scale 1, generated additions are:
 | placements | 50 |
 | tours | 50 |
 | conversations | 100 |
-| messages per conversation | 10 |
+| messages per conversation | 10 (density; scale-invariant) |
 | broadcasts | 10 |
-| recipients per broadcast | 25 |
+| recipients per broadcast | 25 (density; scale-invariant) |
+
+The scale factor multiplies the entity counts only. The two density rows are
+scale-invariant: at scale 100 each conversation still carries 10 messages and
+each broadcast 25 recipients unless overridden. This is what keeps the
+messages-per-conversation bound (0..100) satisfiable at every allowed scale and
+what the scale-100 arithmetic in section 11.4 assumes.
 
 The lean seed remains present for stable admin identities and canonical route
 fixtures. Generated records use a reserved `perf-` ID namespace and fake `+1555`
@@ -672,11 +697,16 @@ distributed by fixed ratios so every list view has representative rows.
 The relay-group ratio carries a hard ceiling, not just a ratio: generated
 open/connecting relay groups never exceed 1,000 regardless of the conversation
 count, because `/inbox` folds every open/connecting relay group onto page 1
-additively under a roughly 2,000-row relay query budget. Staying below the
-budget keeps the inbox's relay `truncated` flag false (asserted by tests), keeps
-the guaranteed relay-group fixture reachable, and keeps `/inbox` - itself a
-ranked route and the warm source for `/conversations/:conversationId` - from
-degenerating into a page that renders the entire relay population.
+additively, one query per status, each bounded by its own roughly 2,000-row
+page budget. Staying below the budget keeps the relay queries untruncated
+(asserted by the section 15.2 integration test) and keeps the guaranteed
+relay-group fixture reachable. What the ceiling does NOT do is bound `/inbox`
+as a measured page: page 1 renders 30 contact rows plus every open/connecting
+relay group by design, each relay row costing its own server-side lookup, so at
+high relay counts `/inbox` - itself a ranked route and the warm source for
+`/conversations/:conversationId` - is legitimately heavy, and its ranking and
+the conversation detail's preparation budget must be read with that in mind.
+The docs say so.
 
 At least one eligible detail fixture of each required kind is guaranteed whenever
 the corresponding count is non-zero. When an override intentionally sets a kind to
@@ -689,11 +719,15 @@ each source actually renders:
   generated broadcasts, so it sorts onto the broadcast list's first 50-row page
   at every scale;
 - relay-group rows do not compete for the inbox's 30 contact-row slots - they
-  merge additively onto page 1 bounded by the relay list's roughly 2,000-row
-  query budget - so the guarantee for the relay-group fixture is a volume cap,
-  not a sort position: generated open/connecting relay groups stay safely below
-  that budget (section 11.2) and the inbox response's relay `truncated` flag is
-  asserted false.
+  merge additively onto page 1, queried per status (open, then connecting),
+  each status call bounded by its own roughly 2,000-row page budget - so the
+  guarantee for the relay-group fixture is a volume cap, not a sort position:
+  generated open/connecting relay groups stay safely below the per-status
+  budget (section 11.2). The budget flag never leaves the server, so the
+  assertion is two-sided: a DynamoDB-Local integration test (section 15.2)
+  asserts `listRelayGroups` reports no truncation at the generated volume, and
+  the runner compares the inbox response's relay-row count against the
+  manifest's generated relay count, flagging any shortfall in the route result.
 
 ### 11.2 Physical table and reader manifest
 
@@ -731,7 +765,13 @@ Independent zero overrides follow one fixed relation policy:
 - message rows are generated only for generated conversations, so
   `conversations=0` resolves the generated message total to zero;
 - conversation rosters and broadcast recipients use the tenant/landlord rules
-  above.
+  above. Broadcast recipients are a map keyed per contact, so fallback
+  references COLLAPSE: with `contacts=0`, 25 requested recipients resolve to
+  one entry keyed on the lean tenant. Recipient resolution is de-duplicated
+  against the resolved recipient pool BEFORE the total-item cap is computed,
+  and the count manifest reports requested versus resolved recipient totals.
+  The zero/non-zero parent-child test matrix includes the
+  recipients-to-contacts vector.
 
 The count manifest records requested counts, resolved counts, and symbolic
 fallback keys such as `lean_tenant`, never fallback raw IDs. Tests cover every
@@ -811,8 +851,9 @@ The runner accepts:
 ```
 
 Comparison requires the same schema version and route key. It reports target mode,
-git commit, scale/count manifest, browser version, OS, Node version, repeat counts,
-and timestamps so a reviewer can judge whether two runs are comparable.
+git commit, scale/count manifest, browser version, browser channel, OS, Node
+version, repeat counts, interception scope, settle window, readiness poll
+interval, and timestamps so a reviewer can judge whether two runs are comparable.
 
 When target kind, scale manifest, route set, browser major version, browser
 channel, interception scope, settle window, or readiness poll interval differs,
@@ -887,16 +928,32 @@ Vitest never picks up the Playwright specs, and Vitest fails by default when no
 test files match, which closes the zero-test-green gate hazard natively. Root
 `npm test` already runs workspace test scripts with `--if-present`, so it
 executes these modules without a new dependency. The root package also adds only
-the on-demand `perf:pages` command.
+the on-demand `perf:pages` command, and its form is pinned:
+
+```text
+"perf:pages": "tsx e2e/performance/cli.ts"
+```
+
+Direct invocation, never a nested `npm run ... -w <workspace>` - the root
+`"e2e"` script is exactly that nested shape and it swallows the caller's `--`
+arguments, which for this command would mean `--scale=10` silently never
+arrives and the run "succeeds" at scale 1 while reporting a trusted manifest.
+Section 15.1 includes an end-to-end argv test through `npm run perf:pages`, not
+only a unit test of the parser. The direct form also keeps all Playwright
+execution inside e2e-workspace code, which is how the root command satisfies
+AGENTS.md's Playwright rule for the hermetic target.
 
 `AGENTS.md` is in the file list because the D3 reconciliation in section 2 is a
 required edit, not aspiration. The carve-out wording the branch adds to
 AGENTS.md's "UI testing and verification" section is:
 
-> The one exception is `npm run perf:pages -- local` / `-- hosted-dev`: these
-> profiler targets are human-invoked only. An agent may run them only on the
-> human's explicit per-run instruction naming the target; the local target
-> additionally requires an interactive TTY confirmation the runner enforces.
+> `npm run perf:pages` is a sanctioned Playwright entry point: the root script
+> delegates directly into e2e-workspace code, so it satisfies the
+> e2e-workspace-only rule for its hermetic target. Its `-- local` and
+> `-- hosted-dev` targets are additionally human-invoked only: an agent may run
+> them only on the human's explicit per-run instruction naming the target, and
+> the local target requires an interactive TTY confirmation the runner
+> enforces.
 
 ## 14. Failure behavior
 
@@ -932,7 +989,8 @@ messages to the terminal.
 ### 15.1 Pure unit tests
 
 - CLI target and numeric option parsing, including conflicting and forbidden
-  options.
+  options, plus an end-to-end argv check through `npm run perf:pages` proving
+  `--` options actually reach the CLI on Windows.
 - local target loopback/port/ping/prefix checks.
 - hosted HTTPS, admin, and exact `env === "dev"` checks.
 - existing-user-only dev login: `requireExisting: true` refuses a missing user,
@@ -946,9 +1004,14 @@ messages to the terminal.
 - recipients-per-broadcast bound and embedded-recipient counting toward the
   total-item cap.
 - fixture reachability: the terminal-broadcast first-page sort guarantee against
-  the broadcast list's 50-row page, and the relay-group volume cap against the
-  inbox's roughly 2,000-row relay query budget with the relay `truncated` flag
-  asserted false.
+  the broadcast list's 50-row page, the relay-group ceiling against the
+  per-status relay page budget, and the runner's inbox relay-row-count versus
+  manifest comparison (the repo-level no-truncation assertion is a section 15.2
+  integration test, because the budget flag never leaves the server).
+- the zero/non-zero parent-child matrix including the recipients-to-contacts
+  vector: recipient map collapse under `contacts=0`, requested-versus-resolved
+  recipient totals in the manifest, and de-duplication before the total-item
+  cap arithmetic.
 - endpoint templating and final artifact privacy scans against adversarial values.
 - cold/warm aggregation, null metrics, low sample count, and percentile rule.
 - baseline deltas, zero baseline, missing routes, and environment mismatch.
@@ -969,9 +1032,21 @@ messages to the terminal.
 - every registered auxiliary reader returns either its declared lean fixture or
   the declared valid empty state;
 - representative unit/tour/placement/relay-group/broadcast-results reads resolve;
+- `listRelayGroups` reports no truncation for either status at the maximum
+  generated relay-group volume (the ceiling-versus-budget assertion; the flag
+  never leaves the server, so this is the only place it can be tested);
 - a second identical reseed produces the same logical dataset;
 - the performance reseed guard refuses lane 0, cloud-dev prefixes, absent local
   endpoints, and over-cap input before clearing data.
+
+Ownership split, so the two sides cannot drift silently: these integration
+tests live in the app workspace (the existing `app/test/*.integration.test.ts`
+convention) and assert the section 11.2 physical/query contract, which is
+app-owned. They never import the e2e-workspace route registry. The
+registry-to-endpoint binding (that each registry entry's declared endpoint
+templates and fixture predicates match what its route actually requests) is
+asserted by the e2e-workspace unit tests in section 15.1, and the hermetic
+smoke in section 15.3 is the live check that ties the two contracts together.
 
 ### 15.3 Profiler smoke
 
@@ -1020,6 +1095,12 @@ Add an `e2e/README.md` section covering:
   detail pages, not just the contact lists);
 - why a low rank for a route that is not scale-bearing on the relevant axis is
   not evidence it scales;
+- why `/inbox` is legitimately heavy at high relay-group counts (page 1 renders
+  every open/connecting relay group by design) and how that reads in the
+  ranking and in `/conversations/:conversationId` warm preparation;
+- the chrome browser channel's one-time Administrator install prerequisite on
+  Windows, stated before the hosted-dev instructions rather than discovered at
+  OAuth-refusal time;
 - rough expected reseed and total run wall-clock by scale, quoted as second-run
   figures (the clear phase scans the previous run's items);
 - the one-direction session guard: a later e2e run in the same worktree reaps

@@ -131,6 +131,20 @@ export interface SendAsPartyInput {
   mediaUrls?: string[];
 }
 
+/**
+ * A NATIVE CARRIER group text arriving at the business number - a different
+ * product from the relay `GroupSnapshot` above, which is pool-number inference.
+ * `otherRecipients` becomes the undocumented `OtherRecipients{N}` envelope the
+ * app's detection reads.
+ */
+export interface SendGroupAsPartyInput extends SendAsPartyInput {
+  otherRecipients: string[];
+  /** `indexed` (the live shape) or `single` (the bare defensive key). */
+  otherRecipientsShape?: 'indexed' | 'single';
+  /** Force the provider SID prefix - the tripwire needs MM with NumMedia=0. */
+  sidShape?: 'SM' | 'MM';
+}
+
 export interface SetDeliveryOutcomeInput {
   /** Party number whose NEXT outbound message uses this profile. */
   partyNumber: string;

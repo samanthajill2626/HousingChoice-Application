@@ -31,7 +31,71 @@ The web UI talks to a small control API on the same port; the useful bits:
   inbound send. Omit `to` (or set the app business number) for a 1:1; set
   `to = <poolNumber>` to text a relay group (this is what triggers the app's real
   fan-out). The fake-phones GroupPanel does exactly this from its member picker.
-- `POST /control/reset` — clear threads **and** groups (personas persist).
+- `GET  /control/conversations` - **native carrier group** rails (Twilio
+  Conversations): `{ sid, uniqueName, state, participants, messages }`. See
+  "Carrier groups" below; this is a *different product* from `/control/groups`.
+- `POST /control/send-group-as-party`
+  `{ from, otherRecipients[], to?, body?, mediaUrls?, otherRecipientsShape?, sidShape?, railEvent? }`
+  impersonates an inbound **carrier group text**: a normal inbound to the
+  business number that additionally carries the undocumented `OtherRecipients`
+  envelope. `otherRecipientsShape` picks the indexed (`OtherRecipients0..N`,
+  the live shape) or bare-key form; `sidShape: 'MM'` forces the MM prefix so the
+  no-envelope **tripwire** shape is producible; `railEvent: false` suppresses the
+  Conversations `onMessageAdded`, which is how a test manufactures the guardrail
+  failure (a classic inbound the Conversations channel never reported).
+- `POST /control/conversations/inject-event`
+  `{ conversationSid | uniqueName, author?, body?, source?, messageSid? }` - fire
+  an `onMessageAdded` with **no** classic counterpart. `source: 'API'` exercises
+  the cross-check's `Source === 'SMS'` filter.
+- `GET  /control/conversations/dispatch-errors` - the Conversations engine's own
+  rejected-webhook ring buffer.
+- `POST /control/reset` - clear threads, relay groups **and** carrier-group rails
+  (personas persist).
+
+## Carrier groups (native, Twilio Conversations)
+
+Distinct from the relay groups below, and the two never mix. A **carrier group**
+is a real group text between real handsets: everyone sees everyone's number, and
+Twilio binds it to a Conversations resource (`CHxx`) whose participants are the
+business number (as a `projected_address`-only participant) and each member (as
+an `address`-only participant). Combining both on ONE participant is Twilio's
+`50407 Invalid messaging binding address`, which reads like a bad phone number
+and is not one - the fake models the shape faithfully and refuses the wrong one.
+
+Emulated REST (the paths twilio-node produces; `createRedirectingHttpClient`
+rewrites only the origin):
+
+```
+POST   /v1/Conversations                      POST /v1/ConversationWithParticipants
+GET    /v1/Conversations/{SidOrUniqueName}    DELETE /v1/Conversations/{SidOrUniqueName}
+POST   /v1/Conversations/{Sid}/Participants   GET  /v1/Conversations/{Sid}/Participants
+POST   /v1/Conversations/{Sid}/Messages
+```
+
+A duplicate `UniqueName` answers `409 / 50353` (what the app's rail-claim logic
+is written against); an unknown Conversation answers `404 / 20404` (which the
+adapter maps to "no rail exists").
+
+Two behaviors are deliberate and load-bearing:
+
+- **A post fans out to each member's ordinary 1:1 thread and fires NO classic
+  status callback.** Conversations-originated sends genuinely do not produce
+  them (proven live), and emitting them would manufacture an
+  "unknown provider SID" error in the app for every leg.
+- **Delivery state arrives solely as `onDeliveryUpdated`,** and our own posts
+  produce no `onMessageAdded` echo unless the caller sets
+  `X-Twilio-Webhook-Enabled` (the app deliberately does not). Both event kinds go
+  to the ONE service-scoped webhook, `POST /webhooks/twilio/conversations`,
+  signed exactly like every other webhook the fake sends.
+
+Per-member outcomes reuse the SAME `POST /control/delivery-outcome` arming a 1:1
+send uses - that is how a STOPped handset's `21610` is simulated on one leg while
+the others still deliver.
+
+In the fake-phones UI the seam is the **"Carrier group recipients"** picker in the
+1:1 pane: tick one or more other handsets and the next send becomes a carrier
+group text. It is named "Carrier group" and never "Group text" on purpose - the
+left rail's "Group texts" section means relay groups.
 
 ## Relay groups (masked, pool-number-fronted)
 

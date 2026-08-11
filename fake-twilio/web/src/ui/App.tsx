@@ -32,6 +32,9 @@ function PhonePanel({
   onSetDeliveryProfile,
   deliveryResetSignal,
   sendError,
+  otherPersonas,
+  carrierGroupWith,
+  onToggleCarrierGroupMember,
 }: {
   persona: Persona | undefined;
   thread: Thread | undefined;
@@ -39,6 +42,9 @@ function PhonePanel({
   onSetDeliveryProfile: (profile: DeliveryProfile) => void;
   deliveryResetSignal: number;
   sendError?: string;
+  otherPersonas: Persona[];
+  carrierGroupWith: string[];
+  onToggleCarrierGroupMember: (number: string) => void;
 }): React.JSX.Element {
   if (!persona) {
     return (
@@ -67,6 +73,47 @@ function PhonePanel({
           messages.map((m) => <MessageBubble key={m.sid} message={m} />)
         )}
       </div>
+
+      {/* NATIVE CARRIER group texting. Named "Carrier group" everywhere and
+          NEVER "Group text": the rail on the left already has a section
+          literally called "Group texts" meaning RELAY groups, and the dashboard
+          chip for THIS product is "Group text" - three labels for two products
+          would make every spec selector ambiguous.
+
+          Picking one or more recipients turns the next send from a 1:1 into a
+          carrier group text: it still goes to the business number, but it
+          carries the undocumented OtherRecipients envelope, which is the ONLY
+          thing that distinguishes the two on the wire. */}
+      <fieldset className={styles.carrierGroup}>
+        <legend className={styles.carrierGroupLegend}>Carrier group recipients</legend>
+        <p className={styles.carrierGroupHint}>
+          {carrierGroupWith.length === 0
+            ? 'None picked - the next send is an ordinary one-to-one text.'
+            : `The next send is a carrier group text with ${carrierGroupWith.length} other handset${
+                carrierGroupWith.length === 1 ? '' : 's'
+              }.`}
+        </p>
+        {otherPersonas.length === 0 ? (
+          <p className={styles.carrierGroupHint}>No other handsets to group with.</p>
+        ) : (
+          <ul className={styles.carrierGroupList}>
+            {otherPersonas.map((other) => (
+              <li key={other.number}>
+                <label className={styles.carrierGroupItem}>
+                  <input
+                    type="checkbox"
+                    checked={carrierGroupWith.includes(other.number)}
+                    onChange={() => onToggleCarrierGroupMember(other.number)}
+                  />
+                  <span>
+                    {other.label} {other.number}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        )}
+      </fieldset>
 
       {sendError !== undefined && sendError !== '' && (
         <p role="alert" className={styles.sendError}>
@@ -120,10 +167,27 @@ export function App(): React.JSX.Element {
     prevOutboundCountRef.current = selectedOutboundCount;
   }, [selectedOutboundCount]);
 
+  // NATIVE CARRIER group seam: the other handsets the next send is addressed to.
+  // Cleared on every party switch (below) - a carrier group is a property of the
+  // message being composed, not a standing setting.
+  const [carrierGroupWith, setCarrierGroupWith] = useState<string[]>([]);
+  const otherPersonas = phones.personas.filter((p) => p.number !== phones.selected);
+
   const handleSend = async (input: ComposerSendInput): Promise<void> => {
     if (!selectedPersona) return;
     setSendError(undefined);
     try {
+      if (carrierGroupWith.length > 0) {
+        // A carrier group text: still addressed to the business number, but
+        // carrying the OtherRecipients envelope that makes it a group.
+        await phones.sendGroupAsParty({
+          from: selectedPersona.number,
+          otherRecipients: carrierGroupWith,
+          body: input.body,
+          ...(input.mediaUrls.length > 0 && { mediaUrls: input.mediaUrls }),
+        });
+        return;
+      }
       await phones.sendAsParty({
         from: selectedPersona.number,
         body: input.body,
@@ -196,6 +260,10 @@ export function App(): React.JSX.Element {
             // The armed delivery profile is per-party + one-shot; don't carry one
             // party's selection over to the next. Reset the radio on every switch.
             setDeliveryResetSignal((n) => n + 1);
+            // The carrier-group picker belongs to the message being composed on
+            // the party we are leaving; carrying it over would silently address
+            // the next send to a group nobody chose.
+            setCarrierGroupWith([]);
             phones.select(number);
           }}
           onAddAdHoc={() => {
@@ -228,6 +296,13 @@ export function App(): React.JSX.Element {
             onSend={handleSend}
             onSetDeliveryProfile={handleSetDeliveryProfile}
             deliveryResetSignal={deliveryResetSignal}
+            otherPersonas={otherPersonas}
+            carrierGroupWith={carrierGroupWith}
+            onToggleCarrierGroupMember={(number) =>
+              setCarrierGroupWith((prev) =>
+                prev.includes(number) ? prev.filter((n) => n !== number) : [...prev, number],
+              )
+            }
             {...(sendError !== undefined && { sendError })}
           />
         )}

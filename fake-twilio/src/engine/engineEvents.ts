@@ -3,7 +3,7 @@
 // The EngineEvent union — a live engine state-change, streamed to the fake-phones
 // UI over SSE. Both engines (messaging + the Phase 5 CallEngine) emit through the
 // shared EventHub, so the union lives here, decoupled from any single engine.
-import type { GroupSnapshot, Persona, ThreadMessage } from './types.js';
+import type { ConversationSnapshot, GroupSnapshot, Persona, ThreadMessage } from './types.js';
 import type { CallState } from './voiceTypes.js';
 import type { InboundEmailRecord, StoredEmail } from './mailStore.js';
 
@@ -18,6 +18,16 @@ export type EngineEvent =
   // package hand-mirrors this variant AND must list 'group.updated' in its SSE
   // EVENT_TYPES allowlist, or the frame is silently dropped.
   | { type: 'group.updated'; group: GroupSnapshot }
+  // NATIVE CARRIER group texting (Twilio Conversations) - a DIFFERENT product
+  // from the relay groups above, which are pool-number inference. Emitted on
+  // every rail mutation (create, participant add, post, delivery-leg advance),
+  // carrying the whole recomputed Conversation. The fake-phones UI has no
+  // carrier-group pane (a rail is invisible from a handset - members just see
+  // ordinary texts), so like the two mail.* variants below this one is
+  // deliberately ABSENT from the web SSE EVENT_TYPES allowlist and EventSource
+  // drops it there by design. The state a spec asserts on is read through
+  // GET /control/conversations instead.
+  | { type: 'conversation.updated'; conversation: ConversationSnapshot }
   | { type: 'reset' }
   // ---- voice (call) variants ----
   | { type: 'call.placed'; call: CallState }

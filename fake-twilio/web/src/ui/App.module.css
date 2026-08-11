@@ -97,6 +97,48 @@
   font-size: var(--hc-font-size-sm);
 }
 
+/* --- Native CARRIER group picker (group-texting S8). Sits between the log and
+   the composer, so it reads as "who this next message is addressed to". Named
+   "Carrier group" throughout, never "Group text" - the left rail's "Group texts"
+   section is RELAY groups, a different product. --- */
+.carrierGroup {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: var(--hc-space-2) var(--hc-space-4);
+  border: 0;
+  border-top: 1px solid var(--hc-color-border);
+}
+
+.carrierGroupLegend {
+  padding: 0;
+  font-size: var(--hc-font-size-sm);
+  font-weight: var(--hc-font-weight-semibold);
+  color: var(--hc-color-text);
+}
+
+.carrierGroupHint {
+  margin: 0 0 var(--hc-space-1);
+  font-size: var(--hc-font-size-sm);
+}
+
+.carrierGroupList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hc-space-1) var(--hc-space-4);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  max-height: 6rem;
+  overflow-y: auto;
+}
+
+.carrierGroupItem {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hc-space-1);
+  font-size: var(--hc-font-size-sm);
+}
+
 /* Empty state when nothing is selected (fills the whole panel). */
 .empty {
   flex: 1 1 auto;

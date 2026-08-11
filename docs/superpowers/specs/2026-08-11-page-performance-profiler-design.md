@@ -91,9 +91,11 @@ explicitly instead of left in conflict:
    network, recording each blocked write in sanitized form. Paths outside that
    scope (`/public/**`, `/unit-media/**`, the direct-to-storage upload origin)
    are not intercepted; they are read-only in practice because D6 exercises no
-   workflow control that writes to them, and the hermetic smoke's
-   state-unchanged assertions (section 15.3) are the end-to-end check that no
-   write landed anywhere.
+   workflow control that writes to them. The end-to-end proof is scoped to
+   match: the full-registry self-QA's state assertions (section 15.3) prove no
+   ENUMERATED automatic write surface changed state, and the mechanically
+   derived mutation-path inventory (section 6) is what keeps that enumeration
+   complete as the dashboard grows.
 6. The runner measures three cold and three warm samples per route by default.
    Both repeat counts are configurable.
 7. Routes are ranked separately by cold and warm median meaningful-ready time.
@@ -324,11 +326,16 @@ so that the cost lands only on API-class requests and is identical across
 routes, repeats, and baselines.
 
 Two proofs keep the scope honest. A mutation-path inventory test (section 15.1)
-enumerates every client mutation call site reachable by navigation - the
-mark-read family across contact, conversation, inbox row, email row, and the
-tour/placement channel tabs - and asserts each one's endpoint falls inside the
-intercepted path scope, so a future mutation added outside `/api/**` fails the
-test rather than silently bypassing the firewall. And the full-registry
+is mechanically derived, not hand-maintained: a source-level scan of
+`dashboard/src` finds every request initiated with a write method - the typed
+endpoints module's non-GET functions plus any direct `fetch` call - and the
+test fails when a found call site is absent from the checked-in catalog, or
+when a cataloged navigation-reachable endpoint falls outside the intercepted
+path scope. A future mutation added anywhere in the dashboard therefore fails
+the test until it is cataloged and covered, rather than silently bypassing the
+firewall. The navigation-reachable subset today is the mark-read family across
+contact, conversation, inbox row, email row, and the tour/placement channel
+tabs. And the full-registry
 self-QA run (section 15.3) asserts app state unchanged for EACH enumerated
 automatic write surface, not just one of them.
 
@@ -652,8 +659,10 @@ patterns are found, or on the repository's entity-ID shapes - raw entity IDs are
 not phone/email-shaped, so they need their own scan patterns. The pattern list
 is derived from the repository's actual ID constructors and seed namespaces,
 not hand-enumerated: every known entity prefix (`contact`, `unit`, `conv`,
-`tour`, `placement`, `bcast`, `broadcast`, `user`, `msg`, `perf`) followed by a
-UUID, digit run, or slug tail, plus bare UUIDs and ULID-like tokens. `bcast` is
+`tour`, `placement`, `bcast`, `broadcast`, `user`, `msg`, `um`, `perf`)
+followed by a UUID, digit run, hex run, or slug tail, plus bare UUIDs and
+ULID-like tokens. The unmatched-email shape is `um-<32 hex chars>` - hex, not
+UUID, so it needs its own tail pattern. `bcast` is
 the PRODUCTION broadcast prefix (`bcast-${randomUUID()}` in the repo);
 `broadcast` covers the seed namespace - deriving from the actual constructors
 means both, and the per-kind negative tests feed each real shape through. Matching is
@@ -783,7 +792,12 @@ The destructive boundary and generated additions are separate contracts:
 - the existing reset clears every base in `TABLES` plus the dev outbox, restores
   the complete lean seed, and stamps the lean admin identity;
 - performance generation then appends rows to exactly `contacts`, `units`,
-  `placements`, `tours`, `conversations`, `messages`, and `broadcasts`;
+  `placements`, `tours`, `conversations`, `messages`, and `broadcasts`, plus
+  one FIXED-FIXTURE appendix: a small constant set of fake unmatched-email
+  rows (a few inbox rows and a few quarantined, fake addresses in the reserved
+  namespace, never scaled) so `/email` and `/email/quarantine` render
+  representative rows and the email no-write assertion in section 15.3 has a
+  row to open - the lean seed contains no unmatched-email fixture at all;
 - it does not append generated rows to any other physical table;
 - auxiliary readers backed by settings, users, unmatched email, audit/activity,
   reminders, deadlines, nudges, pool numbers, or other tables must either receive
@@ -908,16 +922,25 @@ Profiler commit and target app revision are separate fields, because the
 runner's checkout does not identify the application being measured. Hermetic
 mode gets the target revision from `/__dev/ping`'s `appCommit`, which the e2e
 launcher populates. On a manual local stack that field is normally null, and
-the hosted flags endpoint exposes no commit at all - in both cases the target
-revision is recorded as `target_version_unverified`, and a comparison where
-either side is unverified or the two revisions differ is an
-`environment_mismatch`.
+the hosted flags endpoint exposes no commit at all - in those cases the target
+revision is recorded as `target_version_unverified` and the comparison carries
+that WARNING label. A DIFFERING target revision is never a mismatch: comparing
+two revisions is the tool's central use case ("did the fix help?"), so the
+revision pair is reported as the experimental variable, not as evidence the
+comparison is uncontrolled.
 
-When target kind, scale manifest, route set, target app revision (missing or
-differing), browser major version, browser channel, viewport, cold or warm
-repeat count, route-order seed, interception scope, settle window, or readiness
-poll interval differs, the comparison is labeled `environment_mismatch` and
-lists the mismatches. It still computes route deltas but never presents them
+The seed anchor is provenance, not identity: two anchors produce time-shifted
+but structurally identical datasets, so scale-manifest equality for
+comparability EXCLUDES the anchor and keys on the resolved configuration
+(counts, densities, ratios) alone. Otherwise every hermetic baseline would be
+an `environment_mismatch` by construction.
+
+When target kind, scale manifest (anchor excluded), route set, browser major
+version, browser channel, viewport, cold or warm repeat count, route-order
+seed, interception scope, settle window, or readiness poll interval differs,
+the comparison is labeled `environment_mismatch` and lists the mismatches. A
+missing target revision adds the `target_version_unverified` warning; a
+differing target revision is the experimental variable and triggers nothing. It still computes route deltas but never presents them
 as controlled proof.
 
 For each matching route and cold/warm mode, compare median:

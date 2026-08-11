@@ -35,6 +35,7 @@ import { createTourRemindersRepo } from '../../repos/tourRemindersRepo.js';
 import { createSettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementDeadlinesRepo } from '../../repos/placementDeadlinesRepo.js';
 import { deriveStatuses } from '../statusModel.js';
+import { conversationIdForGroup } from '../import/ids.js';
 import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
 import type { SeedConversationRow } from './types.js';
@@ -72,6 +73,17 @@ export const LIVE_IDS = {
   tenantBPhone: '+15550170002',
   landlordAPhone: '+15550170003',
 } as const;
+
+/**
+ * The demo carrier group text's conversationId, DERIVED from its sorted roster.
+ * Exported because that id is the only way to address the thread - a group text
+ * has no `participant_phone` and no pool number to look it up by.
+ */
+export const LIVE_GROUP_TEXT_ID = conversationIdForGroup([
+  LIVE_IDS.tenantAPhone,
+  LIVE_IDS.tenantBPhone,
+  LIVE_IDS.landlordAPhone,
+]);
 
 // ---------------------------------------------------------------------------
 // Build static items (contacts, units, conversations, placements)
@@ -294,6 +306,27 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
         owner: { type: 'tour', id: LIVE_IDS.tourTomorrow },
         last_activity_at: iso,
         last_message_preview: '[AUTO] Tour group opened.',
+        unread_count: 0,
+        created_at: iso,
+      },
+      // A NATIVE CARRIER group text - the demo world's one live example, and a
+      // deliberate contrast with the relay group directly above: same three
+      // people, no pool number, no `relay_status`, its own `group_open`
+      // partition, and nobody masked. Its id is DERIVED from the sorted roster
+      // (that derivation IS the thread's identity, so a hand-written uuid would
+      // fork it away from the thread the runtime creates for the same people).
+      {
+        conversationId: LIVE_GROUP_TEXT_ID,
+        status: 'group_open', // byLastActivity HASH - its own partition
+        type: 'group_text',
+        ai_mode: 'manual',
+        participants: [
+          { contactId: LIVE_IDS.tenantA, phone: LIVE_IDS.tenantAPhone, name: 'Diana Osei' },
+          { contactId: LIVE_IDS.tenantB, phone: LIVE_IDS.tenantBPhone, name: 'Leon Abara' },
+          { contactId: LIVE_IDS.landlordA, phone: LIVE_IDS.landlordAPhone, name: 'Gloria Mensah' },
+        ],
+        last_activity_at: iso,
+        last_message_preview: 'I can meet you both at the unit at 5.',
         unread_count: 0,
         created_at: iso,
       },

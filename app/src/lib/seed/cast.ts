@@ -10,6 +10,7 @@
 // conversation participant_phone. The drift-alarm test (app/test/seedPersonaDrift.test.ts)
 // enforces the alignment.
 
+import { conversationIdForGroup } from '../import/ids.js';
 import { CAST_RECORDING_KEY, CAST_PHOTO_KEY } from './media.js';
 import type { SeedConversationRow } from './types.js';
 
@@ -1307,6 +1308,121 @@ const pmManagedProperty = {
 
 /** Additional contacts/units/etc. that fill out the narrative cast beyond the
  *  lean base fixtures. Merged on top of SEED by seedAll('full'). */
+// ---------------------------------------------------------------------------
+// Native carrier group texts (group-texting spec 4.1) - the demo world's two
+// ---------------------------------------------------------------------------
+//
+// A DIFFERENT PRODUCT from the relay groups above, and the two rows look nothing
+// alike: a group text carries no pool number, no `relay_status`, no
+// `participant_phone`, and lives in its own `group_open` byLastActivity
+// partition. Nobody is masked - everyone on a carrier group sees everyone's
+// real number, which is exactly what the dashboard has to say out loud.
+//
+// The ids are DERIVED from the sorted roster, never hardcoded: a group thread's
+// identity IS that derivation, so a hand-written uuid could silently fork the
+// thread the runtime would create for the same people.
+const GROUP_A_MEMBERS = [PHONES.searchingTenant, PHONES.touredYes] as const;
+const GROUP_A_ID = conversationIdForGroup([...GROUP_A_MEMBERS]);
+const GROUP_B_MEMBERS = [PHONES.coldCallLandlord, PHONES.neverSigned, PHONES.parkedLandlord] as const;
+const GROUP_B_ID = conversationIdForGroup([...GROUP_B_MEMBERS]);
+
+/** Two tenants comparing notes on the same building - the two-member shape. */
+const groupTextTwoMember = {
+  conversation: {
+    conversationId: GROUP_A_ID,
+    status: 'group_open', // byLastActivity HASH - its own partition
+    last_activity_at: CY, // byLastActivity RANGE
+    type: 'group_text',
+    ai_mode: 'manual',
+    participants: [
+      { contactId: C_SEARCHING, phone: GROUP_A_MEMBERS[0], name: 'Monique Everett' },
+      { contactId: C_TOURED_YES, phone: GROUP_A_MEMBERS[1], name: 'Brianna Whitfield' },
+    ],
+    last_message_preview: 'Same here - the 3BR looked great.',
+    unread_count: 0,
+    created_at: CW,
+  } satisfies SeedConversationRow,
+  messages: [
+    {
+      conversationId: GROUP_A_ID,
+      tsMsgId: `${CW}#msg-cast-grp-a-001`,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      body: 'Adding Brianna here - we both toured 350 Boulevard SE this week.',
+      delivery_status: 'delivered',
+      // Group attribution is PHONE-scoped (`phone#<E164>`), never contactId-
+      // scoped the way a relay group keys the same field.
+      relay_sender_key: `phone#${GROUP_A_MEMBERS[0]}`,
+      ts: CW,
+    },
+    {
+      conversationId: GROUP_A_ID,
+      tsMsgId: `${CX}#msg-cast-grp-a-002`,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'Great - I can send you both the application checklist today.',
+      delivery_status: 'delivered',
+      ts: CX,
+    },
+    {
+      conversationId: GROUP_A_ID,
+      tsMsgId: `${CY}#msg-cast-grp-a-003`,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'tenant',
+      body: 'Same here - the 3BR looked great.',
+      delivery_status: 'delivered',
+      relay_sender_key: `phone#${GROUP_A_MEMBERS[1]}`,
+      ts: CY,
+    },
+  ] as Record<string, unknown>[],
+};
+
+/** Three landlords on one carrier group - the >2-member title formula, and the
+ *  case where the roster is bigger than any relay group the demo world has. */
+const groupTextThreeMember = {
+  conversation: {
+    conversationId: GROUP_B_ID,
+    status: 'group_open',
+    last_activity_at: CZ,
+    type: 'group_text',
+    ai_mode: 'manual',
+    participants: [
+      { contactId: C_COLD_CALL, phone: GROUP_B_MEMBERS[0], name: 'Theodore Vinson' },
+      { contactId: C_NEVER_SIGNED, phone: GROUP_B_MEMBERS[1], name: 'Patricia Shelton' },
+      { contactId: C_PARKED_LL, phone: GROUP_B_MEMBERS[2], name: 'Raymond Cordova' },
+    ],
+    last_message_preview: 'Sending the packet to all three of you now.',
+    unread_count: 0,
+    created_at: CZ,
+  } satisfies SeedConversationRow,
+  messages: [
+    {
+      conversationId: GROUP_B_ID,
+      tsMsgId: `${CZ}#msg-cast-grp-b-001`,
+      type: 'sms',
+      direction: 'inbound',
+      author: 'landlord',
+      body: 'Looping in the other two owners on Sycamore about the HQS walkthrough.',
+      delivery_status: 'delivered',
+      relay_sender_key: `phone#${GROUP_B_MEMBERS[0]}`,
+      ts: CZ,
+    },
+    {
+      conversationId: GROUP_B_ID,
+      tsMsgId: `${CZ}#msg-cast-grp-b-002`,
+      type: 'sms',
+      direction: 'outbound',
+      author: 'teammate',
+      body: 'Sending the packet to all three of you now.',
+      delivery_status: 'delivered',
+      ts: CZ,
+    },
+  ] as Record<string, unknown>[],
+};
+
 export function castItems(): Record<string, Record<string, unknown>[]> {
   const contacts: Record<string, unknown>[] = [
     unknownTexter.contact,
@@ -1352,6 +1468,9 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     parkedLandlord.phoneClaimRow,
     midIntakeUnitLandlord.conversation,
     midIntakeUnitLandlord.phoneClaimRow,
+    // Native carrier group texts - NOT relay groups (see the block above).
+    groupTextTwoMember.conversation,
+    groupTextThreeMember.conversation,
   ];
 
   const messages: Record<string, unknown>[] = [
@@ -1366,6 +1485,8 @@ export function castItems(): Record<string, Record<string, unknown>[]> {
     ...parkedLandlord.messages,
     parkedLandlord.callSidPointerRow,
     ...midIntakeUnitLandlord.messages,
+    ...groupTextTwoMember.messages,
+    ...groupTextThreeMember.messages,
   ];
 
   const tours: Record<string, unknown>[] = [

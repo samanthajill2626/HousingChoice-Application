@@ -40,6 +40,7 @@ const threads: Thread[] = [{ partyNumber: '+15550100001', messages: [seededMsg] 
 let groups: GroupSnapshot[] = [];
 
 const sendAsParty = vi.fn(async () => 'SMx');
+const sendGroupAsParty = vi.fn(async () => 'MMx');
 const setDeliveryOutcome = vi.fn(async () => undefined);
 const addAdHoc = vi.fn(async () => personas[0]!);
 
@@ -48,6 +49,7 @@ vi.mock('../api/client.js', () => ({
   getThreads: vi.fn(async () => threads),
   getGroups: vi.fn(async () => groups),
   sendAsParty: (...args: unknown[]) => sendAsParty(...(args as [])),
+  sendGroupAsParty: (...args: unknown[]) => sendGroupAsParty(...(args as [])),
   addAdHoc: (...args: unknown[]) => addAdHoc(...(args as [])),
   setDeliveryOutcome: (...args: unknown[]) => setDeliveryOutcome(...(args as [])),
   resetAll: vi.fn(async () => undefined),
@@ -103,6 +105,59 @@ describe('App shell', () => {
 
     expect(sendAsParty).toHaveBeenCalledWith(
       expect.objectContaining({ from: '+15550100001', body: 'hello there' }),
+    );
+  });
+
+  // The NATIVE CARRIER group seam. Named "Carrier group recipients" and never
+  // "Group text": the left rail's "Group texts" section means RELAY groups, a
+  // different product, and one label for two things makes every selector
+  // ambiguous. These three tests pin the switch, not the transport.
+  it('with no carrier-group recipient picked, a send stays an ordinary 1:1', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'just you');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(sendAsParty).toHaveBeenCalled();
+    expect(sendGroupAsParty).not.toHaveBeenCalled();
+  });
+
+  it('picking a carrier-group recipient turns the next send into a group text', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+
+    await user.click(screen.getByRole('checkbox', { name: /Bob Landlord/ }));
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'both of you');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(sendGroupAsParty).toHaveBeenCalledWith(
+      expect.objectContaining({
+        from: '+15550100001',
+        otherRecipients: ['+15550100002'],
+        body: 'both of you',
+      }),
+    );
+    expect(sendAsParty).not.toHaveBeenCalled();
+  });
+
+  it('clears the carrier-group picker when the party changes', async () => {
+    const user = userEvent.setup();
+    render(<App />);
+    await user.click(await screen.findByRole('button', { name: /Ana Tenant/ }));
+    await user.click(screen.getByRole('checkbox', { name: /Bob Landlord/ }));
+
+    // Switching phones must not carry one party's addressing over to the next -
+    // that would silently send to a group nobody chose.
+    await user.click(screen.getByRole('button', { name: /Bob Landlord/ }));
+    await user.type(screen.getByRole('textbox', { name: 'Message' }), 'just bob');
+    await user.click(screen.getByRole('button', { name: 'Send' }));
+
+    expect(sendGroupAsParty).not.toHaveBeenCalled();
+    expect(sendAsParty).toHaveBeenCalledWith(
+      expect.objectContaining({ from: '+15550100002', body: 'just bob' }),
     );
   });
 

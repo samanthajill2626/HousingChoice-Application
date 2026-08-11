@@ -59,6 +59,21 @@ export function parseOtherRecipients(params: GroupEnvelopeParams): string[] {
   return out;
 }
 
+/**
+ * True when the envelope carries an index PAST the scan cap - i.e. the roster
+ * `parseOtherRecipients` returned is SHORT.
+ *
+ * A short roster is a different `conversationIdForGroup`, so this is the same
+ * class of corruption as an unparseable address, and the caller alarms on it.
+ * Probing exactly one index past the cap is enough: the scan is gap-tolerant,
+ * so a populated 33 can only mean the envelope kept going.
+ */
+export function hasOtherRecipientsBeyondCap(params: GroupEnvelopeParams): boolean {
+  const probe: string[] = [];
+  collect(params[`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 1}`], probe);
+  return probe.length > 0;
+}
+
 /** True when this inbound carries a group envelope at all (spec 5.2 vs 5.3). */
 export function hasGroupEnvelope(params: GroupEnvelopeParams): boolean {
   return parseOtherRecipients(params).length > 0;

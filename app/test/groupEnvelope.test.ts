@@ -2,7 +2,9 @@ import { describe, expect, it } from 'vitest';
 
 import {
   hasGroupEnvelope,
+  hasOtherRecipientsBeyondCap,
   isMissingEnvelopeGroupShape,
+  MAX_OTHER_RECIPIENTS_INDEX,
   parseOtherRecipients,
 } from '../src/services/groupEnvelope.js';
 
@@ -103,5 +105,29 @@ describe('isMissingEnvelopeGroupShape (group-texting T3.7 tripwire)', () => {
     expect(
       isMissingEnvelopeGroupShape('MM123', { NumMedia: '0', OtherRecipients0: '+15550100002' }),
     ).toBe(false);
+  });
+});
+
+describe('hasOtherRecipientsBeyondCap', () => {
+  it('is false for an ordinary envelope', () => {
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipients0: '+15550100002' })).toBe(false);
+  });
+
+  it('is false when the envelope fills the cap exactly', () => {
+    const params: Record<string, string> = {};
+    for (let i = 0; i <= MAX_OTHER_RECIPIENTS_INDEX; i++) params[`OtherRecipients${i}`] = `+1555010${4000 + i}`;
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(false);
+  });
+
+  it('is TRUE when an index past the cap is populated - the scan truncated', () => {
+    // A short roster is a DIFFERENT conversationIdForGroup, i.e. a forked
+    // thread. This is the only roster-shrinking condition that used to be
+    // silent, and the module header's own argument (the contract is
+    // undocumented and Twilio can change it without notice) is the argument FOR
+    // a tripwire, not against one.
+    const params: Record<string, string> = {
+      [`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 1}`]: '+15550104099',
+    };
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(true);
   });
 });

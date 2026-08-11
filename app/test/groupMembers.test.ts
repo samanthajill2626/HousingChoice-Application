@@ -180,3 +180,47 @@ describe('resolveGroupMembers (T3.4)', () => {
     expect(JSON.stringify(lines)).not.toContain('5550100002');
   });
 });
+
+describe('resolveGroupMembers: the vanished-contact signal', () => {
+  it('REPORTS + WARNs when the stamp comes back `missing` instead of dropping it', async () => {
+    // The interleaving: the import's `retractImported` guard is ONE-directional.
+    // Its atomic `attribute_not_exists(group_participation_at)` stops a contact
+    // being deleted AFTER it joins a group, but not a group being formed around
+    // a contact that is being deleted right now - findByPhone sees the row, the
+    // delete lands, and the stamp then finds nothing. Discarding that outcome
+    // produced a live group thread whose member chip points at a contactId that
+    // no longer exists, with ZERO log output, while the other consumer of the
+    // same signal (groupConvert.converge) reported it.
+    const f = fakeContacts();
+    const warns: string[] = [];
+    const logger = {
+      info() {},
+      warn: (_f: unknown, m: string) => warns.push(m),
+      error() {},
+    } as never;
+    // findByPhone answers, then the row vanishes before the stamp.
+    const repo = {
+      ...f.repo,
+      async findByPhone(phone: string) {
+        return contact({ contactId: 'c-doomed', phone });
+      },
+      async stampGroupParticipation() {
+        return 'missing' as const;
+      },
+    };
+
+    const out = await resolveGroupMembers([A], { contactsRepo: repo, logger }, { at: AT });
+
+    expect(out.missing).toEqual(['c-doomed']);
+    expect(out.stamped).toEqual([]);
+    // The member KEEPS its roster slot - a short roster is a different id.
+    expect(out.members.map((m) => m.phone)).toEqual([A]);
+    expect(warns.some((m) => m.includes('VANISHED'))).toBe(true);
+  });
+
+  it('reports NOTHING missing on the ordinary path', async () => {
+    const f = fakeContacts();
+    const out = await resolveGroupMembers([A, B], { contactsRepo: f.repo }, { at: AT });
+    expect(out.missing).toEqual([]);
+  });
+});

@@ -56,6 +56,33 @@ if (config.eventBridgeUrl) {
   });
 }
 
+// Native group texting (spec 4.1): the SAME identity fingerprint guard the app
+// runs at boot (index.ts). A deployed stack pins a fingerprint of
+// GROUP_IDENTITY_EXCLUDED_NUMBERS and REFUSES to start when the configured list
+// stops matching, because changing it re-mints every affected group's
+// conversationId - a migration, not a config edit. The worker needs it for the
+// same reason the app does: it runs the same job handlers against the same
+// identity contract, and a worker that started with a divergent list would
+// derive wrong ids for as long as it lived. Idempotent and order-independent -
+// whichever process boots first claims the fingerprint (conditional first
+// write), and the other compares against it. Deliberately BEFORE the consumer
+// starts polling: a process that would mint wrong ids must not take work.
+{
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
+  const { verifyGroupIdentityFingerprint } = await import(
+    './services/groupIdentityFingerprint.js'
+  );
+  await runWithContext(bootContext, async () =>
+    verifyGroupIdentityFingerprint({
+      store: createSettingsRepo(),
+      excludedNumbers: config.groupIdentityExcludedNumbers,
+      // Deployed stacks pin NODE_ENV=production (see lib/config.ts).
+      deployed: config.nodeEnv === 'production',
+      logger,
+    }),
+  );
+}
+
 // The shared A2P token bucket — ONE instance, sized from config
 // (a2pRateLimitPerSec, default ~1 msg/sec), shared across relay fan-out +
 // broadcast + missed-call auto-text so the COMBINED outbound rate stays under

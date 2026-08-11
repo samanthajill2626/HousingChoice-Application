@@ -552,6 +552,52 @@ describe('POST /webhooks/twilio/status — transitions', () => {
       }
     });
 
+    it('21610 on a GROUP thread writes nothing and says so ONCE, not on every redelivery', async () => {
+      // The 30005/30006 twin above got this treatment; the 21610 arm did not,
+      // so a group leg fell into "no contact record to flag" - the exact
+      // misleading line the twin's branch was written to avoid - and repeated it
+      // on every Twilio redelivery. There is no number to scope a group 21610
+      // to; per-member receipts land in S5 (spec 15.8).
+      const { app, world, capture } = makeWebhookHarness();
+      world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
+      const group = await world.conversationsRepo.createGroupTextThread({
+        conversationId: 'gt-21610',
+        members: [
+          { contactId: 'contact-T', phone: TENANT_PHONE },
+          { contactId: 'contact-O', phone: '+15550100009' },
+        ],
+      });
+      await world.messagesRepo.append({
+        conversationId: group.item.conversationId,
+        providerSid: 'SMgroup21610',
+        providerTs: '2026-06-12T10:00:00.000Z',
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'group body',
+        deliveryStatus: 'queued',
+      });
+
+      const params = statusParams({
+        MessageSid: 'SMgroup21610',
+        MessageStatus: 'failed',
+        ErrorCode: '21610',
+      });
+      await signedTwilioPost(app, STATUS_PATH, params);
+      await signedTwilioPost(app, STATUS_PATH, params);
+
+      expect(world.flagWrites).toHaveLength(0);
+      expect(world.auditEvents).toHaveLength(0);
+      expect(
+        capture.lines.filter((l) => String(l['msg']).includes('no contact record to flag')),
+      ).toHaveLength(0);
+      expect(
+        capture.lines.filter((l) =>
+          String(l['msg']).includes('21610 suppression on a group_text thread'),
+        ),
+      ).toHaveLength(1);
+    });
+
     it('the error code is recorded on the message item either way', async () => {
       const { app, world } = makeWebhookHarness();
       await seedOutbound(world, 'SMout0001');

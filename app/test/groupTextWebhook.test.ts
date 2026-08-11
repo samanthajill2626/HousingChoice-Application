@@ -114,13 +114,42 @@ describe('group detection: branch placement (T3.2)', () => {
 
   it('adds NO pool-number read and NO group repo call to an envelope-less inbound', async () => {
     const { world, calls } = recordingWorld();
+    // The pool read is the ONE piece of I/O the group branch needs, so it is the
+    // one that must not touch the 1:1 path. Spy it for real - asserting that the
+    // method merely EXISTS proves nothing.
+    let poolReads = 0;
+    const realListActive = world.poolNumbersRepo.listActive.bind(world.poolNumbersRepo);
+    world.poolNumbersRepo = {
+      async listActive() {
+        poolReads += 1;
+        return realListActive();
+      },
+    };
     const { app } = makeWebhookHarness({ world });
 
     await signedTwilioPost(app, SMS_PATH, inboundSmsParams());
 
     expect(calls.filter((c) => c.includes('GroupText'))).toEqual([]);
     expect(calls.filter((c) => c.includes('putGroupTimestamp'))).toEqual([]);
-    expect(world.poolNumbersRepo.listActive).toBeDefined();
+    expect(poolReads).toBe(0);
+  });
+
+  it('DOES read the pool numbers once a group envelope is present (the spy is real)', async () => {
+    // The control for the assertion above: same spy, envelope present.
+    const world = createFakeWorld();
+    let poolReads = 0;
+    const realListActive = world.poolNumbersRepo.listActive.bind(world.poolNumbersRepo);
+    world.poolNumbersRepo = {
+      async listActive() {
+        poolReads += 1;
+        return realListActive();
+      },
+    };
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(poolReads).toBe(1);
   });
 
   it('A6: a group envelope addressed to a POOL number keeps relay behavior', async () => {
@@ -150,7 +179,36 @@ describe('group detection: branch placement (T3.2)', () => {
     expect(world.messages[0]?.conversationId).not.toBe(GROUP_ID);
   });
 
-  it('WARNs instead of silently disabling when the business number is unset', async () => {
+  it('INVARIANT 13.1: a pool-addressed group envelope filed 1:1 still carries the marker + a WARN', async () => {
+    // A6 keeps relay behavior byte-identical by not minting a thread here. That
+    // decision is SEPARATE from the extraction marker: this message is proven
+    // carrier-group content (the envelope is right here), so filing it 1:1
+    // unmarked would feed group content to AI fact extraction as this one
+    // contact's own speech - the precise harm the marker exists to prevent.
+    const world = createFakeWorld();
+    const poolNumber = '+15559990001';
+    world.conversations.set('relay-closed', {
+      conversationId: 'relay-closed',
+      type: 'relay_group',
+      status: 'closed',
+      pool_number: poolNumber,
+      participants: [{ contactId: 'c-x', phone: '+15550999999' }],
+      ai_mode: 'manual',
+      last_activity_at: '2026-08-01T00:00:00.000Z',
+      created_at: '2026-08-01T00:00:00.000Z',
+    } as ConversationItem);
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams({ To: poolNumber }));
+
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+    expect(
+      capture.atLevel(WARN).some((l) => l['event'] === 'group_envelope_off_business_number'),
+    ).toBe(true);
+  });
+
+  it('WARNs AND marks instead of silently disabling when the business number is unset', async () => {
     const world = createFakeWorld();
     const { app, capture } = makeWebhookHarness({
       world,
@@ -163,6 +221,9 @@ describe('group detection: branch placement (T3.2)', () => {
     expect(
       capture.atLevel(WARN).some((l) => l['event'] === 'group_detection_unconfigured'),
     ).toBe(true);
+    // The fourth exception to invariant 13.1 is MARKED like the other three.
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
 });
 
@@ -579,6 +640,53 @@ describe('group detection: media (T3.6)', () => {
       `media/${GROUP_ID}/MMgroup0001/0`,
     );
   });
+
+  it('RECOVERS the media on a redelivery after a failed first mirror', async () => {
+    // `mirrorInboundMedia` catches PER ATTACHMENT and never throws, so a Twilio
+    // media 404 or an S3 5xx leaves the row with no attachment and the webhook
+    // still answers 200. Twilio then redelivers the same MessageSid - and
+    // Twilio's media URLs expire, so a redelivery that skipped the mirror on
+    // `deduped` alone would lose the photo PERMANENTLY. The 1:1 path gates on
+    // COMPLETENESS instead; this proves the group path does too.
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    const mediaUrl = 'https://api.twilio.com/media/ME1';
+    const params = groupParams({
+      NumMedia: '1',
+      MediaUrl0: mediaUrl,
+      MediaContentType0: 'image/jpeg',
+    });
+
+    world.failMediaUrls.add(mediaUrl);
+    await signedTwilioPost(app, SMS_PATH, params);
+    expect(world.mediaPuts).toHaveLength(0);
+    expect(world.messages[0]?.media_attachments ?? []).toHaveLength(0);
+
+    world.failMediaUrls.delete(mediaUrl);
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    // Still ONE message (the append deduped), now WITH its attachment.
+    expect(world.messages).toHaveLength(1);
+    expect(world.mediaPuts).toHaveLength(1);
+    expect(world.messages[0]?.media_attachments?.[0]?.s3Key).toBe(
+      `media/${GROUP_ID}/MMgroup0001/0`,
+    );
+  });
+
+  it('does NOT re-mirror when the first pass already stored every attachment', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+    const params = groupParams({
+      NumMedia: '1',
+      MediaUrl0: 'https://api.twilio.com/media/ME1',
+      MediaContentType0: 'image/jpeg',
+    });
+
+    await signedTwilioPost(app, SMS_PATH, params);
+    await signedTwilioPost(app, SMS_PATH, params);
+
+    expect(world.mediaPuts).toHaveLength(1);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -653,5 +761,107 @@ describe('group detection: envelope tripwire (T3.7)', () => {
 
     expect(world.messages[0]?.group_ambiguous_origin).toBeUndefined();
     expect(capture.atLevel(WARN).some((l) => l['event'] === 'group_envelope_missing')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 1 - the roster-shrinking and roster-divergence tripwires
+// ---------------------------------------------------------------------------
+describe('group detection: loud failures', () => {
+  it('REFUSES the group branch when the pool-number read fails with no cached list', async () => {
+    // COLD START. The stale-if-error cache has nothing to be stale WITH, and
+    // installing an empty exclusion set would (a) do the exact silent shrink the
+    // cache comment forbids and (b) silence poolNumbersInEnvelope, which is
+    // computed from the same set. A wrong group id is permanent data; a 1:1
+    // refile is recoverable, so this fails 1:1 WITH the marker.
+    const world = createFakeWorld();
+    world.poolNumbersRepo = {
+      async listActive() {
+        throw new Error('ProvisionedThroughputExceededException');
+      },
+    };
+    const { app, capture } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(res.status).toBe(200);
+    // No group thread was minted from an incomplete exclusion set.
+    expect(groupThread(world)).toBeUndefined();
+    // The message is NOT lost (invariant 13.3) and it is MARKED (invariant 13.1).
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]?.conversationId).not.toBe(GROUP_ID);
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+    expect(
+      capture.atLevel(ERROR).some((l) => l['event'] === 'group_exclusions_unavailable'),
+    ).toBe(true);
+  });
+
+  it('WARNs when the OtherRecipients scan truncates at the cap', async () => {
+    // The one roster-SHRINKING condition that used to be silent. A short roster
+    // is a DIFFERENT conversationId, i.e. a forked thread, so the cap gets the
+    // same tripwire the unparseable and collapsed cases have.
+    const world = createFakeWorld();
+    const { app, capture } = makeWebhookHarness({ world });
+
+    const wide: Record<string, string> = {};
+    for (let i = 0; i <= 32; i++) wide[`OtherRecipients${i}`] = `+1555010${4000 + i}`;
+    wide['OtherRecipients33'] = '+15550104099';
+
+    await signedTwilioPost(app, SMS_PATH, groupParams(wide));
+
+    const warn = capture.atLevel(WARN).find((l) => l['event'] === 'group_envelope_truncated');
+    expect(warn).toBeDefined();
+    expect(warn?.['maxIndex']).toBe(32);
+  });
+
+  it('does NOT warn about truncation on an ordinary two-member envelope', async () => {
+    const world = createFakeWorld();
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(capture.atLevel(WARN).some((l) => l['event'] === 'group_envelope_truncated')).toBe(
+      false,
+    );
+  });
+
+  it('ERRORs when the sender is not on the resolved thread roster', async () => {
+    // The workbook-`drop` shape reaching the runtime: the thread was written
+    // under the FULL-set id but carries a TRUNCATED roster, so the sender is a
+    // non-member of the thread its own message lands on. Report, never repair -
+    // a silent re-key would change thread identity.
+    const world = createFakeWorld();
+    world.conversations.set(GROUP_ID, {
+      conversationId: GROUP_ID,
+      type: 'group_text',
+      status: GROUP_TEXT_STATUS,
+      participants: [
+        { contactId: contactIdForPhone(MEMBER_B), phone: MEMBER_B },
+        { contactId: contactIdForPhone(MEMBER_C), phone: MEMBER_C },
+      ],
+      ai_mode: 'manual',
+      last_activity_at: '2026-08-01T00:00:00.000Z',
+      created_at: '2026-08-01T00:00:00.000Z',
+    } as ConversationItem);
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    // The message is still correctly filed BY ID - the roster is what is wrong.
+    expect(world.messages[0]?.conversationId).toBe(GROUP_ID);
+    const err = capture.atLevel(ERROR).find((l) => l['event'] === 'group_sender_not_on_roster');
+    expect(err).toBeDefined();
+    expect(err?.['rosterMatchesId']).toBe(false);
+  });
+
+  it('says NOTHING about the roster when the sender IS on it', async () => {
+    const world = createFakeWorld();
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(
+      capture.atLevel(ERROR).some((l) => l['event'] === 'group_sender_not_on_roster'),
+    ).toBe(false);
   });
 });

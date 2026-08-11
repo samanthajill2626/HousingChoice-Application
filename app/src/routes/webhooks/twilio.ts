@@ -69,7 +69,9 @@ import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
 import { applyNumberSuppression } from '../../services/numberSuppression.js';
 import {
+  hasOtherRecipientsBeyondCap,
   isMissingEnvelopeGroupShape,
+  MAX_OTHER_RECIPIENTS_INDEX,
   parseOtherRecipients,
 } from '../../services/groupEnvelope.js';
 import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
@@ -84,6 +86,7 @@ import { createPoolNumbersRepo, type PoolNumbersRepo } from '../../repos/poolNum
 import { GROUP_RAILED_INBOUND_LAST_AT_ID } from '../../repos/settingsRepo.js';
 import { createRateLimitedWarn } from '../../lib/rateLimitedWarn.js';
 import { normalizeToE164 } from '../../lib/phone.js';
+import { conversationIdForGroup } from '../../lib/import/ids.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -174,25 +177,29 @@ export function groupMemberKey(e164: string): string {
 }
 
 /**
- * Seen provider SIDs for the sms_unreachable DEGRADATION logs (the two arms that
- * flag nothing and only report). Twilio redelivers a status callback until it is
- * acked, and a group leg has no contact to flag, so without this one undeliverable
- * message could log the same line dozens of times and swamp the signal.
+ * Seen keys for the delivery-error DEGRADATION logs (the arms that flag nothing
+ * and only report: sms_unreachable with no contact, and the 21610 arms). Twilio
+ * redelivers a status callback until it is acked, and a group leg has no contact
+ * to flag, so without this one undeliverable message could log the same line
+ * dozens of times and swamp the signal.
+ *
+ * Keyed `<code>:<sid>` so the 21610 and 30005/30006 arms cannot swallow each
+ * other's first line for the same message.
  *
  * Bounded FIFO: this is a log-noise damper, not a correctness mechanism, so
- * forgetting the oldest sids is fine - the worst case is one extra line.
+ * forgetting the oldest keys is fine - the worst case is one extra line.
  */
-const UNREACHABLE_LOGGED_SIDS = new Set<string>();
-const UNREACHABLE_LOGGED_MAX = 500;
+const DEGRADATION_LOGGED_KEYS = new Set<string>();
+const DEGRADATION_LOGGED_MAX = 500;
 
-/** Run `emit` at most once per provider SID (within the bound above). */
-function logUnreachableOnce(providerSid: string, emit: () => void): void {
-  if (UNREACHABLE_LOGGED_SIDS.has(providerSid)) return;
-  if (UNREACHABLE_LOGGED_SIDS.size >= UNREACHABLE_LOGGED_MAX) {
-    const oldest = UNREACHABLE_LOGGED_SIDS.values().next().value;
-    if (oldest !== undefined) UNREACHABLE_LOGGED_SIDS.delete(oldest);
+/** Run `emit` at most once per (error code, provider SID) (within the bound above). */
+function logDegradationOnce(key: string, emit: () => void): void {
+  if (DEGRADATION_LOGGED_KEYS.has(key)) return;
+  if (DEGRADATION_LOGGED_KEYS.size >= DEGRADATION_LOGGED_MAX) {
+    const oldest = DEGRADATION_LOGGED_KEYS.values().next().value;
+    if (oldest !== undefined) DEGRADATION_LOGGED_KEYS.delete(oldest);
   }
-  UNREACHABLE_LOGGED_SIDS.add(providerSid);
+  DEGRADATION_LOGGED_KEYS.add(key);
   emit();
 }
 
@@ -936,6 +943,17 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     logger: log,
     intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
   });
+  /**
+   * The invariant-13.1 alarm for an envelope-bearing inbound we file 1:1 without
+   * minting a native thread (business number unset, or the message landed on a
+   * pool/other org number). ITS OWN damper, not the tripwire's: sharing one
+   * would let a chatty misconfiguration starve the tripwire signal, and the two
+   * say completely different things.
+   */
+  const warnEnvelopeUnminted = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
 
   /**
    * The exclusion set group identity subtracts (spec 4.1): our business number,
@@ -947,6 +965,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    * STALE-IF-ERROR: a refresh failure reuses the last good list rather than
    * silently shrinking the exclusion set, which would fork every id derived
    * while the read is broken.
+   *
+   * COLD START HAS NO STALE LIST, so there is nothing to be stale-if-error
+   * WITH. Installing an empty one would do the exact thing the paragraph above
+   * forbids - and it would ALSO silence `poolNumbersInEnvelope`, the one signal
+   * that says a pool number is in this roster, because that anomaly is computed
+   * from the same set. A wrong id is permanent data; a 1:1 refile is
+   * recoverable. So a cold-start failure THROWS and the caller refuses the
+   * group branch for this inbound.
    */
   async function groupExclusions(): Promise<GroupExclusionSet> {
     const now = Date.now();
@@ -955,17 +981,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         const active = await poolNumbers.listActive();
         poolNumberCache = { at: now, numbers: active.map((p) => p.poolNumber) };
       } catch (err) {
+        if (poolNumberCache === undefined) {
+          log.error(
+            { err, hadCache: false },
+            'group identity: pool-number read failed with NO cached list - refusing to derive a group id from an incomplete exclusion set',
+          );
+          throw err;
+        }
         log.error(
-          { err, hadCache: poolNumberCache !== undefined },
+          { err, hadCache: true },
           'group identity: pool-number read failed - reusing the last known list for the exclusion set',
         );
         // Keep the stale entry but do not re-stamp `at`, so the next inbound retries.
-        poolNumberCache ??= { at: 0, numbers: [] };
       }
+    }
+    const cached = poolNumberCache;
+    if (cached === undefined) {
+      // Unreachable: the try either assigns or (cold) throws above.
+      throw new Error('group identity: pool-number exclusion list unavailable');
     }
     return {
       businessPhoneNumber: config.businessPhoneNumber,
-      poolNumbers: poolNumberCache.numbers,
+      poolNumbers: cached.numbers,
       configuredNumbers: config.groupIdentityExcludedNumbers,
     };
   }
@@ -1025,7 +1062,43 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     others: string[];
   }): Promise<GroupInboundOutcome> {
     const { MessageSid, From, To, Body, params } = msg;
-    const identity = groupIdentity(From, To, msg.others, await groupExclusions(), { logger: log });
+
+    // (0) THE EXCLUSION SET, or nothing. A cold-start pool-number read failure
+    // throws here rather than deriving an id from a set known to be incomplete
+    // (that id would be permanent, wrong, and unrecoverable). Refuse the group
+    // branch instead: the caller files 1:1 WITH the extraction marker, which is
+    // recoverable, and invariant 13.3 still holds because nothing is lost.
+    let exclusions: GroupExclusionSet;
+    try {
+      exclusions = await groupExclusions();
+    } catch (err) {
+      log.error(
+        { err, event: 'group_exclusions_unavailable', providerSid: MessageSid },
+        'group exclusion set unavailable - refusing to derive a group id, filed to the sender 1:1 with the extraction marker',
+      );
+      return { handled: false };
+    }
+
+    // (0b) ENVELOPE CAP TRIPWIRE. `parseOtherRecipients` stops at
+    // MAX_OTHER_RECIPIENTS_INDEX. Every other roster-SHRINKING condition in
+    // this feature is loud (an unparseable address ERRORs, a collapsed roster
+    // WARNs) because a smaller roster is a DIFFERENT conversationId - i.e. a
+    // forked thread. Twilio's group cap is 10 today, but the contract is
+    // undocumented and can change without notice, so the cap gets a tripwire
+    // too rather than truncating in silence.
+    if (hasOtherRecipientsBeyondCap(params)) {
+      log.warn(
+        {
+          event: 'group_envelope_truncated',
+          providerSid: MessageSid,
+          scannedCount: msg.others.length,
+          maxIndex: MAX_OTHER_RECIPIENTS_INDEX,
+        },
+        'group envelope carries an OtherRecipients index past the scan cap - the derived roster may be SHORT and the thread id therefore WRONG',
+      );
+    }
+
+    const identity = groupIdentity(From, To, msg.others, exclusions, { logger: log });
 
     // (i) CORRUPT ENVELOPE: an address we cannot canonicalize. Deriving an id
     // from the survivors would give a 3-person group the id of a 2-person one -
@@ -1124,6 +1197,36 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // --- From here the message IS a group message -------------------------
     mergeContext({ conversationId: thread.conversationId });
 
+    // ROSTER/ID DIVERGENCE TRIPWIRE. The thread's id is uuidv5 over its roster,
+    // so the roster STORED on the thread must hash back to the id we resolved
+    // it by. A row written by a path that truncated the roster while keeping
+    // the full-set id (a workbook `drop` on an imported group is the known
+    // producer) breaks that: the sender can then be a NON-MEMBER of the thread
+    // its own message lands on - no member chip, no sender attribution, no
+    // stub, and a Conversations rail built from `participants` would omit a
+    // real handset.
+    //
+    // REPORT ONLY, never repair. Re-keying the roster to match the id (or the
+    // id to match the roster) changes thread identity and orphans history; the
+    // migration refuses such a row so a human adjudicates it (groupConvert's
+    // `roster_id_mismatch`). Here the message is already correctly filed by id,
+    // so the honest action is to say the roster is wrong and keep going.
+    const senderE164 = normalizeToE164(From);
+    const rosterPhones = (thread.participants ?? []).map((p) => p.phone);
+    if (senderE164 !== undefined && !rosterPhones.includes(senderE164)) {
+      log.error(
+        {
+          event: 'group_sender_not_on_roster',
+          providerSid: MessageSid,
+          conversationId: thread.conversationId,
+          rosterSize: rosterPhones.length,
+          derivedRosterSize: identity.roster.length,
+          rosterMatchesId: conversationIdForGroup(rosterPhones) === thread.conversationId,
+        },
+        'the sender of a group message is NOT on the resolved thread roster - the stored roster does not describe this group (member chips, attribution and the rail will all be short)',
+      );
+    }
+
     // T3.4a: group member keys are PHONE-SCOPED, ALWAYS. relayMemberKey prefers
     // contactId, which would collapse two numbers of ONE contact into a single
     // delivery/attribution slot (spec 15.6) - so it is deliberately not used.
@@ -1139,10 +1242,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
 
     const mediaUrls = parseInboundMediaUrls(params);
     const providerTs = new Date().toISOString();
-    // Dedupe rides the EXISTING MessageSid sid-pointer transaction. The relay
-    // idiom (use appended.tsMsgId directly) is correct here: the repo returns
-    // the FIRST delivery's tsMsgId from the pointer, and there is no
-    // partial-mirror recovery to do - group media mirrors in one pass.
+    // Dedupe rides the EXISTING MessageSid sid-pointer transaction. The repo
+    // returns the FIRST delivery's tsMsgId from the pointer, so the keys below
+    // address the persisted row either way - and a redelivery RE-ENTERS media
+    // mirroring when the first pass stored fewer attachments than the envelope
+    // carried (see the completeness gate below; the 1:1 path does the same).
     //
     // NO `deliveryRecipients` seed: the relay path seeds an empty map because a
     // fan-out job writes per-recipient child fields into the SOURCE message. A
@@ -1162,7 +1266,37 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     });
 
     // Media (T3.6): the SHARED mirror, under the GROUP conversationId.
-    if (!appended.deduped) {
+    //
+    // REDELIVERY RECOVERY, identical to the 1:1 path's completeness gate.
+    // `mirrorInboundMedia` never throws - it catches PER ATTACHMENT - so a
+    // Twilio media 404 or an S3 5xx leaves the row with fewer attachments than
+    // `NumMedia` and still returns 200. Twilio's media URLs expire, so a
+    // redelivery that skipped the mirror outright would lose the photo
+    // PERMANENTLY. Gate on completeness (not on `deduped`): re-putting an
+    // already-stored key is an idempotent same-bytes no-op.
+    let groupMediaAlreadyMirrored = false;
+    if (appended.deduped && mediaUrls.length > 0) {
+      try {
+        const persisted = await messages.getByProviderSid(MessageSid);
+        groupMediaAlreadyMirrored =
+          persisted !== undefined && mediaAttachmentsOf(persisted).length >= mediaUrls.length;
+        if (persisted === undefined) {
+          // The append deduped, so the SID pointer exists - failing to read the
+          // message back is never expected. Mirror anyway under the keys we
+          // have rather than dropping the media.
+          log.error(
+            { providerSid: MessageSid },
+            'group inbound deduped but the persisted message could not be read back - re-mirroring media under the append keys',
+          );
+        }
+      } catch (err) {
+        log.error(
+          { err, providerSid: MessageSid },
+          'group inbound media completeness read failed - re-entering the mirror rather than risking a permanent media loss',
+        );
+      }
+    }
+    if (!groupMediaAlreadyMirrored) {
       await mirrorInboundMedia({
         mediaUrls,
         messageSid: MessageSid,
@@ -1418,13 +1552,33 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Collapsed roster or corrupt shape: fall through to the 1:1 pipeline
       // below, MARKED. Nothing was persisted above, so no double-filing.
       groupAmbiguousOrigin = true;
-    } else if (others.length > 0 && To !== undefined && config.businessPhoneNumber === undefined) {
-      // Detection is structurally off without a configured business number. Say
-      // so - silence here looks identical to "no group texts are arriving".
-      log.warn(
-        { event: 'group_detection_unconfigured', providerSid: MessageSid },
-        'a group envelope arrived but BUSINESS_PHONE_NUMBER is unset - group detection is OFF, filing as 1:1',
-      );
+    } else if (others.length > 0) {
+      // EVERY OTHER ENVELOPE-BEARING INBOUND. We have POSITIVE proof this is
+      // carrier-group content (the envelope is right here) but we are NOT
+      // minting a native thread for it - either BUSINESS_PHONE_NUMBER is unset
+      // (detection is structurally off) or the message landed on one of our
+      // OTHER numbers, which for a pool number is A6's deliberate fall-through
+      // keeping relay behavior byte-identical (invariant 13.6).
+      //
+      // The DECISION not to mint a thread is separate from the MARKER. Filing
+      // group content into a 1:1 UNMARKED hands it to AI fact extraction as
+      // that one contact's own speech - the precise harm the marker exists to
+      // prevent - so invariant 13.1's rule holds here too: EVERY envelope-
+      // bearing inbound filed 1:1 carries the marker AND alarms. Rate-limited
+      // because a misconfigured stack matches on every group inbound at once
+      // and the flood would bury the signal.
+      groupAmbiguousOrigin = true;
+      if (config.businessPhoneNumber === undefined) {
+        warnEnvelopeUnminted(
+          { event: 'group_detection_unconfigured', providerSid: MessageSid },
+          'a group envelope arrived but BUSINESS_PHONE_NUMBER is unset - group detection is OFF, filed as 1:1 WITH the extraction marker',
+        );
+      } else {
+        warnEnvelopeUnminted(
+          { event: 'group_envelope_off_business_number', providerSid: MessageSid },
+          'a carrier group envelope arrived on a NON-business number (pool or other org number) - filed as 1:1 WITH the extraction marker, no native thread minted (A6)',
+        );
+      }
     } else if (onBusinessNumber && isMissingEnvelopeGroupShape(MessageSid, params)) {
       // (1.8) TRIPWIRE (spec 8.1). An MM-prefixed SID with no media and no
       // envelope is what a SILENTLY REMOVED `OtherRecipients` contract looks
@@ -1934,7 +2088,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // situation from "we have a number and no contact record", so it
             // says so and logs ONCE per sid instead of on every redelivery.
             if (conversation?.type === 'group_text') {
-              logUnreachableOnce(MessageSid, () => {
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
                 log.warn(
                   { providerSid: MessageSid, errorCode: ErrorCode },
                   'sms_unreachable on a group_text thread - no single member to flag (group legs report per-recipient)',
@@ -1952,7 +2106,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 'sms_unreachable on a non-primary attached number — contact flag NOT set (number-scoped)',
               );
             } else {
-              logUnreachableOnce(MessageSid, () => {
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
                 log.warn(
                   { providerSid: MessageSid, errorCode: ErrorCode },
                   'sms_unreachable: no contact record to flag',
@@ -1980,6 +2134,26 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // (participant_phone === contact.phone) — a 21610 on a SECONDARY
             // number must not suppress the contact's good primary.
             const conversation = await conversations.getById(message.conversationId);
+            // NATIVE GROUP TEXTS ARE REACHABLE HERE, exactly as on the
+            // 30005/30006 twin above: a classic status callback for a group leg
+            // resolves to the GROUP thread, which carries no participant_phone.
+            // RULING (invariant 13.8): this arm writes NOTHING for a group
+            // thread. A 21610 on a group leg is per-RECIPIENT information that
+            // the classic callback does not carry, so there is no number to
+            // scope the suppression to and guessing would suppress the wrong
+            // handset. Spec 15.8's receipts-side 21610 bookkeeping (the
+            // per-member map on the Conversations rail) is S5/T5.3's job and
+            // builds on this branch; until then, say so ONCE per sid instead of
+            // falling into "no contact record to flag" on every redelivery.
+            if (conversation?.type === 'group_text') {
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn(
+                  { providerSid: MessageSid, errorCode: ErrorCode },
+                  '21610 suppression on a group_text thread - no single member to scope it to, nothing flagged (per-member receipts land in S5)',
+                );
+              });
+              break;
+            }
             const convPhone = conversation?.participant_phone;
             const contact = convPhone !== undefined ? await contacts.findByPhone(convPhone) : undefined;
             if (contact && convPhone === contact.phone) {
@@ -1995,7 +2169,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 '21610 suppression on a non-primary attached number — contact flag NOT set (number-scoped)',
               );
             } else {
-              log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, '21610 suppression: no contact record to flag');
+              logDegradationOnce(`${ErrorCode}:${MessageSid}`, () => {
+                log.warn({ providerSid: MessageSid, errorCode: ErrorCode }, '21610 suppression: no contact record to flag');
+              });
             }
             break;
           }

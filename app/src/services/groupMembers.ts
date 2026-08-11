@@ -55,6 +55,21 @@ export interface GroupMemberResolution {
   stamped: string[];
   /** Roster phones whose contact could not be read or written (still on the roster). */
   failed: string[];
+  /**
+   * contactIds whose `group_participation_at` stamp came back `'missing'` - the
+   * contact row VANISHED between our read and our write.
+   *
+   * `stampGroupParticipation` distinguishes this outcome deliberately ("an
+   * absent contact is a hole in the roster"), and the other caller
+   * (groupConvert.converge) already reports it, so dropping it here made two
+   * consumers of one signal disagree. The producing interleaving is real: the
+   * import's `retractImported` guard is ONE-DIRECTIONAL - its atomic
+   * `attribute_not_exists(group_participation_at)` stops a contact being
+   * deleted AFTER it joins a group, but not a group being formed around a
+   * contact that is being deleted right now. The member KEEPS its roster slot
+   * either way (a short roster is a different id, i.e. a forked thread).
+   */
+  missing: string[];
 }
 
 /** Display name from a contact (mirrors lib/rosterResolution.displayName). */
@@ -110,6 +125,7 @@ export async function resolveGroupMembers(
   const created: string[] = [];
   const stamped: string[] = [];
   const failed: string[] = [];
+  const missing: string[] = [];
 
   for (const phone of roster) {
     const derivedId = contactIdForPhone(phone);
@@ -132,6 +148,7 @@ export async function resolveGroupMembers(
       if (contact.group_participation_at === undefined) {
         const outcome = await contacts.stampGroupParticipation(contact.contactId, at);
         if (outcome === 'stamped') stamped.push(contact.contactId);
+        else if (outcome === 'missing') missing.push(contact.contactId);
       }
       const name = displayName(contact);
       members.push({
@@ -155,5 +172,14 @@ export async function resolveGroupMembers(
       'group text members resolved (stubs minted with group_participation_at, never consent_method)',
     );
   }
-  return { members, created, stamped, failed };
+  if (missing.length > 0) {
+    // WARN, matching groupConvert.converge's treatment of the same signal. The
+    // roster now points at a contactId with no row behind it: the member chip
+    // renders from the phone alone until something re-mints the stub.
+    log.warn(
+      { memberCount: members.length, missingCount: missing.length },
+      'group member contact VANISHED between the read and the group_participation_at stamp - the roster slot points at a contact record that no longer exists',
+    );
+  }
+  return { members, created, stamped, failed, missing };
 }

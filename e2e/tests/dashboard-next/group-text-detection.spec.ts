@@ -90,7 +90,10 @@ test('a carrier group MMS files as a group thread; silent members gain no consen
   const composer = page.getByRole('textbox', { name: 'Reply message' });
   await expect(composer).toBeVisible({ timeout: 15_000 });
   await composer.fill(`proactive attempt ${stamp}`);
-  await page.getByRole('button', { name: 'Send' }).click();
+  // EXACT: a tenant's contact page also carries a "+ Send" aside whose
+  // accessible name is "Send a property to this tenant", so a substring match
+  // on "Send" is a strict-mode violation - and only on a tenant's page.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Record consent before texting' })).toBeVisible({
     timeout: 15_000,
   });
@@ -102,7 +105,7 @@ test('a carrier group MMS files as a group thread; silent members gain no consen
   const senderComposer = page.getByRole('textbox', { name: 'Reply message' });
   await expect(senderComposer).toBeVisible({ timeout: 15_000 });
   await senderComposer.fill(`reply to the sender ${stamp}`);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('dialog', { name: 'Record consent before texting' })).toHaveCount(0);
   await expect(page.getByText(`reply to the sender ${stamp}`)).toBeVisible({ timeout: 15_000 });
 });

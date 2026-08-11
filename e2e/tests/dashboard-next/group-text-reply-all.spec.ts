@@ -81,7 +81,10 @@ test('a dashboard reply reaches every handset once, with per-member delivery and
   const composer = page.getByRole('textbox', { name: 'Reply message' });
   await expect(composer).toBeEnabled();
   await composer.fill(reply);
-  await page.getByRole('button', { name: 'Send' }).click();
+  // EXACT: a tenant's contact page also carries a "+ Send" aside whose
+  // accessible name is "Send a property to this tenant", so a substring match
+  // on "Send" is a strict-mode violation - and only on a tenant's page.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText(reply)).toBeVisible({ timeout: 15_000 });
 
   // 1) EVERY handset got it, EXACTLY ONCE, from the BUSINESS number. "Exactly

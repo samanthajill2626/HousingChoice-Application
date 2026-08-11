@@ -102,7 +102,10 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   });
   const partial = `Still on for Saturday ${stamp}`;
   await composer.fill(partial);
-  await page.getByRole('button', { name: 'Send' }).click();
+  // EXACT: a tenant's contact page also carries a "+ Send" aside whose
+  // accessible name is "Send a property to this tenant", so a substring match
+  // on "Send" is a strict-mode violation - and only on a tenant's page.
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText(partial)).toBeVisible({ timeout: 15_000 });
   // Two reachable members, both delivered - the opted-out leg is excluded from
   // the count rather than counted as a failure. Reloaded rather than waited on:
@@ -129,7 +132,7 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   const oneToOne = page.getByRole('textbox', { name: 'Reply message' });
   await expect(oneToOne).toBeVisible({ timeout: 10_000 });
   await oneToOne.fill(`should be refused ${stamp}`);
-  await page.getByRole('button', { name: 'Send' }).click();
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByRole('alert')).toContainText(/Do-Not-Contact/i);
 
   // 5) START restores him - the chip goes, on the same surface it appeared on.
@@ -204,7 +207,7 @@ test.describe('the SECOND-number case (full profile)', () => {
     const composer = page.getByRole('textbox', { name: 'Reply message' });
     await expect(composer).toBeVisible({ timeout: 10_000 });
     await composer.fill(`still reachable ${stamp}`);
-    await page.getByRole('button', { name: 'Send' }).click();
+    await page.getByRole('button', { name: 'Send', exact: true }).click();
     await expect(page.getByText(`still reachable ${stamp}`)).toBeVisible({ timeout: 15_000 });
   });
 });

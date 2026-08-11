@@ -1254,7 +1254,7 @@ list to the `settings` table (`settingId = group_identity_fingerprint`) and comp
 every later boot. A mismatch refuses the boot with the message pointing here. Local and
 hermetic stacks skip the check (reseeds wipe that table).
 
-**Changing the list deliberately** — treat as a migration, in this order:
+**Changing the list deliberately** - treat as a migration, in this order:
 
 1. Record the decision and WHY (which numbers, which direction). Adding a number
    REMOVES a member from every roster containing it; removing one ADDS a member back.

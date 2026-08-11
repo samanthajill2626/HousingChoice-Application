@@ -1953,7 +1953,7 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         }
         return { item: existing, created: false };
       }
-      // PII (doc §9): ids + counts only, never a member phone.
+      // PII (doc 9): ids + counts only, never a member phone.
       log.info({ conversationId, memberCount: members.length }, 'group text thread created');
       return { item, created: true };
     },

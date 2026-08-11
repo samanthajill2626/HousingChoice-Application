@@ -180,6 +180,27 @@ function suggestionMatchesAppliedValue(pending: SuggestionItem, applied: unknown
  * numbers/names to the authed client matches the M1.7 relay posture; LOG
  * LINES stay IDs/counts only (doc §9).
  */
+/**
+ * One NATIVE group text on a contact's page. Smaller than RelayGroupRow by
+ * construction: a group_text has no pool number, no owner, no operator tag and
+ * no lifecycle status (spec 4.2). Names only, never a phone (same PII posture).
+ */
+interface GroupThreadRow {
+  conversationId: string;
+  memberCount: number;
+  /** ISO 8601 — the conversation's last_activity_at. */
+  lastActivityAt: string;
+  otherMemberNames: string[];
+}
+
+/**
+ * How many group threads the contact card's read considers. There is no
+ * member->thread index, so membership is matched in code over a bounded page of
+ * the group_open partition; whatever this bound withholds is reported to the
+ * client as `truncated`, never dropped silently.
+ */
+const CONTACT_GROUP_THREADS_LIMIT = 200;
+
 interface RelayGroupRow {
   conversationId: string;
   status: 'open' | 'closed' | 'connecting';
@@ -1133,6 +1154,65 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
 
     log.info({ contactId, groupCount: groups.length }, 'contact relay groups served');
     res.json({ groups });
+  });
+
+  // GET /api/contacts/:contactId/group-threads
+  //   → { groups: GroupThreadRow[], truncated: boolean }
+  // The contact page's "Group threads" card: every NATIVE group text whose
+  // roster includes this contact. Same shape of problem as the relay card - there
+  // is no member->conversation index and this feature does not add one - so it
+  // reads the ONE group_open partition through the bounded listGroupTexts pager
+  // and matches rosters in code.
+  //
+  // TRUNCATION IS ON THE WIRE, not just in a log line (the relay card's
+  // precedent): a bounded walk that quietly omitted the older half of a
+  // founder's 132 group threads would read as "they are not in any others".
+  router.get('/:contactId/group-threads', async (req, res) => {
+    const contactId = String(req.params['contactId'] ?? '');
+    mergeContext({ contactId });
+    const contact = await contacts.getById(contactId);
+    if (!contact || contact.phone_ref === true) {
+      res.status(404).json({ error: 'contact_not_found' });
+      return;
+    }
+
+    // Membership across ALL the contact's numbers. Identical to the relay card's
+    // rule, and already the superset spec 15.6 wants: matching on EITHER the
+    // contactId or the phone is what makes phone-scoped member keys a no-op here.
+    const phones = new Set(contactPhones(contact).map((p) => p.phone));
+    const isSelf = (p: ConversationParticipant): boolean =>
+      (p.contactId !== '' && p.contactId === contactId) || phones.has(p.phone);
+
+    const { items, truncated, nextCursor } = await conversations.listGroupTexts({
+      limit: CONTACT_GROUP_THREADS_LIMIT,
+    });
+    // Either bound can withhold a thread this contact is in: the repo's walk
+    // budget, or our own page limit.
+    const withheld = truncated || nextCursor !== undefined;
+    if (withheld) {
+      log.warn(
+        { contactId, considered: items.length },
+        'contact group-threads: bounded read stopped early - older group threads not considered',
+      );
+    }
+
+    const groups: GroupThreadRow[] = [];
+    for (const conv of items) {
+      const roster = conv.participants ?? [];
+      if (!roster.some(isSelf)) continue;
+      groups.push({
+        conversationId: conv.conversationId,
+        memberCount: roster.length,
+        lastActivityAt: conv.last_activity_at,
+        otherMemberNames: roster
+          .filter((p) => !isSelf(p))
+          .map((p) => p.name)
+          .filter((n): n is string => typeof n === 'string' && n.length > 0),
+      });
+    }
+
+    log.info({ contactId, groupCount: groups.length }, 'contact group threads served');
+    res.json({ groups, truncated: withheld });
   });
 
   // GET /api/contacts/:contactId/media → { media: ContactMediaItem[] } (BE5/C5).

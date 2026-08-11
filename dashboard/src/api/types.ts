@@ -2308,6 +2308,29 @@ export interface RelayGroupRow {
   otherMemberNames: string[];
 }
 
+// --- Native group texts (the contact file's "Group threads" card) ------------
+// MIRRORS routes/contacts.ts GroupThreadRow - GET /api/contacts/:id/group-threads.
+// One row per group_text thread whose roster includes this contact. Smaller than
+// RelayGroupRow by construction: no pool number, no owner, no tag, no lifecycle
+// status (spec 4.2).
+
+export interface GroupThreadRow {
+  conversationId: string;
+  memberCount: number;
+  lastActivityAt: string; // ISO
+  /** The OTHER members' resolved display names (known names only - no phones). */
+  otherMemberNames: string[];
+}
+
+/** The card's page: `truncated` says a BOUNDED read stopped before it had seen
+ *  every group thread, so the list may be missing older ones. There is no
+ *  member->thread index and this feature does not add one; the card must show
+ *  the flag rather than imply completeness. */
+export interface GroupThreadsPage {
+  groups: GroupThreadRow[];
+  truncated: boolean;
+}
+
 // --- C3: Unit ↔ contacts roster + related (§API Contract C3) ----------------
 // Copied verbatim from the build plan §C3. The property page's Contacts roster
 // (landlord/PM, each opening their contact page) + Related-properties panel.

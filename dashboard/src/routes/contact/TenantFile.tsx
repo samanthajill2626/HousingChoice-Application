@@ -12,6 +12,7 @@ import {
   type Contact,
   type ContactPhone,
   type FieldSource,
+  type GroupThreadRow,
   type RelayGroupRow,
   type SuggestionItem,
   type Tour,
@@ -37,6 +38,7 @@ import { SuggestionChip } from './SuggestionChip.js';
 import { SUGGESTION_TARGET_LABEL, aiSourceOf, suggestionFor } from './suggestionTargets.js';
 import { EligibilityIntakeCard } from './EligibilityIntakeCard.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
+import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -58,6 +60,11 @@ export interface TenantFileProps {
   relayGroupsPending: boolean;
   /** The relay groups (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
+  groupThreadsPending: boolean;
+  /** The contact's NATIVE group texts (the "Group threads" card). */
+  groupThreads: GroupThreadRow[];
+  /** The bounded group-threads read stopped early - the card says so. */
+  groupThreadsTruncated: boolean;
   /** Pending AI suggestions for this contact (conversation-fact-extraction). A
    *  chip renders under a field only when a suggestion for that target is present
    *  here - the server is authoritative (no client-side policy). */
@@ -103,6 +110,9 @@ export function TenantFile({
   listingsSent,
   relayGroupsPending,
   relayGroups,
+  groupThreadsPending,
+  groupThreads,
+  groupThreadsTruncated,
   media,
   mediaLoading,
   suggestions = [],
@@ -321,6 +331,12 @@ export function TenantFile({
       </Card>
 
       <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
+
+      <GroupThreadsCard
+        pending={groupThreadsPending}
+        groups={groupThreads}
+        truncated={groupThreadsTruncated}
+      />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

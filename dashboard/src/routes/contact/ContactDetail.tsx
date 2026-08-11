@@ -550,6 +550,9 @@ export function ContactDetail(): React.JSX.Element {
                 units={file.units}
                 relayGroupsPending={file.relayGroups.status !== 'ready'}
                 relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
+                groupThreadsPending={file.groupThreads.status !== 'ready'}
+                groupThreads={file.groupThreads.status === 'ready' ? file.groupThreads.rows : []}
+                groupThreadsTruncated={file.groupThreadsTruncated}
                 media={media}
                 mediaLoading={mediaLoading}
                 onEdit={() => setEditing(true)}
@@ -602,6 +605,9 @@ export function ContactDetail(): React.JSX.Element {
                 listingsSent={file.listingsSent.status === 'ready' ? file.listingsSent.rows : []}
                 relayGroupsPending={file.relayGroups.status !== 'ready'}
                 relayGroups={file.relayGroups.status === 'ready' ? file.relayGroups.rows : []}
+                groupThreadsPending={file.groupThreads.status !== 'ready'}
+                groupThreads={file.groupThreads.status === 'ready' ? file.groupThreads.rows : []}
+                groupThreadsTruncated={file.groupThreadsTruncated}
                 media={media}
                 mediaLoading={mediaLoading}
                 suggestions={suggestions.suggestions}

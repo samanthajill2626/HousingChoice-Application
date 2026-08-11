@@ -12,6 +12,7 @@ import {
   type PlacementItem,
   type Contact,
   type ContactPhone,
+  type GroupThreadRow,
   type RelayGroupRow,
   type Tour,
   type UnitItem,
@@ -31,6 +32,7 @@ import {
 } from './Card.js';
 import { DeadlineChip } from '../placements/DeadlineChip.js';
 import { GroupTextsCard } from './GroupTextsCard.js';
+import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { LandlordOnboardingCard } from './LandlordOnboardingCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
@@ -50,6 +52,11 @@ export interface LandlordFileProps {
   relayGroupsPending: boolean;
   /** The relay groups (relay threads) this contact is a member of. */
   relayGroups: RelayGroupRow[];
+  groupThreadsPending: boolean;
+  /** The contact's NATIVE group texts (the "Group threads" card). */
+  groupThreads: GroupThreadRow[];
+  /** The bounded group-threads read stopped early - the card says so. */
+  groupThreadsTruncated: boolean;
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
@@ -82,6 +89,9 @@ export function LandlordFile({
   units,
   relayGroupsPending,
   relayGroups,
+  groupThreadsPending,
+  groupThreads,
+  groupThreadsTruncated,
   media,
   mediaLoading,
   onEdit,
@@ -234,6 +244,12 @@ export function LandlordFile({
       </Card>
 
       <GroupTextsCard pending={relayGroupsPending} groups={relayGroups} />
+
+      <GroupThreadsCard
+        pending={groupThreadsPending}
+        groups={groupThreads}
+        truncated={groupThreadsTruncated}
+      />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

@@ -5,7 +5,15 @@ import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
 import type { CommsMediaItem } from './media.js';
-import type { PlacementItem, Contact, RelayGroupRow, Tour, UnitItem, ListingSendRow } from '../../api/index.js';
+import type {
+  PlacementItem,
+  Contact,
+  GroupThreadRow,
+  RelayGroupRow,
+  Tour,
+  UnitItem,
+  ListingSendRow,
+} from '../../api/index.js';
 
 const UNIT: UnitItem = {
   unitId: 'u1',
@@ -50,6 +58,8 @@ describe('TenantFile', () => {
       units?: UnitItem[];
       relayGroupsPending?: boolean;
       relayGroups?: RelayGroupRow[];
+      groupThreads?: GroupThreadRow[];
+      groupThreadsTruncated?: boolean;
       onSendProperty?: () => void;
     } = {},
   ) {
@@ -65,6 +75,9 @@ describe('TenantFile', () => {
           listingsSent={opts.listingsSent ?? []}
           relayGroupsPending={opts.relayGroupsPending ?? true}
           relayGroups={opts.relayGroups ?? []}
+          groupThreadsPending={opts.groupThreads === undefined}
+          groupThreads={opts.groupThreads ?? []}
+          groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={opts.media ?? []}
           onSendProperty={opts.onSendProperty}
         />
@@ -282,7 +295,15 @@ describe('LandlordFile', () => {
     company: 'Porter Properties',
   };
 
-  function renderIt(opts: { tours?: Tour[]; relayGroups?: RelayGroupRow[]; contact?: Contact } = {}) {
+  function renderIt(
+    opts: {
+      tours?: Tour[];
+      relayGroups?: RelayGroupRow[];
+      groupThreads?: GroupThreadRow[];
+      groupThreadsTruncated?: boolean;
+      contact?: Contact;
+    } = {},
+  ) {
     return render(
       <MemoryRouter>
         <LandlordFile
@@ -293,6 +314,9 @@ describe('LandlordFile', () => {
           units={[UNIT, PLACED_UNIT]}
           relayGroupsPending={opts.relayGroups === undefined}
           relayGroups={opts.relayGroups ?? []}
+          groupThreadsPending={opts.groupThreads === undefined}
+          groupThreads={opts.groupThreads ?? []}
+          groupThreadsTruncated={opts.groupThreadsTruncated ?? false}
           media={[]}
         />
       </MemoryRouter>,

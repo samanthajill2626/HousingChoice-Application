@@ -36,6 +36,7 @@ import type {
   ConversationParticipant,
   ConversationsPage,
   GroupMemberRow,
+  GroupThreadsPage,
   DevLoginResult,
   HistoryRow,
   InboxFilter,
@@ -1212,6 +1213,20 @@ export async function getContactRelayGroups(
     { ...(signal !== undefined && { signal }) },
   );
   return res.groups;
+}
+
+/** GET /api/contacts/:id/group-threads - the NATIVE group texts this contact is
+ *  a member of, newest-activity-first, plus the `truncated` flag from the
+ *  bounded partition read. 404s on a backend without the route -> the "Group
+ *  threads" card renders its pending state. */
+export async function getContactGroupThreads(
+  contactId: string,
+  signal?: AbortSignal,
+): Promise<GroupThreadsPage> {
+  return request<GroupThreadsPage>(
+    `/api/contacts/${encodeURIComponent(contactId)}/group-threads`,
+    { ...(signal !== undefined && { signal }) },
+  );
 }
 
 // --- Contact mutations (edit / triage / phones / opt-out) -------------------

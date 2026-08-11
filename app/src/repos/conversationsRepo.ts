@@ -822,6 +822,38 @@ export interface ConversationsRepo {
     participantMap: Record<string, string>,
     claimToken: string,
   ): Promise<ConversationItem | undefined>;
+  /**
+   * MIGRATION (group-texting spec section 9): flip an imported
+   * `relay_group`/`connecting` thread onto the native `group_text` shape, in ONE
+   * CONDITIONAL write - type, status, the contactId-backfilled roster and the
+   * removal of every relay-only field land together or not at all.
+   *
+   * The condition is the three preconditions verbatim (`relay_group`,
+   * `connecting`, no `pool_number`) plus row existence, so this can never
+   * convert an open relay group, a group that already has a pool number, or a
+   * thread another caller converted first. Returns the post-update item on the
+   * winning write and `undefined` on a lost condition - the caller RE-READS to
+   * decide whether it lost to a concurrent convert (already converted) or the
+   * row never qualified (refused). Never a throw: losing is an expected outcome
+   * when the bulk runner and inbound auto-convert race on the same thread.
+   *
+   * The conversationId is NEVER changed: history stays attached, and the id is
+   * already the derived group id both the importer and detection produce.
+   */
+  convertRelayGroupToGroupText(
+    conversationId: string,
+    members: ConversationParticipant[],
+  ): Promise<ConversationItem | undefined>;
+  /**
+   * Convergence helper for a thread that is ALREADY `group_text`: rewrite the
+   * roster (the contactId backfill) without touching type or status. Conditional
+   * on the row still being a group thread, so it can never resurrect a roster
+   * onto something else. `undefined` when that condition did not hold.
+   */
+  backfillGroupTextRoster(
+    conversationId: string,
+    members: ConversationParticipant[],
+  ): Promise<ConversationItem | undefined>;
 }
 
 export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo {
@@ -2043,6 +2075,68 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         // Claim taken over / already cleared / row gone: the caller discards its
         // orphaned rail. Never a throw - losing the fence is an expected outcome.
         log.warn({ conversationId }, 'group text rail finalize lost its claim');
+        return undefined;
+      }
+    },
+
+    async convertRelayGroupToGroupText(conversationId, members) {
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression:
+              'SET #type = :groupText, #s = :groupOpen, participants = :members ' +
+              // Every relay-only field goes in the SAME write. relay_status is
+              // the one that MUST go: leaving it would keep the thread in the
+              // sparse byRelayStatus GSI, so it would still answer
+              // listRelayGroups('connecting') while rendering as a group text.
+              'REMOVE relay_status, pool_number, participant_phone, participants_version, ' +
+              'relay_opted_out_members, close_nag_next_at, close_announced_at, ' +
+              'ever_member_phones, placementId, #owner',
+            ConditionExpression:
+              'attribute_exists(conversationId) AND #type = :relayGroup AND #s = :connecting ' +
+              'AND attribute_not_exists(pool_number)',
+            ExpressionAttributeNames: { '#type': 'type', '#s': 'status', '#owner': 'owner' },
+            ExpressionAttributeValues: {
+              ':groupText': 'group_text',
+              ':groupOpen': GROUP_TEXT_STATUS,
+              ':relayGroup': 'relay_group',
+              ':connecting': 'connecting',
+              ':members': members,
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info(
+          { conversationId, memberCount: members.length },
+          'relay group converted to native group text',
+        );
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Expected: another converter won, or the row never qualified. The
+        // caller re-reads and classifies - this is not an error here.
+        return undefined;
+      }
+    },
+
+    async backfillGroupTextRoster(conversationId, members) {
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression: 'SET participants = :members',
+            ConditionExpression: 'attribute_exists(conversationId) AND #type = :groupText',
+            ExpressionAttributeNames: { '#type': 'type' },
+            ExpressionAttributeValues: { ':groupText': 'group_text', ':members': members },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
         return undefined;
       }
     },

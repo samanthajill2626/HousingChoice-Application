@@ -151,6 +151,12 @@ function makeFakes(
     setTwilioConversation: async () => {
       throw new Error('setTwilioConversation: not used in this suite');
     },
+    convertRelayGroupToGroupText: async () => {
+      throw new Error('convertRelayGroupToGroupText: not used in this suite');
+    },
+    backfillGroupTextRoster: async () => {
+      throw new Error('backfillGroupTextRoster: not used in this suite');
+    },
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,
@@ -173,6 +179,9 @@ function makeFakes(
     setPrimaryEmail: async () => contact!,
     removeEmail: async () => contact!,
     touchEmailLastSeen: async () => {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
   const messagesRepo: MessagesRepo = {
     append: async (message) => {

@@ -122,6 +122,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
       return contacts.find((c) => c.contactId === contactId)!;
     },
     async touchEmailLastSeen() {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
 
   const conversationsRepo: ConversationsRepo = {
@@ -197,6 +200,12 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     },
     setTwilioConversation: async () => {
       throw new Error('setTwilioConversation: not used in this suite');
+    },
+    convertRelayGroupToGroupText: async () => {
+      throw new Error('convertRelayGroupToGroupText: not used in this suite');
+    },
+    backfillGroupTextRoster: async () => {
+      throw new Error('backfillGroupTextRoster: not used in this suite');
     },
   };
 

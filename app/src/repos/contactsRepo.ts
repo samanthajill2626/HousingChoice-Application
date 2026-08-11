@@ -195,6 +195,16 @@ export interface ContactItem {
   /** When consent was obtained (ISO 8601) — may differ from created_at. */
   consent_at?: string;
   /**
+   * First observed participation in a native group text (ISO 8601;
+   * group-texting spec 4.4). A DISTINCT field from `consent_method` on purpose:
+   * being added to a carrier group by someone else is NOT consent to be
+   * messaged, so this must never make hasSmsConsent true. Written ONLY by the
+   * group paths (migration conversion, detection member stubs), never rewritten
+   * once set, and it is what the import retract guard conditions its contact
+   * delete on.
+   */
+  group_participation_at?: string;
+  /**
    * Staff-set tenant voucher expiration (ISO 8601) — the SOURCE of the
    * `voucher_expiration` placement deadline (placement-deadline-model §6). Set via
    * the contact create/triage API (allowlisted, canonicalized like consent_at);
@@ -522,6 +532,25 @@ export interface ContactsRepo {
    * in emails[]. Never throws on a missing entry.
    */
   touchEmailLastSeen(contactId: string, email: string, at: string): Promise<void>;
+  /**
+   * Stamp `group_participation_at` - the DISTINCT consent basis for a native
+   * group text member (group-texting spec section 4.4 / worklist naming table).
+   *
+   * `consent_method` is NEVER touched by any group path: being silently added to
+   * a carrier group is participation, not consent to be messaged 1:1, and
+   * stamping it would hand every silent member SMS consent through
+   * hasSmsConsent.
+   *
+   * Conditional and therefore idempotent: it only ever writes the FIRST
+   * participation instant, so a migration re-run cannot rewrite the basis date.
+   * Returns which happened, so a caller can converge and report without a
+   * second read: `stamped` (this call wrote it), `already` (a stamp was already
+   * there), `missing` (no contact record - reported, never created here).
+   */
+  stampGroupParticipation(
+    contactId: string,
+    at: string,
+  ): Promise<'stamped' | 'already' | 'missing'>;
 }
 
 export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
@@ -1185,6 +1214,29 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
         await persistEmails(contactId, emails);
       } catch {
         // Best-effort: a lost race must never throw on inbound.
+      }
+    },
+
+    async stampGroupParticipation(contactId, at) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { contactId },
+            UpdateExpression: 'SET group_participation_at = :at',
+            ConditionExpression:
+              'attribute_exists(contactId) AND attribute_not_exists(group_participation_at)',
+            ExpressionAttributeValues: { ':at': at },
+          }),
+        );
+        return 'stamped';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Two very different outcomes share one exception; only a read tells
+        // them apart, and the caller reports them differently (an absent
+        // contact is a hole in the roster, an existing stamp is convergence).
+        const existing = await getByIdImpl(contactId);
+        return existing ? 'already' : 'missing';
       }
     },
   };

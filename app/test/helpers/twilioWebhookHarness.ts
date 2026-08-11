@@ -709,6 +709,45 @@ export function createFakeWorld(): FakeWorld {
       delete conv.rail_creating;
       return conv;
     },
+
+    async convertRelayGroupToGroupText(conversationId, members) {
+      const conv = conversations.get(conversationId);
+      // Models the real ConditionExpression: existence + the three
+      // preconditions. A lost condition returns undefined, never throws.
+      if (
+        !conv ||
+        conv.type !== 'relay_group' ||
+        conv.status !== 'connecting' ||
+        typeof conv.pool_number === 'string'
+      ) {
+        return undefined;
+      }
+      conv.type = 'group_text';
+      conv.status = GROUP_TEXT_STATUS;
+      conv.participants = members;
+      for (const relayOnly of [
+        'relay_status',
+        'pool_number',
+        'participant_phone',
+        'participants_version',
+        'relay_opted_out_members',
+        'close_nag_next_at',
+        'close_announced_at',
+        'ever_member_phones',
+        'placementId',
+        'owner',
+      ]) {
+        delete conv[relayOnly];
+      }
+      return conv;
+    },
+
+    async backfillGroupTextRoster(conversationId, members) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.type !== 'group_text') return undefined;
+      conv.participants = members;
+      return conv;
+    },
   };
 
   const findBySid = (sid: string): MessageItem | undefined =>
@@ -1293,6 +1332,14 @@ export function createFakeWorld(): FakeWorld {
       contact.emails = emails.filter((e) => e.email !== email);
       fakeDeleteEmailPointer(email);
       return contact;
+    },
+    async stampGroupParticipation(contactId, at) {
+      const contact = contacts.find((c) => c.contactId === contactId);
+      if (!contact) return 'missing';
+      // Conditional and first-write-wins, like the real conditional update.
+      if (typeof contact.group_participation_at === 'string') return 'already';
+      contact.group_participation_at = at;
+      return 'stamped';
     },
     async touchEmailLastSeen(contactId, email, at) {
       const contact = contacts.find((c) => c.contactId === contactId);

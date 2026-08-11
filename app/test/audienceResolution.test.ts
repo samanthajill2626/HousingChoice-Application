@@ -105,6 +105,9 @@ function fakeContacts(items: ContactItem[]): ContactsRepo & {
       return { contactId, type: 'tenant' };
     },
     async touchEmailLastSeen() {},
+    stampGroupParticipation: async () => {
+      throw new Error('stampGroupParticipation: not used in this suite');
+    },
   };
 }
 

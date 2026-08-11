@@ -230,6 +230,24 @@ function makeFakes(
     parkGroupReceipt: async () => true,
     listParkedGroupReceipts: async () => [],
     deleteParkedGroupReceipt: async () => {},
+    claimCrossCheckEvent: async () => {
+      throw new Error('claimCrossCheckEvent: not used in this suite');
+    },
+    takeCrossCheckCredit: async () => {
+      throw new Error('takeCrossCheckCredit: not used in this suite');
+    },
+    putCrossCheckPending: async () => {
+      throw new Error('putCrossCheckPending: not used in this suite');
+    },
+    takeCrossCheckPending: async () => {
+      throw new Error('takeCrossCheckPending: not used in this suite');
+    },
+    putCrossCheckCredit: async () => {
+      throw new Error('putCrossCheckCredit: not used in this suite');
+    },
+    resolveCrossCheckPending: async () => {
+      throw new Error('resolveCrossCheckPending: not used in this suite');
+    },
   };
   const auditRepo: AuditRepo = {
     append: async (entityKey, eventType, payload) => {

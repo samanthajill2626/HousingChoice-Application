@@ -79,6 +79,7 @@ import {
   type MessagesRepo,
   type ParkedEmailEvent,
   type ParkedGroupReceipt,
+  type PendingCrossCheckEvent,
 } from '../../src/repos/messagesRepo.js';
 import {
   CannotRemoveLandlordOfRecordError,
@@ -304,6 +305,12 @@ export interface FakeWorld {
   /** Every group-rail enqueue the webhook attempted (S3 seam; S6 wires the job). */
   groupRailEnqueues: GroupRailEnqueueRequest[];
   groupRailEnqueuer: GroupRailEnqueuer;
+  /** T6.2 cross-check ledger: IM SIDs already recorded (the dedupe marker). */
+  crossCheckMarkers: Set<string>;
+  /** Events awaiting their classic filing, per (rail, author) pair. */
+  crossCheckPending: Map<string, PendingCrossCheckEvent[]>;
+  /** Classic filings that arrived first, per pair - ISO instants, oldest first. */
+  crossCheckCredits: Map<string, string[]>;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1113,6 +1120,50 @@ export function createFakeWorld(): FakeWorld {
     },
     async deleteDueRow() {
       throw new Error('deleteDueRow: not used by the webhook harness');
+    },
+
+    // T6.2's cross-check ledger. MODELLED (not thrown), because T6.6(d) wires
+    // recordClassicInbound into the very filing path this harness drives: a
+    // throwing stub would be swallowed by that call site's catch and the wiring
+    // test would pass while production wrote nothing.
+    async claimCrossCheckEvent(messageSid) {
+      if (crossCheckMarkers.has(messageSid)) return false;
+      crossCheckMarkers.add(messageSid);
+      return true;
+    },
+    async takeCrossCheckCredit(pairKey, notBeforeIso) {
+      const credits = crossCheckCredits.get(pairKey) ?? [];
+      // Newest first, and only inside the match window.
+      const idx = [...credits].reverse().findIndex((filedAt) => filedAt >= notBeforeIso);
+      if (idx === -1) return false;
+      credits.splice(credits.length - 1 - idx, 1);
+      crossCheckCredits.set(pairKey, credits);
+      return true;
+    },
+    async putCrossCheckPending(event) {
+      const pending = crossCheckPending.get(event.pairKey) ?? [];
+      pending.push({ ...event });
+      pending.sort((a: PendingCrossCheckEvent, b: PendingCrossCheckEvent) =>
+        a.deadlineAt < b.deadlineAt ? -1 : 1,
+      );
+      crossCheckPending.set(event.pairKey, pending);
+    },
+    async takeCrossCheckPending(pairKey) {
+      const pending = crossCheckPending.get(pairKey) ?? [];
+      const oldest = pending.shift();
+      crossCheckPending.set(pairKey, pending);
+      return oldest;
+    },
+    async putCrossCheckCredit(pairKey, filedAt) {
+      const credits = crossCheckCredits.get(pairKey) ?? [];
+      credits.push(filedAt);
+      crossCheckCredits.set(pairKey, credits);
+    },
+    async resolveCrossCheckPending(pairKey, messageSid) {
+      const pending = (crossCheckPending.get(pairKey) ?? []).filter(
+        (p) => p.messageSid !== messageSid,
+      );
+      crossCheckPending.set(pairKey, pending);
     },
   };
 
@@ -3041,6 +3092,9 @@ export function createFakeWorld(): FakeWorld {
       return activePoolNumbers.map((poolNumber) => ({ poolNumber }) as PoolNumberItem);
     },
   };
+  const crossCheckMarkers = new Set<string>();
+  const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
+  const crossCheckCredits = new Map<string, string[]>();
   const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
   const groupRailEnqueuer: GroupRailEnqueuer = {
     async enqueueGroupRail(request) {
@@ -3127,6 +3181,9 @@ export function createFakeWorld(): FakeWorld {
     activePoolNumbers,
     poolNumbersRepo,
     groupRailEnqueues,
+    crossCheckMarkers,
+    crossCheckPending,
+    crossCheckCredits,
     groupRailEnqueuer,
   };
 }

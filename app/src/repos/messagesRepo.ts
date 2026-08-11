@@ -218,6 +218,10 @@ export interface GroupDueRow {
   /** The message the row is about. */
   ref: { conversationId: string; tsMsgId: string };
   providerSid?: string;
+  /** Cross-check rows only: the rail the event arrived on (CHxx). */
+  conversationSid?: string;
+  /** Cross-check rows only: the external member who authored the event. */
+  author?: string;
 }
 
 /**
@@ -278,6 +282,67 @@ export function buildGroupSendDueRow(input: {
       ...(input.expiresAt !== undefined && { expires_at: input.expiresAt }),
     },
   };
+}
+
+// --- Cross-check (T6.2) ------------------------------------------------------
+//
+// Three row shapes, all on the messages table, all in pointer/marker partitions
+// `listByConversation` cannot see:
+//
+//  1. DEDUPE MARKER, `groupim#<IMxx>` / `ptr` - point-readable, conditional
+//     create. Twilio redelivers webhooks; a redelivered event must not enter the
+//     ledger twice.
+//  2. PAIR LEDGER, `groupxc#<CHxx>#<memberKey>` - the (rail, author) pair, with
+//     two sort-key ranges: `evt#<deadline>#<IMxx>` for an event awaiting its
+//     classic filing, and `credit#<filedAt>#<id>` for a classic filing that
+//     arrived FIRST. Two ranges in one partition means both directions are a
+//     bounded, point-partition Query - and rapid same-author messages match
+//     one-for-one instead of colliding on a single key.
+//  3. DUE ROW, in GROUP_DUE_PARTITION, so the T6.3 sweep discovers overdue
+//     events through the SAME deadline Query the staleness sweep uses. Its
+//     `ref` points back at the pair row, so resolving an alarm deletes both.
+
+/** Due-row discriminator for a cross-check event awaiting its classic filing. */
+export const GROUP_CROSSCHECK_DUE_KIND = 'group_crosscheck_event';
+
+/**
+ * How long a Conversations event may sit unmatched before it alarms. Five
+ * minutes: the two webhooks fire off the same carrier message, so real skew is
+ * sub-second, and redelivery is the only legitimate source of minutes-scale lag.
+ */
+export const GROUP_CROSSCHECK_GRACE_MS = 5 * 60 * 1000;
+
+/**
+ * How far back a classic filing's credit stays claimable. Longer than the grace
+ * window (an event that shows up 4 minutes late must still find its credit),
+ * bounded so a stale credit cannot mask a genuine miss forever.
+ */
+export const GROUP_CROSSCHECK_CREDIT_MS = 15 * 60 * 1000;
+
+/**
+ * Cleanup horizon for cross-check rows. CLEANUP ONLY (A12) - TTL is best-effort
+ * and up to 48h late, so it can only ever reap a row the sweep already had every
+ * chance to act on. Never the alarm mechanism.
+ */
+export const GROUP_CROSSCHECK_CLEANUP_MS = 7 * 24 * 60 * 60 * 1000;
+
+/** The (rail, author) pair partition both halves of the cross-check read. */
+export function groupCrossCheckPairKey(conversationSid: string, memberKey: string): string {
+  return `groupxc#${conversationSid}#${memberKey}`;
+}
+
+/** Deadline-prefixed due sort key for an unmatched cross-check event. */
+export function groupCrossCheckDueSortKey(deadlineIso: string, messageSid: string): string {
+  return `${deadlineIso}#${GROUP_CROSSCHECK_DUE_KIND}#${messageSid}`;
+}
+
+/** A cross-check event still waiting for its classic counterpart. */
+export interface PendingCrossCheckEvent {
+  pairKey: string;
+  messageSid: string;
+  conversationSid: string;
+  author: string;
+  deadlineAt: string;
 }
 
 export interface NewMessage {
@@ -1019,6 +1084,47 @@ export interface MessagesRepo {
    * go, or it alarms forever.
    */
   deleteDueRow(partition: string, sortKey: string): Promise<void>;
+
+  // --- Group texting: the cross-check ledger (T6.2) -------------------------
+
+  /**
+   * Conditional-create the per-IM dedupe marker. `false` means this event has
+   * already been recorded (a Twilio redelivery), so the caller must NOT add a
+   * second entry to the pair ledger.
+   */
+  claimCrossCheckEvent(
+    messageSid: string,
+    attrs: { conversationSid: string; author: string; receivedAt: string },
+    expiresAt: number,
+  ): Promise<boolean>;
+  /**
+   * Consume the newest CREDIT no older than `notBeforeIso` from this pair
+   * (a classic filing that arrived before its event). `false` when there is
+   * none - the event then becomes pending. A credit older than the window is
+   * deliberately left alone rather than consumed: it must never mask a real miss.
+   */
+  takeCrossCheckCredit(pairKey: string, notBeforeIso: string): Promise<boolean>;
+  /** Record an event awaiting its classic filing: pair row + due row, together. */
+  putCrossCheckPending(event: PendingCrossCheckEvent, expiresAt: number): Promise<void>;
+  /**
+   * Consume the OLDEST pending event for this pair (deleting both its pair row
+   * and its due row), or `undefined` when nothing is pending. Oldest-first is
+   * what makes rapid same-author messages match one-for-one.
+   */
+  takeCrossCheckPending(pairKey: string): Promise<PendingCrossCheckEvent | undefined>;
+  /** Bank a credit for a classic filing that arrived before its event. */
+  putCrossCheckCredit(
+    pairKey: string,
+    filedAt: string,
+    id: string,
+    expiresAt: number,
+  ): Promise<void>;
+  /**
+   * Resolve an ALARMED pending event: delete the due row and its pair row so the
+   * alarm fires exactly once. There is no sparse-index trick on a base-table
+   * partition - the rows must actually go, or they alarm forever.
+   */
+  resolveCrossCheckPending(pairKey: string, messageSid: string, deadlineAt: string): Promise<void>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -1051,6 +1157,11 @@ function relaySidPk(providerSid: string): string {
 /** Marker partition key for a system (non-conversation) send's provider SID. */
 function sysSidPk(providerSid: string): string {
   return `syssid#${providerSid}`;
+}
+
+/** Point-readable dedupe marker for ONE Conversations event (IMxx). */
+function groupCrossCheckMarkerPk(messageSid: string): string {
+  return `groupim#${messageSid}`;
 }
 
 /**
@@ -2045,6 +2156,10 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             tsMsgId: typeof item['ref_tsMsgId'] === 'string' ? item['ref_tsMsgId'] : '',
           },
           ...(typeof item['provider_sid'] === 'string' && { providerSid: item['provider_sid'] }),
+          ...(typeof item['conversation_sid'] === 'string' && {
+            conversationSid: item['conversation_sid'],
+          }),
+          ...(typeof item['author'] === 'string' && { author: item['author'] }),
         };
       });
     },
@@ -2052,6 +2167,169 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     async deleteDueRow(partition, sortKey) {
       await doc.send(
         new DeleteCommand({ TableName: table, Key: { conversationId: partition, tsMsgId: sortKey } }),
+      );
+    },
+
+    async claimCrossCheckEvent(messageSid, attrs, expiresAt) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: groupCrossCheckMarkerPk(messageSid),
+              tsMsgId: 'ptr',
+              message_sid: messageSid,
+              conversation_sid: attrs.conversationSid,
+              author: attrs.author,
+              received_at: attrs.receivedAt,
+              // CLEANUP ONLY (A12). The marker outlives the ledger entry so a
+              // redelivery hours later is still recognized as a duplicate.
+              expires_at: expiresAt,
+            },
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
+    async takeCrossCheckCredit(pairKey, notBeforeIso) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          // BETWEEN pins the `credit#` range AND the freshness bound in one
+          // condition: '~' (0x7E) sorts after every character an ISO instant can
+          // start with, so it is the exclusive upper edge of the prefix.
+          KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
+          ExpressionAttributeValues: {
+            ':p': pairKey,
+            ':lo': `credit#${notBeforeIso}`,
+            ':hi': 'credit#~',
+          },
+          ScanIndexForward: false, // newest credit first
+          Limit: 1,
+        }),
+      );
+      const item = (Items ?? [])[0] as { tsMsgId?: string } | undefined;
+      if (item?.tsMsgId === undefined) return false;
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: { conversationId: pairKey, tsMsgId: item.tsMsgId },
+        }),
+      );
+      return true;
+    },
+
+    async putCrossCheckPending(event, expiresAt) {
+      // The pair row (matching) and the due row (alarming) are written
+      // separately on purpose: a lost due row would only cost an alarm, while a
+      // transaction here would make an ordinary redelivery a hard failure.
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: event.pairKey,
+            tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}`,
+            message_sid: event.messageSid,
+            conversation_sid: event.conversationSid,
+            author: event.author,
+            deadline_at: event.deadlineAt,
+            expires_at: expiresAt,
+          },
+        }),
+      );
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: GROUP_DUE_PARTITION,
+            tsMsgId: groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid),
+            due_kind: GROUP_CROSSCHECK_DUE_KIND,
+            deadline_at: event.deadlineAt,
+            // `ref` points back at the pair row, so resolving an alarm can drop
+            // both without re-deriving anything.
+            ref_conversationId: event.pairKey,
+            ref_tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}`,
+            provider_sid: event.messageSid,
+            conversation_sid: event.conversationSid,
+            author: event.author,
+            expires_at: expiresAt,
+          },
+        }),
+      );
+    },
+
+    async takeCrossCheckPending(pairKey) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
+          ExpressionAttributeValues: { ':p': pairKey, ':lo': 'evt#', ':hi': 'evt#~' },
+          ScanIndexForward: true, // OLDEST pending event first
+          Limit: 1,
+        }),
+      );
+      const item = (Items ?? [])[0] as Record<string, unknown> | undefined;
+      if (item === undefined) return undefined;
+      const messageSid = String(item['message_sid']);
+      const deadlineAt = String(item['deadline_at']);
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: { conversationId: pairKey, tsMsgId: String(item['tsMsgId']) },
+        }),
+      );
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: {
+            conversationId: GROUP_DUE_PARTITION,
+            tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
+          },
+        }),
+      );
+      return {
+        pairKey,
+        messageSid,
+        conversationSid: String(item['conversation_sid'] ?? ''),
+        author: String(item['author'] ?? ''),
+        deadlineAt,
+      };
+    },
+
+    async putCrossCheckCredit(pairKey, filedAt, id, expiresAt) {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: pairKey,
+            tsMsgId: `credit#${filedAt}#${id}`,
+            filed_at: filedAt,
+            expires_at: expiresAt,
+          },
+        }),
+      );
+    },
+
+    async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: { conversationId: pairKey, tsMsgId: `evt#${deadlineAt}#${messageSid}` },
+        }),
+      );
+      await doc.send(
+        new DeleteCommand({
+          TableName: table,
+          Key: {
+            conversationId: GROUP_DUE_PARTITION,
+            tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
+          },
+        }),
       );
     },
 

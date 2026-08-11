@@ -314,9 +314,15 @@ describe('ConsoleGroupConversationsDriver', () => {
     ).rejects.toBeInstanceOf(GroupConversationsUnavailableError);
   });
 
-  it('reports no rail and no participants for the read paths', async () => {
+  it('REFUSES the rail lookup rather than reporting "no such rail"', async () => {
+    // `undefined` would read as "no rail exists" and send ensureGroupRail down
+    // the create path to the throw above: the same end state, one wasted
+    // Twilio-shaped round trip, and a rail_failed reason naming creation
+    // instead of the real cause. Every method on this driver refuses.
     const driver = new ConsoleGroupConversationsDriver({ logger: silentLogger });
-    expect(await driver.fetchByUniqueName('conv-1')).toBeUndefined();
+    await expect(driver.fetchByUniqueName('conv-1')).rejects.toBeInstanceOf(
+      GroupConversationsUnavailableError,
+    );
     expect(await driver.fetchParticipants('CHx')).toEqual([]);
   });
 });

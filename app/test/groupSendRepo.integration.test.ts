@@ -26,7 +26,7 @@ import { getTableSpec } from '../src/lib/tables.js';
 import {
   buildGroupSendDueRow,
   createMessagesRepo,
-  GROUP_DUE_PARTITION,
+  GROUP_SEND_DUE_PARTITION,
   GROUP_SEND_DUE_KIND,
 } from '../src/repos/messagesRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -129,7 +129,7 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
       new GetCommand({
         TableName: table,
         Key: {
-          conversationId: GROUP_DUE_PARTITION,
+          conversationId: GROUP_SEND_DUE_PARTITION,
           tsMsgId: `${deadlineAt}#${GROUP_SEND_DUE_KIND}#${providerSid}`,
         },
       }),
@@ -167,14 +167,14 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
       deadlineAt: '2026-09-01T23:10:00.000Z',
     });
 
-    const dueNow = await messages.listDueRows(GROUP_DUE_PARTITION, '2026-09-01T10:20:00.000Z');
+    const dueNow = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, '2026-09-01T10:20:00.000Z');
     const mine = dueNow.filter((r) => r.ref.conversationId === conversationId);
     expect(mine.map((r) => r.providerSid)).toEqual([early, late]);
     expect(mine[0]?.kind).toBe(GROUP_SEND_DUE_KIND);
     expect(mine[0]?.deadlineAt).toBe('2026-09-01T10:10:00.000Z');
 
     // A row due at EXACTLY the sweep instant is included (the '~' upper bound).
-    const atDeadline = await messages.listDueRows(GROUP_DUE_PARTITION, '2026-09-01T10:10:00.000Z');
+    const atDeadline = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, '2026-09-01T10:10:00.000Z');
     expect(atDeadline.some((r) => r.providerSid === early)).toBe(true);
     expect(atDeadline.some((r) => r.providerSid === late)).toBe(false);
   });
@@ -191,10 +191,10 @@ describe.skipIf(!reachable)('group send persistence against DynamoDB Local', () 
     });
     const sortKey = `${deadlineAt}#${GROUP_SEND_DUE_KIND}#${providerSid}`;
 
-    await messages.deleteDueRow(GROUP_DUE_PARTITION, sortKey);
-    await messages.deleteDueRow(GROUP_DUE_PARTITION, sortKey);
+    await messages.deleteDueRow(GROUP_SEND_DUE_PARTITION, sortKey);
+    await messages.deleteDueRow(GROUP_SEND_DUE_PARTITION, sortKey);
 
-    const remaining = await messages.listDueRows(GROUP_DUE_PARTITION, '2026-09-02T23:00:00.000Z');
+    const remaining = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, '2026-09-02T23:00:00.000Z');
     expect(remaining.some((r) => r.providerSid === providerSid)).toBe(false);
   });
 

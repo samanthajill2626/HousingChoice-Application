@@ -183,7 +183,7 @@ export interface GroupRailSnapshot {
  * alarm mechanism.
  */
 export interface MessageDueRow {
-  /** Synthetic partition key, e.g. GROUP_DUE_PARTITION. */
+  /** Synthetic partition key, e.g. GROUP_SEND_DUE_PARTITION. */
   partition: string;
   /** `<ISO deadline>#<kind>#<id>`. */
   sortKey: string;
@@ -225,14 +225,27 @@ export interface GroupDueRow {
 }
 
 /**
- * The ONE synthetic partition every group deadline row lives in. A fixed bucket
- * (not per-day) keeps due-discovery to a single Query; at this feature's scale
- * (132 threads, one row per send, deleted as soon as it is resolved) the
- * partition never holds more than a handful of live rows. Pointer/marker
- * partitions like this never collide with real conversation partitions, so
- * listByConversation cannot see them.
+ * ONE SYNTHETIC DEADLINE PARTITION PER SWEEP, NOT ONE SHARED BY BOTH.
+ *
+ * Both group guardrail sweeps discover work by Querying a deadline-prefixed
+ * partition with a bounded `Limit`. When they shared a partition they also
+ * shared that budget, and each dropped the other's rows with a `continue` AFTER
+ * the limit had already been spent - so 50 overdue cross-check rows sorted
+ * ahead of every stuck send and the send-staleness sweep examined ZERO sends,
+ * exactly when both webhooks are most likely to be broken at once. A post-Limit
+ * filter is never a correct way to share a partition (`conversationsRepo.ts`
+ * says the same thing about `group_open`).
+ *
+ * Two fixed buckets (not per-day) keep due-discovery to a single Query each; at
+ * this feature's scale (132 threads, one row per send, deleted as soon as it is
+ * resolved) neither partition holds more than a handful of live rows.
+ * Pointer/marker partitions like these never collide with real conversation
+ * partitions, so listByConversation cannot see them.
  */
-export const GROUP_DUE_PARTITION = 'groupdue#pending';
+export const GROUP_SEND_DUE_PARTITION = 'groupdue#send';
+
+/** The cross-check's own deadline partition. See GROUP_SEND_DUE_PARTITION. */
+export const GROUP_CROSSCHECK_DUE_PARTITION = 'groupdue#xc';
 
 /** Due-row discriminator for the per-send group delivery-staleness check. */
 export const GROUP_SEND_DUE_KIND = 'group_send_staleness';
@@ -271,7 +284,7 @@ export function buildGroupSendDueRow(input: {
   expiresAt?: number;
 }): MessageDueRow {
   return {
-    partition: GROUP_DUE_PARTITION,
+    partition: GROUP_SEND_DUE_PARTITION,
     sortKey: groupSendDueSortKey(input.deadlineAt, input.providerSid),
     attributes: {
       due_kind: GROUP_SEND_DUE_KIND,
@@ -298,9 +311,18 @@ export function buildGroupSendDueRow(input: {
 //     arrived FIRST. Two ranges in one partition means both directions are a
 //     bounded, point-partition Query - and rapid same-author messages match
 //     one-for-one instead of colliding on a single key.
-//  3. DUE ROW, in GROUP_DUE_PARTITION, so the T6.3 sweep discovers overdue
-//     events through the SAME deadline Query the staleness sweep uses. Its
-//     `ref` points back at the pair row, so resolving an alarm deletes both.
+//  3. DUE ROW, in GROUP_CROSSCHECK_DUE_PARTITION, so the T6.3 sweep discovers
+//     overdue events through the same KIND of deadline Query the staleness
+//     sweep uses - but over its OWN partition, so neither sweep can spend the
+//     other's row budget. Its `ref` points back at the pair row, so resolving an
+//     alarm deletes both.
+//  4. CLASSIC DEDUPE MARKER, `groupsm#<SMxx>` / `ptr` - the mirror image of (1)
+//     for the CLASSIC half. Twilio redelivers the messaging webhook too, and a
+//     redelivered filing used to bank a SECOND credit (the credit sort key
+//     carries a fresh `filedAt`, so the Put was not idempotent). That phantom
+//     credit is later consumed by a genuinely UNMATCHED event, which then never
+//     goes pending and never alarms - the guardrail silently reporting health
+//     while detection is down. The ledger must be dedupe-safe on BOTH sides.
 
 /** Due-row discriminator for a cross-check event awaiting its classic filing. */
 export const GROUP_CROSSCHECK_DUE_KIND = 'group_crosscheck_event';
@@ -1098,6 +1120,23 @@ export interface MessagesRepo {
     expiresAt: number,
   ): Promise<boolean>;
   /**
+   * Conditional-create the per-CLASSIC-SID dedupe marker - the mirror image of
+   * `claimCrossCheckEvent`. `false` means this classic inbound has already been
+   * filed into the ledger (a Twilio redelivery of the messaging webhook), so the
+   * caller must NOT consume a second pending event or bank a second credit.
+   *
+   * THIS IS THE IDEMPOTENCY AUTHORITY FOR THE CLASSIC HALF, deliberately in
+   * preference to the append's `deduped` flag: a first delivery that died AFTER
+   * the append but BEFORE the ledger write leaves no marker, and its redelivery
+   * is then the only chance to file the classic half. Keying on the flag instead
+   * would turn that recovery into a false `group_crosscheck_inbound_missing`.
+   */
+  claimCrossCheckClassic(
+    providerSid: string,
+    attrs: { conversationSid: string; memberKey: string; filedAt: string },
+    expiresAt: number,
+  ): Promise<boolean>;
+  /**
    * Consume the newest CREDIT no older than `notBeforeIso` from this pair
    * (a classic filing that arrived before its event). `false` when there is
    * none - the event then becomes pending. A credit older than the window is
@@ -1164,6 +1203,11 @@ function groupCrossCheckMarkerPk(messageSid: string): string {
   return `groupim#${messageSid}`;
 }
 
+/** Point-readable dedupe marker for ONE CLASSIC group inbound (SMxx/MMxx). */
+function groupCrossCheckClassicPk(providerSid: string): string {
+  return `groupsm#${providerSid}`;
+}
+
 /**
  * Marker partition for a group delivery receipt that arrived before its message
  * (spec 15.2a). One partition per IMxx, one sort key per ParticipantSid - the
@@ -1200,9 +1244,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
   /** Read the SID pointer item: where the persisted message actually lives. */
   async function getSidPointer(
     sid: string,
+    opts: { consistent?: boolean } = {},
   ): Promise<{ ref_conversationId: string; ref_tsMsgId: string } | undefined> {
     const pointer = await doc.send(
-      new GetCommand({ TableName: table, Key: { conversationId: sidPk(sid), tsMsgId: 'ptr' } }),
+      new GetCommand({
+        TableName: table,
+        Key: { conversationId: sidPk(sid), tsMsgId: 'ptr' },
+        // The append's dedupe branch reads STRONGLY: it only gets there because
+        // the pointer's own conditional Put just failed, so "absent" would be a
+        // real invariant violation - and it is about to be treated as one.
+        ...(opts.consistent === true && { ConsistentRead: true }),
+      }),
     );
     return pointer.Item as { ref_conversationId: string; ref_tsMsgId: string } | undefined;
   }
@@ -1376,9 +1428,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               // post-append enqueue would leave a crash window in which a send
               // exists with nothing watching its receipts - and after spec 16.2
               // this sweep is the ONLY detector of a dead receipts webhook.
-              // A redelivered send fails this condition too, which the
-              // TransactionCanceledException branch below correctly reports as a
-              // DEDUPE, not as a due-row failure.
+              // A redelivered send fails this condition too - but so does the
+              // SID pointer, and it is the SID POINTER's cancellation reason
+              // (never this one) that the branch below reads as a dedupe.
               ...(message.dueRow !== undefined
                 ? [
                     {
@@ -1399,21 +1451,52 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         );
       } catch (err) {
         if (err instanceof TransactionCanceledException) {
-          const conditionFailed = err.CancellationReasons?.some(
-            (r) => r.Code === 'ConditionalCheckFailed',
-          );
-          if (conditionFailed) {
+          // PRECISE ATTRIBUTION, not "any item failed". CancellationReasons is
+          // index-aligned with TransactItems, and index 1 is ALWAYS the SID
+          // pointer - the one and only item whose condition failing means "this
+          // provider message is already persisted". Inferring dedupe from the
+          // transaction as a whole would let a due-row (or email-pointer)
+          // collision - which rolls the WHOLE transaction back, message row
+          // included - report a message as written when nothing was written, and
+          // hand the caller a tsMsgId that addresses nothing.
+          const reasons = err.CancellationReasons ?? [];
+          const sidPointerFailed = reasons[1]?.Code === 'ConditionalCheckFailed';
+          if (sidPointerFailed) {
             // The PERSISTED tsMsgId can differ from the one computed above:
             // inbound redeliveries carry no provider timestamp, so a
             // redelivered webhook computes a NEW first-seen providerTs.
             // Resolve the real key via the SID pointer (written in the same
-            // transaction as the original message, so it must exist here).
-            const ptr = await getSidPointer(message.providerSid);
+            // transaction as the original message, so it MUST exist here - the
+            // read is strongly consistent so "absent" is not a race).
+            const ptr = await getSidPointer(message.providerSid, { consistent: true });
+            if (ptr === undefined) {
+              // The pointer's own condition just failed, so it exists. Falling
+              // back to the computed tsMsgId here would silently hand back a key
+              // for a row nobody can prove is there.
+              log.error(
+                { conversationId: message.conversationId, providerSid: message.providerSid },
+                'message append deduped but the SID pointer it deduped against cannot be read - refusing to guess the persisted key',
+              );
+              throw err;
+            }
             log.info(
               { conversationId: message.conversationId, providerSid: message.providerSid },
               'message append deduped (provider SID already persisted)',
             );
-            return { deduped: true, tsMsgId: ptr?.ref_tsMsgId ?? tsMsgId };
+            return { deduped: true, tsMsgId: ptr.ref_tsMsgId };
+          }
+          if (reasons.some((r) => r.Code === 'ConditionalCheckFailed')) {
+            // A condition failed somewhere OTHER than the SID pointer: the
+            // message row's own key collided, or a pointer/due row did. Nothing
+            // was written. Loud, and rethrown - never reported as a dedupe.
+            log.error(
+              {
+                conversationId: message.conversationId,
+                providerSid: message.providerSid,
+                reasons: reasons.map((r) => r.Code ?? 'None'),
+              },
+              'message append transaction cancelled by a condition OTHER than the provider-SID pointer - nothing was persisted',
+            );
           }
         }
         throw err;
@@ -2196,6 +2279,33 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
     },
 
+    async claimCrossCheckClassic(providerSid, attrs, expiresAt) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: {
+              conversationId: groupCrossCheckClassicPk(providerSid),
+              tsMsgId: 'ptr',
+              provider_sid: providerSid,
+              conversation_sid: attrs.conversationSid,
+              member_key: attrs.memberKey,
+              filed_at: attrs.filedAt,
+              // CLEANUP ONLY (A12), and the marker deliberately OUTLIVES the
+              // credit it guards: a redelivery hours later must still be
+              // recognized as a duplicate rather than banking a phantom credit.
+              expires_at: expiresAt,
+            },
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+        return true;
+      } catch (err) {
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
+      }
+    },
+
     async takeCrossCheckCredit(pairKey, notBeforeIso) {
       const { Items } = await doc.send(
         new QueryCommand({
@@ -2246,7 +2356,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         new PutCommand({
           TableName: table,
           Item: {
-            conversationId: GROUP_DUE_PARTITION,
+            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
             tsMsgId: groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid),
             due_kind: GROUP_CROSSCHECK_DUE_KIND,
             deadline_at: event.deadlineAt,
@@ -2287,7 +2397,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         new DeleteCommand({
           TableName: table,
           Key: {
-            conversationId: GROUP_DUE_PARTITION,
+            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
             tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
           },
         }),
@@ -2326,7 +2436,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         new DeleteCommand({
           TableName: table,
           Key: {
-            conversationId: GROUP_DUE_PARTITION,
+            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
             tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
           },
         }),

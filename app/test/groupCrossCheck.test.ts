@@ -31,7 +31,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createGroupCrossCheck } from '../src/services/groupCrossCheck.js';
-import { createMessagesRepo } from '../src/repos/messagesRepo.js';
+import {
+  buildGroupSendDueRow,
+  buildTsMsgId,
+  createMessagesRepo,
+} from '../src/repos/messagesRepo.js';
 import { GROUP_CROSSCHECK_LAST_EVENT_AT_ID } from '../src/repos/settingsRepo.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -118,11 +122,19 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
         dateCreated: clock,
         ...over,
       }),
-      classic: (memberPhone = MEMBER) =>
+      /**
+       * File the CLASSIC half. `author` is the RAW webhook `From` - the service
+       * normalizes it, which is what keeps the two halves' pair keys identical.
+       * `providerSid` is fixed by a caller that wants to model a REDELIVERY.
+       */
+      classic: (author: string = MEMBER, providerSid?: string) =>
         crossCheck.recordClassicInbound({
           conversationSid: rail,
-          memberKey: `phone#${memberPhone}`,
-          providerSid: `MM${(imSeq += 1)}`,
+          author,
+          // Rail-scoped like `event()`'s IM SIDs: the classic dedupe marker is
+          // keyed by provider SID ALONE and the table is shared by the whole
+          // file, so a bare counter would collide across tests.
+          providerSid: providerSid ?? `MM${rail}${(imSeq += 1)}`,
         }),
       /** Alarms raised for THIS test's rail. */
       sweep: async (nowIso = AFTER_GRACE) => {
@@ -266,6 +278,123 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
       await h.crossCheck.recordConversationEvent(h.event());
 
       expect(await h.sweep('2026-08-11T14:00:00.000Z')).toHaveLength(1);
+    });
+  });
+
+  describe('the ledger dedupes BOTH sides (fix wave 4, X1/C1)', () => {
+    // THE DEFECT THIS PINS. The classic half used to have no dedupe of its own,
+    // and its credit's sort key carries a fresh `filedAt`, so a Twilio
+    // REDELIVERY of the messaging webhook banked a SECOND credit for the (rail,
+    // author) pair. Nothing consumes that phantom - until detection genuinely
+    // breaks, at which point it absorbs an event whose classic filing NEVER
+    // came, no pending row is written and NO ALARM EVER FIRES. That is exactly
+    // the failure the whole mechanism exists to detect, so the phantom credit
+    // silently blinds the only watch we have on `OtherRecipients{N}`.
+    it('a REDELIVERED classic inbound banks NO second credit, so a later genuine miss still alarms', async () => {
+      const h = harness();
+      const redelivered = 'MMredelivered0001';
+
+      // One carrier message: filed, then REDELIVERED by Twilio (same SM/MM SID).
+      await h.classic(MEMBER, redelivered);
+      await h.classic(MEMBER, redelivered);
+
+      // The real event consumes the ONE legitimate credit.
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep()).toEqual([]);
+
+      // Now detection breaks: an event arrives whose classic filing never came.
+      // With a phantom credit banked it would be silently marked matched.
+      h.setNow('2026-08-11T14:00:00.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+      const alarms = await h.sweep('2026-08-11T15:00:00.000Z');
+      expect(alarms).toHaveLength(1);
+
+      expect(h.log.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'group_crosscheck_classic_duplicate',
+          providerSid: redelivered,
+        }),
+        expect.any(String),
+      );
+    });
+
+    it('a redelivered classic filing does not consume a SECOND pending event', async () => {
+      const h = harness();
+      const redelivered = 'MMredelivered0002';
+      await h.crossCheck.recordConversationEvent(h.event());
+      h.setNow('2026-08-11T12:00:01.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      // ONE classic message, delivered twice. It may clear exactly ONE event.
+      await h.classic(MEMBER, redelivered);
+      await h.classic(MEMBER, redelivered);
+
+      expect(await h.sweep()).toHaveLength(1);
+    });
+  });
+
+  describe('ONE pair-key builder for both halves (fix wave 4, X4)', () => {
+    // THE DEFECT THIS PINS. The classic side keyed on the RAW webhook `From`
+    // while the Conversations side keyed on a normalized author, so a single
+    // non-canonical address made every event for that member miss its credit,
+    // go pending, and alarm at the grace deadline - a storm of false
+    // "envelope may have gone away" ERRORs on completely healthy traffic.
+    it('a NON-CANONICAL classic From still matches the E.164 conversations author', async () => {
+      const h = harness();
+      await h.crossCheck.recordConversationEvent(h.event());
+      // Same handset, formatted the way a human (or a replayed capture) writes it.
+      await h.classic('(555) 111-0001');
+
+      expect(await h.sweep()).toEqual([]);
+    });
+
+    it('a non-canonical classic filing FIRST is still found by the event', async () => {
+      const h = harness();
+      await h.classic('(555) 111-0001');
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      expect(await h.sweep()).toEqual([]);
+    });
+  });
+
+  describe('the two sweeps no longer share a deadline partition (fix wave 4, X3)', () => {
+    // THE DEFECT THIS PINS. Both sweeps Queried ONE partition with `Limit: 50`
+    // and dropped the other kind AFTER the limit was spent, so a full batch of
+    // the other kind's rows starved this one completely - and the two failures
+    // that produce those backlogs (a dead classic webhook, a dead receipts
+    // webhook) are exactly the pair most likely to happen together.
+    it('a BACKLOG of overdue SEND due rows cannot hide an unmatched event', async () => {
+      const messages = createMessagesRepo({ doc, env: testEnv });
+      const backlog = 50;
+      await Promise.all(
+        Array.from({ length: backlog }, (_unused, i) => {
+          const providerSid = `IMstarveSend${String(i).padStart(4, '0')}`;
+          const conversationId = `convGroup:starve-${i}`;
+          const providerTs = new Date(Date.parse(T0) - (backlog - i) * 1000).toISOString();
+          return messages.append({
+            conversationId,
+            providerSid,
+            providerTs,
+            type: 'sms',
+            direction: 'outbound',
+            author: 'teammate',
+            body: 'starve',
+            deliveryStatus: 'queued',
+            deliveryRecipients: { 'phone#+15550000001': { status: 'queued' } },
+            dueRow: buildGroupSendDueRow({
+              conversationId,
+              tsMsgId: buildTsMsgId(providerTs, providerSid),
+              providerSid,
+              deadlineAt: providerTs,
+            }),
+          });
+        }),
+      );
+
+      const h = harness();
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      expect(await h.sweep()).toHaveLength(1);
     });
   });
 });

@@ -1462,9 +1462,14 @@ export type DeliveryStatus =
  * Per-recipient delivery slot on a relay-group source message (M1.7). MIRRORS
  * app/src/repos/messagesRepo.ts `RelayRecipientDelivery` — the dashboard can't
  * import from app/, so keep it in sync by hand. Keyed by member key
- * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map;
- * a `status:'failed'` + `errorCode:'contact_opted_out'` slot means that member
- * opted out and was NOT relayed to (surfaced as a subtle Timeline note). */
+ * (contactId, else `phone#<E164>`) in the message's `delivery_recipients` map.
+ *
+ * SUPPRESSION IS KEYED ON THE CODE ALONE: an `errorCode:'contact_opted_out'`
+ * slot means that member opted out and was NOT delivered to (surfaced as a
+ * subtle Timeline note, and excluded from the `Delivered N/M` denominator
+ * rather than painted as a hard failure). Do NOT also require
+ * `status:'failed'` - relay writes `failed`, but a native group text's
+ * Conversations receipt carries Twilio's `undelivered` for the same event. */
 export interface RelayRecipientDelivery {
   status: DeliveryStatus;
   sid?: string;
@@ -2134,10 +2139,12 @@ export interface TimelineMessage extends TimelineBase {
    *  mail had HTML - fall back to the trimmed text body). Rendered ONLY inside the
    *  CSP-framed, fully sandboxed EmailHtmlFrame (B7) - never dangerouslySetInnerHTML. */
   email_html_sanitized?: string;
-  /** Relay group (M1.7): per-recipient delivery slots on a relay SOURCE message,
-   *  keyed by member key. A `contact_opted_out` failed slot means that member
-   *  opted out and wasn't relayed to — the bubble renders a subtle note. Absent
-   *  on 1:1 messages. */
+  /** Relay group (M1.7) and native group texting: per-recipient delivery slots
+   *  on a relay SOURCE message or a group send, keyed by member key. A slot
+   *  whose `errorCode` is `contact_opted_out` means that member opted out and
+   *  wasn't delivered to — the bubble renders a subtle note. The CODE alone
+   *  decides that; the accompanying `status` is `failed` on relay and
+   *  `undelivered` on a group leg. Absent on 1:1 messages. */
   delivery_recipients?: Record<string, RelayRecipientDelivery>;
   /** Relay group (M1.7): who authored a relayed message — a member's key
    *  (contactId, else `phone#<E164>`), the `'team'` sentinel (a team reply),

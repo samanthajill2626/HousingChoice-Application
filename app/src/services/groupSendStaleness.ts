@@ -24,12 +24,13 @@
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createMessagesRepo,
-  GROUP_DUE_PARTITION,
   GROUP_SEND_DUE_KIND,
+  GROUP_SEND_DUE_PARTITION,
   type MessageItem,
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
 
 /**
  * Terminal for THIS alarm: the leg reached the handset, or Twilio told us it
@@ -81,6 +82,16 @@ export interface GroupSendStalenessService {
 
 export interface GroupSendStalenessDeps {
   messagesRepo?: Pick<MessagesRepo, 'getByTsMsgId' | 'listDueRows' | 'deleteDueRow'>;
+  /**
+   * The SECOND drain caller (spec 15.2a). The send path drains immediately after
+   * its append, but a receipt that parks AFTER that call - it lost the race, or
+   * the drain itself threw - had nothing left to apply it and was stranded until
+   * its 24h TTL, which spec 15.5 says must never be the mechanism. The sweep
+   * already holds the due row's `provider_sid`, so draining before it decides
+   * turns a permanent strand into a bounded delay AND stops the alarm blaming a
+   * perfectly healthy webhook.
+   */
+  receipts?: Pick<GroupReceiptsService, 'drainParked'>;
   logger?: Logger;
 }
 
@@ -99,6 +110,9 @@ export function createGroupSendStaleness(
   const messages =
     deps.messagesRepo ??
     createMessagesRepo({ ...(deps.logger !== undefined && { logger: deps.logger }) });
+  const receipts =
+    deps.receipts ??
+    createGroupReceiptsService({ ...(deps.logger !== undefined && { logger: deps.logger }) });
 
   async function check(ref: {
     conversationId: string;
@@ -126,11 +140,36 @@ export function createGroupSendStaleness(
       // Normalized: the sort key is compared LEXICOGRAPHICALLY, so '...00Z' and
       // '...00.000Z' must collapse to one form.
       const through = new Date(nowIso).toISOString();
-      const due = await messages.listDueRows(GROUP_DUE_PARTITION, through, SWEEP_BATCH);
+      // THE SEND SWEEP'S OWN PARTITION. It used to share one with the
+      // cross-check sweep and drop the other kind AFTER the Limit was spent, so
+      // 50 overdue cross-check rows could hide every stuck send. The kind guard
+      // below is now a structural assertion, not a filter.
+      const due = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, through, SWEEP_BATCH);
       let alarmed = 0;
       let cleared = 0;
       for (const row of due) {
-        if (row.kind !== GROUP_SEND_DUE_KIND) continue;
+        if (row.kind !== GROUP_SEND_DUE_KIND) {
+          log.error(
+            { event: 'group_due_partition_foreign_row', kind: row.kind, sortKey: row.sortKey },
+            'a non-send row is sitting in the send-staleness deadline partition',
+          );
+          continue;
+        }
+        // DRAIN BEFORE DECIDING. A receipt that parked after the send's own
+        // drain is still holding this message's real delivery state; alarming
+        // without applying it would report a healthy webhook as dead and send an
+        // operator to the wrong system. Best-effort: a drain failure must not
+        // stop the sweep from raising the alarm it exists to raise.
+        if (row.providerSid !== undefined) {
+          try {
+            await receipts.drainParked(row.providerSid);
+          } catch (err) {
+            log.warn(
+              { err, event: 'group_send_staleness_drain_failed', providerSid: row.providerSid },
+              'draining parked group delivery receipts failed before the staleness check',
+            );
+          }
+        }
         const result = await check(row.ref);
         if (result.outcome === 'alarmed') {
           alarmed += 1;

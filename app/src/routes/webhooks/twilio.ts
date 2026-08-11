@@ -1467,9 +1467,22 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // unmatched and alarm at its grace deadline - i.e. a perfectly healthy
       // channel would look like the failure the guardrail exists to detect.
       // recordClassicInbound never throws; a bookkeeping problem is its own WARN.
+      //
+      // DELIBERATELY NOT GATED ON `appended.deduped`. This step used to be
+      // non-idempotent, and a redelivery banked a phantom credit that later
+      // absorbed a genuinely unmatched event - the guardrail reporting health
+      // while detection was down. The fix is a per-provider-SID dedupe marker
+      // INSIDE recordClassicInbound, not a gate here: a first delivery that died
+      // after the append but before this line leaves no marker, and its
+      // redelivery (which appends as `deduped`) is the only chance to file the
+      // classic half. Gating on the flag would convert that recovery into a
+      // false `group_crosscheck_inbound_missing` ERROR on healthy traffic.
+      //
+      // The RAW `From` is passed on purpose: the ledger's ONE key builder
+      // normalizes it, so the two halves cannot drift (spec 4.1).
       await groupCrossCheck.recordClassicInbound({
         conversationSid: thread.twilio_conversation_sid as string,
-        memberKey: groupMemberKey(From),
+        author: From,
         providerSid: MessageSid,
       });
     }

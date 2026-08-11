@@ -21,7 +21,7 @@ import {
   buildGroupSendDueRow,
   buildTsMsgId,
   createMessagesRepo,
-  GROUP_DUE_PARTITION,
+  GROUP_SEND_DUE_PARTITION,
   GROUP_SEND_STALENESS_MS,
   type RelayRecipientDelivery,
 } from '../src/repos/messagesRepo.js';
@@ -114,8 +114,27 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     return { conversationId, providerSid, tsMsgId: appended.tsMsgId };
   }
 
-  function service(log: { error: unknown }) {
-    return createGroupSendStaleness({ messagesRepo: messages, logger: log as never });
+  /** A drain that records what it was asked to drain. */
+  function recordingReceipts(): { drainParked: (sid: string) => Promise<number>; drained: string[] } {
+    const drained: string[] = [];
+    return {
+      drained,
+      async drainParked(sid: string) {
+        drained.push(sid);
+        return 0;
+      },
+    };
+  }
+
+  function service(
+    log: { error: unknown },
+    receipts: { drainParked: (sid: string) => Promise<number> } = recordingReceipts(),
+  ) {
+    return createGroupSendStaleness({
+      messagesRepo: messages,
+      receipts: receipts as never,
+      logger: log as never,
+    });
   }
 
   it('PARTIAL RECEIPT LOSS alarms: one member delivered, one still `sent`', async () => {
@@ -147,7 +166,7 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     log.error.mockClear();
     expect((await svc.sweepSendStaleness(PAST_DEADLINE)).alarmed).toBe(0);
     expect(log.error).not.toHaveBeenCalled();
-    expect(await messages.listDueRows(GROUP_DUE_PARTITION, PAST_DEADLINE)).toEqual([]);
+    expect(await messages.listDueRows(GROUP_SEND_DUE_PARTITION, PAST_DEADLINE)).toEqual([]);
   });
 
   it('a FULLY DELIVERED send clears without alarming', async () => {
@@ -193,7 +212,7 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     // Nothing but the append ran: no receipt, no drain, no follow-up write.
     const send = await groupSend({ 'phone#+15551110009': { status: 'queued' } });
 
-    const due = await messages.listDueRows(GROUP_DUE_PARTITION, PAST_DEADLINE);
+    const due = await messages.listDueRows(GROUP_SEND_DUE_PARTITION, PAST_DEADLINE);
     expect(due.some((row) => row.providerSid === send.providerSid)).toBe(true);
   });
 
@@ -218,5 +237,72 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
       tsMsgId: '2026-08-11T12:00:00.000Z#nope',
     });
     expect(result.outcome).toBe('missing');
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, X2/C2). `drainParked` had exactly ONE
+  // caller - the send path, immediately after its append. A receipt that parked
+  // AFTER that call (it lost the race, or the drain itself threw) had nothing
+  // left to apply it, so the slot read `Delivered 0/N` forever for a message
+  // that WAS delivered and this sweep then alarmed "check Conversations service
+  // webhook config" - a misdiagnosis that sends an operator to a healthy system.
+  it('DRAINS parked receipts for the due row BEFORE deciding a send is stale', async () => {
+    const send = await groupSend({ 'phone#+15551110012': { status: 'queued' } });
+    const receipts = recordingReceipts();
+
+    await service({ error: vi.fn() }, receipts).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(receipts.drained).toContain(send.providerSid);
+  });
+
+  it('still raises the alarm when the drain throws - a drain failure is not a reason to go quiet', async () => {
+    const send = await groupSend({ 'phone#+15551110013': { status: 'sent' } });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+    const throwing = {
+      async drainParked() {
+        throw new Error('DynamoDB throttle');
+      },
+    };
+
+    const outcome = await service(log, throwing as never).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(outcome.alarmed).toBe(1);
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ providerSid: send.providerSid }),
+      'group delivery receipts silent - check Conversations service webhook config',
+    );
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, X3). Both guardrail sweeps used to Query
+  // ONE shared deadline partition with `Limit: 50` and drop the other kind AFTER
+  // the limit was spent, so a backlog of overdue cross-check rows hid every
+  // stuck send - precisely when both webhooks are most likely broken at once.
+  it('a BACKLOG of overdue cross-check rows cannot hide a stuck send', async () => {
+    const stuck = await groupSend({ 'phone#+15551110014': { status: 'sent' } });
+    // A full sweep batch of cross-check rows, every one of them OLDER than the
+    // send's deadline, so they would sort ahead of it in a shared partition.
+    const backlog = 50;
+    await Promise.all(
+      Array.from({ length: backlog }, (_unused, i) =>
+        messages.putCrossCheckPending(
+          {
+            pairKey: `groupxc#CHstarve#phone#+1555000${String(i).padStart(4, '0')}`,
+            messageSid: `IMstarve${String(i).padStart(4, '0')}`,
+            conversationSid: 'CHstarve',
+            author: '+15550000001',
+            deadlineAt: new Date(Date.parse(SENT_AT) - (backlog - i) * 1000).toISOString(),
+          },
+          Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
+        ),
+      ),
+    );
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+    const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({ providerSid: stuck.providerSid }),
+      'group delivery receipts silent - check Conversations service webhook config',
+    );
+    expect(outcome.alarmed).toBeGreaterThanOrEqual(1);
   });
 });

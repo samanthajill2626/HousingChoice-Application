@@ -35,6 +35,10 @@ interface Fakes {
   optOutSets: { conversationId: string; value: boolean }[];
   audits: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   createdOneToOnes: string[];
+  /** `onPark` fires INSIDE parkGroupReceipt - models the append committing
+   *  mid-park. Held in its own object because makeFakes returns a SPREAD copy,
+   *  so a field set on the result would never reach the closure. */
+  hooks: { onPark?: () => void };
   capture: LogCapture;
   service: ReturnType<typeof createGroupReceiptsService>;
 }
@@ -84,6 +88,7 @@ function makeFakes(
   };
   const conversations = new Map<string, ConversationItem>([['group-1', conversation]]);
   const contacts = overrides.contacts ?? [];
+  const hooks: { onPark?: () => void } = {};
   const capture = createLogCapture();
 
   const fakes = {
@@ -96,6 +101,7 @@ function makeFakes(
     optOutSets: [] as Fakes['optOutSets'],
     audits: [] as Fakes['audits'],
     createdOneToOnes: [] as string[],
+    hooks,
     capture,
   };
 
@@ -137,6 +143,7 @@ function makeFakes(
         return true;
       },
       parkGroupReceipt: async (receipt, opts) => {
+        hooks.onPark?.();
         const slots = parked.get(receipt.messageSid) ?? new Map();
         const existing = slots.get(receipt.participantSid);
         if (existing !== undefined && existing.rank > opts.rank) return false;
@@ -438,6 +445,48 @@ describe('park and drain (a receipt CAN beat the append)', () => {
   it('draining with nothing parked is a cheap no-op', async () => {
     const f = makeFakes();
     expect(await f.service.drainParked('IMposted1')).toBe(0);
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, X2/C2). The park and the send's own drain
+  // race with no synchronisation: the park PutItem can still be IN FLIGHT while
+  // `drainParked` lists an empty set, so the park lands AFTER the only drain
+  // that would ever have run for it. The receipt was then stranded until its 24h
+  // TTL - the slot reading `Delivered 0/N` forever for a message that WAS
+  // delivered, and the staleness alarm ten minutes later blaming a Conversations
+  // webhook that is working perfectly. Whichever side loses the race must still
+  // converge, so the parking side re-reads once and applies what it just parked.
+  it('APPLIES a receipt whose message row appears while the park is in flight', async () => {
+    const f = makeFakes({ message: undefined });
+    // The append commits mid-park - exactly the window the send's drain misses.
+    f.hooks.onPark = () => {
+      f.messages.push(outboundGroupMessage());
+    };
+
+    const out = await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: 'SMann',
+    });
+
+    expect(out).toEqual({ outcome: 'applied', memberKey: ANN_KEY });
+    expect(f.messages[0]?.delivery_recipients?.[ANN_KEY]).toMatchObject({
+      status: 'delivered',
+      sid: 'SMann',
+    });
+    // ...and the park row is consumed, so a later drain cannot re-apply it.
+    expect(f.parked.get('IMposted1')?.size ?? 0).toBe(0);
+  });
+
+  it('leaves the receipt parked when the message still does not exist after the park', async () => {
+    const f = makeFakes({ message: undefined });
+    const out = await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+    });
+    expect(out).toEqual({ outcome: 'parked' });
+    expect(f.parked.get('IMposted1')?.size).toBe(1);
   });
 
   it('BOUNDS the park: past the cap a receipt is dropped with a counter, never accrued forever', async () => {

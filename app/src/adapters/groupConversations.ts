@@ -486,7 +486,11 @@ export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
   }
 
   async fetchByUniqueName(_uniqueName: string): Promise<GroupConversationRef | undefined> {
-    return undefined;
+    // REFUSE, like every other method here. Returning `undefined` reads as "no
+    // such rail exists", which sends ensureGroupRail down the create path to the
+    // throw below - the same end state, one wasted Twilio-shaped round trip, and
+    // a `rail_failed` reason that names creation rather than the real cause.
+    throw this.unavailable('group rail lookup');
   }
 
   async postGroupMessage(_input: PostGroupMessageInput): Promise<PostGroupMessageResult> {

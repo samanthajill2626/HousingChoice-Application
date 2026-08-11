@@ -81,7 +81,7 @@ import {
   type ParkedEmailEvent,
   groupCrossCheckDueSortKey,
   GROUP_CROSSCHECK_DUE_KIND,
-  GROUP_DUE_PARTITION,
+  GROUP_CROSSCHECK_DUE_PARTITION,
   type GroupDueRow,
   type ParkedGroupReceipt,
   type PendingCrossCheckEvent,
@@ -312,6 +312,8 @@ export interface FakeWorld {
   groupRailEnqueuer: GroupRailEnqueuer;
   /** T6.2 cross-check ledger: IM SIDs already recorded (the dedupe marker). */
   crossCheckMarkers: Set<string>;
+  /** The CLASSIC half's dedupe marker: SM/MM SIDs already filed into the ledger. */
+  crossCheckClassicMarkers: Set<string>;
   /** Events awaiting their classic filing, per (rail, author) pair. */
   crossCheckPending: Map<string, PendingCrossCheckEvent[]>;
   /** Classic filings that arrived first, per pair - ISO instants, oldest first. */
@@ -1144,6 +1146,14 @@ export function createFakeWorld(): FakeWorld {
       crossCheckMarkers.add(messageSid);
       return true;
     },
+    // MODELLED, not stubbed, for the same reason as the marker above: the
+    // wiring suite drives a REAL redelivery through the real filing path, and a
+    // fake that always said "fresh" would let the spurious-credit defect pass.
+    async claimCrossCheckClassic(providerSid) {
+      if (crossCheckClassicMarkers.has(providerSid)) return false;
+      crossCheckClassicMarkers.add(providerSid);
+      return true;
+    },
     async takeCrossCheckCredit(pairKey, notBeforeIso) {
       const credits = crossCheckCredits.get(pairKey) ?? [];
       // Newest first, and only inside the match window.
@@ -1162,7 +1172,7 @@ export function createFakeWorld(): FakeWorld {
       crossCheckPending.set(event.pairKey, pending);
       const sortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
       crossCheckDueRows.set(sortKey, {
-        partition: GROUP_DUE_PARTITION,
+        partition: GROUP_CROSSCHECK_DUE_PARTITION,
         sortKey,
         kind: GROUP_CROSSCHECK_DUE_KIND,
         deadlineAt: event.deadlineAt,
@@ -3132,6 +3142,7 @@ export function createFakeWorld(): FakeWorld {
     },
   };
   const crossCheckMarkers = new Set<string>();
+  const crossCheckClassicMarkers = new Set<string>();
   const crossCheckDueRows = new Map<string, GroupDueRow>();
   const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
   const crossCheckCredits = new Map<string, string[]>();
@@ -3222,6 +3233,7 @@ export function createFakeWorld(): FakeWorld {
     poolNumbersRepo,
     groupRailEnqueues,
     crossCheckMarkers,
+    crossCheckClassicMarkers,
     crossCheckPending,
     crossCheckCredits,
     groupRailEnqueuer,

@@ -49,6 +49,7 @@ import {
 } from '../repos/conversationsRepo.js';
 import {
   buildGroupSendDueRow,
+  buildTsMsgId,
   createMessagesRepo,
   GROUP_DUE_CLEANUP_MS,
   GROUP_SEND_STALENESS_MS,
@@ -310,7 +311,11 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
 
     const at = now();
     const deadlineAt = new Date(at.getTime() + GROUP_SEND_STALENESS_MS).toISOString();
-    const tsMsgIdForDue = `${posted.dateCreated}#${posted.messageSid}`;
+    // The EXPORTED builder, never a hand-rolled copy of it: this back-pointer is
+    // what the staleness sweep resolves the message by, and a drifted key would
+    // make every check return `missing`, count as cleared, and report a dead
+    // receipts webhook as healthy forever.
+    const tsMsgIdForDue = buildTsMsgId(posted.dateCreated, posted.messageSid);
     const appended = await messages.append({
       conversationId,
       providerSid: posted.messageSid,

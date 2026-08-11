@@ -11,8 +11,10 @@
 //   channel_quiet     - WARN when railed group threads took classic inbound in
 //                       the last 24h while the cross-check recorded nothing:
 //                       the monitor itself has died.
-//   heartbeat         - WARN when group threads exist but no group traffic has
-//                       been seen for seven days (spec 8 mechanism 3).
+//   heartbeat         - WARN when group threads exist but no group-origin
+//                       INBOUND has been seen for seven days (spec 8 mechanism
+//                       3). INBOUND, not activity: a staff reply must never be
+//                       able to silence the detector.
 //
 // CADENCE, NOT PER-POLL. The worker polls every 60s; these duties act ONCE per
 // elapsed period. The gate is a conditional claim on a settings record, so it
@@ -95,6 +97,13 @@ const DUTY_RECORD: Record<GroupGuardrailDuty, GroupPeriodRecordId> = {
 export const CHANNEL_QUIET_WINDOW_MS = DAY;
 /** How long group silence must last before the heartbeat WARNs (spec 8.3). */
 export const GROUP_HEARTBEAT_WINDOW_MS = 7 * DAY;
+/**
+ * How many group threads the heartbeat samples for the newest `created_at`. The
+ * list is ordered by ACTIVITY, so the newest-created thread is not necessarily
+ * first; one bounded page is enough to find it at this feature's scale (132
+ * threads all created at cutover).
+ */
+export const HEARTBEAT_THREAD_SAMPLE = 25;
 
 export interface RunGroupGuardrailsDeps {
   crossCheck?: Pick<GroupCrossCheck, 'sweepCrossCheckDeadlines'>;
@@ -205,19 +214,36 @@ export async function runGroupGuardrails(
       case 'heartbeat': {
         // Spec 8.3. Only meaningful while group threads exist - on a stack with
         // none, silence is correct and a WARN would be noise forever.
-        const page = await conversations.listGroupTexts({ limit: 1 });
-        const newest = page.items[0];
-        if (newest === undefined) {
+        const page = await conversations.listGroupTexts({ limit: HEARTBEAT_THREAD_SAMPLE });
+        if (page.items.length === 0) {
           outcome.results.heartbeat = { threads: 0, quiet: false };
           break;
         }
         const railedAt = await settings.getGroupTimestamp(GROUP_RAILED_INBOUND_LAST_AT_ID);
-        // The newest thread activity is a DELIBERATE fallback alongside the
-        // liveness record: the record is only written for RAILED threads, so a
-        // freshly migrated stack that has not been replied to yet would
-        // otherwise WARN on day one, which is a false alarm at cutover.
-        const activity = typeof newest.last_activity_at === 'string' ? newest.last_activity_at : '';
-        const lastSeen = railedAt !== undefined && railedAt > activity ? railedAt : activity;
+        // INBOUND ONLY - never `last_activity_at`. That field is bumped by every
+        // group SEND, so the failure this mechanism exists to catch (detection
+        // breaks, carrier group messages start filing as 1:1s) would keep it
+        // fresh forever through ordinary staff replies, and mechanism 3 could
+        // never fire while anyone was working. Spec 8.3 says "zero group-origin
+        // INBOUND for 7 days", and this now measures exactly that.
+        //
+        // The day-one protection the activity fallback was really providing is
+        // kept, bounded by thread CREATION instead: the railed-inbound record is
+        // only written for railed threads, so a freshly migrated stack that has
+        // not been texted yet would otherwise WARN at cutover. A group thread's
+        // `created_at` is itself an inbound-derived instant - migration stamps
+        // the cutover, and detection only mints a thread from a group inbound -
+        // so it is a grace window, never an activity signal. Sampled over a
+        // bounded page because the list is ordered by activity, not creation.
+        const newestCreatedAt = page.items.reduce(
+          (newestSoFar, item) =>
+            typeof item.created_at === 'string' && item.created_at > newestSoFar
+              ? item.created_at
+              : newestSoFar,
+          '',
+        );
+        const lastSeen =
+          railedAt !== undefined && railedAt > newestCreatedAt ? railedAt : newestCreatedAt;
         const since = new Date(nowMs - GROUP_HEARTBEAT_WINDOW_MS).toISOString();
         const quiet = lastSeen < since;
         if (quiet) {

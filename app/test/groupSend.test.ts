@@ -13,7 +13,8 @@ import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem, ConversationParticipant } from '../src/repos/conversationsRepo.js';
 import type { NewMessage } from '../src/repos/messagesRepo.js';
 import {
-  GROUP_DUE_PARTITION,
+  buildTsMsgId,
+  GROUP_SEND_DUE_PARTITION,
   GROUP_SEND_DUE_KIND,
   GROUP_SEND_STALENESS_MS,
 } from '../src/repos/messagesRepo.js';
@@ -245,7 +246,7 @@ describe('groupSend - the happy path', () => {
     // The due row rides the SAME append - not a follow-up write with a crash
     // window, because this sweep is the only detector of a dead receipts webhook.
     const deadline = new Date(NOW.getTime() + GROUP_SEND_STALENESS_MS).toISOString();
-    expect(appended?.dueRow?.partition).toBe(GROUP_DUE_PARTITION);
+    expect(appended?.dueRow?.partition).toBe(GROUP_SEND_DUE_PARTITION);
     expect(appended?.dueRow?.sortKey).toBe(`${deadline}#${GROUP_SEND_DUE_KIND}#IMposted1`);
     expect(appended?.dueRow?.attributes).toMatchObject({
       due_kind: GROUP_SEND_DUE_KIND,
@@ -253,6 +254,14 @@ describe('groupSend - the happy path', () => {
       ref_conversationId: 'group-1',
       provider_sid: 'IMposted1',
     });
+    // The back-pointer is built by the EXPORTED builder, not a hand-rolled copy
+    // (fix wave 4, X5). It is what the staleness sweep resolves the message by:
+    // a drifted key makes every check return `missing`, count as cleared, and
+    // report a dead receipts webhook as healthy forever. Asserted THROUGH
+    // buildTsMsgId so the two can never be pinned to a stale literal.
+    expect(appended?.dueRow?.attributes['ref_tsMsgId']).toBe(
+      buildTsMsgId('2026-08-11T13:00:00.500Z', 'IMposted1'),
+    );
   });
 
   it('gives the due row an expires_at horizon FAR past its own deadline (TTL is cleanup, never the alarm)', async () => {

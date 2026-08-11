@@ -248,6 +248,9 @@ function makeSendFakes(
     parkGroupReceipt: async () => true,
     listParkedGroupReceipts: async () => [],
     deleteParkedGroupReceipt: async () => {},
+    claimCrossCheckClassic: async () => {
+      throw new Error('claimCrossCheckClassic: not used in this suite');
+    },
     claimCrossCheckEvent: async () => {
       throw new Error('claimCrossCheckEvent: not used in this suite');
     },

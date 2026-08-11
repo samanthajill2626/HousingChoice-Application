@@ -105,7 +105,16 @@ export function conversationsStatusRuling(status: string): StatusRuling | undefi
   return CONVERSATIONS_DELIVERY_STATUS[status.trim().toLowerCase()];
 }
 
-/** Forward-only ordering used to coalesce within one parked slot. */
+/**
+ * Forward-only ordering used to coalesce within one PARKED slot.
+ *
+ * DELIBERATELY COARSER than the real slot's guard: every terminal status shares
+ * rank 2, so `delivered`, `failed` and `undelivered` are interchangeable here
+ * and the last writer wins. A leg reaches exactly one terminal state, so a
+ * second terminal for the same MBxx is not a state a carrier produces - and the
+ * moment the park drains, `updateRecipientDeliveryStatus`'s prior-status
+ * condition applies the strict ordering anyway.
+ */
 export function receiptRank(status: string): number {
   const ruling = conversationsStatusRuling(status);
   if (ruling === undefined || ruling.kind === 'ignore') return 0;
@@ -166,8 +175,10 @@ export interface GroupReceiptsService {
   applyReceipt(input: GroupReceiptInput): Promise<GroupReceiptOutcome>;
   /**
    * Drain every receipt parked for an IMxx now that its message row exists.
-   * Called by the send path immediately after the append; returns how many
-   * parked receipts were consumed.
+   * THREE things run it, because one point-in-time call is not a recovery path:
+   * the send path immediately after its append (the common case), the park
+   * itself when the append commits mid-park, and the T6.4 staleness sweep before
+   * it decides a send is stale. Returns how many parked receipts were consumed.
    */
   drainParked(providerSid: string): Promise<number>;
 }
@@ -310,7 +321,10 @@ export function createGroupReceiptsService(
     return { outcome: 'duplicate', memberKey };
   }
 
-  async function park(input: GroupReceiptInput): Promise<GroupReceiptOutcome> {
+  async function park(
+    input: GroupReceiptInput,
+    ruling: { status: DeliveryStatus },
+  ): Promise<GroupReceiptOutcome> {
     const existing = await messages.listParkedGroupReceipts(input.messageSid);
     const isNewSlot = !existing.some((p) => p.participantSid === input.participantSid);
     if (isNewSlot && existing.length >= MAX_PARKED_GROUP_RECEIPTS) {
@@ -339,7 +353,25 @@ export function createGroupReceiptsService(
       { event: 'group_receipt_parked', providerSid: input.messageSid },
       'group delivery receipt arrived before its message - parked for the post-append drain',
     );
-    return { outcome: 'parked' };
+
+    // CLOSE THE LOST-UPDATE WINDOW AT ITS SOURCE. The send drains parked
+    // receipts right after its append, and this park can still be IN FLIGHT
+    // while that drain lists an empty set - in which case the park lands after
+    // the only drain that would ever have run for it. Re-reading the message
+    // here means whichever side loses the race still converges: if the append
+    // committed while we were parking, we apply the receipt ourselves and
+    // consume the row. Without this, the slot reads `Delivered 0/N` forever for
+    // a message that WAS delivered, and the staleness alarm fires ten minutes
+    // later blaming a webhook that is working perfectly.
+    const message = await messages.getByProviderSid(input.messageSid);
+    if (message === undefined) return { outcome: 'parked' };
+    const applied = await applyToMessage(message, input, ruling);
+    await messages.deleteParkedGroupReceipt(input.messageSid, input.participantSid);
+    log.info(
+      { event: 'group_receipt_park_raced', providerSid: input.messageSid },
+      'the message row appeared while its receipt was parking - applied directly and the park consumed',
+    );
+    return applied;
   }
 
   async function applyOne(
@@ -371,7 +403,7 @@ export function createGroupReceiptsService(
     }
     if (!message) {
       if (!opts.allowPark) return { outcome: 'dropped', reason: 'unknown_message' };
-      return park(input);
+      return park(input, ruling);
     }
     return applyToMessage(message, input, ruling);
   }

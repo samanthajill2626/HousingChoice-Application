@@ -189,11 +189,22 @@ describe('cross-check channel quiet', () => {
 });
 
 describe('group inbound heartbeat', () => {
-  const groupThread = (lastActivityAt: string) =>
+  /**
+   * One group thread. `createdAt` is the MIGRATION/detection instant (an
+   * inbound-derived signal); `lastActivityAt` is bumped by every group SEND and
+   * must NEVER be able to quiet this duty - that is the whole point of the fix.
+   */
+  const groupThread = (createdAt: string, lastActivityAt = '2026-08-11T11:59:00.000Z') =>
     ({
       async listGroupTexts() {
         return {
-          items: [{ conversationId: 'convGroup:x', last_activity_at: lastActivityAt }],
+          items: [
+            {
+              conversationId: 'convGroup:x',
+              created_at: createdAt,
+              last_activity_at: lastActivityAt,
+            },
+          ],
           truncated: false,
         };
       },
@@ -213,9 +224,35 @@ describe('group inbound heartbeat', () => {
     );
   });
 
-  it('stays silent when a group thread saw activity inside the window', async () => {
+  // THE DEFECT THIS PINS (fix wave 4, C4). The duty used to fall back to the
+  // newest thread's `last_activity_at`, which every group SEND bumps. So the
+  // exact failure mechanism 3 exists to catch - detection breaks, carrier group
+  // messages start filing as 1:1s, staff keep replying into the group threads -
+  // kept the fallback fresh forever and the WARN could never fire. Only INBOUND
+  // signals may quiet it.
+  it('still WARNs while STAFF REPLIES keep last_activity_at fresh', async () => {
     const { deps, log } = makeDeps({
-      conversationsRepo: groupThread('2026-08-10T12:00:00.000Z'),
+      // Migrated long ago; no railed inbound at all; but a staff member sent
+      // into the thread a minute ago.
+      conversationsRepo: groupThread('2026-08-01T12:00:00.000Z', '2026-08-11T11:59:00.000Z'),
+    });
+
+    const outcome = await runGroupGuardrails(T0, deps, { duties: ['heartbeat'] });
+
+    expect(outcome.results.heartbeat).toMatchObject({ quiet: true });
+    expect(log.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ event: 'group_inbound_heartbeat_quiet' }),
+      'no group-origin inbound in seven days while group threads are active',
+    );
+  });
+
+  it('stays silent when railed INBOUND arrived inside the window', async () => {
+    const settings = makeSettings({
+      [GROUP_RAILED_INBOUND_LAST_AT_ID]: '2026-08-10T12:00:00.000Z',
+    });
+    const { deps, log } = makeDeps({
+      settingsRepo: settings as never,
+      conversationsRepo: groupThread('2026-08-01T12:00:00.000Z'),
     });
     const outcome = await runGroupGuardrails(T0, deps, { duties: ['heartbeat'] });
     expect(outcome.results.heartbeat).toMatchObject({ quiet: false });
@@ -224,7 +261,8 @@ describe('group inbound heartbeat', () => {
 
   it('a freshly migrated stack with no replies yet does NOT warn on day one', async () => {
     // Every thread was just converted; nobody has texted back. The liveness
-    // record is absent because no railed inbound has arrived.
+    // record is absent because no railed inbound has arrived. The grace comes
+    // from thread CREATION, not from activity.
     const { deps, log } = makeDeps({
       conversationsRepo: groupThread('2026-08-11T11:00:00.000Z'),
     });

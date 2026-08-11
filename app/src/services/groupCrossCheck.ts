@@ -42,10 +42,11 @@ import {
   GROUP_CROSSCHECK_CLEANUP_MS,
   GROUP_CROSSCHECK_CREDIT_MS,
   GROUP_CROSSCHECK_DUE_KIND,
+  GROUP_CROSSCHECK_DUE_PARTITION,
   GROUP_CROSSCHECK_GRACE_MS,
-  GROUP_DUE_PARTITION,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
+import { normalizeToE164 } from '../lib/phone.js';
 import {
   createSettingsRepo,
   GROUP_CROSSCHECK_LAST_EVENT_AT_ID,
@@ -63,17 +64,34 @@ export interface CrossCheckAlarm {
 }
 
 export interface CrossCheckSweepOutcome {
-  /** Due rows examined (both kinds - the partition is shared). */
+  /** Due rows examined from the cross-check's own deadline partition. */
   scanned: number;
   alarms: CrossCheckAlarm[];
+}
+
+/**
+ * THE ONE PAIR-KEY BUILDER, used by BOTH halves of the ledger.
+ *
+ * The match only works if the classic side and the Conversations side produce
+ * the IDENTICAL string, and they derive it from different Twilio params
+ * (`From` vs the event `Author`). Spec 4.1 makes normalization part of the
+ * contract, so it happens HERE rather than at two call sites that can drift: a
+ * single non-canonical address would otherwise send every event for that member
+ * pending and alarm `group_crosscheck_inbound_missing` on healthy traffic.
+ */
+export function groupCrossCheckMemberKey(author: string): string {
+  return groupMemberKey(normalizeToE164(author) ?? author);
 }
 
 export interface ClassicInboundRecord {
   /** CHxx of the rail the thread is bound to. */
   conversationSid: string;
-  /** `phone#<E164>` of the SENDER (spec 15.6 member keys are phone-scoped). */
-  memberKey: string;
-  /** The classic provider SID, for the log line only. */
+  /**
+   * The SENDER's RAW address (the webhook's `From`). Normalized into a member
+   * key by `groupCrossCheckMemberKey` here, NEVER by the caller - see above.
+   */
+  author: string;
+  /** The classic provider SID. The ledger's dedupe key, and the log line. */
   providerSid?: string;
 }
 
@@ -90,6 +108,7 @@ export interface GroupCrossCheckDeps {
   messagesRepo?: Pick<
     MessagesRepo,
     | 'claimCrossCheckEvent'
+    | 'claimCrossCheckClassic'
     | 'takeCrossCheckCredit'
     | 'putCrossCheckPending'
     | 'takeCrossCheckPending'
@@ -191,7 +210,10 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
         return;
       }
 
-      const pairKey = groupCrossCheckPairKey(event.conversationSid, groupMemberKey(author));
+      const pairKey = groupCrossCheckPairKey(
+        event.conversationSid,
+        groupCrossCheckMemberKey(author),
+      );
       const notBefore = new Date(at.getTime() - creditWindowMs).toISOString();
       if (await messages.takeCrossCheckCredit(pairKey, notBefore)) {
         log.info(
@@ -222,7 +244,40 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
       // NEVER throws: this runs inside the inbound webhook, and a cross-check
       // bookkeeping failure must not cost us a real message.
       try {
-        const pairKey = groupCrossCheckPairKey(record.conversationSid, record.memberKey);
+        const memberKey = groupCrossCheckMemberKey(record.author);
+        const pairKey = groupCrossCheckPairKey(record.conversationSid, memberKey);
+        const at = now();
+        // DEDUPE, SYMMETRIC WITH THE CONVERSATIONS HALF. Twilio redelivers the
+        // messaging webhook, and this step is NOT idempotent on its own: the
+        // credit's sort key carries a fresh `filedAt`, so a redelivery banked a
+        // SECOND credit for the pair. Nothing ever consumes that phantom - until
+        // detection genuinely breaks and an event arrives whose classic filing
+        // never came, at which point the phantom absorbs it, no pending row is
+        // written and NO ALARM EVER FIRES. That is precisely the failure this
+        // guardrail exists to detect, so the classic half must be as
+        // dedupe-safe as `claimCrossCheckEvent` already makes the other one.
+        if (record.providerSid !== undefined) {
+          const fresh = await messages.claimCrossCheckClassic(
+            record.providerSid,
+            {
+              conversationSid: record.conversationSid,
+              memberKey,
+              filedAt: at.toISOString(),
+            },
+            cleanupAt(at),
+          );
+          if (!fresh) {
+            log.info(
+              {
+                event: 'group_crosscheck_classic_duplicate',
+                providerSid: record.providerSid,
+                conversationSid: record.conversationSid,
+              },
+              'classic group inbound already recorded in the cross-check ledger - redelivery ignored',
+            );
+            return;
+          }
+        }
         const pending = await messages.takeCrossCheckPending(pairKey);
         if (pending !== undefined) {
           log.info(
@@ -236,7 +291,6 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           );
           return;
         }
-        const at = now();
         await messages.putCrossCheckCredit(
           pairKey,
           at.toISOString(),
@@ -259,10 +313,25 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
       // Normalized: sort keys are compared LEXICOGRAPHICALLY, so '...00Z' and
       // '...00.000Z' must collapse to one form.
       const through = new Date(nowIso).toISOString();
-      const due = await messages.listDueRows(GROUP_DUE_PARTITION, through, SWEEP_BATCH);
+      // THE CROSS-CHECK'S OWN PARTITION. It used to share one with the
+      // send-staleness sweep and drop the other kind AFTER the Limit was spent,
+      // so a backlog of one kind starved the other exactly when both webhooks
+      // were most likely broken at once. The kind guard below is now a
+      // structural assertion, not a filter: a foreign row here is a bug.
+      const due = await messages.listDueRows(
+        GROUP_CROSSCHECK_DUE_PARTITION,
+        through,
+        SWEEP_BATCH,
+      );
       const alarms: CrossCheckAlarm[] = [];
       for (const row of due) {
-        if (row.kind !== GROUP_CROSSCHECK_DUE_KIND) continue;
+        if (row.kind !== GROUP_CROSSCHECK_DUE_KIND) {
+          log.error(
+            { event: 'group_due_partition_foreign_row', kind: row.kind, sortKey: row.sortKey },
+            'a non-cross-check row is sitting in the cross-check deadline partition',
+          );
+          continue;
+        }
         const alarm: CrossCheckAlarm = {
           messageSid: row.providerSid ?? '',
           conversationSid: row.conversationSid ?? '',

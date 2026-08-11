@@ -87,7 +87,11 @@ describe('messagesRepo.append dedupe (fake document client)', () => {
           throw new TransactionCanceledException({
             $metadata: {},
             message: 'Transaction cancelled',
-            CancellationReasons: [{ Code: 'ConditionalCheckFailed' }, { Code: 'None' }],
+            // FAITHFUL TO DYNAMODB: CancellationReasons is index-aligned with
+            // TransactItems, and on a redelivery it is the SID POINTER (item 1)
+            // whose condition fails - the message row's own key carries the NEW
+            // first-seen providerTs, so item 0 would have succeeded.
+            CancellationReasons: [{ Code: 'None' }, { Code: 'ConditionalCheckFailed' }],
           });
         }
         if (cmd instanceof GetCommand && cmd.input.Key?.['conversationId'] === 'sid#SMdup1') {
@@ -123,6 +127,56 @@ describe('messagesRepo.append dedupe (fake document client)', () => {
 
     expect(result.deduped).toBe(true);
     expect(result.tsMsgId).toBe(persistedTsMsgId); // NOT 2026-06-12T10:09:59.000Z#SMdup1
+  });
+
+  // A condition failure ANYWHERE ELSE in the transaction is NOT a dedupe: the
+  // whole transaction rolled back, so there is no message row and no SID
+  // pointer. Inferring "deduped" from the transaction as a whole reported a
+  // send as persisted when nothing was written and handed the caller a tsMsgId
+  // that addresses nothing - the group send would then drain, touch, emit SSE
+  // and schedule a staleness watch for a message that does not exist.
+  it('does NOT report a dedupe when the failing condition is not the SID pointer', async () => {
+    const fakeDoc = {
+      send: async (cmd: unknown) => {
+        if (cmd instanceof TransactWriteCommand) {
+          throw new TransactionCanceledException({
+            $metadata: {},
+            message: 'Transaction cancelled',
+            // Item 3 is the group send's DUE ROW; the SID pointer succeeded.
+            CancellationReasons: [
+              { Code: 'None' },
+              { Code: 'None' },
+              { Code: 'ConditionalCheckFailed' },
+            ],
+          });
+        }
+        throw new Error(`unexpected command: ${String(cmd)}`);
+      },
+    } as unknown as DynamoDBDocumentClient;
+
+    const repo = createMessagesRepo({
+      doc: fakeDoc,
+      env: { TABLE_PREFIX: 'hc-fake-' } as NodeJS.ProcessEnv,
+      logger: createLogger({ destination: createLogCapture().stream }),
+    });
+
+    await expect(
+      repo.append({
+        conversationId: 'conv-1',
+        providerSid: 'IMdue1',
+        providerTs: '2026-06-12T10:09:59.000Z',
+        type: 'sms',
+        direction: 'outbound',
+        author: 'teammate',
+        body: 'hello',
+        deliveryStatus: 'queued',
+        dueRow: {
+          partition: 'groupdue#send',
+          sortKey: '2026-06-12T10:19:59.000Z#group_send_staleness#IMdue1',
+          attributes: { due_kind: 'group_send_staleness' },
+        },
+      }),
+    ).rejects.toBeInstanceOf(TransactionCanceledException);
   });
 });
 

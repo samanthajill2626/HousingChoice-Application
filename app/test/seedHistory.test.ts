@@ -793,7 +793,13 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     } finally {
       doc.destroy();
     }
-  }, 60_000);
+    // 120s, matching this describe's own beforeAll/afterAll. NOT a slow test: it
+    // runs in ~6s on its own. In-suite it shares DynamoDB Local with every other
+    // integration file and the whole `full` seed round-trip measured 57.0s
+    // against the old 60s budget on 2026-08-11 - a three-second margin, i.e. it
+    // was going to fail on the next slow day whatever anyone did to the seed.
+    // Budget, not work: raise it to where the surrounding hooks already are.
+  }, 120_000);
 
   it('a seeded TOURED tour reads back as a newest-first tours# trail projecting to known labels', async () => {
     // Task 2: the tour detail page's Activity read is auditRepo.listByEntity
@@ -880,7 +886,8 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     } finally {
       doc.destroy();
     }
-  }, 60_000);
+    // Same reasoning as its sibling above: 120s to match this describe's hooks.
+  }, 120_000);
 });
 
 // ---------------------------------------------------------------------------

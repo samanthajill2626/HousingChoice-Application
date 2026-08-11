@@ -1236,6 +1236,40 @@ built-in prod mode, exactly like `db:seed`. Set them deliberately per stage.
   (diff contact ids between two exports). If they turn out to be per-export, the
   fallback is a content hash — one function, not a redesign.
 
+## Group identity exclusion list (GROUP_IDENTITY_EXCLUDED_NUMBERS)
+
+The org's OTHER numbers, subtracted from a carrier group's roster before the group
+thread id is derived. It is part of the group-thread IDENTITY contract, not ordinary
+config: ids are `uuidv5(sorted roster)`, so changing the list re-mints the
+conversationId of every group containing a changed number. The old threads are
+orphaned (nothing points at them) and the next inbound opens a SECOND thread for the
+same people.
+
+Set it in `.env.dev` / `.env.prod` (comma-separated E.164, or the literal `none` to
+assert the org has no extra numbers), then `npm run secrets:push -- <env>` and deploy.
+A deployed stack REFUSES TO BOOT when the key is missing or blank.
+
+**Boot fingerprint.** On its first deployed boot the app writes a sha256 of the sorted
+list to the `settings` table (`settingId = group_identity_fingerprint`) and compares on
+every later boot. A mismatch refuses the boot with the message pointing here. Local and
+hermetic stacks skip the check (reseeds wipe that table).
+
+**Changing the list deliberately** — treat as a migration, in this order:
+
+1. Record the decision and WHY (which numbers, which direction). Adding a number
+   REMOVES a member from every roster containing it; removing one ADDS a member back.
+2. Write the thread-merge plan: list the affected group threads (their ids change), and
+   decide per thread whether history moves to the new id or the old thread is retired.
+   There is no automatic merge.
+3. Push the new value and deploy.
+4. Reset the fingerprint LAST, after 1-3 are done: delete the
+   `group_identity_fingerprint` item from the `settings` table
+   (`aws dynamodb delete-item --table-name hc-<env>-settings --key '{"settingId":{"S":"group_identity_fingerprint"}}' --profile <hc profile> --region us-east-1`),
+   then restart the app so the next boot re-pins it.
+
+Deleting the fingerprint item WITHOUT steps 1-3 is the failure mode this guard exists
+to prevent: the boot then succeeds and the thread population forks silently.
+
 ## Rollback
 
 One-liner per env (re-deploys an EXISTING ECR tag — no build, ~20–25 s end to end):

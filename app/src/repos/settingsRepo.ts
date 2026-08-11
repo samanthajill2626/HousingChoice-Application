@@ -13,12 +13,14 @@
 // EDITS these values — nothing reads them to send a text yet.
 //
 // Item is a flexible document; only the key (settingId) is contractual.
-import { GetCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
+import { ConditionalCheckFailedException } from '@aws-sdk/client-dynamodb';
+import { GetCommand, PutCommand, UpdateCommand } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { DEFAULT_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
+import type { GroupFingerprintClaim } from '../services/groupIdentityFingerprint.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /** The singleton org-settings item id (per-user rows would use other ids later). */
@@ -26,6 +28,14 @@ export const ORG_SETTINGS_ID = 'org';
 
 /** Audit entityKey for the org-settings item (auditRepo `<table>#<id>` convention). */
 export const ORG_SETTINGS_ENTITY_KEY = `settings#${ORG_SETTINGS_ID}`;
+
+/**
+ * Settings item holding the group-identity exclusion fingerprint (native group
+ * texting, spec 4.1). NOTE the underscores: the two older records use hyphens
+ * (`org`, `contact-vocabulary`); this id is the one adjudicated in the mission
+ * worklist and is shared with the other group records, so it is kept verbatim.
+ */
+export const GROUP_IDENTITY_FINGERPRINT_ID = 'group_identity_fingerprint';
 
 /**
  * The founder-editable settings (CO2). Defaults are CO2's copy, applied by
@@ -103,6 +113,17 @@ export interface SettingsRepo {
    * A `null`-valued field (today only welcomeText) is REMOVEd (cleared).
    */
   putOrgSettings(patch: OrgSettingsPatch): Promise<OrgSettings>;
+  /**
+   * Claim the group-identity exclusion fingerprint (native group texting).
+   *
+   * FIRST-WRITE RACE: this is a CONDITIONAL create
+   * (`attribute_not_exists(settingId)`), NOT putOrgSettings' unconditional
+   * upsert - two instances booting together must not both "win" and leave the
+   * second one's list silently blessed. The conditional loser re-reads and
+   * COMPARES: same hash -> `matched`, different -> `mismatch` (the caller then
+   * refuses to start). Never throws on a lost race; only on a corrupt record.
+   */
+  claimGroupIdentityFingerprint(hash: string): Promise<GroupFingerprintClaim>;
 }
 
 export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
@@ -216,6 +237,37 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
       // audit event records the actual change at the route).
       log.info({ fields: sets.length + removes.length }, 'org settings updated');
       return toOrgSettings(Attributes as Record<string, unknown> | undefined);
+    },
+
+    async claimGroupIdentityFingerprint(hash) {
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: { settingId: GROUP_IDENTITY_FINGERPRINT_ID, hash, at: new Date().toISOString() },
+            ConditionExpression: 'attribute_not_exists(settingId)',
+          }),
+        );
+        log.info({ settingId: GROUP_IDENTITY_FINGERPRINT_ID }, 'group identity fingerprint written');
+        return { outcome: 'created' };
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Someone (an earlier boot, or the instance next to us) already holds it.
+        // Re-read and compare - the house "loser re-reads" idiom.
+        const { Item } = await doc.send(
+          new GetCommand({
+            TableName: table,
+            Key: { settingId: GROUP_IDENTITY_FINGERPRINT_ID },
+          }),
+        );
+        const stored = (Item as { hash?: unknown } | undefined)?.hash;
+        if (typeof stored !== 'string' || stored.length === 0) {
+          throw new Error(
+            'group identity fingerprint exists per the conditional put but carries no hash',
+          );
+        }
+        return stored === hash ? { outcome: 'matched' } : { outcome: 'mismatch', storedHash: stored };
+      }
     },
   };
 }

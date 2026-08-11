@@ -110,6 +110,29 @@ if (config.jobsQueueUrl) {
   });
 }
 
+// Native group texting (spec 4.1): GROUP_IDENTITY_EXCLUDED_NUMBERS is part of
+// the group-thread IDENTITY contract, so a DEPLOYED stack pins a fingerprint of
+// it on first boot and REFUSES to start when the configured list stops matching
+// (changing it re-mints every affected group's conversationId - a migration, not
+// a config edit). Local/hermetic stacks skip it: reseeds wipe the settings table,
+// where the fingerprint would protect nothing and break every lane. Deliberately
+// BEFORE the server listens - a stack that would mint wrong ids must not serve.
+{
+  const { createSettingsRepo } = await import('./repos/settingsRepo.js');
+  const { verifyGroupIdentityFingerprint } = await import(
+    './services/groupIdentityFingerprint.js'
+  );
+  await runWithContext(bootContext, async () =>
+    verifyGroupIdentityFingerprint({
+      store: createSettingsRepo(),
+      excludedNumbers: config.groupIdentityExcludedNumbers,
+      // Deployed stacks pin NODE_ENV=production (see lib/config.ts).
+      deployed: config.nodeEnv === 'production',
+      logger,
+    }),
+  );
+}
+
 // One epoch cache shared by the app's auth middleware AND the dev router, so
 // /__dev/reseed can clear it after wiping + reseeding the users table.
 const { createSessionEpochCache } = await import('./middleware/auth.js');

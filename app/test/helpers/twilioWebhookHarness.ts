@@ -1395,6 +1395,11 @@ export function createFakeWorld(): FakeWorld {
       }
       return { ...settings };
     },
+    async claimGroupIdentityFingerprint() {
+      // The fingerprint is a DEPLOYED-stack boot guard; no webhook path touches
+      // it. Throw so an accidental call is loud rather than silently "created".
+      throw new Error('claimGroupIdentityFingerprint: not used in the webhook harness');
+    },
   };
 
   // Fake vocabulary repo (Task 4): accumulates tokens in three in-memory Sets;

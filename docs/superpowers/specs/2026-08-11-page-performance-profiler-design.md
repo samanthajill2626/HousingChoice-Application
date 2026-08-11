@@ -121,7 +121,7 @@ explicitly instead of left in conflict:
 | D6 | Interaction scope | Navigation and observation only; no workflow controls are exercised. |
 | D7 | Page modes | Cold direct loads plus warm in-app navigations. |
 | D8 | Evidence | Privacy-safe performance evidence only. |
-| D9 | Hosted safety | Interactive in-memory auth, `env === "dev"` proof, and a strict write firewall. |
+| D9 | Hosted safety | Interactive in-memory auth, `env === "dev"` proof, and a scoped write firewall covering every navigation-triggered mutation path (section 6; the scope and its residual surface are stated, not "strict" as a slogan). |
 | D10 | Comparison | Built-in baseline comparison. |
 | D11 | Automation | On-demand only; no CI or enforced budget. |
 | D12 | Dependencies | Use Node, TypeScript/tsx, and the existing Playwright dependency; add no runtime dependency. |
@@ -321,8 +321,16 @@ For every measured context:
 
 Interception has a per-request cost even when scoped. The scoped design exists
 so that the cost lands only on API-class requests and is identical across
-routes, repeats, and baselines. The end-to-end proof that no write escapes
-remains the hermetic smoke assertion that the fake server observed no write.
+routes, repeats, and baselines.
+
+Two proofs keep the scope honest. A mutation-path inventory test (section 15.1)
+enumerates every client mutation call site reachable by navigation - the
+mark-read family across contact, conversation, inbox row, email row, and the
+tour/placement channel tabs - and asserts each one's endpoint falls inside the
+intercepted path scope, so a future mutation added outside `/api/**` fails the
+test rather than silently bypassing the firewall. And the full-registry
+self-QA run (section 15.3) asserts app state unchanged for EACH enumerated
+automatic write surface, not just one of them.
 
 A blocked mount-time mark-read is expected evidence, not a profiler failure. The
 route remains measurable when the application treats the failed mark-read as
@@ -644,8 +652,11 @@ patterns are found, or on the repository's entity-ID shapes - raw entity IDs are
 not phone/email-shaped, so they need their own scan patterns. The pattern list
 is derived from the repository's actual ID constructors and seed namespaces,
 not hand-enumerated: every known entity prefix (`contact`, `unit`, `conv`,
-`tour`, `placement`, `broadcast`, `user`, `msg`, `perf`) followed by a UUID,
-digit run, or slug tail, plus bare UUIDs and ULID-like tokens. Matching is
+`tour`, `placement`, `bcast`, `broadcast`, `user`, `msg`, `perf`) followed by a
+UUID, digit run, or slug tail, plus bare UUIDs and ULID-like tokens. `bcast` is
+the PRODUCTION broadcast prefix (`bcast-${randomUUID()}` in the repo);
+`broadcast` covers the seed namespace - deriving from the actual constructors
+means both, and the per-kind negative tests feed each real shape through. Matching is
 substring, not whole-segment, so an ID embedded in a longer value still trips
 it. Patterns match full ID shapes, never bare prefixes, and the known sanitized
 template literals and `:placeholder` tokens are exempt - otherwise the scan
@@ -700,8 +711,20 @@ what the scale-100 arithmetic in section 11.4 assumes.
 
 The lean seed remains present for stable admin identities and canonical route
 fixtures. Generated records use a reserved `perf-` ID namespace and fake `+1555`
-numbers. Values are deterministic for the resolved configuration and contain no
-real data.
+numbers. Values are deterministic for the resolved configuration plus a seed
+anchor, and contain no real data.
+
+The seed anchor is the clock contract: the generator captures ONE anchor
+timestamp at validation time and derives every time value from it - tour
+`scheduledAt` spread across the anchor's next 30 days (the `/tours` window
+reads `[start-of-today, +30 days]` against the live clock), `last_activity_at`,
+`created_at`, placement timestamps, and Today's due/upcoming windows. The
+anchor is recorded in the count manifest. "Deterministic" therefore means
+configuration + anchor reproduce the same dataset; two runs at different times
+produce time-shifted but structurally identical datasets. Without an anchor
+contract, fixed timestamps silently age out of the time-windowed readers
+(`/tours`, `/api/today`) and those routes go empty while the spec promises
+representative rows.
 
 Per-entity overrides replace, rather than add to, the scale-derived generated
 count. Referential links use the deterministic generated tenant, landlord, or unit
@@ -874,14 +897,27 @@ The runner accepts:
 --baseline=<path-to-summary.json>
 ```
 
-Comparison requires the same schema version and route key. It reports target mode,
-git commit, scale/count manifest, browser version, browser channel, OS, Node
-version, repeat counts, interception scope, settle window, readiness poll
-interval, and timestamps so a reviewer can judge whether two runs are comparable.
+Comparison requires the same schema version and route key. It reports target
+mode, profiler commit, target app revision, scale/count manifest with its seed
+anchor, browser version, browser channel, viewport, OS, Node version, cold and
+warm repeat counts, route-order seed, interception scope, settle window,
+readiness poll interval, and timestamps so a reviewer can judge whether two
+runs are comparable.
 
-When target kind, scale manifest, route set, browser major version, browser
-channel, interception scope, settle window, or readiness poll interval differs,
-the comparison is labeled `environment_mismatch` and lists the mismatches. It still computes route deltas but never presents them
+Profiler commit and target app revision are separate fields, because the
+runner's checkout does not identify the application being measured. Hermetic
+mode gets the target revision from `/__dev/ping`'s `appCommit`, which the e2e
+launcher populates. On a manual local stack that field is normally null, and
+the hosted flags endpoint exposes no commit at all - in both cases the target
+revision is recorded as `target_version_unverified`, and a comparison where
+either side is unverified or the two revisions differ is an
+`environment_mismatch`.
+
+When target kind, scale manifest, route set, target app revision (missing or
+differing), browser major version, browser channel, viewport, cold or warm
+repeat count, route-order seed, interception scope, settle window, or readiness
+poll interval differs, the comparison is labeled `environment_mismatch` and
+lists the mismatches. It still computes route deltas but never presents them
 as controlled proof.
 
 For each matching route and cold/warm mode, compare median:
@@ -1043,7 +1079,12 @@ messages to the terminal.
 - cold/warm aggregation, null metrics, low sample count, and percentile rule.
 - baseline deltas, zero baseline, missing routes, and environment mismatch.
 - scale resolution, overrides, every bound, and total-item cap.
-- deterministic seed output and ID uniqueness.
+- deterministic seed output for a fixed configuration + anchor, ID uniqueness,
+  and time-window coverage: at any anchor, the generated dataset puts
+  representative rows inside the `/tours` 30-day window and Today's
+  due/upcoming windows.
+- the mutation-path inventory: every navigation-reachable client mutation call
+  site maps to an intercepted path (section 6).
 - referential integrity across contacts, units, placements, tours, conversations,
   messages, and broadcasts.
 - fixed-ratio coverage for list statuses/types and guaranteed detail fixtures.
@@ -1072,17 +1113,26 @@ convention) and assert the section 11.2 physical/query contract, which is
 app-owned. They never import the e2e-workspace route registry. The
 registry-to-endpoint binding (that each registry entry's declared endpoint
 templates and fixture predicates match what its route actually requests) is
-observable only at runtime, so it is asserted by the hermetic smoke (section
-15.3): every measured route's observed sanitized API templates must be a
-subset of its registry entry's declared set. Section 15.1's unit tests cover
+observable only at runtime, so it is asserted by the full-registry self-QA run
+(section 15.3), which measures every registry entry: each route's observed
+sanitized API templates must be a subset of its registry entry's declared set. Section 15.1's unit tests cover
 only what is statically checkable - registry completeness against the
 implemented route table and registry well-formedness - and the runtime
 `unmatched_api` flag feeds ongoing registry maintenance.
 
 ### 15.3 Profiler smoke
 
-Run one cold and one warm sample over a narrow hermetic route subset at scale 1.
-Assert:
+Two tiers, both hermetic:
+
+- NARROW SMOKE, for quick iteration: one cold and one warm sample over a small
+  route subset at scale 1.
+- FULL-REGISTRY SELF-QA, the pre-handback live verification: one cold and one
+  warm sample for EVERY registry entry at scale 1. The registry-to-endpoint
+  binding check and the per-surface write assertions below run here, because a
+  narrow subset cannot validate declarations it never exercises - a registry
+  entry outside the subset could carry a wrong endpoint contract undetected.
+
+Assert (narrow smoke on its subset; full-registry self-QA on everything):
 
 - the runner starts and stops its lane;
 - the output files exist and pass the privacy scan;
@@ -1091,16 +1141,21 @@ Assert:
   registry entry's declared templates - this is the live registry-to-endpoint
   binding check, and the only place it is observable (section 15.2);
 - a detail-page mark-read attempt is blocked and recorded;
-- the blocked write did not land: a conversation visited with a non-zero unread
-  count still has the same unread count when re-read over the API afterward
-  (the mark-read is exactly the write that would have zeroed it), and
-  `GET /__dev/outbox` shows no new outbound message. A fake-twilio no-SMS check
-  alone would be vacuous here - the enumerated mount-time writes are app-side
-  POSTs that never touch the comms mock, so the proof must observe app state;
+- no blocked write landed, observed in app state per enumerated surface. In the
+  full-registry self-QA this covers EVERY automatic write surface from section
+  6: the visited contact's unread state, the visited relay conversation's
+  unread state, the inbox row's read state, the email row's read state, and the
+  tour/placement channel read states are each re-read over the API afterward
+  and asserted unchanged; `GET /__dev/outbox` shows no new outbound message.
+  The narrow smoke asserts the surfaces its subset touches. A fake-twilio
+  no-SMS check alone would be vacuous here - the enumerated mount-time writes
+  are app-side POSTs that never touch the comms mock, so the proof must observe
+  app state;
 - the report includes route ranking and a count manifest.
 
-This smoke is an explicit feature verification command and live self-QA step, not a
-new full-suite test repeated inside every existing Playwright spec.
+Both tiers are explicit feature verification commands, not a new full-suite
+test repeated inside every existing Playwright spec. The full-registry self-QA
+is the live self-QA step reported at handback.
 
 ### 15.4 Required repository gates
 
@@ -1110,9 +1165,9 @@ Before handback, after the final `main` sync:
 2. `npm test`
 3. `npm run e2e`
 
-Run a real hermetic profiler smoke separately and report its exit code and artifact
-path. Do not run it concurrently with the worktree's full e2e suite or interactive
-session.
+Run the real hermetic full-registry self-QA (section 15.3) separately and report
+its exit code and artifact path. Do not run it concurrently with the worktree's
+full e2e suite or interactive session.
 
 ## 16. Documentation
 

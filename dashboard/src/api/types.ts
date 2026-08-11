@@ -2088,6 +2088,11 @@ export type TimelineMilestoneType =
   | 'contact_status_changed'
   | 'opt_out_changed'
   | 'number_added'
+  // NAME COLLISION, ADJUDICATED - DO NOT RENAME. Mirrors the server union
+  // (app/src/repos/activityEventsRepo.ts, where the full ruling lives): these
+  // two mean a RELAY-group or PROPERTY-contact add/remove, never the native
+  // `group_text` conversation type, and they are PERSISTED on historical rows.
+  // The dashboard reads them only to pick a milestone colour.
   | 'added_to_group_text'
   | 'removed_from_group_text';
 

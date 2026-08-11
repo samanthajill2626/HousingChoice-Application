@@ -276,6 +276,11 @@ async function removedWhilePending(
         // Newest-first: the first event at or before the row's birth ends the
         // window - nothing older can be a removal "while pending".
         if (e.at <= row.createdAt) return false;
+        // The stored kind is named for the pre-group_text vocabulary (see the
+        // adjudication on ActivityEventType); it means a RELAY group removal.
+        // The `refId === conversationId` clause pins it to THIS relay thread, so
+        // the unit-contact reuse of the same kind (refType 'unit') and any
+        // native group_text milestone can never match here.
         if (e.type === 'removed_from_group_text' && e.refId === conversationId) return true;
       }
       // A short page means the feed is exhausted: the boundary IS reached.

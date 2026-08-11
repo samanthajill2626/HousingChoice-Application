@@ -44,6 +44,17 @@ export type ActivityEventType =
   | 'contact_status_changed'
   | 'opt_out_changed'
   | 'number_added'
+  // NAME COLLISION, ADJUDICATED - DO NOT RENAME. These two predate the native
+  // `group_text` conversation type and have nothing to do with it: they mean
+  // "added to / removed from a RELAY GROUP" (relayMembers.ts) and, since the
+  // unit-contact reuse, "added to / removed from a PROPERTY's contact list"
+  // (routes/contactTimeline.ts). S1 renamed the staff-facing COPY to "relay
+  // group" and deliberately renamed NO identifiers, because these strings are
+  // PERSISTED on every historical activity-event row: renaming them is a data
+  // migration, and a partial rename would silently split the feed. The label is
+  // where the meaning lives; the dashboard consumes the type only for a colour
+  // switch (Timeline.tsx). Anything genuinely about a group_text thread gets
+  // its own new kind.
   | 'added_to_group_text'
   | 'removed_from_group_text';
 

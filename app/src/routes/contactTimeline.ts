@@ -501,6 +501,13 @@ function unitAuditToMilestone(unitId: string, e: AuditEvent): TimelineMilestone 
     case 'unit_contact_removed':
       return {
         ...base,
+        // A UNIT-CONTACT event borrowing the add/remove MILESTONE KIND - not a
+        // group text and not a relay group. The kind is a display bucket here
+        // (the dashboard switches a colour on it, Timeline.tsx); the label and
+        // `refType: 'unit'` below carry the real meaning. Named before the
+        // native `group_text` conversation type existed and deliberately NOT
+        // renamed - these strings are persisted on historical rows, so a rename
+        // is a data migration (adjudication on ActivityEventType).
         type: e.event_type === 'unit_contact_added' ? 'added_to_group_text' : 'removed_from_group_text',
         label: e.event_type === 'unit_contact_added' ? 'Property contact added' : 'Property contact removed',
         refType: 'unit',

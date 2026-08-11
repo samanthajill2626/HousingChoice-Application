@@ -238,6 +238,10 @@ export async function addMemberToRelay(
     try {
       await activityEvents.record({
         contactId: member.contactId,
+        // STORED EVENT KIND, NOT A RENAME TARGET: this is a RELAY group add, and
+        // the kind's name predates the native `group_text` conversation type
+        // (adjudication at activityEventsRepo.ts's ActivityEventType). The
+        // user-visible truth is the label below, which S1 already corrected.
         type: 'added_to_group_text',
         label: 'Added to relay group',
         refType: 'conversation',
@@ -362,6 +366,8 @@ export async function removeMemberFromRelay(
     try {
       await activityEvents.record({
         contactId: removedMember.contactId,
+        // STORED EVENT KIND, NOT A RENAME TARGET - see the add path above and
+        // the adjudication on ActivityEventType. RELAY group, not group_text.
         type: 'removed_from_group_text',
         label: 'Removed from relay group',
         refType: 'conversation',

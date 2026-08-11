@@ -45,6 +45,30 @@ function groupThread(world: FakeWorld): ConversationItem | undefined {
   return world.conversations.get(GROUP_ID);
 }
 
+/**
+ * Make the `byPhone` GSI LAG - the one real-DynamoDB behavior no fake in this
+ * suite reproduces, and the reason a live defect survived 229 e2e tests.
+ *
+ * `contactsRepo.findByPhone` is a QUERY on an eventually-consistent index, so a
+ * contact written moments ago in the SAME request is legitimately invisible to
+ * it, while `getById` (a point read on the base table) sees it immediately.
+ * Every fake resolves both consistently, so a lookup that goes through the index
+ * always hit in tests and never in production.
+ *
+ * Only `findByPhone` is darkened, and only for `lagged` phones while `on` is
+ * true. Flip `on` to false to model the index having caught up.
+ */
+function withLaggingPhoneIndex(world: FakeWorld, lagged: string[]): { on: boolean } {
+  const real = world.contactsRepo;
+  const gate = { on: true };
+  world.contactsRepo = {
+    ...real,
+    findByPhone: async (phone: string) =>
+      gate.on && lagged.includes(phone) ? undefined : real.findByPhone(phone),
+  };
+  return gate;
+}
+
 // ---------------------------------------------------------------------------
 // T3.2 - branch placement
 // ---------------------------------------------------------------------------
@@ -772,6 +796,62 @@ describe('group detection: consent and keywords (T3.5)', () => {
     expect(world.contacts.find((c) => c.contactId === 'c-known')?.consent_method).toBe(
       'inbound_text',
     );
+  });
+
+  it('stamps the SENDER even when the byPhone index has not caught up with their own new stub', async () => {
+    // THE LIVE DEFECT (S9, fix wave 5). The sender's stub is minted by
+    // resolveGroupMembers in THIS request, so a `findByPhone` GSI read for the
+    // sender legitimately returns nothing - and the consent stamp, guarded on
+    // the contact being present, silently no-ops. Live dev left the sender with
+    // `group_participation_at` and NO `consent_method`, which JIT-gates the next
+    // proactive 1:1 to somebody who already texted us.
+    //
+    // This test FAILS if the sender lookup goes back through the index.
+    const world = createFakeWorld();
+    withLaggingPhoneIndex(world, GROUP_ROSTER);
+    const { app } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    const byId = new Map(world.contacts.map((c) => [c.contactId, c]));
+    const sender = byId.get(contactIdForPhone(SENDER));
+    expect(sender?.consent_method).toBe('inbound_text');
+    expect(typeof sender?.consent_at).toBe('string');
+    // The asymmetry survives the fix: a lagging index must not widen consent to
+    // the silent members either.
+    expect(byId.get(contactIdForPhone(MEMBER_B))?.consent_method).toBeUndefined();
+    expect(byId.get(contactIdForPhone(MEMBER_C))?.consent_method).toBeUndefined();
+  });
+
+  it('attributes the message from the ROSTER contact when the byPhone index is lagging', async () => {
+    // The SECOND effect of the same undefined read: `author` is derived from the
+    // sender contact, so a known landlord's group message arrived attributed
+    // `unknown` (Cameron saw it live). The thread roster already names the real
+    // contactId, and a point read on it answers immediately.
+    const world = createFakeWorld();
+    world.contacts.push({
+      contactId: 'c-landlord',
+      type: 'landlord',
+      phone: SENDER,
+      consent_method: 'inbound_text',
+    } as never);
+    const gate = withLaggingPhoneIndex(world, [SENDER]);
+    const { app } = makeWebhookHarness({ world });
+
+    // First inbound with a healthy index: the thread is created and its roster
+    // records the landlord's real contactId.
+    gate.on = false;
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+    expect(
+      groupThread(world)!.participants?.find((p) => p.phone === SENDER)?.contactId,
+    ).toBe('c-landlord');
+
+    // Now the index goes dark for the sender.
+    gate.on = true;
+    await signedTwilioPost(app, SMS_PATH, groupParams({ MessageSid: 'MMgroup0002', Body: 'again' }));
+
+    const second = world.messages.find((m) => m.provider_sid === 'MMgroup0002');
+    expect(second?.author).toBe('landlord');
   });
 
   it('runs the sender touchPhoneLastSeen exactly as a 1:1 does', async () => {

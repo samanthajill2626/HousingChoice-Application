@@ -1298,7 +1298,40 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // contactId, which would collapse two numbers of ONE contact into a single
     // delivery/attribution slot (spec 15.6) - so it is deliberately not used.
     const senderKey = groupMemberKey(normalizeToE164(From) ?? From);
-    const senderContact = await contacts.findByPhone(From);
+    // THE SENDER'S CONTACT, RESOLVED THROUGH THE ROSTER - NOT THROUGH `byPhone`.
+    //
+    // `contacts.findByPhone` is a QUERY on the byPhone GSI, and a GSI is
+    // EVENTUALLY consistent. On the create branch above, the sender's own stub
+    // was minted MOMENTS AGO in THIS SAME REQUEST (resolveGroupMembers), so that
+    // query legitimately comes back empty. Live dev proved it: the first-contact
+    // sender was left with `group_participation_at` and NO `consent_method`,
+    // because the plain-inbound consent stamp inside processInboundKeywords is
+    // guarded on `effectiveContact &&` and therefore silently no-opped - and
+    // `author` fell to `unknown` off the same undefined read. Spec 4.4/5 says a
+    // group sender gets NORMAL inbound consent semantics; without the stamp the
+    // next proactive 1:1 to them is JIT-gated for consent they already gave.
+    //
+    // No test could see it: every fake resolves byPhone consistently, so this
+    // read always hit. Only real DynamoDB exhibits the lag.
+    //
+    // The thread's roster already carries the sender's contactId - the create
+    // branch just wrote it, and branches (b)/(c) read a persisted one - and
+    // `getById` with `consistentRead` is a strongly-consistent POINT read with
+    // no index to lag behind. `findByPhone` stays as the fallback for a sender
+    // who is legitimately NOT a roster member (the exclusion-set case: staff
+    // texting one of their own groups from another org number), and for a roster
+    // slot whose derived id has no row behind it - neither races a just-written
+    // item. This is inside the group branch only; the 1:1-classified path gains
+    // no I/O (invariant 13.2).
+    const senderRosterContactId =
+      senderE164 === undefined
+        ? undefined
+        : (thread.participants ?? []).find((p) => p.phone === senderE164)?.contactId;
+    const senderContact =
+      senderRosterContactId === undefined
+        ? await contacts.findByPhone(From)
+        : ((await contacts.getById(senderRosterContactId, { consistentRead: true })) ??
+          (await contacts.findByPhone(From)));
     // Author honesty: only a reviewed contact type claims tenant/landlord.
     const author =
       senderContact?.type === 'landlord' ||

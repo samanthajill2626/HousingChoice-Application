@@ -35,13 +35,28 @@ import { logger as defaultLogger, type Logger } from '../lib/logger.js';
  * tenant/landlord identity is typed `unknown_1to1`, never guessed.
  * `relay_group` (M1.7) is a multi-party masked thread fronted by a pool
  * number — inbound on the pool number fans out to the other members.
+ * `group_text` (native group texting) is a CARRIER group thread on our own
+ * business number: no pool number, no fan-out, identity is the sorted outside
+ * roster (services/groupIdentity.ts). It lives in its own `group_open` status
+ * partition of byLastActivity - never in the 1:1 `open` partition.
  */
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
   | 'partner_1to1'
   | 'unknown_1to1'
-  | 'relay_group';
+  | 'relay_group'
+  | 'group_text';
+
+/**
+ * The ONE status a `group_text` thread ever carries: its own partition of the
+ * EXISTING byLastActivity GSI (HASH is `status`). Group threads are therefore
+ * invisible to every reader that queries the `open` partition (Today's capped
+ * 100-row read, the inbox contact pager, GET /api/conversations?status=open) -
+ * deliberate, and the reason no new GSI/Terraform/lane reset is needed. The
+ * repo GUARDS the partition: see touchLastActivity.
+ */
+export const GROUP_TEXT_STATUS = 'group_open';
 
 /** Phase 2 hands `auto` to the AI; `manual` means humans only (breaker trips here). */
 export type ConversationMode = 'auto' | 'manual';
@@ -98,6 +113,9 @@ export interface ConversationItem {
    * KEEPS the pool number (a closed group stays resolvable so late texts intercept
    * to the sender's 1:1); reopening reuses the SAME number (nothing is
    * re-provisioned). This is the coarse field the dashboard + inbox key on (D9).
+   * `group_text` threads carry `group_open` and NOTHING else (GROUP_TEXT_STATUS)
+   * - their own partition, guarded in this repo so no writer can flip them out
+   * of it (an unrecoverable loss: nothing points back into the partition).
    */
   status: string;
   /** byLastActivity GSI RANGE (ISO 8601). */
@@ -218,6 +236,29 @@ export interface ConversationItem {
    * (already-sent) announcement, proceeding straight to the idempotent flip.
    */
   close_announced_at?: string;
+  /**
+   * `group_text` only: the CHxx of the Twilio Conversations rail backing this
+   * carrier group (the outbound send path). Absent before the rail exists or
+   * when rail creation failed - readers must treat absence as "no rail yet",
+   * never as an error. Written ONLY by setTwilioConversation, which is fenced
+   * on the rail_creating claim below.
+   */
+  twilio_conversation_sid?: string;
+  /**
+   * `group_text` only: the rail's participant map, MBxx -> member key
+   * (`phone#<E164>`, spec 15.6). Late per-member receipts carry only the MBxx,
+   * so this is what makes them attributable. Written with the CHxx in ONE
+   * fenced update so a sid can never outlive its map.
+   */
+  twilio_participant_map?: Record<string, string>;
+  /**
+   * `group_text` only: the in-flight rail-creation claim ({token, at}).
+   * ensureGroupRail claims it before talking to Twilio and setTwilioConversation
+   * finalizes CONDITIONAL on the token still matching, so an expired claimant
+   * that wakes up late cannot overwrite a newer claimant's rail. REMOVEd by a
+   * successful finalize.
+   */
+  rail_creating?: { token: string; at: string };
   [key: string]: unknown;
 }
 
@@ -297,6 +338,64 @@ const DEFAULT_INBOX_PAGE_LIMIT = 50;
  */
 const RELAY_LIST_PAGE_LIMIT = 100;
 const RELAY_LIST_MAX_PAGES = 20;
+
+/**
+ * listGroupTexts walk bounds. The `group_open` partition holds group threads
+ * ONLY (no post-Limit type filter), so every evaluated row counts toward the
+ * caller's limit. The page budget bounds ONE call; `truncated` says the budget
+ * stopped the walk with rows still unread, so the caller surfaces it instead of
+ * pretending it saw the whole partition.
+ */
+const GROUP_LIST_PAGE_LIMIT = 100;
+const GROUP_LIST_MAX_PAGES = 20;
+
+/** Default page size for listGroupTexts (callers pass their own). */
+const DEFAULT_GROUP_PAGE_LIMIT = 50;
+
+/**
+ * Cursor tag for the group partition. The cursor is an opaque base64 blob, so a
+ * cursor minted by another reader (or a tampered one) would otherwise be handed
+ * to DynamoDB as an ExclusiveStartKey for the WRONG partition and silently
+ * return a wrong-but-plausible page. Tagging makes that a loud 400-shaped
+ * refusal instead.
+ */
+const GROUP_CURSOR_TAG = 'gt1';
+
+/**
+ * A malformed / foreign listGroupTexts cursor. Routes map this to HTTP 400 -
+ * never a 500, and never a silent restart of the walk from the newest row.
+ */
+export class GroupCursorError extends Error {
+  constructor(reason: string) {
+    super(`invalid group text cursor: ${reason}`);
+    this.name = new.target.name;
+  }
+}
+
+/** Encode a LastEvaluatedKey as the tagged, opaque group cursor. */
+export function encodeGroupCursor(key: Record<string, unknown>): string {
+  return Buffer.from(JSON.stringify({ t: GROUP_CURSOR_TAG, k: key }), 'utf8').toString('base64url');
+}
+
+/** Decode a tagged group cursor; throws GroupCursorError on anything else. */
+export function decodeGroupCursor(cursor: string): Record<string, unknown> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'));
+  } catch {
+    throw new GroupCursorError('not decodable');
+  }
+  if (
+    typeof parsed !== 'object' ||
+    parsed === null ||
+    (parsed as { t?: unknown }).t !== GROUP_CURSOR_TAG
+  ) {
+    throw new GroupCursorError('wrong tag');
+  }
+  const key = (parsed as { k?: unknown }).k;
+  if (typeof key !== 'object' || key === null) throw new GroupCursorError('no key');
+  return key as Record<string, unknown>;
+}
 
 export function toPreview(text: string | undefined): string | undefined {
   if (text === undefined) return undefined;
@@ -443,6 +542,15 @@ export interface ConversationsRepo {
    * Stamp the byLastActivity GSI attrs (status + last_activity_at) + preview.
    * Returns the post-update item (ALL_NEW) — the fresh inbox row the M1.2
    * SSE conversation.updated event is built from.
+   *
+   * PARTITION GUARD (native group texting): the status write is CONDITIONAL on
+   * the row not being a `group_text` thread; on the conditional failure the
+   * activity + preview are re-applied WITHOUT the status clause. So a group
+   * thread keeps `group_open` through every touch (inbound, outbound send,
+   * announcements) while 1:1 rows - typed AND legacy type-less - keep today's
+   * exact "activity (re)opens the thread" behavior. A missing row still throws
+   * ConditionalCheckFailedException (both commands require the row to exist), so
+   * no call site can phantom-upsert.
    */
   touchLastActivity(
     conversationId: string,
@@ -655,6 +763,65 @@ export interface ConversationsRepo {
    * leaves the others intact. Idempotent (removing an absent slot is a no-op).
    */
   clearRelayMemberOptedOut(conversationId: string, memberKey: string): Promise<void>;
+
+  // --- Native group texts (carrier groups on the business number) ----------
+
+  /**
+   * Create the `group_text` thread for an ALREADY-DERIVED deterministic id
+   * (services/groupIdentity.ts -> conversationIdForGroup over the sorted outside
+   * roster). status `group_open`, ai_mode `manual` (a carrier group is never
+   * AI-driven in v1), roster written ONCE at creation. NO participant_phone /
+   * participant_email (group threads are never reached through those GSIs), NO
+   * pool_number, NO relay_status - ever.
+   *
+   * Conditional create with the house "loser adopts" semantics: two members'
+   * near-simultaneous first inbounds derive the SAME id and race on the same
+   * key, so exactly one call reports `created: true` and the other returns the
+   * stored row UNCHANGED (its roster is authoritative - roster changes are a new
+   * identity by construction, never a mutation of this one).
+   */
+  createGroupTextThread(input: {
+    /** Deterministic id from groupIdentity() - never a random uuid. */
+    conversationId: string;
+    members: ConversationParticipant[];
+    /** ISO; defaults to now. */
+    lastActivityAt?: string;
+    /** Optional first preview (truncated like every other preview write). */
+    preview?: string;
+  }): Promise<{ item: ConversationItem; created: boolean }>;
+  /**
+   * List `group_text` threads newest-activity-first: ONE Query on the EXISTING
+   * byLastActivity GSI, `group_open` partition - never a Scan, and never diluted
+   * by 1:1 volume (they are in a different partition entirely).
+   *
+   * LOUD (spec 4.2): a failed Query logs at ERROR and THROWS. It must NEVER
+   * degrade to an empty page - "no group threads" and "the query broke" would be
+   * indistinguishable and the inbox would silently hide every group.
+   *
+   * `cursor` is a TAGGED opaque cursor (see GroupCursorError): a foreign or
+   * tampered cursor is refused, never used as an ExclusiveStartKey for someone
+   * else's partition. `truncated` is true when the page budget stopped the walk
+   * early - the caller MUST surface that (no silent truncation).
+   */
+  listGroupTexts(opts?: {
+    cursor?: string | undefined;
+    limit?: number | undefined;
+  }): Promise<{ items: ConversationItem[]; nextCursor?: string; truncated: boolean }>;
+  /**
+   * FENCED rail finalize: stamp `twilio_conversation_sid` + the MBxx -> member
+   * key map and CLEAR the `rail_creating` claim, CONDITIONAL on the caller still
+   * owning that claim (`rail_creating.token === claimToken`). Returns the
+   * post-update item (ALL_NEW) on the winning write, or `undefined` when the
+   * condition did not hold (claim taken over, claim already cleared, or the row
+   * is gone) - a late/expired claimant can then discard its orphaned rail
+   * instead of overwriting the live one.
+   */
+  setTwilioConversation(
+    conversationId: string,
+    twilioConversationSid: string,
+    participantMap: Record<string, string>,
+    claimToken: string,
+  ): Promise<ConversationItem | undefined>;
 }
 
 export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo {
@@ -1130,26 +1297,62 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
 
     async touchLastActivity(conversationId, previewText, ts) {
       const preview = toPreview(previewText);
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: { conversationId },
-          // Activity (re)opens the thread; preview only set when one exists.
-          UpdateExpression:
-            preview !== undefined
-              ? 'SET #s = :open, last_activity_at = :ts, last_message_preview = :preview'
-              : 'SET #s = :open, last_activity_at = :ts',
-          ConditionExpression: 'attribute_exists(conversationId)',
-          ExpressionAttributeNames: { '#s': 'status' },
-          ExpressionAttributeValues: {
-            ':open': 'open',
-            ':ts': ts,
-            ...(preview !== undefined && { ':preview': preview }),
-          },
-          ReturnValues: 'ALL_NEW',
-        }),
-      );
-      return Attributes as ConversationItem;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            // Activity (re)opens the thread; preview only set when one exists.
+            UpdateExpression:
+              preview !== undefined
+                ? 'SET #s = :open, last_activity_at = :ts, last_message_preview = :preview'
+                : 'SET #s = :open, last_activity_at = :ts',
+            // PARTITION GUARD: never write `open` onto a group_text thread. A
+            // group thread lives in the `group_open` partition and nothing points
+            // back into it, so one blind status write would lose it forever.
+            // Legacy rows carry no `type` at all - attribute_not_exists keeps
+            // them on today's path.
+            ConditionExpression:
+              'attribute_exists(conversationId) AND (attribute_not_exists(#type) OR #type <> :groupText)',
+            ExpressionAttributeNames: { '#s': 'status', '#type': 'type' },
+            ExpressionAttributeValues: {
+              ':open': 'open',
+              ':groupText': 'group_text',
+              ':ts': ts,
+              ...(preview !== undefined && { ':preview': preview }),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Group thread (or a missing row). Re-apply activity + preview with the
+        // status clause DROPPED. This MUST be a separate command object: reusing
+        // the one above with the clause stripped would leave `#s`/`:open`/
+        // `:groupText` bound but unreferenced, and DynamoDB rejects unused
+        // expression names/values with a ValidationException - which would turn
+        // every group touch into a 500. `attribute_exists(conversationId)` stays,
+        // so a MISSING row still fails here and the CCFE surfaces to the caller
+        // exactly as it does today (no phantom upsert).
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            UpdateExpression:
+              preview !== undefined
+                ? 'SET last_activity_at = :ts, last_message_preview = :preview'
+                : 'SET last_activity_at = :ts',
+            ConditionExpression: 'attribute_exists(conversationId)',
+            ExpressionAttributeValues: {
+              ':ts': ts,
+              ...(preview !== undefined && { ':preview': preview }),
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        return Attributes as ConversationItem;
+      }
     },
 
     async setParticipantsIfAbsent(conversationId, participants) {
@@ -1710,6 +1913,138 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       );
       log.info({ conversationId, ownerType: newOwner.type }, 'relay group owner rebound');
       return Attributes as ConversationItem;
+    },
+
+    // --- Native group texts ------------------------------------------------
+
+    async createGroupTextThread({ conversationId, members, lastActivityAt, preview }) {
+      const now = new Date().toISOString();
+      const previewText = toPreview(preview);
+      const item: ConversationItem = {
+        conversationId,
+        // Own partition of byLastActivity - never `open` (see GROUP_TEXT_STATUS).
+        status: GROUP_TEXT_STATUS,
+        last_activity_at: lastActivityAt ?? now,
+        type: 'group_text',
+        // Carrier groups are staff-run in v1; `manual` keeps the automated-send
+        // breaker's manual-mode posture, matching relay groups.
+        ai_mode: 'manual',
+        participants: members,
+        created_at: now,
+        ...(previewText !== undefined && { last_message_preview: previewText }),
+      };
+      try {
+        await doc.send(
+          new PutCommand({
+            TableName: table,
+            Item: item,
+            ConditionExpression: 'attribute_not_exists(conversationId)',
+          }),
+        );
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Another inbound for the SAME roster won the race (ids are derived, so
+        // both callers target one key). Adopt the stored row untouched.
+        const existing = await getById(conversationId);
+        if (!existing) {
+          throw new Error(
+            `createGroupTextThread: conversation ${conversationId} exists per the conditional put but is unreadable`,
+          );
+        }
+        return { item: existing, created: false };
+      }
+      // PII (doc §9): ids + counts only, never a member phone.
+      log.info({ conversationId, memberCount: members.length }, 'group text thread created');
+      return { item, created: true };
+    },
+
+    async listGroupTexts(opts = {}) {
+      const limit = opts.limit ?? DEFAULT_GROUP_PAGE_LIMIT;
+      // Decode BEFORE any I/O: a foreign cursor must never reach DynamoDB as an
+      // ExclusiveStartKey (it would page someone else's partition).
+      let exclusiveStartKey: QueryCommandInput['ExclusiveStartKey'] =
+        opts.cursor !== undefined && opts.cursor.length > 0
+          ? (decodeGroupCursor(opts.cursor) as QueryCommandInput['ExclusiveStartKey'])
+          : undefined;
+
+      const items: ConversationItem[] = [];
+      for (let page = 0; page < GROUP_LIST_MAX_PAGES; page++) {
+        const remaining = limit - items.length;
+        if (remaining <= 0) break;
+        let result;
+        try {
+          result = await doc.send(
+            new QueryCommand({
+              TableName: table,
+              IndexName: 'byLastActivity',
+              KeyConditionExpression: '#s = :status',
+              ExpressionAttributeNames: { '#s': 'status' },
+              ExpressionAttributeValues: { ':status': GROUP_TEXT_STATUS },
+              ScanIndexForward: false, // newest activity first
+              Limit: Math.min(remaining, GROUP_LIST_PAGE_LIMIT),
+              ...(exclusiveStartKey !== undefined && { ExclusiveStartKey: exclusiveStartKey }),
+            }),
+          );
+        } catch (err) {
+          // LOUD, never best-effort-empty: an empty page here is
+          // indistinguishable from "this org has no group threads", which would
+          // silently hide every group conversation in the inbox.
+          log.error({ err }, 'group text list query failed');
+          throw err;
+        }
+        items.push(...((result.Items ?? []) as ConversationItem[]));
+        exclusiveStartKey = result.LastEvaluatedKey;
+        if (exclusiveStartKey === undefined) {
+          return { items, truncated: false };
+        }
+      }
+      // More rows remain: hand back the tagged cursor. `truncated` says the PAGE
+      // BUDGET (not the caller's limit) ended the walk - the caller surfaces it.
+      return {
+        items,
+        ...(exclusiveStartKey !== undefined && {
+          nextCursor: encodeGroupCursor(exclusiveStartKey as Record<string, unknown>),
+        }),
+        truncated: items.length < limit && exclusiveStartKey !== undefined,
+      };
+    },
+
+    async setTwilioConversation(conversationId, twilioConversationSid, participantMap, claimToken) {
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            // The sid and its MBxx map land together (a sid without a map makes
+            // late receipts unattributable), and the claim is cleared in the same
+            // write so the rail is never "done" while still marked in-flight.
+            UpdateExpression:
+              'SET twilio_conversation_sid = :sid, twilio_participant_map = :map REMOVE #rc',
+            // FENCING (spec 15.3): only the claimant that still owns the token may
+            // finalize. An expired claimant waking up late fails here rather than
+            // overwriting the newer claimant's live rail.
+            ConditionExpression: 'attribute_exists(conversationId) AND #rc.#tok = :token',
+            ExpressionAttributeNames: { '#rc': 'rail_creating', '#tok': 'token' },
+            ExpressionAttributeValues: {
+              ':sid': twilioConversationSid,
+              ':map': participantMap,
+              ':token': claimToken,
+            },
+            ReturnValues: 'ALL_NEW',
+          }),
+        );
+        log.info(
+          { conversationId, participantCount: Object.keys(participantMap).length },
+          'group text rail finalized',
+        );
+        return Attributes as ConversationItem;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Claim taken over / already cleared / row gone: the caller discards its
+        // orphaned rail. Never a throw - losing the fence is an expected outcome.
+        log.warn({ conversationId }, 'group text rail finalize lost its claim');
+        return undefined;
+      }
     },
   };
 }

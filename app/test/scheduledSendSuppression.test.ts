@@ -161,6 +161,17 @@ function makeSendFakes(
     setRelayMemberOptedOut: async () => {},
     clearRelayMemberOptedOut: async () => {},
     rebindOwner: async () => conversation,
+    // group_text repo methods are unreachable from this 1:1 suite - throw so an
+    // accidental call is loud instead of silently returning a plausible shape.
+    createGroupTextThread: async () => {
+      throw new Error('createGroupTextThread: not used in this suite');
+    },
+    listGroupTexts: async () => {
+      throw new Error('listGroupTexts: not used in this suite');
+    },
+    setTwilioConversation: async () => {
+      throw new Error('setTwilioConversation: not used in this suite');
+    },
   };
   const contactsRepo: ContactsRepo = {
     findByPhone: async () => contact,

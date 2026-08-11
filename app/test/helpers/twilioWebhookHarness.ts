@@ -57,6 +57,7 @@ import {
   type SettingsRepo,
 } from '../../src/repos/settingsRepo.js';
 import {
+  GROUP_TEXT_STATUS,
   toPreview,
   type ConversationItem,
   type ConversationsRepo,
@@ -371,7 +372,12 @@ export function createFakeWorld(): FakeWorld {
       touches.push({ conversationId, previewText, ts });
       const conv = conversations.get(conversationId);
       if (!conv) throw conditionalCheckFailed(`touchLastActivity: no conversation ${conversationId}`);
-      conv.status = 'open';
+      // Model the REPO-LEVEL PARTITION GUARD: a group_text thread keeps its
+      // `group_open` status through every touch (the real repo's conditional
+      // status write + no-status retry). Without this the webhook tests would
+      // pass while production silently loses group threads out of their
+      // partition.
+      if (conv.type !== 'group_text') conv.status = 'open';
       conv.last_activity_at = ts;
       const preview = toPreview(previewText);
       if (preview !== undefined) conv.last_message_preview = preview;
@@ -666,6 +672,41 @@ export function createFakeWorld(): FakeWorld {
         conv.owner = newOwner;
         delete conv.placementId;
       }
+      return conv;
+    },
+
+    async createGroupTextThread({ conversationId, members, lastActivityAt, preview }) {
+      const existing = conversations.get(conversationId);
+      if (existing) return { item: existing, created: false };
+      const now = new Date().toISOString();
+      const item: ConversationItem = {
+        conversationId,
+        status: GROUP_TEXT_STATUS,
+        last_activity_at: lastActivityAt ?? now,
+        type: 'group_text',
+        ai_mode: 'manual',
+        participants: members,
+        created_at: now,
+        ...(toPreview(preview) !== undefined && { last_message_preview: toPreview(preview) }),
+      };
+      conversations.set(conversationId, item);
+      return { item, created: true };
+    },
+
+    async listGroupTexts(opts = {}) {
+      const all = [...conversations.values()]
+        .filter((c) => c.status === GROUP_TEXT_STATUS)
+        .sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at));
+      const limit = opts.limit ?? 50;
+      return { items: all.slice(0, limit), truncated: false };
+    },
+
+    async setTwilioConversation(conversationId, sid, participantMap, claimToken) {
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.rail_creating?.token !== claimToken) return undefined;
+      conv.twilio_conversation_sid = sid;
+      conv.twilio_participant_map = participantMap;
+      delete conv.rail_creating;
       return conv;
     },
   };

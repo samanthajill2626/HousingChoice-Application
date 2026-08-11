@@ -35,6 +35,7 @@ import type {
   ConversationHeader,
   ConversationParticipant,
   ConversationsPage,
+  GroupMemberRow,
   DevLoginResult,
   HistoryRow,
   InboxFilter,
@@ -752,6 +753,24 @@ export async function getConversationMembers(
 ): Promise<ConversationParticipant[]> {
   const res = await request<{ members: ConversationParticipant[] }>(
     `/api/conversations/${encodeURIComponent(conversationId)}/members`,
+    { ...(signal !== undefined && { signal }) },
+  );
+  return res.members;
+}
+
+/** GET /api/conversations/:id/group-members → { members }. A NATIVE group text's
+ *  roster with per-member suppression + deleted state (unwrapped). 404
+ *  group_text_not_found for a relay / 1:1 / missing id.
+ *
+ *  This is NOT getConversationMembers: that route is relay-only by a positive
+ *  type guard and 404s a group thread. The roster itself is immutable, but
+ *  suppression is number-scoped state only the server can resolve correctly. */
+export async function getGroupMembers(
+  conversationId: string,
+  signal?: AbortSignal,
+): Promise<GroupMemberRow[]> {
+  const res = await request<{ members: GroupMemberRow[] }>(
+    `/api/conversations/${encodeURIComponent(conversationId)}/group-members`,
     { ...(signal !== undefined && { signal }) },
   );
   return res.members;

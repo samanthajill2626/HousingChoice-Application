@@ -454,6 +454,29 @@ export interface ConversationsPage {
   nextCursor: string | null;
 }
 
+/** Which record answered a member's suppression question. MIRRORS app/src/
+ *  services/numberSuppression.ts `NumberSuppressionScope`. */
+export type NumberSuppressionScope = 'primary' | 'secondary' | 'no_contact';
+
+/** GET /api/conversations/:id/group-members → { members }. One member of a
+ *  NATIVE group text. MIRRORS app/src/routes/api.ts `GroupMemberRow`.
+ *
+ *  `suppressed` is NUMBER-scoped, resolved server-side through the one
+ *  suppression seam: the contact's own flag answers for a member's PRIMARY
+ *  number, that number's 1:1 thread answers for a secondary one. The dashboard
+ *  must never re-derive it from a contact's opt-out alone - that would libel a
+ *  member who only silenced a different number of theirs. */
+export interface GroupMemberRow {
+  /** Empty string when the member has no contact record yet. */
+  contactId: string;
+  phone: string;
+  name?: string;
+  suppressed: boolean;
+  suppressionScope: NumberSuppressionScope;
+  /** Present/true for a soft-deleted contact (group sends refuse; spec 15.7). */
+  deleted?: boolean;
+}
+
 /** The owning entity of a relay_group thread. MIRRORS app/src/repos/
  *  conversationsRepo.ts `RelayOwner` (getOwner) — a tour/placement reference, or
  *  `{ type: null }` for a standalone/unowned group. Keep in sync. */

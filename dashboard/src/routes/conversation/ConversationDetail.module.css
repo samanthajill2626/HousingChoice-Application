@@ -185,3 +185,43 @@
   gap: var(--sp-2);
   justify-content: flex-end;
 }
+
+/* --- Native group text (GroupTextView) ------------------------------------
+   A group text is an UNMASKED carrier group chat, so the header states the one
+   fact that changes how staff write in it. Quiet, but always present: it is a
+   standing property of the thread, not an alert. */
+.groupUnmasked {
+  margin: 2px 0 0;
+  color: var(--c-header-facts);
+  font-size: var(--fs-xs);
+}
+
+/* Read-only threshold banner: over the send cap the thread cannot be replied to
+   as a group, so the banner sends staff to the per-member 1:1 links. */
+.groupBanner {
+  margin: var(--sp-3) var(--sp-3) 0;
+  padding: var(--sp-2) var(--sp-3);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-md);
+  background: var(--c-surface);
+  color: var(--c-text);
+  font-size: var(--fs-sm);
+}
+
+/* Per-member state chip (opted out / deleted) - pushed to the row's end. */
+.memberFlag {
+  margin-left: auto;
+  padding: 0 var(--sp-2);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-alt, var(--c-surface));
+  border: 1px solid var(--c-border);
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+}
+
+.memberNote {
+  margin: var(--sp-2) 0 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}

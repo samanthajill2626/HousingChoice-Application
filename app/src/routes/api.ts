@@ -60,7 +60,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
-import { createContactsRepo, type ContactsRepo } from '../repos/contactsRepo.js';
+import { createContactsRepo, isDeleted, type ContactItem, type ContactsRepo } from '../repos/contactsRepo.js';
 import { createActivityEventsRepo, type ActivityEventsRepo } from '../repos/activityEventsRepo.js';
 import { createListingSendsRepo, type ListingSendsRepo } from '../repos/listingSendsRepo.js';
 import { createSettingsRepo, type SettingsRepo } from '../repos/settingsRepo.js';
@@ -83,6 +83,11 @@ import {
   type SendEmailService,
 } from '../services/sendEmailMessage.js';
 import { createApplyParkedEmailEvents } from '../services/emailEvents.js';
+import {
+  readNumberSuppression,
+  type NumberSuppressionScope,
+  type NumberSuppressionState,
+} from '../services/numberSuppression.js';
 import { type PushService } from '../services/pushService.js';
 import { type PoolNumbersService } from '../services/poolNumbers.js';
 import { createPoolNumbersRepo, type PoolNumbersRepo } from '../repos/poolNumbersRepo.js';
@@ -196,6 +201,26 @@ const CONVERSATION_STATUSES = new Set(['open']);
  * default — 25s comment frames keep the stream alive through it.
  */
 const SSE_HEARTBEAT_MS = 25_000;
+
+/**
+ * One member of a NATIVE group text, as the thread view needs them. The roster
+ * itself is immutable (spec 4.2), so the only moving parts are the per-member
+ * states the view must be honest about: number-scoped suppression and the
+ * contact's soft-delete.
+ */
+export interface GroupMemberRow {
+  /** Empty string when the member has no contact record yet. */
+  contactId: string;
+  phone: string;
+  name?: string;
+  /** Is THIS NUMBER suppressed? Never "the contact opted out" on its own. */
+  suppressed: boolean;
+  /** Which record answered: the contact's own flag ('primary'), this number's
+   *  1:1 thread ('secondary'), or a number with no contact at all. */
+  suppressionScope: NumberSuppressionScope;
+  /** Present/true only for a soft-deleted contact (sends refuse; spec 15.7). */
+  deleted?: boolean;
+}
 
 export interface ApiRouterDeps {
   config?: AppConfig;
@@ -1587,6 +1612,72 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       return;
     }
     res.json({ conversation });
+  });
+
+  // GET /api/conversations/:conversationId/group-members -> the NATIVE group
+  // thread's roster, each member carrying the state the thread view must show.
+  //
+  // WHY ITS OWN ROUTE: /relay-groups/:id/members 404s for a non-relay thread
+  // (positive type guard, deliberately), and the two pieces of state that matter
+  // here cannot be derived client-side anyway:
+  //   • SUPPRESSION is NUMBER-SCOPED. The contact flag is authoritative for a
+  //     member's PRIMARY number only; on a secondary number it says nothing, and
+  //     that number's own 1:1 thread flag is the answer. Reading "contact opted
+  //     out" alone would libel a member who only silenced another number - so
+  //     this reads through the ONE suppression seam (services/numberSuppression).
+  //   • DELETED is a soft-delete flag on the contact record.
+  // Roster membership itself is immutable (written once at creation, spec 4.2).
+  router.get('/conversations/:conversationId/group-members', async (req, res) => {
+    const { conversationId } = req.params;
+    mergeContext({ conversationId });
+    const conversation = await conversations.getById(conversationId);
+    if (!conversation || conversation.type !== 'group_text') {
+      // Positive guard, mirroring the relay routes: this surface answers for
+      // NATIVE group threads only, and never speaks for a relay or 1:1 thread.
+      res.status(404).json({ error: 'group_text_not_found' });
+      return;
+    }
+
+    const members: GroupMemberRow[] = [];
+    for (const m of conversation.participants ?? []) {
+      // ONE contact read per member, passed into the seam so it cannot issue a
+      // second (presence of the key is the switch - `{contact: undefined}` means
+      // "there is none", not "look it up").
+      let contact: ContactItem | undefined;
+      try {
+        contact = await contacts.findByPhone(m.phone);
+      } catch (err) {
+        log.warn({ err, conversationId }, 'group members: contact lookup failed (best-effort)');
+      }
+      let suppression: NumberSuppressionState;
+      try {
+        suppression = await readNumberSuppression(
+          { contactsRepo: contacts, conversationsRepo: conversations },
+          m.phone,
+          { contact },
+        );
+      } catch (err) {
+        // Best-effort: an unreadable flag must not blank the roster. The chip is
+        // simply absent - it never claims "not suppressed" from a failed read.
+        log.warn({ err, conversationId }, 'group members: suppression read failed (best-effort)');
+        suppression = { suppressed: false, scope: 'no_contact' };
+      }
+      const first = typeof contact?.firstName === 'string' ? contact.firstName : '';
+      const last = typeof contact?.lastName === 'string' ? contact.lastName : '';
+      const contactName = `${first} ${last}`.trim();
+      const rosterName = typeof m.name === 'string' ? m.name.trim() : '';
+      // The CONTACT's name is fresher than the roster snapshot taken at creation.
+      const name = contactName.length > 0 ? contactName : rosterName;
+      members.push({
+        contactId: contact?.contactId ?? m.contactId,
+        phone: m.phone,
+        ...(name.length > 0 && { name }),
+        suppressed: suppression.suppressed,
+        suppressionScope: suppression.scope,
+        ...(contact !== undefined && isDeleted(contact) && { deleted: true }),
+      });
+    }
+    res.json({ members });
   });
 
   // GET /api/conversations/:conversationId/messages?limit=50&before=...

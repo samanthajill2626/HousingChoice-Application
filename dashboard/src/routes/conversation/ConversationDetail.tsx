@@ -1,6 +1,7 @@
 // ConversationDetail — the /conversations/:conversationId view. It fetches the
 // conversation header (GET /api/conversations/:id) and DISPATCHES by type:
-//   • relay_group → the group view (transcript + reply + roster/close management)
+//   • relay_group → the relay view (transcript + reply + roster/close management)
+//   • group_text → the NATIVE group-text view (transcript + read-only roster)
 //   • a plain 1:1 → REDIRECT to its owning contact (/contacts/:contactId); 1:1
 //     threads live on the contact page, so this generic URL stays honest without
 //     duplicating the timeline. An unresolvable contact degrades to a minimal
@@ -36,6 +37,7 @@ import { ContactSearchField, type ContactSearchValue } from '../contact/ContactS
 import { useContacts } from '../contacts/useContacts.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
 import { useRelayThread } from './useRelayThread.js';
+import { GroupTextView } from './GroupTextView.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
 
@@ -129,23 +131,31 @@ export function ConversationDetail(): React.JSX.Element {
     );
   }
 
-  // A plain 1:1 lives on the contact page — redirect there. When the contact
-  // can't be resolved, degrade to a minimal fallback link (never crash).
-  if (header.type !== 'relay_group') {
-    const contactId = firstParticipantContactId(header.participants as readonly unknown[] | undefined);
-    if (contactId !== undefined) return <Navigate to={`/contacts/${contactId}`} replace />;
-    const phone = typeof header.participant_phone === 'string' ? header.participant_phone : '';
-    return (
-      <div className={styles.fallback}>
-        <p>This is a direct conversation. Open it on the contact:</p>
-        <Link to={`/contacts/unknown?phone=${encodeURIComponent(phone)}`}>
-          Open the contact
-        </Link>
-      </div>
-    );
+  // POSITIVE DISPATCH, one arm per thread type. This used to be a single
+  // `type !== 'relay_group'` redirect, which silently sent a MULTI-PARTY thread
+  // to roster member #1's contact page - a compile-clean misroute that looks
+  // like it worked. Every new type must now name itself here, and the 1:1
+  // redirect is the FALL-THROUGH, never a negative test.
+  if (header.type === 'relay_group') {
+    return <RelayGroupView conversationId={conversationId} header={header} onHeader={setHeader} />;
   }
 
-  return <RelayGroupView conversationId={conversationId} header={header} onHeader={setHeader} />;
+  if (header.type === 'group_text') {
+    return <GroupTextView conversationId={conversationId} header={header} />;
+  }
+
+  // 1:1 ONLY from here down. A plain 1:1 lives on the contact page — redirect
+  // there. When the contact can't be resolved, degrade to a minimal fallback
+  // link (never crash).
+  const contactId = firstParticipantContactId(header.participants as readonly unknown[] | undefined);
+  if (contactId !== undefined) return <Navigate to={`/contacts/${contactId}`} replace />;
+  const phone = typeof header.participant_phone === 'string' ? header.participant_phone : '';
+  return (
+    <div className={styles.fallback}>
+      <p>This is a direct conversation. Open it on the contact:</p>
+      <Link to={`/contacts/unknown?phone=${encodeURIComponent(phone)}`}>Open the contact</Link>
+    </div>
+  );
 }
 
 interface RelayGroupViewProps {

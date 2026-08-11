@@ -206,6 +206,11 @@ export interface TimelineProps {
   deleted?: boolean;
   /** Restore the deleted contact (the note's button). */
   onRestore?: () => void;
+  /** Replace the composer entirely with this standing reason - the thread is
+   *  READ-ONLY. Prefer this over `canSend={false}` when sending is structurally
+   *  impossible rather than momentarily unavailable: a disabled composer invites
+   *  a draft that can never be sent. Absent on every existing caller. */
+  readOnlyNote?: string;
   /** Bumped by the parent when a DEFERRED send finally goes out (the just-in-time
    *  consent modal records consent, then retries the send out-of-band of the
    *  composer). The composer restored its draft on the 409 refusal, so it must
@@ -785,6 +790,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     selectedConversationId,
     onSelectTarget,
     canSend,
+    readOnlyNote,
     onSend,
     onRetry,
     optedOut,
@@ -1241,6 +1247,15 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </button>
             ) : null}
           </>
+        ) : readOnlyNote !== undefined ? (
+          /* READ-ONLY thread: the composer is replaced by a plain reason, never
+             rendered-but-disabled. A text box you can type into and never send
+             from is a trap - the operator writes a reply, hits a dead Send, and
+             loses the draft. Used by the native group-text view (no group send
+             until it exists; a >9-member group can never have one). */
+          <p className={styles.optOutNote} role="note">
+            {readOnlyNote}
+          </p>
         ) : (
           <>
             {showChannelToggle ? (

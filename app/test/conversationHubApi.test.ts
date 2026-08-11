@@ -327,3 +327,144 @@ describe('POST /api/conversations/:conversationId/read — unread reset', () => 
   });
 });
 
+describe('GET /api/conversations/:conversationId/group-members', () => {
+  async function seedGroup(world: ReturnType<typeof createFakeWorld>) {
+    await world.conversationsRepo.createGroupTextThread({
+      conversationId: 'gt-1',
+      members: [
+        { contactId: 'c-ann', phone: '+14045550111', name: 'Ann Tenant' },
+        { contactId: 'c-marcus', phone: '+14045550112', name: 'Marcus Landlord' },
+      ],
+      lastActivityAt: '2026-06-12T10:00:00.000Z',
+    });
+  }
+  const get = (app: Parameters<typeof request>[0], id: string) =>
+    request(app)
+      .get(`/api/conversations/${id}/group-members`)
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE);
+
+  it('returns the roster with per-member suppression, preferring the CONTACT name', async () => {
+    const { app, world } = makeWebhookHarness();
+    await seedGroup(world);
+    world.contacts.push({
+      contactId: 'c-ann',
+      type: 'tenant',
+      firstName: 'Annabel',
+      lastName: 'Tenant',
+      phone: '+14045550111',
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+
+    const res = await get(app, 'gt-1');
+
+    expect(res.status).toBe(200);
+    expect(res.body.members).toEqual([
+      {
+        contactId: 'c-ann',
+        phone: '+14045550111',
+        // The contact record is fresher than the roster snapshot taken at
+        // creation, so a renamed contact renders under its current name.
+        name: 'Annabel Tenant',
+        suppressed: false,
+        suppressionScope: 'primary',
+      },
+      {
+        contactId: 'c-marcus',
+        phone: '+14045550112',
+        name: 'Marcus Landlord',
+        suppressed: false,
+        suppressionScope: 'no_contact',
+      },
+    ]);
+  });
+
+  it('reports a PRIMARY-number opt-out from the contact flag', async () => {
+    const { app, world } = makeWebhookHarness();
+    await seedGroup(world);
+    world.contacts.push({
+      contactId: 'c-ann',
+      type: 'tenant',
+      firstName: 'Ann',
+      lastName: 'Tenant',
+      phone: '+14045550111',
+      sms_opt_out: true,
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+
+    const res = await get(app, 'gt-1');
+
+    expect(res.body.members[0]).toMatchObject({
+      suppressed: true,
+      suppressionScope: 'primary',
+    });
+  });
+
+  it('reports a SECONDARY number from that number OWN 1:1 thread, never the contact flag', async () => {
+    // The number-scoped rule: the contact is NOT opted out, but this second
+    // number of theirs is. Reading the contact flag alone would miss it; reading
+    // it as the contact opting out would libel them.
+    const { app, world } = makeWebhookHarness();
+    await seedGroup(world);
+    world.contacts.push({
+      contactId: 'c-ann',
+      type: 'tenant',
+      firstName: 'Ann',
+      lastName: 'Tenant',
+      phone: '+14045550100',
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+    // The second number resolves through its phone-pointer item, exactly as a
+    // real multi-number contact does.
+    await world.contactsRepo.addPhone('c-ann', { phone: '+14045550111' });
+    const { conversationId } = await world.conversationsRepo.createOrGetByParticipantPhone(
+      '+14045550111',
+      'tenant_1to1',
+    );
+    await world.conversationsRepo.setSmsOptOut(conversationId, true);
+
+    const res = await get(app, 'gt-1');
+
+    expect(res.body.members[0]).toMatchObject({
+      suppressed: true,
+      suppressionScope: 'secondary',
+    });
+  });
+
+  it('flags a soft-deleted member', async () => {
+    const { app, world } = makeWebhookHarness();
+    await seedGroup(world);
+    world.contacts.push({
+      contactId: 'c-ann',
+      type: 'tenant',
+      firstName: 'Ann',
+      lastName: 'Tenant',
+      phone: '+14045550111',
+      deleted_at: '2026-06-11T00:00:00.000Z',
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+
+    const res = await get(app, 'gt-1');
+
+    expect(res.body.members[0]).toMatchObject({ deleted: true });
+  });
+
+  it('404s for a relay group and for a 1:1 (this surface speaks for group texts only)', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedConversation(world, 'conv-1');
+    const relay = await world.conversationsRepo.createRelayGroup({
+      poolNumber: '+15550160001',
+      members: [{ contactId: 'c-ann', phone: '+14045550111' }],
+    });
+
+    const oneToOne = await get(app, 'conv-1');
+    expect(oneToOne.status).toBe(404);
+    expect(oneToOne.body).toEqual({ error: 'group_text_not_found' });
+
+    const relayRes = await get(app, relay.conversationId);
+    expect(relayRes.status).toBe(404);
+
+    const missing = await get(app, 'nope');
+    expect(missing.status).toBe(404);
+  });
+});

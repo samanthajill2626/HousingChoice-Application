@@ -1270,6 +1270,110 @@ hermetic stacks skip the check (reseeds wipe that table).
 Deleting the fingerprint item WITHOUT steps 1-3 is the failure mode this guard exists
 to prevent: the boot then succeeds and the thread population forks silently.
 
+## Native group texting: merge/cutover checklist
+
+Everything below is Cameron-executed and in ORDER. Nothing here is automated: the
+Twilio-side configuration is console/API work, and the migration is a command that
+must be re-run until it says COMPLETE.
+
+**THERE IS NO ACCOUNT-GLOBAL CONVERSATIONS WEBHOOK STEP.** The S5-PRE addendum
+proved live that configuring a SERVICE-scoped webhook silences the account-global
+scope entirely - the global config fired zero times over a 60-minute window while
+the service scope received everything. An earlier draft of this checklist had a
+global-webhook step; following it would have silently killed the cross-check
+guardrail. One webhook, on the default Conversations service, with BOTH filters.
+
+### 1. Before anything else: the identity list
+
+`GROUP_IDENTITY_EXCLUDED_NUMBERS` must be the import export's `ownNumbers` MINUS
+the business number, set and deployed BEFORE detection goes live (see the section
+above - this is an identity contract, not config). The migration command refuses
+the whole run on a mismatch, by design.
+
+### 2. Production preflight (before the migration window)
+
+1. **Capability check.** On the PROD Twilio account, create one throwaway group
+   Conversation with two participants and delete it. This proves the account can
+   do Conversations at all, with the campaign-bearing messaging service pinned,
+   before 132 groups depend on it.
+2. **Signed webhook canary.** POST a SIGNED request to the EXACT configured URL
+   (`https://<prod host>/webhooks/twilio/conversations`) with
+   `EventType=onDeliveryUpdated` and confirm a 200 plus the handler's log line.
+   Aim it at the exact string configured in the console, not at a URL retyped
+   from memory - a trailing slash or a stale host is the whole failure mode.
+3. **Production-service keyword canary.** Send STOP from a test handset to the
+   business number and confirm the ordinary 1:1 keyword handling still applies
+   (group keyword handling is scoped to the sender, never the group thread).
+
+### 3. Twilio configuration, per env
+
+On the DEFAULT Conversations service (the one the rails are created under):
+
+- Post-webhook URL: `https://<host>/webhooks/twilio/conversations`
+- Filters: **`onDeliveryUpdated` AND `onMessageAdded`** - both, on this one URL.
+  `onDeliveryUpdated` is the only source of group delivery state (classic status
+  callbacks do NOT fire for Conversations sends - proved live), and
+  `onMessageAdded` is the cross-check guardrail's entire input.
+- Do NOT set `X-Twilio-Webhook-Enabled` on our own posts: delivery receipts flow
+  without it, and setting it would only add echoes of our own outbound.
+
+### 4. The migration run
+
+```powershell
+npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir> --yes
+```
+
+Convergent and safe to re-run. Exit 0 ONLY when every expected group reached the
+full end state; exit 1 while anything is refused or rail-less. **Re-run until it
+prints COMPLETE.**
+
+CUTOVER GATE (hard): zero unresolved rail failures. Every retained imported group
+must be converted AND carry an ACTIVE rail with a VERIFIED participant map, or be
+explicitly deleted/adjudicated (a documented inbound-only thread the founder knows
+about). Also verify zero remaining `relay_group#connecting` rows.
+
+A rail failure in the report names its reason - a landline in the roster, a number
+Twilio will not attach (50407-class), a roster above nine members. That is exactly
+why rails are created eagerly: the alternative is discovering it when staff try to
+reply weeks later.
+
+### 5. After the run
+
+- Reseed where applicable, then spot-check one converted thread in the dashboard:
+  members visible, composer enabled, no relay chrome.
+- The founder's `drop = Y` workbook column can no longer delete the contact record
+  of anyone on a group roster (the retract guard). Post-migration that is most of
+  the roster-bearing population. Contact soft-delete in the app is the remaining
+  lever.
+
+### 6. Rollback contract
+
+**Conversion is FORWARD-ONLY.** There is no down-migration. A code rollback leaves
+`group_text` rows UI-orphaned (the readers that render them are gone) until a
+redeploy. The remedy is to roll FORWARD - redeploy the current build - not to try
+to convert threads back.
+
+### 7. Cost note
+
+Twilio bills Conversations by users assigned to conversations. The imported rosters
+plausibly exceed the 200-user free tier; order $10-20/month. Budgeted, not a
+surprise to discover on the first invoice.
+
+### 8. What tells you it broke
+
+Group detection depends on `OtherRecipients{N}`, an UNDOCUMENTED Twilio webhook
+parameter, so the guardrails exist to make its disappearance loud. Watch for these
+log events (see "Reading logs" and "Alarms"):
+
+| event | level | what it means |
+| --- | --- | --- |
+| `group_crosscheck_inbound_missing` | ERROR | A message reached the Conversation and never reached the classic webhook. The envelope may be gone. |
+| `group_send_receipts_stale` | ERROR | A group send's recipients are still non-terminal past the deadline. The receipts webhook is likely dead or misconfigured - re-check step 3. |
+| `group_crosscheck_channel_quiet` | WARN | Railed threads took classic inbound for 24h while the cross-check recorded nothing. The MONITOR is dead, not the feature. |
+| `group_inbound_heartbeat_quiet` | WARN | No group traffic at all for seven days while group threads exist. |
+| `group_envelope_missing` | WARN | The tripwire: an MMS shaped like a group with no envelope. One is not news; a run of them is. |
+| `group_rail_ensure_failed` | WARN | One thread could not get a rail. It is inbound-only until it does. |
+
 ## Rollback
 
 One-liner per env (re-deploys an EXISTING ECR tag — no build, ~20–25 s end to end):

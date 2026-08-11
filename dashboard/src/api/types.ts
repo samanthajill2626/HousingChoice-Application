@@ -404,13 +404,17 @@ export interface TodayResponse {
 /** Conversation thread type. `unknown_1to1` is the honest-identity value: a
  *  thread whose participant has not been triaged to tenant/landlord yet.
  *  `relay_group` (M1.7) is a multi-party masked thread fronted by a pool number:
- *  inbound on the pool number fans out to the other members. */
+ *  inbound on the pool number fans out to the other members.
+ *  `group_text` is a NATIVE carrier group on our own business number: no pool
+ *  number, no fan-out, identity is the sorted outside roster. Mirrors
+ *  app/src/repos/conversationsRepo.ts - keep the two unions in lockstep. */
 export type ConversationType =
   | 'tenant_1to1'
   | 'landlord_1to1'
   | 'partner_1to1'
   | 'unknown_1to1'
-  | 'relay_group';
+  | 'relay_group'
+  | 'group_text';
 
 /** A linked external participant: contact + phone pair. */
 export interface ConversationParticipant {
@@ -2553,9 +2557,14 @@ export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by
  *  OPTIONAL (a relay_group row omits them); the relay-only fields
  *  (`conversationId`/`status`/`owner`) are present iff `kind === 'relay_group'`;
  *  the group label rides the shared `name` field (formatted "With A & B"). Keep
- *  in sync with the backend contract. */
+ *  in sync with the backend contract.
+ *  `group_text` (native carrier groups) is declared here in S2 so both sides of
+ *  the wire agree on the vocabulary; the rows themselves are emitted in S4,
+ *  where the group source, its filter, and the renderers land. A group_text row
+ *  carries `conversationId` + the derived roster label in `name`, and NO
+ *  `status`/`owner`/`phone`. */
 export interface InboxRow {
-  kind: 'contact' | 'unknown' | 'relay_group';
+  kind: 'contact' | 'unknown' | 'relay_group' | 'group_text';
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
@@ -2574,7 +2583,10 @@ export interface InboxRow {
   deleted?: boolean;
   // --- relay_group only (present iff kind === 'relay_group') --------------------
   conversationId?: string; // the relay conversation id → route /conversations/:conversationId
-  status?: 'open' | 'closed'; // the relay group's lifecycle status
+  // Lifecycle status. `connecting` (D9) was on the server union only - a
+  // pre-existing mirror drift, fixed here so group status cannot repeat it.
+  // A group_text row carries no lifecycle status at all (it is always open).
+  status?: 'open' | 'closed' | 'connecting';
   owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 

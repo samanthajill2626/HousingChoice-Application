@@ -64,6 +64,11 @@ const CONTACT_TYPE_LABELS: Record<ConversationType, string> = {
   partner_1to1: 'Partner',
   unknown_1to1: 'Unknown',
   relay_group: 'Relay group',
+  // Label only. Today's full group ruling - group threads are EXCLUDED from the
+  // Today feed by construction (Today reads the `open` status partition; groups
+  // live in `group_open`) - lands in S4 along with the ONE_TO_ONE set and
+  // participantContactId rulings. This key exists so the Record stays total.
+  group_text: 'Group text',
 };
 
 const HOUR_MS = 3_600_000;

@@ -70,7 +70,10 @@ export type InboxFilter = 'all' | 'unread' | 'unknown';
 export type InboxChannel = 'sms' | 'mms' | 'call' | 'email';
 
 export interface InboxRow {
-  kind: 'contact' | 'unknown' | 'relay_group';
+  // `group_text` (native carrier groups) is declared in S2 so the server and
+  // dashboard unions agree; the rows are BUILT in S4 (its own source, filter and
+  // renderers). Nothing emits this kind yet.
+  kind: 'contact' | 'unknown' | 'relay_group' | 'group_text';
   contactId?: string; // present when kind='contact'
   phone?: string; // E.164; the number (esp. for unknown rows). Absent on relay_group.
   name: string; // contact name, formatted number (unknown), or the group label (relay_group)
@@ -374,8 +377,11 @@ export async function aggregateInbox(
   const rowForConversation = async (conv: ConversationItem): Promise<InboxRow | undefined> => {
     // relay_group threads are emitted by the SEPARATE relay source (relayRowFor
     // via listRelayGroups), never by the contact pager — so skip them here to
-    // guarantee they can't be double-counted.
-    if (conv.type === 'relay_group') return undefined;
+    // guarantee they can't be double-counted. group_text threads are the same
+    // shape of exclusion and are ALREADY unreachable here (the pager queries the
+    // `open` partition and they live in `group_open`); the explicit case is
+    // defense-in-depth so this reader can never treat a group as a 1:1.
+    if (conv.type === 'relay_group' || conv.type === 'group_text') return undefined;
 
     // Email channel v1 (plan F2/F3 BLOCKER): resolve the contact via
     // participant_phone OR participant_email, so an email-only thread folds into

@@ -838,3 +838,98 @@ earlier sections where they conflict)
    would be dead code).
 10. The nav badge group read follows the SAME accepted full-partition-walk
     contract as section 4.2 (no O(BADGE_LIMIT) claim).
+
+## 16. S5-PRE addendum results (LIVE, 2026-08-11 - AUTHORITATIVE over
+sections 2, 7, 8 and 14 where they conflict)
+
+Run on the dev Twilio account with Cameron's two handsets, production-shaped:
+the DEFAULT Conversations chat service (IS4375...), a group Conversation
+pinned to the CAMPAIGN-BEARING messaging service (MG8715...), business number
+as an UNATTACHED projected-address participant, members as address-only
+participants. Every configured webhook URL carried a `capscope` query tag, so
+each captured event self-identifies which scope delivered it. Raw captures:
+`.superpowers/spike/addendum/`.
+
+### 16.1 Item (a): webhook scope precedence - ANSWERED, DESIGN AMENDED
+
+RUN 1 (production shape as written: service scope = onDeliveryUpdated only;
+account-global = onMessageAdded). Cameron sent a carrier group text. The
+message BOUND to the Conversation (IMe5ce27..., author +16783837896,
+verified present in the Conversation's message list, carrier MMce8542...
+received) - and the ACCOUNT-GLOBAL webhook fired ZERO times, over a 60-minute
+log window, with both webhook configs re-read and confirmed still live after
+the fact.
+
+**PRECEDENCE IS REAL: configuring the service-scoped webhook silences the
+account-global scope.** Shipping section 7's config as written would have
+killed guardrail 2 silently, which is exactly the failure this item existed
+to detect.
+
+RUN 2 (service scope = onDeliveryUpdated AND onMessageAdded; global
+unchanged). The SERVICE scope received the carrier group text as
+`onMessageAdded` with `Source: "SMS"`, the external member as `Author`, and
+the correct `ParticipantSid`. The global scope again fired zero times.
+
+**SPIKE FINDING F5 IS REFUTED.** F5 reported that a service-scoped config
+received onDeliveryUpdated but NOT carrier-sourced onMessageAdded ("2x
+reproduced"). The service scope had never been configured WITH the
+onMessageAdded filter, so that event could not have arrived under any scope
+behavior. The claimed asymmetry was an artifact of the filter set, not a
+property of Twilio.
+
+AMENDMENTS (binding on S5/S6):
+1. ONE service-scoped webhook on the default Conversations service carries
+   BOTH filters: `onDeliveryUpdated` + `onMessageAdded`. Section 7's "filter
+   onDeliveryUpdated only" is superseded.
+2. The guardrail-2 cross-check consumes carrier-sourced `onMessageAdded` from
+   that SAME service-scoped webhook. Section 8 mechanism 2's "ACCOUNT-GLOBAL
+   Conversations webhook" is superseded.
+3. THE ACCOUNT-GLOBAL WEBHOOK IS NOT USED AT ALL. Section 14's ops item
+   "account-global Conversations webhook config (cross-check URL)" is DELETED
+   - one fewer production configuration step.
+4. Twilio permits exactly ONE PostWebhookUrl per service, so the two planned
+   routes (`/conversations/receipts` and `/conversations/events`) COLLAPSE
+   INTO ONE route that dispatches on `EventType`. Both halves keep their
+   distinct handling; only the transport is shared.
+5. Section 15.1's input filter is CONFIRMED correct and now load-bearing on
+   one shared route: `Source === 'SMS'` plus an external-member author.
+   Confirmed live: our own API-sourced post produced NO `onMessageAdded`
+   echo, because `X-Twilio-Webhook-Enabled` is deliberately not set.
+
+### 16.2 Item (b): classic status callbacks - ANSWERED, CODE DROPPED
+
+The campaign-bearing service's StatusCallback was pointed at the capture
+endpoint (tagged `capscope=classic`) for the whole window and re-verified
+still pointed there afterward. The outbound Conversations post
+(IM7ec5ba85...) fanned out to both handsets; both underlying carrier messages
+(SMe80de32..., SM55be061...) reached terminal status `delivered`.
+
+**ZERO classic status callbacks fired.** Classic Programmable Messaging
+status callbacks do NOT fire for Conversations-originated sends.
+
+Delivery state arrived SOLELY as four service-scoped `onDeliveryUpdated`
+events (sent -> delivered per recipient), each carrying both join keys the
+receipts design needs: `ParticipantSid` (MBxx -> member key) and
+`ChannelMessageSid` (the per-member SMxx).
+
+AMENDMENTS (binding on S5):
+1. T5.3 DROPS the `syssid#` system-marker write entirely. There is no classic
+   callback to suppress.
+2. T5.3 DROPS the durable parked-classic-DLR path entirely (external review
+   finding 6 was conditioned on this item; the condition is now false).
+3. `putSystemSidMarker`'s optional TTL parameter and the messages-table
+   "sole expires_at writer" comment change (r3 finding 13, r4 finding 7) are
+   NO LONGER NEEDED for group texting.
+4. Section 7's status-callback interplay paragraph is superseded in full.
+5. The e2e assertion "no unknown-SID ERROR from a group send" is retained and
+   is now trivially satisfiable - keep it as a regression pin.
+6. The per-send staleness alarm (15.9) becomes MORE important, not less: it is
+   now the ONLY detector of a dead receipts webhook, since no second delivery
+   channel exists.
+
+### 16.3 Method note worth keeping
+
+Both scopes posting to one capture URL would have been unattributable. Tagging
+each configured URL with a `capscope` query parameter (Twilio Functions merge
+query params into `event`) made every captured event self-identifying, which
+is what turned "the global seems quiet" into a provable precedence finding.

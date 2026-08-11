@@ -52,6 +52,16 @@ export const IMPORT_SOURCE = 'quo-airtable-import';
 /** The `status_source` value the import stamps (statusModel TransitionSource). */
 const IMPORT_STATUS_SOURCE: TransitionSource = 'import';
 
+/**
+ * The native group-text conversation type (group-texting spec section 4.2).
+ *
+ * A local literal on purpose: this module imports no conversation types today
+ * (only `ContactType`), and pulling `conversationsRepo` in for one string would
+ * drag the whole repo layer into the import lib. The value is pinned by the
+ * guard tests on both sides.
+ */
+const GROUP_TEXT_TYPE = 'group_text';
+
 export interface ApplyOptions {
   doc: DynamoDBDocumentClient;
   plan: PlanResult;
@@ -659,6 +669,23 @@ async function upsertContact(
   return preserveStatus;
 }
 
+/**
+ * Drop `#name` / `:value` bindings the expression no longer references.
+ *
+ * DynamoDB rejects the WHOLE request when ExpressionAttributeValues (or Names)
+ * carries an unused entry, so a reduced expression that keeps its original
+ * bindings is a ValidationException rather than a smaller write.
+ */
+function pruneBindings<T>(expression: string, bindings: Record<string, T>): Record<string, T> {
+  const kept: Record<string, T> = {};
+  for (const [key, value] of Object.entries(bindings)) {
+    // Word boundary so `:import` cannot be mistaken for a reference by
+    // `:importSource` (and vice versa).
+    if (new RegExp(`${key}\\b`).test(expression)) kept[key] = value;
+  }
+  return kept;
+}
+
 interface ConversationUpsert {
   conversationId: string;
   isGroup: boolean;
@@ -702,6 +729,14 @@ async function upsertConversation(
     ':importedAt': input.importedAt,
   };
 
+  /**
+   * Group-path SET clauses that must NEVER be re-applied to a row that has
+   * already become a native `group_text` thread (group-texting spec section 9).
+   * Kept as the literal clause strings so this list and the expression it
+   * filters cannot drift apart.
+   */
+  const groupUnsafeClauses = new Set<string>();
+
   if (!input.isGroup) {
     const phone = input.participants[0]?.phone;
     if (phone) {
@@ -717,18 +752,72 @@ async function upsertConversation(
       // never buys a number as a side effect of a spreadsheet cell.
       sets.push('import_connect_requested = :true');
       values[':true'] = true;
+      groupUnsafeClauses.add('import_connect_requested = :true');
     }
+    // `participants` would re-key the roster detection/conversion filled in
+    // (imported entries carry `contactId: ''`), breaking every member chip.
+    groupUnsafeClauses.add('participants = :participants');
+    // Stamping these would make a live thread look import-owned, exposing it to
+    // the retract paths below.
+    groupUnsafeClauses.add('imported_from = :importSource');
+    groupUnsafeClauses.add('imported_at = :importedAt');
+    // THE SUBTLE ONE: `relay_status = if_not_exists(...)` is NOT self-protecting
+    // on a group_text row. A group_text thread deliberately carries NO
+    // relay_status (spec 4.2), so `if_not_exists` finds nothing to protect and
+    // SEEDS `relay_group#connecting` - which writes the thread into the sparse
+    // byRelayStatus GSI and makes it show up in listRelayGroups('connecting'),
+    // i.e. as a relay group in the inbox. The other if_not_exists clauses
+    // (type/status/ai_mode/created_at/last_activity_at) really are safe: a
+    // converted row has all of them.
+    groupUnsafeClauses.add('relay_status = if_not_exists(relay_status, :relayStatus)');
   }
 
-  await doc.send(
-    new UpdateCommand({
-      TableName: table,
-      Key: { conversationId: input.conversationId },
-      UpdateExpression: `SET ${sets.join(', ')}`,
-      ExpressionAttributeNames: names,
-      ExpressionAttributeValues: values,
-    }),
-  );
+  const fullExpression = `SET ${sets.join(', ')}`;
+
+  if (!input.isGroup) {
+    // Unchanged: a 1:1 id is derived from a single counterparty phone and can
+    // never collide with a group id, so there is nothing here to guard against.
+    await doc.send(
+      new UpdateCommand({
+        TableName: table,
+        Key: { conversationId: input.conversationId },
+        UpdateExpression: fullExpression,
+        ExpressionAttributeNames: names,
+        ExpressionAttributeValues: values,
+      }),
+    );
+  } else {
+    // CONDITIONAL WRITE, not read-then-write: a Get-then-Update would race live
+    // detection during the import's own supported re-run-under-traffic scenario
+    // (the re-run exists precisely for the window when real traffic is landing).
+    values[':groupText'] = GROUP_TEXT_TYPE;
+    try {
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId: input.conversationId },
+          UpdateExpression: fullExpression,
+          ConditionExpression: 'attribute_not_exists(#type) OR #type <> :groupText',
+          ExpressionAttributeNames: names,
+          ExpressionAttributeValues: values,
+        }),
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+      // The row IS a native group thread. Re-import only what a converted or
+      // detected thread can absorb without losing anything it owns.
+      const reducedExpression = `SET ${sets.filter((s) => !groupUnsafeClauses.has(s)).join(', ')}`;
+      await doc.send(
+        new UpdateCommand({
+          TableName: table,
+          Key: { conversationId: input.conversationId },
+          UpdateExpression: reducedExpression,
+          ExpressionAttributeNames: pruneBindings(reducedExpression, names),
+          ExpressionAttributeValues: pruneBindings(reducedExpression, values),
+        }),
+      );
+    }
+  }
 
   // Second write: advance last_activity_at only when the export is NEWER than
   // what is stored. Expressed as a guarded update rather than folded above,

@@ -474,6 +474,103 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(await countMessages(id)).toBe(0);
   });
 
+  it('leaves a native group_text thread byte-identical on every field it owns', async () => {
+    // THE RE-RUN-UNDER-TRAFFIC CASE (group-texting spec section 9). After the
+    // migration (or after live detection minted the same derived id), the group
+    // row is a native group_text thread. A later import re-run must not be able
+    // to drag it back into relay shape.
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+
+    const converted = {
+      conversationId: id,
+      type: 'group_text',
+      status: 'group_open',
+      last_activity_at: '2026-09-01T00:00:00.000Z',
+      created_at: '2026-07-25T10:00:00.000Z',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: contactIdForPhone(PHONES.groupTenant), phone: PHONES.groupTenant },
+        { contactId: contactIdForPhone(PHONES.landlord), phone: PHONES.landlord },
+      ],
+      twilio_conversation_sid: 'CH00000000000000000000000000000001',
+      twilio_participant_map: { MB0000000000000000000000000000001: `phone#${PHONES.landlord}` },
+    };
+    await doc.send(new Put({ TableName: table('conversations'), Item: converted }));
+
+    const review = cleanReview();
+    for (const row of review.groups.values()) row.connect_day_one = 'Y';
+    await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    const conv = await doc.send(
+      new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
+    );
+    const item = conv.Item!;
+    // Everything the native thread owns is untouched.
+    expect(item.type).toBe('group_text');
+    expect(item.status).toBe('group_open');
+    expect(item.participants).toEqual(converted.participants);
+    expect(item.ai_mode).toBe('manual');
+    expect(item.created_at).toBe(converted.created_at);
+    expect(item.twilio_conversation_sid).toBe(converted.twilio_conversation_sid);
+    expect(item.twilio_participant_map).toEqual(converted.twilio_participant_map);
+    // And nothing relay-shaped or import-owned was stamped onto it. relay_status
+    // is the sneaky one: `if_not_exists` protects nothing on a row that
+    // deliberately has none, so without the skip this row would have joined the
+    // byRelayStatus GSI and reappeared as a connecting relay group.
+    expect(item.relay_status).toBeUndefined();
+    expect(item.imported_from).toBeUndefined();
+    expect(item.imported_at).toBeUndefined();
+    expect(item.import_connect_requested).toBeUndefined();
+    expect(item.pool_number).toBeUndefined();
+    // KNOWN, ACCEPTED residual: the second write (the guarded last_activity_at
+    // advance) is not type-guarded, so a re-run whose export is NEWER than the
+    // stored activity reorders the group in the inbox. Here the stored value is
+    // newer, so it stays put.
+    expect(item.last_activity_at).toBe(converted.last_activity_at);
+
+    // Messages still import normally - they are separately keyed.
+    expect(await countMessages(id)).toBeGreaterThan(0);
+  });
+
+  it('advances a converted group thread last_activity_at when the export is newer', async () => {
+    // The one write that still reaches a native group thread. Pinned rather than
+    // fixed: moving last_activity_at forward is correct behavior, and the only
+    // consequence is inbox ORDER (group_open is a byLastActivity partition).
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    const id = conversationIdForGroup([PHONES.groupTenant, PHONES.landlord]);
+    const { PutCommand: Put } = await import('@aws-sdk/lib-dynamodb');
+    await doc.send(
+      new Put({
+        TableName: table('conversations'),
+        Item: {
+          conversationId: id,
+          type: 'group_text',
+          status: 'group_open',
+          last_activity_at: '2020-01-01T00:00:00.000Z',
+          created_at: '2020-01-01T00:00:00.000Z',
+          ai_mode: 'manual',
+          participants: [],
+        },
+      }),
+    );
+
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const conv = await doc.send(
+      new GetCommand({ TableName: table('conversations'), Key: { conversationId: id } }),
+    );
+    expect(conv.Item!.last_activity_at).toBe('2026-07-26T10:00:00.000Z');
+    expect(conv.Item!.status).toBe('group_open');
+  });
+
   it('writes nothing on a dry run', async () => {
     for (const t of TABLES) {
       await deleteTableIfExists(client, table(t));

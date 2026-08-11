@@ -946,6 +946,27 @@ describe('Timeline relay-group annotations', () => {
     expect(screen.getByText('Keisha Kane')).toBeInTheDocument();
   });
 
+  it('attributes a PHONE-SCOPED sender key to the same member (native group_text convention)', () => {
+    // Native group threads key members by phone (spec 15.6) while relay keys
+    // them by contactId. ONE shared resolver serves both - this bubble proves
+    // the phone-scoped form resolves through the very same Timeline path.
+    const inbound: TimelineItem = {
+      kind: 'message',
+      id: 'gt1',
+      at: '2026-06-08T09:26:00',
+      conversationId: 'gt-1',
+      tsMsgId: 'gt1',
+      direction: 'inbound',
+      author: 'tenant',
+      type: 'sms',
+      delivery_status: 'delivered',
+      body: 'On my way',
+      relay_sender_key: 'phone#+14045550112',
+    };
+    renderTimeline({ items: [inbound], relayRoster: ROSTER });
+    expect(screen.getByText('Lars Landlord')).toBeInTheDocument();
+  });
+
   it('leaves a 1:1 bubble unchanged (no delivered summary, no attribution)', () => {
     renderTimeline({ items: [MESSAGE_OUT] });
     expect(screen.queryByText(/^delivered \d+\/\d+$/)).not.toBeInTheDocument();

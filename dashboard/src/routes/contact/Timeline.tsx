@@ -26,6 +26,7 @@ import { ScheduledCard } from './ScheduledCard.js';
 import { dayKey, formatDayDivider, formatDuration, formatPhone, formatTime } from './format.js';
 import { deliveryReason, presentDeliveryStatus, presentRelayDelivery } from './deliveryStatus.js';
 import type { DeliveryTone } from './deliveryStatus.js';
+import { senderLabel as resolveSenderLabel } from '../../lib/memberAttribution.js';
 import { messageMediaSrc, messageSid } from './media.js';
 import { useAutoGrowTextarea } from './useAutoGrowTextarea.js';
 import { ReplyTargetPicker } from './ReplyTargetPicker.js';
@@ -270,35 +271,6 @@ export interface TimelineProps {
   onDraftSeeded?: () => void;
 }
 
-/** The relay member key convention (MIRRORS app relayMemberKey): the member's
- *  contactId when set, else `phone#<E164>`. */
-function relayMemberKey(member: ConversationParticipant): string {
-  return member.contactId && member.contactId.length > 0
-    ? member.contactId
-    : `phone#${member.phone}`;
-}
-
-/** Resolve a relayed message's sender label: the `'team'` sentinel → "Team";
- *  the `'system'` sentinel → "Automated" (an app announcement: group intro /
- *  tour reminder rung); a member key → that member's name (roster lookup);
- *  otherwise undefined (no attribution line). Only meaningful for a relay
- *  bubble (relay_sender_key set). */
-function relaySenderLabel(
-  senderKey: string | undefined,
-  roster: ConversationParticipant[] | undefined,
-): string | undefined {
-  if (senderKey === undefined || senderKey.length === 0) return undefined;
-  if (senderKey === 'team') return 'Team';
-  if (senderKey === 'system') return 'Automated';
-  for (const m of roster ?? []) {
-    if (relayMemberKey(m) === senderKey) {
-      const name = m.name?.trim();
-      return name && name.length > 0 ? name : undefined;
-    }
-  }
-  return undefined;
-}
-
 /** The GROUP composer footer: a reply relays to EVERY member, so the line names
  *  the whole roster ("everyone in this relay group (Ann, Marcus)") instead of a
  *  single number. A member with no resolved name falls back to their formatted
@@ -502,9 +474,11 @@ function MessageBubble({
     outbound && msg.delivery_recipients && msg.delivery_status !== 'queued_pending'
       ? presentRelayDelivery(Object.values(msg.delivery_recipients))
       : null;
-  // Relay attribution: who authored this relayed message ("Team" or a member's
-  // name). Undefined on a 1:1 bubble (no relay_sender_key) → no attribution line.
-  const senderLabel = relaySenderLabel(msg.relay_sender_key, relayRoster);
+  // Multi-party attribution: who authored this message ("Team" or a member's
+  // name), resolved through the SHARED resolver so a relay bubble and a native
+  // group_text bubble render identically. Undefined on a 1:1 bubble (no
+  // relay_sender_key) → no attribution line.
+  const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster);
   const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
 
   // The transport - number - time line is hidden by default; a click/tap on the

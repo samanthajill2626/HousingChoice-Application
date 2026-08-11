@@ -490,7 +490,7 @@ async function retractImported(
   if (existing.Item.origin === GROUP_DETECTION_ORIGIN) {
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but their contact record was created by ` +
-        `group text detection, not by the import — left untouched (GROUP MEMBER).`,
+        `group text detection, not by the import - left untouched (GROUP MEMBER).`,
     );
     return;
   }
@@ -506,7 +506,7 @@ async function retractImported(
   if (groupRosterContactIds.has(person.contactId)) {
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but they are on a native group text ` +
-        `roster — the contact was KEPT (GROUP MEMBER). Deleting it would orphan their member ` +
+        `roster - the contact was KEPT (GROUP MEMBER). Deleting it would orphan their member ` +
         `chips and delivery records in a conversation that belongs to the other members too.`,
     );
     return;
@@ -529,7 +529,7 @@ async function retractImported(
     if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
-        `while this import was running — the contact was KEPT (GROUP MEMBER) and their thread ` +
+        `while this import was running - the contact was KEPT (GROUP MEMBER) and their thread ` +
         `was left untouched.`,
     );
     return;

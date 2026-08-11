@@ -498,8 +498,12 @@ function MessageBubble({
   // Relay group (M1.7): count recipients this message was NOT relayed to because
   // they opted out (a `contact_opted_out` failed slot). Surfaced as a subtle note
   // so staff know the relay group didn't reach everyone. Absent on 1:1 messages.
+  // The CODE alone, matching presentRelayDelivery: relay writes `failed` on a
+  // suppressed leg, the group-text receipts path writes Twilio's own
+  // `undelivered` for a 21610. Requiring `failed` too left a group text's
+  // opted-out member unexplained AND counted as a hard failure.
   const optedOutCount = Object.values(msg.delivery_recipients ?? {}).filter(
-    (r) => r.status === 'failed' && r.errorCode === 'contact_opted_out',
+    (r) => r.errorCode === 'contact_opted_out',
   ).length;
   // Relay group (M1.7): a message carrying a delivery_recipients map is a relayed
   // SOURCE message. For an OUTBOUND relay bubble, summarize per-member delivery

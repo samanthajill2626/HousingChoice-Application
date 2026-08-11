@@ -76,9 +76,15 @@ export interface RelayDeliverySlot {
  * null: nothing was fanned out, so there is nothing to summarize.
  */
 export function presentRelayDelivery(slots: RelayDeliverySlot[]): DeliveryPresentation | null {
-  const fanned = slots.filter(
-    (s) => !(s.status === 'failed' && s.errorCode === 'contact_opted_out'),
-  );
+  // Keyed on the CODE ALONE, deliberately. The relay fan-out records a
+  // suppressed leg as `failed`; the group-text receipts path records what Twilio
+  // actually reported for a 21610, which is `undelivered`. Requiring `failed` as
+  // well meant a group text's opted-out member was counted as a hard failure -
+  // the exact outcome the synthetic `contact_opted_out` code exists to prevent -
+  // while the identical relay leg was excluded. `contact_opted_out` is written by
+  // us, never by a carrier, so the code by itself is an unambiguous statement
+  // that this leg was never really sent.
+  const fanned = slots.filter((s) => s.errorCode !== 'contact_opted_out');
   if (fanned.length === 0) return null;
   const delivered = fanned.filter((s) => s.status === 'delivered').length;
   const failed = fanned.filter(

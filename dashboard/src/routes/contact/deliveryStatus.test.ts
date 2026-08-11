@@ -99,6 +99,21 @@ describe('presentRelayDelivery', () => {
     ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
   });
 
+  it('excludes an UNDELIVERED opted-out leg too - group receipts record 21610 that way', () => {
+    // The relay fan-out writes `failed` on a suppressed leg; the group-text
+    // receipts path writes what Twilio actually reports for a 21610, which is
+    // `undelivered`. Both mean "never really sent", so both must be excluded -
+    // otherwise a group text paints an opted-out member as a hard failure while
+    // the identical relay leg is quietly excluded.
+    expect(
+      presentRelayDelivery([
+        { status: 'delivered' },
+        { status: 'delivered' },
+        { status: 'undelivered', errorCode: 'contact_opted_out' },
+      ]),
+    ).toEqual({ label: 'Delivered 2/2', tone: 'success', isFailure: false });
+  });
+
   it('returns null when there is nothing to summarize (no legs, or everyone opted out)', () => {
     expect(presentRelayDelivery([])).toBeNull();
     expect(

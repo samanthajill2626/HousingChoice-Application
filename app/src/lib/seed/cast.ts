@@ -421,6 +421,11 @@ const searchingTenant = {
   // Pointer row for the second (non-primary) phone
   phonePointerRow: {
     contactId: `phoneref#${PHONES.searchingSecond}`,
+    // THE INDEXED SCALAR IS THE WHOLE POINT (contactsRepo.putPointer writes it):
+    // findByPhone queries the byPhone GSI, so a pointer row without `phone` is
+    // in no index at all and this contact's second number resolved to NOBODY.
+    // The seed has been demonstrating multi-phone resolution that never worked.
+    phone: PHONES.searchingSecond,
     phone_ref: true,
     phone_ref_owner: C_SEARCHING,
   },

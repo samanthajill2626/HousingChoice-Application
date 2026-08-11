@@ -27,6 +27,7 @@
 // to wait for the append, which is exactly what parking is.
 //
 // PII (doc 9): ids, codes and counts only.
+import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
@@ -165,6 +166,11 @@ export interface GroupReceiptsServiceDeps {
   >;
   contactsRepo?: Pick<ContactsRepo, 'findByPhone' | 'setFlag' | 'clearFlag'>;
   auditRepo?: Pick<AuditRepo, 'append'>;
+  /**
+   * SSE bus. A per-recipient delivery move changes what the open group thread
+   * renders, so this path has to push it - see the emit in `applyToMessage`.
+   */
+  events?: EventBus;
   /** Test seam - keeps the unknown-IMxx retry from costing 250ms per case. */
   unknownMessageRetryDelayMs?: number;
   now?: () => Date;
@@ -194,6 +200,7 @@ export function createGroupReceiptsService(
   const conversations = deps.conversationsRepo ?? createConversationsRepo(loggerDep);
   const contacts = deps.contactsRepo ?? createContactsRepo(loggerDep);
   const audit = deps.auditRepo ?? createAuditRepo(loggerDep);
+  const events = deps.events ?? appEvents;
   const retryDelayMs = deps.unknownMessageRetryDelayMs ?? UNKNOWN_MESSAGE_RETRY_DELAY_MS;
   const now = deps.now ?? ((): Date => new Date());
 
@@ -306,7 +313,30 @@ export function createGroupReceiptsService(
         context: 'group',
       },
     );
-    if (applied) return { outcome: 'applied', memberKey };
+    if (applied) {
+      // REFRESH THE UI. A per-recipient delivery move re-renders the group
+      // thread, exactly as it re-renders the relay thread - the relay status
+      // route emits this same event immediately after its own successful
+      // transition (routes/webhooks/twilio.ts, "a per-recipient delivery move
+      // re-renders the relay thread"). Group did NOT inherit that, and live dev
+      // showed the cost: a reply reached both handsets while the open thread
+      // read `Delivered 0/2` until the operator refreshed the page.
+      //
+      // Emitted ONLY on a real transition, so a duplicate/out-of-order receipt
+      // costs no SSE traffic. Receipts arrive on the APP process (the
+      // Conversations webhook), so this reaches SSE clients directly; the
+      // worker-side drains ride the cross-process event bridge as every other
+      // worker emit does. `direction` is the message's own - a group send's
+      // delivery map hangs off an OUTBOUND row - rather than relay's hard-coded
+      // 'inbound', which is true only of a relay SOURCE message.
+      events.emit('message.persisted', {
+        conversationId: message.conversationId,
+        tsMsgId: message.tsMsgId,
+        direction: message.direction,
+        deliveryStatus: ruling.status,
+      });
+      return { outcome: 'applied', memberKey };
+    }
 
     // The transition was refused as a regression - a duplicate or out-of-order
     // receipt. Its SID is still worth having: keep it if the slot has none.

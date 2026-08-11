@@ -6,6 +6,7 @@
 // below is the forward-only guard, the park-and-drain race, the two MBxx
 // resolution sources, and the 21610 bookkeeping nobody else does.
 import { describe, expect, it } from 'vitest';
+import { createEventBus, type AppEventName } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
@@ -35,6 +36,8 @@ interface Fakes {
   optOutSets: { conversationId: string; value: boolean }[];
   audits: { entityKey: string; eventType: string; payload?: Record<string, unknown> }[];
   createdOneToOnes: string[];
+  /** SSE events this service emitted (the UI-refresh push, fix wave 5 L2). */
+  emitted: { event: AppEventName; payload: unknown }[];
   /** `onPark` fires INSIDE parkGroupReceipt - models the append committing
    *  mid-park. Held in its own object because makeFakes returns a SPREAD copy,
    *  so a field set on the result would never reach the closure. */
@@ -101,11 +104,18 @@ function makeFakes(
     optOutSets: [] as Fakes['optOutSets'],
     audits: [] as Fakes['audits'],
     createdOneToOnes: [] as string[],
+    emitted: [] as Fakes['emitted'],
     hooks,
     capture,
   };
 
+  const events = createEventBus();
+  for (const name of ['message.persisted', 'conversation.updated'] as AppEventName[]) {
+    events.on(name, (payload: unknown) => fakes.emitted.push({ event: name, payload }));
+  }
+
   const service = createGroupReceiptsService({
+    events,
     logger: createLogger({ level: 'info', destination: capture.stream }),
     unknownMessageRetryDelayMs: 0,
     now: () => new Date('2026-08-11T13:05:00.000Z'),
@@ -312,6 +322,73 @@ describe('applying a receipt', () => {
       f.capture.atLevel(WARN).some((l) => l['event'] === 'group_receipt_status_unmapped'),
     ).toBe(true);
     expect(slot(f, ANN_KEY)?.status).toBe('queued');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The UI push (fix wave 5, L2)
+// ---------------------------------------------------------------------------
+describe('the SSE push that makes the rollup live', () => {
+  it('EMITS message.persisted on every successful transition, so the open thread re-renders', async () => {
+    // THE LIVE DEFECT. This path updated `delivery_recipients` and emitted
+    // NOTHING, so a group thread sat at `Delivered 0/2` until the operator
+    // reloaded the page - while the relay status route has always emitted here.
+    // The e2e spec could not see it because it reloaded inside its own poll.
+    // This test FAILS if the emit is removed.
+    const f = makeFakes();
+    await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBann',
+      status: 'delivered',
+      channelMessageSid: 'SMann',
+    });
+
+    expect(f.emitted).toEqual([
+      {
+        event: 'message.persisted',
+        payload: {
+          conversationId: 'group-1',
+          tsMsgId: '2026-08-11T13:00:00.500Z#IMposted1',
+          direction: 'outbound',
+          deliveryStatus: 'delivered',
+        },
+      },
+    ]);
+  });
+
+  it('emits ONCE PER MEMBER as each leg lands, which is what moves 0/2 to 2/2 live', async () => {
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBmarcus', status: 'delivered' });
+
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted', 'message.persisted']);
+  });
+
+  it('emits NOTHING for a refused transition, an ignored status or an unknown message', async () => {
+    // Only a real state move changes what the thread renders; a duplicate
+    // receipt or a `read` must not cost SSE traffic on every send.
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    f.emitted.length = 0;
+
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'sent' });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBmarcus', status: 'read' });
+    await f.service.applyReceipt({ messageSid: 'IMnosuch', participantSid: 'MBann', status: 'delivered' });
+
+    expect(f.emitted).toEqual([]);
+  });
+
+  it('emits when a PARKED receipt finally drains - the late path pushes too', async () => {
+    // The park-and-drain route reaches applyToMessage by a different door; if
+    // the emit sat at the caller instead, this receipt would land silently.
+    const f = makeFakes({ message: undefined });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    expect(f.emitted).toEqual([]);
+
+    f.messages.push(outboundGroupMessage());
+    await f.service.drainParked('IMposted1');
+
+    expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted']);
   });
 });
 

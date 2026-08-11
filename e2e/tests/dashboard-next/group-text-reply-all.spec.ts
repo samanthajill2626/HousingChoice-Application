@@ -107,25 +107,20 @@ test('a dashboard reply reaches every handset once, with per-member delivery and
   // 2) The per-member delivery rollup finalizes green once every receipt lands.
   //    This is the ONLY delivery signal a Conversations send produces.
   //
-  //    RELOAD-POLLED, not waited on. Group delivery receipts arrive on the
-  //    Conversations webhook and emit NO SSE event, so nothing pushes the open
-  //    thread: a bare `toBeVisible` here was passing only because the post-send
-  //    `message.persisted` refetch happened to land after the fake's delivery
-  //    ladder, a margin of about a hundred milliseconds. The rollup is
-  //    refetch-driven, so the spec has to drive the refetch - the same pattern
-  //    the STOP spec uses for its own `Delivered 2/2`.
+  //    DELIBERATELY NOT RELOADED. This poll used to call `page.reload()` on
+  //    every sample, which made it pass against a product that never pushed the
+  //    update at all: group receipts updated `delivery_recipients` and emitted
+  //    no SSE, so a live operator watched `Delivered 0/3` until they refreshed.
+  //    The reload was added in wave 4 to settle a "flaky" assertion that was in
+  //    fact reporting that defect. The receipts path now emits
+  //    `message.persisted` exactly as the relay path does, so THE PAGE IS NEVER
+  //    TOUCHED HERE - the rollup has to arrive on its own. If this goes flaky,
+  //    the push is broken; do not put the reload back.
   await expect
-    .poll(
-      async () => {
-        await page.reload();
-        // `count()` takes a snapshot with no auto-wait, so wait for the thread
-        // to have rendered before counting - otherwise every sample measures an
-        // empty SPA.
-        await page.getByText(reply).waitFor({ timeout: 15_000 });
-        return page.getByText(`Delivered ${3}/${3}`).count();
-      },
-      { timeout: 60_000, message: 'the per-member delivery rollup never finalized' },
-    )
+    .poll(async () => page.getByText(`Delivered ${3}/${3}`).count(), {
+      timeout: 60_000,
+      message: 'the per-member delivery rollup never finalized LIVE (no reload) - the SSE push is missing',
+    })
     .toBeGreaterThan(0);
 
   // 3) NO unknown-provider-SID error. Checked over the whole window, not just

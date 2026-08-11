@@ -111,21 +111,17 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   await page.getByRole('button', { name: 'Send', exact: true }).click();
   await expect(page.getByText(partial)).toBeVisible({ timeout: 15_000 });
   // Two reachable members, both delivered - the opted-out leg is excluded from
-  // the count rather than counted as a failure. Reloaded rather than waited on:
-  // per-member receipts arrive on the Conversations webhook and do not push the
-  // open thread, so the rollup is refetch-driven.
+  // the count rather than counted as a failure. NOT RELOADED, for the same
+  // reason the reply-all spec is not: this poll used to reload every sample,
+  // which hid the fact that group receipts pushed no SSE at all. The receipts
+  // path now emits `message.persisted` like the relay path, so the rollup must
+  // arrive on its own. If this goes flaky, the push is broken - do not restore
+  // the reload.
   await expect
-    .poll(
-      async () => {
-        await page.reload();
-        // Wait for the thread to actually render before counting - `count()`
-        // takes a snapshot with no auto-wait, so counting straight after a
-        // reload measures an empty SPA every time.
-        await page.getByText(partial).waitFor({ timeout: 15_000 });
-        return page.getByText('Delivered 2/2').count();
-      },
-      { timeout: 60_000, message: 'the delivery rollup never finalized around the opted-out leg' },
-    )
+    .poll(async () => page.getByText('Delivered 2/2').count(), {
+      timeout: 60_000,
+      message: 'the delivery rollup never finalized LIVE around the opted-out leg (no reload)',
+    })
     .toBeGreaterThan(0);
 
   // 4) Ben's OWN 1:1 is flagged. This is where the suppression has to live: a

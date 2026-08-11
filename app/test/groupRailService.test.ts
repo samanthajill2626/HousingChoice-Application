@@ -126,6 +126,9 @@ function makePort(over: Partial<GroupConversationsPort> = {}) {
     async fetchParticipants() {
       return participantsFor(MEMBERS);
     },
+    async addParticipants() {
+      throw new Error('addParticipants: override it in the test that needs it');
+    },
     ...over,
   };
   return { port, created };
@@ -254,16 +257,25 @@ describe('ensureGroupRail', () => {
     expect(row.current?.rail_creating).toBeUndefined();
   });
 
-  it('MB-MAP MISMATCH: a map that does not cover the roster fails instead of enabling compose', async () => {
+  it('MB-MAP MISMATCH: a roster the rail STILL cannot cover fails instead of enabling compose', async () => {
     const { repo, row } = makeRepo();
+    const partial = [{ participantSid: 'MB0', address: MEMBERS[0]!.phone }];
     const { port } = makePort({
       async createConversationWithParticipants(input) {
         return {
           conversation: { conversationSid: 'CH1', uniqueName: input.uniqueName, state: 'active' },
           // Only ONE of the two members actually attached.
-          participants: [{ participantSid: 'MB0', address: MEMBERS[0]!.phone }],
+          participants: partial,
           failures: [{ address: MEMBERS[1]!.phone, message: 'landline', errorCode: '50407' }],
         };
+      },
+      // The repair is attempted and Twilio refuses again - a landline is a
+      // PERMANENT refusal, so this thread really is rail-failed.
+      async addParticipants(_sid, addresses) {
+        return addresses.map((address) => ({ address, message: 'landline', errorCode: '50407' }));
+      },
+      async fetchParticipants() {
+        return partial;
       },
     });
 
@@ -273,6 +285,55 @@ describe('ensureGroupRail', () => {
     expect(result.reason).toContain('+15551110002');
     expect(row.current?.twilio_conversation_sid).toBeUndefined();
     expect(row.current?.rail_failed).toBeDefined();
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, C5). The individual-add fallback can
+  // attach 8 of 9 when one add throws a 429 or a 5xx, and the port had NO
+  // add-participant operation - so every retry adopted the same Conversation by
+  // UniqueName, re-read the same incomplete list and recorded `rail_failed`
+  // again, permanently. Spec 14 makes "zero UNRESOLVED rail failures" a hard
+  // cutover gate over 132 real threads, and the operator's only remedy was to
+  // delete the Conversation in the Twilio console.
+  it('REPAIRS a partially-attached rail on the next run instead of re-failing forever', async () => {
+    const { repo, row } = makeRepo();
+    // The rail exists (a throttled add left it short of one member) and the
+    // adopt half finds it.
+    let attached: GroupParticipantRef[] = [
+      { participantSid: 'MBbiz', projectedAddress: '+15550000000' },
+      { participantSid: 'MB0', address: MEMBERS[0]!.phone },
+    ];
+    const repairs: string[][] = [];
+    const { port, created } = makePort({
+      async fetchByUniqueName(uniqueName) {
+        return { conversationSid: 'CH1', uniqueName, state: 'active' };
+      },
+      async addParticipants(_sid, addresses) {
+        repairs.push([...addresses]);
+        attached = [
+          ...attached,
+          ...addresses.map((address, i) => ({ participantSid: `MBrepair${i}`, address })),
+        ];
+        return [];
+      },
+      async fetchParticipants() {
+        return attached;
+      },
+    });
+
+    const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+    // Exactly the member the rail was short, and nothing else.
+    expect(repairs).toEqual([[MEMBERS[1]!.phone]]);
+    // No second Conversation was minted to work around the incomplete one.
+    expect(created).toEqual([]);
+    expect(result.status).toBe('created');
+    expect(result.participantMap).toMatchObject({
+      MB0: 'phone#+15551110001',
+      MBrepair0: 'phone#+15551110002',
+    });
+    expect(row.current?.twilio_conversation_sid).toBe('CH1');
+    expect(row.current?.rail_failed).toBeUndefined();
+    expect(row.current?.rail_creating).toBeUndefined();
   });
 
   it('RECREATION RACE: losing the fenced finalize adopts the winner rail, never overwrites it', async () => {

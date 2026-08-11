@@ -105,6 +105,25 @@ export interface GroupConversationsPort {
   fetchByUniqueName(uniqueName: string): Promise<GroupConversationRef | undefined>;
   postGroupMessage(input: PostGroupMessageInput): Promise<PostGroupMessageResult>;
   fetchParticipants(conversationSid: string): Promise<GroupParticipantRef[]>;
+  /**
+   * ATTACH MEMBERS TO AN EXISTING RAIL - the repair operation.
+   *
+   * Without it, a partially-attached rail was PERMANENT: the individual-add
+   * fallback can attach 8 of 9 when one add throws (a 429 or a 5xx), and every
+   * retry then adopts the same Conversation by UniqueName, re-reads the same
+   * incomplete participant list, fails MB-map validation, and records
+   * `rail_failed` again - forever. Spec 14 makes "zero UNRESOLVED rail
+   * failures" a hard cutover gate over 132 real threads, so one throttled add
+   * on migration day stranded a thread with no in-app remedy at all.
+   *
+   * Returns the members Twilio refused, per address, exactly like the create
+   * path's `failures` - never throws for a per-member refusal, because the
+   * caller's job is to report which member could not be attached.
+   */
+  addParticipants(
+    conversationSid: string,
+    addresses: string[],
+  ): Promise<GroupParticipantFailure[]>;
 }
 
 /**
@@ -355,9 +374,6 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
       ...(input.friendlyName !== undefined && { friendlyName: input.friendlyName }),
       messagingServiceSid: this.deps.messagingServiceSid,
     });
-    const context = this.client.conversations.v1.conversations(conversation.sid);
-    const failures: GroupParticipantFailure[] = [];
-
     const adds: { address: string; params: Record<string, string | undefined> }[] = [
       {
         address: input.businessNumber,
@@ -368,6 +384,18 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
         params: { 'messagingBinding.address': address },
       })),
     ];
+    const failures = await this.attach(conversation.sid, adds);
+    const attached = await this.fetchParticipants(conversation.sid);
+    return { conversation: toConversationRef(conversation), participants: attached, failures };
+  }
+
+  /** One participant create per entry, collecting per-member refusals. */
+  private async attach(
+    conversationSid: string,
+    adds: { address: string; params: Record<string, string | undefined> }[],
+  ): Promise<GroupParticipantFailure[]> {
+    const context = this.client.conversations.v1.conversations(conversationSid);
+    const failures: GroupParticipantFailure[] = [];
     for (const add of adds) {
       try {
         await context.participants.create(add.params);
@@ -386,8 +414,20 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
         );
       }
     }
-    const attached = await this.fetchParticipants(conversation.sid);
-    return { conversation: toConversationRef(conversation), participants: attached, failures };
+    return failures;
+  }
+
+  async addParticipants(
+    conversationSid: string,
+    addresses: string[],
+  ): Promise<GroupParticipantFailure[]> {
+    // MEMBERS ONLY, never a projected address: the business number is attached
+    // once at create time, and re-adding it would be a 50407-class refusal on
+    // an otherwise healthy repair.
+    return this.attach(
+      conversationSid,
+      addresses.map((address) => ({ address, params: { 'messagingBinding.address': address } })),
+    );
   }
 
   async fetchByUniqueName(uniqueName: string): Promise<GroupConversationRef | undefined> {
@@ -499,6 +539,13 @@ export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
 
   async fetchParticipants(_conversationSid: string): Promise<GroupParticipantRef[]> {
     return [];
+  }
+
+  async addParticipants(
+    _conversationSid: string,
+    _addresses: string[],
+  ): Promise<GroupParticipantFailure[]> {
+    throw this.unavailable('group rail participant add');
   }
 }
 

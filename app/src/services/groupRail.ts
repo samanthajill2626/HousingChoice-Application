@@ -358,13 +358,57 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       // VALIDATE BEFORE COMPOSE IS ENABLED (spec 6.1). A map that does not cover
       // the roster would send to a subset while the UI showed the whole group,
       // and every receipt for the missing member would be unattributable.
-      const participantMap = buildParticipantMap(participants);
-      const missing = missingFromMap(members, participantMap);
+      let participantMap = buildParticipantMap(participants);
+      let missing = missingFromMap(members, participantMap);
+
+      // REPAIR, DO NOT RE-FAIL. The individual-add fallback can attach 8 of 9
+      // when one add throws (a 429 or a 5xx). Before `addParticipants` existed
+      // that thread was stranded PERMANENTLY: every retry adopted the same
+      // Conversation by UniqueName, re-read the same incomplete list, and
+      // recorded `rail_failed` again - against a cutover gate (spec 14) that
+      // requires ZERO unresolved rail failures over 132 real threads, with no
+      // in-app remedy at all. A retry now attaches exactly the members the rail
+      // is short and re-reads the truth from Twilio.
+      if (missing.length > 0) {
+        log.warn(
+          { event: 'group_rail_participants_incomplete', conversationId, missing: missing.length },
+          'group rail is short of its roster - attaching the missing members',
+        );
+        try {
+          const failures = await port.addParticipants(ref.conversationSid, missing);
+          if (failures.length > 0) {
+            log.warn(
+              {
+                event: 'group_rail_repair_partial',
+                conversationId,
+                refused: failures.length,
+                errorCodes: [...new Set(failures.map((f) => f.errorCode ?? 'unknown'))],
+              },
+              'Twilio refused some of the members this rail was short',
+            );
+          }
+          // The re-read is authoritative: an add can "succeed" and still leave
+          // a shape Twilio will not bind, and a repair that trusted its own
+          // return value would store a map that does not describe the rail.
+          participants = await port.fetchParticipants(ref.conversationSid);
+          participantMap = buildParticipantMap(participants);
+          missing = missingFromMap(members, participantMap);
+        } catch (err) {
+          const reason = err instanceof Error ? err.message : String(err);
+          log.warn(
+            { err, event: 'group_rail_ensure_failed', conversationId },
+            'group rail participant repair failed - the thread stays inbound-only',
+          );
+          await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
+          return { status: 'failed', reason };
+        }
+      }
+
       if (missing.length > 0) {
         const reason = `rail participants do not cover the roster: ${missing.join(', ')}`;
         log.warn(
           { event: 'group_rail_mb_map_mismatch', conversationId, missing: missing.length },
-          'group rail participant map does not cover the roster - recorded rail-failed',
+          'group rail participant map does not cover the roster even after a repair attempt - recorded rail-failed',
         );
         await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
         return { status: 'failed', reason };

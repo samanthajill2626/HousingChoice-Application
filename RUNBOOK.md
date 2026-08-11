@@ -1292,6 +1292,16 @@ the whole run on a mismatch, by design.
 
 ### 2. Production preflight (before the migration window)
 
+0. **MMS-ENABLED CAMPAIGN APPROVAL - the gate on outbound existing at all.**
+   Real group outbound may NOT be switched on until the A2P campaign backing
+   `TWILIO_MESSAGING_SERVICE_SID` is approved AND MMS-enabled. This is Cameron's
+   gate, it is not negotiable by any other step in this list, and it is
+   independent of the detection/ingestion side: group INBOUND and rail creation
+   are silent (creating a Conversation and attaching participants transmits
+   nothing to any handset), so those may go live first. Until the campaign is
+   approved, leave `SMS_SENDING_ENABLED=false` in the env - the adapter refuses
+   every group POST inside itself, so no code path can leak unregistered A2P
+   traffic. Confirm the approval in the Twilio console before flipping it.
 1. **Capability check.** On the PROD Twilio account, create one throwaway group
    Conversation with two participants and delete it. This proves the account can
    do Conversations at all, with the campaign-bearing messaging service pinned,
@@ -1319,6 +1329,23 @@ On the DEFAULT Conversations service (the one the rails are created under):
 
 ### 4. The migration run
 
+**REQUIRED: DRY RUN FIRST.** The bulk runner is the cutover instrument - it is
+run ONCE, against 132 real threads, and spec 14's hardened invariant is expressed
+entirely in its report. It has good unit coverage but no end-to-end exercise (the
+hermetic lane has no export-directory fixture), so the first real exercise of the
+real thing must not also be the real thing. Run it without `--yes` against the
+same three export directories the real run will use:
+
+```powershell
+npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir>
+```
+
+Without `--yes` the runner writes NOTHING: it prints the target endpoint, the
+table prefix, the expected group count and how many the workbook excluded, then
+exits 1 by design. Check all four before proceeding - a wrong `TABLE_PREFIX` or
+`DYNAMODB_ENDPOINT` is the failure that is unrecoverable, and it is visible only
+here. Then the real run:
+
 ```powershell
 npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir> --yes
 ```
@@ -1336,6 +1363,23 @@ A rail failure in the report names its reason - a landline in the roster, a numb
 Twilio will not attach (50407-class), a roster above nine members. That is exactly
 why rails are created eagerly: the alternative is discovering it when staff try to
 reply weeks later.
+
+**Resolving a rail failure**, in order:
+
+1. **Just re-run.** A transient refusal (a 429, a 5xx, one throttled participant
+   add) heals on the next run: `ensureGroupRail` adopts the same Conversation by
+   UniqueName, attaches exactly the members the rail is short, and re-reads the
+   participant list from Twilio. An incomplete rail is REPAIRABLE in-app; it does
+   not need a human.
+2. **A permanent refusal is a data problem.** A landline or an unattachable
+   number will refuse forever. Fix the roster (remove or correct the number in
+   the workbook, or adjudicate the thread as documented inbound-only) - do not
+   retry it hoping for a different answer.
+3. **Last resort, and only if a rail is wedged in a state the repair cannot
+   reach** (for example the Conversation itself is `closed` or `failed`): delete
+   that Conversation in the Twilio console. Because `UniqueName` is our
+   conversationId, the next run finds nothing to adopt and creates a clean rail
+   under the same name. Delete the CONVERSATION, never the messaging service.
 
 ### 5. After the run
 
@@ -1370,9 +1414,80 @@ log events (see "Reading logs" and "Alarms"):
 | `group_crosscheck_inbound_missing` | ERROR | A message reached the Conversation and never reached the classic webhook. The envelope may be gone. |
 | `group_send_receipts_stale` | ERROR | A group send's recipients are still non-terminal past the deadline. The receipts webhook is likely dead or misconfigured - re-check step 3. |
 | `group_crosscheck_channel_quiet` | WARN | Railed threads took classic inbound for 24h while the cross-check recorded nothing. The MONITOR is dead, not the feature. |
-| `group_inbound_heartbeat_quiet` | WARN | No group traffic at all for seven days while group threads exist. |
+| `group_inbound_heartbeat_quiet` | WARN | No group-origin INBOUND for seven days while group threads exist. Staff replies deliberately do NOT quiet this - only inbound (and a just-migrated thread's grace window) does. |
 | `group_envelope_missing` | WARN | The tripwire: an MMS shaped like a group with no envelope. One is not news; a run of them is. |
-| `group_rail_ensure_failed` | WARN | One thread could not get a rail. It is inbound-only until it does. |
+| `group_rail_ensure_failed` | WARN | One thread could not get a rail. It is inbound-only until it does. Remedy: "Resolving a rail failure" in step 4. |
+| `group_rail_participants_incomplete` | WARN | A rail was short of its roster and the missing members are being attached. One is a healed transient; a run of them means participant adds are being throttled. |
+
+### 9. The support ticket (open it, do not wait for a failure)
+
+Open a Twilio support ticket asking Twilio to **confirm `OtherRecipients{N}` as a
+supported contract on the Programmable Messaging inbound webhook** - whether it is
+guaranteed, whether it is subject to change without notice, and whether there is a
+supported alternative for identifying a carrier group inbound.
+
+This is the single highest-leverage ops action for this feature and it costs
+nothing. Every guardrail in the table above exists because the answer today is
+"undocumented". A written answer either downgrades that risk permanently or tells
+us to start on the standby below - and it is far better to have it in hand than to
+be reading it for the first time during an incident. Record the ticket number and
+Twilio's answer here when it arrives.
+
+### 10. Standby: switching group ingestion onto the Conversations rail
+
+**Use when:** `group_crosscheck_inbound_missing` is firing broadly, or
+`group_envelope_missing` has gone from occasional to constant - i.e. the envelope
+has been removed or suppressed and detection is no longer receiving it. This is
+the contingency for this feature's central undocumented-API risk (spec 8.2), and
+it is DORMANT: nothing about it is switched on today.
+
+**Why it works.** Group inbound reaches the app on TWO independent paths. The
+classic messaging webhook carries `OtherRecipients{N}` (the undocumented one);
+the service-scoped Conversations webhook delivers `onMessageAdded` for the same
+carrier message because it bound to a rail - a path that has nothing to do with
+the envelope. Today the second path is used only to CROSS-CHECK the first. The
+standby promotes it to the ingestion rail for railed threads.
+
+**Preconditions - check these first, because the standby is worthless without
+them:**
+
+- The thread must HAVE a rail. Rail-less and rail-ineligible threads (a roster
+  above nine) are not covered by this path at all, and never will be - they stay
+  on the classic path with the envelope, whatever state it is in.
+- The Conversations webhook must be healthy. If `group_crosscheck_channel_quiet`
+  is also firing, the standby channel is the one that is broken - fix step 3
+  before anything else. Two dead channels is not a failover situation.
+
+**Procedure:**
+
+1. **Confirm which channel is alive.** Compare `group_railed_inbound_last_at` and
+   `group_crosscheck_last_event_at` (both in the settings table). Events arriving
+   with no classic filings is the signature this standby is for; the reverse means
+   the problem is the Conversations webhook, not the envelope.
+2. **Freeze the blast radius.** Set `SMS_SENDING_ENABLED=false` if staff replies
+   would compound a mis-filing, and tell the team group threads are read-only.
+3. **Assess exposure.** Group-shaped inbound that arrives with no envelope is
+   already fail-open: it files onto the sender's 1:1 marked
+   `group_ambiguous_origin`, which excludes it from every AI transcript window
+   and is visible in the UI. Nothing is lost while the standby is being switched
+   on; messages are merely in the wrong thread and marked as such.
+4. **Switch ingestion.** This is a CODE change, deliberately not a flag - it
+   changes which webhook files a message and must go through review:
+   `onMessageAdded` already carries the author, the body and the CHxx, and the
+   roster comes from ONE Participants read on that rail (or from the thread's own
+   stored roster, which the rail was built from). File onto the thread whose
+   `twilio_conversation_sid` is that CHxx. Keep the classic path filing 1:1 as it
+   does now, marked - do not delete it.
+5. **Turn the cross-check around.** With ingestion on the Conversations side, a
+   classic filing that never arrives is expected, not an alarm. The
+   `group_crosscheck_inbound_missing` ERROR must be downgraded in the same change
+   or it will fire on every message and bury everything else.
+6. **Re-file what landed wrong.** Messages filed 1:1 during the outage carry
+   `group_ambiguous_origin`, which is how you find them.
+
+**What this does NOT cover:** rail-less threads, media (`onMessageAdded` carries
+media differently), and delivery receipts (unchanged - they were always on the
+Conversations side). Treat it as ingestion continuity, not a full replacement.
 
 ## Rollback
 

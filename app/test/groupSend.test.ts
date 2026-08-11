@@ -122,6 +122,9 @@ function makeFakes(
     },
     fetchByUniqueName: async () => undefined,
     fetchParticipants: async () => [],
+    addParticipants: async () => {
+      throw new Error('groupSend must never repair a rail directly - that is ensureGroupRail');
+    },
     postGroupMessage: async (input) => {
       fakes.posted.push(input);
       return { messageSid: 'IMposted1', dateCreated: '2026-08-11T13:00:00.500Z' };

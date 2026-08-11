@@ -203,6 +203,49 @@ describe('TwilioGroupConversationsDriver.createConversationWithParticipants', ()
   });
 });
 
+// THE DEFECT THIS PINS (fix wave 4, C5). The port had NO add-participant
+// operation, so a rail left short by one throttled add could never be repaired:
+// every retry adopted the same Conversation by UniqueName, re-read the same
+// incomplete list, and recorded `rail_failed` again - against a cutover gate
+// that requires ZERO unresolved rail failures over 132 real threads.
+describe('TwilioGroupConversationsDriver.addParticipants', () => {
+  it('attaches ADDRESS-ONLY participants - never a second projected address', async () => {
+    const f = fakeConversationsClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    const failures = await driver.addParticipants('CHrail1', ['+16175550222']);
+
+    expect(failures).toEqual([]);
+    expect(f.participantCreate.mock.calls.map((c) => c[0])).toEqual([
+      { 'messagingBinding.address': '+16175550222' },
+    ]);
+  });
+
+  it('reports the member Twilio refuses instead of throwing the whole repair away', async () => {
+    const f = fakeConversationsClient({
+      participantCreate: vi
+        .fn()
+        .mockResolvedValueOnce({ sid: 'MBok' })
+        .mockRejectedValueOnce(Object.assign(new Error('bad address'), { code: 50407 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    const failures = await driver.addParticipants('CHrail1', ['+16175550222', '+16175550333']);
+
+    expect(failures).toEqual([
+      { address: '+16175550333', errorCode: '50407', message: 'bad address' },
+    ]);
+  });
+});
+
 describe('TwilioGroupConversationsDriver.postGroupMessage', () => {
   it('authors as the business number and NEVER sets X-Twilio-Webhook-Enabled', async () => {
     const f = fakeConversationsClient();

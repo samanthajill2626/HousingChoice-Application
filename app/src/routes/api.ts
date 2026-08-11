@@ -78,6 +78,10 @@ import {
   type SendMessageService,
 } from '../services/sendMessage.js';
 import {
+  createGroupSendService,
+  type GroupSendService,
+} from '../services/groupSend.js';
+import {
   createSendEmailMessageService,
   EmailSendRefusedError,
   type SendEmailService,
@@ -249,6 +253,8 @@ export interface ApiRouterDeps {
   logger?: Logger;
   /** Test seam: injected service (no DynamoDB/provider). */
   sendMessageService?: SendMessageService;
+  /** Native group texting (S5): injected group send service (test seam). */
+  groupSendService?: GroupSendService;
   /** Email-channel A5: injected email send service (test seam). */
   sendEmailService?: SendEmailService;
   conversationsRepo?: ConversationsRepo;
@@ -547,6 +553,22 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
   // from config. The email send route also resolves the recipient contact by
   // address, so a contacts repo is shared with it.
   const contacts = deps.contactsRepo ?? createContactsRepo({ logger: deps.logger });
+  // Native group texting (S5): the group reply path. Default-constructed here
+  // for the same reason sendMessage is - the composition root needs no change -
+  // and it builds its own Conversations adapter from config. It takes the SAME
+  // contacts repo as the email path so the deleted/consent fences read the
+  // caller's repo, never a second one of their own.
+  const groupSend =
+    deps.groupSendService ??
+    createGroupSendService({
+      config,
+      logger: deps.logger,
+      conversationsRepo: conversations,
+      messagesRepo: messages,
+      contactsRepo: contacts,
+      auditRepo: audit,
+      events,
+    });
   // The email From line renders "<name> at Housing Choice" to the RECIPIENT;
   // the session user carries no `name`, so resolve the full user record
   // (best-effort - a users-table blip falls back to the session identity).
@@ -1162,6 +1184,39 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     const conversation = await conversations.getById(conversationId);
     if (conversation?.type === 'relay_group') {
       await sendRelayTeamMessage(req, res, conversation, body, mediaUrls, attachments);
+      return;
+    }
+
+    // Native group text branch (S5). Its own service: the 1:1 wrapper texts
+    // participant_phone, which a group thread does not have, and the relay
+    // fan-out sends FROM a pool number, which a group thread does not have
+    // either. Both other branches are untouched.
+    if (conversation?.type === 'group_text') {
+      if (body === undefined) {
+        // Outbound group MEDIA is a filed follow-up (spec 6.2: text only in v1).
+        // Refuse explicitly rather than dropping the attachments silently.
+        res.status(400).json({ error: 'group_text_media_not_supported' });
+        return;
+      }
+      if (attachments !== undefined || mediaUrls !== undefined) {
+        res.status(400).json({ error: 'group_text_media_not_supported' });
+        return;
+      }
+      try {
+        const actor = (req as AuthedRequest).user?.userId;
+        const outcome = await groupSend({
+          conversationId,
+          body,
+          ...(actor !== undefined && { actorUserId: actor }),
+        });
+        res.status(201).json(outcome);
+      } catch (err) {
+        if (err instanceof SendRefusedError) {
+          res.status(REFUSAL_STATUS[err.code]).json({ error: err.code });
+          return;
+        }
+        throw err; // Express 5 forwards async throws to the error handler.
+      }
       return;
     }
 

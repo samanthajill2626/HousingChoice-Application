@@ -50,6 +50,7 @@ import {
   createGroupReceiptsService,
   type GroupReceiptsService,
 } from '../../src/services/groupReceipts.js';
+import type { GroupSendService } from '../../src/services/groupSend.js';
 import type { ConversationsCrossCheck } from '../../src/routes/webhooks/twilioConversations.js';
 import type { Verdict } from '../../src/services/extraction/runTypes.js';
 import type {
@@ -3130,6 +3131,8 @@ export interface HarnessOptions {
   statusUnknownSidRetryDelayMs?: number;
   /** Native group texting (S5): replace the Conversations receipts pipeline. */
   groupReceipts?: GroupReceiptsService;
+  /** Native group texting (S5): replace the group send service on /api. */
+  groupSendService?: GroupSendService;
   /** Unknown-IMxx retry window for the group receipts path (default 250ms). */
   groupReceiptRetryDelayMs?: number;
   /** Native group texting (S6 seam): observe onMessageAdded forwarding. */
@@ -3314,6 +3317,9 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
       ...(opts.sendMessageService !== undefined && {
         sendMessageService: opts.sendMessageService,
       }),
+      // Native group texting (S5): the group reply path. Injected so a route
+      // test drives the branch without a Conversations adapter.
+      ...(opts.groupSendService !== undefined && { groupSendService: opts.groupSendService }),
       ...(opts.sseHeartbeatMs !== undefined && { sseHeartbeatMs: opts.sseHeartbeatMs }),
       ...(opts.poolNumbersService !== undefined && {
         poolNumbersService: opts.poolNumbersService,

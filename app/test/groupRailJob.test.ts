@@ -79,6 +79,34 @@ describe('groupRail.ensure job', () => {
     );
   });
 
+  it('the failure WARN never carries the reason string - it can name members', async () => {
+    // The MB-map mismatch case builds its reason as
+    // `rail participants do not cover the roster: <E.164>, <E.164>`, so logging
+    // `reason` verbatim would put member phone numbers in the log sink. The
+    // service already logs the SHAPE (a missing COUNT) and the full string is
+    // persisted by recordRailFailure. This test fails if `reason` comes back.
+    const rail = makeRail({
+      status: 'failed',
+      reason: 'rail participants do not cover the roster: +16174707727, +16783837896',
+    });
+    const warn = vi.fn();
+    registerGroupRailJobHandler({
+      rail,
+      logger: { ...logger, warn, info: vi.fn(), error: vi.fn() } as never,
+    });
+
+    await dispatchJob({
+      jobName: GROUP_RAIL_ENSURE_JOB,
+      payload: { conversationId: 'convGroup:pii' },
+    });
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = warn.mock.calls[0] as [Record<string, unknown>, string];
+    expect(fields).not.toHaveProperty('reason');
+    // Belt and braces: no E.164 anywhere in the emitted line, whatever the key.
+    expect(JSON.stringify({ fields, message })).not.toMatch(/\+1\d{10}/);
+  });
+
   it('a malformed payload is logged and dropped, never retried', async () => {
     const rail = makeRail({ status: 'created' });
     const error = vi.fn();

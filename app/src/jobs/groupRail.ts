@@ -61,12 +61,19 @@ export function registerGroupRailJobHandler(deps: GroupRailJobDeps = {}): void {
       // WARN, not ERROR: a rail-less thread is inbound-only, which the thread
       // view says out loud. The ERROR channel is reserved for the guardrail
       // alarms, and a landline in a roster must not page anyone.
+      // `reason` is DELIBERATELY NOT LOGGED: it is a human-readable diagnostic
+      // that can name members - the MB-map mismatch case builds it as
+      // `rail participants do not cover the roster: <E.164>, <E.164>` - and log
+      // sinks are not subject to the access controls and retention that member
+      // data is. The service that produced it already logs the SHAPE of the
+      // failure (a `missing` COUNT, not the numbers), and the full string is
+      // persisted on the row by `recordRailFailure`, where it belongs. Same
+      // posture as the tracked `telemetry-phone-in-url-pii` gate.
       log.warn(
         {
           event: 'group_rail_job_incomplete',
           conversationId: payload.conversationId,
           railStatus: result.status,
-          reason: result.reason,
         },
         'groupRail.ensure did not establish a rail - the thread stays inbound-only',
       );

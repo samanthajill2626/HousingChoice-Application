@@ -67,6 +67,7 @@ import {
 import { createContactCapture } from '../../services/contactCapture.js';
 import { createOurNumberKind } from '../../services/ourNumberKind.js';
 import { isMemberSuppressed, logSafeMemberKey } from '../../services/relayAnnouncements.js';
+import { applyNumberSuppression } from '../../services/numberSuppression.js';
 import {
   enqueueSendRetry,
   MAX_SEND_RETRY_ATTEMPTS,
@@ -605,21 +606,48 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   // SAME logic path (relay-number-lifecycle AF-4: a closed-group member's STOP
   // to the pool number must suppress exactly like a STOP to the main number did
   // pre-feature, when a closed group's cleared number fell through to the 1:1).
-  // Sets the conversation opt-out flag, the CONTACT flag only on the primary
-  // number (BE1 number-scope), stamps inbound_text consent, audits, and returns
-  // the filed reply (STOP confirmation / HELP / welcome) to ride the TwiML
-  // response. Best-effort: a repo failure is logged and NEVER crashes the
-  // webhook (the message is already persisted). PII: SIDs/IDs only.
+  // Suppression writes go through the SHARED number-scoped seam
+  // (services/numberSuppression.ts): conversation flag always, CONTACT flag only
+  // on the primary number (BE1 number-scope). This function keeps the consent
+  // stamps, the audit source tag, and the filed reply (STOP confirmation / HELP
+  // / welcome) that rides the TwiML response. Best-effort: a repo failure is
+  // logged and NEVER crashes the webhook (the message is already persisted).
+  // PII: SIDs/IDs only.
+  //
+  // GROUP TEXTING (spec 4.4): the target conversation may be a LAZY THUNK. The
+  // group path runs this seam on EVERY group inbound - the plain-inbound
+  // contact-level consent stamp lives here - but must NOT mint the sender's 1:1
+  // thread for a plain inbound or a HELP, which would leave an empty
+  // needs-triage inbox row per group member. The thunk is therefore called only
+  // inside the opt-out/opt-in block, where setSmsOptOut genuinely needs a
+  // target. Passing a ConversationItem (every 1:1/relay caller) is unchanged.
   // ---------------------------------------------------------------------
   async function processInboundKeywords(input: {
-    conversation: ConversationItem;
+    conversation: ConversationItem | (() => Promise<ConversationItem>);
     effectiveContact: ContactItem | undefined;
     From: string;
     Body: string | undefined;
     OptOutType: string | undefined;
     MessageSid: string;
+    /** Extra audit detail (group provenance, spec 4.4). Absent on 1:1. */
+    auditContext?: Record<string, unknown>;
+    /**
+     * Skip composing the filed reply. The group path sends NOTHING on group
+     * keywords in v1 (spec 4.4), and composing the opt-in welcome would do a
+     * pointless settings read on every group START.
+     */
+    suppressReply?: boolean;
   }): Promise<string | undefined> {
-    const { conversation, effectiveContact, From, Body, OptOutType, MessageSid } = input;
+    const {
+      conversation,
+      effectiveContact,
+      From,
+      Body,
+      OptOutType,
+      MessageSid,
+      auditContext,
+      suppressReply,
+    } = input;
     let keywordReply: string | undefined;
     try {
       const kind = classifyInboundKeyword(Body, OptOutType);
@@ -650,68 +678,42 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
 
       if (isHelp) {
-        // HELP: no suppression change. Reply the filed HELP copy (declares no
-        // phone number - verified in lib/smsCompliance.ts + its test).
-        keywordReply = resolveMessage('keyword.help');
+        // HELP: no suppression change, and NO conversation is resolved - which is
+        // exactly why the lazy thunk sits below and not at the top of this
+        // function. Reply the filed HELP copy (declares no phone number -
+        // verified in lib/smsCompliance.ts + its test).
+        if (suppressReply !== true) keywordReply = resolveMessage('keyword.help');
       } else if (optedOut || optedIn) {
-        // The CONVERSATION flag is always written - a STOP from a phone with
-        // no contact record yet (auto-capture is M1.2) must still suppress
-        // every later send. The send wrapper gates on either flag.
-        await conversations.setSmsOptOut(conversation.conversationId, optedOut);
-        const eventType = optedOut ? 'sms_opt_out_recorded' : 'sms_opt_out_cleared';
         const source =
           OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
-        // BE1 number-scoped consent: the CONTACT-level flag (which suppresses the
-        // contact's GOOD primary number across broadcasts + 1:1 sends) is set ONLY
-        // when the STOP/START arrived on the contact's PRIMARY number (From ===
-        // contact.phone). A STOP on an ATTACHED secondary number must NOT
-        // contaminate the primary - the conversation-level flag above already
-        // suppresses this thread (the correct per-number scope).
-        const isPrimaryNumber =
-          effectiveContact !== undefined && From === effectiveContact.phone;
-        if (effectiveContact && isPrimaryNumber) {
-          if (optedOut) await contacts.setFlag(effectiveContact.contactId, 'sms_opt_out');
-          else await contacts.clearFlag(effectiveContact.contactId, 'sms_opt_out');
-          await audit.append(`contacts#${effectiveContact.contactId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
+        // The one number-scoped suppression writer (BE1): the CONVERSATION flag
+        // always - a STOP from a phone with no contact record yet (auto-capture
+        // is M1.2) must still suppress every later send - and the CONTACT flag
+        // only when the keyword arrived on the contact's PRIMARY number. A STOP
+        // on an ATTACHED secondary number must not contaminate the primary.
+        // This is where the lazy target is finally resolved.
+        const applied = await applyNumberSuppression(
+          { contactsRepo: contacts, conversationsRepo: conversations, auditRepo: audit, logger: log },
+          {
+            phone: From,
+            suppressed: optedOut,
+            contact: effectiveContact,
+            conversation:
+              typeof conversation === 'function' ? conversation : async () => conversation,
             source,
-          });
-          // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
-          // opt-in (spec sec 6): if this (primary-number) contact has NO
-          // consent_method yet, stamp inbound_text so proactive sends aren't
-          // JIT-gated. Idempotent - only stamped when absent (never overwrites
-          // a web_form / verbal record). Best-effort inside the same try.
-          if (optedIn && !effectiveContact.consent_method) {
-            await contacts.update(effectiveContact.contactId, {
-              consent_method: 'inbound_text',
-              consent_at: new Date().toISOString(),
-            });
-          }
-        } else if (effectiveContact) {
-          // Non-primary (attached) number: the contact flag is NOT touched (per-
-          // number scope) - only this conversation is suppressed (above). Audit on
-          // the conversation so the trail records the number-scoped opt-out/in.
-          log.info(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in on a non-primary attached number - conversation suppressed, contact flag NOT changed (number-scoped)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
             providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
-          });
-        } else {
-          // Only reachable when auto-capture itself failed above - the
-          // conversation flag still suppresses every later send.
-          log.warn(
-            { providerSid: MessageSid, optOut: optedOut },
-            'opt-out/in from a phone with no contact record - conversation flagged, no contact to flag (auto-capture failed)',
-          );
-          await audit.append(`conversations#${conversation.conversationId}`, eventType, {
-            providerSid: MessageSid,
-            conversationId: conversation.conversationId,
-            source,
+            ...(auditContext !== undefined && { auditContext }),
+          },
+        );
+        // Opt-in (START/JOIN/HOME/YES/UNSTOP) is a documented affirmative
+        // opt-in (spec sec 6): if this (primary-number) contact has NO
+        // consent_method yet, stamp inbound_text so proactive sends aren't
+        // JIT-gated. Idempotent - only stamped when absent (never overwrites
+        // a web_form / verbal record). Best-effort inside the same try.
+        if (optedIn && effectiveContact && applied.scope === 'primary' && !effectiveContact.consent_method) {
+          await contacts.update(effectiveContact.contactId, {
+            consent_method: 'inbound_text',
+            consent_at: new Date().toISOString(),
           });
         }
         // The filed reply for the matched keyword (rides the TwiML response).
@@ -719,9 +721,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // resolved through settings so an operator `welcomeText` override is
         // honored (sec 7 - matches the housing-fair path; today's raw-constant use
         // ignored the override).
-        keywordReply = optedOut
-          ? resolveMessage('keyword.stop')
-          : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
+        if (suppressReply !== true) {
+          keywordReply = optedOut
+            ? resolveMessage('keyword.stop')
+            : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
+        }
       }
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed - message persisted, flag NOT updated');

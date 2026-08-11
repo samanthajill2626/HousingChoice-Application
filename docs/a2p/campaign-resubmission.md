@@ -230,3 +230,38 @@ enforcement on every send path including relay fan-out; and a template-validatio
 floor so opt-out language can't be edited out of first-contact templates.
 Live SMS stays disabled (`SMS_SENDING_ENABLED=false`) until this re-filed
 campaign is approved.
+
+### Group texting: participation is a separate basis (added 2026-08-11)
+
+Native group texting introduces one consent situation the list above does not
+cover, and it is worth being precise about before the MMS campaign gate.
+
+When a carrier group text arrives at our business number, we file it as a group
+thread and resolve-or-create a contact for every outside member. A member who
+has never messaged us has given us **no consent** - they were simply named on
+someone else's group thread. Those members are stamped with a DISTINCT contact
+field `group_participation_at`, and `consent_method` is deliberately left
+UNSET.
+
+That distinction is what keeps the submission truthful:
+
+- `consent_method` remains the single "has SMS consent" predicate, and it feeds
+  six consumers (the just-in-time gate, tour reminders, placement nudges,
+  broadcast fan-out, audience resolution, and the broadcast API). A silent group
+  member is refused by all six, exactly like any other no-consent contact.
+- `group_participation_at` authorizes ONE thing: replying into the group thread
+  that member is already part of. It authorizes no proactive 1:1, no broadcast,
+  and no reminder.
+- The group SENDER is different - they messaged us, so they receive the ordinary
+  `inbound_text` basis through the same inbound path as a 1:1.
+- The separate field also cannot mask a later genuine basis: `consent_method`
+  stays absent until real consent arrives, then stamps normally.
+
+Opt-out behavior in a group is per member and unchanged: a STOP sent inside a
+group suppresses that member (contact-level for their primary number, on the
+number's own thread for a secondary), never the whole group thread, and the
+other members keep receiving. START restores.
+
+Outbound group sends additionally require an MMS-enabled campaign; that gate is
+listed in `RUNBOOK.md`'s group-texting cutover checklist and precedes enabling
+real outbound.

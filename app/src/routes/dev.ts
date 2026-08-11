@@ -8,7 +8,14 @@ import { Router, json } from 'express';
 import { ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { loadConfig, tableName, type AppConfig } from '../lib/config.js';
 import { createDocumentClient } from '../lib/dynamo.js';
-import { logger as defaultLogger, type Logger } from '../lib/logger.js';
+import {
+  clearDevLogTail,
+  devLogTailEnabled,
+  logger as defaultLogger,
+  readDevLogTail,
+  DEV_LOG_TAIL_MIN_LEVEL,
+  type Logger,
+} from '../lib/logger.js';
 import { sealSession, sessionCookieOptions, type SessionEpochCache } from '../middleware/auth.js';
 import { SESSION_COOKIE_NAME } from '../lib/sessionCookie.js';
 import {
@@ -178,6 +185,53 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       // it to the checkout to catch a stale reused backend. null when unstamped.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,
     });
+  });
+
+  // GET /__dev/logtail — the app process's WARN+ERROR ring buffer
+  // (group-texting S8/T8.0). The ONLY way an e2e spec can assert on an app log
+  // line: every child is spawned with stdio:'inherit', so the lines otherwise
+  // go to the launcher's stdout where no test can reach them.
+  //
+  // A16 (BINDING): this is the APP process only. The hermetic lane also spawns
+  // a real worker whose WARN/ERROR never lands here, so a spec asserting a
+  // guardrail line must drive the APP-side tick (/__dev/group-guardrails/tick,
+  // /__dev/group-send-staleness/check, ...), never wait on the worker.
+  //
+  // Query: level=warn|error (default warn), since=<ISO>, contains=<substr of
+  // msg>, event=<exact `event` field>, limit=<n>. Newest last.
+  router.get('/__dev/logtail', (req, res) => {
+    const levelRaw = typeof req.query['level'] === 'string' ? req.query['level'].toLowerCase() : '';
+    const minLevel = levelRaw === 'error' ? 50 : levelRaw === 'fatal' ? 60 : DEV_LOG_TAIL_MIN_LEVEL;
+    const sinceRaw = typeof req.query['since'] === 'string' ? req.query['since'] : undefined;
+    if (sinceRaw !== undefined && !Number.isFinite(Date.parse(sinceRaw))) {
+      res.status(400).json({ error: 'since must be a valid ISO 8601 datetime' });
+      return;
+    }
+    const contains = typeof req.query['contains'] === 'string' ? req.query['contains'] : undefined;
+    const event = typeof req.query['event'] === 'string' ? req.query['event'] : undefined;
+    const limitRaw = typeof req.query['limit'] === 'string' ? Number(req.query['limit']) : undefined;
+    const lines = readDevLogTail({
+      minLevel,
+      ...(sinceRaw !== undefined && { sinceMs: Date.parse(sinceRaw) }),
+      ...(contains !== undefined && { contains }),
+      ...(event !== undefined && { event }),
+      ...(limitRaw !== undefined && Number.isFinite(limitRaw) && { limit: limitRaw }),
+    });
+    res.status(200).json({
+      // FALSE means the ring was never installed (the gate was closed at
+      // createLogger time), so an EMPTY `lines` proves nothing. A spec asserting
+      // the ABSENCE of an ERROR must check this first or it asserts on a
+      // structurally silent surface.
+      capturing: devLogTailEnabled(),
+      lines,
+    });
+  });
+
+  // POST /__dev/logtail/clear — drop the retained lines so a spec can assert
+  // "nothing since I started" without threading timestamps. Workers=1 in the
+  // Playwright config, so this is never racing another spec.
+  router.post('/__dev/logtail/clear', (_req, res) => {
+    res.status(200).json({ ok: true, cleared: clearDevLogTail() });
   });
 
   // POST /auth/dev-login — mint a session for a dev user without Google.

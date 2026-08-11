@@ -115,6 +115,28 @@ export interface ApplyReport {
   warnings: string[];
 }
 
+/**
+ * Group threads keyed by conversationId -> their reviewed workbook row.
+ *
+ * The workbook's groups tab is keyed by POSITION (`GRP-0001` is the first group
+ * thread the plan produced), so this ordering is the join and both the apply and
+ * the group-conversion runner must derive it identically - hence one exported
+ * function rather than two copies of the same forEach.
+ */
+export function groupReviewRowsByConversationId(
+  plan: PlanResult,
+  reviewGroups: Map<string, CsvRow>,
+): Map<string, CsvRow> {
+  const byConversationId = new Map<string, CsvRow>();
+  plan.threads.threads
+    .filter((t) => t.isGroup)
+    .forEach((t, idx) => {
+      const row = reviewGroups.get(`GRP-${String(idx + 1).padStart(4, '0')}`);
+      if (row) byConversationId.set(t.conversationId, row);
+    });
+  return byConversationId;
+}
+
 const VALID_TYPES: ReadonlySet<string> = new Set<ContactType>([
   'tenant',
   'landlord',
@@ -213,15 +235,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
   const messagesTable = table('messages');
   const ownNumbers = plan.quo.ownNumbers;
 
-  const groupRowByConversationId = new Map<string, CsvRow>();
-  {
-    const groupThreads = plan.threads.threads.filter((t) => t.isGroup);
-    groupThreads.forEach((t, idx) => {
-      const key = `GRP-${String(idx + 1).padStart(4, '0')}`;
-      const row = review.groups.get(key);
-      if (row) groupRowByConversationId.set(t.conversationId, row);
-    });
-  }
+  const groupRowByConversationId = groupReviewRowsByConversationId(plan, review.groups);
 
   const messageBatch = new BatchWriter(doc, messagesTable, dryRun);
 

@@ -372,6 +372,14 @@ describe('sendEmailMessage - behavior 5: optimistic persist + provider ids', () 
     const relay = makeFakes({ conversation: { type: 'relay_group' } });
     await expect(relay.service(input())).rejects.toMatchObject({ code: 'conversation_not_found' });
   });
+
+  it('refuses a native group_text thread (invariant 13.6: no "not relay_group" reader treats it as 1:1)', async () => {
+    // A carrier group has no participant_email and no 1:1 counterparty. Without
+    // an explicit case it passes the `!== relay_group` guard and enters the
+    // email send path, where it would fail late and confusingly.
+    const group = makeFakes({ conversation: { type: 'group_text' } });
+    await expect(group.service(input())).rejects.toMatchObject({ code: 'conversation_not_found' });
+  });
 });
 
 // M2: once adapter.send() returns a MessageId the mail is IRREVERSIBLY at SES.

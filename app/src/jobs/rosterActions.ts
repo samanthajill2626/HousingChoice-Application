@@ -324,6 +324,19 @@ async function validateAction(
       // action waited (a force-send, the raw relay route, the other hub).
       const conversation = await readConversation(owner.threadId, deps);
       if (conversation === 'unreadable' || conversation === undefined) return { wait: true };
+      // A native carrier group is NOT a relay group: it has no pool number and
+      // no roster mutation by construction, and its `group_open` status is
+      // neither `closed` nor `connecting`, so without this it would fall through
+      // and be treated as a live relay group. Nothing attaches a group_text to a
+      // tour/placement today (filed out of scope), so this is unreachable - and
+      // it is exactly the kind of unreachable that stops being unreachable.
+      if (conversation.type === 'group_text') {
+        log.error(
+          { actionId: row.actionId },
+          'roster action: owner thread is a native group text, not a relay group - retiring',
+        );
+        return { skip: 'group_closed' };
+      }
       // Opened AND closed inside the window: re-opening is not this action's
       // business (reopen is a separate decision) - retire it visibly.
       if (conversation.status === 'closed') return { skip: 'group_closed' };
@@ -363,6 +376,15 @@ async function validateAction(
   // read failure alike): claim nothing, retry next tick. Never a skip - a blip
   // must not retire a real add.
   if (conversation === 'unreadable' || conversation === undefined) return { wait: true };
+  // Same native-carrier-group guard as the open path above: a group_text thread
+  // has no roster to mutate, and its status is neither closed nor connecting.
+  if (conversation.type === 'group_text') {
+    log.error(
+      { actionId: row.actionId },
+      'roster action: add target is a native group text, not a relay group - retiring',
+    );
+    return { skip: 'group_closed' };
+  }
   // Spec section 7: a closed group is never announced into.
   if (conversation.status === 'closed') return { skip: 'group_closed' };
   // A CONNECTING group has no pool number yet, so services/relayMembers refuses

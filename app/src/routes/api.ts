@@ -177,11 +177,17 @@ const DEFAULT_PAGE_LIMIT = 50;
 const MAX_PAGE_LIMIT = 100;
 
 /**
- * The statuses conversations actually use (conversationsRepo: `open` is the
- * only value any code path writes — create, touchLastActivity). ?status= is
- * the byLastActivity partition key, so anything else is allowlisted here
- * before it reaches DynamoDB; extend this set when a close/archive flow
- * lands.
+ * The statuses THIS ROUTE serves. `?status=` is the byLastActivity partition
+ * key, so anything else is allowlisted here before it reaches DynamoDB; extend
+ * this set when a close/archive flow lands.
+ *
+ * `open` is no longer the only value the repo writes: relay groups use
+ * `connecting`/`closed` (read through byRelayStatus, never here) and native
+ * group texts live in their own `group_open` partition. Group threads stay OUT
+ * of this allowlist DELIBERATELY - this is the 50-row page four dashboard hooks
+ * consume, and it is what keeps 132+ group rows from diluting it. They are read
+ * through conversations.listGroupTexts by the group source instead, so a client
+ * asking for `?status=group_open` gets a 400, by design.
  */
 const CONVERSATION_STATUSES = new Set(['open']);
 

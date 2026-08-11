@@ -1161,7 +1161,11 @@ export function createContactsRouter(deps: ContactsRouterDeps = {}): Router {
     // contact's real phone/email), so they are excluded purely on type.
     const convById = new Map<string, string>(); // conversationId → (presence)
     for (const conv of await conversationsForContact(contact, conversations)) {
-      if (conv.type === 'relay_group') continue; // pool-number thread, not 1:1
+      // Multi-party threads are excluded by NAME, never by "not relay_group"
+      // (invariant 13.6). A native group_text carries no participant_phone or
+      // participant_email, so conversationsForContact cannot return one today -
+      // the explicit case keeps that true if it ever can.
+      if (conv.type === 'relay_group' || conv.type === 'group_text') continue;
       convById.set(conv.conversationId, conv.conversationId);
     }
 

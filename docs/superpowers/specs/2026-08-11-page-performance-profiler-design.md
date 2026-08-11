@@ -92,7 +92,8 @@ explicitly instead of left in conflict:
    scope (`/public/**`, `/unit-media/**`, the direct-to-storage upload origin)
    are not intercepted; they are read-only in practice because D6 exercises no
    workflow control that writes to them, and the hermetic smoke's
-   no-write-observed assertion is the end-to-end check.
+   state-unchanged assertions (section 15.3) are the end-to-end check that no
+   write landed anywhere.
 6. The runner measures three cold and three warm samples per route by default.
    Both repeat counts are configurable.
 7. Routes are ranked separately by cold and warm median meaningful-ready time.
@@ -132,6 +133,15 @@ The root command is:
 ```text
 npm run perf:pages -- <target> [options]
 ```
+
+Every target supports `--print-config`: parse and fully validate the argv,
+print the resolved target, counts, and densities as JSON, and exit 0 without
+starting a lane, opening a browser, or touching any stack. Argv parsing and
+full configuration validation always complete BEFORE any lifecycle step - an
+invalid or over-cap configuration is rejected before section 5.1 step 1 runs,
+not merely before a table is cleared. `--print-config` exists so the
+end-to-end argv test (section 15.1) can execute the real npm script inside the
+`npm test` gate without booting - or reaping - a real e2e stack.
 
 ### 5.1 Hermetic target
 
@@ -631,13 +641,19 @@ The redactor has adversarial tests for E.164 phone values, email addresses, URL
 encoded values, opaque cursor values, UUIDs, arbitrary slug-like IDs, and unknown
 endpoints. A final artifact scan fails the run if common phone/email/cookie/token
 patterns are found, or on the repository's entity-ID shapes - raw entity IDs are
-not phone/email-shaped, so they need their own scan patterns. Those patterns
-match FULL ID shapes (`unit-<digits>`, `contact-<type>-<digits>`, `perf-`
-namespace tokens, UUIDs, ULID-like tokens), never bare prefixes, and the known
-sanitized template literals and `:placeholder` tokens are exempt - otherwise the
-scan would reject its own `/unit-media/:unitId/:mediaKey` output, quarantining
-every run that measures `/listings/:unitId`. A test asserts that every template
-in the registry passes the final scan.
+not phone/email-shaped, so they need their own scan patterns. The pattern list
+is derived from the repository's actual ID constructors and seed namespaces,
+not hand-enumerated: every known entity prefix (`contact`, `unit`, `conv`,
+`tour`, `placement`, `broadcast`, `user`, `msg`, `perf`) followed by a UUID,
+digit run, or slug tail, plus bare UUIDs and ULID-like tokens. Matching is
+substring, not whole-segment, so an ID embedded in a longer value still trips
+it. Patterns match full ID shapes, never bare prefixes, and the known sanitized
+template literals and `:placeholder` tokens are exempt - otherwise the scan
+would reject its own `/unit-media/:unitId/:mediaKey` output, quarantining every
+run that measures `/listings/:unitId`. Tests assert that every template in the
+registry passes the final scan AND that one real ID of every entity kind - in
+both its production `<prefix>-<uuid>` shape and its seed `<prefix>-<digits>`
+shape - fails it.
 
 ### 10.3 Artifact location and files
 
@@ -698,7 +714,11 @@ The relay-group ratio carries a hard ceiling, not just a ratio: generated
 open/connecting relay groups never exceed 1,000 regardless of the conversation
 count, because `/inbox` folds every open/connecting relay group onto page 1
 additively, one query per status, each bounded by its own roughly 2,000-row
-page budget. Staying below the budget keeps the relay queries untruncated
+page budget. When the fixed kind ratio would exceed the ceiling (above roughly
+scale 50), the clipped conversations are generated as 1:1 conversations
+instead, so the conversation TOTAL is preserved deterministically and only the
+kind ratio shifts; the count manifest records both the requested and the
+clipped relay ratio. Staying below the budget keeps the relay queries untruncated
 (asserted by the section 15.2 integration test) and keeps the guaranteed
 relay-group fixture reachable. What the ceiling does NOT do is bound `/inbox`
 as a measured page: page 1 renders 30 contact rows plus every open/connecting
@@ -726,8 +746,12 @@ each source actually renders:
   budget (section 11.2). The budget flag never leaves the server, so the
   assertion is two-sided: a DynamoDB-Local integration test (section 15.2)
   asserts `listRelayGroups` reports no truncation at the generated volume, and
-  the runner compares the inbox response's relay-row count against the
-  manifest's generated relay count, flagging any shortfall in the route result.
+  in hermetic mode only, the runner counts the relay-group rows RENDERED in the
+  inbox DOM by accessible role - never by reading the response body, which the
+  privacy contract forbids and which carries member names and message previews -
+  and flags any shortfall against the manifest's generated relay count in the
+  route result. Local and hosted-dev have no manifest and perform no such
+  comparison.
 
 ### 11.2 Physical table and reader manifest
 
@@ -989,8 +1013,10 @@ messages to the terminal.
 ### 15.1 Pure unit tests
 
 - CLI target and numeric option parsing, including conflicting and forbidden
-  options, plus an end-to-end argv check through `npm run perf:pages` proving
-  `--` options actually reach the CLI on Windows.
+  options, plus an end-to-end argv check through
+  `npm run perf:pages -- hermetic --scale=7 --print-config` proving `--`
+  options actually reach the CLI on Windows - `--print-config` exits before
+  any lane work, so the check runs safely inside the `npm test` gate.
 - local target loopback/port/ping/prefix checks.
 - hosted HTTPS, admin, and exact `env === "dev"` checks.
 - existing-user-only dev login: `requireExisting: true` refuses a missing user,
@@ -1005,9 +1031,10 @@ messages to the terminal.
   total-item cap.
 - fixture reachability: the terminal-broadcast first-page sort guarantee against
   the broadcast list's 50-row page, the relay-group ceiling against the
-  per-status relay page budget, and the runner's inbox relay-row-count versus
-  manifest comparison (the repo-level no-truncation assertion is a section 15.2
-  integration test, because the budget flag never leaves the server).
+  per-status relay page budget, and the hermetic-only DOM relay-row-count
+  versus manifest comparison (the repo-level no-truncation assertion is a
+  section 15.2 integration test, because the budget flag never leaves the
+  server; the runner never reads the inbox response body).
 - the zero/non-zero parent-child matrix including the recipients-to-contacts
   vector: recipient map collapse under `contacts=0`, requested-versus-resolved
   recipient totals in the manifest, and de-duplication before the total-item
@@ -1045,8 +1072,12 @@ convention) and assert the section 11.2 physical/query contract, which is
 app-owned. They never import the e2e-workspace route registry. The
 registry-to-endpoint binding (that each registry entry's declared endpoint
 templates and fixture predicates match what its route actually requests) is
-asserted by the e2e-workspace unit tests in section 15.1, and the hermetic
-smoke in section 15.3 is the live check that ties the two contracts together.
+observable only at runtime, so it is asserted by the hermetic smoke (section
+15.3): every measured route's observed sanitized API templates must be a
+subset of its registry entry's declared set. Section 15.1's unit tests cover
+only what is statically checkable - registry completeness against the
+implemented route table and registry well-formedness - and the runtime
+`unmatched_api` flag feeds ongoing registry maintenance.
 
 ### 15.3 Profiler smoke
 
@@ -1056,8 +1087,16 @@ Assert:
 - the runner starts and stops its lane;
 - the output files exist and pass the privacy scan;
 - `/contacts/tenants` contains sanitized `/api/contacts` request evidence;
+- every measured route's observed sanitized API templates are a subset of its
+  registry entry's declared templates - this is the live registry-to-endpoint
+  binding check, and the only place it is observable (section 15.2);
 - a detail-page mark-read attempt is blocked and recorded;
-- no write reaches the fake server after the firewall is installed;
+- the blocked write did not land: a conversation visited with a non-zero unread
+  count still has the same unread count when re-read over the API afterward
+  (the mark-read is exactly the write that would have zeroed it), and
+  `GET /__dev/outbox` shows no new outbound message. A fake-twilio no-SMS check
+  alone would be vacuous here - the enumerated mount-time writes are app-side
+  POSTs that never touch the comms mock, so the proof must observe app state;
 - the report includes route ranking and a count manifest.
 
 This smoke is an explicit feature verification command and live self-QA step, not a
@@ -1120,7 +1159,8 @@ backend. Neither is silently presented as production-user telemetry.
 Mitigation: scoped method firewall on API-class paths after auth, blocked-write
 evidence with phase tags, service workers blocked as defense in depth, D6's
 navigation-only interaction contract for the un-intercepted residual paths, and
-a smoke proof that the fake server saw no write.
+the smoke's app-state proofs that no write landed (unchanged unread count on a
+visited conversation, empty dev outbox delta).
 
 ### R2. Running against production
 

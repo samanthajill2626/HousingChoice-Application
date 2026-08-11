@@ -130,4 +130,32 @@ describe('hasOtherRecipientsBeyondCap', () => {
     };
     expect(hasOtherRecipientsBeyondCap(params)).toBe(true);
   });
+
+  it('is TRUE for a SPARSE envelope whose next populated index skips the probe', () => {
+    // The scanner is GAP-TOLERANT by design - `parseOtherRecipients` documents a
+    // sparse `OtherRecipients0` + `OtherRecipients3` envelope as supported - so
+    // a check that probes only cap+1 is narrower than the property it claims to
+    // enforce. Here index 33 is absent and 34 is populated: the roster is short
+    // by one and the derived thread id is therefore wrong.
+    const params: Record<string, string> = {};
+    for (let i = 0; i <= MAX_OTHER_RECIPIENTS_INDEX; i++) {
+      params[`OtherRecipients${i}`] = `+1555010${4000 + i}`;
+    }
+    params[`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 2}`] = '+15550104099';
+
+    expect(parseOtherRecipients(params)).toHaveLength(MAX_OTHER_RECIPIENTS_INDEX + 1);
+    expect(hasOtherRecipientsBeyondCap(params)).toBe(true);
+  });
+
+  it('is TRUE for an index-base change the literal scan cannot read', () => {
+    // A zero-padded key is neither read by the capped scan nor equal to any key
+    // it reads, so it is a silent truncation of exactly the same kind.
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipients033: '+15550104099' })).toBe(true);
+  });
+
+  it('ignores a non-numeric OtherRecipients-prefixed key', () => {
+    // Only `OtherRecipients{digits}` is the envelope contract; anything else is
+    // some other param and must not raise a truncation alarm.
+    expect(hasOtherRecipientsBeyondCap({ OtherRecipientsCount: '34' })).toBe(false);
+  });
 });

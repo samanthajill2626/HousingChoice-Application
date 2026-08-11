@@ -831,6 +831,22 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     const { MessageSid, From, Body } = msg;
     const mediaUrls = parseInboundMediaUrls(msg.params);
 
+    // INVARIANT 13.1, THE FIFTH FILING PATH. This intercept runs at step (1.5),
+    // BEFORE the group block at (1.75) computes an envelope at all - so a
+    // carrier-group message that happens to include a RETIRED POOL NUMBER (the
+    // population `docs/issues/group-mms-including-pool-numbers.md` describes)
+    // lands here and is filed as ONE contact's 1:1 speech. The ROUTING decision
+    // stays exactly as it is (relay behavior is unchanged - invariant 13.6);
+    // what changes is that the filing is no longer silent. `parseOtherRecipients`
+    // is pure property access on the already-parsed body, so this costs no I/O.
+    const envelopeBearing = parseOtherRecipients(msg.params).length > 0;
+    if (envelopeBearing) {
+      warnEnvelopeUnminted(
+        { event: 'group_envelope_via_closed_relay_group', providerSid: MessageSid },
+        'a carrier group envelope arrived on a pool number whose groups are all CLOSED - intercepted into the sender 1:1 WITH the extraction marker, no native thread minted',
+      );
+    }
+
     // Resolve the sender's 1:1 thread exactly as the public-intake path does:
     // honest conversation typing (only a reviewed contact type yields a typed
     // thread), then createOrGetByParticipantPhone.
@@ -859,6 +875,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Provenance: the pool number this reached only matches From on the CLOSED
       // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
       viaClosedGroup: group.conversationId,
+      // Fail-open group filing (spec 5.4 / invariant 13.1): the envelope proves
+      // this MAY be carrier-group content, so AI fact extraction must not read
+      // it as this one contact's own speech.
+      ...(envelopeBearing && { groupAmbiguousOrigin: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -1079,13 +1099,17 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       return { handled: false };
     }
 
-    // (0b) ENVELOPE CAP TRIPWIRE. `parseOtherRecipients` stops at
-    // MAX_OTHER_RECIPIENTS_INDEX. Every other roster-SHRINKING condition in
-    // this feature is loud (an unparseable address ERRORs, a collapsed roster
-    // WARNs) because a smaller roster is a DIFFERENT conversationId - i.e. a
-    // forked thread. Twilio's group cap is 10 today, but the contract is
-    // undocumented and can change without notice, so the cap gets a tripwire
-    // too rather than truncating in silence.
+    // (0b) ENVELOPE CAP - REFUSAL, not just a tripwire. `parseOtherRecipients`
+    // stops at MAX_OTHER_RECIPIENTS_INDEX, so an envelope that keeps going
+    // yields a SHORT roster - and a short roster is a DIFFERENT
+    // conversationId, i.e. a forked thread under an id this code would itself
+    // call wrong. The two sibling roster-SHRINKING conditions already state the
+    // rule: an unparseable address refuses ("deriving an id from the survivors
+    // would give a 3-person group the id of a 2-person one") and so does a
+    // cold-start exclusion failure ("a wrong id is permanent data; a 1:1 refile
+    // is recoverable"). This is the same fact pattern and now gets the same
+    // answer - WARN (not ERROR: the level is F13's ruling, and a subject-only
+    // shape must not page anyone) and file to the sender's 1:1 with the marker.
     if (hasOtherRecipientsBeyondCap(params)) {
       log.warn(
         {
@@ -1094,8 +1118,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           scannedCount: msg.others.length,
           maxIndex: MAX_OTHER_RECIPIENTS_INDEX,
         },
-        'group envelope carries an OtherRecipients index past the scan cap - the derived roster may be SHORT and the thread id therefore WRONG',
+        'group envelope carries an OtherRecipients index past the scan cap - the derived roster would be SHORT and the thread id therefore WRONG, so no thread was minted; filed to the sender 1:1 with the extraction marker',
       );
+      return { handled: false };
     }
 
     const identity = groupIdentity(From, To, msg.others, exclusions, { logger: log });
@@ -1122,6 +1147,47 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       );
       return { handled: false };
     }
+
+    // (ii.5) A REDELIVERY NEVER RE-CLASSIFIES. The cold-start refusal at (0) is
+    // the one TRANSIENT fail-open path in this feature, so one MessageSid can be
+    // classified 1:1 on its first delivery (pool read down) and group on a
+    // redelivery (pool read healthy) - and Twilio only redelivers when the first
+    // delivery 5xx'd AFTER the append. Without this check the second delivery
+    // MINTS the group thread, then `messages.append` dedupes against the row in
+    // the sender's 1:1: a group thread carrying a preview and ZERO messages,
+    // with nothing logged.
+    //
+    // The sid pointer is the authority on where this message already lives. If
+    // it lives somewhere other than the id we just derived, the FIRST delivery's
+    // filing stands and this delivery's job is to finish it - so refuse the
+    // group branch and let the 1:1 pipeline re-run its idempotent side effects
+    // (it adopts `persistedConversationId` from the same read). One point read
+    // on the group branch only; the 1:1 path is untouched (invariant 13.2).
+    let alreadyFiledElsewhere = false;
+    try {
+      const alreadyFiled = await messages.getByProviderSid(MessageSid);
+      alreadyFiledElsewhere =
+        alreadyFiled !== undefined && alreadyFiled.conversationId !== identity.conversationId;
+      if (alreadyFiledElsewhere) {
+        log.error(
+          {
+            event: 'group_inbound_already_filed_elsewhere',
+            providerSid: MessageSid,
+            conversationId: identity.conversationId,
+          },
+          'this MessageSid already persisted on a DIFFERENT conversation (a first delivery classified it 1:1) - refusing to mint a group thread for a message that lives elsewhere; completing the original filing instead',
+        );
+      }
+    } catch (err) {
+      // A failed pointer read must not lose the message. Fall through: the worst
+      // case is the pre-fix behavior, and the post-append guard below still
+      // keeps a diverged row from dressing this thread.
+      log.error(
+        { err, providerSid: MessageSid },
+        'group inbound: sid-pointer pre-check failed - proceeding, the post-append divergence guard still applies',
+      );
+    }
+    if (alreadyFiledElsewhere) return { handled: false };
 
     // (iii) Resolve the thread at the derived id. THREE legal shapes.
     const existing = await conversations.getById(identity.conversationId);
@@ -1211,9 +1277,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // migration refuses such a row so a human adjudicates it (groupConvert's
     // `roster_id_mismatch`). Here the message is already correctly filed by id,
     // so the honest action is to say the roster is wrong and keep going.
+    //
+    // EXCLUSION-SET-AWARE (fix wave 2). An ABSENT sender is only a signal when
+    // the roster is supposed to contain them. When the founder or staff texts
+    // one of their own groups from ANOTHER ORG NUMBER, the exclusion set
+    // correctly subtracts that number and the sender is correctly not on the
+    // roster - spec 4.1 (r3 finding 9) calls that "the correctly-configured
+    // steady state, not a signal". It is also a designed-for workflow that
+    // recurs across every group, so alarming on it at ERROR - the channel that
+    // feeds the production alarm - would bury the real corruption signal on day
+    // one. Skip those; keep the ERROR for a sender absent for any OTHER reason.
     const senderE164 = normalizeToE164(From);
     const rosterPhones = (thread.participants ?? []).map((p) => p.phone);
-    if (senderE164 !== undefined && !rosterPhones.includes(senderE164)) {
+    if (senderE164 !== undefined && !rosterPhones.includes(senderE164) && !identity.senderExcluded) {
       log.error(
         {
           event: 'group_sender_not_on_roster',
@@ -1275,24 +1351,42 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // PERMANENTLY. Gate on completeness (not on `deduped`): re-putting an
     // already-stored key is an idempotent same-bytes no-op.
     let groupMediaAlreadyMirrored = false;
-    if (appended.deduped && mediaUrls.length > 0) {
+    if (appended.deduped) {
       try {
         const persisted = await messages.getByProviderSid(MessageSid);
+        // THE CONCURRENT HALF of the (ii.5) guard: two deliveries in flight at
+        // once can both pass the pre-check and still dedupe against each other.
+        // Nothing was persisted by THIS pass, so refusing here is safe and the
+        // 1:1 pipeline finishes the filing that actually won - which also keeps
+        // the media mirror pointed at the row that exists.
+        if (persisted !== undefined && persisted.conversationId !== thread.conversationId) {
+          log.error(
+            {
+              event: 'group_inbound_already_filed_elsewhere',
+              providerSid: MessageSid,
+              conversationId: thread.conversationId,
+            },
+            'group inbound deduped against a message persisted on a DIFFERENT conversation - leaving this thread untouched and completing the original filing',
+          );
+          return { handled: false };
+        }
         groupMediaAlreadyMirrored =
-          persisted !== undefined && mediaAttachmentsOf(persisted).length >= mediaUrls.length;
+          mediaUrls.length > 0 &&
+          persisted !== undefined &&
+          mediaAttachmentsOf(persisted).length >= mediaUrls.length;
         if (persisted === undefined) {
           // The append deduped, so the SID pointer exists - failing to read the
-          // message back is never expected. Mirror anyway under the keys we
-          // have rather than dropping the media.
+          // message back is never expected. Carry on under the keys we have
+          // rather than dropping the media.
           log.error(
             { providerSid: MessageSid },
-            'group inbound deduped but the persisted message could not be read back - re-mirroring media under the append keys',
+            'group inbound deduped but the persisted message could not be read back - re-mirroring any media under the append keys',
           );
         }
       } catch (err) {
         log.error(
           { err, providerSid: MessageSid },
-          'group inbound media completeness read failed - re-entering the mirror rather than risking a permanent media loss',
+          'group inbound dedupe read-back failed - re-entering the mirror rather than risking a permanent media loss',
         );
       }
     }

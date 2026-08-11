@@ -185,3 +185,39 @@ describe('misconfigured exclusion is OBSERVABLE (A5)', () => {
     }
   });
 });
+
+describe('senderExcluded - the correctly-configured steady state (spec 4.1, r3 finding 9)', () => {
+  const OFFICE_LINE = '+15550004444';
+
+  it('is TRUE when the sender is one of the org numbers the exclusion set removes', () => {
+    // The founder or staff texting one of their own groups from a second org
+    // line. The roster is CORRECT - it is the two real members - and the sender
+    // is correctly absent from it. The webhook's sender-not-on-roster ERROR
+    // reads this flag so it does not alarm on a designed-for workflow.
+    const result = groupIdentity(OFFICE_LINE, BUSINESS, [A, B], {
+      businessPhoneNumber: BUSINESS,
+      poolNumbers: [],
+      configuredNumbers: [OFFICE_LINE],
+    });
+
+    expect(result.senderExcluded).toBe(true);
+    expect(result.roster).toEqual([A, B].sort());
+    expect(result.conversationId).toBe(conversationIdForGroup([A, B]));
+  });
+
+  it('is TRUE for a pool number in the sender position (also excluded)', () => {
+    const POOL = '+15550005555';
+    const result = groupIdentity(POOL, BUSINESS, [A, B], {
+      businessPhoneNumber: BUSINESS,
+      poolNumbers: [POOL],
+      configuredNumbers: [],
+    });
+    expect(result.senderExcluded).toBe(true);
+  });
+
+  it('is FALSE for an ordinary member sender', () => {
+    const result = groupIdentity(A, BUSINESS, [B, C], healthy);
+    expect(result.senderExcluded).toBe(false);
+    expect(result.roster).toContain(A);
+  });
+});

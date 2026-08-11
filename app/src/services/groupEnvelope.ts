@@ -64,14 +64,30 @@ export function parseOtherRecipients(params: GroupEnvelopeParams): string[] {
  * `parseOtherRecipients` returned is SHORT.
  *
  * A short roster is a different `conversationIdForGroup`, so this is the same
- * class of corruption as an unparseable address, and the caller alarms on it.
- * Probing exactly one index past the cap is enough: the scan is gap-tolerant,
- * so a populated 33 can only mean the envelope kept going.
+ * class of corruption as an unparseable address, and the caller REFUSES the
+ * group branch on it.
+ *
+ * MATCHES THE SCANNER'S OWN TOLERANCE. An earlier version probed exactly
+ * `OtherRecipients33` and argued that a gap-tolerant scan makes one probe
+ * sufficient. That premise is inverted: gap-tolerance is precisely the
+ * statement that THE ENVELOPE MAY BE SPARSE (`parseOtherRecipients`'s docstring
+ * above says a sparse `OtherRecipients0` + `OtherRecipients3` shape is
+ * supported), so an envelope whose next populated index is 34 truncated
+ * silently under the probe. Enumerate the params instead: ANY populated
+ * `OtherRecipients{N}` key the capped scan does not read means the roster is
+ * short - which also catches a contract change to a different index base
+ * (`OtherRecipients033`). Only reached from the group branch, so it costs the
+ * 1:1 path nothing (invariant 13.2).
  */
 export function hasOtherRecipientsBeyondCap(params: GroupEnvelopeParams): boolean {
-  const probe: string[] = [];
-  collect(params[`OtherRecipients${MAX_OTHER_RECIPIENTS_INDEX + 1}`], probe);
-  return probe.length > 0;
+  const scanned = new Set<string>(['OtherRecipients']);
+  for (let i = 0; i <= MAX_OTHER_RECIPIENTS_INDEX; i++) scanned.add(`OtherRecipients${i}`);
+  const beyond: string[] = [];
+  for (const key of Object.keys(params)) {
+    if (!/^OtherRecipients\d+$/.test(key) || scanned.has(key)) continue;
+    collect(params[key], beyond);
+  }
+  return beyond.length > 0;
 }
 
 /** True when this inbound carries a group envelope at all (spec 5.2 vs 5.3). */

@@ -60,6 +60,19 @@ export interface GroupIdentityResult {
    * for it.
    */
   collapsed: boolean;
+  /**
+   * TRUE when the SENDER (`from`) was removed from the roster by the exclusion
+   * set - i.e. the founder or staff texted one of their own groups from another
+   * ORG number, which `GROUP_IDENTITY_EXCLUDED_NUMBERS` exists to name.
+   *
+   * This is the CORRECTLY-CONFIGURED STEADY STATE (spec 4.1, folding r3 finding
+   * 9: "an excluded number appearing there is the correctly-configured steady
+   * state, not a signal"), and it is exported because the caller's
+   * sender-not-on-roster tripwire would otherwise fire on it - on ordinary
+   * founder traffic, at ERROR, across every group, burying the one alarm that
+   * means imported-roster corruption.
+   */
+  senderExcluded: boolean;
 }
 
 /** Normalize, dropping anything unparseable (used for the exclusion inputs). */
@@ -140,6 +153,11 @@ export function groupIdentity(
     );
   }
 
+  // Computed HERE, where the normalized exclusion set already exists, so no
+  // caller has to rebuild it (and none can rebuild it differently).
+  const normalizedFrom = normalizeToE164(from);
+  const senderExcluded = normalizedFrom !== undefined && excluded.has(normalizedFrom);
+
   return {
     roster,
     conversationId: conversationIdForGroup(roster),
@@ -147,5 +165,6 @@ export function groupIdentity(
     poolNumbersInEnvelope,
     businessNumberSurvived,
     collapsed: roster.length < 2,
+    senderExcluded,
   };
 }

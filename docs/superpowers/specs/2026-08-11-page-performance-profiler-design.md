@@ -58,8 +58,13 @@ explicitly instead of left in conflict:
   per-run instruction naming the target.
 - This change amends AGENTS.md in the same branch with a narrow carve-out
   naming `npm run perf:pages -- local` and `-- hosted-dev` as the sole
-  human-invoked exceptions. If the human declines that amendment, D3 must be
+  human-invoked exceptions (exact wording in section 13; `AGENTS.md` is in the
+  implementation file list). If the human declines that amendment, D3 must be
   re-decided and the local target removed.
+- "Human-invoked only" is enforced, not honored: local mode requires an
+  interactive TTY confirmation (section 5.2) with no bypass flag or
+  environment variable, and hosted-dev requires a human completing a headed
+  interactive login (section 5.3).
 - Agent self-QA and the profiler smoke use the hermetic target only.
 
 ## 3. Success criteria
@@ -77,9 +82,14 @@ explicitly instead of left in conflict:
    interactive login browser, keeps the resulting authentication state in memory
    only, requires an admin session, and refuses unless `/api/system/flags`
    returns `env: "dev"`.
-5. After target verification and authentication, a request firewall blocks every
-   `POST`, `PUT`, `PATCH`, and `DELETE` attempted by a measured page. A blocked
-   write is recorded in sanitized form and never reaches the server.
+5. After target verification and authentication, a request firewall intercepts
+   first-party API-class paths (`/api/**`, `/auth/**`, `/__dev/**`) and blocks
+   every `POST`, `PUT`, `PATCH`, and `DELETE` on them before it reaches the
+   network, recording each blocked write in sanitized form. Paths outside that
+   scope (`/public/**`, `/unit-media/**`, the direct-to-storage upload origin)
+   are not intercepted; they are read-only in practice because D6 exercises no
+   workflow control that writes to them, and the hermetic smoke's
+   no-write-observed assertion is the end-to-end check.
 6. The runner measures three cold and three warm samples per route by default.
    Both repeat counts are configurable.
 7. Routes are ranked separately by cold and warm median meaningful-ready time.
@@ -137,6 +147,7 @@ Supported scale options:
 --conversations=<non-negative integer>
 --messages-per-conversation=<non-negative integer>
 --broadcasts=<non-negative integer>
+--recipients-per-broadcast=<non-negative integer>
 ```
 
 The scale factor supplies every count not explicitly overridden. The resolved
@@ -157,7 +168,10 @@ Hermetic mode owns its lifecycle:
 2. Resolve a free lane with the existing lane resolver. Lane 0 is impossible.
 3. Start `scripts/e2e-session.mjs` for that exact lane, spawned attached so the
    launcher's parent-death watch tears the stack down if the profiler process
-   dies.
+   dies. That watch is armed only after the launcher finishes booting and
+   reseeding, so it is a post-ready backstop: the profiler's own `finally`
+   cleanup (step 8) is the primary guarantee, and the docs cover recovery for a
+   profiler killed during boot (`npm run e2e:stop` clears both state files).
 4. Confirm `/__dev/ping`, including the expected per-lane table prefix and launch
    commit.
 5. Call the new performance reseed seam with the validated scale configuration.
@@ -190,12 +204,19 @@ it requires:
   lane prefix;
 - no seed or reseed option is present.
 
+Local mode also carries a human-presence gate, because "human-invoked only"
+must be a mechanism, not an honor system: the runner requires an interactive
+TTY and a typed confirmation naming the target stack before authenticating,
+and refuses when stdin is not a TTY. The runner never accepts a flag or
+environment variable that bypasses the confirmation.
+
 The profiler calls dev-login with an explicit existing-user-only contract:
-`POST /auth/dev-login` gains an optional boolean body field `require_existing`.
-When true, the route returns a non-success response if the user does not exist
-instead of inviting or provisioning it. Absent or false preserves today's
-auto-provision behavior for every other caller (e2e fixtures, the dashboard
-dev-login button). The profiler always sends `require_existing: true`.
+`POST /auth/dev-login` gains an optional boolean body field `requireExisting`
+(camelCase, matching the repository's request-body convention). When true, the
+route returns a non-success response if the user does not exist instead of
+inviting or provisioning it. Absent or false preserves today's auto-provision
+behavior for every other caller (e2e fixtures, the dashboard dev-login button).
+The profiler always sends `requireExisting: true`.
 
 The login identity defaults to `founder@example.com` and can be overridden with
 `--login-email=<address>` under the same existing-user-only and admin-session
@@ -225,6 +246,15 @@ scope includes admin-only settings pages.
 
 The write firewall is installed only after interactive authentication and the
 environment check. Authentication traffic is outside the measured samples.
+
+The deployed login is Google OAuth, and Google can refuse sign-in inside an
+automation-controlled browser. The runner therefore accepts
+`--browser-channel=chrome` to run the headed login and the measured session in
+installed Chrome instead of bundled Chromium; storage state remains
+memory-only either way. Even so, hosted-dev ships unverified: the pre-merge
+smoke is hermetic-only, so the first real hosted-dev run is the human's, and if
+Google refuses both browser channels, D4 must be re-decided on that evidence
+rather than patched around.
 
 ## 6. Read-only request firewall
 
@@ -292,10 +322,14 @@ Routes are declared in one typed registry. Each entry owns:
 - API endpoint templates expected during the load;
 - whether the route is static or needs a read-only representative entity
   resolver;
-- a `scale_bearing` flag: whether the route's data surface grows with the
-  generated dataset or is fixed-fixture (backed only by tables the generator
-  never writes). The flag is emitted into every ranking row so a reader can
-  tell a route that scaled flat from a route that was never varied.
+- two scale flags, because surface and load can diverge:
+  `surface_scale_bearing` (does the list or detail content the route displays
+  grow with the generated dataset?) and `load_scale_bearing` (does the request
+  volume behind the route grow with it?). `/email` is the canonical split case:
+  its unmatched-email surface is never generated, while its load includes full
+  capped `useContacts` walks over the generated contact set. Both flags are
+  emitted into every ranking row so a reader can tell a route that scaled flat
+  from a route that was never varied - on either axis.
 
 The initial registry includes:
 
@@ -374,11 +408,21 @@ targets without an eligible record use
 `skipped_no_fixture`. The report key always remains the route template, and no raw
 ID is emitted.
 
-The inbox and broadcast lists render only their first page behind a Load more
-control, and D6 forbids clicking it - an API-side page walk does not put a row
-into the DOM. Section 11's seed contract therefore guarantees the eligible
-relay-group and terminal-broadcast fixtures sort onto the first page of those
-sources; without that guarantee the two routes would silently degrade to
+The two paginated sources behave differently, and the seed contract in section
+11 covers each on its own terms - an API-side page walk does not put a row into
+the DOM, and D6 forbids clicking Load more:
+
+- The broadcast list renders one 50-row page behind a Load more control, so the
+  guaranteed terminal broadcast must sort onto that first page.
+- `/inbox` merges relay-group rows additively onto page 1: every open or
+  connecting relay group lands there regardless of recency, on top of the
+  30-row contact page, bounded only by the relay list's own query budget of
+  roughly 2,000 rows. The relay-group fixture is therefore reachable whenever
+  that budget is not truncated, so section 11 caps generated open/connecting
+  relay groups safely below the budget and asserts the server's `truncated`
+  flag stays false.
+
+Without those guarantees the two detail routes would silently degrade to
 `skipped_fixture_not_navigable` as scale rises.
 
 The catch-all not-found route, public pages, create forms, broadcast
@@ -399,7 +443,9 @@ are included.
   targets: the first registry route is loaded cold and thrown away so the Vite
   dev server's process-global transform and pre-bundle caches are warm before
   measurement begins. The warmup is recorded in the manifest. Hosted-dev serves
-  built assets and skips it.
+  built assets and skips it. One route suffices only because the dashboard
+  bundle is not code-split (every route component is imported statically);
+  revisit this if lazy routes are ever introduced.
 
 Both repeat counts are configurable positive integers. A run with fewer than
 three samples is allowed for smoke testing but is labeled `low_sample_count`.
@@ -418,9 +464,13 @@ Chromium for that page is stored as `null`, never synthesized.
 
 Warm samples reuse one authenticated browser context and the application shell.
 For a navigation destination or settings tab, the runner uses its real accessible
-link. For a detail route, the runner first reaches the declared source list,
-applies the declared source state, pages by GET when necessary, and exposes the
-exact accessible row link bound to the resolver's in-memory ID. Timing and request
+link. For a detail route, the runner first reaches the declared source list and
+applies the declared source state. The resolver may page by GET to SELECT its
+fixture, but GET paging never puts a row into the DOM - the warm link must
+already be rendered on the source page, which is what section 11's reachability
+guarantees (first-page sort for broadcasts, the relay volume cap for the inbox)
+exist to ensure. The runner then locates the exact accessible row link bound to
+the resolver's in-memory ID. Timing and request
 collection start immediately before that exact click, so preparation traffic is
 not attributed to the destination. A missing or filtered-out link produces
 `skipped_fixture_not_navigable`, not a click on the first available row.
@@ -462,6 +512,14 @@ event (the final tracked response or the terminal UI state, whichever is
 later), confirmed retroactively once the settle window elapses quiet. The
 settle window confirms readiness; it is never added to `readyMs`.
 
+The network half of that definition has an exact CDP timestamp; the UI half is
+observed by polling, so its timestamp is late by up to one poll interval. The
+readiness poll interval is therefore a named constant (default 100 ms),
+recorded in the manifest next to the settle window, and both are
+`environment_mismatch` triggers in section 12 - two runs polled at different
+cadences are not comparable on UI-settling routes, which are exactly the routes
+this tool exists to find.
+
 The event stream, known long polling, and third-party authentication traffic are
 excluded from request quiescence. Each exclusion is named in code; there is no
 blanket `networkidle` fallback.
@@ -492,9 +550,13 @@ Per sample, collect when available:
   stable category; the known list-hook page-cap warnings map to a
   `client_truncated` category;
 - a `client_truncated` flag when any tracked list hook reported its page cap
-  during the sample, so a metric plateau caused by client-side truncation
-  (contacts/listings cap at 40 pages x 100, placements at 50) is never
-  mistaken for the app scaling well;
+  during the sample, so a metric plateau caused by client-side truncation is
+  never mistaken for the app scaling well. The caps differ per hook: contacts
+  truncate at 40 pages x 100 records per type; listings at 40 pages x the
+  server's default 50-row page (2,000 units - the hook sends no limit); the
+  placements page runs three independent 50-page walks (placements, tenant
+  contacts, units) and truncates when ANY of them caps, the contact and unit
+  walks at 50 x 50 = 2,500 records each;
 - readiness or skip reason.
 
 Chromium DevTools Protocol network events provide encoded transfer size without
@@ -509,9 +571,10 @@ design; the field exists for deliberate elevated-repeat runs.
 
 Worst-offender tables rank cold and warm routes separately by median `readyMs`.
 Secondary tables rank API transfer bytes, API request count, long-task duration,
-and DOM size. Every ranking row carries the route's `scale_bearing` flag and its
-`client_truncated` status, so a flat curve past the client page caps or a
-never-varied fixed-fixture route cannot be read as the app scaling well.
+and DOM size. Every ranking row carries the route's `surface_scale_bearing` and
+`load_scale_bearing` flags and its `client_truncated` status, so a flat curve
+past the client page caps or a never-varied fixed-fixture route cannot be read
+as the app scaling well.
 
 ## 10. Privacy and redaction
 
@@ -542,14 +605,20 @@ segments become semantic placeholders such as `:contactId`, `:unitId`, and
 
 No query value is retained. An unmatched `/api` URL is reduced to the HTTP method,
 resource class, segment count, and `unmatched_api`; it is not emitted verbatim.
-Static assets retain only a non-sensitive asset class and transfer size. External
-origins are reduced to `first_party` or `third_party`; hostnames and paths are not
-stored.
+First-party non-`/api` application paths that carry entity IDs in their segments
+are in the template registry too: `/unit-media/<unitId>/<uuid>` maps to
+`/unit-media/:unitId/:mediaKey` and `/public/**` paths map to their own
+templates, so a `/listings/:unitId` sample's media requests never emit a raw
+unit ID. Static assets retain only a non-sensitive asset class and transfer
+size. External origins are reduced to `first_party` or `third_party`; hostnames
+and paths are not stored.
 
 The redactor has adversarial tests for E.164 phone values, email addresses, URL
 encoded values, opaque cursor values, UUIDs, arbitrary slug-like IDs, and unknown
 endpoints. A final artifact scan fails the run if common phone/email/cookie/token
-patterns are found.
+patterns are found, or if any path segment matches the repository's entity-ID
+shapes (`unit-`, `contact-`, `perf-` prefixes, UUIDs, and ULID-like tokens) -
+raw entity IDs are not phone/email-shaped, so they need their own scan pattern.
 
 ### 10.3 Artifact location and files
 
@@ -586,6 +655,7 @@ At scale 1, generated additions are:
 | conversations | 100 |
 | messages per conversation | 10 |
 | broadcasts | 10 |
+| recipients per broadcast | 25 |
 
 The lean seed remains present for stable admin identities and canonical route
 fixtures. Generated records use a reserved `perf-` ID namespace and fake `+1555`
@@ -599,16 +669,31 @@ fallback in section 11.2. Statuses, contact types, deleted records, tour states,
 placement stages, conversation kinds, unread counts, and broadcast states are
 distributed by fixed ratios so every list view has representative rows.
 
+The relay-group ratio carries a hard ceiling, not just a ratio: generated
+open/connecting relay groups never exceed 1,000 regardless of the conversation
+count, because `/inbox` folds every open/connecting relay group onto page 1
+additively under a roughly 2,000-row relay query budget. Staying below the
+budget keeps the inbox's relay `truncated` flag false (asserted by tests), keeps
+the guaranteed relay-group fixture reachable, and keeps `/inbox` - itself a
+ranked route and the warm source for `/conversations/:conversationId` - from
+degenerating into a page that renders the entire relay population.
+
 At least one eligible detail fixture of each required kind is guaranteed whenever
 the corresponding count is non-zero. When an override intentionally sets a kind to
 zero, affected detail routes are honestly skipped.
 
-Fixtures whose declared warm source paginates behind a Load more control get a
-first-page sort guarantee: the guaranteed eligible relay-group conversation
-carries the newest `last_activity_at` among generated conversations, and the
-guaranteed terminal broadcast the newest `created_at` among generated
-broadcasts, so each sorts onto the first rendered page of its declared source
-(`/inbox` pages at 30, the broadcast list at 50) at every scale.
+Fixtures behind paginated sources get a reachability guarantee matched to how
+each source actually renders:
+
+- the guaranteed terminal broadcast carries the newest `created_at` among
+  generated broadcasts, so it sorts onto the broadcast list's first 50-row page
+  at every scale;
+- relay-group rows do not compete for the inbox's 30 contact-row slots - they
+  merge additively onto page 1 bounded by the relay list's roughly 2,000-row
+  query budget - so the guarantee for the relay-group fixture is a volume cap,
+  not a sort position: generated open/connecting relay groups stay safely below
+  that budget (section 11.2) and the inbox response's relay `truncated` flag is
+  asserted false.
 
 ### 11.2 Physical table and reader manifest
 
@@ -685,7 +770,9 @@ proxy, with an explicit HTTP timeout scaled by the resolved item count. A
 scale-100 reseed performs on the order of ten thousand sequential 25-item batch
 writes on top of a full multi-table clear, so the docs publish a rough expected
 reseed wall-clock per scale and the runner must not misreport a long reseed as
-a hang.
+a hang. The published figure is a SECOND-run figure: the clear phase scans full
+items from the previous run, including broadcasts carrying embedded recipient
+maps, so every run after the first pays a clear cost the first run never shows.
 
 ### 11.4 Bounds
 
@@ -695,12 +782,19 @@ The initial safety bounds are:
 - contacts, units, placements, tours, conversations, broadcasts: 0 through
   20,000 each;
 - messages per conversation: 0 through 100;
-- recipients per broadcast: 0 through 1,000 - deliberately below the
-  repository's `MAX_BROADCAST_RECIPIENTS` (1,500) and sized so the embedded
-  recipients map stays well under the 400KB DynamoDB item ceiling, because
-  broadcast recipients live on the broadcast item itself;
+- recipients per broadcast: 0 through 1,000 (default 25, scale-invariant) -
+  deliberately below the repository's `MAX_BROADCAST_RECIPIENTS` (1,500) and
+  sized so the embedded recipients map stays well under the 400KB DynamoDB item
+  ceiling, because broadcast recipients live on the broadcast item itself;
+- generated open/connecting relay groups: at most 1,000 (section 11.2's inbox
+  budget ceiling);
 - resolved generated items across every table: at most 250,000, with embedded
-  broadcast recipients counted toward the resolved total.
+  broadcast recipients counted toward the resolved total. The default
+  configuration stays inside the cap at every allowed scale (scale 100 resolves
+  to roughly 133,500 rows plus 25,000 embedded recipients); a high
+  recipients-per-broadcast override multiplied by a high broadcast count can
+  exceed it, and the pre-flight validator rejects that combination before
+  anything is cleared.
 
 The total-item cap wins over individual caps. The validator reports the resolved
 count that exceeded the cap and runs entirely before any table is cleared, so an
@@ -720,9 +814,9 @@ Comparison requires the same schema version and route key. It reports target mod
 git commit, scale/count manifest, browser version, OS, Node version, repeat counts,
 and timestamps so a reviewer can judge whether two runs are comparable.
 
-When target kind, scale manifest, route set, browser major version, interception
-scope, or settle window differs, the comparison is labeled `environment_mismatch`
-and lists the mismatches. It still computes route deltas but never presents them
+When target kind, scale manifest, route set, browser major version, browser
+channel, interception scope, settle window, or readiness poll interval differs,
+the comparison is labeled `environment_mismatch` and lists the mismatches. It still computes route deltas but never presents them
 as controlled proof.
 
 For each matching route and cold/warm mode, compare median:
@@ -768,7 +862,9 @@ app/test/performanceSeed.test.ts
 app/test/devRoutes.test.ts or the existing dev-route test surface
 e2e/tsconfig.json
 e2e/package.json
+e2e/vitest.config.ts
 package.json
+AGENTS.md
 ```
 
 The exact split may change in the plan, but the boundaries do not:
@@ -783,15 +879,24 @@ The exact split may change in the plan, but the boundaries do not:
 The e2e TypeScript configuration includes performance sources: `e2e/tsconfig.json`
 has an explicit `include` allowlist, so it gains a `performance/**/*.ts` entry -
 without it the `npm run typecheck` gate would silently skip every new source.
-`e2e/package.json` adds `"test": "tsx --test performance/"` - the directory form,
-not a shell glob, because npm scripts run through `cmd.exe` on Windows and a glob
-that expands to nothing would exit green having run zero tests. The plan must
-prove a non-zero executed-test count on Windows; a zero-test run fails the gate.
-The tests use `node:test` through the already-hoisted `tsx` rather than adding
-Vitest to the e2e workspace, keeping D12's no-new-dependency rule. Root
+`e2e/package.json` adds `"test": "vitest run"` - Vitest is already a hoisted
+root devDependency that the app workspace runs without declaring, so this adds
+zero dependencies and uses the same runner as every other workspace. An
+`e2e/vitest.config.ts` restricts the include to `performance/**/*.test.ts` so
+Vitest never picks up the Playwright specs, and Vitest fails by default when no
+test files match, which closes the zero-test-green gate hazard natively. Root
 `npm test` already runs workspace test scripts with `--if-present`, so it
 executes these modules without a new dependency. The root package also adds only
 the on-demand `perf:pages` command.
+
+`AGENTS.md` is in the file list because the D3 reconciliation in section 2 is a
+required edit, not aspiration. The carve-out wording the branch adds to
+AGENTS.md's "UI testing and verification" section is:
+
+> The one exception is `npm run perf:pages -- local` / `-- hosted-dev`: these
+> profiler targets are human-invoked only. An agent may run them only on the
+> human's explicit per-run instruction naming the target; the local target
+> additionally requires an interactive TTY confirmation the runner enforces.
 
 ## 14. Failure behavior
 
@@ -830,7 +935,7 @@ messages to the terminal.
   options.
 - local target loopback/port/ping/prefix checks.
 - hosted HTTPS, admin, and exact `env === "dev"` checks.
-- existing-user-only dev login: `require_existing: true` refuses a missing user,
+- existing-user-only dev login: `requireExisting: true` refuses a missing user,
   and absent/false preserves current auto-provision behavior for other callers.
 - request firewall allows read methods and blocks every write method before a fake
   server observes it, on intercepted paths only; the never-intercepted list keeps
@@ -840,8 +945,10 @@ messages to the terminal.
   stable category and route flag.
 - recipients-per-broadcast bound and embedded-recipient counting toward the
   total-item cap.
-- first-page sort guarantee for the relay-group and terminal-broadcast fixtures
-  against the inbox and broadcast-list page limits.
+- fixture reachability: the terminal-broadcast first-page sort guarantee against
+  the broadcast list's 50-row page, and the relay-group volume cap against the
+  inbox's roughly 2,000-row relay query budget with the relay `truncated` flag
+  asserted false.
 - endpoint templating and final artifact privacy scans against adversarial values.
 - cold/warm aggregation, null metrics, low sample count, and percentile rule.
 - baseline deltas, zero baseline, missing routes, and environment mismatch.
@@ -906,15 +1013,19 @@ Add an `e2e/README.md` section covering:
 - baseline comparison;
 - interpreting cold versus warm results;
 - known sources of measurement noise;
-- the client list page caps (contacts and listings at 40 pages x 100,
-  placements at 50) and why metrics plateau past them under the
-  `client_truncated` label;
-- why a low rank for a route that is not scale-bearing is not evidence it
-  scales;
-- rough expected reseed and total run wall-clock by scale;
+- the client list page caps and why metrics plateau past them under the
+  `client_truncated` label, with the per-hook numbers from section 9 and the
+  note that EVERY route mounting `useContacts` inherits the contacts cap
+  (email triage, tours, and the contact/listing/conversation/tour/placement
+  detail pages, not just the contact lists);
+- why a low rank for a route that is not scale-bearing on the relevant axis is
+  not evidence it scales;
+- rough expected reseed and total run wall-clock by scale, quoted as second-run
+  figures (the clear phase scans the previous run's items);
 - the one-direction session guard: a later e2e run in the same worktree reaps
   the profiler's launcher, so runs must be serialized by the human;
-- safe cleanup when a profiler-owned lane fails to stop.
+- safe cleanup when a profiler-owned lane fails to stop, including a profiler
+  killed during boot before the launcher's parent-death watch is armed.
 
 The docs explicitly warn that a Vite local run and a deployed production build are
 different environments. Local evidence is best for dataset-scaling diagnosis;
@@ -925,8 +1036,10 @@ backend. Neither is silently presented as production-user telemetry.
 
 ### R1. Measuring a mutation by accident
 
-Mitigation: method firewall after auth, service workers blocked, blocked-write
-evidence, and a smoke proof that the fake server saw no write.
+Mitigation: scoped method firewall on API-class paths after auth, blocked-write
+evidence with phase tags, service workers blocked as defense in depth, D6's
+navigation-only interaction contract for the un-intercepted residual paths, and
+a smoke proof that the fake server saw no write.
 
 ### R2. Running against production
 

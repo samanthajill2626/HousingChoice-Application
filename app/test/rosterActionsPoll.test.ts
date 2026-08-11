@@ -98,9 +98,12 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
   let world: FakeWorld;
   let deps: RunDuePendingRosterActionsDeps;
   let queueAdapter: InProcessOutboundQueueAdapter;
-  const logger = createLogger({ destination: createLogCapture().stream });
+  const capture = createLogCapture();
+  const logger = createLogger({ destination: capture.stream });
+  const ERROR = 50;
 
   beforeEach(() => {
+    capture.lines.length = 0;
     _resetForTests();
     configureJobsLogger(logger);
     configureScheduler(new InMemorySchedulerAdapter());
@@ -333,6 +336,81 @@ describe('runDuePendingRosterActions (contact-rosters Task 13)', () => {
     expect(row.skippedReason).toBe('group_closed');
     expect(world.conversations.get('conv-live')!.participants!.map((p) => p.contactId)).not.toContain('c-case');
     expect(world.sent).toHaveLength(0);
+  });
+
+  // The two native-carrier-group arms, shipped with no test. A group_text
+  // thread has no pool number and no roster to mutate, and its `group_open`
+  // status is neither `closed` nor `connecting` - so WITHOUT these arms both
+  // paths fall through and treat it as a live relay group: the open retires
+  // 'applied' as a no-op over a thread that is not a relay group at all, and the
+  // add mutates a CARRIER roster, which changes nothing at the carrier and
+  // leaves a lie on the row. Retire visibly, and ERROR: nothing attaches a
+  // group_text to a tour or placement today, so reaching here at all is news.
+  function seedGroupTextThread(conversationId: string): void {
+    world.conversations.set(conversationId, {
+      conversationId,
+      status: 'group_open',
+      last_activity_at: CONFIRMED_AT,
+      type: 'group_text',
+      ai_mode: 'manual',
+      participants: [
+        { contactId: 'c-tenant', phone: TENANT_PHONE },
+        { contactId: 'c-pm', phone: PM_PHONE },
+      ],
+      created_at: CONFIRMED_AT,
+    });
+  }
+
+  it('retires a deferred OPEN with an ERROR when the owner thread is a native group text', async () => {
+    const tourId = await createTour();
+    const actionId = await deferOpen('tour', tourId);
+    seedGroupTextThread('conv-native');
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-native' });
+    world.sent.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('group_closed');
+    expect(world.sent).toHaveLength(0);
+    expect(
+      capture
+        .atLevel(ERROR)
+        .some((l) =>
+          String(l['msg']).includes('owner thread is a native group text, not a relay group'),
+        ),
+    ).toBe(true);
+  });
+
+  it('retires a deferred ADD with an ERROR when the target thread is a native group text', async () => {
+    const tourId = await createTour();
+    seedGroupTextThread('conv-native');
+    await world.toursRepo.patch(tourId, { groupThreadId: 'conv-native' });
+    const actionId = await deferAdd('tour', tourId, 'c-case');
+    world.sent.length = 0;
+
+    await runDuePendingRosterActions(POLL_AT, deps);
+    await queueAdapter.settle();
+
+    const row = await rowOf(actionId);
+    expect(row.status).toBe('skipped');
+    expect(row.skippedReason).toBe('group_closed');
+    // The CARRIER roster is untouched - a group_text roster is the thread's own
+    // identity, and adding to it here would neither reach the carrier nor be
+    // undoable.
+    expect(
+      world.conversations.get('conv-native')!.participants!.map((p) => p.contactId),
+    ).not.toContain('c-case');
+    expect(world.sent).toHaveLength(0);
+    expect(
+      capture
+        .atLevel(ERROR)
+        .some((l) =>
+          String(l['msg']).includes('add target is a native group text, not a relay group'),
+        ),
+    ).toBe(true);
   });
 
   it('skips group_closed: a deferred OPEN whose group was opened AND closed meanwhile', async () => {

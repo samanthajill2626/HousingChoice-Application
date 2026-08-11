@@ -76,7 +76,19 @@ describe('senderLabel', () => {
     expect(senderLabel('c1', undefined)).toBeUndefined();
   });
 
-  it('never matches an empty contactId against an empty key', () => {
-    expect(senderLabel('', [member({ contactId: '' })])).toBeUndefined();
+  it('an EMPTY-contactId stub resolves by phone and by nothing else', () => {
+    // The untested population: every migrated / phone-only roster entry carries
+    // `contactId: ''`. Three facts about it at once.
+    //
+    // HONEST NOTE ON WHAT GUARDS THIS. Two clauses defend the last assertion and
+    // EITHER ONE alone is sufficient: the early `senderKey.length === 0` return,
+    // and `m.contactId.length > 0 &&` in the match. Deleting one leaves this
+    // green; deleting BOTH turns the last line red (an empty key would resolve
+    // to this stub's name). They are a deliberate pair, and this is the only
+    // test that holds the pair.
+    const stub = member({ contactId: '', phone: '+15555550777', name: 'Stub Member' });
+    expect(senderLabel('phone#+15555550777', [stub])).toBe('Stub Member');
+    expect(senderLabel('c1', [stub])).toBeUndefined();
+    expect(senderLabel('', [stub])).toBeUndefined();
   });
 });

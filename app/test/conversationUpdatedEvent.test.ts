@@ -97,6 +97,12 @@ describe('toConversationUpdatedEvent', () => {
       type: 'group_text',
       status: GROUP_TEXT_STATUS,
       participants: MEMBERS,
+      // A STORED pool_number, which spec 4.2 says a group_text never has. The
+      // fixture carries one anyway: without it, a widening of `isRelay` written
+      // as a conditional spread (`...(item.pool_number !== undefined && {...})`)
+      // would emit no key and slip past this assertion. With it, ANY shape of
+      // widening puts the field on the wire and this test goes red.
+      pool_number: '+15559990001',
     } as ConversationItem;
 
     expect('pool_number' in toConversationUpdatedEvent(group)).toBe(false);

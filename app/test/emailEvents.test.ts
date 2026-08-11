@@ -169,6 +169,46 @@ describe('applyEmailEvent - RESOLVED behavior matrix', () => {
     expect(f.setFlag).toHaveBeenCalledWith('c1', 'email_unreachable');
   });
 
+  // The multi-party exclusion in resolveRecipientContact's FALLBACK, shipped in
+  // 8c193e26 as a behavior change with no test. Reachable only through the
+  // fallback, so every case here misses findByEmail first (the contact carries
+  // no matching address) and lands on the conversation roster.
+  describe('multi-party fallback exclusion (the roster is never first-matched)', () => {
+    const nameless = { contactId: 'c1', type: 'tenant' } as ContactItem;
+    const roster = [
+      { contactId: 'c1', phone: '+15550100001' },
+      { contactId: 'c2', phone: '+15550100002' },
+    ];
+    const conv = (type: string): ConversationItem =>
+      ({ conversationId: 'conv-1', type, participants: roster } as unknown as ConversationItem);
+
+    it('flags NOBODY on a group_text roster rather than the first member listed', async () => {
+      const f = makeApplier({ contact: nameless, conversation: conv('group_text') });
+      await f.applyEmailEvent(event({ eventType: 'Bounce', bounceType: 'Permanent' }));
+      // Status still moves - only the suppression is withheld.
+      expect(f.updateDeliveryStatus).toHaveBeenCalledWith('ses-1', 'undelivered', 'bounce:Permanent');
+      expect(f.getById).not.toHaveBeenCalled();
+      expect(f.setFlag).not.toHaveBeenCalled();
+      expect(f.append).not.toHaveBeenCalled();
+    });
+
+    it('flags NOBODY on a relay_group roster either', async () => {
+      const f = makeApplier({ contact: nameless, conversation: conv('relay_group') });
+      await f.applyEmailEvent(event({ eventType: 'Complaint' }));
+      expect(f.setFlag).not.toHaveBeenCalled();
+      expect(f.append).not.toHaveBeenCalled();
+    });
+
+    it('POSITIVE CONTROL: the same roster on a 1:1 thread DOES flag its participant', async () => {
+      // Byte-for-byte the group fixture except the type, so the exclusion - not
+      // the roster shape, the missing email or anything else - is what differs.
+      const f = makeApplier({ contact: nameless, conversation: conv('tenant_1to1') });
+      await f.applyEmailEvent(event({ eventType: 'Bounce', bounceType: 'Permanent' }));
+      expect(f.getById).toHaveBeenCalledWith('c1');
+      expect(f.setFlag).toHaveBeenCalledWith('c1', 'email_unreachable');
+    });
+  });
+
   it('suppression with NO resolvable contact still updates status and never throws', async () => {
     const f = makeApplier({ contact: undefined, conversation: undefined });
     await expect(f.applyEmailEvent(event({ eventType: 'Bounce', bounceType: 'Permanent' }))).resolves.toBeUndefined();

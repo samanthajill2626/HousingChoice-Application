@@ -408,6 +408,83 @@ describe('group detection: filing (T3.3)', () => {
     ).toBe(true);
   });
 
+  it('(c) AUTOCONVERT REFUSED: a roster that does not hash to its own id files 1:1 with an ERROR + the marker', async () => {
+    // The refusal arm of the same inline auto-convert. The known producer is a
+    // workbook `drop` applied to a group member: the id encodes the FULL sorted
+    // roster while the stored roster is short, so the row cannot describe its
+    // own thread and conversion refuses `roster_id_mismatch`. NEVER guess a
+    // roster - file to the sender's 1:1, MARKED so AI extraction excludes it,
+    // and alarm.
+    const world = createFakeWorld();
+    world.conversations.set(GROUP_ID, {
+      conversationId: GROUP_ID,
+      type: 'relay_group',
+      status: 'connecting',
+      relay_status: 'connecting',
+      // SHORT: the derived id is over all three members, this roster has two.
+      participants: [SENDER, MEMBER_B].map((phone) => ({ contactId: '', phone })),
+      ai_mode: 'manual',
+      last_activity_at: '2026-08-01T00:00:00.000Z',
+      created_at: '2026-08-01T00:00:00.000Z',
+      imported_from: 'quo',
+    } as ConversationItem);
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    // Nothing was converted and nothing was filed on the group thread.
+    expect(groupThread(world)!.type).toBe('relay_group');
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]?.conversationId).not.toBe(GROUP_ID);
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+    const alarm = capture
+      .atLevel(ERROR)
+      .find((l) => l['event'] === 'group_autoconvert_refused');
+    expect(alarm).toBeDefined();
+    expect(alarm?.['refusal']).toBe('roster_id_mismatch');
+  });
+
+  it('(c) AUTOCONVERT UNREADABLE: a convert that reports success but does not read back files 1:1 with an ERROR + the marker', async () => {
+    // The post-convert re-read is a TRUST-NOTHING step: the converter answered
+    // `converted`, but if the row does not read back as a group_text we do not
+    // know what we are filing into. Modelled by a repo whose conditional
+    // transition returns the converted item WITHOUT storing it - the same shape
+    // as a lost write or a replica that has not caught up.
+    const world = createFakeWorld();
+    const stored = {
+      conversationId: GROUP_ID,
+      type: 'relay_group',
+      status: 'connecting',
+      relay_status: 'connecting',
+      participants: GROUP_ROSTER.map((phone) => ({ contactId: '', phone })),
+      ai_mode: 'manual',
+      last_activity_at: '2026-08-01T00:00:00.000Z',
+      created_at: '2026-08-01T00:00:00.000Z',
+      imported_from: 'quo',
+    } as ConversationItem;
+    world.conversations.set(GROUP_ID, stored);
+    const repo = world.conversationsRepo;
+    world.conversationsRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        if (prop !== 'convertRelayGroupToGroupText') {
+          return Reflect.get(target, prop, receiver) as unknown;
+        }
+        return async (conversationId: string, members: unknown) =>
+          ({ ...stored, conversationId, type: 'group_text', status: GROUP_TEXT_STATUS, participants: members } as ConversationItem);
+      },
+    });
+    const { app, capture } = makeWebhookHarness({ world });
+
+    await signedTwilioPost(app, SMS_PATH, groupParams());
+
+    expect(world.messages).toHaveLength(1);
+    expect(world.messages[0]?.conversationId).not.toBe(GROUP_ID);
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+    expect(
+      capture.atLevel(ERROR).some((l) => l['event'] === 'group_autoconvert_unreadable'),
+    ).toBe(true);
+  });
+
   it('CORRUPT SHAPE: an open relay group at the derived id files 1:1 with an ERROR + the marker', async () => {
     const world = createFakeWorld();
     world.conversations.set(GROUP_ID, {
@@ -509,12 +586,51 @@ describe('group detection: filing (T3.3)', () => {
     expect((persisted?.payload as { conversationId: string }).conversationId).toBe(GROUP_ID);
   });
 
-  it('keeps the group thread in its own status partition through the touch', async () => {
+  // THE REPO PARTITION GUARD IS NOT PROVED IN THIS FILE, and no test here may
+  // claim it is. `touchLastActivity`'s ConditionExpression
+  // (`... OR #type <> :groupText`) lives in conversationsRepo and can only be
+  // exercised against a real table; the in-memory world MODELS it
+  // (helpers/twilioWebhookHarness.ts - `if (conv.type !== 'group_text')`), so
+  // deleting the production ConditionExpression fails NOTHING under a bare
+  // `npm test`.
+  //
+  // THE REAL PROOF IS DOCKER-GATED: app/test/groupTextRepo.integration.test.ts,
+  // describe "touchLastActivity partition guard". It self-skips when nothing
+  // answers at DYNAMODB_ENDPOINT - run `npm run db:start` to exercise it. Losing
+  // a group thread out of its partition is unrecoverable (nothing points back
+  // into `group_open`), so that suite is the one that must be run before a
+  // release, not this one.
+  //
+  // What THIS test proves is the WEBHOOK's own half of the property: the only
+  // status-bearing repo calls it makes on a group inbound are the guarded
+  // create and the guarded touch - it performs no separate status write, so
+  // there is no second writer for the repo guard to have to defend against.
+  it('performs NO separate status write on a group inbound (the repo guard is the only defender)', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });
+    const statusWrites: string[] = [];
+    const repo = world.conversationsRepo;
+    world.conversationsRepo = new Proxy(repo, {
+      get(target, prop, receiver) {
+        const value = Reflect.get(target, prop, receiver) as unknown;
+        if (typeof value !== 'function') return value;
+        return (...args: unknown[]) => {
+          // Every repo method whose name says it writes a lifecycle status.
+          if (/^(assignPoolNumberAndOpen|closeGroup|reopenGroup|setStatus)/.test(String(prop))) {
+            statusWrites.push(String(prop));
+          }
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    });
 
     await signedTwilioPost(app, SMS_PATH, groupParams());
 
+    expect(statusWrites).toEqual([]);
+    // The touch went through the ONE guarded seam, on the group id.
+    expect(world.touches.map((t) => t.conversationId)).toEqual([GROUP_ID]);
+    // And the modelled guard held - see the header above for why this line is
+    // NOT the proof of the production ConditionExpression.
     expect(groupThread(world)!.status).toBe(GROUP_TEXT_STATUS);
   });
 

@@ -137,6 +137,11 @@ describe('InboxRow', () => {
         role: undefined,
         name: 'With Ann & Marcus',
         conversationId: 'gt-1',
+        // status MUST be 'closed' here. mkRow omits status, and with it omitted
+        // `row.status === 'closed'` alone is already false, so the assertion
+        // below would pass for any row kind and prove nothing. With it set, the
+        // `isRelay &&` half is the only thing suppressing the tag.
+        status: 'closed',
       }),
     );
     expect(screen.queryByText('Closed')).toBeNull();

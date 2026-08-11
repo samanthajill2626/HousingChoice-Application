@@ -12,6 +12,14 @@
 //   3. setTwilioConversation - the FENCED rail finalize slice S6 depends on:
 //      the write lands only while the caller still owns the rail_creating claim.
 //
+// THIS SUITE IS THE ONLY PROOF OF THE PARTITION GUARD (1). The guard is a
+// ConditionExpression, so it exists only on the wire to DynamoDB: the webhook
+// suite's in-memory world MODELS the same rule in its fake repo
+// (helpers/twilioWebhookHarness.ts), which means deleting the production
+// ConditionExpression fails nothing there. Delete it and THESE tests are what
+// go red. Since losing a group thread out of its partition is unrecoverable,
+// run this suite (Docker up) before any release that touches touchLastActivity.
+//
 // Self-skipping like the other integration suites: with nothing answering at
 // DYNAMODB_ENDPOINT the suite is skipped so `npm test` stays green without
 // Docker (`npm run db:start` to exercise it).

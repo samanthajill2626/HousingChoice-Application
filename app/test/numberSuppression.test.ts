@@ -135,12 +135,25 @@ describe('readNumberSuppression', () => {
     await expect(readNumberSuppression(rig, PRIMARY)).resolves.toMatchObject({ suppressed: false });
   });
 
-  it('never treats a multi-party thread flag as a per-number suppression', async () => {
+  it('never treats a GROUP_TEXT thread flag as a per-number suppression', async () => {
     // A group_text thread carries no participant_phone, so it cannot reach this
     // GSI - the exclusion is invariant 13.6 defense-in-depth, stated explicitly.
     const rig = readRig({
       contact: contact(),
       threads: [thread({ type: 'group_text', sms_opt_out: true })],
+    });
+    await expect(readNumberSuppression(rig, PRIMARY)).resolves.toMatchObject({ suppressed: false });
+  });
+
+  it('never treats a RELAY_GROUP thread flag as a per-number suppression either', async () => {
+    // The other half of the SAME predicate, which the group_text case alone
+    // left unexercised. A relay_group's participant_phone IS a real (pool)
+    // number, so this half is the one that can genuinely be reached by the GSI
+    // read - a group-level opt-out must never read as "this person's number is
+    // suppressed".
+    const rig = readRig({
+      contact: contact(),
+      threads: [thread({ type: 'relay_group', sms_opt_out: true })],
     });
     await expect(readNumberSuppression(rig, PRIMARY)).resolves.toMatchObject({ suppressed: false });
   });

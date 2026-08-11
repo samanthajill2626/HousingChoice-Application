@@ -4,7 +4,8 @@
 // authed via the real sealed session cookie next to the origin secret. Covers:
 //   - membership matched by roster contactId AND by any of the contact's numbers
 //     (a roster entry minted for a bare phone carries no contactId);
-//   - relay groups and 1:1 threads never appear here;
+//   - relay groups and 1:1 threads never appear here - by PARTITION, not by any
+//     type filter (the route has none; see that test's own comment);
 //   - otherMemberNames excludes self and nameless entries (names only, no phone);
 //   - the BOUNDED read reports truncation instead of silently clipping;
 //   - 404 unknown contact + 404 a phone-pointer id; empty list for none.
@@ -133,7 +134,15 @@ describe('GET /api/contacts/:id/group-threads', () => {
     expect(res.body.truncated).toBe(false);
   });
 
-  it('never returns a relay group or a 1:1 thread', async () => {
+  it('shows neither the relay group nor the 1:1 this contact IS on - the group_open partition read is the WHOLE exclusion', async () => {
+    // NAMED FOR WHAT IT PROVES. The route has NO type filter: it reads the
+    // `group_open` partition through listGroupTexts and matches rosters in code,
+    // so a relay group or a 1:1 is excluded purely by living in another
+    // partition. Forcing listGroupTexts to hand back a relay row would NOT be
+    // excluded - it would be rendered - which is exactly why the old name
+    // ("never returns a relay group or a 1:1 thread") promised a guard that does
+    // not exist. If a type filter is ever wanted here, it has to be written
+    // first; this test would not have caught its absence.
     seedContact();
     await world.conversationsRepo.createRelayGroup({
       poolNumber: '+15550190001',

@@ -160,9 +160,15 @@ describe('Inbox - group truncation affordance', () => {
     name: 'With Ann & Marcus',
     conversationId: 'gt-1',
   });
+  // A CONTACT row sits beside the group row on purpose. The count in the
+  // affordance is `rows.filter(kind === 'group_text').length`; with a
+  // group-only fixture that filter and a plain `rows.length` are
+  // indistinguishable, so "1" proved nothing about the filter. With two rows of
+  // different kinds, "1" is the FILTER's answer and "2" is the bug.
+  const contactRow = mkRow({ contactId: 'c-other', name: 'Sam Sender' });
 
   it('says what is shown and links to the full list when the server truncated', () => {
-    state = baseState({ rows: [groupRow], groupsTruncated: true });
+    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true });
     renderInbox();
     expect(screen.getByText(/Showing the latest 1 group texts/)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'See all group texts' })).toHaveAttribute(
@@ -172,13 +178,13 @@ describe('Inbox - group truncation affordance', () => {
   });
 
   it('renders no affordance when nothing was withheld', () => {
-    state = baseState({ rows: [groupRow] });
+    state = baseState({ rows: [contactRow, groupRow] });
     renderInbox();
     expect(screen.queryByText(/Showing the latest/)).toBeNull();
   });
 
   it('drops the self-link once the Groups filter is already active', () => {
-    state = baseState({ rows: [groupRow], groupsTruncated: true });
+    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true });
     renderInbox('/inbox?filter=groups');
     expect(screen.getByText(/Showing the latest 1 group texts/)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'See all group texts' })).toBeNull();

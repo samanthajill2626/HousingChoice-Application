@@ -60,6 +60,18 @@ function sendFailureMessage(err: unknown): string {
         return 'SMS sending is currently disabled.';
       case 'relay_closed':
         return 'This relay group is closed — reopen it to send.';
+      // Native group text refusals (S5). Each names the ONE thing to do about
+      // it: a generic "couldn't send" would leave the operator re-clicking.
+      case 'group_member_deleted':
+        return 'Someone in this group text is a deleted contact - restore them, or reply one to one from the member links.';
+      case 'group_member_no_consent':
+        return 'Someone in this group text has no recorded consent basis, so group sending is blocked.';
+      case 'group_too_many_members':
+        return 'This group text has too many members to send as a group - reply one to one from the member links.';
+      case 'group_rail_unavailable':
+        return 'This group text is not connected for sending yet - try again in a moment.';
+      case 'group_text_media_not_supported':
+        return 'Group texts are text only for now - remove the attachment to send.';
     }
   }
   return "Couldn't send — please try again.";
@@ -157,6 +169,9 @@ function uploadFailureMessage(err: unknown): string {
 
 export type TimelineStatus = 'loading' | 'ready' | 'error';
 
+/** Which multi-party product a roster belongs to (see TimelineProps.rosterKind). */
+export type RosterKind = 'relay' | 'group_text';
+
 export interface TimelineProps {
   status: TimelineStatus;
   items: TimelineItem[];
@@ -222,6 +237,16 @@ export interface TimelineProps {
    *  outbound relay bubble shows a per-member "delivered N/M" summary. Absent on a
    *  1:1 contact timeline → those bubbles are visually unchanged. */
   relayRoster?: ConversationParticipant[];
+  /**
+   * Which PRODUCT the `relayRoster` above belongs to. It changes staff-facing
+   * words and one affordance, never behavior:
+   *   - the reply note names a "relay group" or a "group text";
+   *   - a group text hides the ATTACH control, because outbound group media is
+   *     not supported in v1 and the server 400s it - offering a picker that
+   *     uploads a file and then refuses it is worse than not offering one.
+   * Defaults to 'relay' so every existing caller is untouched.
+   */
+  rosterKind?: RosterKind;
   /** Relay group is closed — show a standing note at the composer (sending is
    *  ALSO hard-disabled via canSend=false). Analogous to the opt-out note. */
   relayClosed?: boolean;
@@ -281,14 +306,24 @@ export interface TimelineProps {
  *  single number. A member with no resolved name falls back to their formatted
  *  phone; an empty/unloaded roster (best-effort fetch) keeps the honest
  *  "everyone" line with no list. */
-function GroupReplyNote({ roster }: { roster: ConversationParticipant[] }): React.JSX.Element {
+function GroupReplyNote({
+  roster,
+  kind,
+}: {
+  roster: ConversationParticipant[];
+  kind: RosterKind;
+}): React.JSX.Element {
   const names = roster.map((m) => {
     const n = m.name?.trim();
     return n && n.length > 0 ? n : formatPhone(m.phone) || m.phone;
   });
+  // The noun matters: a NATIVE group text is not a relay group, and calling it
+  // one on the very control that fans a message out to real handsets is the
+  // exact privacy-relevant confusion the S1 rename existed to end.
+  const label = kind === 'group_text' ? 'everyone in this group text' : 'everyone in this relay group';
   return (
     <>
-      Reply sends to <strong>everyone in this relay group</strong>
+      Reply sends to <strong>{label}</strong>
       {names.length > 0 ? <> ({names.join(', ')})</> : null}
     </>
   );
@@ -798,6 +833,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
     onRestore,
     clearDraftSignal,
     relayRoster,
+    rosterKind = 'relay',
     relayClosed,
     relayConnecting,
     resetScrollKey,
@@ -1386,33 +1422,40 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
               </p>
             ) : null}
             <div className={styles.replyFoot}>
-              <label className={styles.srOnly} htmlFor="mms-attach-input">
-                Attach files
-              </label>
-              <input
-                ref={fileInputRef}
-                id="mms-attach-input"
-                className={styles.srOnly}
-                type="file"
-                multiple
-                accept={MMS_ACCEPT}
-                aria-label="Attach files"
-                onChange={onPickFiles}
-              />
-              <button
-                type="button"
-                className={styles.attachBtn}
-                onClick={() => fileInputRef.current?.click()}
-                aria-label="Attach a file"
-              >
-                <span aria-hidden="true">+</span> Attach
-              </button>
+              {/* Outbound group MEDIA is not supported in v1 (spec 6.2) and the
+                  server refuses it, so a group text offers no picker at all
+                  rather than uploading a file and then rejecting it. */}
+              {rosterKind === 'group_text' ? null : (
+                <>
+                  <label className={styles.srOnly} htmlFor="mms-attach-input">
+                    Attach files
+                  </label>
+                  <input
+                    ref={fileInputRef}
+                    id="mms-attach-input"
+                    className={styles.srOnly}
+                    type="file"
+                    multiple
+                    accept={MMS_ACCEPT}
+                    aria-label="Attach files"
+                    onChange={onPickFiles}
+                  />
+                  <button
+                    type="button"
+                    className={styles.attachBtn}
+                    onClick={() => fileInputRef.current?.click()}
+                    aria-label="Attach a file"
+                  >
+                    <span aria-hidden="true">+</span> Attach
+                  </button>
+                </>
+              )}
               <span className={styles.replyTarget}>
                 {relayRoster !== undefined ? (
                   // A relay GROUP: a reply fans out to every member, so naming a
                   // single contact/number here would be wrong (and was: the shared
                   // "this contact" fallback). Say who it actually reaches.
-                  <GroupReplyNote roster={relayRoster} />
+                  <GroupReplyNote roster={relayRoster} kind={rosterKind} />
                 ) : (
                   <ReplyTargetPicker
                     {...(replyToPhone !== undefined && { replyToPhone })}

@@ -1,7 +1,7 @@
 // GroupTextView - the NATIVE group-text thread view, exercised THROUGH
 // ConversationDetail so the type dispatch is covered by the same tests (the
 // dangerous failure this replaces was a silent redirect, not a crash).
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -18,6 +18,7 @@ const getGroupMembers = vi.fn();
 const getConversationMessages = vi.fn();
 const getConversationScheduled = vi.fn();
 const markConversationRead = vi.fn();
+const sendMessageMock = vi.fn();
 const getContacts = vi.fn();
 let sse: EventStreamHandlers = {};
 
@@ -31,6 +32,7 @@ vi.mock('../../api/index.js', async () => {
     getConversationMessages: (...a: unknown[]) => getConversationMessages(...a),
     getConversationScheduled: (...a: unknown[]) => getConversationScheduled(...a),
     markConversationRead: (...a: unknown[]) => markConversationRead(...a),
+    sendMessage: (...a: unknown[]) => sendMessageMock(...a),
     getContacts: (...a: unknown[]) => getContacts(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
@@ -87,6 +89,12 @@ beforeEach(() => {
   getConversationMessages.mockReset().mockResolvedValue([]);
   getConversationScheduled.mockReset().mockResolvedValue({ scheduled: [] });
   markConversationRead.mockReset().mockResolvedValue(undefined);
+  sendMessageMock.mockReset().mockResolvedValue({
+    conversationId: 'gt-1',
+    providerSid: 'IMsent1',
+    tsMsgId: '2026-06-17T11:00:00.000Z#IMsent1',
+    status: 'queued',
+  });
   getContacts.mockReset().mockResolvedValue({ nextCursor: null, contacts: [] });
   getGroupMembers.mockResolvedValue([ANN, MARCUS]);
   getConversation.mockResolvedValue(groupHeader());
@@ -121,14 +129,12 @@ describe('ConversationDetail dispatch - group_text', () => {
     );
   });
 
-  it('ships NO composer in this slice (the group send lands with its typed refusal)', async () => {
+  it('ships a working composer (S5) - and no leftover "coming next" note', async () => {
     renderAt('gt-1');
     await waitFor(() => expect(screen.getByText('Group text')).toBeInTheDocument());
-    // Not a disabled composer either: a text box you can type into and never
-    // send from loses the operator's draft.
-    expect(screen.queryByLabelText('Reply message')).toBeNull();
-    expect(screen.queryByRole('button', { name: /^Send$/ })).toBeNull();
-    expect(screen.getByRole('note')).toHaveTextContent(/Replying to a group text is coming next/);
+    expect(await screen.findByLabelText('Reply message')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /^Send$/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Replying to a group text is coming next/)).toBeNull();
   });
 
   it('offers no roster editing, close, or reopen (a different roster is a different thread)', async () => {
@@ -281,5 +287,141 @@ describe('GroupTextView - the transcript', () => {
     renderAt('gt-1');
     await waitFor(() => expect(getConversationMessages).toHaveBeenCalled());
     expect(getConversationScheduled).not.toHaveBeenCalled();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// S5 - the composer
+// ---------------------------------------------------------------------------
+
+describe('GroupTextView - the composer (S5)', () => {
+  async function typeAndSend(text: string): Promise<void> {
+    const box = await screen.findByLabelText('Reply message');
+    fireEvent.change(box, { target: { value: text } });
+    fireEvent.click(screen.getByRole('button', { name: /^Send$/ }));
+  }
+
+  it('POSTs the reply to the thread and shows the bubble optimistically', async () => {
+    renderAt('gt-1');
+    await typeAndSend('on my way');
+
+    await waitFor(() => expect(sendMessageMock).toHaveBeenCalledWith('gt-1', { body: 'on my way' }));
+    // The optimistic bubble is on screen before any refetch resolves.
+    await waitFor(() => expect(screen.getByText('on my way')).toBeInTheDocument());
+  });
+
+  it('names the GROUP TEXT in the reply note, never "relay group"', async () => {
+    renderAt('gt-1');
+    await screen.findByLabelText('Reply message');
+    expect(screen.getByText(/everyone in this group text/)).toBeInTheDocument();
+    expect(screen.queryByText(/everyone in this relay group/)).toBeNull();
+  });
+
+  it('offers NO attach control - outbound group media is not supported in v1', async () => {
+    renderAt('gt-1');
+    await screen.findByLabelText('Reply message');
+    expect(screen.queryByRole('button', { name: /Attach a file/i })).toBeNull();
+  });
+
+  it('surfaces a refused send and restores the draft rather than losing it', async () => {
+    sendMessageMock.mockRejectedValue(
+      new ApiError(409, 'group_member_deleted', 'Marcus is a deleted contact'),
+    );
+    renderAt('gt-1');
+    await typeAndSend('on my way');
+
+    await waitFor(() =>
+      expect(screen.getByText(/Someone in this group text is a deleted contact/)).toBeInTheDocument(),
+    );
+    // The words are not lost to a 409.
+    expect(await screen.findByLabelText('Reply message')).toHaveValue('on my way');
+    // ...and the optimistic bubble is gone, so nothing implies it was sent: the
+    // only place that text survives is the restored draft itself.
+    const occurrences = screen.getAllByText('on my way');
+    expect(occurrences).toHaveLength(1);
+    expect(occurrences[0]?.tagName).toBe('TEXTAREA');
+  });
+
+  it('explains a no-consent refusal specifically', async () => {
+    sendMessageMock.mockRejectedValue(new ApiError(409, 'group_member_no_consent', 'no basis'));
+    renderAt('gt-1');
+    await typeAndSend('hello');
+    await waitFor(() =>
+      expect(screen.getByText(/has no recorded consent basis/)).toBeInTheDocument(),
+    );
+  });
+
+  it('explains a rail-not-ready refusal specifically', async () => {
+    sendMessageMock.mockRejectedValue(new ApiError(409, 'group_rail_unavailable', 'no rail'));
+    renderAt('gt-1');
+    await typeAndSend('hello');
+    await waitFor(() =>
+      expect(screen.getByText(/not connected for sending yet/)).toBeInTheDocument(),
+    );
+  });
+
+  it('REPLACES the composer on an over-cap thread rather than offering a dead one', async () => {
+    getGroupMembers.mockResolvedValue(
+      Array.from({ length: 10 }, (_, i) => ({
+        contactId: `c-${i}`,
+        phone: `+140455501${String(20 + i)}`,
+        name: `Member${i}`,
+        suppressed: false,
+        suppressionScope: 'primary' as const,
+      })),
+    );
+    renderAt('gt-1');
+    await waitFor(() =>
+      expect(screen.getByRole('note')).toHaveTextContent(/Too many members to send as a group/),
+    );
+    expect(screen.queryByLabelText('Reply message')).toBeNull();
+  });
+
+  it('KEEPS the composer live when a member is deleted, and says why sending will be refused', async () => {
+    // A deleted member is a SERVER refusal, not a structural impossibility: the
+    // contact can be restored while the operator is looking at the thread.
+    getGroupMembers.mockResolvedValue([{ ...ANN, deleted: true }, MARCUS]);
+    renderAt('gt-1');
+    expect(await screen.findByLabelText('Reply message')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen
+          .getAllByRole('status')
+          .some((el) => /Sending is refused while a member is a deleted contact/.test(el.textContent ?? '')),
+      ).toBe(true),
+    );
+  });
+
+  it('says a suppressed member will not receive the send, without blocking it', async () => {
+    getGroupMembers.mockResolvedValue([{ ...ANN, suppressed: true, suppressionScope: 'primary' }, MARCUS]);
+    renderAt('gt-1');
+    expect(await screen.findByLabelText('Reply message')).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('status').some((el) => /One member has opted out/.test(el.textContent ?? '')),
+      ).toBe(true),
+    );
+  });
+
+  it('renders the per-member delivery rollup on an outbound group message', async () => {
+    getConversationMessages.mockResolvedValue([
+      {
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:00:00.000Z#IM1',
+        direction: 'outbound',
+        author: 'teammate',
+        type: 'sms',
+        body: 'heading over',
+        delivery_status: 'queued',
+        provider_ts: '2026-06-17T10:00:00.000Z',
+        delivery_recipients: {
+          'phone#+14045550111': { status: 'delivered' },
+          'phone#+14045550112': { status: 'sent' },
+        },
+      } as unknown as Message,
+    ]);
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('heading over')).toBeInTheDocument());
+    expect(screen.getByText(/delivered 1\/2/)).toBeInTheDocument();
   });
 });

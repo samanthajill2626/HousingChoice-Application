@@ -24,7 +24,11 @@ Playwright MCP reads, and they pressure the UI toward accessibility.
 | Group text thread | member panel | `getByRole('list', { name: 'Group members' })`; a known member is a link to their contact page, an unknown-number member is plain text |
 | Group text thread | suppression chip | `getByText('Opted out')` (the member's PRIMARY number) or `getByText('This number opted out')` (a secondary number) - never both for one member |
 | Group text thread | deleted member | `getByText('Deleted')` in the member panel |
-| Group text thread | read-only note | `getByRole('note')` - the composer is REPLACED, so there is no `Reply message` textbox and no `Send` button on this surface until the group send ships |
+| Group text thread | composer | `getByRole('textbox', { name: 'Reply message' })` + `getByRole('button', { name: 'Send' })` - live since S5. There is NO attach control: outbound group media is not supported in v1 |
+| Group text thread | reply note | `getByText(/everyone in this group text/)` - the relay view says `everyone in this relay group` |
+| Group text thread | read-only note | `getByRole('note')` - ONLY on an over-cap (>9 member) thread, where the composer is REPLACED by `Too many members to send as a group` |
+| Group text thread | send-blocked notes | `getByRole('status')` - `Sending is refused while a member is a deleted contact` and `<n> members have opted out`. Neither disables the composer: the server is the authority and the state can change under the operator |
+| Group text thread | refused send | the composer's `role=alert` carries the mapped reason, e.g. `Someone in this group text is a deleted contact` |
 | Group text thread | over-cap banner | `getByRole('status')` containing `more than the 9 a group send can reach` |
 | Contact page | Group threads card | `getByRole('heading', { name: 'Group threads' })` - the NATIVE card; the RELAY card beside it is `Relay groups` (S1 renamed it off "Group texts") |
 | Public form | fields | `getByLabel('First name'|'Last name'|'Phone')` |

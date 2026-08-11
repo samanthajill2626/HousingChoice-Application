@@ -14,6 +14,7 @@ import { Link } from 'react-router-dom';
 import {
   getGroupMembers,
   markConversationRead,
+  sendMessage,
   type ConversationHeader,
   type ConversationParticipant,
   type GroupMemberRow,
@@ -109,6 +110,29 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
   const title = groupThreadLabel(members);
   const overCap = members.length > MAX_SENDABLE_MEMBERS;
   const deletedMembers = members.filter((m) => m.deleted === true);
+  const suppressedMembers = members.filter((m) => m.suppressed === true);
+
+  // Composer (S5). Sending is OFF only when it is STRUCTURALLY impossible - an
+  // over-cap roster is permanently unsendable, so its note replaces the composer
+  // outright. The other blockers (a deleted member, a member with no consent
+  // basis) are SERVER refusals: they are surfaced here as standing notes, but the
+  // composer stays live because the state can change under the operator (a
+  // restore, a consent record) and the server is the authority either way.
+  const canSend = !overCap;
+  const onSend = (body: string): Promise<void> => {
+    const tempId = thread.addOptimistic(conversationId, body);
+    return sendMessage(conversationId, { body })
+      .then((result) => {
+        thread.resolveOptimistic(tempId, result);
+      })
+      .catch((err: unknown) => {
+        thread.failOptimistic(tempId);
+        // Rethrown so the composer restores the draft and renders the mapped
+        // refusal reason - losing the operator's words to a 409 is the failure
+        // this whole seam exists to avoid.
+        throw err;
+      });
+  };
 
   // The roster the shared Timeline resolves sender + per-member delivery chips
   // against. Keys are phone-scoped for a native group (spec 15.6); the shared
@@ -170,26 +194,33 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
               contact pages, linked under Members.
             </p>
           ) : null}
-          {/* COMPOSER SEAM (S5, T5.2): sending is OFF for the whole slice.
-              A POST today falls through the relay branch into the 1:1 send path
-              and dies on the missing participant_phone with an untyped,
-              wrong-named relay error - so S4 ships no composer at all rather
-              than a button that produces one. S5 lands the typed refusal and the
-              group send, then flips `canSend` to `!overCap` and passes its own
-              `onSend` (text only in v1; outbound group media is a follow-up). */}
+          {deletedMembers.length > 0 ? (
+            <p role="status" className={styles.groupBanner}>
+              Sending is refused while a member is a deleted contact. Restore them, or reply one to
+              one from the member links.
+            </p>
+          ) : null}
+          {suppressedMembers.length > 0 ? (
+            <p role="status" className={styles.groupBanner}>
+              {suppressedMembers.length === 1 ? 'One member has' : `${suppressedMembers.length} members have`}{' '}
+              opted out. The group text still sends - their carrier drops it, and their delivery chip
+              says so.
+            </p>
+          ) : null}
           <Timeline
             status={thread.status}
             items={thread.items}
             upcoming={[]}
             upcomingTimezone={undefined}
             source="server"
-            canSend={false}
-            readOnlyNote={
-              overCap
-                ? 'Too many members to send as a group - reply one to one from the member links.'
-                : 'Replying to a group text is coming next - open a member below to reply one to one.'
-            }
+            canSend={canSend}
+            {...(canSend && { onSend })}
+            {...(overCap && {
+              readOnlyNote:
+                'Too many members to send as a group - reply one to one from the member links.',
+            })}
             relayRoster={timelineRoster}
+            rosterKind="group_text"
             resetScrollKey={conversationId}
           />
         </div>

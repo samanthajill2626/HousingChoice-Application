@@ -79,12 +79,15 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   // 1) The chip, on the PRIMARY-number wording. Ben's contact was minted from
   //    this very number, so it IS his primary and the flat "Opted out" is the
   //    true statement.
+  // EXACT: `getByText` is a case-insensitive SUBSTRING match, so a bare
+  // 'Opted out' would also match the SECOND-number chip 'This number opted
+  // out' - the two strings this spec exists to keep apart.
   await expect
-    .poll(async () => (await members.getByText('Opted out').count()) > 0, {
+    .poll(async () => members.getByText('Opted out', { exact: true }).count(), {
       timeout: 15_000,
       message: 'the suppression chip never appeared on the member panel',
     })
-    .toBe(true);
+    .toBe(1);
   await expect(members.getByText('This number opted out')).toHaveCount(0);
 
   // 2) THE GROUP THREAD IS NOT SUPPRESSED. One member's STOP silencing the
@@ -136,16 +139,45 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   await expect(page.getByRole('alert')).toContainText(/Do-Not-Contact/i);
 
   // 5) START restores him - the chip goes, on the same surface it appeared on.
-  await sendGroupAsParty(request, { from: BEN, otherRecipients: [ANA, CAL], body: 'START' });
+  //
+  // ANCHORED ON THE RESOLVED ROSTER, and it has to be. `GroupTextView` seeds
+  // the member list from the conversation HEADER with `suppressed: false`
+  // hard-coded, so the panel renders complete and chip-free BEFORE
+  // `getGroupMembers` resolves. A bare "count the chips, expect 0" poll is
+  // therefore satisfied by the very first, pre-API paint: delete the entire
+  // opt-in path from numberSuppression.ts and it still goes green. Two things
+  // fix that. First a POSITIVE assertion on this surface, so we know the chip
+  // is genuinely here to be removed. Then every poll sample waits for the
+  // group-members RESPONSE that reload triggered, so the zero can only ever be
+  // read off API-resolved state.
+  const membersResponse = /\/api\/conversations\/[^/]+\/group-members/;
   await page.goto(`${NEXT}/conversations/${conversationId}`);
-  await expect(page.getByRole('list', { name: 'Group members' })).toBeVisible({ timeout: 15_000 });
+  const restored = page.getByRole('list', { name: 'Group members' });
+  await expect(restored).toBeVisible({ timeout: 15_000 });
+  // EXACT: `getByText` is a case-insensitive SUBSTRING match, so a bare
+  // 'Opted out' also matches 'This number opted out' - the two chips this spec
+  // exists to keep apart.
+  await expect
+    .poll(async () => restored.getByText('Opted out', { exact: true }).count(), {
+      timeout: 15_000,
+      message: 'the chip was not present before START, so its absence after would prove nothing',
+    })
+    .toBe(1);
+
+  await sendGroupAsParty(request, { from: BEN, otherRecipients: [ANA, CAL], body: 'START' });
   await expect
     .poll(
       async () => {
-        await page.reload();
+        await Promise.all([
+          page.waitForResponse(
+            (r) => membersResponse.test(new URL(r.url()).pathname) && r.status() === 200,
+            { timeout: 15_000 },
+          ),
+          page.reload(),
+        ]);
         const list = page.getByRole('list', { name: 'Group members' });
         await list.waitFor({ timeout: 15_000 });
-        return list.getByText('Opted out').count();
+        return list.getByText('Opted out', { exact: true }).count();
       },
       { timeout: 30_000, message: 'the suppression chip never cleared after START' },
     )

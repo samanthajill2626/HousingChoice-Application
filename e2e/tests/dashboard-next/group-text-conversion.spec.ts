@@ -136,6 +136,11 @@ test.describe('conversion of an imported connecting relay group', () => {
     expect(connecting.ok()).toBe(true);
     const rows = ((await connecting.json()) as { rows: { conversationId: string; kind: string }[] }).rows;
     const row = rows.find((r) => r.conversationId === CONNECTING_ID);
-    if (row) expect(row.kind).toBe('group_text');
+    // ASSERT IT IS THERE FIRST. `if (row) expect(...)` no-ops when the row is
+    // absent, which hides exactly the failure this step is about: the thread
+    // vanishing from the inbox feed altogether during conversion. A converted
+    // group must still be a row, and that row must be a group_text.
+    expect(row, 'the converted thread left the inbox feed entirely').toBeDefined();
+    expect(row?.kind).toBe('group_text');
   });
 });

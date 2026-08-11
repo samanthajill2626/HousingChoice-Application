@@ -74,7 +74,17 @@ test('an MM inbound with no media and no envelope files 1:1, WARNs, and is kept 
   // 3) EXCLUDED FROM EXTRACTION. The body carries an EXTRACT: directive the
   //    fake extraction driver would otherwise act on, so a suggestion chip
   //    appearing here would mean a marked message reached the transcript.
-  await request.post('/__dev/extraction/tick', { data: {} });
+  //    THE TICK RESULT IS THE LOAD-BEARING PART. Discarding it made
+  //    "the marked message was excluded from the window" and "extraction never
+  //    ran at all" pass identically - and the second is not evidence of
+  //    anything. `processed` counts conversations the run actually worked, so
+  //    asserting it ran is what turns the absent chip below into a statement
+  //    about the FILTER rather than about an idle worker.
+  const tick = await request.post('/__dev/extraction/tick', { data: {} });
+  expect(tick.ok()).toBe(true);
+  const { processed } = (await tick.json()) as { processed: number };
+  expect(processed).toBeGreaterThanOrEqual(1);
+
   await page.reload();
   await expect(page.getByText(body)).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole('group', { name: /AI suggestion for voucher size/ })).toHaveCount(0);

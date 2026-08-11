@@ -81,18 +81,33 @@ test('the Groups filter is a real deep link, pages on its own cursor, and refuse
   expect(page2.rows[0]?.kind).toBe('group_text');
   expect(page2.rows[0]?.conversationId).not.toBe(page1.rows[0]?.conversationId);
 
-  // 4) A cursor from the OTHER partition is refused, not silently restarted.
+  // 4) A cursor from the OTHER partition is refused, not silently restarted -
+  //    in BOTH directions, and UNCONDITIONALLY. Wrapping this in `if
+  //    (openCursor)` let the whole guard skip itself on a lane where the open
+  //    partition happened to fit in one page, which is the state a seed change
+  //    can silently produce; and only one of the two guards was covered at all.
+  //    Replaying a cursor into the wrong partition is a 500 at best and a
+  //    wrong-but-plausible page at worst, so both refusals are load-bearing.
   const openPage = await page.request.get(`${APP}/api/inbox?filter=all&limit=1`, {
     headers: apiHeaders,
   });
   const openCursor = ((await openPage.json()) as { nextCursor: string | null }).nextCursor;
-  if (openCursor) {
-    const foreign = await page.request.get(
-      `${APP}/api/inbox?filter=groups&limit=1&cursor=${encodeURIComponent(openCursor)}`,
-      { headers: apiHeaders },
-    );
-    expect(foreign.status()).toBe(400);
-  }
+  expect(openCursor, 'the open partition must page, or this guard proves nothing').toBeTruthy();
+
+  // open cursor -> groups filter: rejected by the groups reader's tag check.
+  const foreign = await page.request.get(
+    `${APP}/api/inbox?filter=groups&limit=1&cursor=${encodeURIComponent(openCursor!)}`,
+    { headers: apiHeaders },
+  );
+  expect(foreign.status()).toBe(400);
+
+  // ...and the REVERSE: a TAGGED group cursor handed to the open-partition
+  // reader, which is the direction inbox.ts's own guard covers.
+  const reverse = await page.request.get(
+    `${APP}/api/inbox?filter=all&limit=1&cursor=${encodeURIComponent(page1.nextCursor!)}`,
+    { headers: apiHeaders },
+  );
+  expect(reverse.status()).toBe(400);
 });
 
 test('a group inbound goes unread, walks into the Unread tab, and clears on mark-read', async ({
@@ -158,8 +173,32 @@ test('a group inbound goes unread, walks into the Unread tab, and clears on mark
   // 4) ...and it leaves the Unread tab, which is the state that actually
   //    matters: a badge that clears while the row stays in Unread is a queue
   //    that never empties.
-  await page.getByRole('tab', { name: 'Unread' }).click();
-  await expect(page.locator(`a[href="/conversations/${conversationId}"]`)).toHaveCount(0);
+  //
+  //    ANCHORED: a bare `toHaveCount(0)` here is satisfied by an Unread tab
+  //    that has not rendered its list yet - the empty SPA passes the assertion
+  //    the instant the tab is clicked. Wait for the tab panel to actually be
+  //    showing its own content first, so the absence is read off a rendered
+  //    list rather than off nothing.
+  await Promise.all([
+    page.waitForResponse(
+      (r) => {
+        const url = new URL(r.url());
+        return (
+          url.pathname.endsWith('/api/inbox') &&
+          url.searchParams.get('filter') === 'unread' &&
+          r.status() === 200
+        );
+      },
+      { timeout: 15_000 },
+    ),
+    page.getByRole('tab', { name: 'Unread' }).click(),
+  ]);
+  await expect
+    .poll(async () => page.locator(`a[href="/conversations/${conversationId}"]`).count(), {
+      timeout: 15_000,
+      message: 'the read row never left the Unread tab',
+    })
+    .toBe(0);
 
   // 5) The thread still opens from the Groups filter, unchanged.
   await page.goto(`${NEXT}/inbox?filter=groups`);

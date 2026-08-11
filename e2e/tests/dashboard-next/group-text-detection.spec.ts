@@ -76,10 +76,19 @@ test('a carrier group MMS files as a group thread; silent members gain no consen
   //    group body - a multi-party message pulled into a 1:1 view misattributes
   //    what was said to a room.
   await page.goto(`${NEXT}/contacts/contact-tenant-0001`);
-  // The Group threads card is the load anchor AND the point: the group is
-  // reachable from her contact page, it just is not IN her 1:1 timeline.
-  await expect(page.getByRole('heading', { name: 'Group threads' })).toBeVisible({ timeout: 15_000 });
+  // ANCHOR ON THE TIMELINE ITSELF, not on the card title. 'Group threads' is a
+  // Card heading that renders while its data is still `pending`, so it proves
+  // the page mounted and nothing more - a negative counted against an unloaded
+  // timeline is satisfied by the empty state. Her SEEDED 1:1 body is the honest
+  // anchor: once it is on screen, her 1:1 timeline has rendered, and only then
+  // does "the group body is not here" mean anything.
+  await expect(page.getByText('Yes! Could we do Saturday morning?')).toBeVisible({
+    timeout: 15_000,
+  });
   await expect(page.getByText(body)).toHaveCount(0);
+  // The group is still REACHABLE from her contact page - it just is not in the
+  // 1:1 timeline. That is the other half of the ruling.
+  await expect(page.getByRole('heading', { name: 'Group threads' })).toBeVisible();
 
   // 4) THE CONSENT ASYMMETRY, proven through the real proactive gate rather
   //    than by reading a field. The stranger exists as a contact only because
@@ -106,6 +115,11 @@ test('a carrier group MMS files as a group thread; silent members gain no consen
   await expect(senderComposer).toBeVisible({ timeout: 15_000 });
   await senderComposer.fill(`reply to the sender ${stamp}`);
   await page.getByRole('button', { name: 'Send', exact: true }).click();
-  await expect(page.getByRole('dialog', { name: 'Record consent before texting' })).toHaveCount(0);
+  // ORDER MATTERS. `toHaveCount(0)` right after a click is satisfied by the
+  // instant before the dialog would have opened, so on its own it proves
+  // nothing. Wait for the SEND to have actually happened first - that is the
+  // state in which "no consent modal" is a real statement - and only then
+  // assert the absence.
   await expect(page.getByText(`reply to the sender ${stamp}`)).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByRole('dialog', { name: 'Record consent before texting' })).toHaveCount(0);
 });

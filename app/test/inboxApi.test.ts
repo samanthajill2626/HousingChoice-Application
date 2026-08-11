@@ -16,7 +16,7 @@ import {
   ORIGIN_SECRET,
 } from './helpers/twilioWebhookHarness.js';
 import { conversationsForContact } from '../src/lib/contactThreads.js';
-import type { ConversationItem } from '../src/repos/conversationsRepo.js';
+import { encodeGroupCursor, type ConversationItem } from '../src/repos/conversationsRepo.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { MessageItem } from '../src/repos/messagesRepo.js';
 import { buildTsMsgId } from '../src/repos/messagesRepo.js';
@@ -242,6 +242,62 @@ describe('GET /api/inbox (C8)', () => {
     const { app } = makeWebhookHarness();
     const res = await auth(request(app).get('/api/inbox?cursor=not-base64-json!!!'));
     expect(res.status).toBe(400);
+  });
+
+  // --- S4: the native group-text filter -------------------------------------
+  it('serves filter=groups from the group partition, with no contact or relay rows', async () => {
+    const { app, world } = makeWebhookHarness();
+    seedContact(world, {
+      contactId: 'c-tenant',
+      type: 'tenant',
+      firstName: 'Dana',
+      lastName: 'Doe',
+      phone: '+15550000001',
+      created_at: '2026-06-01T00:00:00.000Z',
+    });
+    seedConversation(world, 'conv-tenant', {
+      participant_phone: '+15550000001',
+      last_activity_at: '2026-06-14T10:00:00.000Z',
+    });
+    await world.conversationsRepo.createGroupTextThread({
+      conversationId: 'gt-1',
+      members: [
+        { contactId: 'c-tenant', phone: '+15550000001', name: 'Dana Doe' },
+        { contactId: 'c-other', phone: '+15550000009', name: 'Rex Roe' },
+      ],
+      lastActivityAt: '2026-06-12T10:00:00.000Z',
+      preview: 'Saturday works',
+    });
+
+    const res = await auth(request(app).get('/api/inbox?filter=groups'));
+
+    expect(res.status).toBe(200);
+    expect(res.body.rows).toHaveLength(1);
+    expect(res.body.rows[0]).toMatchObject({
+      kind: 'group_text',
+      conversationId: 'gt-1',
+      name: 'With Dana & Rex',
+      preview: 'Saturday works',
+      needsTriage: false,
+    });
+    expect(res.body.rows[0].status).toBeUndefined();
+  });
+
+  it('400s a cursor whose partition does not match the filter (NOT a 500)', async () => {
+    const { app } = makeWebhookHarness();
+    // A bare 'open'-partition LastEvaluatedKey replayed into the groups filter.
+    const openCursor = Buffer.from(JSON.stringify({ conversationId: 'x' }), 'utf8').toString(
+      'base64url',
+    );
+    const intoGroups = await auth(
+      request(app).get(`/api/inbox?filter=groups&cursor=${openCursor}`),
+    );
+    expect(intoGroups.status).toBe(400);
+
+    // ...and the reverse: a tagged group cursor replayed into the default feed.
+    const groupCursor = encodeGroupCursor({ conversationId: 'gt-1' });
+    const intoAll = await auth(request(app).get(`/api/inbox?cursor=${groupCursor}`));
+    expect(intoAll.status).toBe(400);
   });
 });
 

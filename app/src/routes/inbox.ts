@@ -51,7 +51,9 @@ import {
 import {
   createConversationsRepo,
   getOwner,
+  GroupCursorError,
   type ConversationItem,
+  type ConversationParticipant,
   type ConversationsRepo,
   type RelayOwner,
 } from '../repos/conversationsRepo.js';
@@ -66,7 +68,7 @@ import { conversationsForContact } from '../lib/contactThreads.js';
 
 // --- C8 wire contract (VERBATIM — the frontend imports the same shapes) ------
 
-export type InboxFilter = 'all' | 'unread' | 'unknown';
+export type InboxFilter = 'all' | 'unread' | 'unknown' | 'groups';
 export type InboxChannel = 'sms' | 'mms' | 'call' | 'email';
 
 export interface InboxRow {
@@ -90,15 +92,29 @@ export interface InboxRow {
    *  the dashboard renders a "Deleted" chip. Absent on live contacts and
    *  non-contact rows. */
   deleted?: boolean;
-  // --- relay_group only (present iff kind === 'relay_group') --------------------
-  conversationId?: string; // the relay conversation id → route /conversations/:conversationId
-  status?: 'open' | 'closed' | 'connecting'; // the relay group's lifecycle status (D9: connecting = awaiting its number)
+  // --- multi-party rows (relay_group AND group_text) ---------------------------
+  conversationId?: string; // the conversation id → route /conversations/:conversationId
+  // --- relay_group ONLY --------------------------------------------------------
+  /** The RELAY group's lifecycle status (D9: connecting = awaiting its number).
+   *  DELIBERATELY ABSENT on a `group_text` row: a native carrier group has no
+   *  lifecycle in v1 (spec 10 - no close/archive) and its stored status is
+   *  `group_open`, which is not one of these literals. Widening this union with
+   *  a non-relay literal (or, worse, normalizing `group_open` to `'open'` the way
+   *  relayRowFor's catch-all would) would report a silent lie to the dashboard. */
+  status?: 'open' | 'closed' | 'connecting';
   owner?: RelayOwner; // owning tour/placement ({type:'tour'|'placement',id} | {type:null})
 }
 
 export interface InboxPage {
   rows: InboxRow[]; // newest-activity-first; ONE row per contact
   nextCursor: string | null;
+  /** TRUE when the GROUP source could not show every group thread it was asked
+   *  for, so the dashboard renders the "showing latest N" affordance instead of
+   *  implying the page is complete. Two causes, both surfaced the same way:
+   *  the page-one top-50 cap under `filter=all`, and listGroupTexts' own walk
+   *  budget. There is NO exact total - the partition cannot produce one without
+   *  walking it (spec 11). Absent means "nothing was withheld". */
+  groupsTruncated?: boolean;
 }
 
 // --- Deps (injectable; default to the real repos, like TodayRouterDeps) ------
@@ -127,12 +143,38 @@ export const MAX_INBOX_LIMIT = 100;
  */
 const FETCH_BATCH = 100;
 
-/** The three valid filter values (route allowlist -> 400 on anything else). */
+/** The valid filter values (route allowlist -> 400 on anything else). */
 export const INBOX_FILTERS: ReadonlySet<string> = new Set<InboxFilter>([
   'all',
   'unread',
   'unknown',
+  'groups',
 ]);
+
+/**
+ * Page-one cap for the GROUP source under `filter=all` (spec 11). Relay's source
+ * is additive and uncapped because a handful of relay groups exist; the founder
+ * has 132 native group threads on day one, which would flood page one. The
+ * overflow is not lost - it pages in full under `filter=groups`.
+ */
+export const GROUP_PAGE_ONE_LIMIT = 50;
+
+/**
+ * The unread group read is an ACCEPTED FULL PARTITION WALK (spec 4.2 + 15.10),
+ * NOT bounded work: unread state is not in the partition key, so there is no way
+ * to ask DynamoDB for "the unread ones". Every unread group thread must appear
+ * under `filter=unread` because the nav badge counts those rows - a cap here
+ * silently undercounts the badge. The walk is what the contract says it is; this
+ * number is only the repo walk's ceiling (20 pages x 100 rows).
+ */
+const GROUP_UNREAD_WALK_LIMIT = 2000;
+
+/**
+ * Growth threshold for that walk (spec 4.2). At the known scale (132 threads)
+ * the walk is ~2 query pages. Past this many group threads the unread read wants
+ * a materialized counter instead - the WARN is the trigger to file it.
+ */
+const GROUP_UNREAD_GROWTH_THRESHOLD = 500;
 
 export function isInboxFilter(value: unknown): value is InboxFilter {
   return typeof value === 'string' && INBOX_FILTERS.has(value);
@@ -170,6 +212,15 @@ function decodeCursor(cursor: string): Record<string, unknown> {
   }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new InboxBadRequestError('invalid cursor');
+  }
+  // NAMESPACED CURSORS (spec 11). `filter=groups` pages the group_open partition
+  // with the repo's TAGGED cursor ({t,k}); this 'open'-partition cursor is the
+  // bare LastEvaluatedKey. Replaying a group cursor here would hand DynamoDB a
+  // key for the WRONG partition - a 500, or worse, a wrong-but-plausible page.
+  // A tag where none belongs is therefore a 400, never a Query. (The reverse
+  // direction is enforced by decodeGroupCursor's own tag check.)
+  if (typeof (parsed as { t?: unknown }).t === 'string') {
+    throw new InboxBadRequestError('cursor does not match this filter');
   }
   return parsed as Record<string, unknown>;
 }
@@ -218,6 +269,37 @@ function roleFromContact(
  */
 function unreadOf(conv: ConversationItem): number {
   return typeof conv.unread_count === 'number' ? conv.unread_count : 0;
+}
+
+/** How many roster names a group title spells out before it summarizes. A nine
+ *  member carrier group would otherwise render an unreadable inbox row. */
+const GROUP_TITLE_NAMES = 3;
+
+/**
+ * The roster-derived title for a native group thread (spec 4.2: "headers render
+ * a DERIVED name from the roster - member first names, else formatted numbers").
+ * A group_text carries NO stored display name, NO operator tag and NO pool
+ * number, so relayRowFor's precedence chain collapses to this one rule.
+ *
+ * MIRROR: dashboard/src/lib/groupThread.ts `groupThreadLabel` derives the same
+ * title client-side for the thread view + contact card (the thread header route
+ * is a raw passthrough and cannot hand one down). Change both together.
+ */
+export function groupThreadLabel(
+  participants: readonly ConversationParticipant[] | undefined,
+): string {
+  const parts: string[] = [];
+  for (const p of participants ?? []) {
+    const name = typeof p.name === 'string' ? p.name.trim() : '';
+    // First name only - a group title is a glance, not a directory entry.
+    const first = name.length > 0 ? (name.split(/\s+/)[0] ?? '') : '';
+    const label = first.length > 0 ? first : (formatPhoneForDisplay(p.phone) ?? p.phone);
+    if (label.length > 0) parts.push(label);
+  }
+  if (parts.length === 0) return 'Group text';
+  const shown = parts.slice(0, GROUP_TITLE_NAMES);
+  const rest = parts.length - shown.length;
+  return rest > 0 ? `With ${shown.join(' & ')} +${rest} more` : `With ${shown.join(' & ')}`;
 }
 
 /** The latest message's channel/direction/preview, derived (never stored). */
@@ -288,7 +370,11 @@ export async function aggregateInbox(
   const placements = deps.placementsRepo ?? createPlacementsRepo({ logger: deps.logger });
 
   const { filter, limit, cursor } = opts;
-  const startKey = cursor !== undefined ? decodeCursor(cursor) : undefined;
+  // Under `filter=groups` the cursor belongs to the GROUP partition (the repo's
+  // own tagged cursor) and is decoded by listGroupTexts, not here - decoding it
+  // as an 'open'-partition LastEvaluatedKey is precisely the cross-partition
+  // replay the namespacing exists to prevent.
+  const startKey = filter !== 'groups' && cursor !== undefined ? decodeCursor(cursor) : undefined;
 
   // Per-request memoization (each contact/placement/user resolved at most once).
   const contactConvsCache = new Map<string, ConversationItem[]>();
@@ -355,15 +441,18 @@ export async function aggregateInbox(
     return deriveLatest(latest, conv);
   };
 
-  /** Does the row pass the active filter? */
+  /** Does the row pass the active filter? EXHAUSTIVE on purpose - the `default:`
+   *  arm this switch used to carry made a missing filter case SILENT (every row
+   *  passing), which is exactly how a new filter ships as a no-op. */
   const passesFilter = (row: InboxRow): boolean => {
     switch (filter) {
       case 'unread':
         return row.unreadCount > 0;
       case 'unknown':
         return row.needsTriage;
+      case 'groups':
+        return row.kind === 'group_text';
       case 'all':
-      default:
         return true;
     }
   };
@@ -562,6 +651,85 @@ export async function aggregateInbox(
     };
   };
 
+  /**
+   * Build the `group_text` row for one native carrier-group conversation. The
+   * THIRD row source (queried via listGroupTexts on the group_open partition,
+   * never the contact pager and never listRelayGroups).
+   *
+   * It deliberately does NOT reuse relayRowFor: that builder's status normalizer
+   * has an `'open'` CATCH-ALL, so a `group_open` thread run through it would be
+   * reported to the dashboard as a plain open relay group - a silent lie (S2
+   * T2.6 ruling). A group row carries no status, no owner, and no channel.
+   *
+   * PII: the row carries names/preview to the authed client (like every other
+   * row); log lines stay counts/IDs only.
+   */
+  const groupRowFor = (conv: ConversationItem): InboxRow => ({
+    kind: 'group_text',
+    conversationId: conv.conversationId,
+    name: groupThreadLabel(conv.participants),
+    unreadCount: unreadOf(conv),
+    preview: typeof conv.last_message_preview === 'string' ? conv.last_message_preview : '',
+    lastActivityAt: conv.last_activity_at,
+    // Group rows never need triage: the roster is already resolved to contacts
+    // at detection time, so they never appear under the "unknown" filter.
+    needsTriage: false,
+  });
+
+  /**
+   * The group source. Reads the group_open partition ONLY.
+   *
+   * LOUD BY CONTRACT (spec 4.2): unlike the relay source's best-effort catch, a
+   * failed group query is NOT swallowed. "No group threads" and "the group query
+   * broke" would be indistinguishable, and the failure mode is every group
+   * conversation silently vanishing from the inbox. The repo logs at ERROR and
+   * throws; we let it propagate to the route's 500.
+   */
+  const readGroupSource = async (
+    readLimit: number,
+    groupCursor?: string,
+  ): Promise<{ items: ConversationItem[]; nextCursor?: string; truncated: boolean }> => {
+    try {
+      return await conversations.listGroupTexts({
+        limit: readLimit,
+        ...(groupCursor !== undefined && { cursor: groupCursor }),
+      });
+    } catch (err) {
+      if (err instanceof GroupCursorError) {
+        // A cursor from another partition (or a tampered one) -> 400, never a
+        // silent restart of the walk at the newest row.
+        throw new InboxBadRequestError('cursor does not match this filter');
+      }
+      throw err;
+    }
+  };
+
+  // --- filter=groups: the group partition IS the feed --------------------------
+  // The contact pager does NOT run (spec 11, r3 finding 10) and neither does the
+  // relay source: this filter pages the FULL group list through the group
+  // partition's own tagged cursor, which is not interchangeable with the
+  // 'open'-partition cursor the other filters use.
+  if (filter === 'groups') {
+    const page = await readGroupSource(limit, cursor);
+    const groupRows = page.items.map(groupRowFor);
+    log.info(
+      {
+        filter,
+        count: groupRows.length,
+        groupCount: groupRows.length,
+        hasMore: page.nextCursor !== undefined,
+      },
+      'inbox feed assembled',
+    );
+    return {
+      rows: groupRows,
+      nextCursor: page.nextCursor ?? null,
+      // Here `truncated` can only mean the repo's walk budget stopped early -
+      // the caller's limit produces a nextCursor instead.
+      ...(page.truncated && { groupsTruncated: true }),
+    };
+  }
+
   const rows: InboxRow[] = [];
   let nextCursor: string | null = null;
   // The resume key for the CURRENT fetch batch (the cursor passed in, then each
@@ -680,11 +848,50 @@ export async function aggregateInbox(
     }
   }
 
+  // --- group_text rows: the THIRD source, folded in the same split-proof way ---
+  // Same additive first-page contract as the relay source above (no double-serve,
+  // no drop, no dedupe - group ids are disjoint from contact/unknown/relay keys),
+  // with ONE difference that spec 11 makes explicit: the group source is CAPPED.
+  // Relay's uncapped merge is sized for a handful of rows; there are 132 group
+  // threads on day one, so page one takes the newest GROUP_PAGE_ONE_LIMIT and
+  // says so (groupsTruncated) rather than flooding the feed or lying about it.
+  // There is no exact total - the partition cannot produce one without walking it.
+  let groupCount = 0;
+  let groupsTruncated = false;
+  // `unknown` never contains group rows (needsTriage is always false), so skip
+  // the query outright rather than reading a partition to throw it all away.
+  if (startKey === undefined && filter !== 'unknown') {
+    // UNREAD IS AN ACCEPTED FULL PARTITION WALK (spec 4.2 / 15.10), not bounded
+    // work: unread is not in the partition key. The nav badge counts the rows of
+    // a `filter=unread` page, so capping here would silently undercount it.
+    const unreadWalk = filter === 'unread';
+    const readLimit = unreadWalk ? GROUP_UNREAD_WALK_LIMIT : GROUP_PAGE_ONE_LIMIT;
+    const page = await readGroupSource(readLimit);
+    if (unreadWalk && page.items.length > GROUP_UNREAD_GROWTH_THRESHOLD) {
+      log.warn(
+        { walked: page.items.length, threshold: GROUP_UNREAD_GROWTH_THRESHOLD },
+        'inbox: group unread walk past the growth threshold - time to materialize unread counts',
+      );
+    }
+    // TRUNCATED means "rows this filter would have shown were withheld": the
+    // repo's walk budget stopped early, or (page-one only) the cap did.
+    groupsTruncated = page.truncated || page.nextCursor !== undefined;
+    const groupRows = page.items.map(groupRowFor).filter(passesFilter);
+    if (groupRows.length > 0) {
+      rows.push(...groupRows);
+      // Re-sort newest-first (stable) so group rows interleave by last_activity_at.
+      rows.sort((a, b) =>
+        a.lastActivityAt < b.lastActivityAt ? 1 : a.lastActivityAt > b.lastActivityAt ? -1 : 0,
+      );
+      groupCount = groupRows.length;
+    }
+  }
+
   log.info(
-    { filter, count: rows.length, relayCount, hasMore: nextCursor !== null },
+    { filter, count: rows.length, relayCount, groupCount, hasMore: nextCursor !== null },
     'inbox feed assembled',
   );
-  return { rows, nextCursor };
+  return { rows, nextCursor, ...(groupsTruncated && { groupsTruncated: true }) };
 }
 
 // --- Router ------------------------------------------------------------------
@@ -704,7 +911,10 @@ export function createInboxRouter(deps: InboxRouterDeps = {}): Router {
   const events = deps.events ?? appEvents;
   const router = Router();
 
-  // GET /api/inbox?filter=all|unread|unknown&cursor=&limit= -> InboxPage
+  // GET /api/inbox?filter=all|unread|unknown|groups&cursor=&limit= -> InboxPage
+  // `groups` pages the native group-text partition ONLY (the contact and relay
+  // sources do not run) through its own NAMESPACED cursor; a cursor minted under
+  // another filter is a 400, not a cross-partition Query.
   router.get('/', async (req, res) => {
     const rawFilter = req.query['filter'];
     // Default to 'all' when the param is absent; reject anything that's not a

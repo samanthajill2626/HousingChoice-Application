@@ -83,6 +83,18 @@ function makeDeps(seed: Seed): InboxRouterDeps {
           .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1));
         return { items, truncated: false };
       },
+      // The group_open partition - a THIRD, disjoint source (S4). These fixtures
+      // seed no group threads; the source's own behavior is covered by
+      // inboxGroups.test.ts. Modeled (not omitted) so the aggregator's real call
+      // runs here too: a production regression that stopped guarding the group
+      // read must not pass because the fake happened to lack the method.
+      async listGroupTexts({ limit }: { limit?: number; cursor?: string } = {}) {
+        const items = seed.conversations
+          .filter((c) => c.type === 'group_text')
+          .sort((a, b) => (a.last_activity_at < b.last_activity_at ? 1 : -1))
+          .slice(0, limit ?? 50);
+        return { items, truncated: false };
+      },
     } as unknown as NonNullable<InboxRouterDeps['conversationsRepo']>,
     contactsRepo: {
       async findByPhone(phone: string) {

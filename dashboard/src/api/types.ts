@@ -2593,4 +2593,11 @@ export interface InboxRow {
 export interface InboxPage {
   rows: InboxRow[]; // newest-activity-first; ONE row per contact
   nextCursor: string | null;
+  /** TRUE when the GROUP source withheld rows this page would otherwise show:
+   *  page one takes only the newest 50 group threads, and the partition walk has
+   *  its own budget. The dashboard renders the "showing the latest group texts"
+   *  affordance with a link to the Groups filter. There is deliberately NO exact
+   *  total - the partition cannot produce one without walking it (spec 11).
+   *  Absent means nothing was withheld. */
+  groupsTruncated?: boolean;
 }

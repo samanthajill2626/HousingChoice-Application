@@ -57,6 +57,8 @@ import {
   type SettingsRepo,
 } from '../../src/repos/settingsRepo.js';
 import {
+  decodeGroupCursor,
+  encodeGroupCursor,
   GROUP_TEXT_STATUS,
   toPreview,
   type ConversationItem,
@@ -709,8 +711,23 @@ export function createFakeWorld(): FakeWorld {
       const all = [...conversations.values()]
         .filter((c) => c.status === GROUP_TEXT_STATUS)
         .sort((a, b) => b.last_activity_at.localeCompare(a.last_activity_at));
+      // The cursor is TAGGED and decoded BEFORE any I/O, exactly like the real
+      // repo: a foreign/tampered cursor is refused rather than used as an
+      // ExclusiveStartKey for someone else's partition. Modeled here so a route
+      // that stopped mapping GroupCursorError to a 400 cannot pass on a fake.
+      const start =
+        opts.cursor !== undefined && opts.cursor.length > 0
+          ? (((decodeGroupCursor(opts.cursor) as { idx?: number }).idx ?? -1) as number) + 1
+          : 0;
       const limit = opts.limit ?? 50;
-      return { items: all.slice(0, limit), truncated: false };
+      const items = all.slice(start, start + limit);
+      const endIdx = start + items.length - 1;
+      const more = start + items.length < all.length;
+      return {
+        items,
+        ...(more && { nextCursor: encodeGroupCursor({ idx: endIdx }) }),
+        truncated: false,
+      };
     },
 
     async setTwilioConversation(conversationId, sid, participantMap, claimToken) {

@@ -1612,6 +1612,15 @@ export function createFakeWorld(): FakeWorld {
     async getGroupTimestamp(id) {
       return groupTimestamps.get(id);
     },
+    // Cadence claim (T6.3). Models the real ConditionExpression - absent, or no
+    // later than notBefore - so a test cannot pass while production would let
+    // two pollers claim the same period.
+    async claimGroupPeriod(id, at, notBefore) {
+      const stored = groupTimestamps.get(id);
+      if (stored !== undefined && stored > notBefore) return false;
+      groupTimestamps.set(id, at);
+      return true;
+    },
   };
 
   // Fake vocabulary repo (Task 4): accumulates tokens in three in-memory Sets;

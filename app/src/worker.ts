@@ -450,6 +450,29 @@ if (config.aiExtractionEnabled) {
   }, config.workerPollIntervalMs).unref();
 }
 
+// Native group texting: the guardrail duties (T6.3). Same 60s poll as every
+// other block, but the duties are CADENCED behind a conditional claim on a
+// settings record, so this poll is nearly always a no-op read - the cross-check
+// and staleness sweeps act every five minutes and the two liveness WARNs act
+// daily, no matter how many processes are polling.
+//
+// The app can drive the same runner through POST /__dev/group-guardrails/tick.
+// That is not a convenience: a hermetic e2e lane runs this worker process too,
+// and worker-side WARN/ERROR never reaches the app's /__dev/logtail, so any log
+// line a spec asserts has to come from the app side (worklist A16).
+{
+  const { runGroupGuardrails } = await import('./jobs/groupGuardrails.js');
+
+  const guardrailDeps = { logger };
+
+  setInterval(() => {
+    const now = new Date().toISOString();
+    void runGroupGuardrails(now, guardrailDeps).catch((err: unknown) => {
+      logger.error({ err }, 'group guardrail poll error');
+    });
+  }, config.workerPollIntervalMs).unref();
+}
+
 // Keep the process alive until a shutdown signal arrives (also covers the
 // local mode where no poll loop is running).
 const keepAlive = setInterval(() => {

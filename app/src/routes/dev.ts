@@ -57,6 +57,17 @@ import { createAuditRepo } from '../repos/auditRepo.js';
 import { createExtractionDriver } from '../adapters/extraction.js';
 import { appEvents } from '../lib/events.js';
 import { runDueExtractions, type ExtractionJobDeps } from '../jobs/extraction.js';
+import {
+  GROUP_GUARDRAIL_DUTIES,
+  isGroupGuardrailDuty,
+  runGroupGuardrails,
+  type GroupGuardrailDuty,
+  type RunGroupGuardrailsDeps,
+} from '../jobs/groupGuardrails.js';
+import {
+  createGroupSendStaleness,
+  type GroupSendStalenessService,
+} from '../services/groupSendStaleness.js';
 import { joinViSentences, type ChannelRoles } from '../services/voiceTranscripts.js';
 
 /** Deps for POST /__dev/relay/replay-intros. The route LISTS open relay groups
@@ -94,6 +105,10 @@ export interface DevRouterDeps {
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
+  /** Deps for POST /__dev/group-guardrails/tick (T6.3) - injected in tests. */
+  groupGuardrailDeps?: RunGroupGuardrailsDeps;
+  /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
+  groupStaleness?: GroupSendStalenessService;
 }
 
 /**
@@ -364,6 +379,82 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     await runDuePendingRosterActions(nowIso, rosterActionDeps());
     log.info({ now: nowIso }, 'dev roster-action tick ran');
     res.status(200).json({ ok: true, now: nowIso });
+  });
+
+  // POST /__dev/group-guardrails/tick { now?, force?, duties? } - the app-side
+  // driver for the four native-group-texting guardrail duties (T6.3).
+  //
+  // TWO REASONS THIS EXISTS, both from worklist A16. A hermetic e2e lane runs a
+  // REAL worker process beside the app: (1) that worker's WARN/ERROR never
+  // reaches the app-side /__dev/logtail, so a spec asserting a guardrail log
+  // line must drive the duty HERE; (2) the worker polls the SAME cadence
+  // records, so without a bypass a spec would silently no-op whenever the
+  // worker had just claimed the period.
+  //
+  // `force` therefore DEFAULTS TO TRUE. A spec that forgets the flag must not
+  // flake; a test that wants to exercise the cadence gate passes force: false
+  // explicitly. A forced run still stamps the period, so the worker does not
+  // immediately redo the work.
+  //
+  // `duties` (optional) narrows the pass to any of `crosscheck_sweep`,
+  // `send_staleness`, `channel_quiet`, `heartbeat`. `now` (optional) is
+  // NORMALIZED via new Date(x).toISOString(), because every deadline comparison
+  // downstream is a LEXICOGRAPHIC ISO sort-key range.
+  router.post('/__dev/group-guardrails/tick', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { now?: unknown; force?: unknown; duties?: unknown };
+    let nowIso = new Date().toISOString();
+    if (body.now !== undefined) {
+      if (typeof body.now !== 'string' || !Number.isFinite(Date.parse(body.now))) {
+        res.status(400).json({ error: 'now must be a valid ISO 8601 datetime' });
+        return;
+      }
+      nowIso = new Date(body.now).toISOString();
+    }
+    let duties: GroupGuardrailDuty[] | undefined;
+    if (body.duties !== undefined) {
+      if (!Array.isArray(body.duties) || !body.duties.every(isGroupGuardrailDuty)) {
+        res.status(400).json({
+          error: `duties must be a subset of ${GROUP_GUARDRAIL_DUTIES.join(', ')}`,
+        });
+        return;
+      }
+      duties = body.duties;
+    }
+    const force = body.force === undefined ? true : body.force === true;
+    const outcome = await runGroupGuardrails(
+      nowIso,
+      deps.groupGuardrailDeps ?? { logger: log },
+      { force, ...(duties !== undefined && { duties }) },
+    );
+    log.info({ now: nowIso, force, ran: outcome.ran }, 'dev group-guardrail tick ran');
+    res.status(200).json({ ok: true, ...outcome });
+  });
+
+  // POST /__dev/group-send-staleness/check { conversationId, tsMsgId } - T6.4's
+  // direct seam. It answers "are this send's receipts complete?" for ONE
+  // message without waiting out the ten-minute deadline or touching the due
+  // partition, which is what lets a spec assert the predicate (A18: `sent` is
+  // NOT terminal) rather than the sweep's plumbing.
+  let stalenessService: GroupSendStalenessService | undefined;
+  const staleness = (): GroupSendStalenessService => {
+    stalenessService ??= deps.groupStaleness ?? createGroupSendStaleness({ logger: log });
+    return stalenessService;
+  };
+  router.post('/__dev/group-send-staleness/check', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { conversationId?: unknown; tsMsgId?: unknown };
+    if (typeof body.conversationId !== 'string' || typeof body.tsMsgId !== 'string') {
+      res.status(400).json({ error: 'conversationId and tsMsgId are required' });
+      return;
+    }
+    const result = await staleness().checkMessage({
+      conversationId: body.conversationId,
+      tsMsgId: body.tsMsgId,
+    });
+    log.info(
+      { conversationId: body.conversationId, outcome: result.outcome },
+      'dev group send-staleness check ran',
+    );
+    res.status(200).json({ ok: true, ...result });
   });
 
   router.post('/__dev/placement-nudges/tick', json(), async (req, res) => {

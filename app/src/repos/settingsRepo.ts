@@ -56,6 +56,29 @@ export type GroupTimestampRecordId =
   | typeof GROUP_CROSSCHECK_LAST_EVENT_AT_ID;
 
 /**
+ * CADENCE records for the guardrail duties (T6.3). Each holds the instant its
+ * duty last ran, and is CLAIMED conditionally so a duty runs once per elapsed
+ * period no matter how many pollers are looking at it.
+ *
+ * These exist because hermetic e2e lanes spawn a REAL worker process alongside
+ * the app (worklist A16): the worker polls every 60s against the same lane data
+ * an e2e spec drives through a `__dev` tick, so the period claim is what stops
+ * one from stealing the other's work - and the tick's `force` flag is what lets
+ * a spec bypass a period the worker just claimed.
+ */
+export const GROUP_CROSSCHECK_SWEEP_LAST_RUN_AT_ID = 'group_crosscheck_sweep_last_run_at';
+export const GROUP_SEND_STALENESS_LAST_RUN_AT_ID = 'group_send_staleness_last_run_at';
+export const GROUP_CHANNEL_QUIET_LAST_RUN_AT_ID = 'group_channel_quiet_last_run_at';
+export const GROUP_INBOUND_HEARTBEAT_LAST_RUN_AT_ID = 'group_inbound_heartbeat_last_run_at';
+
+/** The four cadence record ids - closed, like the liveness union above. */
+export type GroupPeriodRecordId =
+  | typeof GROUP_CROSSCHECK_SWEEP_LAST_RUN_AT_ID
+  | typeof GROUP_SEND_STALENESS_LAST_RUN_AT_ID
+  | typeof GROUP_CHANNEL_QUIET_LAST_RUN_AT_ID
+  | typeof GROUP_INBOUND_HEARTBEAT_LAST_RUN_AT_ID;
+
+/**
  * The founder-editable settings (CO2). Defaults are CO2's copy, applied by
  * getOrgSettings() when no item exists yet (a fresh stack reads sane values
  * without an admin first having to PUT them).
@@ -150,6 +173,18 @@ export interface SettingsRepo {
   putGroupTimestamp(id: GroupTimestampRecordId, at: string): Promise<void>;
   /** The stored instant for a group liveness record, or undefined. */
   getGroupTimestamp(id: GroupTimestampRecordId): Promise<string | undefined>;
+  /**
+   * CLAIM one cadence period for a guardrail duty (T6.3). Conditional on the
+   * stored instant being absent or no later than `notBefore` - so with
+   * `notBefore = now - period` exactly one caller per elapsed period wins, and
+   * every other poll in that window is a cheap no-op.
+   *
+   * `false` means someone else already claimed this period. A `__dev` tick
+   * passes `notBefore = now` to bypass the gate on purpose (worklist A16: the
+   * hermetic worker polls the same record, so without the bypass a spec would
+   * race it).
+   */
+  claimGroupPeriod(id: GroupPeriodRecordId, at: string, notBefore: string): Promise<boolean>;
 }
 
 export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
@@ -312,6 +347,25 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
         // A newer instant is already stored - the expected outcome under
         // concurrency, not a failure.
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+    },
+
+    async claimGroupPeriod(id, at, notBefore) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { settingId: id },
+            UpdateExpression: 'SET recorded_at = :at',
+            ConditionExpression: 'attribute_not_exists(recorded_at) OR recorded_at <= :notBefore',
+            ExpressionAttributeValues: { ':at': at, ':notBefore': notBefore },
+          }),
+        );
+        return true;
+      } catch (err) {
+        // The period is already claimed - the expected outcome on most polls.
+        if (err instanceof ConditionalCheckFailedException) return false;
+        throw err;
       }
     },
 

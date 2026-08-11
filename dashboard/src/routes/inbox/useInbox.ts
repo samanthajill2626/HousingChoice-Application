@@ -34,6 +34,11 @@ interface Pending {
 export interface InboxState {
   status: InboxStatus;
   rows: InboxRowData[];
+  /** The server withheld group-text rows this filter would otherwise show (page
+   *  one takes the newest 50; the partition walk has its own budget). The page
+   *  renders the "showing the latest" affordance instead of implying the list is
+   *  complete. There is no exact total by design. */
+  groupsTruncated: boolean;
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
@@ -48,10 +53,14 @@ const PAGE_LIMIT = 30;
  *  burst of conversation.updated events into one refetch (matches useToday). */
 const REFETCH_DEBOUNCE_MS = 300;
 
-/** Stable identity for a row: conversationId for relay groups, contactId for
- *  contacts, phone for unknowns. The three prefixes never collide. */
+/** Stable identity for a row: conversationId for the two multi-party kinds,
+ *  contactId for contacts, phone for unknowns. The four prefixes never collide -
+ *  native group texts take `gt:` because `g:` is already relay's, and the
+ *  trailing branch is the UNKNOWN case, so an unhandled kind would key as `u:`
+ *  (empty phone) and collide with every other unhandled row. */
 export function rowKey(row: InboxRowData): string {
   if (row.kind === 'relay_group') return `g:${row.conversationId ?? ''}`;
+  if (row.kind === 'group_text') return `gt:${row.conversationId ?? ''}`;
   return row.kind === 'contact' ? `c:${row.contactId ?? ''}` : `u:${row.phone ?? ''}`;
 }
 
@@ -66,6 +75,7 @@ export function useInbox(filter: InboxFilter): InboxState {
   const [status, setStatus] = useState<InboxStatus>('loading');
   const [base, setBase] = useState<InboxRowData[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
+  const [groupsTruncated, setGroupsTruncated] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   // In-flight optimistic patches keyed by rowKey; re-applied over refetches.
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
@@ -86,6 +96,7 @@ export function useInbox(filter: InboxFilter): InboxState {
       if (controller.signal.aborted || gen !== genRef.current) return;
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
+      setGroupsTruncated(pageData.groupsTruncated === true);
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -95,6 +106,7 @@ export function useInbox(filter: InboxFilter): InboxState {
         // C8 backend slice isn't live yet → honest pending state (not an error).
         setBase([]);
         setCursor(null);
+        setGroupsTruncated(false);
         setStatus('pending');
         return;
       }
@@ -111,6 +123,7 @@ export function useInbox(filter: InboxFilter): InboxState {
     setStatus('loading');
     setBase([]);
     setCursor(null);
+    setGroupsTruncated(false);
     setPending(new Map());
     void fetchFirstPage();
     return () => abortRef.current?.abort();
@@ -182,10 +195,12 @@ export function useInbox(filter: InboxFilter): InboxState {
       if (row.unreadCount === 0) return;
       const key = rowKey(row);
       // Resolve the read action per KIND (bail if unaddressable — don't fake
-      // success). A relay_group row marks read through its OWN conversation
-      // (POST /api/conversations/:id/read), NOT the contact/phone fan-out.
+      // success). A MULTI-PARTY row (relay_group / group_text) marks read through
+      // its OWN conversation (POST /api/conversations/:id/read), NOT the
+      // contact/phone fan-out - the inbox mark-read routes both fan out over a
+      // contact's participant-keyed threads, which a group thread has none of.
       let read: (() => Promise<void>) | undefined;
-      if (row.kind === 'relay_group') {
+      if (row.kind === 'relay_group' || row.kind === 'group_text') {
         if (row.conversationId !== undefined) {
           const conversationId = row.conversationId;
           read = () => markConversationRead(conversationId);
@@ -227,5 +242,14 @@ export function useInbox(filter: InboxFilter): InboxState {
   const visible = filter === 'unread' ? patched.filter((r) => r.unreadCount > 0) : patched;
   const rows = sortByActivity(visible);
 
-  return { status, rows, hasMore: cursor !== null, loadingMore, loadMore, retry, markRead };
+  return {
+    status,
+    rows,
+    groupsTruncated,
+    hasMore: cursor !== null,
+    loadingMore,
+    loadMore,
+    retry,
+    markRead,
+  };
 }

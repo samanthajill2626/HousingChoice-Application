@@ -105,6 +105,43 @@ describe('InboxRow', () => {
     expect(within(link).getByText(/See you at 3/)).toBeInTheDocument();
   });
 
+  it('renders a group_text row with a Group text chip, linking to the thread view', () => {
+    renderRow(
+      mkRow({
+        kind: 'group_text',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Ann & Marcus',
+        preview: 'Saturday works',
+        conversationId: 'gt-1',
+      }),
+    );
+    const link = screen.getByRole('link', { name: /With Ann & Marcus/ });
+    // NOT /contacts/unknown?phone= - the trailing fall-through would have sent a
+    // group row to the triage list with an empty number.
+    expect(link).toHaveAttribute('href', '/conversations/gt-1');
+    expect(screen.getByText('Group text')).toBeInTheDocument();
+    expect(screen.queryByText('Relay group')).toBeNull();
+    expect(within(link).getByText(/Saturday works/)).toBeInTheDocument();
+  });
+
+  it('renders no lifecycle tag on a group_text row (no closed state in v1)', () => {
+    renderRow(
+      mkRow({
+        kind: 'group_text',
+        contactId: undefined,
+        channel: undefined,
+        direction: undefined,
+        role: undefined,
+        name: 'With Ann & Marcus',
+        conversationId: 'gt-1',
+      }),
+    );
+    expect(screen.queryByText('Closed')).toBeNull();
+  });
+
   it('flags a closed relay_group row', () => {
     renderRow(
       mkRow({

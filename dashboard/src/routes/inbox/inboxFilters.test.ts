@@ -2,9 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { INBOX_FILTERS, emptyCopy } from './inboxFilters.js';
 
 describe('inboxFilters', () => {
-  it('lists the three filters with All first (the default)', () => {
-    expect(INBOX_FILTERS.map((t) => t.filter)).toEqual(['all', 'unread', 'unknown']);
+  it('lists the filters with All first (the default) and Groups last', () => {
+    expect(INBOX_FILTERS.map((t) => t.filter)).toEqual(['all', 'unread', 'unknown', 'groups']);
     expect(INBOX_FILTERS[0]?.label).toBe('All');
+    expect(INBOX_FILTERS[3]?.label).toBe('Groups');
+  });
+
+  it('gives the groups filter its own empty copy', () => {
+    expect(emptyCopy('groups')).toEqual({
+      title: 'No group texts yet',
+      body: 'Group texts you are part of show up here.',
+    });
   });
 
   it('gives each filter distinct, non-empty empty-state copy', () => {

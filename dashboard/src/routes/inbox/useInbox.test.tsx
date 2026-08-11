@@ -6,6 +6,7 @@ import type { InboxFilter, InboxPage, InboxRow } from '../../api/index.js';
 
 const getInbox = vi.fn();
 const markInboxRead = vi.fn();
+const markConversationRead = vi.fn();
 let sse: EventStreamHandlers = {};
 
 vi.mock('../../api/index.js', async () => {
@@ -14,6 +15,7 @@ vi.mock('../../api/index.js', async () => {
     ...actual,
     getInbox: (...a: unknown[]) => getInbox(...a),
     markInboxRead: (...a: unknown[]) => markInboxRead(...a),
+    markConversationRead: (...a: unknown[]) => markConversationRead(...a),
     useEventStream: (h: EventStreamHandlers) => {
       sse = h;
     },
@@ -49,6 +51,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="count">{s.rows.length}</span>
       <span data-testid="unread">{s.rows.map((r) => r.unreadCount).join(',')}</span>
       <span data-testid="hasMore">{String(s.hasMore)}</span>
+      <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
       <button onClick={() => s.loadMore()}>more</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
@@ -62,6 +65,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
 beforeEach(() => {
   getInbox.mockReset();
   markInboxRead.mockReset().mockResolvedValue(undefined);
+  markConversationRead.mockReset().mockResolvedValue(undefined);
   sse = {};
 });
 afterEach(() => vi.restoreAllMocks());
@@ -207,5 +211,50 @@ describe('useInbox', () => {
     // The stale refetch now resolves — the generation guard must discard it.
     act(() => releaseStale());
     await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+  });
+});
+
+describe('useInbox - native group text rows', () => {
+  const groupRow = (over: Partial<InboxRow> = {}): InboxRow =>
+    mkRow({
+      kind: 'group_text',
+      contactId: undefined,
+      channel: undefined,
+      direction: undefined,
+      name: 'With Ann & Marcus',
+      conversationId: 'gt-1',
+      unreadCount: 2,
+      ...over,
+    });
+
+  it('keys a group_text row with its OWN prefix (g: already belongs to relay)', () => {
+    expect(rowKey(groupRow())).toBe('gt:gt-1');
+    expect(rowKey(mkRow({ kind: 'relay_group', contactId: undefined, conversationId: 'gt-1' }))).toBe(
+      'g:gt-1',
+    );
+  });
+
+  it('marks a group row read through its OWN conversation, not the contact fan-out', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([groupRow()]));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0'));
+    expect(markConversationRead).toHaveBeenCalledWith('gt-1');
+    expect(markInboxRead).not.toHaveBeenCalled();
+  });
+
+  it('surfaces the server truncation flag and clears it on a filter change', async () => {
+    getInbox.mockResolvedValueOnce({ rows: [groupRow()], nextCursor: null, groupsTruncated: true });
+    const { rerender } = render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('groupsTruncated')).toHaveTextContent('true'));
+
+    getInbox.mockResolvedValueOnce(pageOf([groupRow()]));
+    rerender(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('groupsTruncated')).toHaveTextContent('false'));
+    expect(getInbox).toHaveBeenLastCalledWith(
+      expect.objectContaining({ filter: 'groups' }),
+      expect.anything(),
+    );
   });
 });

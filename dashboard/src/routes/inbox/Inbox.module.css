@@ -72,6 +72,19 @@
   opacity: 0.6;
 }
 
+/* Truncation affordance: the group source is capped on page one, so the list is
+   honest about being partial and offers the full one. Quiet by design - it is a
+   footnote on the feed, not an alert. */
+.notice {
+  margin: 0 0 var(--sp-3);
+  font-size: var(--fs-sm);
+  color: var(--c-text-muted);
+}
+.notice a {
+  color: var(--c-text);
+  text-decoration: underline;
+}
+
 .error {
   margin: var(--sp-4) 0;
   padding: var(--sp-3) var(--sp-4);

@@ -2549,7 +2549,9 @@ export interface BroadcastUpdatedEvent {
 // newest-activity-first, aggregating all of a contact's numbers. GET /api/inbox
 // 404s until the BE7/C8 slice lands → useInbox degrades to an honest 'pending'.
 
-export type InboxFilter = 'all' | 'unread' | 'unknown';
+// 'groups' (S4) serves the native group-text partition ALONE, through its own
+// namespaced cursor - the contact and relay sources do not run under it.
+export type InboxFilter = 'all' | 'unread' | 'unknown' | 'groups';
 export type InboxChannel = 'sms' | 'mms' | 'call' | 'email'; // 'email' added by email-channel v1 (A4)
 
 /** One inbox row. A single WIDENED interface (not a union) mirroring the app's

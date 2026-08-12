@@ -51,7 +51,11 @@ const MEDIA_ONLY_SUFFIX = MEDIA_ONLY_TEMPLATE.replace('{name}', '').trim(); // "
 async function devLogin(page: Page): Promise<void> {
   await page.goto(`${NEXT}/`);
   await page.getByRole('button', { name: /Continue as dev user/i }).click();
-  await expect(page.getByRole('heading', { name: 'Today' })).toBeVisible();
+  // EXACT. The Today page's own group heading is "Tours today", so the loose
+  // name matches TWO headings the moment any tour lands in that group and the
+  // wait fails on a strict-mode violation rather than on anything this spec is
+  // about. Same correction ba1df280 already made in the group-text specs.
+  await expect(page.getByRole('heading', { name: 'Today', exact: true })).toBeVisible();
 }
 
 /** Attach the fixture image on the shared composer and wait for the upload to

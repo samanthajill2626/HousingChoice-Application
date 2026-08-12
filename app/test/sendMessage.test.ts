@@ -236,17 +236,20 @@ function makeFakes(
     claimCrossCheckEvent: async () => {
       throw new Error('claimCrossCheckEvent: not used in this suite');
     },
-    takeCrossCheckCredit: async () => {
-      throw new Error('takeCrossCheckCredit: not used in this suite');
+    bumpCrossCheckEvent: async () => {
+      throw new Error('bumpCrossCheckEvent: not used in this suite');
+    },
+    bumpCrossCheckClassic: async () => {
+      throw new Error('bumpCrossCheckClassic: not used in this suite');
+    },
+    releaseCrossCheckPending: async () => {
+      throw new Error('releaseCrossCheckPending: not used in this suite');
     },
     putCrossCheckPending: async () => {
       throw new Error('putCrossCheckPending: not used in this suite');
     },
-    takeCrossCheckPending: async () => {
-      throw new Error('takeCrossCheckPending: not used in this suite');
-    },
-    putCrossCheckCredit: async () => {
-      throw new Error('putCrossCheckCredit: not used in this suite');
+    claimOldestCrossCheckPending: async () => {
+      throw new Error('claimOldestCrossCheckPending: not used in this suite');
     },
     resolveCrossCheckPending: async () => {
       throw new Error('resolveCrossCheckPending: not used in this suite');

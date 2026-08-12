@@ -357,6 +357,83 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
     });
   });
 
+  describe('the ledger is a CLAIM, not check-then-act (fix wave 5, adversarial 3/9)', () => {
+    // THE DEFECT THESE PIN. Both halves used to match by check-then-act: an
+    // eventually-consistent Query for the other half's row, then an
+    // UNCONDITIONAL delete whose result was never inspected. Two webhooks fired
+    // by ONE carrier message could each miss the other - by a true interleave or
+    // by read lag alone - so a `credit#` row AND an `evt#` row both survived for
+    // the same message. Five minutes later the sweep logged
+    // `group_crosscheck_inbound_missing` at ERROR (the channel that feeds the
+    // production error-logs alarm) about a message the classic webhook filed
+    // correctly, and the orphaned credit went on to absorb a LATER genuine miss,
+    // silencing the only detector of `OtherRecipients{N}` disappearing.
+    it('the exact t0-t4 interleave from the finding matches, and leaves NO orphan credit', async () => {
+      const h = harness();
+      // t0: both halves accepted. t1/t2: each "takes" before either "puts" -
+      // which is the whole point: with one atomic balance there is no window
+      // between taking and putting for the other half to fall into.
+      await Promise.all([h.crossCheck.recordConversationEvent(h.event()), h.classic()]);
+
+      // NO false alarm for the message the classic webhook filed correctly.
+      expect(await h.sweep()).toEqual([]);
+      expect(h.log.error).not.toHaveBeenCalled();
+
+      // ...and NO orphaned credit left behind to mask the next real miss.
+      h.setNow('2026-08-11T12:05:00.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep('2026-08-11T12:30:00.000Z')).toHaveLength(1);
+    });
+
+    it('twenty concurrent event/classic pairs on one rail all match, with nothing left over', async () => {
+      const h = harness();
+      const pairs = 20;
+      await Promise.all(
+        Array.from({ length: pairs }, (_unused, i) =>
+          i % 2 === 0
+            ? Promise.all([h.crossCheck.recordConversationEvent(h.event()), h.classic()])
+            : Promise.all([h.classic(), h.crossCheck.recordConversationEvent(h.event())]),
+        ),
+      );
+
+      expect(await h.sweep()).toEqual([]);
+      expect(h.log.error).not.toHaveBeenCalled();
+    });
+
+    it('two concurrent classic filings consume ONE pending event exactly once', async () => {
+      // The old `takeCrossCheckPending` read Limit:1 and then deleted
+      // unconditionally without checking the result, so two concurrent
+      // consumers both returned "matched" for one row - and a genuinely
+      // unfiled message was silently absorbed.
+      const h = harness();
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      // Two DISTINCT carrier messages (distinct provider SIDs - not a
+      // redelivery), landing at the same instant.
+      await Promise.all([h.classic(), h.classic()]);
+
+      // One consumed the pending event; the OTHER banked a credit rather than
+      // evaporating. So the next event matches, and nothing alarms.
+      expect(await h.sweep()).toEqual([]);
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep()).toEqual([]);
+    });
+
+    it('an ALARMED event stops counting as pending, so a very late filing banks a credit instead', async () => {
+      const h = harness();
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep()).toHaveLength(1); // given up on
+
+      // The classic filing finally turns up an hour late. It must NOT "match"
+      // the message we already reported missing - it is a fresh credit.
+      h.setNow('2026-08-11T13:30:00.000Z');
+      await h.classic();
+      // Proof it banked: the NEXT event consumes it and nothing alarms.
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep('2026-08-11T14:30:00.000Z')).toEqual([]);
+    });
+  });
+
   describe('the two sweeps no longer share a deadline partition (fix wave 4, X3)', () => {
     // THE DEFECT THIS PINS. Both sweeps Queried ONE partition with `Limit: 50`
     // and dropped the other kind AFTER the limit was spent, so a full batch of

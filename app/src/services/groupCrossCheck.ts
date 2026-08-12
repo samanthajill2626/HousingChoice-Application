@@ -25,6 +25,25 @@
 //     cannot bank credits that mask a later genuine miss;
 //   - anything still pending past its deadline alarms ONCE, from the T6.3 sweep.
 //
+// THE LEDGER IS A CLAIM, NOT A CHECK-THEN-ACT (fix wave 5, adversarial 3/9).
+// "Either can win the race and neither order is a fault" is the stated intent,
+// and the first implementation only delivered it for STRICTLY ORDERED wins:
+// each half Queried (eventually consistent) for the other half's row and then
+// deleted it unconditionally without inspecting the result. Two webhooks fired
+// by ONE carrier message could each miss the other - by a true interleave or by
+// read lag alone - banking a credit AND a pending row for the same message,
+// which raised `group_crosscheck_inbound_missing` at ERROR on healthy traffic
+// and left an orphaned credit to absorb a LATER genuine miss. False firing
+// "trains the operator to ignore the one alarm that matters" (groupDelivery.ts),
+// and this is the only detector of `OtherRecipients` disappearing.
+//
+// So matching is decided by ONE strongly-consistent atomic `ADD` on a single
+// per-pair state item carrying a signed balance (positive = events awaiting
+// their filings, negative = filings banked as credits). Both halves move the
+// same counter, so neither can miss the other and neither can double-consume;
+// the `evt#` rows survive only as the alarm index, claimed with a
+// ConsistentRead plus a CONDITIONAL delete whose result is checked.
+//
 // COVERAGE, HONESTLY (spec 8). The cross-check sees only threads that HAVE a
 // rail. Under eager creation that is every converted group from migration day
 // and every detected group within seconds - but the brief pre-rail window and
@@ -109,10 +128,11 @@ export interface GroupCrossCheckDeps {
     MessagesRepo,
     | 'claimCrossCheckEvent'
     | 'claimCrossCheckClassic'
-    | 'takeCrossCheckCredit'
+    | 'bumpCrossCheckEvent'
+    | 'bumpCrossCheckClassic'
+    | 'releaseCrossCheckPending'
     | 'putCrossCheckPending'
-    | 'takeCrossCheckPending'
-    | 'putCrossCheckCredit'
+    | 'claimOldestCrossCheckPending'
     | 'resolveCrossCheckPending'
     | 'listDueRows'
   >;
@@ -215,7 +235,36 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
         groupCrossCheckMemberKey(author),
       );
       const notBefore = new Date(at.getTime() - creditWindowMs).toISOString();
-      if (await messages.takeCrossCheckCredit(pairKey, notBefore)) {
+      const deadlineAt = new Date(at.getTime() + graceMs).toISOString();
+
+      // ROW FIRST, THEN THE BALANCE (fix wave 5, adversarial 3/9). The classic
+      // half claims a pending ROW whenever the balance says one exists, so the
+      // row must be durable BEFORE the bump that says so - otherwise a classic
+      // filing in between would find the balance positive and the row absent.
+      // The cost of that ordering is this: when the bump turns out to land on a
+      // banked credit, the row we just wrote is retracted below. A crash in that
+      // sub-second window leaves one due row that alarms in `graceMs` - strictly
+      // better than the old design, where the SAME window produced both a false
+      // alarm AND an orphaned credit that masked a later real one.
+      await messages.putCrossCheckPending(
+        {
+          pairKey,
+          messageSid: event.messageSid,
+          conversationSid: event.conversationSid,
+          author,
+          deadlineAt,
+        },
+        cleanupAt(at),
+      );
+
+      const landed = await messages.bumpCrossCheckEvent(
+        pairKey,
+        notBefore,
+        at.toISOString(),
+        cleanupAt(at),
+      );
+      if (landed === 'credit') {
+        await messages.resolveCrossCheckPending(pairKey, event.messageSid, deadlineAt);
         log.info(
           {
             event: 'group_crosscheck_event_matched',
@@ -225,19 +274,7 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           },
           'conversations event matched a classic inbound that arrived first',
         );
-        return;
       }
-
-      await messages.putCrossCheckPending(
-        {
-          pairKey,
-          messageSid: event.messageSid,
-          conversationSid: event.conversationSid,
-          author,
-          deadlineAt: new Date(at.getTime() + graceMs).toISOString(),
-        },
-        cleanupAt(at),
-      );
     },
 
     async recordClassicInbound(record) {
@@ -278,24 +315,40 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
             return;
           }
         }
-        const pending = await messages.takeCrossCheckPending(pairKey);
-        if (pending !== undefined) {
-          log.info(
+        // ONE ATOMIC STEP decides matched-or-credit (fix wave 5, adversarial
+        // 3/9). It replaces a Query-then-unconditional-Delete that could both
+        // miss a row written moments earlier AND let two concurrent filings
+        // consume the same one.
+        const landed = await messages.bumpCrossCheckClassic(
+          pairKey,
+          at.toISOString(),
+          cleanupAt(at),
+        );
+        if (landed !== 'matched') return; // credit banked for an event still in flight
+
+        const pending = await messages.claimOldestCrossCheckPending(pairKey);
+        if (pending === undefined) {
+          // The balance said a pending event existed and its row was not
+          // claimable. The event half writes the row BEFORE the bump, so the
+          // only way here is a crash between those two writes on the other side.
+          // The balance already accounts for this filing; say so and stop.
+          log.warn(
             {
-              event: 'group_crosscheck_event_matched',
-              reason: 'filed',
-              messageSid: pending.messageSid,
+              event: 'group_crosscheck_pending_row_missing',
               conversationSid: record.conversationSid,
             },
-            'conversations event matched by the classic inbound it predicted',
+            'cross-check balance reported a pending event with no claimable row',
           );
           return;
         }
-        await messages.putCrossCheckCredit(
-          pairKey,
-          at.toISOString(),
-          record.providerSid ?? at.getTime().toString(),
-          cleanupAt(at),
+        log.info(
+          {
+            event: 'group_crosscheck_event_matched',
+            reason: 'filed',
+            messageSid: pending.messageSid,
+            conversationSid: record.conversationSid,
+          },
+          'conversations event matched by the classic inbound it predicted',
         );
       } catch (err) {
         log.warn(
@@ -357,6 +410,11 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           alarm.messageSid,
           row.deadlineAt,
         );
+        // ...and give the slot back to the pair balance (fix wave 5). We have
+        // stopped waiting for this event, so it must stop counting as pending -
+        // otherwise a very late classic filing would silently "match" a message
+        // we already reported missing, and the ledger would drift by one forever.
+        await messages.releaseCrossCheckPending(row.ref.conversationId);
         alarms.push(alarm);
       }
       return { scanned: due.length, alarms };

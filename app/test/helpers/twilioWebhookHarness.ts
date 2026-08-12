@@ -316,8 +316,19 @@ export interface FakeWorld {
   crossCheckClassicMarkers: Set<string>;
   /** Events awaiting their classic filing, per (rail, author) pair. */
   crossCheckPending: Map<string, PendingCrossCheckEvent[]>;
-  /** Classic filings that arrived first, per pair - ISO instants, oldest first. */
-  crossCheckCredits: Map<string, string[]>;
+  /**
+   * The PAIR BALANCE, per (rail, author) pair (fix wave 5). Positive = events
+   * awaiting their filings; negative = filings banked as credits, the oldest of
+   * them at `since`. Both halves move this one counter atomically, which is what
+   * makes the two webhooks impossible to interleave wrongly.
+   */
+  crossCheckBalances: Map<string, CrossCheckPairState>;
+}
+
+/** One pair's ledger balance in the fake world. See crossCheckBalances. */
+export interface CrossCheckPairState {
+  balance: number;
+  since?: string;
 }
 
 export function createFakeWorld(): FakeWorld {
@@ -1154,14 +1165,40 @@ export function createFakeWorld(): FakeWorld {
       crossCheckClassicMarkers.add(providerSid);
       return true;
     },
-    async takeCrossCheckCredit(pairKey, notBeforeIso) {
-      const credits = crossCheckCredits.get(pairKey) ?? [];
-      // Newest first, and only inside the match window.
-      const idx = [...credits].reverse().findIndex((filedAt) => filedAt >= notBeforeIso);
-      if (idx === -1) return false;
-      credits.splice(credits.length - 1 - idx, 1);
-      crossCheckCredits.set(pairKey, credits);
-      return true;
+    // THE PAIR BALANCE, modelled the way the repo implements it (fix wave 5):
+    // one signed counter per pair, moved atomically by both halves. Positive =
+    // events awaiting their filings; negative = filings banked as credits, the
+    // oldest of them at `since`.
+    async bumpCrossCheckEvent(pairKey, notBeforeIso) {
+      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
+      if (state.balance < 0 && state.since !== undefined && state.since < notBeforeIso) {
+        // Stale credits are DISCARDED, never consumed.
+        crossCheckBalances.set(pairKey, { balance: 1 });
+        return 'pending';
+      }
+      const balance = state.balance + 1;
+      crossCheckBalances.set(pairKey, {
+        balance,
+        ...(state.since !== undefined && { since: state.since }),
+      });
+      return balance <= 0 ? 'credit' : 'pending';
+    },
+    async bumpCrossCheckClassic(pairKey, nowIso) {
+      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
+      const balance = state.balance - 1;
+      // The FIRST credit of a run stamps `since`; later ones keep the oldest.
+      const since = state.balance >= 0 ? nowIso : state.since;
+      crossCheckBalances.set(pairKey, { balance, ...(since !== undefined && { since }) });
+      return balance >= 0 ? 'matched' : 'credit';
+    },
+    async releaseCrossCheckPending(pairKey) {
+      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
+      if (state.balance > 0) {
+        crossCheckBalances.set(pairKey, {
+          balance: state.balance - 1,
+          ...(state.since !== undefined && { since: state.since }),
+        });
+      }
     },
     async putCrossCheckPending(event) {
       const pending = crossCheckPending.get(event.pairKey) ?? [];
@@ -1182,7 +1219,7 @@ export function createFakeWorld(): FakeWorld {
         author: event.author,
       });
     },
-    async takeCrossCheckPending(pairKey) {
+    async claimOldestCrossCheckPending(pairKey) {
       const pending = crossCheckPending.get(pairKey) ?? [];
       const oldest = pending.shift();
       crossCheckPending.set(pairKey, pending);
@@ -1192,11 +1229,6 @@ export function createFakeWorld(): FakeWorld {
         );
       }
       return oldest;
-    },
-    async putCrossCheckCredit(pairKey, filedAt) {
-      const credits = crossCheckCredits.get(pairKey) ?? [];
-      credits.push(filedAt);
-      crossCheckCredits.set(pairKey, credits);
     },
     async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {
       const pending = (crossCheckPending.get(pairKey) ?? []).filter(
@@ -3138,7 +3170,7 @@ export function createFakeWorld(): FakeWorld {
   const crossCheckClassicMarkers = new Set<string>();
   const crossCheckDueRows = new Map<string, GroupDueRow>();
   const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
-  const crossCheckCredits = new Map<string, string[]>();
+  const crossCheckBalances = new Map<string, CrossCheckPairState>();
   const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
   const groupRailEnqueuer: GroupRailEnqueuer = {
     async enqueueGroupRail(request) {
@@ -3228,7 +3260,7 @@ export function createFakeWorld(): FakeWorld {
     crossCheckMarkers,
     crossCheckClassicMarkers,
     crossCheckPending,
-    crossCheckCredits,
+    crossCheckBalances,
     groupRailEnqueuer,
   };
 }

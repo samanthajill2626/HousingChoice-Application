@@ -305,12 +305,14 @@ export function buildGroupSendDueRow(input: {
 //  1. DEDUPE MARKER, `groupim#<IMxx>` / `ptr` - point-readable, conditional
 //     create. Twilio redelivers webhooks; a redelivered event must not enter the
 //     ledger twice.
-//  2. PAIR LEDGER, `groupxc#<CHxx>#<memberKey>` - the (rail, author) pair, with
-//     two sort-key ranges: `evt#<deadline>#<IMxx>` for an event awaiting its
-//     classic filing, and `credit#<filedAt>#<id>` for a classic filing that
-//     arrived FIRST. Two ranges in one partition means both directions are a
-//     bounded, point-partition Query - and rapid same-author messages match
-//     one-for-one instead of colliding on a single key.
+//  2. PAIR LEDGER, `groupxc#<CHxx>#<memberKey>` - the (rail, author) pair. ONE
+//     `state` item carries the signed BALANCE that decides every match (see
+//     GROUP_CROSSCHECK_STATE_SORT_KEY), plus one `evt#<deadline>#<IMxx>` row per
+//     event awaiting its classic filing. The `evt#` rows are the ALARM INDEX and
+//     the oldest-first ordering that makes rapid same-author messages match
+//     one-for-one; they are no longer what decides a match. There is no
+//     `credit#` row shape any more - a credit is just a negative balance, which
+//     is what makes the two halves impossible to interleave wrongly.
 //  3. DUE ROW, in GROUP_CROSSCHECK_DUE_PARTITION, so the T6.3 sweep discovers
 //     overdue events through the same KIND of deadline Query the staleness
 //     sweep uses - but over its OWN partition, so neither sweep can spend the
@@ -352,6 +354,26 @@ export const GROUP_CROSSCHECK_CLEANUP_MS = 7 * 24 * 60 * 60 * 1000;
 export function groupCrossCheckPairKey(conversationSid: string, memberKey: string): string {
   return `groupxc#${conversationSid}#${memberKey}`;
 }
+
+/**
+ * THE PAIR STATE ITEM's sort key (fix wave 5, adversarial 3/9).
+ *
+ * One item per (rail, author) pair carrying a signed `balance`:
+ *   balance > 0  -> that many Conversations events are awaiting their classic
+ *                   filings (one `evt#` row each, plus a due row each);
+ *   balance < 0  -> that many classic filings are banked as credits, the oldest
+ *                   of them at `credit_since`;
+ *   balance == 0 -> the pair is square.
+ *
+ * Both halves move it with ONE atomic `ADD`, which is what makes the ledger a
+ * claim rather than a check-then-act pair of eventually-consistent Queries. It
+ * sorts before both `credit#` and `evt#`, and `state` is not a valid prefix of
+ * either, so it can never be mistaken for a ledger row.
+ */
+export const GROUP_CROSSCHECK_STATE_SORT_KEY = 'state';
+
+/** How many oldest-first pending rows one claim will try before giving up. */
+const CROSSCHECK_CLAIM_ATTEMPTS = 3;
 
 /** Deadline-prefixed due sort key for an unmatched cross-check event. */
 export function groupCrossCheckDueSortKey(deadlineIso: string, messageSid: string): string {
@@ -1137,27 +1159,70 @@ export interface MessagesRepo {
     expiresAt: number,
   ): Promise<boolean>;
   /**
-   * Consume the newest CREDIT no older than `notBeforeIso` from this pair
-   * (a classic filing that arrived before its event). `false` when there is
-   * none - the event then becomes pending. A credit older than the window is
-   * deliberately left alone rather than consumed: it must never mask a real miss.
+   * THE EVENT HALF'S ONE ATOMIC LEDGER STEP (fix wave 5, adversarial 3/9).
+   *
+   * Adds this event to the pair's balance and reports what it landed on:
+   *   - `'credit'`: the balance was negative, i.e. a classic filing for this
+   *     pair arrived FIRST and is still claimable. Matched.
+   *   - `'pending'`: nothing was banked (or every banked credit was stale), so
+   *     this event now awaits its classic filing.
+   *
+   * WHY A COUNTER AND NOT TWO ROW RANGES. The old ledger was two independent
+   * rows read check-then-act: the event half Queried for a `credit#` row and
+   * the classic half Queried for an `evt#` row, both eventually consistent and
+   * both followed by an UNCONDITIONAL delete. Two webhooks fired by ONE carrier
+   * message could therefore each miss the other's row - by a true interleave or
+   * by read lag alone - leaving a credit AND a pending row for the same message
+   * and raising `group_crosscheck_inbound_missing` at ERROR on healthy traffic,
+   * while the orphaned credit went on to absorb a LATER genuine miss. A single
+   * `ADD` on one item is strongly consistent and read-modify-write atomic, so
+   * neither half can miss the other and neither can double-consume.
+   *
+   * `notBeforeIso` is the credit freshness bound. `credit_since` tracks the
+   * OLDEST outstanding credit, so a quiet period that banked credits long ago
+   * can never mask a later genuine miss - those credits are discarded and this
+   * event goes pending instead.
    */
-  takeCrossCheckCredit(pairKey: string, notBeforeIso: string): Promise<boolean>;
+  bumpCrossCheckEvent(
+    pairKey: string,
+    notBeforeIso: string,
+    nowIso: string,
+    expiresAt: number,
+  ): Promise<'credit' | 'pending'>;
+  /**
+   * THE CLASSIC HALF'S ONE ATOMIC LEDGER STEP. The mirror of
+   * `bumpCrossCheckEvent`:
+   *   - `'matched'`: the balance was positive, i.e. an event for this pair is
+   *     pending. The caller must claim and resolve the oldest pending row.
+   *   - `'credit'`: nothing pending, so this filing is banked for the event
+   *     that has not arrived yet.
+   */
+  bumpCrossCheckClassic(
+    pairKey: string,
+    nowIso: string,
+    expiresAt: number,
+  ): Promise<'matched' | 'credit'>;
+  /**
+   * Give an ALARMED pending event back to the balance. The sweep has stopped
+   * waiting for it, so it must stop counting as pending - otherwise a very late
+   * classic filing would "match" a message we already reported missing.
+   * Conditional on a positive balance, and never throws for a race.
+   */
+  releaseCrossCheckPending(pairKey: string): Promise<void>;
   /** Record an event awaiting its classic filing: pair row + due row, together. */
   putCrossCheckPending(event: PendingCrossCheckEvent, expiresAt: number): Promise<void>;
   /**
-   * Consume the OLDEST pending event for this pair (deleting both its pair row
-   * and its due row), or `undefined` when nothing is pending. Oldest-first is
-   * what makes rapid same-author messages match one-for-one.
+   * CLAIM the OLDEST pending event for this pair (deleting both its pair row and
+   * its due row), or `undefined` when nothing is claimable. Oldest-first is what
+   * makes rapid same-author messages match one-for-one.
+   *
+   * A CLAIM, NOT A READ (adversarial 9). The Query is `ConsistentRead` - the
+   * pair row is written microseconds before the balance bump that sends a caller
+   * here, so an eventually-consistent read would miss it - and the delete is
+   * CONDITIONAL with its result inspected, so two concurrent claimants can never
+   * both take the same row. A loser retries against the next-oldest row.
    */
-  takeCrossCheckPending(pairKey: string): Promise<PendingCrossCheckEvent | undefined>;
-  /** Bank a credit for a classic filing that arrived before its event. */
-  putCrossCheckCredit(
-    pairKey: string,
-    filedAt: string,
-    id: string,
-    expiresAt: number,
-  ): Promise<void>;
+  claimOldestCrossCheckPending(pairKey: string): Promise<PendingCrossCheckEvent | undefined>;
   /**
    * Resolve an ALARMED pending event: delete the due row and its pair row so the
    * alarm fires exactly once. There is no sparse-index trick on a base-table
@@ -2306,32 +2371,141 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
     },
 
-    async takeCrossCheckCredit(pairKey, notBeforeIso) {
-      const { Items } = await doc.send(
-        new QueryCommand({
+    async bumpCrossCheckEvent(pairKey, notBeforeIso, nowIso, expiresAt) {
+      const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: key,
+            UpdateExpression: 'ADD #b :one SET #e = :exp',
+            // Refuse ONLY the stale-credit case: the pair is in credit AND the
+            // oldest of those credits predates the match window. Everything else
+            // (no state item yet, a square pair, a fresh credit) proceeds.
+            ConditionExpression:
+              'attribute_not_exists(#b) OR #b >= :zero OR attribute_not_exists(#cs) OR #cs >= :notBefore',
+            ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' },
+            ExpressionAttributeValues: {
+              ':one': 1,
+              ':zero': 0,
+              ':exp': expiresAt,
+              ':notBefore': notBeforeIso,
+            },
+            ReturnValues: 'UPDATED_NEW',
+          }),
+        );
+        const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
+        // <= 0 means the ADD landed on a banked credit rather than creating a
+        // new pending slot: this event is matched.
+        return balance <= 0 ? 'credit' : 'pending';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      // STALE CREDITS. They must never mask a genuine miss, so they are
+      // DISCARDED here rather than consumed, and this event takes the pair's
+      // only pending slot. Conditional so a concurrent writer that already moved
+      // the balance is not clobbered; if it lost the race the plain bump below
+      // still accounts for this event.
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: key,
+            UpdateExpression: 'SET #b = :one, #e = :exp REMOVE #cs',
+            ConditionExpression: '#b < :zero AND #cs < :notBefore',
+            ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' },
+            ExpressionAttributeValues: {
+              ':one': 1,
+              ':zero': 0,
+              ':exp': expiresAt,
+              ':notBefore': notBeforeIso,
+            },
+          }),
+        );
+        log.info(
+          { pairKey, notBeforeIso },
+          'cross-check: stale credits discarded - the event takes a pending slot',
+        );
+        return 'pending';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      // The pair moved under us between the two writes. Re-run the ordinary
+      // bump; whatever it lands on now is the truthful answer.
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
           TableName: table,
-          // BETWEEN pins the `credit#` range AND the freshness bound in one
-          // condition: '~' (0x7E) sorts after every character an ISO instant can
-          // start with, so it is the exclusive upper edge of the prefix.
-          KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
-          ExpressionAttributeValues: {
-            ':p': pairKey,
-            ':lo': `credit#${notBeforeIso}`,
-            ':hi': 'credit#~',
-          },
-          ScanIndexForward: false, // newest credit first
-          Limit: 1,
+          Key: key,
+          UpdateExpression: 'ADD #b :one SET #e = :exp',
+          ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at' },
+          ExpressionAttributeValues: { ':one': 1, ':exp': expiresAt },
+          ReturnValues: 'UPDATED_NEW',
         }),
       );
-      const item = (Items ?? [])[0] as { tsMsgId?: string } | undefined;
-      if (item?.tsMsgId === undefined) return false;
-      await doc.send(
-        new DeleteCommand({
+      const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
+      return balance <= 0 ? 'credit' : 'pending';
+    },
+
+    async bumpCrossCheckClassic(pairKey, nowIso, expiresAt) {
+      const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
+      const names = { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' };
+      try {
+        // FIRST CREDIT of a run stamps `credit_since`, so the freshness bound
+        // the event half applies is the age of the OLDEST outstanding credit.
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: key,
+            UpdateExpression: 'ADD #b :negOne SET #cs = :now, #e = :exp',
+            ConditionExpression: 'attribute_not_exists(#b) OR #b >= :zero',
+            ExpressionAttributeNames: names,
+            ExpressionAttributeValues: {
+              ':negOne': -1,
+              ':zero': 0,
+              ':now': nowIso,
+              ':exp': expiresAt,
+            },
+            ReturnValues: 'UPDATED_NEW',
+          }),
+        );
+        const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? -1);
+        return balance >= 0 ? 'matched' : 'credit';
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
+      // The pair is ALREADY in credit: stack another one and keep the existing
+      // `credit_since` (the oldest credit is the one the window is measured on).
+      const { Attributes } = await doc.send(
+        new UpdateCommand({
           TableName: table,
-          Key: { conversationId: pairKey, tsMsgId: item.tsMsgId },
+          Key: key,
+          UpdateExpression: 'ADD #b :negOne SET #e = :exp',
+          ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at' },
+          ExpressionAttributeValues: { ':negOne': -1, ':exp': expiresAt },
+          ReturnValues: 'UPDATED_NEW',
         }),
       );
-      return true;
+      const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? -1);
+      return balance >= 0 ? 'matched' : 'credit';
+    },
+
+    async releaseCrossCheckPending(pairKey) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY },
+            UpdateExpression: 'ADD #b :negOne',
+            ConditionExpression: '#b > :zero',
+            ExpressionAttributeNames: { '#b': 'balance' },
+            ExpressionAttributeValues: { ':negOne': -1, ':zero': 0 },
+          }),
+        );
+      } catch (err) {
+        // Already square (or claimed by a classic filing in the same instant).
+        // Giving a slot back is best effort by construction.
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
     },
 
     async putCrossCheckPending(event, expiresAt) {
@@ -2373,56 +2547,64 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
     },
 
-    async takeCrossCheckPending(pairKey) {
-      const { Items } = await doc.send(
-        new QueryCommand({
-          TableName: table,
-          KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
-          ExpressionAttributeValues: { ':p': pairKey, ':lo': 'evt#', ':hi': 'evt#~' },
-          ScanIndexForward: true, // OLDEST pending event first
-          Limit: 1,
-        }),
-      );
-      const item = (Items ?? [])[0] as Record<string, unknown> | undefined;
-      if (item === undefined) return undefined;
-      const messageSid = String(item['message_sid']);
-      const deadlineAt = String(item['deadline_at']);
-      await doc.send(
-        new DeleteCommand({
-          TableName: table,
-          Key: { conversationId: pairKey, tsMsgId: String(item['tsMsgId']) },
-        }),
-      );
-      await doc.send(
-        new DeleteCommand({
-          TableName: table,
-          Key: {
-            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
-            tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
-          },
-        }),
-      );
-      return {
-        pairKey,
-        messageSid,
-        conversationSid: String(item['conversation_sid'] ?? ''),
-        author: String(item['author'] ?? ''),
-        deadlineAt,
-      };
-    },
-
-    async putCrossCheckCredit(pairKey, filedAt, id, expiresAt) {
-      await doc.send(
-        new PutCommand({
-          TableName: table,
-          Item: {
-            conversationId: pairKey,
-            tsMsgId: `credit#${filedAt}#${id}`,
-            filed_at: filedAt,
-            expires_at: expiresAt,
-          },
-        }),
-      );
+    async claimOldestCrossCheckPending(pairKey) {
+      for (let attempt = 0; attempt < CROSSCHECK_CLAIM_ATTEMPTS; attempt += 1) {
+        const { Items } = await doc.send(
+          new QueryCommand({
+            TableName: table,
+            KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
+            ExpressionAttributeValues: { ':p': pairKey, ':lo': 'evt#', ':hi': 'evt#~' },
+            ScanIndexForward: true, // OLDEST pending event first
+            // STRONGLY CONSISTENT BY CONTRACT. The event half writes this row
+            // microseconds before the balance bump that sends a caller here, so
+            // an eventually-consistent read can miss a row that certainly
+            // exists - which is exactly how the old ledger produced false
+            // `group_crosscheck_inbound_missing` ERRORs on healthy traffic.
+            ConsistentRead: true,
+            // Read a small window rather than one row: if another claimant takes
+            // the oldest, the next-oldest is already in hand.
+            Limit: CROSSCHECK_CLAIM_ATTEMPTS,
+          }),
+        );
+        const items = (Items ?? []) as Record<string, unknown>[];
+        if (items.length === 0) return undefined;
+        for (const item of items) {
+          const sortKey = String(item['tsMsgId']);
+          const messageSid = String(item['message_sid']);
+          const deadlineAt = String(item['deadline_at']);
+          try {
+            // THE CLAIM. Conditional, and its result IS inspected: two
+            // concurrent claimants cannot both take one row.
+            await doc.send(
+              new DeleteCommand({
+                TableName: table,
+                Key: { conversationId: pairKey, tsMsgId: sortKey },
+                ConditionExpression: 'attribute_exists(conversationId)',
+              }),
+            );
+          } catch (err) {
+            if (err instanceof ConditionalCheckFailedException) continue; // lost it
+            throw err;
+          }
+          await doc.send(
+            new DeleteCommand({
+              TableName: table,
+              Key: {
+                conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
+                tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
+              },
+            }),
+          );
+          return {
+            pairKey,
+            messageSid,
+            conversationSid: String(item['conversation_sid'] ?? ''),
+            author: String(item['author'] ?? ''),
+            deadlineAt,
+          };
+        }
+      }
+      return undefined;
     },
 
     async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {

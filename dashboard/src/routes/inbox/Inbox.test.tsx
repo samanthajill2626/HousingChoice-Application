@@ -15,6 +15,7 @@ function baseState(over: Partial<InboxState> = {}): InboxState {
     status: 'ready',
     rows: [],
     groupsTruncated: false,
+    groupRowsShown: 0,
     hasMore: false,
     loadingMore: false,
     loadMore,
@@ -160,33 +161,57 @@ describe('Inbox - group truncation affordance', () => {
     name: 'With Ann & Marcus',
     conversationId: 'gt-1',
   });
-  // A CONTACT row sits beside the group row on purpose. The count in the
-  // affordance is `rows.filter(kind === 'group_text').length`; with a
-  // group-only fixture that filter and a plain `rows.length` are
-  // indistinguishable, so "1" proved nothing about the filter. With two rows of
-  // different kinds, "1" is the FILTER's answer and "2" is the bug.
   const contactRow = mkRow({ contactId: 'c-other', name: 'Sam Sender' });
 
+  // A26 / adversarial 21. The count is the hook's `groupRowsShown` - captured
+  // from the PAGE THE SERVER RETURNED - and NOT a filter over the displayed
+  // `rows`, which the Unread filter narrows and the optimistic mark-read
+  // patches. The fixture makes the difference visible on purpose: `rows` here
+  // carries one group row, `groupRowsShown` says two, and two is the truth about
+  // what the server handed down.
   it('says what is shown and links to the full list when the server truncated', () => {
-    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true });
+    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true, groupRowsShown: 2 });
     renderInbox();
-    expect(screen.getByText(/Showing the latest 1 group texts/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing the latest 2 group texts\./)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'See all group texts' })).toHaveAttribute(
       'href',
       '/inbox?filter=groups',
     );
   });
 
+  // C3 / conformance F11. One withheld group row rendered "Showing the latest 1
+  // group texts", and two tests PINNED that string as correct. The tests were
+  // wrong, not the code.
+  it('says "group text", singular, for exactly one', () => {
+    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true, groupRowsShown: 1 });
+    renderInbox();
+    expect(screen.getByText(/Showing the latest 1 group text\./)).toBeInTheDocument();
+    expect(screen.queryByText(/1 group texts/)).toBeNull();
+  });
+
   it('renders no affordance when nothing was withheld', () => {
-    state = baseState({ rows: [contactRow, groupRow] });
+    state = baseState({ rows: [contactRow, groupRow], groupRowsShown: 1 });
     renderInbox();
     expect(screen.queryByText(/Showing the latest/)).toBeNull();
   });
 
   it('drops the self-link once the Groups filter is already active', () => {
-    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true });
+    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true, groupRowsShown: 1 });
     renderInbox('/inbox?filter=groups');
-    expect(screen.getByText(/Showing the latest 1 group texts/)).toBeInTheDocument();
+    expect(screen.getByText(/Showing the latest 1 group text\./)).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'See all group texts' })).toBeNull();
+  });
+
+  // C12 / conformance F12. On the Unread tab the notice is about UNREAD group
+  // texts, but the link lands on the Groups tab, which pages ALL of them. There
+  // is no server-side unread-groups filter, so the affordance is LABELLED for
+  // where it actually goes rather than implying a view that does not exist.
+  it('is honest on the Unread tab about what it counted and where the link goes', () => {
+    state = baseState({ rows: [groupRow], groupsTruncated: true, groupRowsShown: 4 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.getByText(/Showing the latest 4 unread group texts\./)).toBeInTheDocument();
+    const link = screen.getByRole('link', { name: /Browse all group texts/ });
+    expect(link).toHaveAttribute('href', '/inbox?filter=groups');
+    expect(link).toHaveTextContent(/read and unread/);
   });
 });

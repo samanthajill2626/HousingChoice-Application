@@ -137,4 +137,19 @@ describe('deliveryReason', () => {
     expect(deliveryReason(undefined)).toBeUndefined();
     expect(deliveryReason('')).toBeUndefined();
   });
+
+  // A16 / adversarial 14. When EVERY member of a group has opted out,
+  // deriveGroupDeliveryStatus writes the message-level aggregate as
+  // { status: 'undelivered', errorCode: 'contact_opted_out' } - and the bubble
+  // has no per-leg rollup to fall back on, so this reason IS the chip. The
+  // generic branch rendered "Delivery failed (error contact_opted_out)", which
+  // dresses a token this app invents as a carrier error number an operator could
+  // look up. Staff-facing UI copy, so it lives here beside ERROR_CODE_REASONS,
+  // NOT in the app's message catalog (that catalog is member-facing copy).
+  it('renders the app-internal opted-out token as operator copy, never as an error number', () => {
+    const reason = deliveryReason('contact_opted_out');
+    expect(reason).toBe('Everyone here has opted out - nothing was sent');
+    expect(reason).not.toMatch(/contact_opted_out/);
+    expect(reason).not.toMatch(/error/i);
+  });
 });

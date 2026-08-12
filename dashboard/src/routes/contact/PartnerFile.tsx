@@ -7,8 +7,9 @@
 // carries NO "Needs triage" call-to-action and NO Placements card - a partner is
 // already classified (A2, email-channel-v1). Header pill reads "Partner" via
 // CONTACT_TYPE_LABEL in ContactDetail.
-import type { Contact, ContactPhone } from '../../api/index.js';
+import type { Contact, ContactPhone, GroupThreadRow } from '../../api/index.js';
 import { BLANK, Card, CardAction, CardInlineAction, KV, NotesText, PendingPanel } from './Card.js';
+import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { contactStatusLabel, formatPhone } from './format.js';
@@ -19,6 +20,13 @@ export interface PartnerFileProps {
   /** "Media from comms" - derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** NATIVE group texts this partner is a member of (C13 - see the card below).
+   *  REQUIRED, not optional: the props are what make the wiring in
+   *  ContactDetail a typecheck error to forget, which is how this card came to
+   *  be absent from two of the four contact pages in the first place. */
+  groupThreadsPending: boolean;
+  groupThreads: GroupThreadRow[];
+  groupThreadsTruncated: boolean;
   /** Open the edit dialog. */
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
@@ -30,6 +38,9 @@ export function PartnerFile({
   phones,
   media,
   mediaLoading,
+  groupThreadsPending,
+  groupThreads,
+  groupThreadsTruncated,
   onEdit,
   onManagePhones,
 }: PartnerFileProps): React.JSX.Element {
@@ -87,6 +98,18 @@ export function PartnerFile({
           <PendingPanel note={'No preferences yet - added manually for now.'} />
         )}
       </Card>
+
+      {/* PLACEMENT RULING (C13). "Group threads" is TYPE-AGNOSTIC: a group text
+          is a plain carrier thread with no housing pipeline attached, and
+          useContactFile already reads /group-threads for EVERY contact, so a
+          partner on a coordination group paid for the read and saw nothing. It
+          sits above "Media from comms" on all four pages so the ordering does
+          not shift when a contact is triaged from unknown to tenant/landlord. */}
+      <GroupThreadsCard
+        pending={groupThreadsPending}
+        groups={groupThreads}
+        truncated={groupThreadsTruncated}
+      />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

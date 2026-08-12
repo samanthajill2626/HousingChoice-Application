@@ -11,11 +11,13 @@ import type {
   PlacementItem,
   Contact,
   ContactPhone,
+  GroupThreadRow,
   SuggestionItem,
   UnitItem,
 } from '../../api/index.js';
 import { Button } from '../../ui/index.js';
 import { Card, CardAction, CardInlineAction, EmptyRow, KV, NotesText, PendingPanel, Row } from './Card.js';
+import { GroupThreadsCard } from './GroupThreadsCard.js';
 import { MediaGallery } from './MediaGallery.js';
 import type { CommsMediaItem } from './media.js';
 import { tenantPlacements } from './buildContactFile.js';
@@ -36,6 +38,13 @@ export interface UnknownFileProps {
   /** "Media from comms" — derived from the live timeline (updates on send). */
   media: CommsMediaItem[];
   mediaLoading?: boolean;
+  /** NATIVE group texts this contact is a member of (C13 - see the card below).
+   *  REQUIRED, not optional: the props are what make the wiring in ContactDetail
+   *  a typecheck error to forget, which is how this card came to be absent from
+   *  two of the four contact pages in the first place. */
+  groupThreadsPending: boolean;
+  groupThreads: GroupThreadRow[];
+  groupThreadsTruncated: boolean;
   /** Open the edit dialog. */
   onEdit?: () => void;
   /** Open the "Manage numbers" dialog (Phone numbers row). */
@@ -56,6 +65,9 @@ export function UnknownFile({
   units,
   media,
   mediaLoading,
+  groupThreadsPending,
+  groupThreads,
+  groupThreadsTruncated,
   onEdit,
   onManagePhones,
   onTriage,
@@ -164,6 +176,20 @@ export function UnknownFile({
           })
         )}
       </Card>
+
+      {/* PLACEMENT RULING (C13). This is the page that needed it MOST: detection
+          mints every unseen group member as `type:'unknown', status:'needs_review'`
+          (app/src/services/groupMembers.ts), so an untriaged contact IS the
+          default state of a group member - and the group thread is where the
+          evidence for triaging them lives. useContactFile already reads
+          /group-threads for every contact, so this card costs no request. Same
+          slot as the other three pages (above "Media from comms") so the layout
+          does not shift when the contact is triaged. */}
+      <GroupThreadsCard
+        pending={groupThreadsPending}
+        groups={groupThreads}
+        truncated={groupThreadsTruncated}
+      />
 
       <Card title="Media from comms">
         <MediaGallery media={media} loading={mediaLoading ?? false} />

@@ -66,8 +66,15 @@ export function senderLabel(
   if (senderKey === 'team') return 'Team';
   if (senderKey === 'system') return 'Automated';
   for (const m of roster ?? []) {
+    // GUARDED, restoring the check the code this replaced carried (A25). The
+    // types say `contactId: string` / `phone: string`, but the relay view seeds
+    // its roster straight from `header.participants` - the raw passthrough
+    // ConversationDetail documents as arriving in more than one wire shape. This
+    // function runs for EVERY bubble in BOTH timelines, so an absent field here
+    // does not blank one chip: it throws and blanks the whole conversation page.
+    const contactId = typeof m.contactId === 'string' ? m.contactId : '';
     const matches =
-      (m.contactId.length > 0 && m.contactId === senderKey) || phoneMemberKey(m) === senderKey;
+      (contactId.length > 0 && contactId === senderKey) || phoneMemberKey(m) === senderKey;
     if (matches) {
       const name = m.name?.trim();
       if (name && name.length > 0) return name;

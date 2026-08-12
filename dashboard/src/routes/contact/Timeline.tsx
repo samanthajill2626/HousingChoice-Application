@@ -586,10 +586,24 @@ function MessageBubble({
         ) : null}
       </div>
       {optedOutCount > 0 ? (
+        // A27(a). The FRAMING is per product, because the mechanism is per
+        // product. A relay send really is relayed - we fan a message out to each
+        // member from a pool number, and an opted-out member is one we did not
+        // send to. A NATIVE group text relays nothing: the carrier thread already
+        // exists on every handset and we post one message into it, which Twilio
+        // then SKIPS for a suppressed participant (no leg, no carrier attempt, no
+        // receipt - app/src/services/groupDelivery.ts). Saying "not relayed to
+        // them" on a group bubble invents a mechanism AND contradicts the
+        // suppression banner directly above it in GroupTextView. Relay's copy is
+        // deliberately untouched (invariant 6).
         <p className={styles.relayOptOutNote}>
-          {optedOutCount === 1
-            ? '1 member opted out — not relayed to them.'
-            : `${optedOutCount} members opted out — not relayed to them.`}
+          {rosterKind === 'group_text'
+            ? optedOutCount === 1
+              ? '1 member opted out - Twilio skips them, so their phone never receives it.'
+              : `${optedOutCount} members opted out - Twilio skips them, so their phones never receive it.`
+            : optedOutCount === 1
+              ? '1 member opted out — not relayed to them.'
+              : `${optedOutCount} members opted out — not relayed to them.`}
         </p>
       ) : null}
       {delivery?.isFailure && onRetry ? (

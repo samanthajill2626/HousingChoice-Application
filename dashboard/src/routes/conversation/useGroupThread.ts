@@ -39,6 +39,15 @@ const REFETCH_DEBOUNCE_MS = 300;
 export interface GroupThreadState {
   status: GroupThreadStatus;
   items: TimelineItem[];
+  /** Bumped once per SSE-triggered (debounced) refetch of this thread.
+   *
+   *  A15. The view's OTHER read - the member panel's `getGroupMembers` - has to
+   *  move on exactly the same beat as the transcript, or the delivery chips and
+   *  the roster beside them make two contradictory statements about the same
+   *  member until a reload. Exposing the tick rather than having the view open a
+   *  SECOND `useEventStream` subscription keeps one subscriber, one debounce and
+   *  one definition of "something changed in this thread". */
+  refetchSignal: number;
   /** Refetch now (the view's error-state retry). */
   refresh: () => void;
   /** Optimistic send: show the outbound bubble immediately; returns a temp id. */
@@ -138,10 +147,15 @@ export function useGroupThread(conversationId: string): GroupThreadState {
   }, [fetchNow]);
 
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
+  const [refetchSignal, setRefetchSignal] = useState(0);
   const scheduleRefetch = useCallback(() => {
     if (debounceRef.current !== undefined) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       debounceRef.current = undefined;
+      // Published on the SAME tick as the transcript fetch (A15), so anything
+      // else the view reads about this thread reconciles together rather than
+      // drifting apart until a reload.
+      setRefetchSignal((n) => n + 1);
       void fetchNow();
     }, REFETCH_DEBOUNCE_MS);
   }, [fetchNow]);
@@ -174,5 +188,13 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     return extra.length === 0 ? serverItems : [...serverItems, ...extra];
   }, [serverItems, pending]);
 
-  return { status, items, refresh, addOptimistic, resolveOptimistic, failOptimistic };
+  return {
+    status,
+    items,
+    refetchSignal,
+    refresh,
+    addOptimistic,
+    resolveOptimistic,
+    failOptimistic,
+  };
 }

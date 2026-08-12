@@ -131,12 +131,36 @@ const ERROR_CODE_REASONS: Record<string, string> = {
 };
 
 /**
+ * Codes THIS APP invents, which no carrier ever emits and no operator can look
+ * up. They get plain operator copy and, deliberately, NO "(error <code>)" tail:
+ * printing `contact_opted_out` as if it were a carrier error number is the
+ * defect this map exists to fix (A16).
+ *
+ * `contact_opted_out` reaches the message-level chip only as the group-send
+ * AGGREGATE: `deriveGroupDeliveryStatus` (app/src/services/groupDelivery.ts)
+ * writes `{ status: 'undelivered', errorCode: 'contact_opted_out' }` when every
+ * member is suppressed, and `presentRelayDelivery` returns null for that map, so
+ * the bubble has no rollup to fall back on and this string IS what staff read.
+ * The framing matches groupDelivery.ts: Twilio never creates the leg, so nothing
+ * was sent - it is not a delivery failure.
+ *
+ * This is STAFF-FACING dashboard copy, so it lives here beside
+ * ERROR_CODE_REASONS rather than in the app's message catalog (which is the
+ * single source for automated MEMBER-facing copy).
+ */
+const INTERNAL_CODE_REASONS: Record<string, string> = {
+  contact_opted_out: 'Everyone here has opted out - nothing was sent',
+};
+
+/**
  * Twilio error code → a human reason that ALWAYS surfaces the raw code number
  * (mapped or not), so an operator never has to leave the thread to learn WHY a
  * send failed. Absent code ⇒ undefined (caller shows just the "Failed" label).
  */
 export function deliveryReason(errorCode: string | undefined): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
+  const internal = INTERNAL_CODE_REASONS[errorCode];
+  if (internal !== undefined) return internal;
   const mapped = ERROR_CODE_REASONS[errorCode];
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`

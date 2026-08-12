@@ -203,6 +203,70 @@ describe('GroupTextView - member panel', () => {
     expect(screen.getByText(/Sending is refused while they are deleted/)).toBeInTheDocument();
   });
 
+  // A15 / adversarial 13. The panel used to be fetched once on mount while the
+  // delivery chips beside it updated live off SSE, so a member who texted STOP
+  // stayed chipless and the left-pane banner stayed silent until a reload. One
+  // screen, two contradictory statements, on the screen staff use to decide
+  // whether to text a group.
+  it('refetches the member panel on the SAME live signal that refetches the transcript', async () => {
+    renderAt('gt-1');
+    await screen.findByRole('list', { name: 'Group members' });
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+    expect(screen.queryByText('Opted out')).toBeNull();
+
+    // A member texts STOP; the receipts path records the suppression and emits
+    // message.persisted - the same event that drives the transcript refetch.
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' },
+      MARCUS,
+    ]);
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:05:00.000Z#SM2',
+        direction: 'outbound',
+      } as never);
+    });
+
+    // The roster chip lights up...
+    await waitFor(() => expect(screen.getByText('Opted out')).toBeInTheDocument());
+    // ...and so does the left-pane banner, with no reload.
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('status').some((el) => /One member has opted out/.test(el.textContent ?? '')),
+      ).toBe(true),
+    );
+  });
+
+  it('does not let a slow member fetch overwrite a newer one', async () => {
+    // Guarding the refetch means guarding the ORDER: the first (stale) response
+    // must never land on top of the second.
+    let releaseFirst: (rows: GroupMemberRow[]) => void = () => {};
+    getGroupMembers.mockImplementationOnce(
+      () => new Promise<GroupMemberRow[]>((res) => { releaseFirst = res; }),
+    );
+    renderAt('gt-1');
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' },
+      MARCUS,
+    ]);
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:06:00.000Z#SM3',
+        direction: 'inbound',
+      } as never);
+    });
+    await waitFor(() => expect(screen.getByText('Opted out')).toBeInTheDocument());
+
+    // The FIRST request finally resolves, carrying the pre-STOP roster.
+    act(() => releaseFirst([ANN, MARCUS]));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(screen.getByText('Opted out')).toBeInTheDocument();
+  });
+
   it('keeps the membership visible when the member-state read fails, and says state is missing', async () => {
     getGroupMembers.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
     renderAt('gt-1');
@@ -211,6 +275,50 @@ describe('GroupTextView - member panel', () => {
     const roster = screen.getByRole('list', { name: 'Group members' });
     expect(within(roster).getByRole('link', { name: 'Ann Tenant' })).toBeInTheDocument();
     expect(screen.getByText(/Opt-out state may be missing/)).toBeInTheDocument();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A13 (dashboard half) - ONE naming rule, ONE input
+// ---------------------------------------------------------------------------
+
+describe('GroupTextView - the header title', () => {
+  it('titles from the ROSTER SNAPSHOT only, so the members fetch never re-titles the header', async () => {
+    // The inbox row (app/src/routes/inbox.ts) and the contact card
+    // (routes/contacts.ts) both title from the IMMUTABLE participants snapshot
+    // through app/src/lib/groupTitle.ts. Titling the header from the
+    // /group-members resolve instead made the header disagree with both of them
+    // permanently, and visibly re-title itself a beat after open. The resolved
+    // roster still owns the member PANEL, which is where per-person detail
+    // belongs.
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, name: 'Annabelle Renamed' },
+      { ...MARCUS, name: 'Marcus Landlord' },
+    ]);
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument());
+    // The panel picks up the fresher contact name...
+    expect(
+      await screen.findByRole('link', { name: 'Annabelle Renamed' }),
+    ).toBeInTheDocument();
+    // ...and the header title is byte-identical to what it opened with.
+    expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument();
+    expect(screen.queryByText(/With Annabelle/)).toBeNull();
+  });
+
+  it('still titles a nameless snapshot by formatted numbers', async () => {
+    getConversation.mockResolvedValue(
+      groupHeader({
+        participants: [
+          { contactId: 'c-a', phone: '+14045550111' },
+          { contactId: 'c-b', phone: '+14045550112' },
+        ],
+      }),
+    );
+    renderAt('gt-1');
+    await waitFor(() =>
+      expect(screen.getByText('With (404) 555-0111 & (404) 555-0112')).toBeInTheDocument(),
+    );
   });
 });
 
@@ -475,6 +583,75 @@ describe('GroupTextView - the composer (S5)', () => {
     // ...and the flex-ROW pane above it has exactly that one child, so nothing
     // can ever sit BESIDE the conversation again.
     expect(stack!.parentElement!.children).toHaveLength(1);
+  });
+
+  // A27(b) / adversarial 22. `suppressionUnknown` means a read behind that
+  // member FAILED server-side, so `suppressed:false` is the absence of an answer.
+  // Counting only `suppressed === true` in the banner made that member invisible
+  // everywhere except a chip in the Details pane - the pane hidden on a phone.
+  it('names members whose opt-out state could NOT be read, without claiming they opted out', async () => {
+    getGroupMembers.mockResolvedValue([{ ...ANN, suppressionUnknown: true }, MARCUS]);
+    renderAt('gt-1');
+    const notice = await waitFor(() => {
+      const el = screen
+        .getAllByRole('status')
+        .find((n) => /could not be read/i.test(n.textContent ?? ''));
+      if (!el) throw new Error('the unknown-opt-out-state notice never rendered');
+      return el;
+    });
+    expect(notice.textContent).toMatch(/1 member/);
+    // HONEST: it must not assert they opted out - we do not know.
+    expect(
+      screen.queryAllByRole('status').some((el) => /members? (has|have) opted out/.test(el.textContent ?? '')),
+    ).toBe(false);
+  });
+
+  it('counts suppressed and unknown-state members separately', async () => {
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+      { ...MARCUS, suppressionUnknown: true },
+    ]);
+    renderAt('gt-1');
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('status').some((el) => /One member has opted out/.test(el.textContent ?? '')),
+      ).toBe(true),
+    );
+    expect(
+      screen.getAllByRole('status').some((el) => /could not be read/i.test(el.textContent ?? '')),
+    ).toBe(true);
+  });
+
+  // A27(c) / adversarial 22. The Details pane is display:none at <=860px and the
+  // left-pane banner sits inside the Conversation pane, so on a phone the thread
+  // looked entirely normal with zero indication. The HEADER renders at every
+  // width - the state has to be there too.
+  it('surfaces the suppression state on the thread HEADER (visible at every width)', async () => {
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+      MARCUS,
+    ]);
+    renderAt('gt-1');
+    const header = (await screen.findByText('Group text')).closest('header');
+    expect(header).not.toBeNull();
+    await waitFor(() => expect(within(header!).getByText(/opted out/i)).toBeInTheDocument());
+  });
+
+  it('surfaces UNREAD opt-out state on the header too', async () => {
+    getGroupMembers.mockResolvedValue([{ ...ANN, suppressionUnknown: true }, MARCUS]);
+    renderAt('gt-1');
+    const header = (await screen.findByText('Group text')).closest('header');
+    await waitFor(() =>
+      expect(within(header!).getByText(/opt-out state unknown/i)).toBeInTheDocument(),
+    );
+  });
+
+  it('puts nothing on the header when every member is reachable', async () => {
+    renderAt('gt-1');
+    const header = (await screen.findByText('Group text')).closest('header');
+    await screen.findByRole('list', { name: 'Group members' });
+    expect(within(header!).queryByText(/opted out/i)).toBeNull();
+    expect(within(header!).queryByText(/unknown/i)).toBeNull();
   });
 
   it('renders the per-member delivery rollup on an outbound group message', async () => {

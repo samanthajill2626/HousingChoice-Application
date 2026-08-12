@@ -39,6 +39,18 @@ export interface InboxState {
    *  renders the "showing the latest" affordance instead of implying the list is
    *  complete. There is no exact total by design. */
   groupsTruncated: boolean;
+  /** How many group-text rows the SERVER has actually handed down so far, across
+   *  the pages loaded for this filter.
+   *
+   *  A26. The truncation notice used to count `rows`, the DISPLAYED list - which
+   *  the Unread filter narrows and the optimistic mark-read patches - so marking
+   *  a group row read made "Showing the latest 4 group texts" tick to 3, then 2,
+   *  while the truncation claim stood. This count is captured when a page lands,
+   *  from the unfiltered, unpatched page the server returned, which is the set
+   *  the server's `groupsTruncated` flag is actually a statement about. It grows
+   *  with "Load more" and resets with the filter, and no client-side mutation
+   *  can move it. */
+  groupRowsShown: number;
   hasMore: boolean;
   loadingMore: boolean;
   loadMore: () => void;
@@ -64,6 +76,12 @@ export function rowKey(row: InboxRowData): string {
   return row.kind === 'contact' ? `c:${row.contactId ?? ''}` : `u:${row.phone ?? ''}`;
 }
 
+/** Group-text rows in a server-returned page (the basis for the truncation
+ *  notice's count - see `InboxState.groupRowsShown`). */
+function countGroupRows(rows: InboxRowData[]): number {
+  return rows.filter((r) => r.kind === 'group_text').length;
+}
+
 /** Newest-activity-first, matching the server's inbox ordering. */
 function sortByActivity(rows: InboxRowData[]): InboxRowData[] {
   return [...rows].sort(
@@ -76,6 +94,7 @@ export function useInbox(filter: InboxFilter): InboxState {
   const [base, setBase] = useState<InboxRowData[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [groupsTruncated, setGroupsTruncated] = useState(false);
+  const [groupRowsShown, setGroupRowsShown] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   // In-flight optimistic patches keyed by rowKey; re-applied over refetches.
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
@@ -85,6 +104,13 @@ export function useInbox(filter: InboxFilter): InboxState {
   // started before the commit (so it read pre-mutation server state) is then
   // discarded instead of clobbering the commit.
   const genRef = useRef(0);
+  // C2 / spec 11's defense-in-depth pair. `loadMore` gets its OWN abort handle
+  // and its own generation, both keyed on the FILTER rather than on optimistic
+  // mutations: a page fetched for the previous filter must never append to the
+  // new filter's list, and its cursor addresses a different DynamoDB partition,
+  // so installing it would 400 the next Load more.
+  const loadMoreAbortRef = useRef<AbortController | null>(null);
+  const filterGenRef = useRef(0);
 
   const fetchFirstPage = useCallback(async () => {
     abortRef.current?.abort();
@@ -97,6 +123,7 @@ export function useInbox(filter: InboxFilter): InboxState {
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
       setGroupsTruncated(pageData.groupsTruncated === true);
+      setGroupRowsShown(countGroupRows(pageData.rows));
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -107,6 +134,7 @@ export function useInbox(filter: InboxFilter): InboxState {
         setBase([]);
         setCursor(null);
         setGroupsTruncated(false);
+        setGroupRowsShown(0);
         setStatus('pending');
         return;
       }
@@ -119,11 +147,18 @@ export function useInbox(filter: InboxFilter): InboxState {
   // filter change; folding them into one derived state would obscure this hook's
   // gen-ref race handling, so this reset-on-key-change is suppressed deliberately.
   useEffect(() => {
+    // A NEW filter is a new partition: bump the loadMore generation and abort any
+    // in-flight page BEFORE the reset, so a response already on the wire cannot
+    // append to the list we are about to build (C2).
+    filterGenRef.current += 1;
+    loadMoreAbortRef.current?.abort();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStatus('loading');
     setBase([]);
     setCursor(null);
     setGroupsTruncated(false);
+    setGroupRowsShown(0);
+    setLoadingMore(false);
     setPending(new Map());
     void fetchFirstPage();
     return () => abortRef.current?.abort();
@@ -137,15 +172,32 @@ export function useInbox(filter: InboxFilter): InboxState {
   const loadMore = useCallback(() => {
     if (cursor === null || loadingMore) return;
     setLoadingMore(true);
-    getInbox({ filter, limit: PAGE_LIMIT, cursor })
+    // Same abort + generation pattern as fetchFirstPage above (C2). The filter
+    // and cursor are captured at callback creation, so without this a tab switch
+    // mid-flight appends the OLD filter's rows and installs a cursor addressing
+    // the OLD partition - which the server tag-check then 400s into the empty
+    // .catch below, leaving contaminated rows and a permanently dead Load more.
+    loadMoreAbortRef.current?.abort();
+    const controller = new AbortController();
+    loadMoreAbortRef.current = controller;
+    const gen = filterGenRef.current;
+    const stale = (): boolean => controller.signal.aborted || gen !== filterGenRef.current;
+    getInbox({ filter, limit: PAGE_LIMIT, cursor }, controller.signal)
       .then((pageData) => {
+        if (stale()) return;
         setBase((prev) => [...prev, ...pageData.rows]);
         setCursor(pageData.nextCursor);
+        setGroupRowsShown((n) => n + countGroupRows(pageData.rows));
       })
       .catch(() => {
         /* keep the cursor so the user can retry "Load more" */
       })
-      .finally(() => setLoadingMore(false));
+      .finally(() => {
+        // The filter-change effect already cleared the flag for the new filter;
+        // clearing it again from a stale page would re-enable the button under a
+        // page that IS in flight.
+        if (!stale()) setLoadingMore(false);
+      });
   }, [filter, cursor, loadingMore]);
 
   // --- SSE: debounced reconcile-refetch of the current filter's first page ---
@@ -246,6 +298,7 @@ export function useInbox(filter: InboxFilter): InboxState {
     status,
     rows,
     groupsTruncated,
+    groupRowsShown,
     hasMore: cursor !== null,
     loadingMore,
     loadMore,

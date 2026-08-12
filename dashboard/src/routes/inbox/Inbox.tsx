@@ -27,7 +27,12 @@ export function Inbox(): React.JSX.Element {
   const filter = filterFromParam(params.get('filter'));
   const inbox = useInbox(filter);
   const empty = emptyCopy(filter);
-  const groupRowCount = inbox.rows.filter((r) => r.kind === 'group_text').length;
+  // A26: the count comes from the hook's server-page tally, NOT from a filter
+  // over `inbox.rows`. `rows` is the DISPLAYED list - already narrowed by the
+  // Unread filter and already patched by the optimistic mark-read - so counting
+  // it made the notice tick 4, 3, 2 while the truncation claim stood.
+  const groupRowCount = inbox.groupRowsShown;
+  const groupNoun = groupRowCount === 1 ? 'group text' : 'group texts';
 
   const selectFilter = useCallback(
     (next: InboxFilter) => {
@@ -62,14 +67,31 @@ export function Inbox(): React.JSX.Element {
 
       {inbox.groupsTruncated ? (
         // Honest, and no invented TOTAL: the group partition cannot produce one
-        // without walking it. The number here is what is actually on screen, and
-        // the link goes to the filter that pages the whole list.
+        // without walking it. The number is what the server actually handed
+        // down for this filter, and the link goes to the filter that pages the
+        // whole list.
+        //
+        // C12 RULING - the Unread case. This notice can render on the Unread
+        // tab, where the rows counted are unread group texts, but the only
+        // group-paging view we have is `?filter=groups`, which pages ALL group
+        // texts. There is no server-side unread-groups filter today: the groups
+        // partition is walked newest-first with its own budget, and an
+        // unread-scoped variant would be a new query shape and a new cursor tag,
+        // which this feature does not add. So the affordance is LABELLED for
+        // where it really goes rather than implying a view that does not exist -
+        // the cheap correct option, and reachable only past ~2000 group threads
+        // against a real-world 132.
         <p className={styles.notice}>
-          Showing the latest {groupRowCount} group texts.
+          Showing the latest {groupRowCount} {filter === 'unread' ? 'unread ' : ''}
+          {groupNoun}.
           {filter !== 'groups' ? (
             <>
               {' '}
-              <Link to="/inbox?filter=groups">See all group texts</Link>
+              <Link to="/inbox?filter=groups">
+                {filter === 'unread'
+                  ? 'Browse all group texts (read and unread)'
+                  : 'See all group texts'}
+              </Link>
             </>
           ) : null}
         </p>

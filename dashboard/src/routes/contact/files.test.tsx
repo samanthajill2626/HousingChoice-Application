@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import { TenantFile } from './TenantFile.js';
 import { LandlordFile } from './LandlordFile.js';
+import { PartnerFile } from './PartnerFile.js';
 import { BLANK } from './Card.js';
 import type { CommsMediaItem } from './media.js';
 import type {
@@ -454,5 +455,58 @@ describe('LandlordFile', () => {
       .find((a) => a.getAttribute('href') === '/conversations/conv-g2' && /With Tina Tenant/.test(a.textContent ?? ''));
     expect(link).toBeDefined();
     expect(link).toHaveTextContent('Closed');
+  });
+});
+
+// C13 / conformance F13. A partner is a resolved external party (caseworker,
+// inspector, agency) and is exactly the kind of counterparty a coordination
+// group text is opened with. useContactFile already pays for the /group-threads
+// read on EVERY contact, so the card was absent here for no reason but omission.
+describe('PartnerFile', () => {
+  const partner: Contact = {
+    contactId: 'P1',
+    type: 'partner',
+    firstName: 'Pat',
+    lastName: 'Partner',
+    status: 'active',
+    phone: '+14040100055',
+  };
+
+  function renderIt(groupThreads: GroupThreadRow[] = []) {
+    return render(
+      <MemoryRouter>
+        <PartnerFile
+          contact={partner}
+          phones={[{ phone: '+14040100055', primary: true }]}
+          media={[]}
+          groupThreadsPending={false}
+          groupThreads={groupThreads}
+          groupThreadsTruncated={false}
+        />
+      </MemoryRouter>,
+    );
+  }
+
+  it('renders the Group threads card with a linked row', () => {
+    renderIt([
+      {
+        conversationId: 'gt-9',
+        memberCount: 3,
+        lastActivityAt: '2026-06-17T10:00:00.000Z',
+        title: 'With Ann & Marcus',
+        otherMemberNames: ['Ann Tenant', 'Marcus Landlord'],
+      },
+    ]);
+    expect(screen.getByRole('heading', { name: 'Group threads' })).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /With Ann & Marcus/ })).toHaveAttribute(
+      'href',
+      '/conversations/gt-9',
+    );
+  });
+
+  it('shows the card empty rather than hiding it', () => {
+    renderIt();
+    expect(screen.getByRole('heading', { name: 'Group threads' })).toBeInTheDocument();
+    expect(screen.getByText('No group texts yet.')).toBeInTheDocument();
   });
 });

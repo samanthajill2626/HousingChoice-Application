@@ -94,6 +94,28 @@ describe('senderLabel', () => {
     expect(senderLabel('c1', [stub])).toBeUndefined();
     expect(senderLabel('', [stub])).toBeUndefined();
   });
+
+  // A25 / adversarial 20. senderLabel runs for EVERY bubble in BOTH the relay
+  // and the group timeline, so an unguarded `m.contactId.length` does not blank
+  // one chip - it throws and blanks the whole conversation page. The roster the
+  // relay view seeds comes straight from `header.participants`, a raw
+  // passthrough documented as arriving in more than one wire shape, so the type
+  // saying `contactId: string` is not a runtime guarantee. The code this
+  // function replaced guarded exactly this.
+  it('survives a roster member whose contactId is ABSENT (not just empty)', () => {
+    const shapeless = { phone: '+15555550888', name: 'Shapeless' } as unknown as ConversationParticipant;
+    expect(() => senderLabel('c1', [shapeless])).not.toThrow();
+    expect(senderLabel('c1', [shapeless])).toBeUndefined();
+    // ...and the member is still resolvable by the key that DOES exist.
+    expect(senderLabel('phone#+15555550888', [shapeless])).toBe('Shapeless');
+  });
+
+  it('survives a roster member whose PHONE is absent', () => {
+    const phoneless = { contactId: 'c-nophone', name: 'No Number' } as unknown as ConversationParticipant;
+    expect(() => senderLabel('c-nophone', [phoneless])).not.toThrow();
+    expect(senderLabel('c-nophone', [phoneless])).toBe('No Number');
+    expect(() => senderLabel('phone#+15555550999', [phoneless])).not.toThrow();
+  });
 });
 
 // LIVE QA ROUND 2, L6. Every member a native carrier group detects is a bare

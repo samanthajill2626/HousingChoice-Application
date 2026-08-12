@@ -196,6 +196,28 @@
   font-size: var(--fs-xs);
 }
 
+/* Reachability summary in the THREAD HEADER (A27c). The Details pane that
+   carries the per-member chips is hidden under 860px and the left-pane banners
+   sit inside the Conversation pane, so on a phone the thread showed no sign at
+   all that a member was opted out. The header renders at every width, so this
+   line does too - wrapping rather than truncating, because a truncated warning
+   is not a warning. */
+.groupHeaderFlags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--sp-1) var(--sp-2);
+  margin: var(--sp-1) 0 0;
+}
+
+.groupHeaderFlag {
+  padding: 0 var(--sp-2);
+  border: 1px solid var(--c-border);
+  border-radius: var(--radius-sm);
+  background: var(--c-surface-alt, var(--c-surface));
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
+}
+
 /* The group thread's LEFT pane stack.
    `twoPaneShell .left` is `display:flex` with the default ROW direction, because
    its only child everywhere else is the <Timeline>. GroupTextView adds notices

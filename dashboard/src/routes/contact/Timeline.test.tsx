@@ -693,6 +693,45 @@ describe('Timeline', () => {
     expect(screen.queryByText(/opted out — not relayed/)).not.toBeInTheDocument();
   });
 
+  // A27(a) / adversarial 22. On a NATIVE group text nothing is relayed - the
+  // thread already exists on everyone's handset and we post into it. Twilio
+  // SKIPS a suppressed participant outright (app/src/services/groupDelivery.ts),
+  // so "not relayed to them" both invents a mechanism and contradicts the
+  // suppression banner rendered directly above the same conversation
+  // (GroupTextView.tsx). Relay bubbles keep their copy: relay really does relay.
+  it('frames the opted-out note for a GROUP TEXT as a skipped participant, never as a relay', () => {
+    const groupSource: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-group-optout',
+      tsMsgId: 'm-group-optout',
+      body: 'heading over now',
+      delivery_recipients: {
+        'phone#+14045550111': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550112': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [groupSource], rosterKind: 'group_text' });
+    expect(screen.queryByText(/not relayed to them/)).not.toBeInTheDocument();
+    expect(screen.getByText(/1 member opted out/)).toHaveTextContent(/Twilio skips them/);
+  });
+
+  it('pluralizes the group-text opted-out note', () => {
+    const groupSource: TimelineItem = {
+      ...MESSAGE_OUT,
+      id: 'm-group-optout2',
+      tsMsgId: 'm-group-optout2',
+      body: 'open house Saturday',
+      delivery_recipients: {
+        'phone#+14045550111': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550113': { status: 'undelivered', errorCode: 'contact_opted_out' },
+        'phone#+14045550112': { status: 'delivered' },
+      },
+    };
+    renderTimeline({ items: [groupSource], rosterKind: 'group_text' });
+    expect(screen.getByText(/2 members opted out/)).toHaveTextContent(/Twilio skips them/);
+    expect(screen.queryByText(/not relayed to them/)).not.toBeInTheDocument();
+  });
+
   it('shows no status chip (and no Retry) when delivery_status is absent — seed/legacy rows', () => {
     const noStatus = {
       ...MESSAGE_OUT,

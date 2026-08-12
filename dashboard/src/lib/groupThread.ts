@@ -24,7 +24,14 @@ export function groupThreadLabel(
     const name = m.name?.trim() ?? '';
     // First name only - a group title is a glance, not a directory entry.
     const first = name.length > 0 ? (name.split(/\s+/)[0] ?? '') : '';
-    const label = first.length > 0 ? first : formatPhoneDisplay(m.phone) || m.phone;
+    // GUARDED (A25). `formatPhoneDisplay` returns '' for an absent number, and
+    // the `|| m.phone` fallback then hands back `undefined` for a member whose
+    // phone never arrived - `label.length` on the next line would throw and
+    // blank the thread header (and, through the app mirror, the inbox row). The
+    // type says `phone: string`; the wire shape is what is not guaranteed. A
+    // member we can say nothing about contributes no part.
+    const phone = typeof m.phone === 'string' ? m.phone : '';
+    const label = first.length > 0 ? first : formatPhoneDisplay(phone) || phone;
     if (label.length > 0) parts.push(label);
   }
   if (parts.length === 0) return 'Group text';

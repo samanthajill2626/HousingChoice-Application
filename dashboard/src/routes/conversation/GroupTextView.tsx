@@ -9,7 +9,7 @@
 // per-member delivery rollups light up unchanged (spec 4.3).
 // RIGHT: a READ-ONLY member panel - who is in the thread, whether their NUMBER
 // is suppressed, and whether their contact is deleted.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Link } from 'react-router-dom';
 import {
   getGroupMembers,
@@ -76,29 +76,44 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
   const [members, setMembers] = useState<GroupMemberRow[]>(headerRoster);
   const [membersStatus, setMembersStatus] = useState<'loading' | 'ready' | 'error'>('loading');
 
+  // A15. The member panel is REFETCHED on the same debounced SSE tick that
+  // refetches the transcript (`thread.refetchSignal`), because the two are one
+  // screen: a member texts STOP, the receipts path records the suppression and
+  // emits message.persisted, and the bubble's delivery chip updates. A panel
+  // frozen at mount then keeps that member chipless and the banner silent - two
+  // contradictory statements side by side, on the screen staff use to decide
+  // whether to text a group, reconciled only by a reload.
+  //
+  // OVERLAP GUARD: a generation ref, not just the AbortController. Abort covers
+  // the request we know about; the generation covers a response that was already
+  // resolving when the next tick started, so a slow first read can never land on
+  // top of a newer one.
+  const membersGenRef = useRef(0);
   useEffect(() => {
-    let cancelled = false;
+    membersGenRef.current += 1;
+    const gen = membersGenRef.current;
     const controller = new AbortController();
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setMembersStatus('loading');
     getGroupMembers(conversationId, controller.signal)
       .then((roster) => {
-        if (cancelled) return;
+        if (gen !== membersGenRef.current) return;
         setMembers(roster);
         setMembersStatus('ready');
       })
       .catch((err: unknown) => {
-        if (cancelled || (err instanceof DOMException && err.name === 'AbortError')) return;
+        if (gen !== membersGenRef.current || (err instanceof DOMException && err.name === 'AbortError')) {
+          return;
+        }
         // The membership itself still renders from the header - only the STATE
         // is missing, and the panel says so rather than implying "nobody is
         // suppressed".
         setMembersStatus('error');
       });
     return () => {
-      cancelled = true;
       controller.abort();
     };
-  }, [conversationId]);
+  }, [conversationId, thread.refetchSignal]);
 
   // Viewing the thread marks it read - the inbox unread badge clears once seen.
   useEffect(() => {
@@ -107,10 +122,25 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
     });
   }, [conversationId]);
 
-  const title = groupThreadLabel(members);
+  // A13 (dashboard half). ONE naming rule, ONE input. The inbox row and the
+  // contact card both title from the IMMUTABLE participants SNAPSHOT (server
+  // side, through app/src/lib/groupTitle.ts); titling the header from the
+  // /group-members resolve instead made the header disagree with both of them
+  // permanently AND re-title itself a beat after open, from numbers to names.
+  // The resolved `members` still owns the member PANEL below, which is where
+  // per-person detail (name, suppression, deleted) belongs. Converging the
+  // snapshot's names is a SERVER concern (a roster write-back), not something
+  // the header can paper over.
+  const title = groupThreadLabel(headerRoster);
   const overCap = members.length > MAX_SENDABLE_MEMBERS;
   const deletedMembers = members.filter((m) => m.deleted === true);
   const suppressedMembers = members.filter((m) => m.suppressed === true);
+  // A27(b). `suppressionUnknown` means the read behind that member FAILED, so
+  // `suppressed:false` is the ABSENCE of an answer. Counting only
+  // `suppressed === true` made those members invisible outside a chip in the
+  // Details pane. They are surfaced separately, and never as "opted out" - we
+  // do not know that, and staff would act on the claim.
+  const unknownStateMembers = members.filter((m) => m.suppressionUnknown === true);
 
   // Composer (S5). Sending is OFF only when it is STRUCTURALLY impossible - an
   // over-cap roster is permanently unsendable, so its note replaces the composer
@@ -160,6 +190,32 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
           <p className={styles.groupUnmasked}>
             Everyone in this group text sees everyone&apos;s real number.
           </p>
+          {/* A27(c). The Details pane (and its per-member chips) is display:none
+           *  at <=860px, and the left-pane banners live inside the Conversation
+           *  pane, so on a phone this thread used to look entirely normal with
+           *  ZERO indication that a member was opted out or that their state was
+           *  never read. The header is the one region rendered at every width, so
+           *  the reachability summary belongs here as well. Deliberately NOT
+           *  role="status": the left-pane banners already announce it, and two
+           *  live regions saying the same thing is noise for a screen reader. */}
+          {suppressedMembers.length > 0 || unknownStateMembers.length > 0 ? (
+            <p className={styles.groupHeaderFlags}>
+              {suppressedMembers.length > 0 ? (
+                <span className={styles.groupHeaderFlag}>
+                  {suppressedMembers.length === 1
+                    ? '1 member opted out'
+                    : `${suppressedMembers.length} members opted out`}
+                </span>
+              ) : null}
+              {unknownStateMembers.length > 0 ? (
+                <span className={styles.groupHeaderFlag}>
+                  {unknownStateMembers.length === 1
+                    ? 'Opt-out state unknown for 1 member'
+                    : `Opt-out state unknown for ${unknownStateMembers.length} members`}
+                </span>
+              ) : null}
+            </p>
+          ) : null}
         </div>
       </header>
 
@@ -219,6 +275,21 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
                   : `${suppressedMembers.length} members have`}{' '}
                 opted out. The group text still goes to everyone else - Twilio skips them, so their
                 phone never receives it and their delivery chip says so.
+              </p>
+            ) : null}
+            {/* A27(b). HONEST, and deliberately not folded into the banner above:
+             *  a failed read is not an opt-out. Saying "N members have opted out"
+             *  about someone we could not read would be a claim staff act on
+             *  (they would stop texting a reachable person); saying nothing at
+             *  all reads as "everyone is reachable", which is the false negative
+             *  the suppressionUnknown flag exists to prevent. */}
+            {unknownStateMembers.length > 0 ? (
+              <p role="status" className={styles.groupNotice}>
+                {unknownStateMembers.length === 1
+                  ? 'Opt-out state could not be read for 1 member.'
+                  : `Opt-out state could not be read for ${unknownStateMembers.length} members.`}{' '}
+                They may or may not have opted out. The send still goes to the whole group, and
+                Twilio skips anyone who has.
               </p>
             ) : null}
             <Timeline

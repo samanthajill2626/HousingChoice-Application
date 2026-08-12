@@ -27,6 +27,8 @@ import {
 } from '../repos/usersRepo.js';
 import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessaging.js';
 import { resetLocalData } from '../lib/devReset.js';
+import { resetPerformanceData } from '../lib/performanceSeed.js';
+import { resolvePerformanceSeedConfig, type PerformanceSeedInput } from '../lib/seed/performance.js';
 import { createMessagingAdapter } from '../adapters/messaging.js';
 import { createContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -116,6 +118,16 @@ export interface DevRouterDeps {
   groupGuardrailDeps?: RunGroupGuardrailsDeps;
   /** Service for POST /__dev/group-send-staleness/check (T6.4) - injected in tests. */
   groupStaleness?: GroupSendStalenessService;
+  performanceReseed?: typeof resetPerformanceData;
+  performanceReseedRequestAllowed?: (remoteAddress: string | null) => boolean;
+}
+
+export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
+  if (remoteAddress === null) return false;
+  const normalized = remoteAddress.toLowerCase().split('%', 1)[0]!;
+  return normalized === '::1'
+    || /^127(?:\.[0-9]{1,3}){3}$/u.test(normalized)
+    || /^::ffff:127(?:\.[0-9]{1,3}){3}$/u.test(normalized);
 }
 
 /**
@@ -184,6 +196,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       // Launch commit (set by scripts/e2e-session.mjs) — the e2e preflight compares
       // it to the checkout to catch a stale reused backend. null when unstamped.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,
+      // Random per-profiler launcher proof. It is not a credential and is exposed
+      // only by this already dev-gated router.
+      profilerOwnerToken: process.env['E2E_PROFILER_OWNER_TOKEN'] ?? null,
     });
   });
 
@@ -247,10 +262,18 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // flag is ever set in production). The real OAuth callback is untouched and
   // stays invite-first.
   router.post('/auth/dev-login', json(), async (req, res) => {
-    const body = (req.body ?? {}) as { email?: unknown };
+    const body = (req.body ?? {}) as { email?: unknown; requireExisting?: unknown };
+    if (body.requireExisting !== undefined && typeof body.requireExisting !== 'boolean') {
+      res.status(400).json({ error: 'invalid_require_existing' });
+      return;
+    }
     const email = typeof body.email === 'string' && body.email.trim() ? body.email : 'va@example.com';
     let user = await users.findByEmail(email);
     if (!user) {
+      if (body.requireExisting === true) {
+        res.status(404).json({ error: 'dev_user_not_found' });
+        return;
+      }
       // Known seed personas keep their roles (va@example.com → va, the default
       // dev-login identity); any other deliberately-typed email defaults to
       // admin for full dashboard visibility.
@@ -304,6 +327,39 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     // post-reseed dev-login session is rejected (cookie epoch ≠ stale cached epoch).
     deps.sessionEpochCache?.clear();
     res.status(200).json({ ok: true, profile });
+  });
+
+  router.post('/__dev/performance/reseed', json(), async (req, res) => {
+    const requestAllowed = deps.performanceReseedRequestAllowed ?? isLoopbackRemoteAddress;
+    if (!requestAllowed(req.socket.remoteAddress ?? null)) {
+      res.status(403).json({ error: 'performance_reseed_loopback_required' });
+      return;
+    }
+    const body = (req.body ?? {}) as { input?: unknown; anchor?: unknown };
+    if (
+      typeof body.input !== 'object' ||
+      body.input === null ||
+      Array.isArray(body.input) ||
+      typeof body.anchor !== 'string'
+    ) {
+      res.status(400).json({ error: 'invalid_performance_seed_input' });
+      return;
+    }
+    try {
+      resolvePerformanceSeedConfig(body.input as PerformanceSeedInput, body.anchor);
+    } catch {
+      res.status(400).json({ error: 'invalid_performance_seed_input' });
+      return;
+    }
+    const performanceReseed = deps.performanceReseed ?? resetPerformanceData;
+    const manifest = await performanceReseed({
+      config,
+      logger: log,
+      input: body.input as PerformanceSeedInput,
+      anchor: body.anchor,
+    });
+    deps.sessionEpochCache?.clear();
+    res.status(200).json({ ok: true, manifest });
   });
 
   // POST /__dev/tour-reminders/tick { now? } — the deterministic e2e seam for

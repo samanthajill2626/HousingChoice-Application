@@ -19,3 +19,5 @@ export {
   LOCAL_DEFAULT_ENDPOINT,
 } from './seed/index.js';
 export type { SeedProfile } from './seed/index.js';
+export { createTableNamespace } from './devReset.js';
+export type { TableNamespace } from './devReset.js';

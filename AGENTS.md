@@ -79,6 +79,15 @@ the work is done, and add or extend a spec for new behavior.
   there.
 - Run Playwright only through the e2e workspace (`npm run e2e`). A stray/root
   Playwright invocation can target the human's live lane.
+
+`npm run perf:pages` is a sanctioned Playwright entry point: the root script
+delegates directly into e2e-workspace code, so it satisfies the
+e2e-workspace-only rule for its hermetic target. Its `-- local` and
+`-- hosted-dev` targets are additionally human-invoked only: an agent may run
+them only on the human's explicit per-run instruction naming the target, and
+the local target requires an interactive TTY confirmation the runner
+enforces.
+
 - Do not run a full e2e suite and an interactive e2e session concurrently from the
   same worktree.
 - The `full` reseed profile is the demo world; `lean` is the byte-stable e2e world.

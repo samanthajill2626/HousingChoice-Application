@@ -24,6 +24,7 @@ import { SEED } from '../src/lib/seedData.js';
 import { matrixItems } from '../src/lib/seed/matrix.js';
 import { castItems } from '../src/lib/seed/cast.js';
 import { seedLive, LIVE_IDS } from '../src/lib/seed/live.js';
+import type { TableNamespace } from '../src/lib/devReset.js';
 import { deriveStatuses } from '../src/lib/statusModel.js';
 import {
   clampOutOfQuietHours,
@@ -115,18 +116,19 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
   const client = createDynamoClient({ endpoint });
   const doc = createDocumentClient({ endpoint });
 
-  const origPrefix = process.env.TABLE_PREFIX;
-  const origEndpoint = process.env.DYNAMODB_ENDPOINT;
+  const namespace: TableNamespace = {
+    tablePrefix: prefix,
+    tableNameFor: (base) => `${prefix}${base}`,
+    env: Object.freeze({ TABLE_PREFIX: prefix }) as NodeJS.ProcessEnv,
+  };
 
   beforeAll(async () => {
-    process.env.TABLE_PREFIX = prefix;
-    process.env.DYNAMODB_ENDPOINT = endpoint;
     // Create all tables under the throwaway prefix.
     for (const spec of TABLES) {
       await ensureTable(client, spec, `${prefix}${spec.baseName}`);
     }
     // Run seedLive with the fixed now.
-    await seedLive(endpoint, FIXED_NOW);
+    await seedLive(endpoint, FIXED_NOW, namespace);
   }, 120_000);
 
   afterAll(async () => {
@@ -134,8 +136,6 @@ describe.skipIf(!reachable)('seedLive — injected-now determinism', () => {
     for (const spec of TABLES) {
       await deleteTableIfExists(client, `${prefix}${spec.baseName}`);
     }
-    process.env.TABLE_PREFIX = origPrefix;
-    process.env.DYNAMODB_ENDPOINT = origEndpoint;
     doc.destroy();
   }, 120_000);
 

@@ -15,6 +15,24 @@ import { TABLES } from './tables.js';
 import { OUTBOX_TABLE_BASE } from '../adapters/recordingMessaging.js';
 import { logger as defaultLogger, type Logger } from './logger.js';
 
+export interface TableNamespace {
+  tablePrefix: string;
+  tableNameFor: (base: string) => string;
+  env: NodeJS.ProcessEnv;
+}
+
+export function createTableNamespace(
+  config: AppConfig,
+  availableEnv: NodeJS.ProcessEnv = process.env,
+): TableNamespace {
+  const env = Object.freeze({ ...availableEnv, TABLE_PREFIX: config.tablePrefix }) as NodeJS.ProcessEnv;
+  return Object.freeze({
+    tablePrefix: config.tablePrefix,
+    tableNameFor: (base: string) => tableName(base, env),
+    env,
+  });
+}
+
 async function clearTable(
   doc: DynamoDBDocumentClient,
   client: ReturnType<typeof createDynamoClient>,
@@ -49,6 +67,7 @@ async function clearTable(
 export async function resetLocalData(deps: {
   config: AppConfig;
   logger?: Logger;
+  namespace?: TableNamespace;
   /** Seed profile to re-seed with. Defaults to 'lean' (the byte-stable e2e/dev
    *  world). 'full' additionally seeds the extended cast + matrix + live items —
    *  used by the relay-group-view e2e, which needs the live relay group
@@ -59,7 +78,8 @@ export async function resetLocalData(deps: {
   const { config } = deps;
   const log = deps.logger ?? defaultLogger;
   const profile: SeedProfile = deps.profile ?? 'lean';
-  const prefix = tableName(''); // the TABLE_PREFIX
+  const namespace = deps.namespace ?? createTableNamespace(config);
+  const prefix = namespace.tablePrefix;
   // Safety guard: only allow reseed against a hermetic local DynamoDB stack.
   // The prefix must be the lane-0 dev prefix (hc-local-) OR a per-lane e2e
   // prefix (hc-local-<N>- where N is a positive integer). This prevents
@@ -74,9 +94,9 @@ export async function resetLocalData(deps: {
   const doc = createDocumentClient({ config });
   const bases = [...TABLES.map((t) => t.baseName), OUTBOX_TABLE_BASE];
   for (const base of bases) {
-    await clearTable(doc, client, tableName(base));
+    await clearTable(doc, client, namespace.tableNameFor(base));
   }
-  const count = await seedAll(config.dynamodbEndpoint, profile);
+  const count = await seedAll(config.dynamodbEndpoint, profile, namespace);
   // LOCAL dev/e2e convenience ONLY: stamp the founder/admin as the inbound-voice-line
   // holder so inbound-bridge e2e tests pass without a manual UI assignment. The seed
   // cell is the hardcoded `SEED_INBOUND_VOICE_CELL` fake (no env var — the deprecated
@@ -86,6 +106,8 @@ export async function resetLocalData(deps: {
   const stampedInboundLine = await seedInboundVoiceLineHolder(
     config.dynamodbEndpoint,
     SEED_INBOUND_VOICE_CELL,
+    new Date().toISOString(),
+    namespace,
   );
   log.info(
     { tables: bases.length, seeded: count, profile, inboundVoiceLineStamped: stampedInboundLine },

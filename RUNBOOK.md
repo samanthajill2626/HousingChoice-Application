@@ -1216,15 +1216,35 @@ npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --
 - Contact carry-forward joins on PHONE (digits-only), so her edits survive the
   wholesale row_key reshuffle a re-export causes.
 
-Apply — **always dry-run first**; the write needs an explicit `--yes`:
+Apply — **always dry-run first**; the write needs an explicit `--yes`. The stage
+is a required flag, NOT environment variables.
+
+TWO ENV VARS ARE STILL REQUIRED, and they are NOT stage targeting — that is the
+distinction to hold onto. `--env` (or the `:local`/`:dev`/`:prod` scripts)
+resolves WHERE the run writes: table prefix, credentials, account guard. The two
+vars below are the inputs to the GROUP-IDENTITY PARITY GATE, which compares the
+export's `ownNumbers` against the exclusion list the target stage is deployed
+with. `assertGroupIdentityEnvDeclared` REFUSES the run — dry runs included — if
+either is undeclared, because an unset list silently means "compare against
+nothing". They come from THIS shell, so set them to the values the stage named
+in the flag is actually deployed with:
 
 ```powershell
-$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
-$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
-Target is whatever `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` point at — there is no
-built-in prod mode, exactly like `db:seed`. Set them deliberately per stage.
+`import:apply:local` / `import:apply:dev` / `import:apply:prod` (or the generic
+`import:apply -- --env <stage> ...`) resolve everything themselves:
+
+- **local** → `hc-local-*` at DynamoDB Local (`http://localhost:8000`).
+- **dev / prod** → `hc-dev-*` / `hc-prod-*` on AWS via the pinned
+  `housingchoice` profile (`scripts/lib/hcAws.mjs`), running
+  `assertHousingChoiceAccount()` FIRST — the machine's default credential chain
+  (wrong account) is never touched, and a wrong-account profile refuses loudly
+  before any write.
+
+No `DYNAMODB_ENDPOINT`, no `TABLE_PREFIX`, no `AWS_PROFILE` exports needed.
 
 **Both group-identity vars are REQUIRED in the invoking shell**, on the real run
 and on the dry run alike. Before its first write, `import:apply` compares the

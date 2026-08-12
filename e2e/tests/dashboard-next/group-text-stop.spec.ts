@@ -120,7 +120,19 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
     })
     .toBeGreaterThan(0);
   // The opted-out member is EXPLAINED on the bubble, not silently missing.
-  await expect(page.getByText(/1 member opted out/)).toBeVisible({ timeout: 15_000 });
+  //
+  // TWO SURFACES SAY IT NOW (fix wave 5, adversarial 22c), so the old loose
+  // regex is a strict-mode violation rather than a failure: the thread HEADER
+  // carries a reachability flag at every width - the Details pane that used to
+  // be the only carrier is hidden at <=860px, so on a phone the thread looked
+  // entirely normal - and the BUBBLE carries the per-send note. Assert the
+  // bubble note specifically (this test is about the send's own rollup), and
+  // assert the header flag beside it rather than letting a substring pick one
+  // of them at random.
+  await expect(
+    page.getByText(/1 member opted out - Twilio skips them/),
+  ).toBeVisible({ timeout: 15_000 });
+  await expect(page.getByText('1 member opted out', { exact: true })).toBeVisible();
 
   // 3b) AND THE ALARM STAYS QUIET. This is the L3 regression, at the level it
   //     actually bit: with Ben's slot left `queued` (no receipt will ever come

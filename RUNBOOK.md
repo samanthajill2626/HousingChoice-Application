@@ -1386,11 +1386,22 @@ them costs at most one window's matching - which the deploy costs anyway.
 
 **What to delete** in `hc-<env>-messages`: every item whose `conversationId`
 begins with `groupxc#` (the per-pair `state` item and its `evt2#`/`evt#` pending
-rows) and every item in the `groupdue#xc` partition. Leave `groupdue#send` alone
-- that is the delivery-staleness sweep, not this one.
+rows - one prefix match covers BOTH row generations, because only the SORT key
+changed), every item in the `groupdue#xc` partition, and every item in the
+**`groupdue#pending`** partition. Leave `groupdue#send` alone - that is the
+delivery-staleness sweep, not this one.
+
+`groupdue#pending` is the third one and it is easy to miss (added fix wave 4,
+item 10). The two guardrail sweeps originally SHARED one deadline partition under
+that name; a later build on this branch split them into `groupdue#send` and
+`groupdue#xc`. Nothing reads `groupdue#pending` any more, so every row a
+pre-split build wrote there is orphaned - including SEND due rows, which means a
+send that went stale under the old build will never be alarmed by anything. They
+age out on the 7-day TTL either way; deleting them with the rest is free and
+leaves no partition behind that no code knows about.
 
 ```powershell
-$v = @{':xc'=@{S='groupxc#'};':due'=@{S='groupdue#xc'}} | ConvertTo-Json -Compress; aws dynamodb scan --table-name hc-dev-messages --projection-expression 'conversationId,tsMsgId' --filter-expression 'begins_with(conversationId, :xc) OR conversationId = :due' --expression-attribute-values $v --profile housingchoice --region us-east-1 --no-cli-pager --output json | ConvertFrom-Json | ForEach-Object { $_.Items } | ForEach-Object { aws dynamodb delete-item --table-name hc-dev-messages --key (@{conversationId=@{S=$_.conversationId.S};tsMsgId=@{S=$_.tsMsgId.S}} | ConvertTo-Json -Compress) --profile housingchoice --region us-east-1 --no-cli-pager }
+$v = @{':xc'=@{S='groupxc#'};':due'=@{S='groupdue#xc'};':old'=@{S='groupdue#pending'}} | ConvertTo-Json -Compress; aws dynamodb scan --table-name hc-dev-messages --projection-expression 'conversationId,tsMsgId' --filter-expression 'begins_with(conversationId, :xc) OR conversationId = :due OR conversationId = :old' --expression-attribute-values $v --profile housingchoice --region us-east-1 --no-cli-pager --output json | ConvertFrom-Json | ForEach-Object { $_.Items } | ForEach-Object { aws dynamodb delete-item --table-name hc-dev-messages --key (@{conversationId=@{S=$_.conversationId.S};tsMsgId=@{S=$_.tsMsgId.S}} | ConvertTo-Json -Compress) --profile housingchoice --region us-east-1 --no-cli-pager }
 ```
 
 Run the `scan` half alone first and read the count - the same dry-run-then-commit

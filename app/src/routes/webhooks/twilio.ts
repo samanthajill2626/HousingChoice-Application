@@ -946,6 +946,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // behavior (a closed group's cleared number fell through to the 1:1 STOP
     // block). The message already landed above; the returned reply rides the
     // TwiML the caller sends.
+    //
+    // WHY THE MARKER AND THE REPLY DISAGREE ON THIS PATH, since they look like
+    // they should move together (fix wave 4, item 10). Above, the extraction
+    // marker is set only when the inbound is envelope-bearing. Here, the keyword
+    // reply is sent unconditionally - no `suppressReply` - envelope or not. That
+    // is deliberate and the two are answering different questions:
+    //   - the MARKER asks "might this text be group content?", and the envelope
+    //     is the evidence. It is extraction HYGIENE, with exactly one consumer
+    //     (jobs/extraction.ts's transcript filter) and no effect on routing.
+    //   - the REPLY asks "what does this NUMBER get told when it texts STOP?",
+    //     and the answer is PRESERVED RELAY BEHAVIOR: before this feature a
+    //     closed group's cleared number fell through to the 1:1 keyword block and
+    //     got its confirmation. Invariant 13.6 keeps relay behavior
+    //     byte-identical, so suppressing it because an envelope happened to be
+    //     present would be this feature changing relay, which is the one thing it
+    //     may not do.
+    // Same principle as fix wave 4 item 9: suppression belongs to a GROUP FILING,
+    // and no group filing happens here.
     return processInboundKeywords({
       conversation,
       effectiveContact: contact,
@@ -980,7 +998,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    * Threads already reported as structurally unrailable (fix wave 2, adversarial
    * 15). The condition is permanent, so the line is worth exactly once per
    * thread per process - and the durable reader is the migration convergence
-   * report, not this log. Bounded so the set cannot grow without limit.
+   * report, not this log. Bounded so the set cannot grow without limit; past the
+   * bound it STOPS REMEMBERING rather than forgetting what it knows (see the
+   * call site).
    */
   const unrailableRostersLogged = new Set<string>();
   const UNRAILABLE_LOG_MEMORY = 500;
@@ -1101,12 +1121,18 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         // (lib/import/convertGroups.ts); this line is the live-traffic echo of
         // the same fact, and one is enough.
         if (!unrailableRostersLogged.has(thread.conversationId)) {
-          if (unrailableRostersLogged.size >= UNRAILABLE_LOG_MEMORY) {
-            // Bounded: a process cannot accumulate thread ids forever. Dropping
-            // the memory just means the line may be emitted once more.
-            unrailableRostersLogged.clear();
+          // AT THE CAP WE STOP REMEMBERING; WE DO NOT FORGET EVERYTHING (fix
+          // wave 4, item 10). Clearing the set turned the bound into a
+          // PERIODIC FLUSH: past 500 unrailable threads, every 501st one wiped
+          // the memory of the other 500, and each of them logged again on its
+          // next inbound - so on a stack that has passed the cap the line goes
+          // from "once per thread" back to something close to once per message,
+          // which is exactly what this guard exists to prevent. Not adding past
+          // the cap degrades honestly instead: the first 500 stay quiet and only
+          // the tail repeats.
+          if (unrailableRostersLogged.size < UNRAILABLE_LOG_MEMORY) {
+            unrailableRostersLogged.add(thread.conversationId);
           }
-          unrailableRostersLogged.add(thread.conversationId);
           log.info(
             {
               event: 'group_rail_requeue_skipped',
@@ -1243,14 +1269,27 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // HELP still mints nothing; `suppressReply` because this IS group
             // content). Idempotent by construction, so re-running it after a
             // delivery that already recorded is a no-op on the same flags.
+            //
+            // ONE contact read, not two (fix wave 4, item 10). The sender was
+            // being resolved twice - once for the lazy conversation factory and
+            // once for `effectiveContact` - on a path that runs while the pool
+            // table is already unavailable. Two reads of the same row cannot
+            // disagree usefully here; they can only cost.
+            //
+            // THE AUDIT ROW IS WRITTEN AGAIN ON A REDELIVERY, deliberately and
+            // consistently with the rest of this webhook. `processInboundKeywords`
+            // is idempotent on the FLAGS (same value, same row) but its audit
+            // append is not deduped by provider sid - and neither is the 1:1
+            // keyword path's, which has always re-audited a redelivered STOP. A
+            // duplicate audit row is a true record of a webhook delivery that
+            // really happened; a MISSING opt-out is not recoverable. The
+            // precedent is what settles it, not an accident.
             try {
+              const sender = await contacts.findByPhone(From);
               await processInboundKeywords({
                 conversation: async () =>
-                  conversations.createOrGetByParticipantPhone(
-                    From,
-                    conversationTypeFor(await contacts.findByPhone(From)),
-                  ),
-                effectiveContact: await contacts.findByPhone(From),
+                  conversations.createOrGetByParticipantPhone(From, conversationTypeFor(sender)),
+                effectiveContact: sender,
                 From,
                 Body,
                 OptOutType: msg.OptOutType,
@@ -1259,8 +1298,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 suppressReply: true,
               });
             } catch (keywordErr) {
+              // SUMMARIZED, like every other catch that can see a vendor error on
+              // this route (fix wave 4, item 10): a raw `err` here serializes
+              // every enumerable key of whatever threw, and an AxiosError carries
+              // the Authorization header and the request body.
               log.error(
-                { err: keywordErr, providerSid: MessageSid },
+                { err: summarizeError(keywordErr), providerSid: MessageSid },
                 'group inbound redelivery guard: keyword bookkeeping failed - message stays filed, suppression flags NOT updated',
               );
             }

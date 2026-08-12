@@ -871,19 +871,25 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Provenance: the pool number this reached only matches From on the CLOSED
       // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
       viaClosedGroup: group.conversationId,
-      // NO EXTRACTION MARKER HERE (fix wave 5, adversarial 20/32). This is a
-      // PRE-EXISTING relay code path, and `groupAmbiguousOrigin` is PERMANENT:
-      // jobs/extraction.ts filters a marked message out of every transcript
-      // window for the life of the message. Stamping it here silently and
-      // irreversibly removed messages on a shipped relay surface from fact
-      // extraction - a regression of relay behavior, which invariant 13.6 says
-      // this feature does not touch. The envelope is still detected and still
-      // ALARMS above (that is the part worth keeping); the routing and the
-      // filing stay exactly as relay shipped them. `viaClosedGroup` remains the
-      // provenance the dashboard badges the bubble off.
+      // THE EXTRACTION MARKER STAYS ON THIS PATH (fix wave 2, contest X1;
+      // re-review conformance F1 overturned wave 1's removal). Spec 13.1
+      // enumerates FIVE exceptions and says all five are "alarmed, marked with
+      // `group_ambiguous_origin`, and extraction-suppressed" - (e) is this path.
+      // The spec also answers the invariant-6 objection wave 1 raised, in its
+      // own words: "(d) and (e) are ROUTING decisions that predate this feature
+      // and are deliberately unchanged (invariant 6); what fix waves 2 and 4
+      // changed is that the filing is no longer silent."
       //
-      // The wider ruling on coupling a permanent extraction marker to a
-      // group-shape heuristic is tracked in docs/issues/tripwire-extraction-scope.md.
+      // The marker has exactly ONE consumer - jobs/extraction.ts's transcript
+      // filter - so it changes no relay routing, no relay message, no relay UI
+      // and no relay delivery; 13.6 is untouched. And this path carries POSITIVE
+      // proof of group content (parseOtherRecipients already returned members),
+      // unlike the tripwire heuristic, whose separate ruling stays with
+      // docs/issues/tripwire-extraction-scope.md. Without the marker a carrier
+      // group that happens to include a retired pool number is fed to AI fact
+      // extraction as ONE contact's own words - the exact harm the marker
+      // exists to prevent. DO NOT REMOVE IT AGAIN without amending spec 13.1.
+      ...(envelopeBearing && { groupAmbiguousOrigin: true }),
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -969,6 +975,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    * transient (a 429 during a migration burst) still heals within a few minutes.
    */
   const RAIL_REQUEUE_BACKOFF_MS = 5 * 60_000;
+
+  /**
+   * Threads already reported as structurally unrailable (fix wave 2, adversarial
+   * 15). The condition is permanent, so the line is worth exactly once per
+   * thread per process - and the durable reader is the migration convergence
+   * report, not this log. Bounded so the set cannot grow without limit.
+   */
+  const unrailableRostersLogged = new Set<string>();
+  const UNRAILABLE_LOG_MEMORY = 500;
 
   let poolNumberCache: { at: number; numbers: string[] } | undefined;
   const warnEnvelopeMissing = createRateLimitedWarn({
@@ -1077,15 +1092,31 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       if (roster.length === 0 || roster.length > MAX_RAIL_MEMBERS) {
         // STRUCTURAL: no retry can change this, so do not queue one at all. The
         // thread stays inbound-only and the thread view says so.
-        log.info(
-          {
-            event: 'group_rail_requeue_skipped',
-            conversationId: thread.conversationId,
-            reason: 'roster_unrailable',
-            memberCount: roster.length,
-          },
-          'group rail not re-enqueued - the roster can never be railed',
-        );
+        //
+        // ONCE PER THREAD, NOT ONCE PER INBOUND (fix wave 2, adversarial 15).
+        // The condition is permanent, so repeating the line on every message to
+        // an active group buries everything around it. The READER that makes
+        // this thread visible to a human is the migration convergence report,
+        // which lists a structurally unrailable roster as ADJUDICATION-REQUIRED
+        // (lib/import/convertGroups.ts); this line is the live-traffic echo of
+        // the same fact, and one is enough.
+        if (!unrailableRostersLogged.has(thread.conversationId)) {
+          if (unrailableRostersLogged.size >= UNRAILABLE_LOG_MEMORY) {
+            // Bounded: a process cannot accumulate thread ids forever. Dropping
+            // the memory just means the line may be emitted once more.
+            unrailableRostersLogged.clear();
+          }
+          unrailableRostersLogged.add(thread.conversationId);
+          log.info(
+            {
+              event: 'group_rail_requeue_skipped',
+              conversationId: thread.conversationId,
+              reason: 'roster_unrailable',
+              memberCount: roster.length,
+            },
+            'group rail not re-enqueued - the roster can never be railed (the migration convergence report lists this thread as ADJUDICATION-REQUIRED)',
+          );
+        }
         return;
       }
       const failedAt = Date.parse(String(thread.rail_failed?.at ?? ''));
@@ -1137,6 +1168,16 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    */
   interface GroupInboundOutcome {
     handled: boolean;
+    /**
+     * Only meaningful when `handled` is false. TRUE means the group branch
+     * declined because the envelope COLLAPSED to us-plus-one-person, which spec
+     * 13.1(c) rules "semantically IS 1:1" - so the 1:1 pipeline must give it
+     * FULL 1:1 keyword semantics, including the filed TwiML replies invariant
+     * 13.4 pins as byte-identical (fix wave 2, contest X2). Every other decline
+     * reason is a GROUP reason: the envelope is positive proof of carrier-group
+     * content, and spec 13.4's second half says the app sends no reply to that.
+     */
+    semantically1to1?: boolean;
   }
 
   async function handleGroupInbound(msg: {
@@ -1193,6 +1234,36 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
               },
               'group exclusion set unavailable on a REDELIVERY of a message already filed to its group thread - acking without minting a 1:1',
             );
+            // A STOP MAY NEVER GO UNRECORDED (fix wave 2, adversarial 7). This
+            // ack skips the whole pipeline, and the group path's keyword step
+            // runs AFTER media mirroring - so delivery 1 can append the message
+            // and then die before recording anything, leaving THIS delivery as
+            // the only pass that will ever see the keyword. Run the same shared
+            // seam the group path runs (lazy 1:1 target, so a plain inbound or a
+            // HELP still mints nothing; `suppressReply` because this IS group
+            // content). Idempotent by construction, so re-running it after a
+            // delivery that already recorded is a no-op on the same flags.
+            try {
+              await processInboundKeywords({
+                conversation: async () =>
+                  conversations.createOrGetByParticipantPhone(
+                    From,
+                    conversationTypeFor(await contacts.findByPhone(From)),
+                  ),
+                effectiveContact: await contacts.findByPhone(From),
+                From,
+                Body,
+                OptOutType: msg.OptOutType,
+                MessageSid,
+                auditContext: { groupConversationId: filed.conversationId, via: 'group_text' },
+                suppressReply: true,
+              });
+            } catch (keywordErr) {
+              log.error(
+                { err: keywordErr, providerSid: MessageSid },
+                'group inbound redelivery guard: keyword bookkeeping failed - message stays filed, suppression flags NOT updated',
+              );
+            }
             return { handled: true };
           }
         }
@@ -1251,7 +1322,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         { event: 'group_roster_collapsed', providerSid: MessageSid, rosterSize: identity.roster.length },
         'group envelope collapsed to fewer than two outside members - filed to the sender 1:1 (semantically a 1:1)',
       );
-      return { handled: false };
+      // The ONE decline that is not group content: 13.1(c) says this IS a 1:1,
+      // so it keeps 1:1 keyword semantics (contest X2). The extraction marker
+      // still rides along - the body may name the other parties.
+      return { handled: false, semantically1to1: true };
     }
 
     // (ii.5) A REDELIVERY NEVER RE-CLASSIFIES. The cold-start refusal at (0) is
@@ -1788,6 +1862,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // thread. AI fact extraction excludes marked messages from every transcript
     // window it builds (spec 5.4).
     let groupAmbiguousOrigin = false;
+    // Whether the 1:1 pipeline below must withhold OUR filed keyword reply.
+    // Scoped to a decline for a GROUP reason (contest X2) - never to the
+    // collapsed roster, which spec 13.1(c) defines as a 1:1 and 13.4 pins as
+    // byte-identical, and never to the tripwire heuristic, which legitimately
+    // matches ordinary subject-only 1:1 MMS.
+    let suppressKeywordReply = false;
     if (others.length > 0 && onBusinessNumber) {
       const outcome = await handleGroupInbound({
         MessageSid,
@@ -1808,6 +1888,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Collapsed roster or corrupt shape: fall through to the 1:1 pipeline
       // below, MARKED. Nothing was persisted above, so no double-filing.
       groupAmbiguousOrigin = true;
+      suppressKeywordReply = outcome.semantically1to1 !== true;
     } else if (others.length > 0) {
       // EVERY OTHER ENVELOPE-BEARING INBOUND. We have POSITIVE proof this is
       // carrier-group content (the envelope is right here) but we are NOT
@@ -1824,6 +1905,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // because a misconfigured stack matches on every group inbound at once
       // and the flood would bury the signal.
       groupAmbiguousOrigin = true;
+      suppressKeywordReply = true;
       if (config.businessPhoneNumber === undefined) {
         warnDetectionUnconfigured(
           { event: 'group_detection_unconfigured', providerSid: MessageSid },
@@ -1996,16 +2078,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       OptOutType,
       MessageSid,
       // THE APP SENDS NOTHING FOR GROUP-ORIGIN CONTENT (fix wave 5, adversarial
-      // 18). `others.length > 0` is POSITIVE proof this inbound carried a
-      // carrier-group envelope; it only reaches the 1:1 pipeline because a
-      // fail-open path declined to mint a thread for it. Spec 4.4 and the group
-      // branch's own ack both say the app never replies to a group inbound -
-      // Twilio's standard opt-out auto-reply answers the sender 1:1 (issue
-      // twilio-standard-optout-double-reply owns that coupling) - so the
-      // KEYWORD is still processed and the opt-out still recorded; only OUR
-      // reply is suppressed. Deliberately scoped to a real envelope, NOT to the
-      // tripwire heuristic, which legitimately matches ordinary 1:1 MMS.
-      ...(others.length > 0 && { suppressReply: true }),
+      // 18), NARROWED IN FIX WAVE 2 (contest X2). An envelope is positive proof
+      // of carrier-group content, and for a message that only reaches the 1:1
+      // pipeline because a fail-open path declined to mint a thread, spec 4.4
+      // and the group branch's own ack both say the app never replies - Twilio's
+      // standard opt-out auto-reply answers the sender 1:1 (issue
+      // twilio-standard-optout-double-reply owns that coupling). The KEYWORD is
+      // still processed and the opt-out still recorded; only OUR reply is
+      // withheld.
+      //
+      // What wave 1 got wrong was the SCOPE: `others.length > 0` also matches
+      // the COLLAPSED ROSTER, which spec 13.1(c) rules "semantically IS 1:1",
+      // so an ordinary two-party conversation that happened to carry one org
+      // number in its envelope lost its STOP/START/HELP replies - the exact
+      // filed copy invariant 13.4 pins as byte-identical, HELP included (that
+      // copy is deliberately verified to declare no phone number). The flag is
+      // now set from the DECLINE REASON, and the collapsed roster never sets it.
+      // The tripwire heuristic never set it either, then or now.
+      ...(suppressKeywordReply && { suppressReply: true }),
     });
 
     // (5) MMS media — mirror each MediaUrl{i} into S3 (streams only). Runs before

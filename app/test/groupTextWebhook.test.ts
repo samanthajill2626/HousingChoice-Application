@@ -232,19 +232,24 @@ describe('group detection: branch placement (T3.2)', () => {
     ).toBe(true);
   });
 
-  it('INVARIANT 13.1: a late text on a CLOSED relay group carrying an envelope is WARNed, and NOT extraction-marked', async () => {
+  it('INVARIANT 13.1: a late text on a CLOSED relay group carrying an envelope is WARNed AND extraction-marked', async () => {
     // THE FIFTH FILING PATH. The closed-group intercept runs at step (1.5),
     // BEFORE the group block computes an envelope at all, so a carrier group
     // that still includes a RETIRED POOL NUMBER lands here and is filed as one
     // contact's 1:1 speech. Routing is unchanged (invariant 13.6); the filing
     // is no longer silent.
     //
-    // THE MARKER IS NOT PART OF THAT (fix wave 5, adversarial 20/32). This is a
-    // PRE-EXISTING relay code path, and `group_ambiguous_origin` is PERMANENT -
-    // jobs/extraction.ts filters a marked message out of every transcript window
-    // for the life of the message. Stamping it here silently removed messages on
-    // a shipped relay surface from fact extraction, which invariant 13.6 says
-    // this feature does not do. The ALARM stays (that is the part worth having).
+    // THE MARKER IS PART OF THAT (fix wave 2, contest X1 - re-review conformance
+    // F1 overturned the wave-1 removal). Spec 13.1 enumerates FIVE exceptions and
+    // says ALL FIVE are "alarmed, marked with `group_ambiguous_origin`, and
+    // extraction-suppressed", then answers the invariant-6 objection in its own
+    // words: "(d) and (e) are ROUTING decisions that predate this feature and are
+    // deliberately unchanged (invariant 6); what fix waves 2 and 4 changed is that
+    // the filing is no longer silent." The marker changes no relay routing, no
+    // relay message, no relay UI - its ONLY consumer is jobs/extraction.ts's
+    // transcript filter - and this path carries POSITIVE proof of group content
+    // (parseOtherRecipients already returned members). DO NOT REMOVE IT AGAIN
+    // without amending spec 13.1 first.
     const world = createFakeWorld();
     const poolNumber = '+15559990001';
     world.conversations.set('relay-closed-member', {
@@ -272,8 +277,8 @@ describe('group detection: branch placement (T3.2)', () => {
     expect(
       capture.atLevel(WARN).some((l) => l['event'] === 'group_envelope_via_closed_relay_group'),
     ).toBe(true);
-    // ...but relay's extraction behaviour is untouched.
-    expect(world.messages[0]?.group_ambiguous_origin).toBeUndefined();
+    // ...and MARKED, like the other four enumerated exceptions.
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
 
   it('an ENVELOPE-LESS late text on a closed relay group is neither marked nor warned', async () => {
@@ -555,6 +560,59 @@ describe('group detection: filing (T3.3)', () => {
     expect(world.messages).toHaveLength(1);
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
     expect(capture.atLevel(WARN).some((l) => l['event'] === 'group_roster_collapsed')).toBe(true);
+  });
+
+  it('COLLAPSED ROSTER: STOP and HELP still draw the filed 1:1 replies (invariant 13.4, contest X2)', async () => {
+    // Spec 13.1(c) rules the collapsed roster IS a 1:1 - "us-plus-one-person IS
+    // a 1:1" - and invariant 13.4 pins 1:1 keyword handling (the TwiML filed
+    // replies) as BYTE-IDENTICAL. Suppressing our filed replies here would take
+    // the "rely on Twilio's own auto-reply instead of ours" side of a question
+    // spec 10 explicitly leaves to twilio-standard-optout-double-reply, on a
+    // path that is not group content at all. HELP is the sharpest edge: the
+    // filed copy is deliberately verified to declare no phone number.
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    const stop = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({
+        MessageSid: 'MMcollapsedstop',
+        OtherRecipients0: OUR_NUMBER,
+        Body: 'STOP',
+      }),
+    );
+    expect(stop.text).toContain(STOP_CONFIRMATION);
+
+    const help = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      inboundSmsParams({
+        MessageSid: 'MMcollapsedhelp',
+        OtherRecipients0: OUR_NUMBER,
+        Body: 'HELP',
+      }),
+    );
+    expect(help.text).toContain('<Message>');
+  });
+
+  it('CORRUPT ENVELOPE: a STOP filed 1:1 for a GROUP reason still draws no app reply', async () => {
+    // The negative control for the rule above: the group branch declined here
+    // because the envelope is unreadable, NOT because the message is a 1:1. The
+    // envelope is positive proof of carrier-group content, so spec 13.4's second
+    // half applies - consent bookkeeping runs, no app-sent reply.
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      groupParams({ MessageSid: 'MMcorruptstop', OtherRecipients1: 'not-a-phone', Body: 'STOP' }),
+    );
+
+    expect(res.text).not.toContain('<Message>');
+    // The keyword is still PROCESSED - only our reply is withheld.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
   });
 
   it('UNPARSEABLE ENVELOPE: never derives a smaller roster - files 1:1 with an ERROR + the marker', async () => {
@@ -1309,6 +1367,47 @@ describe('group detection: a REDELIVERY after a transient exclusion-set failure'
     expect(world.messages).toHaveLength(1);
     // Filed 1:1 WITH the extraction marker - this MAY be group content.
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+  });
+
+  it('the guard still RUNS keyword bookkeeping on the delivery it acks (adversarial 7)', async () => {
+    // A STOP MAY NEVER GO UNRECORDED. Delivery 1 can classify a group message,
+    // append it to thread G and then die inside media mirroring - which runs
+    // BEFORE the keyword step - so the redelivery is the only pass that will
+    // ever record that STOP. Acking without running the shared keyword seam
+    // loses it entirely: no contact flag, no conversation flag, no audit row.
+    // The seam is idempotent by construction, so re-running it on a redelivery
+    // that DID record is harmless (this test resets the observables to prove
+    // the second pass records on its own).
+    const world = createFakeWorld();
+    const first = makeWebhookHarness({ world });
+    await signedTwilioPost(
+      first.app,
+      SMS_PATH,
+      groupParams({ Body: 'STOP', MessageSid: 'MMgroupstop2' }),
+    );
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
+    const conversationsAfterFirst = new Set(world.conversations.keys());
+    // Forget what delivery 1 recorded: only what THIS delivery does counts.
+    world.optOutSets.length = 0;
+    world.flagWrites.length = 0;
+
+    poolDown(world);
+    const second = makeWebhookHarness({ world });
+    const res = await signedTwilioPost(
+      second.app,
+      SMS_PATH,
+      groupParams({ Body: 'STOP', MessageSid: 'MMgroupstop2' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
+    expect(world.flagWrites).toEqual([
+      { contactId: contactIdForPhone(SENDER), flag: 'sms_opt_out', value: true },
+    ]);
+    // Still no phantom conversation and still no app reply - the guard's own
+    // contract is unchanged.
+    expect(new Set(world.conversations.keys())).toEqual(conversationsAfterFirst);
+    expect(res.text).not.toContain('<Message>');
   });
 
   it('an envelope-bearing STOP filed 1:1 draws NO app reply - the app never answers group content', async () => {

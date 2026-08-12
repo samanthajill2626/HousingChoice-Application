@@ -3,10 +3,26 @@ import {
   BACKGROUND_REFRESH_GETS,
   NetworkCollector,
   classifyConsoleMessage,
+  collectColdSample,
+  collectRunSamples,
+  collectWarmSample,
   createEmptyResourceCounts,
+  deterministicRouteOrder,
   summarizePageMetrics,
+  type SampleBrowser,
+  type SampleBrowserContext,
+  type SampleInstrumentation,
+  type SamplePage,
 } from './collect.js';
-import type { EndpointContract } from './routes.js';
+import {
+  ROUTES,
+  type EndpointContract,
+  type ResolverResult,
+  type RouteContractBranch,
+  type RouteDefinition,
+} from './routes.js';
+import type { InMemoryStorageState } from './auth.js';
+import type { SampleResult, TargetKind } from './types.js';
 
 const REQUIRED_CONTACTS: EndpointContract[] = [{
   endpointTemplate: '/api/contacts', queryKeys: ['limit', 'type'], requirement: 'required',
@@ -279,5 +295,419 @@ describe('numeric page and console instrumentation', () => {
       clientTruncated: true,
     });
     expect(createEmptyResourceCounts()).toEqual({ document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 });
+  });
+});
+
+const STORAGE_STATE: InMemoryStorageState = { cookies: [], origins: [] };
+
+function blankResult(routeKey: string, mode: 'cold' | 'warm', repeat: number): SampleResult {
+  return {
+    routeKey,
+    mode,
+    repeat,
+    status: 'ok',
+    readyMs: 12,
+    navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
+    paint: { fcpMs: null, lcpMs: null },
+    longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+    domElements: 1,
+    apiRequestCount: 0,
+    apiTransferBytes: 0,
+    resourceRequestCount: 0,
+    resourceTransferBytes: 0,
+    resourceCountsByClass: createEmptyResourceCounts(),
+    backgroundRequestCount: 0,
+    backgroundTransferBytes: 0,
+    blockedWrites: [],
+    consoleCategories: {},
+    clientTruncated: false,
+    terminalState: 'populated',
+    reason: null,
+  };
+}
+
+class FakeSamplingPage implements SamplePage {
+  readonly events: string[];
+  readonly hrefs = new Set<string>();
+  sourceReady = true;
+  relayLinks = 0;
+
+  constructor(events: string[]) {
+    this.events = events;
+  }
+
+  async installNextDocumentBootstrap(token: string): Promise<void> {
+    this.events.push(`bootstrap:${token}`);
+  }
+
+  async goto(path: string): Promise<void> {
+    this.events.push(`goto:${path}`);
+  }
+
+  async prepareWarmSource(route: RouteDefinition): Promise<void> {
+    this.events.push(`prepare:${route.source.path}`);
+  }
+
+  async waitForSourceReady(_route: RouteDefinition, timeoutMs: number): Promise<boolean> {
+    this.events.push(`source-ready:${timeoutMs}`);
+    return this.sourceReady;
+  }
+
+  async clickExactHref(href: string): Promise<boolean> {
+    if (!this.hrefs.has(href)) return false;
+    this.events.push(`click:${href}`);
+    return true;
+  }
+
+  async countRelayConversationLinks(): Promise<number> {
+    return this.relayLinks;
+  }
+}
+
+class FakeSamplingContext implements SampleBrowserContext {
+  readonly events: string[];
+  readonly page: FakeSamplingPage;
+  closed = false;
+
+  constructor(events: string[]) {
+    this.events = events;
+    this.page = new FakeSamplingPage(events);
+  }
+
+  async installBasePageStore(): Promise<void> {
+    this.events.push('base-store');
+  }
+
+  async newPage(): Promise<SamplePage> {
+    this.events.push('new-page');
+    return this.page;
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.events.push('close-context');
+  }
+}
+
+class FakeSamplingBrowser implements SampleBrowser {
+  readonly contexts: FakeSamplingContext[] = [];
+  readonly options: unknown[] = [];
+  nextEvents: string[] | null = null;
+
+  async newContext(options: unknown): Promise<SampleBrowserContext> {
+    const events = this.nextEvents ?? [];
+    this.nextEvents = null;
+    const context = new FakeSamplingContext(events);
+    this.options.push(options);
+    this.contexts.push(context);
+    return context;
+  }
+}
+
+class FakeInstrumentation implements SampleInstrumentation {
+  readonly events: string[];
+  readonly branches: RouteContractBranch[] = [];
+  throwOnCollect = false;
+  blockedTimeout = false;
+  blockedReady = false;
+
+  constructor(events: string[]) {
+    this.events = events;
+  }
+
+  async beginSample(input: {
+    token: string;
+    mode: 'cold' | 'warm';
+    sourcePageUrl?: string;
+    destinationPageUrl: string;
+    branch: RouteContractBranch;
+  }): Promise<void> {
+    this.branches.push({ ...input.branch });
+    this.events.push(`begin:${input.mode}:${input.token}:${input.sourcePageUrl ?? '-'}:${input.destinationPageUrl}`);
+  }
+
+  async collectSample(input: { route: RouteDefinition; mode: 'cold' | 'warm'; repeat: number }): Promise<SampleResult> {
+    this.events.push(`collect:${input.mode}:${input.route.key}`);
+    if (this.throwOnCollect) throw new Error('collector_failed');
+    const result = blankResult(input.route.key, input.mode, input.repeat);
+    if (this.blockedTimeout) {
+      result.status = 'timeout';
+      result.readyMs = null;
+      result.reason = 'ready_timeout';
+      result.blockedWrites = [{ method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount' }];
+    }
+    if (this.blockedReady) {
+      result.blockedWrites = [{ method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount' }];
+    }
+    return result;
+  }
+}
+
+function resolved(path: string, branch: RouteContractBranch = { kind: 'none' }): ResolverResult {
+  return { kind: 'resolved', coldPath: path, warmHref: path, branch };
+}
+
+describe('cold and warm sampling protocol', () => {
+  it('uses one fresh blocked-service-worker Desktop context per cold sample and closes on every outcome', async () => {
+    const browser = new FakeSamplingBrowser();
+    const route = ROUTES[0]!;
+    const firstEvents: string[] = [];
+    browser.nextEvents = firstEvents;
+    const firstInstrumentation = new FakeInstrumentation(firstEvents);
+    const first = await collectColdSample({
+      browser,
+      storageState: STORAGE_STATE,
+      route,
+      repeat: 0,
+      resolved: resolved('/'),
+      instrumentation: firstInstrumentation,
+      token: 'cold-a',
+    });
+    expect(first.status).toBe('ok');
+    expect(browser.options[0]).toMatchObject({
+      serviceWorkers: 'block',
+      viewport: { width: 1280, height: 720 },
+      storageState: STORAGE_STATE,
+    });
+    expect(browser.contexts[0]!.events).toEqual([
+      'base-store',
+      'new-page',
+      'bootstrap:cold-a',
+      'begin:cold:cold-a:-:/',
+      'goto:/' ,
+      'collect:cold:/' ,
+      'close-context',
+    ]);
+    expect(browser.contexts[0]!.closed).toBe(true);
+
+    const secondEvents: string[] = [];
+    const secondInstrumentation = new FakeInstrumentation(secondEvents);
+    secondInstrumentation.throwOnCollect = true;
+    await expect(collectColdSample({
+      browser,
+      storageState: STORAGE_STATE,
+      route,
+      repeat: 1,
+      resolved: resolved('/'),
+      instrumentation: secondInstrumentation,
+      token: 'cold-b',
+    })).rejects.toThrow('collector_failed');
+    expect(browser.contexts[1]!.closed).toBe(true);
+    expect(browser.contexts).toHaveLength(2);
+  });
+
+  it('discards warm source preparation and begins every collector immediately before the exact href click', async () => {
+    const events: string[] = [];
+    const context = new FakeSamplingContext(events);
+    const page = context.page;
+    const route = ROUTES.find((candidate) => candidate.key === '/tours/:tourId')!;
+    page.hrefs.add('/tours/tour-private');
+    const instrumentation = new FakeInstrumentation(events);
+    const branch = { kind: 'thread_detail', thread: 'group_thread' } as const;
+
+    const sample = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 321,
+      resolve: async () => {
+        events.push('resolve');
+        return resolved('/tours/tour-private', branch);
+      },
+      instrumentation,
+      token: 'warm-a',
+    });
+
+    expect(sample.status).toBe('ok');
+    expect(instrumentation.branches).toEqual([branch]);
+    expect(events).toEqual([
+      'prepare:/tours',
+      'source-ready:321',
+      'resolve',
+      'begin:warm:warm-a:/tours:/tours/tour-private',
+      'click:/tours/tour-private',
+      'collect:warm:/tours/:tourId',
+    ]);
+  });
+
+  it('maps source, fixture, link, and blocked-readiness outcomes to stable statuses', async () => {
+    const route = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
+    for (const [resolver, status] of [
+      [{ kind: 'skip', reason: 'fixture_absent' }, 'skipped_no_fixture'],
+      [{ kind: 'skip', reason: 'fixture_not_navigable' }, 'skipped_fixture_not_navigable'],
+      [{ kind: 'skip', reason: 'source_not_ready' }, 'skipped_source_not_ready'],
+    ] as const) {
+      const events: string[] = [];
+      const page = new FakeSamplingPage(events);
+      const result = await collectWarmSample({
+        page,
+        route,
+        repeat: 0,
+        sourceTimeoutMs: 10,
+        resolve: async () => resolver,
+        instrumentation: new FakeInstrumentation(events),
+        token: `skip-${status}`,
+      });
+      expect(result.status).toBe(status);
+      expect(events.some((event) => event.startsWith('begin:'))).toBe(false);
+    }
+
+    const events: string[] = [];
+    const page = new FakeSamplingPage(events);
+    page.sourceReady = false;
+    const sourceSkip = await collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private'),
+      instrumentation: new FakeInstrumentation(events),
+      token: 'source-timeout',
+    });
+    expect(sourceSkip.status).toBe('skipped_source_not_ready');
+
+    const blockedEvents: string[] = [];
+    const blockedPage = new FakeSamplingPage(blockedEvents);
+    blockedPage.hrefs.add('/contacts/private');
+    const blocked = new FakeInstrumentation(blockedEvents);
+    blocked.blockedTimeout = true;
+    const blockedResult = await collectWarmSample({
+      page: blockedPage,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private', { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 }),
+      instrumentation: blocked,
+      token: 'blocked',
+    });
+    expect(blockedResult).toMatchObject({ status: 'blocked_write_dependency', reason: 'blocked_write_prevented_ready' });
+
+    const allowedEvents: string[] = [];
+    const allowedPage = new FakeSamplingPage(allowedEvents);
+    allowedPage.hrefs.add('/contacts/private');
+    const allowed = new FakeInstrumentation(allowedEvents);
+    allowed.blockedReady = true;
+    const allowedResult = await collectWarmSample({
+      page: allowedPage,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private', { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 }),
+      instrumentation: allowed,
+      token: 'blocked-but-ready',
+    });
+    expect(allowedResult).toMatchObject({ status: 'ok', reason: null });
+
+    const missingEvents: string[] = [];
+    const missingLink = await collectWarmSample({
+      page: new FakeSamplingPage(missingEvents),
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private', { kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0 }),
+      instrumentation: new FakeInstrumentation(missingEvents),
+      token: 'missing-link',
+    });
+    expect(missingLink.status).toBe('skipped_fixture_not_navigable');
+  });
+});
+
+describe('run ordering and warmup policy', () => {
+  it('uses a deterministic Fisher-Yates base order and repeat rotation without mutating declaration order', () => {
+    const keys = ROUTES.slice(0, 6).map((route) => route.key);
+    const first = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.key);
+    const again = deterministicRouteOrder(ROUTES.slice(0, 6), 1234).map((route) => route.key);
+    const different = deterministicRouteOrder(ROUTES.slice(0, 6), 1235).map((route) => route.key);
+    expect(first).toEqual(again);
+    expect(first).not.toEqual(different);
+    expect(ROUTES.slice(0, 6).map((route) => route.key)).toEqual(keys);
+  });
+
+  it.each([
+    ['hermetic', true],
+    ['local', true],
+    ['hosted-dev', false],
+  ] as const)('records fixed declaration-order warmup and actual rotated orders for %s', async (target: TargetKind, warmup: boolean) => {
+    const browser = new FakeSamplingBrowser();
+    const routes = ROUTES.slice(0, 3);
+    const result = await collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target,
+      routes,
+      coldRepeats: 2,
+      warmRepeats: 2,
+      routeOrderSeed: 99,
+      sourceTimeoutMs: 100,
+      resolveCold: async (route) => resolved(route.key),
+      resolveWarm: async (route, page) => {
+        (page as FakeSamplingPage).hrefs.add(route.source.href);
+        return resolved(route.source.href);
+      },
+      instrumentationFor: () => new FakeInstrumentation([]),
+      tokenFactory: (mode, repeat, route) => `${mode}-${repeat}-${route.key}`,
+    });
+
+    expect(result.warmup).toEqual(warmup ? { performed: true, routeKey: '/' } : { performed: false, routeKey: null });
+    expect(result.orders).toHaveLength(4);
+    expect(result.orders[0]!.routeKeys).not.toEqual(result.orders[1]!.routeKeys);
+    expect(result.samples).toHaveLength(12);
+    expect(result.lowSampleCount).toBe(true);
+    if (warmup) expect(result.samples.every((sample) => sample.repeat >= 0)).toBe(true);
+  });
+
+  it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {
+    const browser = new FakeSamplingBrowser();
+    const inbox = ROUTES.find((route) => route.key === '/inbox')!;
+    const result = await collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target: 'hermetic',
+      routes: [inbox],
+      coldRepeats: 1,
+      warmRepeats: 2,
+      routeOrderSeed: 7,
+      sourceTimeoutMs: 100,
+      expectedRelayLinkCount: 4,
+      resolveCold: async () => resolved('/inbox'),
+      resolveWarm: async (route, page) => {
+        const fake = page as FakeSamplingPage;
+        fake.hrefs.add(route.source.href);
+        fake.relayLinks = 3;
+        return resolved(route.source.href);
+      },
+      instrumentationFor: () => new FakeInstrumentation([]),
+      tokenFactory: (mode, repeat) => `${mode}-${repeat}`,
+    });
+
+    expect(browser.contexts).toHaveLength(3); // discarded warmup, one cold, one reused warm context
+    expect(result.relayDomCheck).toEqual({ expectedCount: 4, renderedCount: 3, shortfall: true });
+    expect(Object.keys(result.relayDomCheck ?? {}).sort()).toEqual(['expectedCount', 'renderedCount', 'shortfall']);
+  });
+
+  it('closes the reused warm context when destination collection throws', async () => {
+    const browser = new FakeSamplingBrowser();
+    const route = ROUTES[0]!;
+    await expect(collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target: 'hosted-dev',
+      routes: [route],
+      coldRepeats: 1,
+      warmRepeats: 1,
+      routeOrderSeed: 7,
+      sourceTimeoutMs: 100,
+      resolveCold: async () => resolved('/'),
+      resolveWarm: async (_route, page) => {
+        (page as FakeSamplingPage).hrefs.add('/');
+        return resolved('/');
+      },
+      instrumentationFor: (_route, mode) => {
+        const value = new FakeInstrumentation([]);
+        value.throwOnCollect = mode === 'warm';
+        return value;
+      },
+    })).rejects.toThrow('collector_failed');
+    expect(browser.contexts.at(-1)?.closed).toBe(true);
   });
 });

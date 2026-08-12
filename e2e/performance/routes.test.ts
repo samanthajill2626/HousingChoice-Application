@@ -16,6 +16,7 @@ import {
   resolvePlacementDetail,
   resolveTourDetail,
   resolveUnitDetail,
+  resolverSkipSampleResult,
   type EndpointContract,
   type ResolverApi,
   type ResolverDom,
@@ -349,6 +350,20 @@ describe('representative resolvers', () => {
     expect(Object.keys(result)).not.toContain('contactId');
     expect(api.calls[0]).toBe('/api/contacts?limit=100&type=tenant');
     expect(api.calls.every((call) => !call.includes('deleted=false'))).toBe(true);
+  });
+
+  it('retains only sanitized conditional branch facts and maps closed skip reasons', () => {
+    const branches: RouteContractBranch[] = [
+      { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 17 },
+      { kind: 'unit_detail', hasLandlord: true },
+      { kind: 'thread_detail', thread: 'group_thread' },
+      { kind: 'thread_detail', thread: 'person_thread' },
+    ];
+    expect(branches).toEqual(branches.map((branch) => ({ ...branch })));
+    expect(JSON.stringify(branches)).not.toMatch(/private|contactId|unitId|conversationId/);
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_absent').status).toBe('skipped_no_fixture');
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_not_navigable').status).toBe('skipped_fixture_not_navigable');
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'source_not_ready').status).toBe('skipped_source_not_ready');
   });
 
   it('returns explicit skips for missing fixtures and exact-link misses without row substitution', async () => {

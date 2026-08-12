@@ -1,4 +1,4 @@
-import type { SampleMode } from './types.js';
+import type { SampleMode, SampleResult } from './types.js';
 import { assertEndpointTemplate, type EndpointTemplate } from './templates.js';
 
 export type EndpointRequirement = 'required' | 'conditional';
@@ -560,6 +560,42 @@ export interface ResolverDom {
 export type ResolverResult =
   | { kind: 'resolved'; coldPath: string; warmHref: string; branch: RouteContractBranch }
   | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' };
+
+export function resolverSkipSampleResult(
+  routeKey: string,
+  mode: SampleMode,
+  repeat: number,
+  reason: Extract<ResolverResult, { kind: 'skip' }>['reason'],
+): SampleResult {
+  const status = reason === 'fixture_absent'
+    ? 'skipped_no_fixture'
+    : reason === 'fixture_not_navigable'
+      ? 'skipped_fixture_not_navigable'
+      : 'skipped_source_not_ready';
+  return {
+    routeKey,
+    mode,
+    repeat,
+    status,
+    readyMs: null,
+    navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
+    paint: { fcpMs: null, lcpMs: null },
+    longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+    domElements: null,
+    apiRequestCount: 0,
+    apiTransferBytes: 0,
+    resourceRequestCount: 0,
+    resourceTransferBytes: 0,
+    resourceCountsByClass: { document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 },
+    backgroundRequestCount: 0,
+    backgroundTransferBytes: 0,
+    blockedWrites: [],
+    consoleCategories: {},
+    clientTruncated: false,
+    terminalState: 'unknown',
+    reason,
+  };
+}
 
 function object(value: unknown): Record<string, unknown> {
   return typeof value === 'object' && value !== null ? value as Record<string, unknown> : {};

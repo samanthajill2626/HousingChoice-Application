@@ -1,4 +1,15 @@
-import type { EndpointContract } from './routes.js';
+import { randomUUID } from 'node:crypto';
+import { devices } from '@playwright/test';
+import type { InMemoryStorageState } from './auth.js';
+import { PROFILER_CONTEXT_OPTIONS } from './firewall.js';
+import {
+  ROUTES,
+  resolverSkipSampleResult,
+  type EndpointContract,
+  type ResolverResult,
+  type RouteContractBranch,
+  type RouteDefinition,
+} from './routes.js';
 import { normalizeCdpOffset, normalizeNodeOffset, type PageStoreSnapshot } from './readiness.js';
 import { sanitizeRequestUrl, type EndpointTemplate, type SanitizedRequestUrl } from './templates.js';
 import type {
@@ -6,6 +17,8 @@ import type {
   RequestEvidence,
   ResourceClass,
   SampleMode,
+  SampleResult,
+  TargetKind,
 } from './types.js';
 
 export interface BackgroundEndpointShape {
@@ -412,5 +425,325 @@ export function summarizePageMetrics(input: SummarizePageMetricsInput): {
     longTasks: { ...input.page.longTasks },
     domElements: input.page.domElements,
     clientTruncated: (input.consoleCategories.client_truncated ?? 0) > 0,
+  };
+}
+
+export interface SamplePage {
+  // The adapter registers a next-document init script that calls the shared
+  // idempotent page-store installer and begins this token with performance.now().
+  installNextDocumentBootstrap(token: string): Promise<void>;
+  goto(path: string): Promise<void>;
+  // The adapter reaches the declared source inside the existing SPA shell. It
+  // may directly load only the first shell; later calls use real accessible
+  // navigation and keep this page/context alive.
+  prepareWarmSource(route: RouteDefinition): Promise<void>;
+  waitForSourceReady(route: RouteDefinition, timeoutMs: number): Promise<boolean>;
+  clickExactHref(href: string): Promise<boolean>;
+  countRelayConversationLinks(): Promise<number>;
+}
+
+export interface SampleBrowserContext {
+  // The real adapter installs readiness.pageStoreInstaller on the context.
+  installBasePageStore(): Promise<void>;
+  newPage(): Promise<SamplePage>;
+  close(): Promise<void>;
+}
+
+export interface SampleBrowser {
+  newContext(options: unknown): Promise<SampleBrowserContext>;
+}
+
+export interface BeginProtocolSampleInput {
+  page: SamplePage;
+  token: string;
+  route: RouteDefinition;
+  branch: RouteContractBranch;
+  mode: SampleMode;
+  repeat: number;
+  destinationPageUrl: string;
+  sourcePageUrl?: string;
+}
+
+export interface CollectProtocolSampleInput {
+  page: SamplePage;
+  token: string;
+  route: RouteDefinition;
+  branch: RouteContractBranch;
+  mode: SampleMode;
+  repeat: number;
+}
+
+export interface SampleInstrumentation {
+  // One call resets page/CDP/Node/firewall state under the same token and
+  // captures each collector's native cutoff. The driver never flips a phase.
+  beginSample(input: BeginProtocolSampleInput): Promise<void>;
+  collectSample(input: CollectProtocolSampleInput): Promise<SampleResult>;
+}
+
+export const DESKTOP_CHROME_SAMPLE_CONTEXT = Object.freeze({
+  ...devices['Desktop Chrome'],
+  ...PROFILER_CONTEXT_OPTIONS,
+});
+
+function contextOptions(storageState: InMemoryStorageState): Record<string, unknown> {
+  return { ...DESKTOP_CHROME_SAMPLE_CONTEXT, storageState };
+}
+
+function normalizeBlockedWriteDependency(result: SampleResult): SampleResult {
+  if (result.status !== 'timeout' || result.blockedWrites.length === 0) return result;
+  return {
+    ...result,
+    status: 'blocked_write_dependency',
+    reason: 'blocked_write_prevented_ready',
+  };
+}
+
+export interface CollectColdSampleInput {
+  browser: SampleBrowser;
+  storageState: InMemoryStorageState;
+  route: RouteDefinition;
+  repeat: number;
+  resolved: ResolverResult;
+  instrumentation: SampleInstrumentation;
+  token?: string;
+}
+
+export async function collectColdSample(input: CollectColdSampleInput): Promise<SampleResult> {
+  if (input.resolved.kind === 'skip') {
+    return resolverSkipSampleResult(input.route.key, 'cold', input.repeat, input.resolved.reason);
+  }
+
+  const token = input.token ?? randomUUID();
+  const context = await input.browser.newContext(contextOptions(input.storageState));
+  try {
+    await context.installBasePageStore();
+    const page = await context.newPage();
+    await page.installNextDocumentBootstrap(token);
+    await input.instrumentation.beginSample({
+      page,
+      token,
+      route: input.route,
+      branch: input.resolved.branch,
+      mode: 'cold',
+      repeat: input.repeat,
+      destinationPageUrl: input.resolved.coldPath,
+    });
+    await page.goto(input.resolved.coldPath);
+    const result = await input.instrumentation.collectSample({
+      page,
+      token,
+      route: input.route,
+      branch: input.resolved.branch,
+      mode: 'cold',
+      repeat: input.repeat,
+    });
+    return normalizeBlockedWriteDependency(result);
+  } finally {
+    await context.close();
+  }
+}
+
+export interface CollectWarmSampleInput {
+  page: SamplePage;
+  route: RouteDefinition;
+  repeat: number;
+  sourceTimeoutMs: number;
+  resolve: () => Promise<ResolverResult>;
+  instrumentation: SampleInstrumentation;
+  token?: string;
+}
+
+export async function collectWarmSample(input: CollectWarmSampleInput): Promise<SampleResult> {
+  await input.page.prepareWarmSource(input.route);
+  if (!await input.page.waitForSourceReady(input.route, input.sourceTimeoutMs)) {
+    return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, 'source_not_ready');
+  }
+
+  const resolved = await input.resolve();
+  if (resolved.kind === 'skip') {
+    return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, resolved.reason);
+  }
+
+  const token = input.token ?? randomUUID();
+  await input.instrumentation.beginSample({
+    page: input.page,
+    token,
+    route: input.route,
+    branch: resolved.branch,
+    mode: 'warm',
+    repeat: input.repeat,
+    sourcePageUrl: input.route.source.path,
+    destinationPageUrl: resolved.warmHref,
+  });
+  if (!await input.page.clickExactHref(resolved.warmHref)) {
+    return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, 'fixture_not_navigable');
+  }
+  const result = await input.instrumentation.collectSample({
+    page: input.page,
+    token,
+    route: input.route,
+    branch: resolved.branch,
+    mode: 'warm',
+    repeat: input.repeat,
+  });
+  return normalizeBlockedWriteDependency(result);
+}
+
+function seededRandom(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (Math.imul(state, 1_664_525) + 1_013_904_223) >>> 0;
+    return state / 0x1_0000_0000;
+  };
+}
+
+export function deterministicRouteOrder<T>(routes: readonly T[], seed: number): T[] {
+  if (!Number.isSafeInteger(seed) || seed <= 0) throw new Error('invalid_route_order_seed');
+  const ordered = [...routes];
+  const random = seededRandom(seed);
+  for (let index = ordered.length - 1; index > 0; index -= 1) {
+    const other = Math.floor(random() * (index + 1));
+    [ordered[index], ordered[other]] = [ordered[other]!, ordered[index]!];
+  }
+  return ordered;
+}
+
+function rotate<T>(values: readonly T[], repeat: number): T[] {
+  if (values.length === 0) return [];
+  const offset = repeat % values.length;
+  return [...values.slice(offset), ...values.slice(0, offset)];
+}
+
+export interface SampleOrderRecord {
+  mode: SampleMode;
+  repeat: number;
+  routeKeys: string[];
+}
+
+export interface RelayDomCheck {
+  expectedCount: number;
+  renderedCount: number;
+  shortfall: boolean;
+}
+
+export interface CollectRunSamplesResult {
+  samples: SampleResult[];
+  orders: SampleOrderRecord[];
+  warmup: { performed: boolean; routeKey: string | null };
+  lowSampleCount: boolean;
+  relayDomCheck: RelayDomCheck | null;
+}
+
+export interface CollectRunSamplesInput {
+  browser: SampleBrowser;
+  storageState: InMemoryStorageState;
+  target: TargetKind;
+  routes: readonly RouteDefinition[];
+  coldRepeats: number;
+  warmRepeats: number;
+  routeOrderSeed: number;
+  sourceTimeoutMs: number;
+  expectedRelayLinkCount?: number;
+  resolveCold(route: RouteDefinition): Promise<ResolverResult>;
+  resolveWarm(route: RouteDefinition, page: SamplePage): Promise<ResolverResult>;
+  instrumentationFor(
+    route: RouteDefinition,
+    mode: SampleMode,
+    repeat: number,
+  ): SampleInstrumentation;
+  tokenFactory?: (mode: SampleMode, repeat: number, route: RouteDefinition) => string;
+}
+
+function assertRepeatCount(value: number): void {
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error('invalid_repeat_count');
+}
+
+export async function collectRunSamples(input: CollectRunSamplesInput): Promise<CollectRunSamplesResult> {
+  assertRepeatCount(input.coldRepeats);
+  assertRepeatCount(input.warmRepeats);
+  if (input.routes.length === 0) throw new Error('empty_route_registry');
+
+  const samples: SampleResult[] = [];
+  const orders: SampleOrderRecord[] = [];
+  const tokenFor = input.tokenFactory ?? ((mode, repeat, route) => `${mode}-${repeat}-${route.key}-${randomUUID()}`);
+  const baseOrder = deterministicRouteOrder(input.routes, input.routeOrderSeed);
+  const shouldWarmup = input.target !== 'hosted-dev';
+
+  if (shouldWarmup) {
+    const warmupRoute = ROUTES[0]!;
+    const resolved = await input.resolveCold(warmupRoute);
+    await collectColdSample({
+      browser: input.browser,
+      storageState: input.storageState,
+      route: warmupRoute,
+      repeat: -1,
+      resolved,
+      instrumentation: input.instrumentationFor(warmupRoute, 'cold', -1),
+      token: tokenFor('cold', -1, warmupRoute),
+    });
+  }
+
+  for (let repeat = 0; repeat < input.coldRepeats; repeat += 1) {
+    const ordered = rotate(baseOrder, repeat);
+    orders.push({ mode: 'cold', repeat, routeKeys: ordered.map((route) => route.key) });
+    for (const route of ordered) {
+      const resolved = await input.resolveCold(route);
+      samples.push(await collectColdSample({
+        browser: input.browser,
+        storageState: input.storageState,
+        route,
+        repeat,
+        resolved,
+        instrumentation: input.instrumentationFor(route, 'cold', repeat),
+        token: tokenFor('cold', repeat, route),
+      }));
+    }
+  }
+
+  let relayDomCheck: RelayDomCheck | null = null;
+  const warmContext = await input.browser.newContext(contextOptions(input.storageState));
+  try {
+    await warmContext.installBasePageStore();
+    const page = await warmContext.newPage();
+    for (let repeat = 0; repeat < input.warmRepeats; repeat += 1) {
+      const ordered = rotate(baseOrder, repeat);
+      orders.push({ mode: 'warm', repeat, routeKeys: ordered.map((route) => route.key) });
+      for (const route of ordered) {
+        const result = await collectWarmSample({
+          page,
+          route,
+          repeat,
+          sourceTimeoutMs: input.sourceTimeoutMs,
+          resolve: () => input.resolveWarm(route, page),
+          instrumentation: input.instrumentationFor(route, 'warm', repeat),
+          token: tokenFor('warm', repeat, route),
+        });
+        samples.push(result);
+        if (
+          input.target === 'hermetic' &&
+          input.expectedRelayLinkCount !== undefined &&
+          route.key === '/inbox' &&
+          result.status === 'ok' &&
+          relayDomCheck === null
+        ) {
+          const renderedCount = await page.countRelayConversationLinks();
+          relayDomCheck = {
+            expectedCount: input.expectedRelayLinkCount,
+            renderedCount,
+            shortfall: renderedCount < input.expectedRelayLinkCount,
+          };
+        }
+      }
+    }
+  } finally {
+    await warmContext.close();
+  }
+
+  return {
+    samples,
+    orders,
+    warmup: shouldWarmup ? { performed: true, routeKey: '/' } : { performed: false, routeKey: null },
+    lowSampleCount: input.coldRepeats < 3 || input.warmRepeats < 3,
+    relayDomCheck,
   };
 }

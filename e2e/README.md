@@ -54,6 +54,237 @@ Helpers (session mode):
 - `npm run e2e -- --grep "<name>"` — run a subset against the live session.
 - `npm run e2e:report` — open the last HTML report.
 
+## Page performance profiler (on demand)
+
+`npm run perf:pages` profiles every registered staff navigation destination and
+representative read-oriented detail page. It is an on-demand diagnostic, not a CI
+gate or production telemetry system. Run it from the repository root and serialize
+it with every `npm run e2e`, `npm run e2e:session`, or other profiler run in the same
+worktree.
+
+The three target commands are:
+
+```powershell
+# Profiler-owned hermetic lane; safe for automated use.
+npm run perf:pages -- hermetic --scale=10
+
+# Human only: the imported lane-0 dataset on the local Vite dashboard.
+npm run perf:pages -- local --base-url=http://127.0.0.1:5174 --login-email=founder@example.com
+
+# Human only: deployed dev assets/backend with interactive headed OAuth.
+npm run perf:pages -- hosted-dev --base-url=https://dev.example.test --headed --browser-channel=chrome
+```
+
+An agent may run `local` or `hosted-dev` only when the human explicitly instructs
+that individual run and names the target. Their first end-to-end executions are
+human-owned: before merge they have guard unit evidence only. This repository does
+not automate either target.
+
+### Hermetic scale and controls
+
+Scale 1 adds 100 contacts, 25 properties, 50 placements, 50 tours, 100
+conversations, and 10 broadcasts. It keeps the densities at 10 messages per
+conversation and 25 recipients per broadcast. Scale multiplies entity counts, not
+the two densities. An explicit entity option replaces that scale-derived count:
+
+```powershell
+npm run perf:pages -- hermetic --scale=10 --contacts=2500 --messages-per-conversation=20 --cold-repeats=5 --warm-repeats=5 --route-order-seed=240812
+```
+
+Other count overrides are `--units`, `--placements`, `--tours`,
+`--conversations`, `--broadcasts`, and `--recipients-per-broadcast`. Validation
+happens before a lane starts or any data is cleared. Use `--print-config` to validate
+a noninteractive command and inspect only its safe resolved configuration:
+
+```powershell
+npm run perf:pages -- hermetic --scale=10 --print-config
+```
+
+The hermetic target owns a positive e2e lane, resets only that lane, writes the
+synthetic performance world, profiles it, and stops only the launcher it started.
+It never clears lane 0 or stops shared DynamoDB Local. The count manifest printed
+by `--print-config` and stored with the report is the authority for the resolved
+totals.
+
+These are rough second-run planning envelopes, not performance claims. A second run
+must first scan and clear the previous generated rows, including embedded broadcast
+recipient maps; a first run can therefore be materially faster.
+
+| Scale | Second-run reseed | Default 3 cold + 3 warm total |
+|------:|------------------:|------------------------------:|
+| 1 | about 1-3 minutes | about 15-30 minutes |
+| 10 | about 2-8 minutes | about 30-90 minutes |
+| 100 | about 15-45 minutes | about 2-6 hours |
+
+Machine load, Docker storage, route timeouts, client truncation, and the shape of a
+prior overridden run can move these ranges substantially. Use lower repeat counts
+for exploration, then repeat the controlled command for evidence.
+
+### Local imported-data target (human only)
+
+Prepare and review the real-data import before profiling. Follow
+[`RUNBOOK.md`'s import procedure](../RUNBOOK.md#importing-the-founders-quo--airtable-data-m16):
+run `import:plan`, review the external workbook, run `import:apply --dry-run`, then
+explicitly apply it with the target environment set to DynamoDB Local and
+`TABLE_PREFIX=hc-local-`. The profiler never runs the importer, seeds, reseeds,
+provisions a user, or changes this dataset. Start the local dev stack normally and
+use an already existing admin email with `--login-email` when the imported data does
+not contain the default `founder@example.com` identity.
+
+Local accepts only a loopback URL on port 5174 and verifies `dev: true` plus exactly
+the lane-0 `hc-local-` prefix. It then requires an interactive terminal and this
+exact typed response before login:
+
+```text
+PROFILE http://127.0.0.1:5174
+```
+
+There is no flag or environment bypass. A local run measures Vite-served development
+modules and is best for dataset-scaling diagnosis. It does not represent built
+assets, CDN behavior, or production-user telemetry.
+
+### Hosted-dev target (human only)
+
+Hosted-dev requires HTTPS and `--headed`. Complete normal Google OAuth in the opened
+browser; the runner waits for an admin session and then proves the authenticated
+environment is exactly `dev`. Authentication is outside measured samples. The
+Playwright storage-state object stays only in process memory and is never written to
+disk.
+
+Google may reject an automation-controlled bundled Chromium session. Before using
+the documented `--browser-channel=chrome` fallback on Windows, install that channel
+once from an Administrator PowerShell:
+
+```powershell
+npx playwright install chrome
+```
+
+Hosted-dev measures the deployed build, CDN/network effects, and deployed backend.
+It is still not production-user telemetry. If OAuth refuses both browser channels,
+stop and reassess the authentication approach; do not work around the target proof.
+
+### Read-only boundary
+
+The profiler performs navigation and exact read-oriented row-link clicks only. It
+does not exercise workflow actions, forms, uploads, or media controls. Before any
+measured navigation it installs a scoped firewall for first-party `/api/**`,
+`/auth/**`, and `/__dev/**` traffic. Every `POST`, `PUT`, `PATCH`, and `DELETE` in
+that scope is blocked before the network and recorded only as a sanitized method,
+endpoint template, and `source_click` or `destination_mount` phase. Mount-time and
+row-click mark-read attempts are expected blocked evidence, not proof of a failed
+run.
+
+This is a navigation-only guarantee, not a blanket network sandbox. Public paths
+under `/public/**`, media reads under `/unit-media/**`, and direct storage origins
+are outside the interception scope. The registry does not navigate public pages or
+invoke media/storage write controls, so those residual paths are read-only in the
+documented workflow. A new navigation-triggered mutation must be added to the
+mechanically checked mutation catalog and self-QA state proof.
+
+`/api/events` is a permanent event stream and is never intercepted, never counted
+as pending readiness work, and never emitted as request evidence. Known timer polls
+and SSE-triggered refreshes are retained as `background_refresh` or
+`background_shell` counts separately from the primary page-load request counts,
+bytes, and quiet-window timing. They cannot satisfy a required endpoint contract.
+
+### Artifacts, privacy, and baselines
+
+Each run writes a gitignored directory at
+`e2e/.artifacts/performance/<timestamp>-<random>/` containing `report.md`,
+`summary.json`, and `requests.jsonl`. A valid baseline additionally produces
+`comparison.md` and `comparison.json`. The CLI prints only the safe run-directory
+name. A final byte scan runs before publication; a failure moves the files to a
+`-quarantined` directory, prints only filenames and closed reason categories, and
+returns nonzero.
+
+Artifacts contain sanitized endpoint templates and allowlisted numeric/categorical
+evidence. They never contain response or request bodies, headers, cookies, auth
+material, query values, raw entity IDs, names, phone numbers, email addresses,
+screenshots, HAR files, or browser traces. Do not move a quarantined artifact or
+paste private source data into a handback.
+
+Compare a controlled run with a prior `summary.json`:
+
+```powershell
+npm run perf:pages -- hermetic --scale=10 --route-order-seed=240812 --baseline=e2e/.artifacts/performance/PRIOR_RUN/summary.json
+```
+
+Comparison reports absolute and percentage deltas for matching route/mode medians.
+It does not enforce a budget or fail because a metric regressed. Keep target kind,
+resolved counts/densities, route set, browser major/channel, viewport, repeat counts,
+route-order seed, firewall version, settle window, and poll interval identical for a
+controlled comparison. A changed app revision is the intended experimental variable;
+a missing revision is warned as `target_version_unverified`.
+
+### Reading the report
+
+A cold sample uses a fresh authenticated browser context, empty HTTP cache, blocked
+service workers, and direct navigation. A warm sample reuses one context and the SPA
+shell, prepares the declared source page outside measurement, then resets collection
+immediately before the exact destination click. Hermetic and local runs first warm
+the process-wide Vite transform/module cache with one discarded route; hosted-dev
+uses built assets and skips that warmup.
+
+Default results are three cold and three warm samples per route. Read the median with
+the minimum/maximum spread, request/resource counts, background counts, and recorded
+route order. Contention, Docker and filesystem caches, browser/OS version, network/CDN
+variance, long tasks, Vite transform caching, and earlier route order all add noise.
+Warm samples deliberately share a context, so use the same `--route-order-seed` for
+comparisons. Increase repeats when the spread is material; P95 remains null until a
+route/mode has at least 20 successful samples.
+
+`client_truncated: true` means a list hook hit its client walk ceiling, so a plateau
+past that point is truncation, not evidence that the page scales. Contacts stop at 40
+pages x 100 records per type; properties stop at 40 pages x the server default of 50
+(2,000); the placements page performs five independent walks capped at 50 pages x 50
+(2,500) each. Every passive `useContacts` consumer inherits the contacts ceiling:
+contact lists, email and quarantine, tour lists, contact detail, property detail, and
+relay conversation detail. Tour detail and placement detail do not passively mount
+`useContacts`; the hook exists only inside their closed add-contact form, so both are
+correctly reported with `load_scale_bearing: false`. This is the adjudicated correction
+to the design document's older enumeration; the approved design remains unchanged.
+
+Every ranking row separately reports `surface_scale_bearing` (does rendered volume
+grow with the synthetic world?) and `load_scale_bearing` (does background/read work
+grow?). A low-ranked route with a false flag on the relevant axis is not proof that it
+scales. Email is the useful split example: its fixed unmatched-email surface does not
+grow, but its passive contact load does.
+
+At higher conversation scales, `/inbox` is legitimately expensive: page 1 renders 30
+contact rows plus every generated open/connecting relay group, up to the profiler's
+1,000-group ceiling, and each relay row has server-side lookup cost. Inbox is both a
+ranked destination and the warm source for `/conversations/:conversationId`, so read
+the conversation detail's source-preparation time separately from its measured click.
+
+### Session ownership and recovery
+
+Hermetic mode refuses to start if this worktree already has a live interactive
+session or full-suite launcher. The guard is one-directional: a later e2e command in
+the same worktree can apply the launcher's normal self-heal and reap the profiler's
+owned launcher. The human must serialize profiler and e2e work in a worktree.
+
+Normal profiler cleanup stops only its recorded launcher and leaves shared DynamoDB
+Local running. If cleanup fails, or the profiler is killed during boot before the
+launcher's parent-death watch is armed, run the same-worktree recovery command:
+
+```powershell
+npm run e2e:stop
+```
+
+It reaps the lane processes and clears the session/lane state files. Confirm the
+ports are free before rerunning; never kill shared MCP browser processes.
+
+### DynamoDB Local integration proof
+
+The performance seed integration suite follows the repository's Docker-optional test
+convention. If DynamoDB Local is unavailable, ordinary `npm test` emits the stable
+`performance_seed_integration_skipped_dynamodb_unavailable` warning and skips that
+suite so pure tests remain usable. This is intentionally a loud skip, not proof that
+the seed boundary ran. Plan-owned seed verification sets
+`PERF_SEED_REQUIRE_DYNAMO=1`; in that mode an unreachable DynamoDB Local is a hard
+failure and the targeted suite cannot pass without executing its physical namespace,
+reset, writer, and reader assertions.
+
 ## Port-lane model
 
 Each e2e run (or `npm run e2e:session`) operates in an isolated **lane** — a

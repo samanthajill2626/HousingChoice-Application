@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import request from 'supertest';
 import type { Express } from 'express';
 import { buildApp } from '../src/app.js';
@@ -109,7 +109,82 @@ describe('dev gating — router', () => {
   });
 });
 
-describe('dev gating — SPA fallback reservation', () => {
+describe('dev gating - performance reseed', () => {
+  const config = loadConfig({
+    NODE_ENV: 'test',
+    DEV_AUTH_ENABLED: '1',
+    CF_ORIGIN_SECRET: SECRET,
+    DYNAMODB_ENDPOINT: 'http://localhost:8000',
+    TABLE_PREFIX: 'hc-local-9-',
+  });
+
+  it('returns only the count manifest and clears cached session epochs', async () => {
+    const manifest = {
+      anchor: '2026-08-11T12:00:00.000Z',
+      scale: 1,
+      contacts: 1,
+      units: 0,
+      placements: 0,
+      tours: 0,
+      conversations: 0,
+      messagesPerConversation: 0,
+      broadcasts: 0,
+      recipientsPerBroadcast: 0,
+      messageCount: 0,
+      requestedRecipientCount: 0,
+      resolvedRecipientsPerBroadcast: 0,
+      resolvedRecipientCount: 0,
+      requestedRelayGroupCount: 0,
+      relayGroupCount: 0,
+      clippedRelayGroupCount: 0,
+      fixedUnmatchedEmailCount: 4,
+      physicalItemCount: 5,
+      totalItemCount: 5,
+      fallbacks: { tenant: 'lean_tenant', landlord: 'lean_landlord', unit: 'lean_unit' },
+    } as const;
+    const performanceReseed = vi.fn().mockResolvedValue(manifest);
+    const sessionEpochCache = { get: vi.fn(), set: vi.fn(), delete: vi.fn(), clear: vi.fn() };
+    const app = buildApp({
+      config,
+      devRouter: createDevRouter({ config, performanceReseed, sessionEpochCache }),
+    });
+
+    const res = await request(app).post('/__dev/performance/reseed').send({
+      input: { contacts: 1, units: 0, placements: 0, tours: 0, conversations: 0, broadcasts: 0 },
+      anchor: manifest.anchor,
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true, manifest });
+    expect(JSON.stringify(res.body)).not.toMatch(/perf-|contact-|unit-|tour-|conversation-|broadcast-|um-/);
+    expect(performanceReseed).toHaveBeenCalledWith(expect.objectContaining({ config, anchor: manifest.anchor }));
+    expect(sessionEpochCache.clear).toHaveBeenCalledOnce();
+  });
+
+  it('rejects invalid input before calling the injected reset boundary', async () => {
+    const performanceReseed = vi.fn();
+    const app = buildApp({ config, devRouter: createDevRouter({ config, performanceReseed }) });
+
+    const res = await request(app).post('/__dev/performance/reseed').send({
+      input: { scale: 0 },
+      anchor: 'not-a-date',
+    });
+
+    expect(res.status).toBe(400);
+    expect(performanceReseed).not.toHaveBeenCalled();
+  });
+
+  it('is absent when the dev router is absent', async () => {
+    const app = buildApp({ config });
+    const res = await request(app).post('/__dev/performance/reseed').send({
+      input: {},
+      anchor: '2026-08-11T12:00:00.000Z',
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('dev gating - SPA fallback reservation', () => {
   it('reserves /__dev under a configured dist dir: non-dev SPA routes get index.html, /__dev/ping gets 404', async () => {
     // Create a temporary dist directory with an index.html so the SPA fallback activates.
     const distDir = fs.mkdtempSync(path.join(os.tmpdir(), 'hc-test-dist-'));

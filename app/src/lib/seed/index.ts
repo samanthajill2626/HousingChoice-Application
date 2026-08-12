@@ -21,6 +21,7 @@ import { matrixItems } from './matrix.js';
 import { seedLive } from './live.js';
 import { seedMedia } from './media.js';
 import { historyItems } from './history.js';
+import type { TableNamespace } from '../devReset.js';
 
 export { SEED } from './lean.js';
 
@@ -53,11 +54,12 @@ export async function seedInboundVoiceLineHolder(
   endpoint: string,
   cell: string | undefined,
   at: string = new Date().toISOString(),
+  namespace?: TableNamespace,
 ): Promise<boolean> {
   if (cell === undefined || cell.length === 0) return false;
   const doc = createDocumentClient({ endpoint });
   try {
-    const usersTable = tableName('users');
+    const usersTable = namespace?.tableNameFor('users') ?? tableName('users');
     // Bounded scan of the tiny users table — pick the seeded founder if present,
     // else the first admin (defensive: filter to items that carry a role).
     const { Items } = await doc.send(new ScanCommand({ TableName: usersTable }));
@@ -105,7 +107,11 @@ export type SeedProfile = 'lean' | 'full';
  * devReset's existing separate seedInboundVoiceLineHolder call is safe to keep —
  * it becomes a no-op double-stamp.
  */
-export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): Promise<number> {
+export async function seedAll(
+  endpoint: string,
+  profile: SeedProfile = 'lean',
+  namespace?: TableNamespace,
+): Promise<number> {
   // Build the item map: start with lean, merge extra tables for full.
   const tables: Record<string, Record<string, unknown>[]> = {};
   for (const [base, items] of Object.entries(SEED)) {
@@ -142,7 +148,7 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
   try {
     for (const [base, items] of Object.entries(tables)) {
       if (items.length === 0) continue;
-      const physicalName = tableName(base);
+      const physicalName = namespace?.tableNameFor(base) ?? tableName(base);
       for (const item of items) {
         await doc.send(new PutCommand({ TableName: physicalName, Item: item }));
         count += 1;
@@ -154,13 +160,13 @@ export async function seedAll(endpoint: string, profile: SeedProfile = 'lean'): 
   }
 
   if (profile === 'full') {
-    await seedLive(endpoint, now);
+    await seedLive(endpoint, now, namespace);
     // Seed the two cast media objects (MinIO); fail-soft when MinIO is unreachable.
-    await seedMedia();
+    await seedMedia(undefined, namespace?.env);
   }
 
   // Fold in the inbound-voice-line holder stamp (both profiles; idempotent).
-  await seedInboundVoiceLineHolder(endpoint, SEED_INBOUND_VOICE_CELL);
+  await seedInboundVoiceLineHolder(endpoint, SEED_INBOUND_VOICE_CELL, new Date().toISOString(), namespace);
 
   return count;
 }

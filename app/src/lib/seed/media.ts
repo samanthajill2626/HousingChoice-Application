@@ -103,9 +103,9 @@ export function minimalMp3(): Buffer {
  *                  + MEDIA_BUCKET). Useful for scripted invocations that need to target
  *                  a specific lane's MinIO.
  */
-export async function seedMedia(endpoint?: string): Promise<void> {
+export async function seedMedia(endpoint?: string, env?: NodeJS.ProcessEnv): Promise<void> {
   // Build a config that respects the caller-supplied endpoint, or falls back to env.
-  const baseConfig = loadConfig();
+  const baseConfig = loadConfig(env);
   const config =
     endpoint !== undefined
       ? { ...baseConfig, mediaS3Endpoint: endpoint, mediaBucket: baseConfig.mediaBucket ?? 'hc-local-media' }

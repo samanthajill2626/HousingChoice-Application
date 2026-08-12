@@ -729,12 +729,14 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
   // private prefix guarantees the round-trip observes ONLY what this seedAll wrote.
   const prefix = `hc-hist-${randomUUID().slice(0, 8)}-`;
   const testEnv: { TABLE_PREFIX?: string } = { TABLE_PREFIX: prefix };
-  const origPrefix = process.env.TABLE_PREFIX;
+  const namespace = {
+    tablePrefix: prefix,
+    tableNameFor: (base: string) => `${prefix}${base}`,
+    env: Object.freeze({ TABLE_PREFIX: prefix }) as NodeJS.ProcessEnv,
+  };
   let adminClient: ReturnType<typeof createDynamoClient> | undefined;
 
   beforeAll(async () => {
-    process.env.DYNAMODB_ENDPOINT = endpoint;
-    process.env.TABLE_PREFIX = prefix;
     adminClient = createDynamoClient({ endpoint });
     for (const spec of TABLES) {
       await ensureTable(adminClient, spec, `${prefix}${spec.baseName}`);
@@ -742,8 +744,6 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
   }, 120_000);
 
   afterAll(async () => {
-    if (origPrefix === undefined) delete process.env.TABLE_PREFIX;
-    else process.env.TABLE_PREFIX = origPrefix;
     if (adminClient) {
       for (const spec of TABLES) {
         await deleteTableIfExists(adminClient, `${prefix}${spec.baseName}`);
@@ -757,7 +757,7 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     const { createDocumentClient } = await import('../src/lib/dynamo.js');
     const { createAuditRepo } = await import('../src/repos/auditRepo.js');
 
-    await seedAll(endpoint, 'full');
+    await seedAll(endpoint, 'full', namespace);
 
     const doc = createDocumentClient({ endpoint });
     try {
@@ -803,7 +803,7 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     const { createDocumentClient } = await import('../src/lib/dynamo.js');
     const { createAuditRepo } = await import('../src/repos/auditRepo.js');
 
-    await seedAll(endpoint, 'full'); // idempotent upsert (round-trip prefix)
+    await seedAll(endpoint, 'full', namespace); // idempotent upsert (round-trip prefix)
 
     const doc = createDocumentClient({ endpoint });
     try {

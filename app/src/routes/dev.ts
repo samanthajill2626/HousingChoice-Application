@@ -20,6 +20,8 @@ import {
 } from '../repos/usersRepo.js';
 import { OUTBOX_TABLE_BASE, type OutboxRecord } from '../adapters/recordingMessaging.js';
 import { resetLocalData } from '../lib/devReset.js';
+import { resetPerformanceData } from '../lib/performanceSeed.js';
+import { resolvePerformanceSeedConfig, type PerformanceSeedInput } from '../lib/seed/performance.js';
 import { createMessagingAdapter } from '../adapters/messaging.js';
 import { createContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -94,6 +96,7 @@ export interface DevRouterDeps {
   /** Deps for POST /__dev/relay/replay-intros — injected in tests; defaults to
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
+  performanceReseed?: typeof resetPerformanceData;
 }
 
 /**
@@ -235,6 +238,34 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
     // post-reseed dev-login session is rejected (cookie epoch ≠ stale cached epoch).
     deps.sessionEpochCache?.clear();
     res.status(200).json({ ok: true, profile });
+  });
+
+  router.post('/__dev/performance/reseed', json(), async (req, res) => {
+    const body = (req.body ?? {}) as { input?: unknown; anchor?: unknown };
+    if (
+      typeof body.input !== 'object' ||
+      body.input === null ||
+      Array.isArray(body.input) ||
+      typeof body.anchor !== 'string'
+    ) {
+      res.status(400).json({ error: 'invalid_performance_seed_input' });
+      return;
+    }
+    try {
+      resolvePerformanceSeedConfig(body.input as PerformanceSeedInput, body.anchor);
+    } catch {
+      res.status(400).json({ error: 'invalid_performance_seed_input' });
+      return;
+    }
+    const performanceReseed = deps.performanceReseed ?? resetPerformanceData;
+    const manifest = await performanceReseed({
+      config,
+      logger: log,
+      input: body.input as PerformanceSeedInput,
+      anchor: body.anchor,
+    });
+    deps.sessionEpochCache?.clear();
+    res.status(200).json({ ok: true, manifest });
   });
 
   // POST /__dev/tour-reminders/tick { now? } — the deterministic e2e seam for

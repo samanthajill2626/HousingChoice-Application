@@ -14,7 +14,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec, TABLES } from '../src/lib/tables.js';
-import { SEED, SEED_INBOUND_VOICE_CELL, seedAll } from '../src/lib/seedData.js';
+import { SEED, SEED_INBOUND_VOICE_CELL, seedAll, createTableNamespace } from '../src/lib/seedData.js';
+import { loadConfig } from '../src/lib/config.js';
 import { HOLDER_POINTER_KEY } from '../src/repos/usersRepo.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -55,13 +56,14 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
   const client = createDynamoClient({ endpoint });
   const doc = createDocumentClient({ endpoint });
 
-  // Override TABLE_PREFIX so tableName() picks up the throwaway prefix.
-  const origPrefix = process.env.TABLE_PREFIX;
-  const origEndpoint = process.env.DYNAMODB_ENDPOINT;
+  const namespace = createTableNamespace(loadConfig({
+    NODE_ENV: 'test',
+    CF_ORIGIN_SECRET: 'test-origin-secret',
+    DYNAMODB_ENDPOINT: endpoint,
+    TABLE_PREFIX: prefix,
+  }));
 
   beforeAll(async () => {
-    process.env.TABLE_PREFIX = prefix;
-    process.env.DYNAMODB_ENDPOINT = endpoint;
     // Create all standard tables under the throwaway prefix.
     for (const spec of TABLES) {
       await ensureTable(client, spec, tn(spec.baseName, prefix));
@@ -69,11 +71,6 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
   }, 120_000);
 
   afterAll(async () => {
-    // Restore env.
-    if (origPrefix === undefined) delete process.env.TABLE_PREFIX;
-    else process.env.TABLE_PREFIX = origPrefix;
-    if (origEndpoint === undefined) delete process.env.DYNAMODB_ENDPOINT;
-    else process.env.DYNAMODB_ENDPOINT = origEndpoint;
     // Clean up throwaway tables.
     for (const spec of TABLES) {
       await deleteTableIfExists(client, tn(spec.baseName, prefix));
@@ -83,7 +80,7 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
   }, 120_000);
 
   it('lean seedAll writes exactly the canonical SEED item count', async () => {
-    const count = await seedAll(endpoint, 'lean');
+    const count = await seedAll(endpoint, 'lean', namespace);
     // count = static items only; the holder stamp does NOT count toward items.
     expect(count).toBe(LEAN_TOTAL);
   });
@@ -124,7 +121,7 @@ describe.skipIf(!reachable)('seedAll profile contract (throwaway prefix)', () =>
     // idempotently overwritten; stubs currently add nothing extra, so counts
     // are equal now (Tasks 2-4 will add more). The superset assertion holds
     // in all future states too.
-    const fullCount = await seedAll(endpoint, 'full');
+    const fullCount = await seedAll(endpoint, 'full', namespace);
     expect(fullCount).toBeGreaterThanOrEqual(LEAN_TOTAL);
   }, 120_000);
 });

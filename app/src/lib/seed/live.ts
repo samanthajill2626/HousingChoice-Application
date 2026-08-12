@@ -34,6 +34,7 @@ import { armTourReminders } from '../../jobs/tourReminders.js';
 import { createTourRemindersRepo } from '../../repos/tourRemindersRepo.js';
 import { createSettingsRepo } from '../../repos/settingsRepo.js';
 import { createPlacementDeadlinesRepo } from '../../repos/placementDeadlinesRepo.js';
+import type { TableNamespace } from '../devReset.js';
 import { deriveStatuses } from '../statusModel.js';
 import { historyItems } from './history.js';
 import type { TourItem } from '../../repos/toursRepo.js';
@@ -405,7 +406,11 @@ function buildLiveStaticItems(now: Date): Record<string, Record<string, unknown>
  * @param now       Injected current time. seedAll passes `new Date()`; tests
  *                  pass a fixed Date for deterministic assertions.
  */
-export async function seedLive(endpoint: string, now: Date = new Date()): Promise<void> {
+export async function seedLive(
+  endpoint: string,
+  now: Date = new Date(),
+  namespace?: TableNamespace,
+): Promise<void> {
   const doc = createDocumentClient({ endpoint });
   const nowIso = now.toISOString();
 
@@ -416,7 +421,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // tours, placements) as plain PutCommands.
     for (const [base, items] of Object.entries(staticItems)) {
       if (items.length === 0) continue;
-      const table = tableName(base);
+      const table = namespace?.tableNameFor(base) ?? tableName(base);
       for (const item of items) {
         await doc.send(new PutCommand({ TableName: table, Item: item }));
       }
@@ -428,7 +433,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // Arm the placement DEADLINE items via the REAL placementDeadlinesRepo (the
     // same code path the transition service / create route use), pointed at the
     // seed endpoint. Dates recomputed from `now` (mirror buildLiveStaticItems).
-    const deadlinesRepo = createPlacementDeadlinesRepo({ doc });
+    const deadlinesRepo = createPlacementDeadlinesRepo({ doc, env: namespace?.env });
     const overdueAt = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString();
     const followUpAt = new Date(now.getTime() - 5 * 60 * 1000).toISOString();
     const voucherAt = new Date(now.getTime() + 20 * 24 * 60 * 60 * 1000).toISOString();
@@ -442,7 +447,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // armTourReminders only needs tourRemindersRepo (+ optional logger) — it does
     // NOT send messages; it only writes reminder rows. This is the exact same
     // code path the booking handler uses, so dueAts always match the worker's view.
-    const remindersRepo = createTourRemindersRepo({ doc });
+    const remindersRepo = createTourRemindersRepo({ doc, env: namespace?.env });
     // Quiet hours (spec 2026-08-03): the armer clamps every dueAt out of the
     // org window, so the seeder must hand it the same settings the worker
     // reads. In a real 'full' reseed the settings row ALREADY exists by now -
@@ -452,7 +457,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
     // (21:00-08:00 America/New_York) applies only when seedLive runs against an
     // EMPTY settings table: a direct call from a unit test
     // (app/test/seedLive.test.ts), never the product path.
-    const settingsRepo = createSettingsRepo({ doc });
+    const settingsRepo = createSettingsRepo({ doc, env: namespace?.env });
 
     // Build TourItem shapes matching what the repo would return (needed by armTourReminders).
     const toursArr = staticItems['tours'] ?? [];
@@ -507,7 +512,7 @@ export async function seedLive(endpoint: string, now: Date = new Date()): Promis
       ['activity_events', history.activity_events],
     ] as const) {
       if (rows.length === 0) continue;
-      const table = tableName(base);
+      const table = namespace?.tableNameFor(base) ?? tableName(base);
       for (const item of rows) {
         await doc.send(new PutCommand({ TableName: table, Item: item }));
       }

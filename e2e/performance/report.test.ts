@@ -24,6 +24,8 @@ import type {
 
 const fsFaults = vi.hoisted(() => ({
   stagedSensitiveValue: null as string | null,
+  failStagingReadNumber: null as number | null,
+  stagingReadCount: 0,
   stagingRemoveFailures: 0,
   failStagingBlankWrites: false,
 }));
@@ -41,6 +43,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
         const value = fsFaults.stagedSensitiveValue;
         fsFaults.stagedSensitiveValue = null;
         await actual.writeFile(path, value, 'utf8');
+      }
+      if (path.includes('-staging')) {
+        fsFaults.stagingReadCount += 1;
+        if (fsFaults.failStagingReadNumber === fsFaults.stagingReadCount) {
+          const error = new Error('locked staging read') as NodeJS.ErrnoException;
+          error.code = 'EPERM';
+          throw error;
+        }
       }
       return await actualReadFile(...args);
     },
@@ -70,6 +80,8 @@ const createdRoots: string[] = [];
 
 afterEach(async () => {
   fsFaults.stagedSensitiveValue = null;
+  fsFaults.failStagingReadNumber = null;
+  fsFaults.stagingReadCount = 0;
   fsFaults.stagingRemoveFailures = 0;
   fsFaults.failStagingBlankWrites = false;
   await Promise.all(createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
@@ -597,6 +609,28 @@ describe('writePerformanceReport', () => {
     const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
     expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
     expect(await readdir(join(outputRoot, `${input.runId}-quarantined`))).toEqual(['quarantine.json']);
+  });
+
+  it('scrubs owned staged handles when the exact-byte scan fails after a private mutation', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-aaaabbbb');
+    const sensitiveValue = 'unreadable.post.write@example.com';
+    fsFaults.stagedSensitiveValue = sensitiveValue;
+    fsFaults.failStagingReadNumber = 2;
+    fsFaults.stagingRemoveFailures = 100;
+    fsFaults.failStagingBlankWrites = true;
+
+    await expect(writePerformanceReport(input)).rejects.toThrowError('artifact_scan_failed');
+
+    const stagingDirectory = join(outputRoot, `${input.runId}-staging`);
+    const stagingFiles = await readdir(stagingDirectory);
+    expect(stagingFiles.sort()).toEqual(['report.md', 'requests.jsonl', 'summary.json']);
+    const stagingTexts = await Promise.all(stagingFiles.map((fileName) => (
+      readFile(join(stagingDirectory, fileName), 'utf8')
+    )));
+    expect(stagingTexts).toEqual(['', '', '']);
+    const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
+    expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
   });
 
   it('refuses to overwrite an extant final run directory', async () => {

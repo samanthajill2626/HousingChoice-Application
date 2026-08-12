@@ -820,19 +820,13 @@ async function writeStagedArtifacts(
   stagingDirectory: string,
   files: readonly string[],
   artifactTexts: ReadonlyMap<string, string>,
-): Promise<StagedArtifactHandle[]> {
-  const artifacts: StagedArtifactHandle[] = [];
-  try {
-    for (const fileName of files) {
-      const handle = await open(join(stagingDirectory, fileName), 'wx+', 0o600);
-      artifacts.push({ fileName, handle });
-      await handle.writeFile(artifactTexts.get(fileName)!, 'utf8');
-      await handle.sync();
-    }
-    return artifacts;
-  } catch {
-    await Promise.allSettled(artifacts.map(({ handle }) => handle.close()));
-    throw new Error('artifact_write_failed');
+  artifacts: StagedArtifactHandle[],
+): Promise<void> {
+  for (const fileName of files) {
+    const handle = await open(join(stagingDirectory, fileName), 'wx+', 0o600);
+    artifacts.push({ fileName, handle });
+    await handle.writeFile(artifactTexts.get(fileName)!, 'utf8');
+    await handle.sync();
   }
 }
 
@@ -1005,7 +999,7 @@ export async function writePerformanceReport(
   await mkdir(stagingDirectory);
   let stagedArtifacts: StagedArtifactHandle[] = [];
   try {
-    stagedArtifacts = await writeStagedArtifacts(stagingDirectory, files, artifactTexts);
+    await writeStagedArtifacts(stagingDirectory, files, artifactTexts, stagedArtifacts);
     const stagedTexts = await Promise.all(files.map(async (fileName) => ({
       fileName,
       text: await readFile(join(stagingDirectory, fileName), 'utf8'),
@@ -1037,6 +1031,10 @@ export async function writePerformanceReport(
     await closeStagedArtifactHandles(stagedArtifacts);
     stagedArtifacts = [];
     await rename(stagingDirectory, finalDirectory);
+  } catch {
+    await scrubStagingArtifacts(stagingDirectory, stagedArtifacts);
+    stagedArtifacts = [];
+    throw new Error('artifact_scan_failed');
   } finally {
     await Promise.allSettled(stagedArtifacts.map(({ handle }) => handle.close()));
   }

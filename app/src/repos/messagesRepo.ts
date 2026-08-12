@@ -1550,9 +1550,53 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             );
             return { deduped: true, tsMsgId: ptr.ref_tsMsgId };
           }
+          // THE EMAIL POINTER IS NOT THIS BRANCH'S BUSINESS (fix wave 5,
+          // adversarial 36). Precise attribution was the right change, but it
+          // widened a PRE-EXISTING channel's behaviour as a side effect: the old
+          // code returned `{deduped: true}` for ANY ConditionalCheckFailed, so an
+          // outbound email whose generated RFC Message-ID pointer collided
+          // (index 2) used to succeed; after the change it threw out of
+          // sendEmailMessage into a 500. That id collision means this exact
+          // message is already persisted under that Message-ID - a genuine
+          // dedupe - so resolve the EXISTING key from the pointer and report it,
+          // which is both the prior behaviour and an honest answer. The rethrow
+          // stays for the cases it was actually written for: the message row's
+          // own key, and the group due row.
+          const emailPointerIndex = message.rfcMessageIdPointer !== undefined ? 2 : -1;
+          const emailPointerOnly =
+            emailPointerIndex >= 0 &&
+            reasons[emailPointerIndex]?.Code === 'ConditionalCheckFailed' &&
+            reasons.every((r, i) => i === emailPointerIndex || r.Code !== 'ConditionalCheckFailed');
+          if (emailPointerOnly) {
+            const { Item } = await doc.send(
+              new GetCommand({
+                TableName: table,
+                Key: {
+                  conversationId: emailMsgIdPk(message.rfcMessageIdPointer as string),
+                  tsMsgId: 'ptr',
+                },
+                ConsistentRead: true,
+              }),
+            );
+            const ptr = Item as { ref_tsMsgId?: string } | undefined;
+            log.warn(
+              {
+                conversationId: message.conversationId,
+                providerSid: message.providerSid,
+                resolved: ptr?.ref_tsMsgId !== undefined,
+              },
+              'message append deduped on the RFC Message-ID pointer - this email is already persisted under that Message-ID',
+            );
+            if (typeof ptr?.ref_tsMsgId === 'string') {
+              return { deduped: true, tsMsgId: ptr.ref_tsMsgId };
+            }
+            // The pointer's own condition just failed, so it exists; an
+            // unreadable one is a real fault and must not be guessed at.
+            throw err;
+          }
           if (reasons.some((r) => r.Code === 'ConditionalCheckFailed')) {
             // A condition failed somewhere OTHER than the SID pointer: the
-            // message row's own key collided, or a pointer/due row did. Nothing
+            // message row's own key collided, or a group due row did. Nothing
             // was written. Loud, and rethrown - never reported as a dedupe.
             log.error(
               {
@@ -2666,6 +2710,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
           TableName: table,
           KeyConditionExpression: 'conversationId = :p',
           ExpressionAttributeValues: { ':p': groupReceiptPk(messageSid) },
+          // STRONGLY CONSISTENT (fix wave 5, adversarial 17). This read is the
+          // cardinality check behind MAX_PARKED_GROUP_RECEIPTS, and it is also
+          // the drain's work list. An eventually-consistent read made the bound
+          // trivially exceedable by receipts arriving milliseconds apart and let
+          // a drain miss a park it should have consumed. The partition holds at
+          // most a rail's worth of rows, so the cost is negligible.
+          ConsistentRead: true,
         }),
       );
       return (Items ?? []).map((raw) => {

@@ -1716,6 +1716,20 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
     }
 
     const members: GroupMemberRow[] = [];
+    // ONE NAME FOR THE THREAD, EVERYWHERE (fix wave 5, adversarial 11). The
+    // inbox row and the contact card both title a group from the IMMUTABLE
+    // roster snapshot via lib/groupTitle.ts; detection mints every unseen member
+    // as a NAMELESS stub, so the moment staff triage that stub into a real
+    // contact the snapshot goes stale and those two surfaces read
+    // "With (555) 010-0002 & (555) 010-0003" forever. The header used to paper
+    // over it by re-titling from this route's fresher names, which made the
+    // divergence permanent AND visible (numbers, then names, a beat after open).
+    // The fix is to CONVERGE the snapshot instead: this route is already reading
+    // every member's contact, so when it finds a fresher name it writes the
+    // roster back through the existing backfill. Best effort by construction -
+    // a failure here must never cost the panel its answer - and conditional on
+    // the roster we read, so a concurrent converge is not clobbered.
+    let rosterNamesAreStale = false;
     for (const m of conversation.participants ?? []) {
       // ONE contact read per member, passed into the seam so it cannot issue a
       // second (presence of the key is the switch - `{contact: undefined}` means
@@ -1760,6 +1774,7 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
       const rosterName = typeof m.name === 'string' ? m.name.trim() : '';
       // The CONTACT's name is fresher than the roster snapshot taken at creation.
       const name = contactName.length > 0 ? contactName : rosterName;
+      if (contactName.length > 0 && contactName !== rosterName) rosterNamesAreStale = true;
       members.push({
         contactId: contact?.contactId ?? m.contactId,
         phone: m.phone,
@@ -1770,6 +1785,24 @@ export function createApiRouter(deps: ApiRouterDeps = {}): Router {
         ...(contact !== undefined && isDeleted(contact) && { deleted: true }),
       });
     }
+
+    if (rosterNamesAreStale) {
+      const prior = conversation.participants ?? [];
+      const refreshed = prior.map((p) => {
+        const resolved = members.find((r) => r.phone === p.phone);
+        const name = resolved?.name;
+        return name !== undefined && name.length > 0 ? { ...p, name } : p;
+      });
+      try {
+        await conversations.backfillGroupTextRoster(conversationId, refreshed, prior);
+      } catch (err) {
+        log.warn(
+          { err, conversationId },
+          'group members: roster name refresh failed - the panel is unaffected, the inbox row stays stale',
+        );
+      }
+    }
+
     res.json({ members });
   });
 

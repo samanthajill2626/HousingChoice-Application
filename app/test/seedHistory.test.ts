@@ -799,7 +799,16 @@ describe.skipIf(!reachable)('seed history — full profile round-trip (DynamoDB 
     // against the old 60s budget on 2026-08-11 - a three-second margin, i.e. it
     // was going to fail on the next slow day whatever anyone did to the seed.
     // Budget, not work: raise it to where the surrounding hooks already are.
-  }, 120_000);
+    //
+    // 120s -> 240s (fix wave 2). The same margin ran out again: this file is the
+    // heaviest writer in the suite and the cross-check ledger's event half now
+    // costs four writes per event instead of two, so the group integration files
+    // hold the emulator's single SQLite write lock longer while this one is
+    // seeding. It timed out in 4 of 6 full runs and passed alone every time
+    // (~20s), which is the signature the issue doc describes
+    // (docs/issues/dynamodb-local-cross-worktree-test-contention.md): budget,
+    // never a hang, and serializing the whole suite costs every future run.
+  }, 240_000);
 
   it('a seeded TOURED tour reads back as a newest-first tours# trail projecting to known labels', async () => {
     // Task 2: the tour detail page's Activity read is auditRepo.listByEntity

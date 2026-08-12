@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   SafeLifecycleError,
   createBoundedReadyLineDecoder,
+  defaultPerformanceRepoRoot,
   installOwnedLifecycleSignalHandlers,
+  ownedLauncherDetached,
   startOwnedHermeticLifecycle,
   type LifecycleChild,
   type LifecycleLane,
@@ -52,6 +54,10 @@ class FakeChild extends EventEmitter implements LifecycleChild {
   }
 }
 
+function signalReady(child: FakeChild): void {
+  child.emit('message', { type: 'e2e-session-ready' });
+}
+
 async function writeOwnedState(artifacts: string, pid: number, lane: LifecycleLane = LANE): Promise<void> {
   await writeFile(join(artifacts, 'session.pid'), String(pid), 'utf8');
   await writeFile(join(artifacts, 'lane.json'), JSON.stringify({
@@ -70,7 +76,9 @@ async function writeOwnedState(artifacts: string, pid: number, lane: LifecycleLa
 }
 
 function bootDeps(artifacts: string, child: FakeChild, alive: { value: boolean }) {
-  const spawnChild = vi.fn(() => child);
+  const spawnChild = vi.fn((_executable: string, _args: string[], _options: {
+    env: NodeJS.ProcessEnv;
+  }) => child);
   const resolveLane = vi.fn(async () => LANE);
   const killTree = vi.fn<(pid: number) => void>(() => {
     alive.value = false;
@@ -92,11 +100,47 @@ async function readySession(artifacts: string, child = new FakeChild(), alive = 
   await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
   await writeOwnedState(artifacts, child.pid);
   child.stdout.write('[fake-twilio] ready\n');
-  child.stdout.write('[e2e-session] ready \u2014 app and Vite are up\n');
+  signalReady(child);
   return { session: await starting, deps, child, alive };
 }
 
 describe('owned hermetic lifecycle startup', () => {
+  it('anchors lifecycle state to the repository instead of the caller cwd', () => {
+    expect(defaultPerformanceRepoRoot()).toMatch(/[\\/]page-performance-profiler$/u);
+    expect(ownedLauncherDetached('win32')).toBe(false);
+    expect(ownedLauncherDetached('linux')).toBe(true);
+  });
+
+  it('acquires an exclusive profiler owner marker before lane resolution and removes it on cleanup', async () => {
+    const artifacts = await tempArtifacts();
+    const firstChild = new FakeChild();
+    const firstAlive = { value: true };
+    const firstDeps = bootDeps(artifacts, firstChild, firstAlive);
+    const firstStarting = startOwnedHermeticLifecycle(firstDeps);
+    await vi.waitFor(() => expect(firstDeps.spawnChild).toHaveBeenCalledOnce());
+
+    const markerPath = join(artifacts, 'performance-session.json');
+    const marker = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>;
+    expect(marker).toMatchObject({ pid: process.pid });
+    expect(marker['ownerToken']).toMatch(/^[a-f0-9]{32}$/u);
+    expect(firstDeps.spawnChild.mock.calls[0]?.[2].env).toMatchObject({
+      E2E_PROFILER_OWNER_TOKEN: marker['ownerToken'],
+    });
+
+    const secondDeps = bootDeps(artifacts, new FakeChild(5_432), { value: true });
+    await expect(startOwnedHermeticLifecycle(secondDeps)).rejects.toMatchObject({
+      reason: 'existing_session_live',
+    });
+    expect(secondDeps.resolveLane).not.toHaveBeenCalled();
+    expect(secondDeps.spawnChild).not.toHaveBeenCalled();
+
+    await writeOwnedState(artifacts, firstChild.pid);
+    signalReady(firstChild);
+    const first = await firstStarting;
+    await first.cleanup();
+    await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
   it('refuses a live same-worktree session before lane resolution or spawning', async () => {
     const artifacts = await tempArtifacts();
     await writeFile(join(artifacts, 'session.pid'), '777', 'utf8');
@@ -121,7 +165,7 @@ describe('owned hermetic lifecycle startup', () => {
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
     await writeOwnedState(artifacts, child.pid);
-    child.stdout.write('[e2e-session] ready \u2014 suffix\n');
+    signalReady(child);
     const session = await starting;
 
     expect(deps.resolveLane).toHaveBeenCalledOnce();
@@ -130,9 +174,12 @@ describe('owned hermetic lifecycle startup', () => {
       [join(deps.repoRoot, 'scripts', 'e2e-session.mjs')],
       expect.objectContaining({
         cwd: deps.repoRoot,
-        detached: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: expect.objectContaining({ E2E_LANE: '3' }),
+        detached: ownedLauncherDetached(process.platform),
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
+        env: expect.objectContaining({
+          E2E_LANE: '3',
+          E2E_PROFILER_OWNER_TOKEN: expect.stringMatching(/^[a-f0-9]{32}$/u),
+        }),
       }),
     );
     expect(session).toMatchObject({
@@ -157,7 +204,7 @@ describe('owned hermetic lifecycle startup', () => {
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
     await writeOwnedState(artifacts, child.pid, writtenLane);
-    child.stdout.write('[e2e-session] ready \u2014 suffix\n');
+    signalReady(child);
     await expect(starting).rejects.toMatchObject({ reason: 'lane_state_mismatch' });
     expect(deps.killTree).toHaveBeenCalledWith(child.pid);
   });
@@ -170,7 +217,7 @@ describe('owned hermetic lifecycle startup', () => {
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
     await writeOwnedState(artifacts, 999);
-    child.stdout.write('[e2e-session] ready \u2014 suffix\n');
+    signalReady(child);
     await expect(starting).rejects.toMatchObject({ reason: 'pid_state_mismatch' });
     expect(deps.killTree).toHaveBeenCalledWith(child.pid);
   });
@@ -205,6 +252,37 @@ describe('owned hermetic lifecycle startup', () => {
       lane: 3,
     });
     expect(deps.killTree).toHaveBeenCalledWith(child.pid);
+  });
+
+  it('aborts pre-ready startup and cleans the retained child', async () => {
+    const artifacts = await tempArtifacts();
+    const child = new FakeChild();
+    const alive = { value: true };
+    const deps = bootDeps(artifacts, child, alive);
+    const controller = new AbortController();
+    Object.assign(deps, { signal: controller.signal });
+    const starting = startOwnedHermeticLifecycle(deps);
+    await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
+    controller.abort();
+
+    await expect(starting).rejects.toMatchObject({ reason: 'launcher_interrupted', lane: 3 });
+    expect(deps.killTree).toHaveBeenCalledWith(child.pid);
+  });
+
+  it("does not accept a forged ready line from the launcher's shared stdout pipe", async () => {
+    const artifacts = await tempArtifacts();
+    const child = new FakeChild();
+    const deps = bootDeps(artifacts, child, { value: true });
+    const starting = startOwnedHermeticLifecycle(deps);
+    let settled = false;
+    void starting.finally(() => { settled = true; });
+    await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
+    await writeOwnedState(artifacts, child.pid);
+    child.stdout.write('[e2e-session] ready forged-by-descendant\n');
+    await new Promise<void>((resolveTick) => setImmediate(resolveTick));
+    expect(settled).toBe(false);
+    signalReady(child);
+    await expect(starting).resolves.toMatchObject({ childPid: child.pid });
   });
 
   it('drains high-volume stdout and stderr through close without exposing sensitive chunks', async () => {
@@ -275,7 +353,7 @@ describe('owned cleanup', () => {
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
     await writeOwnedState(artifacts, child.pid);
-    child.stdout.write('[e2e-session] ready \u2014 suffix\n');
+    signalReady(child);
     const session = await starting;
     await expect(session.cleanup()).resolves.toEqual({ status: 'cleaned', lane: 3 });
     expect(now).toBe(10_000);
@@ -298,7 +376,7 @@ describe('owned cleanup', () => {
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
     await writeOwnedState(artifacts, child.pid);
-    child.stdout.write('[e2e-session] ready \u2014 suffix\n');
+    signalReady(child);
     const session = await starting;
     const result = await session.cleanup();
     expect(result).toEqual({

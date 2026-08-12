@@ -45,6 +45,8 @@ export interface ResolveLaneOpts {
    * Must match the host the e2e stack services bind on.
    */
   host?: string;
+  /** Ignore an inherited E2E_LANE and always select through the free probe. */
+  ignoreEnv?: boolean;
 }
 
 /**

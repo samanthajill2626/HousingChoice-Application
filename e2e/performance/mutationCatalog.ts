@@ -36,7 +36,14 @@ function entry(
 const ENDPOINTS = 'dashboard/src/api/endpoints.ts';
 
 export const DASHBOARD_MUTATION_CATALOG: readonly DashboardMutationCatalogEntry[] = Object.freeze([
-  entry('dashboard/src/api/client.ts', 'requestWithStatus', 'fetch:delegated_to_typed_request_options', 'delegated_to_typed_request_options'),
+  entry(
+    'dashboard/src/api/client.ts',
+    'requestWithStatus',
+    'fetch:delegated_to_typed_request_options',
+    'delegated_to_typed_request_options',
+    'workflow_only',
+    'outside_interception',
+  ),
   entry(ENDPOINTS, 'logout', 'request:POST', '/auth/logout'),
   entry(ENDPOINTS, 'createPlacement', 'request:POST', '/api/placements'),
   entry(ENDPOINTS, 'createPlacementFromTour', 'request:POST', '/api/placements/from-tour'),

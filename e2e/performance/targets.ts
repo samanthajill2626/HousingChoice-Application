@@ -10,6 +10,7 @@ export type TargetFailureReason =
   | 'target_ping_not_dev'
   | 'target_prefix_mismatch'
   | 'target_revision_mismatch'
+  | 'target_owner_mismatch'
   | 'target_admin_required'
   | 'target_env_not_dev'
   | 'target_reseed_failed';
@@ -188,6 +189,7 @@ export async function verifyHermeticTarget(deps: {
   rawFetch: RawFetch;
   expectedTablePrefix: string;
   profilerCommit: string | null;
+  expectedOwnerToken: string;
 }): Promise<TargetMetadata> {
   if (!/^hc-local-[1-9][0-9]*-$/.test(deps.expectedTablePrefix)) {
     throw new SafeTargetError('hermetic', 'target_prefix_mismatch');
@@ -199,15 +201,21 @@ export async function verifyHermeticTarget(deps: {
   }
   const profilerCommit = normalizeGitRevision(deps.profilerCommit);
   const targetAppCommit = normalizeGitRevision(body['appCommit']);
-  if (profilerCommit !== null && targetAppCommit !== null && profilerCommit !== targetAppCommit) {
+  if (profilerCommit === null || targetAppCommit === null || profilerCommit !== targetAppCommit) {
     throw new SafeTargetError('hermetic', 'target_revision_mismatch');
+  }
+  if (
+    !/^[a-f0-9]{32}$/u.test(deps.expectedOwnerToken)
+    || body['profilerOwnerToken'] !== deps.expectedOwnerToken
+  ) {
+    throw new SafeTargetError('hermetic', 'target_owner_mismatch');
   }
   return metadata(
     'hermetic',
     'hermetic_lane',
     profilerCommit,
     targetAppCommit,
-    profilerCommit !== null && targetAppCommit !== null ? 'verified' : 'unverified',
+    'verified',
   );
 }
 

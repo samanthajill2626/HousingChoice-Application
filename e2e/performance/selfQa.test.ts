@@ -206,24 +206,24 @@ describe('self-QA closed proof evaluator', () => {
     expect(result.sampleCount).toBe(56);
   });
 
-  it('associates the warm row-click attempt before de-duplicating destination mount retries', () => {
+  it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {
     const writes = [
       { method: 'POST' as const, endpointTemplate: '/api/conversations/:conversationId/read', phase: 'destination_mount' as const },
       { method: 'POST' as const, endpointTemplate: '/api/conversations/:conversationId/read', phase: 'destination_mount' as const },
     ];
     expect(attemptsFromSamples([sample('/conversations/:conversationId', 'warm', writes)])).toEqual([
-      { surface: 'conversation_detail', mode: 'warm', ...writes[0], phase: 'source_click' },
+      { surface: 'conversation_detail', mode: 'warm', ...writes[0] },
       { surface: 'conversation_detail', mode: 'warm', ...writes[1] },
     ]);
   });
 
-  it('associates the keyed inbox click and destination attempts while keeping unmatched source-only', () => {
+  it('preserves supplemental phases while keeping unmatched source-only', () => {
     const duplicateDestination = [
       { method: 'POST' as const, endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount' as const },
       { method: 'POST' as const, endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount' as const },
     ];
     expect(supplementalAttempts('inbox_row', duplicateDestination).map((row) => row.phase)).toEqual([
-      'source_click', 'destination_mount',
+      'destination_mount', 'destination_mount',
     ]);
     expect(supplementalAttempts('unmatched_email', [{
       method: 'POST', endpointTemplate: '/api/unmatched-email/:unmatchedId/read', phase: 'source_click',

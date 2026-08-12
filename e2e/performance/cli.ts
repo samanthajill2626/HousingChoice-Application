@@ -1,5 +1,5 @@
-import { pathToFileURL } from 'node:url';
-import { resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import type {
   Browser,
@@ -23,7 +23,7 @@ import type {
   SampleInstrumentation,
   SamplePage,
 } from './collect.js';
-import type { FirewallRecordingToken } from './firewall.js';
+import type { FirewallController, FirewallRecordingToken } from './firewall.js';
 import type {
   LocatorContract,
   ResolverApi,
@@ -36,6 +36,11 @@ import { terminalAlternativeVisible } from './readiness.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
 
+export function performanceArtifactRoot(moduleUrl = import.meta.url): string {
+  const repoRoot = resolve(dirname(fileURLToPath(moduleUrl)), '..', '..');
+  return resolve(repoRoot, 'e2e', '.artifacts', 'performance');
+}
+
 export interface CliReportResult {
   exitCode: number;
   status: string;
@@ -45,7 +50,7 @@ export interface CliReportResult {
 }
 
 export interface CliRuntime {
-  startHermetic(config: RunConfig): Promise<unknown>;
+  startHermetic(config: RunConfig, signal?: AbortSignal): Promise<unknown>;
   verifyHermetic(config: RunConfig, lifecycle: unknown): Promise<void>;
   reseedHermetic(config: RunConfig, lifecycle: unknown): Promise<void>;
   verifyLocal(config: RunConfig): Promise<void>;
@@ -67,6 +72,40 @@ export interface RunProfilerDeps {
   configDeps?: ParseRunConfigDeps;
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
+  processEvents?: ProfilerProcessEventSource;
+}
+
+export interface ProfilerProcessEventSource {
+  on(event: 'SIGINT' | 'SIGTERM' | 'uncaughtException' | 'unhandledRejection', listener: (...args: unknown[]) => void): unknown;
+  off(event: 'SIGINT' | 'SIGTERM' | 'uncaughtException' | 'unhandledRejection', listener: (...args: unknown[]) => void): unknown;
+}
+
+export function installProfilerProcessHandlers(
+  controller: AbortController,
+  source: ProfilerProcessEventSource = process,
+): () => void {
+  const handle = (): void => {
+    if (!controller.signal.aborted) controller.abort({ reason: 'interrupted' });
+  };
+  const events = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const;
+  for (const event of events) source.on(event, handle);
+  return () => {
+    for (const event of events) source.off(event, handle);
+  };
+}
+
+async function abortable<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
+  if (signal.aborted) throw { reason: 'interrupted' };
+  let onAbort!: () => void;
+  const aborted = new Promise<never>((_resolve, reject) => {
+    onAbort = () => reject({ reason: 'interrupted' });
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([operation(), aborted]);
+  } finally {
+    signal.removeEventListener('abort', onAbort);
+  }
 }
 
 function closedReason(error: unknown): string {
@@ -184,11 +223,17 @@ export async function runProfiler(
     stderr(`${closedReason(error)}\n`);
     return 1;
   }
+  const abortController = new AbortController();
+  const detachFatalHandlers = installProfilerProcessHandlers(
+    abortController,
+    deps.processEvents ?? process,
+  );
+  const signal = abortController.signal;
 
   if (config.target === 'hermetic') {
     let lifecycle: unknown;
     try {
-      lifecycle = await runtime.startHermetic(config);
+      lifecycle = await abortable(signal, () => runtime.startHermetic(config, signal));
     } catch (error) {
       const failure = cleanupFailure(error);
       if (failure !== null) {
@@ -196,6 +241,7 @@ export async function runProfiler(
       } else {
         stderr(`${closedReason(error)}\n`);
       }
+      detachFatalHandlers();
       return 1;
     }
 
@@ -203,14 +249,14 @@ export async function runProfiler(
     let dashboard: unknown;
     let exitCode = 1;
     try {
-      await runtime.verifyHermetic(config, lifecycle);
-      await runtime.reseedHermetic(config, lifecycle);
-      dashboard = await runtime.openDashboard(config, lifecycle);
-      const auth = await runtime.authenticateHermetic(config, dashboard);
-      await runtime.installFirewall(config, dashboard, auth);
-      await runtime.warmup(config, dashboard, auth);
-      const collected = await runtime.collect(config, dashboard, auth);
-      const report = await runtime.report(config, collected);
+      await abortable(signal, () => runtime.verifyHermetic(config, lifecycle));
+      await abortable(signal, () => runtime.reseedHermetic(config, lifecycle));
+      dashboard = await abortable(signal, () => runtime.openDashboard(config, lifecycle));
+      const auth = await abortable(signal, () => runtime.authenticateHermetic(config, dashboard));
+      await abortable(signal, () => runtime.installFirewall(config, dashboard, auth));
+      await abortable(signal, () => runtime.warmup(config, dashboard, auth));
+      const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth));
+      const report = await abortable(signal, () => runtime.report(config, collected));
       writeReportOutput(report, stdout);
       exitCode = report.exitCode === 0 ? 0 : 1;
     } catch (error) {
@@ -230,21 +276,22 @@ export async function runProfiler(
         exitCode = 1;
       }
       detachSignals?.();
+      detachFatalHandlers();
     }
     return exitCode;
   }
 
   let dashboard: unknown;
   try {
-    if (config.target === 'local') await runtime.verifyLocal(config);
-    dashboard = await runtime.openDashboard(config);
+    if (config.target === 'local') await abortable(signal, () => runtime.verifyLocal(config));
+    dashboard = await abortable(signal, () => runtime.openDashboard(config));
     const auth = config.target === 'local'
-      ? await runtime.authenticateLocal(config, dashboard)
-      : await runtime.authenticateHosted(config, dashboard);
-    await runtime.installFirewall(config, dashboard, auth);
-    if (config.target === 'local') await runtime.warmup(config, dashboard, auth);
-    const collected = await runtime.collect(config, dashboard, auth);
-    const report = await runtime.report(config, collected);
+      ? await abortable(signal, () => runtime.authenticateLocal(config, dashboard))
+      : await abortable(signal, () => runtime.authenticateHosted(config, dashboard));
+    await abortable(signal, () => runtime.installFirewall(config, dashboard, auth));
+    if (config.target === 'local') await abortable(signal, () => runtime.warmup(config, dashboard, auth));
+    const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth));
+    const report = await abortable(signal, () => runtime.report(config, collected));
     writeReportOutput(report, stdout);
     return report.exitCode === 0 ? 0 : 1;
   } catch (error) {
@@ -252,6 +299,7 @@ export async function runProfiler(
     return 1;
   } finally {
     if (dashboard !== undefined) await closeQuietly(runtime, dashboard);
+    detachFatalHandlers();
   }
 }
 
@@ -344,6 +392,7 @@ export async function readPageStoreSnapshot(
 interface RealPage extends SamplePage {
   readonly rawPage: Page;
   readonly contextState: { token: FirewallRecordingToken | null };
+  readonly firewall: FirewallController;
   readonly baseUrl: string;
 }
 
@@ -355,6 +404,7 @@ function createRealSamplePage(input: {
   page: Page;
   context: BrowserContext;
   contextState: { token: FirewallRecordingToken | null };
+  firewall: FirewallController;
   baseUrl: string;
   pageStoreInstaller: typeof import('./readiness.js')['pageStoreInstaller'];
 }): RealPage {
@@ -365,6 +415,7 @@ function createRealSamplePage(input: {
   return {
     rawPage: input.page,
     contextState: input.contextState,
+    firewall: input.firewall,
     baseUrl: input.baseUrl,
     async installNextDocumentBootstrap(token): Promise<void> {
       await input.context.addInitScript(input.pageStoreInstaller, {
@@ -430,39 +481,54 @@ function createRealSampleBrowser(input: {
         baseURL: input.baseUrl,
       });
       const contextState = { token: null as FirewallRecordingToken | null };
-      await input.modules.firewall.installRequestFirewall({
-        context: context as never,
-        firstPartyOrigin: input.baseUrl,
-        currentToken: () => contextState.token,
-      });
+      const firewalls: FirewallController[] = [];
       return {
         async installBasePageStore(): Promise<void> {
           await input.modules.readiness.installPageStoreInitScript(context as never);
         },
         async newPage(): Promise<SamplePage> {
           const page = await context.newPage();
+          const firewall = await input.modules.firewall.installRequestFirewall({
+            page: page as never,
+            firstPartyOrigin: input.baseUrl,
+            currentToken: () => contextState.token,
+          });
+          firewalls.push(firewall);
           return createRealSamplePage({
             page,
             context,
             contextState,
+            firewall,
             baseUrl: input.baseUrl,
             pageStoreInstaller: input.modules.readiness.pageStoreInstaller,
           });
         },
         async close(): Promise<void> {
-          await context.close();
+          try {
+            await Promise.all(firewalls.map((firewall) => firewall.dispose()));
+          } finally {
+            await context.close();
+          }
         },
       };
     },
   };
 }
 
-async function cdpTimestamp(session: CDPSession): Promise<number> {
+export async function captureCdpClockAlignment(
+  session: Pick<CDPSession, 'send'>,
+  now: () => number = () => performance.now(),
+): Promise<{ cdpOriginSeconds: number; nodeOriginMs: number }> {
   await session.send('Performance.enable');
+  const beforeMs = now();
   const result = await session.send('Performance.getMetrics') as {
     metrics?: Array<{ name: string; value: number }>;
   };
-  return result.metrics?.find((metric) => metric.name === 'Timestamp')?.value ?? 0;
+  const afterMs = now();
+  return {
+    cdpOriginSeconds: result.metrics?.find((metric) => metric.name === 'Timestamp')?.value ?? 0,
+    nodeOriginMs: beforeMs + ((afterMs - beforeMs) / 2),
+  };
 }
 
 export function createRealInstrumentation(input: {
@@ -503,10 +569,10 @@ export function createRealInstrumentation(input: {
   return {
     async beginSample(begin): Promise<void> {
       page = begin.page as RealPage;
+      await page.firewall.assertHealthy();
       adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
-      nodeOriginMs = performance.now();
       collector = new input.modules.collect.NetworkCollector({
         firstPartyOrigin: input.baseUrl,
         routeKey: input.route.key,
@@ -515,13 +581,18 @@ export function createRealInstrumentation(input: {
         expectedGets: input.modules.routes.expectedGets(input.route, input.mode, begin.branch),
       });
       cdp = await page.rawPage.context().newCDPSession(page.rawPage);
-      await cdp.send('Network.enable');
-      const originSeconds = await cdpTimestamp(cdp);
-      collector.beginSample({ token, cdpOriginSeconds: originSeconds, nodeOriginMs });
       cdp.on('Network.requestWillBeSent', (event) => collector?.requestWillBeSent(token, event as never));
       cdp.on('Network.responseReceived', (event) => collector?.responseReceived(token, event as never));
       cdp.on('Network.loadingFinished', (event) => collector?.loadingFinished(token, event as never));
       cdp.on('Network.loadingFailed', (event) => collector?.loadingFailed(token, event as never));
+      await cdp.send('Network.enable');
+      const alignment = await captureCdpClockAlignment(cdp);
+      nodeOriginMs = alignment.nodeOriginMs;
+      collector.beginSample({
+        token,
+        cdpOriginSeconds: alignment.cdpOriginSeconds,
+        nodeOriginMs,
+      });
       consoleListener = (message) => {
         const level = message.type() === 'error' ? 'error' : message.type() === 'warning' ? 'warning' : null;
         if (level !== null) collector?.noteConsole(token, level, message.text(), performance.now());
@@ -571,6 +642,7 @@ export function createRealInstrumentation(input: {
           network: collector,
           ui: {
             async urlMatches(): Promise<boolean> {
+              await page!.firewall.assertHealthy();
               try {
                 return new URL(page!.rawPage.url()).pathname === new URL(
                   absoluteUrl(input.baseUrl, destinationPath),
@@ -591,6 +663,7 @@ export function createRealInstrumentation(input: {
             },
           },
         });
+        await page.firewall.assertHealthy();
         for (const write of page.contextState.token?.evidence() ?? []) collector.noteBlockedWrite(token, write);
         const ended = collector.endSample(token);
         input.requests.push(...ended.requests);
@@ -677,6 +750,7 @@ function resolverFor(
 interface DefaultLifecycle {
   lane: number;
   childPid: number;
+  ownerToken: string;
   appBaseUrl: string;
   dashboardBaseUrl: string;
   tablePrefix: string;
@@ -716,12 +790,12 @@ async function runSupplementalSelfQaProbes(input: {
     serviceWorkers: 'block',
   });
   const state = { token: null as FirewallRecordingToken | null };
-  await input.firewall.installRequestFirewall({
-    context: context as never,
+  const page = await context.newPage();
+  const firewall = await input.firewall.installRequestFirewall({
+    page: page as never,
     firstPartyOrigin: input.baseUrl,
     currentToken: () => state.token,
   });
-  const page = await context.newPage();
   try {
     await page.goto(absoluteUrl(input.baseUrl, '/inbox'));
     const href = `/contacts/${input.bindings.inbox_row}`;
@@ -736,6 +810,7 @@ async function runSupplementalSelfQaProbes(input: {
     await link.click();
     await page.waitForURL((url) => url.pathname === href, { timeout: 120_000 });
     await page.waitForTimeout(750);
+    await firewall.assertHealthy();
     attempts.push(...input.selfQa.supplementalAttempts('inbox_row', state.token.evidence()));
 
     state.token = null;
@@ -754,9 +829,11 @@ async function runSupplementalSelfQaProbes(input: {
     });
     await expand.click();
     await page.waitForTimeout(750);
+    await firewall.assertHealthy();
     attempts.push(...input.selfQa.supplementalAttempts('unmatched_email', state.token.evidence()));
   } finally {
     state.token = null;
+    await firewall.dispose();
     await context.close();
   }
   return attempts;
@@ -807,9 +884,9 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
   };
 
   return {
-    async startHermetic(): Promise<DefaultLifecycle> {
+    async startHermetic(_runConfig, signal): Promise<DefaultLifecycle> {
       if (lifecycleModule === null) throw new Error('unexpected_failure');
-      activeLifecycle = await lifecycleModule.startOwnedHermeticLifecycle() as DefaultLifecycle;
+      activeLifecycle = await lifecycleModule.startOwnedHermeticLifecycle({ signal }) as DefaultLifecycle;
       return activeLifecycle;
     },
     async verifyHermetic(_runConfig, owned): Promise<void> {
@@ -820,6 +897,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         rawFetch,
         expectedTablePrefix: lifecycle.tablePrefix,
         profilerCommit,
+        expectedOwnerToken: lifecycle.ownerToken,
       });
     },
     async reseedHermetic(runConfig, owned): Promise<void> {
@@ -933,11 +1011,6 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
     },
     async installFirewall(_runConfig, value): Promise<void> {
       const dashboard = value as DefaultDashboard;
-      await firewallModule.installRequestFirewall({
-        context: dashboard.authContext as never,
-        firstPartyOrigin: dashboard.baseUrl,
-        currentToken: () => null,
-      });
       dashboard.firewallInstalled = true;
     },
     async warmup(): Promise<void> {
@@ -1100,7 +1173,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         baselineJson = await fs.readFile(runConfig.baselinePath, 'utf8');
       }
       const result = await reportModule.writePerformanceReport({
-        outputRoot: resolve(process.cwd(), 'e2e', '.artifacts', 'performance'),
+        outputRoot: performanceArtifactRoot(),
         config: toSafeRunConfig(runConfig),
         target: value['target'] as never,
         samples: value['samples'] as never[],

@@ -1,5 +1,14 @@
+import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
-import { main, readPageStoreSnapshot, runProfiler, type CliRuntime } from './cli.js';
+import {
+  captureCdpClockAlignment,
+  installProfilerProcessHandlers,
+  main,
+  performanceArtifactRoot,
+  readPageStoreSnapshot,
+  runProfiler,
+  type CliRuntime,
+} from './cli.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
 import type { SampleInstrumentation } from './collect.js';
@@ -35,6 +44,41 @@ const configDeps = {
 };
 
 describe('top-level profiler sequencing', () => {
+  it('turns signals and fatal process events into a closed abort without retaining raw errors', () => {
+    for (const event of ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const) {
+      const source = new EventEmitter();
+      const controller = new AbortController();
+      const detach = installProfilerProcessHandlers(controller, source as never);
+      source.emit(event, new Error('private.person@example.test'));
+      expect(controller.signal.aborted).toBe(true);
+      expect(JSON.stringify(controller.signal.reason)).not.toContain('private.person');
+      detach();
+    }
+  });
+
+  it('aligns the Node clock to the midpoint of the CDP timestamp round trip', async () => {
+    const send = vi.fn(async (method: string) => method === 'Performance.getMetrics'
+      ? { metrics: [{ name: 'Timestamp', value: 123.5 }] }
+      : {});
+    const now = vi.fn()
+      .mockReturnValueOnce(100)
+      .mockReturnValueOnce(112);
+
+    await expect(captureCdpClockAlignment({ send } as never, now)).resolves.toEqual({
+      cdpOriginSeconds: 123.5,
+      nodeOriginMs: 106,
+    });
+    expect(send.mock.calls.map(([method]) => method)).toEqual([
+      'Performance.enable',
+      'Performance.getMetrics',
+    ]);
+  });
+
+  it('anchors performance artifacts to the repository instead of the caller cwd', () => {
+    expect(performanceArtifactRoot()).toMatch(/[\\/]e2e[\\/]\.artifacts[\\/]performance$/u);
+    expect(performanceArtifactRoot()).not.toContain('e2e\\e2e');
+  });
+
   it('disposes real sample adapters once across cancellation and later collector cleanup', async () => {
     const cliModule = await import('./cli.js') as typeof import('./cli.js') & {
       createRealInstrumentation?: (input: unknown) => SampleInstrumentation;
@@ -61,6 +105,10 @@ describe('top-level profiler sequencing', () => {
         evaluate: vi.fn(async () => undefined),
       },
       contextState,
+      firewall: {
+        assertHealthy: vi.fn(async () => undefined),
+        dispose: vi.fn(async () => undefined),
+      },
       baseUrl: 'http://127.0.0.1:9111',
     };
     class FakeNetworkCollector {
@@ -228,6 +276,30 @@ describe('top-level profiler sequencing', () => {
       'start', 'verify', 'reseed', 'dashboard', 'auth-hermetic', 'firewall',
       'warmup', 'collect', 'report', 'close-dashboard', 'cleanup',
     ]);
+  });
+
+  it('aborts an active hermetic phase on SIGINT and still runs owned cleanup', async () => {
+    const events: string[] = [];
+    const processEvents = new EventEmitter();
+    const value = runtime(events, {
+      verifyHermetic: vi.fn(async () => {
+        events.push('verify');
+        await new Promise<void>(() => undefined);
+      }),
+    });
+    const stderr = vi.fn();
+    const running = runProfiler(['hermetic'], {
+      configDeps,
+      loadRuntime: vi.fn(async () => value),
+      processEvents: processEvents as never,
+      stderr,
+    });
+    await vi.waitFor(() => expect(value.verifyHermetic).toHaveBeenCalledOnce());
+    processEvents.emit('SIGINT');
+
+    await expect(running).resolves.toBe(1);
+    expect(events.at(-1)).toBe('cleanup');
+    expect(stderr).toHaveBeenCalledWith('interrupted\n');
   });
 
   it('always cleans hermetic startup, profiling, report, browser, and privacy failures', async () => {

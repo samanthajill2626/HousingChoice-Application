@@ -11,6 +11,7 @@ import {
 } from './targets.js';
 
 const response = (status: number, body: unknown) => ({ status, json: async () => body });
+const OWNER_TOKEN = '0123456789abcdef0123456789abcdef';
 
 describe('performance target safety proofs', () => {
   it.each([
@@ -85,9 +86,11 @@ describe('performance target safety proofs', () => {
         dev: true,
         tablePrefix: 'hc-local-3-',
         appCommit: 'ABCDEF1',
+        profilerOwnerToken: OWNER_TOKEN,
       })),
       expectedTablePrefix: 'hc-local-3-',
       profilerCommit: 'abcdef1',
+      expectedOwnerToken: OWNER_TOKEN,
     });
     expect(result.targetVersionStatus).toBe('verified');
     expect(result.targetAppCommit).toBe('abcdef1');
@@ -103,31 +106,49 @@ describe('performance target safety proofs', () => {
       })),
       expectedTablePrefix: 'hc-local-',
       profilerCommit: 'abcdef1',
+      expectedOwnerToken: OWNER_TOKEN,
     })).rejects.toMatchObject({ reason: 'target_prefix_mismatch' });
   });
 
-  it('refuses only a non-null unequal hermetic revision pair', async () => {
+  it('requires exact nonempty commit and owner-token identity for a hermetic child', async () => {
     await expect(verifyHermeticTarget({
       appBaseUrl: 'http://127.0.0.1:9301',
       rawFetch: vi.fn().mockResolvedValue(response(200, {
         dev: true,
         tablePrefix: 'hc-local-3-',
         appCommit: '7654321',
+        profilerOwnerToken: OWNER_TOKEN,
       })),
       expectedTablePrefix: 'hc-local-3-',
       profilerCommit: 'abcdef1',
+      expectedOwnerToken: OWNER_TOKEN,
     })).rejects.toMatchObject({ reason: 'target_revision_mismatch' });
-    const unverified = await verifyHermeticTarget({
+
+    await expect(verifyHermeticTarget({
       appBaseUrl: 'http://127.0.0.1:9301',
       rawFetch: vi.fn().mockResolvedValue(response(200, {
         dev: true,
         tablePrefix: 'hc-local-3-',
         appCommit: '',
+        profilerOwnerToken: OWNER_TOKEN,
       })),
       expectedTablePrefix: 'hc-local-3-',
       profilerCommit: 'abcdef1',
-    });
-    expect(unverified).toMatchObject({ targetAppCommit: null, targetVersionStatus: 'unverified' });
+      expectedOwnerToken: OWNER_TOKEN,
+    })).rejects.toMatchObject({ reason: 'target_revision_mismatch' });
+
+    await expect(verifyHermeticTarget({
+      appBaseUrl: 'http://127.0.0.1:9301',
+      rawFetch: vi.fn().mockResolvedValue(response(200, {
+        dev: true,
+        tablePrefix: 'hc-local-3-',
+        appCommit: 'abcdef1',
+        profilerOwnerToken: 'fedcba9876543210fedcba9876543210',
+      })),
+      expectedTablePrefix: 'hc-local-3-',
+      profilerCommit: 'abcdef1',
+      expectedOwnerToken: OWNER_TOKEN,
+    })).rejects.toMatchObject({ reason: 'target_owner_mismatch' });
   });
 
   it('requires hosted HTTPS, admin auth, and exact dev flags through dashboard requests', async () => {

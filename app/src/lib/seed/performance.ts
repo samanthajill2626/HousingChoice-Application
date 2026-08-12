@@ -193,7 +193,7 @@ export function resolvePerformanceSeedConfig(
   const recipientPoolSize = contacts === 0 ? 1 : contacts;
   const resolvedRecipientsPerBroadcast = Math.min(recipientsPerBroadcast, recipientPoolSize);
   const resolvedRecipientCount = broadcasts * resolvedRecipientsPerBroadcast;
-  const requestedRelayGroupCount = Math.floor(conversations / 5);
+  const requestedRelayGroupCount = conversations === 0 ? 0 : Math.max(1, Math.floor(conversations / 5));
   const relayGroupCount = Math.min(
     requestedRelayGroupCount,
     PERFORMANCE_SEED_BOUNDS.relayGroups.max,
@@ -407,10 +407,13 @@ function buildTour(
   anchorMs: number,
   tenantIds: readonly string[],
   unitIds: readonly string[],
+  guaranteeScheduled: boolean,
 ): TourItem {
-  const status = TOUR_STATUSES[index % TOUR_STATUSES.length]!;
+  const status = guaranteeScheduled && index === 0
+    ? 'scheduled'
+    : TOUR_STATUSES[index % TOUR_STATUSES.length]!;
   const scheduledAt =
-    index === 1
+    (guaranteeScheduled && index === 0) || index === 1
       ? new Date(anchorMs).toISOString()
       : at(anchorMs, ((index % 29) + 1) * DAY_MS + (index % 8) * 60 * MINUTE_MS);
   return {
@@ -747,7 +750,7 @@ export function generatePerformanceSeed(
     buildPlacement(index, anchorMs, tenantIds, unitIds),
   );
   const tours = Array.from({ length: config.tours }, (_, index) =>
-    buildTour(index, anchorMs, tenantIds, unitIds),
+    buildTour(index, anchorMs, tenantIds, unitIds, config.tours === 1),
   );
   const conversations = Array.from({ length: config.conversations }, (_, index) =>
     buildConversation(index, anchorMs, config.relayGroupCount, contacts),

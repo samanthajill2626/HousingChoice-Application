@@ -77,6 +77,7 @@ const ENDPOINT_TEMPLATES: ReadonlySet<string> = new Set([
   'invalid_url',
 ]);
 const SAFE_ROUTE_KEY = /^\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*$/u;
+const ROUTE_KEYS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.key));
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
 const SAFE_RUN_ID = /^\d{8}T\d{9}Z-[0-9a-f]{8}$/u;
@@ -157,6 +158,7 @@ export type ContractCheckpointMismatchCode =
   | 'unexpected_endpoint'
   | 'unmatched_api'
   | 'undeclared_background'
+  | 'missing_blocked_write'
   | 'wrong_blocked_write_tuple';
 
 export interface ContractEndpointObservation {
@@ -302,10 +304,16 @@ export function evaluateContractCheckpoint(
       if (endpointResult.missingRequired.length > 0) mismatches.add('missing_required_endpoint');
       if (endpointResult.undeclared.length > 0) mismatches.add('unexpected_endpoint');
 
-      const expectedWrites = new Set([...expectedBlockedWrites(route, mode, branch)].map((tuple) =>
-        tuple.split('|').slice(1).join('|'),
+      const expectedWrites = new Set<string>(expectedBlockedWrites(route, mode, branch));
+      const blockedSurface = branch.kind === 'thread_detail'
+        ? branch.thread === 'group_thread' ? 'group_thread' : 'person_thread'
+        : route.blockedSurface ?? 'unexpected_surface';
+      const actualWrites = new Set((sample?.blockedWrites ?? []).map((write) =>
+        `${blockedSurface}|${blockedShape(write)}`,
       ));
-      const actualWrites = new Set((sample?.blockedWrites ?? []).map(blockedShape));
+      if ([...expectedWrites].some((tuple) => !actualWrites.has(tuple))) {
+        mismatches.add('missing_blocked_write');
+      }
       if ([...actualWrites].some((tuple) => !expectedWrites.has(tuple))) {
         mismatches.add('wrong_blocked_write_tuple');
       }
@@ -352,8 +360,9 @@ function nullableFinite(value: unknown): number | null {
 }
 
 function routeKey(value: unknown): string {
-  if (value === '/') return '/';
-  return typeof value === 'string' && SAFE_ROUTE_KEY.test(value) ? value : String(value ?? 'invalid_route');
+  return typeof value === 'string' && SAFE_ROUTE_KEY.test(value) && ROUTE_KEYS.has(value)
+    ? value
+    : 'invalid_route';
 }
 
 function endpointTemplate(value: unknown): string {
@@ -539,6 +548,7 @@ function browserMetadata(config: SafeRunConfig, browser: ReportBrowserInput): Br
     channel: config.browserChannel,
     version,
     major: Number.parseInt(version.split('.')[0]!, 10),
+    httpCache: 'preserved',
     viewport: {
       width: integer(browser.viewport.width),
       height: integer(browser.viewport.height),
@@ -579,12 +589,48 @@ function comparisonEnvironment(
   };
 }
 
+function record(value: unknown): Record<string, unknown> | null {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function baselineSummary(value: unknown): boolean {
+  const summary = record(value);
+  return summary !== null && (summary['median'] === null
+    || (typeof summary['median'] === 'number' && Number.isFinite(summary['median'])));
+}
+
+function baselineAggregate(value: unknown): value is RouteModeAggregate {
+  const aggregate = record(value);
+  const metrics = record(aggregate?.['metrics']);
+  const resources = record(metrics?.['resourceCountsByClass']);
+  const statuses = record(aggregate?.['statusCounts']);
+  return aggregate !== null
+    && routeKey(aggregate['routeKey']) === aggregate['routeKey']
+    && (aggregate['mode'] === 'cold' || aggregate['mode'] === 'warm')
+    && metrics !== null
+    && baselineSummary(metrics['readyMs'])
+    && baselineSummary(metrics['apiRequestCount'])
+    && baselineSummary(metrics['apiTransferBytes'])
+    && baselineSummary(metrics['longTaskTotalMs'])
+    && baselineSummary(metrics['domElements'])
+    && resources !== null
+    && RESOURCE_CLASSES.every((resourceClass) => baselineSummary(resources[resourceClass]))
+    && statuses !== null
+    && SAMPLE_STATUSES.every((status) => Number.isSafeInteger(statuses[status]) && Number(statuses[status]) >= 0);
+}
+
 function createComparisonRun(summary: Record<string, unknown>): ComparisonRun {
+  const aggregates = summary['aggregates'];
+  if (!Array.isArray(aggregates) || !aggregates.every(baselineAggregate)) {
+    throw new Error('baseline_schema_invalid');
+  }
   return {
-    schemaVersion: summary.schemaVersion as number,
-    environment: summary.environment as ComparisonEnvironment,
-    revisions: summary.revisions as ComparisonRun['revisions'],
-    aggregates: summary.aggregates as RouteModeAggregate[],
+    schemaVersion: summary['schemaVersion'] as number,
+    environment: summary['environment'] as ComparisonEnvironment,
+    revisions: summary['revisions'] as ComparisonRun['revisions'],
+    aggregates,
   };
 }
 

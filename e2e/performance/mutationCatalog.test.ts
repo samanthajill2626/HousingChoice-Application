@@ -3,6 +3,7 @@ import { dirname, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
+import { isCatalogPathIntercepted } from './firewall.js';
 import { DASHBOARD_MUTATION_CATALOG } from './mutationCatalog.js';
 
 type StaticMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
@@ -398,5 +399,12 @@ describe('dashboard mutation inventory', () => {
     expect(byPath('/public/housing-fair')).toEqual([
       expect.objectContaining({ behavior: 'workflow_only', interception: 'outside_interception' }),
     ]);
+    for (const entry of DASHBOARD_MUTATION_CATALOG) {
+      expect(entry.interception).toBe(
+        isCatalogPathIntercepted(entry.pathCategory) ? 'first_party_api' : 'outside_interception',
+      );
+    }
+    expect(DASHBOARD_MUTATION_CATALOG.filter((entry) => entry.behavior === 'automatic_in_scope')
+      .every((entry) => isCatalogPathIntercepted(entry.pathCategory))).toBe(true);
   });
 });

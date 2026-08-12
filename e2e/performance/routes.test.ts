@@ -278,6 +278,13 @@ describe('route registry completeness', () => {
       cited(terminalSources[route.key]);
       cited(CONTRACT_SOURCE_LEDGER.resolvers[route.resolver]);
     }
+    expect(Object.keys(CONTRACT_SOURCE_LEDGER.warmRequirementClassifications).sort()).toEqual([
+      '/email/quarantine', '/tours/closed',
+    ]);
+    for (const classification of Object.values(CONTRACT_SOURCE_LEDGER.warmRequirementClassifications)) {
+      cited(classification.source);
+      expect(classification.reason).toMatch(/passive navigation work\.$/u);
+    }
     for (const branch of [
       'contact_detail_tenant', 'contact_detail_landlord_with_units', 'contact_detail_other',
       'unit_detail_with_landlord', 'unit_detail_without_landlord',

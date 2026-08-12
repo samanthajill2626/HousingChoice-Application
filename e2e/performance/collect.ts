@@ -162,6 +162,7 @@ interface RequestStartEvent {
   requestId: string;
   timestamp: number;
   type?: string;
+  redirectResponse?: { status: number };
   request: { method: string; url: string };
 }
 
@@ -300,6 +301,12 @@ export class NetworkCollector {
   requestWillBeSent(token: string, event: RequestStartEvent): void {
     const startOffsetMs = this.#active(token, event.timestamp);
     if (startOffsetMs === null || event.request.method.toUpperCase() !== 'GET') return;
+    if (event.redirectResponse !== undefined && this.#inFlight.has(event.requestId)) {
+      const pending = this.#inFlight.get(event.requestId)!;
+      pending.responseSeconds ??= event.timestamp;
+      pending.status = Number.isFinite(event.redirectResponse.status) ? event.redirectResponse.status : null;
+      this.#finish(token, event.requestId, event.timestamp, 'finished', null);
+    }
     let parsed: URL;
     try {
       parsed = new URL(event.request.url);
@@ -422,6 +429,29 @@ export class NetworkCollector {
 
   endSample(token: string): EndedNetworkSample {
     const snapshot = this.snapshot(token);
+    for (const [requestId, pending] of this.#inFlight) {
+      this.#inFlight.delete(requestId);
+      this.#requests.push({
+        routeKey: this.#input.routeKey,
+        mode: this.#input.mode,
+        repeat: this.#input.repeat,
+        method: 'GET',
+        resourceClass: pending.resourceClass,
+        originClass: pending.sanitized.originClass,
+        endpointTemplate: pending.sanitized.endpointTemplate,
+        queryKeys: [...pending.sanitized.queryKeys],
+        startOffsetMs: pending.startOffsetMs,
+        durationMs: null,
+        ttfbMs: pending.responseSeconds === null
+          ? null
+          : Math.max(0, Math.round((pending.responseSeconds - pending.startSeconds) * 1_000 * 1_000) / 1_000),
+        status: pending.status,
+        transferBytes: null,
+        outcome: 'failed',
+        requestRole: pending.role,
+        unmatchedApi: pending.sanitized.unmatchedApi || pending.forceUnmatched,
+      });
+    }
     return {
       ...snapshot,
       requests: this.#requests.map((row) => ({ ...row, queryKeys: [...row.queryKeys] })),

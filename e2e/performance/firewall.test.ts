@@ -1,208 +1,208 @@
 import { describe, expect, it, vi } from 'vitest';
-import { sanitizeRequestUrl } from './templates.js';
 import {
+  INTERCEPTION_SCOPE_VERSION,
   NEVER_INTERCEPTED_PATHS,
   PROFILER_CONTEXT_OPTIONS,
+  FirewallAttributionError,
   FirewallPhaseError,
   UnknownFirewallMethodError,
   createFirewallRecordingToken,
+  firewallRequestPatterns,
   installRequestFirewall,
-  type FirewallRouteHandler,
-  type FirewallRouteLike,
-  type FirewallRoutePredicate,
-  type FirewallRouteRegistrar,
+  isFirewallScopedUrl,
+  type FirewallCdpSession,
+  type FirewallPausedRequest,
 } from './firewall.js';
 
 const ORIGIN = 'https://dashboard.example.test';
 
-class FakeContext implements FirewallRouteRegistrar {
-  private predicate: FirewallRoutePredicate | null = null;
-  private handler: FirewallRouteHandler | null = null;
-  readonly originRequests: Array<{ method: string; url: string }> = [];
-  readonly abortedRequests: Array<{ method: string; url: string }> = [];
-  handlerCalls = 0;
-  continueCalls = 0;
+class FakeSession implements FirewallCdpSession {
+  readonly sent: Array<{ method: string; params: Record<string, unknown> | undefined }> = [];
+  readonly handlers = new Map<string, Array<(event: never) => void>>();
+  frameUrl = `${ORIGIN}/source`;
+  detached = false;
 
-  async route(predicate: FirewallRoutePredicate, handler: FirewallRouteHandler): Promise<void> {
-    this.predicate = predicate;
-    this.handler = handler;
+  async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
+    this.sent.push({ method, params });
+    if (method === 'Page.getFrameTree') {
+      return { frameTree: { frame: { id: 'main', url: this.frameUrl } } };
+    }
+    return {};
   }
 
-  async issue(method: string, url: string, frameUrl = `${ORIGIN}/source`): Promise<'origin' | 'aborted'> {
-    if (this.predicate === null || this.handler === null) throw new Error('firewall_not_installed');
-    const request = {
-      method: () => method,
-      url: () => url,
-      frame: () => ({ url: () => frameUrl }),
-    };
-    let outcome: 'origin' | 'aborted' | null = null;
-    const route: FirewallRouteLike = {
-      request: () => request,
-      continue: async () => {
-        this.continueCalls += 1;
-        this.originRequests.push({ method, url });
-        outcome = 'origin';
-      },
-      abort: async () => {
-        this.abortedRequests.push({ method, url });
-        outcome = 'aborted';
-      },
-    };
-    if (!this.predicate(new URL(url))) {
-      this.originRequests.push({ method, url });
-      return 'origin';
-    }
-    this.handlerCalls += 1;
-    await this.handler(route);
-    if (outcome === null) throw new Error('route_not_settled');
-    return outcome;
+  on(event: string, listener: (value: never) => void): this {
+    const listeners = this.handlers.get(event) ?? [];
+    listeners.push(listener);
+    this.handlers.set(event, listeners);
+    return this;
+  }
+
+  async detach(): Promise<void> {
+    this.detached = true;
+  }
+
+  emitPaused(event: FirewallPausedRequest): void {
+    for (const listener of this.handlers.get('Fetch.requestPaused') ?? []) listener(event as never);
+  }
+
+  emit(event: string, value: unknown): void {
+    for (const listener of this.handlers.get(event) ?? []) listener(value as never);
   }
 }
 
+class FakePage {
+  currentUrl = `${ORIGIN}/source`;
+  readonly session = new FakeSession();
+
+  url(): string {
+    return this.currentUrl;
+  }
+
+  context(): { newCDPSession: () => Promise<FirewallCdpSession> } {
+    return { newCDPSession: async () => this.session };
+  }
+}
+
+function paused(method: string, path: string): FirewallPausedRequest {
+  return {
+    requestId: `${method}-${path}`,
+    request: { method, url: `${ORIGIN}${path}` },
+    resourceType: 'Fetch',
+    frameId: 'main',
+  };
+}
+
+function sentMethods(page: FakePage): string[] {
+  return page.session.sent.map((row) => row.method);
+}
+
 describe('performance request firewall', () => {
-  it('encodes service-worker blocking in the required browser context options', () => {
+  it('blocks service workers and publishes the scoped CDP interception version', () => {
     expect(PROFILER_CONTEXT_OPTIONS).toEqual({ serviceWorkers: 'block' });
+    expect(INTERCEPTION_SCOPE_VERSION).toBe(2);
   });
 
-  it('continues all read methods and aborts all write methods before the fake origin', async () => {
-    const context = new FakeContext();
-    const token = createFirewallRecordingToken({
-      mode: 'cold',
-      firstPartyOrigin: ORIGIN,
-      destinationPageUrl: `${ORIGIN}/contacts/contact-safe`,
-    });
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token });
+  it('pushes only cataloged first-party mutation patterns into the browser', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    const enable = page.session.sent.find((row) => row.method === 'Fetch.enable');
+    const patterns = (enable?.params?.['patterns'] as Array<{ urlPattern: string }>).map((row) => row.urlPattern);
 
-    for (const [method, path] of [
-      ['GET', '/api/contacts'],
-      ['HEAD', '/auth/me'],
-      ['OPTIONS', '/__dev/ping'],
-    ] as const) {
-      await expect(context.issue(method, `${ORIGIN}${path}`)).resolves.toBe('origin');
-    }
-    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
-      await expect(context.issue(method, `${ORIGIN}/api/contacts/contact-safe`)).resolves.toBe('aborted');
-    }
-
-    expect(context.originRequests.map((request) => request.method)).toEqual(['GET', 'HEAD', 'OPTIONS']);
-    expect(context.abortedRequests.map((request) => request.method)).toEqual(['POST', 'PUT', 'PATCH', 'DELETE']);
-    expect(token.evidence()).toEqual([
-      { method: 'POST', endpointTemplate: '/api/contacts/:contactId', phase: 'destination_mount' },
-      { method: 'PUT', endpointTemplate: '/api/contacts/:contactId', phase: 'destination_mount' },
-      { method: 'PATCH', endpointTemplate: '/api/contacts/:contactId', phase: 'destination_mount' },
-      { method: 'DELETE', endpointTemplate: '/api/contacts/:contactId', phase: 'destination_mount' },
-    ]);
-    expect(Object.keys(token.evidence()[0] ?? {}).sort()).toEqual(['endpointTemplate', 'method', 'phase']);
+    expect(patterns).toEqual(firewallRequestPatterns(ORIGIN).map((urlPattern) => ({ urlPattern }).urlPattern));
+    expect(patterns.every((pattern) => pattern.startsWith(ORIGIN))).toBe(true);
+    expect(patterns.some((pattern) => pattern.includes('/assets/'))).toBe(false);
+    expect(patterns.some((pattern) => pattern.includes('/api/events'))).toBe(false);
+    expect(sentMethods(page)).not.toContain('Network.setCacheDisabled');
+    await controller.dispose();
   });
 
-  it('never routes events through the handler, sanitizer, recorder, or continue', async () => {
-    const context = new FakeContext();
-    const sanitize = vi.fn(sanitizeRequestUrl);
-    const token = createFirewallRecordingToken({
-      mode: 'cold',
-      firstPartyOrigin: ORIGIN,
-      destinationPageUrl: `${ORIGIN}/`,
-    });
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token, sanitize });
-
+  it('never scopes events, static assets, public routes, media, or third-party traffic', () => {
     expect(NEVER_INTERCEPTED_PATHS).toEqual(['/api/events']);
-    await expect(context.issue('GET', `${ORIGIN}/api/events?cursor=private`)).resolves.toBe('origin');
-    expect(context.handlerCalls).toBe(0);
-    expect(context.continueCalls).toBe(0);
-    expect(sanitize).not.toHaveBeenCalled();
-    expect(token.evidence()).toEqual([]);
-    expect(context.originRequests).toHaveLength(1);
-  });
-
-  it('leaves static, public, media, and storage traffic outside interception', async () => {
-    const context = new FakeContext();
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => null });
-    const requests = [
-      ['GET', `${ORIGIN}/assets/app.js`],
-      ['POST', `${ORIGIN}/public/housing-fair`],
-      ['POST', `${ORIGIN}/unit-media/unit-safe/media-safe`],
-      ['POST', 'https://storage.example.test/private-upload'],
-      ['POST', 'https://third-party.example.test/api/write'],
-    ] as const;
-    for (const [method, url] of requests) {
-      await expect(context.issue(method, url)).resolves.toBe('origin');
+    for (const url of [
+      `${ORIGIN}/api/events?cursor=private`,
+      `${ORIGIN}/assets/app.js`,
+      `${ORIGIN}/public/housing-fair`,
+      `${ORIGIN}/unit-media/unit-safe/media-safe`,
+      'https://storage.example.test/private-upload',
+      'https://third-party.example.test/api/write',
+    ]) {
+      expect(isFirewallScopedUrl(url, ORIGIN)).toBe(false);
     }
-    expect(context.handlerCalls).toBe(0);
-    expect(context.continueCalls).toBe(0);
-    expect(context.originRequests).toHaveLength(requests.length);
   });
 
-  it('classifies a same-document warm race from the frame URL at each interception', async () => {
-    const context = new FakeContext();
-    const source = `${ORIGIN}/inbox`;
-    const destination = `${ORIGIN}/conversations/conv-safe`;
+  it('continues read methods and aborts all known writes before the network', async () => {
+    const page = new FakePage();
     const token = createFirewallRecordingToken({
-      mode: 'warm',
-      firstPartyOrigin: ORIGIN,
-      sourcePageUrl: source,
-      destinationPageUrl: destination,
+      mode: 'cold', firstPartyOrigin: ORIGIN, destinationPageUrl: `${ORIGIN}/contacts/contact-safe`,
     });
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token });
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
 
-    await context.issue('POST', `${ORIGIN}/api/conversations/conv-safe/read`, destination);
-    await context.issue('POST', `${ORIGIN}/api/inbox/contact-safe/read`, source);
-    expect(token.evidence()).toEqual([
-      { method: 'POST', endpointTemplate: '/api/conversations/:conversationId/read', phase: 'destination_mount' },
-      { method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'source_click' },
-    ]);
+    for (const method of ['GET', 'HEAD', 'OPTIONS']) page.session.emitPaused(paused(method, '/api/contacts'));
+    for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
+      page.session.emitPaused(paused(method, '/api/contacts/contact-safe'));
+    }
+    await controller.assertHealthy();
+
+    expect(sentMethods(page).filter((method) => method === 'Fetch.continueRequest')).toHaveLength(3);
+    expect(sentMethods(page).filter((method) => method === 'Fetch.failRequest')).toHaveLength(4);
+    expect(token.evidence().map((row) => row.method)).toEqual(['POST', 'PUT', 'PATCH', 'DELETE']);
+    await controller.dispose();
   });
 
-  it('tags an explicit source-equals-destination probe as source_click', async () => {
-    const context = new FakeContext();
-    const page = `${ORIGIN}/email`;
-    const token = createFirewallRecordingToken({
-      mode: 'warm',
-      firstPartyOrigin: ORIGIN,
-      sourcePageUrl: page,
-      destinationPageUrl: page,
-      noNavigationProbe: true,
-    });
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token });
-    await context.issue('POST', `${ORIGIN}/api/unmatched-email/um-safe/read`, page);
-    expect(token.evidence()).toEqual([
-      { method: 'POST', endpointTemplate: '/api/unmatched-email/:unmatchedId/read', phase: 'source_click' },
-    ]);
-  });
-
-  it('keeps prior preparation writes out of a fresh sample token', async () => {
-    const context = new FakeContext();
-    let token = null as ReturnType<typeof createFirewallRecordingToken> | null;
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token });
-    await expect(context.issue('POST', `${ORIGIN}/api/inbox/contact-prep/read`)).resolves.toBe('aborted');
-
-    token = createFirewallRecordingToken({
-      mode: 'cold',
-      firstPartyOrigin: ORIGIN,
-      destinationPageUrl: `${ORIGIN}/contacts/contact-fresh`,
-    });
-    await context.issue('POST', `${ORIGIN}/api/inbox/contact-fresh/read`, `${ORIGIN}/contacts/contact-fresh`);
-    expect(token.evidence()).toEqual([
-      { method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount' },
-    ]);
-    expect(context.abortedRequests).toHaveLength(2);
-  });
-
-  it('fails a third-page warm write and an unknown scoped method without reaching origin', async () => {
-    const context = new FakeContext();
+  it('classifies warm writes from protocol frame state even after the driver URL has advanced', async () => {
+    const page = new FakePage();
     const token = createFirewallRecordingToken({
       mode: 'warm',
       firstPartyOrigin: ORIGIN,
       sourcePageUrl: `${ORIGIN}/inbox`,
       destinationPageUrl: `${ORIGIN}/conversations/conv-safe`,
     });
-    await installRequestFirewall({ context, firstPartyOrigin: ORIGIN, currentToken: () => token });
+    page.currentUrl = `${ORIGIN}/inbox`;
+    page.session.frameUrl = `${ORIGIN}/inbox`;
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
 
-    await expect(context.issue('POST', `${ORIGIN}/api/inbox/contact-safe/read`, `${ORIGIN}/settings/team`))
-      .rejects.toBeInstanceOf(FirewallPhaseError);
-    await expect(context.issue('PROPFIND', `${ORIGIN}/api/contacts`))
-      .rejects.toBeInstanceOf(UnknownFirewallMethodError);
-    expect(context.originRequests).toEqual([]);
-    expect(context.abortedRequests).toHaveLength(2);
-    expect(token.evidence()).toEqual([]);
+    page.currentUrl = `${ORIGIN}/conversations/conv-safe`;
+    page.session.emitPaused(paused('POST', '/api/conversations/conv-safe/read'));
+    await controller.assertHealthy();
+    page.session.emit('Page.navigatedWithinDocument', {
+      frameId: 'main',
+      url: `${ORIGIN}/conversations/conv-safe`,
+    });
+    page.session.emitPaused(paused('POST', '/api/conversations/conv-safe/read'));
+    await controller.assertHealthy();
+
+    expect(token.evidence().map((row) => row.phase)).toEqual(['source_click', 'destination_mount']);
+    await controller.dispose();
+  });
+
+  it('records tokenless writes and callback failures in a run-level error channel', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emitPaused(paused('POST', '/api/inbox/contact-safe/read'));
+
+    await expect(controller.assertHealthy()).rejects.toBeInstanceOf(FirewallAttributionError);
+    expect(sentMethods(page)).toContain('Fetch.failRequest');
+    await controller.dispose();
+  });
+
+  it('latches third-page and unknown-method failures without rejecting the CDP callback', async () => {
+    const page = new FakePage();
+    const token = createFirewallRecordingToken({
+      mode: 'warm',
+      firstPartyOrigin: ORIGIN,
+      sourcePageUrl: `${ORIGIN}/inbox`,
+      destinationPageUrl: `${ORIGIN}/conversations/conv-safe`,
+    });
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
+
+    page.currentUrl = `${ORIGIN}/settings/team`;
+    expect(() => page.session.emitPaused(paused('POST', '/api/inbox/contact-safe/read'))).not.toThrow();
+    await expect(controller.assertHealthy()).rejects.toBeInstanceOf(FirewallPhaseError);
+    await controller.dispose();
+
+    const nextPage = new FakePage();
+    const next = await installRequestFirewall({ page: nextPage, firstPartyOrigin: ORIGIN, currentToken: () => token });
+    expect(() => nextPage.session.emitPaused(paused('PROPFIND', '/api/contacts'))).not.toThrow();
+    await expect(next.assertHealthy()).rejects.toBeInstanceOf(UnknownFirewallMethodError);
+    await next.dispose();
+  });
+
+  it('disables Fetch interception and detaches its CDP session on disposal', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    await controller.dispose();
+
+    expect(sentMethods(page)).toContain('Fetch.disable');
+    expect(page.session.detached).toBe(true);
+  });
+
+  it('surfaces an unobserved handler failure during disposal after releasing CDP state', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emitPaused(paused('POST', '/api/inbox/contact-safe/read'));
+
+    await expect(controller.dispose()).rejects.toBeInstanceOf(FirewallAttributionError);
+    expect(sentMethods(page)).toContain('Fetch.disable');
+    expect(page.session.detached).toBe(true);
   });
 });

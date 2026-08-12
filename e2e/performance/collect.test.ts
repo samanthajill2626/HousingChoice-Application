@@ -80,6 +80,42 @@ describe('CDP request collection', () => {
     expect(ended.satisfiedRequired).toEqual(['/api/contacts?limit&type']);
   });
 
+  it('retains sanitized evidence for a request still in flight at sample timeout', () => {
+    const value = collector();
+    start(value, 'hung', 10.25, 'http://127.0.0.1:9111/api/contacts?type=tenant&limit=100');
+
+    expect(value.endSample('sample-1').requests).toEqual([expect.objectContaining({
+      endpointTemplate: '/api/contacts',
+      queryKeys: ['limit', 'type'],
+      startOffsetMs: 250,
+      durationMs: null,
+      ttfbMs: null,
+      status: null,
+      transferBytes: null,
+      outcome: 'failed',
+      requestRole: 'required',
+    })]);
+  });
+
+  it('retains both redirect hops without overwriting the first hop timing', () => {
+    const value = collector();
+    value.requestWillBeSent('sample-1', {
+      requestId: 'redirect', timestamp: 10.1, type: 'Fetch',
+      request: { method: 'GET', url: 'http://127.0.0.1:9111/api/contacts?limit=100&type=tenant' },
+    });
+    value.requestWillBeSent('sample-1', {
+      requestId: 'redirect', timestamp: 10.3, type: 'Fetch',
+      redirectResponse: { status: 302 },
+      request: { method: 'GET', url: 'http://127.0.0.1:9111/api/contacts?cursor=next&limit=100&type=tenant' },
+    });
+    value.loadingFinished('sample-1', { requestId: 'redirect', timestamp: 10.6, encodedDataLength: 40 });
+
+    expect(value.endSample('sample-1').requests).toEqual([
+      expect.objectContaining({ startOffsetMs: 100, durationMs: 200, status: 302, outcome: 'finished' }),
+      expect.objectContaining({ startOffsetMs: 300, durationMs: 300, status: null, outcome: 'finished' }),
+    ]);
+  });
+
   it('counts static, third-party, unknown API, and aborted starts by resource class but sums actual bytes only', () => {
     const value = collector();
     start(value, 'script', 10.1, 'http://127.0.0.1:9111/src/main.tsx', 'Script');

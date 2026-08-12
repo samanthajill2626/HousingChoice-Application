@@ -529,6 +529,16 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/conversations/:conversationId': { base: 'dashboard/src/routes/conversation/ConversationDetail.tsx:173-214' },
     '/broadcasts/:broadcastId': { base: 'dashboard/src/routes/broadcasts/useBroadcastResults.ts:41-155' },
   } as const),
+  warmRequirementClassifications: Object.freeze({
+    '/email/quarantine': Object.freeze({
+      source: 'dashboard/src/routes/email/EmailTriage.tsx:237-239; dashboard/src/routes/email/useUnmatchedEmail.ts:82-118',
+      reason: 'The sibling route changes the unmatched-email filter while the same EmailTriage tree keeps the contacts hook mounted, so only the filtered unmatched-email request is passive navigation work.',
+    }),
+    '/tours/closed': Object.freeze({
+      source: 'dashboard/src/routes/tours/ToursPage.tsx:181-198; dashboard/src/routes/tours/useTours.ts:112-149',
+      reason: 'The sibling route enables useClosedTours while the active-tour and cross-reference hooks remain mounted, so only the status-filtered closed-tour request is passive navigation work.',
+    }),
+  } as const),
   branches: Object.freeze({
     contact_detail_tenant: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
     contact_detail_landlord_with_units: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
@@ -647,6 +657,9 @@ export function expectedGets(
   branch: RouteContractBranch,
 ): readonly EndpointContract[] {
   let destination = selectedDestination(route, branch);
+  // These two warm-only class changes are audited in
+  // CONTRACT_SOURCE_LEDGER.warmRequirementClassifications. They model sibling
+  // route persistence; they are not checkpoint-driven contract weakening.
   if (mode === 'warm' && route.key === '/email/quarantine') {
     destination = destination.map((contract) => contract.endpointTemplate === '/api/unmatched-email'
       ? contract

@@ -1,7 +1,9 @@
 import { spawn } from 'node:child_process';
-import { readFile, rm } from 'node:fs/promises';
-import { join, resolve } from 'node:path';
+import { randomBytes } from 'node:crypto';
+import { mkdir, open, readFile, rm } from 'node:fs/promises';
+import { dirname, join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
+import { fileURLToPath } from 'node:url';
 import { resolveLane as resolveRepositoryLane } from '../support/lane.mjs';
 import { isAlive as processIsAlive, killTree as killProcessTree } from '../../scripts/lib/killTree.mjs';
 
@@ -9,12 +11,18 @@ const READY_PREFIX = '[e2e-session] ready';
 const READY_LINE_LIMIT = 4_096;
 const RECOVERY_COMMAND = 'npm run e2e:stop';
 
+export function defaultPerformanceRepoRoot(moduleUrl = import.meta.url): string {
+  return resolve(dirname(fileURLToPath(moduleUrl)), '..', '..');
+}
+
 export type LifecycleFailureReason =
   | 'existing_session_live'
+  | 'owner_marker_failed'
   | 'lane_zero_forbidden'
   | 'launcher_spawn_failed'
   | 'launcher_closed_before_ready'
   | 'launcher_start_timeout'
+  | 'launcher_interrupted'
   | 'lane_state_mismatch'
   | 'pid_state_mismatch'
   | 'owned_launcher_reaped'
@@ -57,15 +65,17 @@ export interface LifecycleChild {
   readonly stderr: Readable | null;
   on(event: 'error', listener: (error: Error) => void): this;
   on(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  on(event: 'message', listener: (message: unknown) => void): this;
   off(event: 'error', listener: (error: Error) => void): this;
   off(event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): this;
+  off(event: 'message', listener: (message: unknown) => void): this;
 }
 
 interface SpawnOptions {
   cwd: string;
   env: NodeJS.ProcessEnv;
-  detached: false;
-  stdio: ['ignore', 'pipe', 'pipe'];
+  detached: boolean;
+  stdio: ['ignore', 'pipe', 'pipe', 'ipc'];
   windowsHide: true;
 }
 
@@ -81,6 +91,9 @@ export interface LifecycleDeps {
   startupTimeoutMs?: number;
   cleanupTimeoutMs?: number;
   cleanupPollMs?: number;
+  ownerPid?: number;
+  ownerToken?: () => string;
+  signal?: AbortSignal;
 }
 
 export type LifecycleCleanupResult =
@@ -94,6 +107,7 @@ export type LifecycleCleanupResult =
 
 export interface OwnedHermeticLifecycle {
   readonly childPid: number;
+  readonly ownerToken: string;
   readonly lane: number;
   readonly ports: LifecycleLane['ports'];
   readonly tablePrefix: string;
@@ -210,6 +224,91 @@ function defaultSpawn(executable: string, args: string[], options: SpawnOptions)
   return spawn(executable, args, options) as LifecycleChild;
 }
 
+export function ownedLauncherDetached(platform: NodeJS.Platform = process.platform): boolean {
+  return platform !== 'win32';
+}
+
+function defaultKillOwnedLauncher(pid: number): void {
+  if (process.platform === 'win32') {
+    killProcessTree(pid);
+    return;
+  }
+  process.kill(-pid, 'SIGTERM');
+}
+
+interface OwnerMarker {
+  path: string;
+  text: string;
+  token: string;
+}
+
+function markerRecord(value: unknown): { pid: number; ownerToken: string } | null {
+  const record = object(value);
+  return record !== null
+    && Number.isSafeInteger(record['pid'])
+    && (record['pid'] as number) > 0
+    && typeof record['ownerToken'] === 'string'
+    && /^[a-f0-9]{32}$/u.test(record['ownerToken'])
+      ? { pid: record['pid'] as number, ownerToken: record['ownerToken'] }
+      : null;
+}
+
+async function acquireOwnerMarker(input: {
+  artifactsDir: string;
+  pid: number;
+  token: string;
+  isAlive: (pid: number) => boolean;
+}): Promise<OwnerMarker> {
+  await mkdir(input.artifactsDir, { recursive: true });
+  const path = join(input.artifactsDir, 'performance-session.json');
+  const text = `${JSON.stringify({ pid: input.pid, ownerToken: input.token })}\n`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const handle = await open(path, 'wx', 0o600);
+      try {
+        await handle.writeFile(text, 'utf8');
+        await handle.sync();
+      } finally {
+        await handle.close();
+      }
+      return { path, text, token: input.token };
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+        throw new SafeLifecycleError('owner_marker_failed');
+      }
+      let existingText: string;
+      try {
+        existingText = await readFile(path, 'utf8');
+      } catch {
+        continue;
+      }
+      let existing: { pid: number; ownerToken: string } | null = null;
+      try {
+        existing = markerRecord(JSON.parse(existingText));
+      } catch {
+        // Malformed stale state is safe to replace only after compare-before-delete.
+      }
+      if (existing !== null && input.isAlive(existing.pid)) {
+        throw new SafeLifecycleError('existing_session_live');
+      }
+      try {
+        if (await readFile(path, 'utf8') === existingText) await rm(path);
+      } catch {
+        // A concurrent marker replacement wins; the next exclusive create decides.
+      }
+    }
+  }
+  throw new SafeLifecycleError('owner_marker_failed');
+}
+
+async function removeIfMatchingMarker(marker: OwnerMarker): Promise<void> {
+  try {
+    if (await readFile(marker.path, 'utf8') === marker.text) await rm(marker.path);
+  } catch {
+    // A concurrent replacement or prior cleanup wins.
+  }
+}
+
 async function removeIfMatchingPid(path: string, pid: number): Promise<void> {
   if (await readPid(path) !== pid) return;
   try {
@@ -240,6 +339,7 @@ interface CleanupContext {
   sleep: (ms: number) => Promise<void>;
   timeoutMs: number;
   pollMs: number;
+  marker: OwnerMarker;
 }
 
 async function cleanupOwnedChild(input: CleanupContext): Promise<LifecycleCleanupResult> {
@@ -259,6 +359,7 @@ async function cleanupOwnedChild(input: CleanupContext): Promise<LifecycleCleanu
     if (!alive) {
       await removeIfMatchingPid(input.pidFile, input.pid);
       await removeIfMatchingLane(input.laneFile, input.lane);
+      await removeIfMatchingMarker(input.marker);
       return { status: 'cleaned', lane: input.lane };
     }
     const elapsed = Math.max(0, input.now() - startedAt);
@@ -274,7 +375,7 @@ async function cleanupOwnedChild(input: CleanupContext): Promise<LifecycleCleanu
   }
 }
 
-function waitForReady(child: LifecycleChild, timeoutMs: number): {
+function waitForReady(child: LifecycleChild, timeoutMs: number, signal?: AbortSignal): {
   ready: Promise<void>;
   closed: Promise<void>;
   isClosed: () => boolean;
@@ -295,16 +396,26 @@ function waitForReady(child: LifecycleChild, timeoutMs: number): {
   const timer = setTimeout(() => {
     if (!ready && !closed) failReady(new SafeLifecycleError('launcher_start_timeout'));
   }, timeoutMs);
-  const decoder = createBoundedReadyLineDecoder(() => {
+  const onAbort = (): void => {
+    if (ready || closed) return;
+    clearTimeout(timer);
+    failReady(new SafeLifecycleError('launcher_interrupted'));
+  };
+  signal?.addEventListener('abort', onAbort, { once: true });
+  if (signal?.aborted === true) onAbort();
+  const onMessage = (message: unknown): void => {
+    const value = object(message);
+    if (value?.['type'] !== 'e2e-session-ready') return;
     if (ready || closed) return;
     ready = true;
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     settleReady();
+  };
+  child.on('message', onMessage);
+  child.stdout?.on('data', () => {
+    // Deliberately drain and discard every byte through child close.
   });
-  child.stdout?.on('data', (chunk: Buffer | Uint8Array | string) => {
-    decoder.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
-  });
-  child.stdout?.on('end', () => decoder.end());
   child.stderr?.on('data', () => {
     // Deliberately drain and discard every byte through child close.
   });
@@ -313,6 +424,7 @@ function waitForReady(child: LifecycleChild, timeoutMs: number): {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     settleClosed();
     if (!ready) failReady(new SafeLifecycleError('launcher_spawn_failed'));
   };
@@ -320,6 +432,7 @@ function waitForReady(child: LifecycleChild, timeoutMs: number): {
     if (closed) return;
     closed = true;
     clearTimeout(timer);
+    signal?.removeEventListener('abort', onAbort);
     settleClosed();
     if (!ready) failReady(new SafeLifecycleError('launcher_closed_before_ready'));
   };
@@ -332,21 +445,37 @@ function waitForReady(child: LifecycleChild, timeoutMs: number): {
 export async function startOwnedHermeticLifecycle(
   deps: LifecycleDeps = {},
 ): Promise<OwnedHermeticLifecycle> {
-  const repoRoot = resolve(deps.repoRoot ?? process.cwd());
+  const repoRoot = resolve(deps.repoRoot ?? defaultPerformanceRepoRoot());
   const artifactsDir = resolve(deps.artifactsDir ?? join(repoRoot, 'e2e', '.artifacts'));
   const pidFile = join(artifactsDir, 'session.pid');
   const laneFile = join(artifactsDir, 'lane.json');
   const isAlive = deps.isAlive ?? processIsAlive;
-  const killTree = deps.killTree ?? killProcessTree;
+  const killTree = deps.killTree ?? defaultKillOwnedLauncher;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
+  const ownerToken = deps.ownerToken?.() ?? randomBytes(16).toString('hex');
+  if (!/^[a-f0-9]{32}$/u.test(ownerToken)) throw new SafeLifecycleError('owner_marker_failed');
+  const marker = await acquireOwnerMarker({
+    artifactsDir,
+    pid: deps.ownerPid ?? process.pid,
+    token: ownerToken,
+    isAlive,
+  });
   const existingPid = await readPid(pidFile);
   if (existingPid !== null && isAlive(existingPid)) {
+    await removeIfMatchingMarker(marker);
     throw new SafeLifecycleError('existing_session_live');
   }
 
-  const lane = await (deps.resolveLane ?? (() => resolveRepositoryLane() as Promise<LifecycleLane>))();
+  let lane: LifecycleLane;
+  try {
+    lane = await (deps.resolveLane ?? (() => resolveRepositoryLane({ ignoreEnv: true }) as Promise<LifecycleLane>))();
+  } catch (error) {
+    await removeIfMatchingMarker(marker);
+    throw error;
+  }
   if (!Number.isSafeInteger(lane.lane) || lane.lane <= 0) {
+    await removeIfMatchingMarker(marker);
     throw new SafeLifecycleError('lane_zero_forbidden');
   }
   const spawnChild = deps.spawnChild ?? defaultSpawn;
@@ -357,17 +486,23 @@ export async function startOwnedHermeticLifecycle(
       [join(repoRoot, 'scripts', 'e2e-session.mjs')],
       {
         cwd: repoRoot,
-        env: { ...process.env, E2E_LANE: String(lane.lane) },
-        detached: false,
-        stdio: ['ignore', 'pipe', 'pipe'],
+        env: {
+          ...process.env,
+          E2E_LANE: String(lane.lane),
+          E2E_PROFILER_OWNER_TOKEN: ownerToken,
+        },
+        detached: ownedLauncherDetached(),
+        stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
         windowsHide: true,
       },
     );
   } catch {
+    await removeIfMatchingMarker(marker);
     throw new SafeLifecycleError('launcher_spawn_failed', lane.lane);
   }
   const retainedPid = child.pid;
   if (!Number.isSafeInteger(retainedPid) || (retainedPid ?? 0) <= 0) {
+    await removeIfMatchingMarker(marker);
     throw new SafeLifecycleError('launcher_spawn_failed', lane.lane);
   }
   const pid = retainedPid as number;
@@ -383,8 +518,9 @@ export async function startOwnedHermeticLifecycle(
     sleep,
     timeoutMs: deps.cleanupTimeoutMs ?? 10_000,
     pollMs: deps.cleanupPollMs ?? 100,
+    marker,
   };
-  const childState = waitForReady(child, deps.startupTimeoutMs ?? 300_000);
+  const childState = waitForReady(child, deps.startupTimeoutMs ?? 300_000, deps.signal);
   try {
     await childState.ready;
     const state = await readLaneState(laneFile);
@@ -409,6 +545,7 @@ export async function startOwnedHermeticLifecycle(
   let cleanupPromise: Promise<LifecycleCleanupResult> | null = null;
   return Object.freeze({
     childPid: pid,
+    ownerToken,
     lane: lane.lane,
     ports: Object.freeze({ ...lane.ports }),
     tablePrefix: lane.tablePrefix,

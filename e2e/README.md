@@ -106,6 +106,12 @@ It never clears lane 0 or stops shared DynamoDB Local. The count manifest printe
 by `--print-config` and stored with the report is the authority for the resolved
 totals.
 
+Profiler ownership is fail-closed. The runner acquires an exclusive same-worktree
+marker, ignores an inherited `E2E_LANE`, selects a free lane, and gives its launcher
+a random owner token. The launcher does not reap occupied ports in profiler mode and
+must observe its exact commit and token from its child app before any destructive
+reseed. Readiness travels over the direct parent-child IPC channel, not shared stdout.
+
 These are rough second-run planning envelopes, not performance claims. A second run
 must first scan and clear the previous generated rows, including embedded broadcast
 recipient maps; a first run can therefore be materially faster.
@@ -167,12 +173,16 @@ stop and reassess the authentication approach; do not work around the target pro
 
 The profiler performs navigation and exact read-oriented row-link clicks only. It
 does not exercise workflow actions, forms, uploads, or media controls. Before any
-measured navigation it installs a scoped firewall for first-party `/api/**`,
-`/auth/**`, and `/__dev/**` traffic. Every `POST`, `PUT`, `PATCH`, and `DELETE` in
-that scope is blocked before the network and recorded only as a sanitized method,
-endpoint template, and `source_click` or `destination_mount` phase. Mount-time and
-row-click mark-read attempts are expected blocked evidence, not proof of a failed
-run.
+measured navigation it installs browser-side CDP Fetch patterns derived from the
+mechanically checked mutation catalog. The patterns cover cataloged first-party
+`/api/**`, `/auth/**`, and `/__dev/**` mutation paths. Matching reads continue and
+every matching `POST`, `PUT`, `PATCH`, and `DELETE` is blocked before the network and
+recorded only as a sanitized method, endpoint template, and `source_click` or
+`destination_mount` phase. Static assets, Vite modules, and unrelated reads do not
+cross the driver interception boundary. CDP interception preserves the browser HTTP
+cache; `summary.json` records this as `browser.httpCache: "preserved"`. Mount-time
+and row-click mark-read attempts are expected blocked evidence, not proof of a
+failed run.
 
 This is a navigation-only guarantee, not a blanket network sandbox. Public paths
 under `/public/**`, media reads under `/unit-media/**`, and direct storage origins

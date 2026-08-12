@@ -14,6 +14,12 @@ import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
 import { ensureS3Started, LOCAL_S3_ENDPOINT } from './s3.mjs';
 import { killTree, isAlive, killPort } from './lib/killTree.mjs';
+import { defaultProbe } from '../e2e/support/lane.mjs';
+import {
+  assertProfilerPingIdentity,
+  profilerOwnerToken as parseProfilerOwnerToken,
+  sendProfilerReady,
+} from './lib/profilerOwnership.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 // The entity-centric dashboard the e2e specs drive.
@@ -26,6 +32,8 @@ const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const sentinel = path.join(artifactsDir, '.restart');
 const pidFile = path.join(artifactsDir, 'session.pid');
 const laneFile = path.join(artifactsDir, 'lane.json');
+const rawProfilerOwnerToken = process.env.E2E_PROFILER_OWNER_TOKEN;
+let activeProfilerOwnerToken = null;
 
 // ---------------------------------------------------------------------------
 // Lane resolution — OBEY E2E_LANE if set (Playwright path), else free-probe.
@@ -241,15 +249,25 @@ function startApp() {
 function startWorker() {
   spawnNode('worker', ['--import', 'tsx', path.join('app', 'src', 'worker.ts')]);
 }
-function startViteNext() {
+async function prepareOwnedPort(port, label) {
+  if (activeProfilerOwnerToken !== null) {
+    if (!await defaultProbe(port, '127.0.0.1')) {
+      throw new Error(`profiler_${label}_port_occupied`);
+    }
+    return;
+  }
+  const reaped = killPort(port);
+  if (reaped.length) log(`reaped orphan(s) holding :${port} before start: ${reaped.join(', ')}`);
+}
+
+async function startViteNext() {
   // PREFLIGHT — reap any orphan holding the dashboard port before spawning Vite.
   // It pins `strictPort: true` (dashboard/vite.config.ts), so a held port makes
   // Vite exit non-zero instead of drifting to another port — which here lands in
   // `child.on('exit')` (logged, not a shutdown), so `web-next` silently vanishes
   // and Playwright's webServer polls a stale server or times out. Freeing the
   // port first guarantees the child we spawn owns it.
-  const reaped = killPort(ports.dashboard);
-  if (reaped.length) log(`reaped orphan(s) holding :${ports.dashboard} before start: ${reaped.join(', ')}`);
+  await prepareOwnedPort(ports.dashboard, 'dashboard');
   // DASHBOARD_PORT (not the generic PORT — that's the APP's variable, and a
   // shared env would leak it into Vite: the 2026-07-02 `npm run dev` regression
   // where Vite bound the app's 8080). vite.config.ts reads DASHBOARD_PORT.
@@ -258,7 +276,7 @@ function startViteNext() {
     APP_PORT: String(ports.app),
   });
 }
-function startFakeTwilio() {
+async function startFakeTwilio() {
   // The fake-twilio host impersonates Twilio's REST API (the app's redirected
   // driver POSTs sends here) and fires correctly-signed webhooks BACK at the app.
   // Two URLs, deliberately split: it POSTs webhooks to APP_BASE_URL (the app's
@@ -275,8 +293,7 @@ function startFakeTwilio() {
   // the port — un-killable by killChild/shutdown/e2e:stop. Freeing the port first
   // guarantees the child we spawn below is the real owner and a tracked
   // descendant of this launcher (so tree-kill teardown covers it).
-  const reaped = killPort(ports.fake);
-  if (reaped.length) log(`reaped orphan(s) holding :${ports.fake} before start: ${reaped.join(', ')}`);
+  await prepareOwnedPort(ports.fake, 'fake');
   spawnNode('fake-twilio', ['--import', 'tsx', path.join('fake-twilio', 'src', 'index.ts')], undefined, {
     FAKE_TWILIO_PORT: String(ports.fake),
     APP_BASE_URL: appUrl,
@@ -361,6 +378,23 @@ async function cleanSlate() {
   });
 }
 
+async function verifyProfilerChildIdentity() {
+  if (activeProfilerOwnerToken === null) return;
+  let body;
+  try {
+    const response = await fetch(`${appUrl}/__dev/ping`);
+    if (!response.ok) throw new Error('profiler_ping_failed');
+    body = await response.json();
+  } catch {
+    throw new Error('profiler_ping_failed');
+  }
+  assertProfilerPingIdentity({
+    expectedCommit: gitSha,
+    expectedOwnerToken: activeProfilerOwnerToken,
+    body,
+  });
+}
+
 function shutdown(code = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -387,11 +421,12 @@ async function restartBackend() {
     // Also bounce fake-twilio so a code change to it is picked up on restart.
     killChild('fake-twilio');
     await new Promise((r) => setTimeout(r, 200));
-    startFakeTwilio();
+    await startFakeTwilio();
     await waitForHealth(`${fakeUrl}/health`);
     startApp();
     startWorker();
     await waitForHealth();
+    await verifyProfilerChildIdentity();
     log('app + worker + fake-twilio back up');
   } catch (err) {
     log(`restart health check failed: ${String(err)}`);
@@ -402,6 +437,7 @@ async function restartBackend() {
 
 async function main() {
   const parentPid = process.ppid;
+  activeProfilerOwnerToken = parseProfilerOwnerToken(rawProfilerOwnerToken);
 
   mkdirSync(artifactsDir, { recursive: true });
 
@@ -409,6 +445,7 @@ async function main() {
   if (existsSync(pidFile)) {
     const oldPid = parseInt(readFileSync(pidFile, 'utf8').trim(), 10);
     if (!isNaN(oldPid) && oldPid !== process.pid && isAlive(oldPid)) {
+      if (activeProfilerOwnerToken !== null) throw new Error('profiler_existing_session_live');
       log(`reaping stale session launcher (pid=${oldPid})…`);
       killTree(oldPid);
       await new Promise((r) => setTimeout(r, 500));
@@ -439,17 +476,21 @@ async function main() {
   // Start fake-twilio FIRST so the app's very first outbound send has a host to
   // reach (the app only calls it on send, but this avoids a race on boot).
   log(`starting fake-twilio (:${ports.fake})…`);
-  startFakeTwilio();
+  await startFakeTwilio();
   await waitForHealth(`${fakeUrl}/health`);
   log(`fake-twilio ready (:${ports.fake})`);
   log(`fake-phones UI → ${fakeUrl}/`);
 
   log(`starting app, worker, web :${ports.dashboard} (non-watch)…`);
+  if (activeProfilerOwnerToken !== null && !await defaultProbe(ports.app, '127.0.0.1')) {
+    throw new Error('profiler_app_port_occupied');
+  }
   startApp();
   startWorker();
-  startViteNext();
+  await startViteNext();
 
   await waitForHealth();
+  await verifyProfilerChildIdentity();
 
   // Clean slate: clear any rows accumulated in the reused DynamoDB container (incl.
   // stale fake-SID dedup pointers) so this session starts hermetic. See cleanSlate().
@@ -457,6 +498,11 @@ async function main() {
   await cleanSlate();
 
   log(`ready — app :${ports.app} (${appUrl}), web :${ports.dashboard} (${dashboardUrl}), fake-twilio :${ports.fake} (${fakeUrl}), MinIO :9000 (MESSAGING_DRIVER=twilio → fake)`);
+
+  sendProfilerReady(
+    activeProfilerOwnerToken,
+    typeof process.send === 'function' ? (message) => process.send(message) : undefined,
+  );
 
   // PARENT-DEATH WATCH: if the parent process (the task shell or Playwright) dies,
   // shut down automatically. This fires only when the parent is genuinely gone —

@@ -183,7 +183,7 @@ function sample(
     mode,
     repeat,
     status: 'ok',
-    readyMs: routeKey === '/slow' ? 900 : 100,
+    readyMs: routeKey === '/contacts' ? 900 : 100,
     navigation: { ttfbMs: 20, domContentLoadedMs: 70, loadMs: 80 },
     paint: { fcpMs: 40, lcpMs: 60 },
     longTasks: { totalMs: 12, maxMs: 8, count: 2 },
@@ -231,11 +231,11 @@ function request(routeKey: string, mode: 'cold' | 'warm', repeat: number): Reque
 
 function reportInput(outputRoot: string, runId: string) {
   const samples = [
-    sample('/slow', 'cold', 0),
-    sample('/fast', 'cold', 0, { readyMs: 100, clientTruncated: false }),
-    sample('/slow', 'warm', 0, { readyMs: 400 }),
-    sample('/fast', 'warm', 0, { readyMs: 50, clientTruncated: false }),
-    sample('/skip', 'warm', 0, {
+    sample('/contacts', 'cold', 0),
+    sample('/inbox', 'cold', 0, { readyMs: 100, clientTruncated: false }),
+    sample('/contacts', 'warm', 0, { readyMs: 400 }),
+    sample('/inbox', 'warm', 0, { readyMs: 50, clientTruncated: false }),
+    sample('/settings/notifications', 'warm', 0, {
       status: 'skipped_no_fixture',
       reason: 'fixture_absent',
       readyMs: null,
@@ -248,10 +248,10 @@ function reportInput(outputRoot: string, runId: string) {
     config: CONFIG,
     target: TARGET,
     samples,
-    requests: [request('/slow', 'cold', 0), request('/slow', 'warm', 1)],
+    requests: [request('/contacts', 'cold', 0), request('/contacts', 'warm', 1)],
     routeOrders: [
-      { mode: 'cold' as const, repeat: 0, routeKeys: ['/slow', '/fast'] },
-      { mode: 'warm' as const, repeat: 0, routeKeys: ['/fast', '/slow', '/skip'] },
+      { mode: 'cold' as const, repeat: 0, routeKeys: ['/contacts', '/inbox'] },
+      { mode: 'warm' as const, repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
     ],
     browser: { version: '140.0.7339.12', viewport: { width: 1280, height: 720 } },
     warmup: { performed: true, routeKey: '/' },
@@ -321,7 +321,7 @@ describe('writePerformanceReport', () => {
     expect(JSON.stringify(ROUTES)).toBe(before);
   });
 
-  it('allows guarded automatic writes to be absent but rejects any tuple outside the allowlist', () => {
+  it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
     const route = ROUTES.find((candidate) => candidate.key === '/conversations/:conversationId')!;
     const branch = { kind: 'none' } as const;
     const base = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
@@ -336,7 +336,7 @@ describe('writePerformanceReport', () => {
       branches: [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
     });
 
-    expect(evaluate(base).mismatchCodes).not.toContain('wrong_blocked_write_tuple');
+    expect(evaluate(base).mismatchCodes).toContain('missing_blocked_write');
     expect(evaluate({ ...base, blockedWrites: [{
       method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount',
     }] }).mismatchCodes).toContain('wrong_blocked_write_tuple');
@@ -414,7 +414,7 @@ describe('writePerformanceReport', () => {
       'interceptionScopeVersion', 'manifest', 'rankings', 'relayDomCheck', 'revisions',
       'routeOrders', 'run', 'runtime', 'samples', 'schemaVersion', 'target', 'warmup', 'warnings',
     ].sort());
-    expect(summary.interceptionScopeVersion).toBe(1);
+    expect(summary.interceptionScopeVersion).toBe(2);
     expect(summary.config.target).toBe('hermetic');
     expect(summary.config.baseUrl).toBeUndefined();
     expect(summary.target.rawHost).toBeUndefined();
@@ -424,6 +424,7 @@ describe('writePerformanceReport', () => {
       channel: 'chromium',
       version: '140.0.7339.12',
       major: 140,
+      httpCache: 'preserved',
       viewport: { width: 1280, height: 720 },
     });
     expect(summary.runtime.node).toMatch(/^\d+\.\d+\.\d+/u);
@@ -433,8 +434,8 @@ describe('writePerformanceReport', () => {
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
     expect(summary.routeOrders).toEqual([
-      { mode: 'cold', repeat: 0, routeKeys: ['/slow', '/fast'] },
-      { mode: 'warm', repeat: 0, routeKeys: ['/fast', '/slow', '/skip'] },
+      { mode: 'cold', repeat: 0, routeKeys: ['/contacts', '/inbox'] },
+      { mode: 'warm', repeat: 0, routeKeys: ['/inbox', '/contacts', '/settings/notifications'] },
     ]);
     expect(summary.manifest.contacts).toBe(100);
 
@@ -450,7 +451,7 @@ describe('writePerformanceReport', () => {
     expect(requestLines[0].rawUrl).toBeUndefined();
 
     expect(report).toContain('## Cold worst offenders');
-    expect(report.indexOf('| /slow | 900')).toBeLessThan(report.indexOf('| /fast | 100'));
+    expect(report.indexOf('| /contacts | 900')).toBeLessThan(report.indexOf('| /inbox | 100'));
     expect(report).toContain('## Warm worst offenders');
     expect(report).toContain('## Secondary rankings');
     expect(report).toContain('client_truncated');
@@ -475,7 +476,7 @@ describe('writePerformanceReport', () => {
       ...reportInput(outputRoot, '20260812T123456790Z-eeff0011'),
       baselineJson,
     };
-    currentInput.samples[0] = sample('/slow', 'cold', 0, { readyMs: 1_000 });
+    currentInput.samples[0] = sample('/contacts', 'cold', 0, { readyMs: 1_000 });
 
     const result = await writePerformanceReport(currentInput);
 
@@ -491,6 +492,40 @@ describe('writePerformanceReport', () => {
     expect(comparison.matched[0].metrics.readyMs.absolute).toBe(100);
     expect(await readFile(join(outputRoot, currentInput.runId, 'comparison.md'), 'utf8'))
       .toContain('Target app revision changed: no');
+  });
+
+  it('replaces unsafe route keys before they reach any artifact', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456790Z-a1b2c3d4');
+    input.routeOrders = [{
+      mode: 'cold', repeat: 0, routeKeys: ['/a|b', '/contacts/perf-contact-00001'],
+    }];
+
+    const result = await writePerformanceReport(input);
+
+    expect(result.status).toBe('written');
+    const summaryText = await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8');
+    expect(summaryText).not.toContain('/a|b');
+    expect(summaryText).not.toContain('perf-contact-00001');
+    expect(JSON.parse(summaryText).routeOrders[0].routeKeys).toEqual(['invalid_route', 'invalid_route']);
+  });
+
+  it('rejects structurally invalid baseline aggregate entries before comparison publication', async () => {
+    const outputRoot = await artifactRoot();
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-b1c2d3e4');
+    await writePerformanceReport(baselineInput);
+    const baseline = JSON.parse(await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8'));
+    baseline.aggregates[0].routeKey = '/bad|key';
+    baseline.aggregates[0].mode = 'not-a-mode';
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-c1d2e3f4'),
+      baselineJson: JSON.stringify(baseline),
+    };
+
+    const result = await writePerformanceReport(currentInput);
+
+    expect(result).toMatchObject({ status: 'comparison_failure', exitCode: 1, reason: 'comparison_failed' });
+    expect(result.files).not.toContain('comparison.json');
   });
 
   it('keeps the current report and returns a nonzero comparison failure for invalid baseline JSON', async () => {
@@ -538,7 +573,7 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-33334444');
     const sensitiveValue = 'private.person@example.com';
-    input.samples[0] = sample(`/${sensitiveValue}`, 'cold', 0);
+    input.config = { ...input.config, target: sensitiveValue as never };
     const changedPaths: string[] = [];
     const watcher = watch(outputRoot, { persistent: false });
     watcher.on('change', (_eventType, fileName) => changedPaths.push(String(fileName)));

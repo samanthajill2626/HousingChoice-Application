@@ -97,6 +97,15 @@ export interface DevRouterDeps {
    *  the real conversations repo + relay.intro enqueue. */
   relayReplayDeps?: RelayReplayDeps;
   performanceReseed?: typeof resetPerformanceData;
+  performanceReseedRequestAllowed?: (remoteAddress: string | null) => boolean;
+}
+
+export function isLoopbackRemoteAddress(remoteAddress: string | null): boolean {
+  if (remoteAddress === null) return false;
+  const normalized = remoteAddress.toLowerCase().split('%', 1)[0]!;
+  return normalized === '::1'
+    || /^127(?:\.[0-9]{1,3}){3}$/u.test(normalized)
+    || /^::ffff:127(?:\.[0-9]{1,3}){3}$/u.test(normalized);
 }
 
 /**
@@ -165,6 +174,9 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
       // Launch commit (set by scripts/e2e-session.mjs) — the e2e preflight compares
       // it to the checkout to catch a stale reused backend. null when unstamped.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,
+      // Random per-profiler launcher proof. It is not a credential and is exposed
+      // only by this already dev-gated router.
+      profilerOwnerToken: process.env['E2E_PROFILER_OWNER_TOKEN'] ?? null,
     });
   });
 
@@ -249,6 +261,11 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   });
 
   router.post('/__dev/performance/reseed', json(), async (req, res) => {
+    const requestAllowed = deps.performanceReseedRequestAllowed ?? isLoopbackRemoteAddress;
+    if (!requestAllowed(req.socket.remoteAddress ?? null)) {
+      res.status(403).json({ error: 'performance_reseed_loopback_required' });
+      return;
+    }
     const body = (req.body ?? {}) as { input?: unknown; anchor?: unknown };
     if (
       typeof body.input !== 'object' ||

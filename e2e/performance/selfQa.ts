@@ -310,17 +310,7 @@ export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAtt
             ? 'placement_group'
             : null;
     if (surface === null) return [];
-    const writes = sample.blockedWrites.map((write) => ({ surface, mode: sample.mode, ...write }));
-    if (sample.routeKey === '/conversations/:conversationId' && sample.mode === 'warm') {
-      const expected = writes.filter((write) =>
-        write.endpointTemplate === '/api/conversations/:conversationId/read');
-      const hasSource = expected.some((write) => write.phase === 'source_click');
-      const firstDestination = expected.find((write) => write.phase === 'destination_mount');
-      if (!hasSource && expected.length >= 2 && firstDestination !== undefined) {
-        firstDestination.phase = 'source_click';
-      }
-    }
-    return writes;
+    return sample.blockedWrites.map((write) => ({ surface, mode: sample.mode, ...write }));
   });
 }
 
@@ -328,24 +318,11 @@ export function supplementalAttempts(
   surface: 'inbox_row' | 'unmatched_email',
   writes: readonly BlockedWrite[],
 ): SelfQaAttempt[] {
-  const attempts: SelfQaAttempt[] = writes.map((write) => ({
+  return writes.map((write) => ({
     surface,
     mode: 'supplemental',
     ...write,
   }));
-  if (surface !== 'inbox_row' || attempts.some((attempt) => attempt.phase === 'source_click')) {
-    return attempts;
-  }
-  const inboxReadIndices = attempts.flatMap((attempt, index) =>
-    attempt.endpointTemplate === '/api/inbox/:contactId/read'
-      && attempt.phase === 'destination_mount'
-      ? [index]
-      : [],
-  );
-  if (inboxReadIndices.length < 2) return attempts;
-  return attempts.map((attempt, index) =>
-    index === inboxReadIndices[0] ? { ...attempt, phase: 'source_click' } : attempt,
-  );
 }
 
 export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {

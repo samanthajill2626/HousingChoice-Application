@@ -225,6 +225,7 @@ async function isLaneFree(lane, host, probe) {
  * @param {{
  *   probe?: (port: number, host: string) => Promise<boolean>,
  *   host?: string,
+ *   ignoreEnv?: boolean,
  * }=} opts
  * @returns {Promise<LaneResult>}
  */
@@ -233,7 +234,7 @@ export async function resolveLane(opts = {}) {
   const host = opts.host ?? '127.0.0.1';
 
   // --- E2E_LANE override ---
-  const envLane = process.env['E2E_LANE'];
+  const envLane = opts.ignoreEnv === true ? undefined : process.env['E2E_LANE'];
   if (envLane !== undefined && envLane !== '') {
     const n = Number(envLane);
     if (!Number.isInteger(n) || n < 1 || n > MAX_LANES) {

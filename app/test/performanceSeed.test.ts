@@ -451,6 +451,24 @@ describe('generatePerformanceSeed', () => {
     }
   });
 
+  it.each([1, 2, 3, 4])('guarantees a readable relay fixture for %i non-zero conversations', (conversations) => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ conversations, messagesPerConversation: 0 }), ANCHOR);
+    const { tables } = generatePerformanceSeed(config);
+
+    expect(config.relayGroupCount).toBe(1);
+    expect(tables.conversations.some((row) => row.type === 'relay_group' && row.status === 'open')).toBe(true);
+  });
+
+  it('guarantees a current scheduled tour when the tour override is one', () => {
+    const config = resolvePerformanceSeedConfig(zeroWorld({ tours: 1 }), ANCHOR);
+    const { tables } = generatePerformanceSeed(config);
+
+    expect(tables.tours).toEqual([expect.objectContaining({
+      status: 'scheduled',
+      scheduledAt: ANCHOR,
+    })]);
+  });
+
   it('keeps the newest terminal broadcast reachable and de-duplicates every recipient map', () => {
     const config = resolvePerformanceSeedConfig({}, ANCHOR);
     const { tables, manifest } = generatePerformanceSeed(config);

@@ -99,6 +99,7 @@ describe('dev gating — router', () => {
       // The preflight's stale-stack freshness guard reads this (launch commit,
       // stamped by scripts/e2e-session.mjs); null when unstamped, as in this test.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,
+      profilerOwnerToken: process.env['E2E_PROFILER_OWNER_TOKEN'] ?? null,
     });
   });
 
@@ -171,6 +172,29 @@ describe('dev gating - performance reseed', () => {
     });
 
     expect(res.status).toBe(400);
+    expect(performanceReseed).not.toHaveBeenCalled();
+  });
+
+  it('rejects a non-loopback caller before parsing input or invoking the reset boundary', async () => {
+    const performanceReseed = vi.fn();
+    const performanceReseedRequestAllowed = vi.fn().mockReturnValue(false);
+    const app = buildApp({
+      config,
+      devRouter: createDevRouter({
+        config,
+        performanceReseed,
+        performanceReseedRequestAllowed,
+      }),
+    });
+
+    const res = await request(app).post('/__dev/performance/reseed').send({
+      input: { contacts: 1 },
+      anchor: '2026-08-11T12:00:00.000Z',
+    });
+
+    expect(res.status).toBe(403);
+    expect(res.body).toEqual({ error: 'performance_reseed_loopback_required' });
+    expect(performanceReseedRequestAllowed).toHaveBeenCalledWith(expect.stringMatching(/127\.0\.0\.1$/u));
     expect(performanceReseed).not.toHaveBeenCalled();
   });
 

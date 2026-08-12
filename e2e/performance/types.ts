@@ -1,5 +1,5 @@
 export const PERFORMANCE_SCHEMA_VERSION = 1 as const;
-export const INTERCEPTION_SCOPE_VERSION = 1 as const;
+export const INTERCEPTION_SCOPE_VERSION = 2 as const;
 
 export type TargetKind = 'hermetic' | 'local' | 'hosted-dev';
 export type SampleMode = 'cold' | 'warm';
@@ -40,6 +40,7 @@ export interface BrowserMetadata {
   channel: 'chromium' | 'chrome';
   version: string;
   major: number;
+  httpCache: 'preserved';
   viewport: { width: number; height: number };
 }
 

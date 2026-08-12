@@ -129,7 +129,16 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
   const nsA = createTableNamespace(configA);
   const doc = createDocumentClient({ config: configB });
   const client = createDynamoClient({ config: configB });
-  const readers = createPerformanceSeedReaders({ doc, config: configB });
+  const readers = (() => {
+    const ambientPrefix = process.env.TABLE_PREFIX;
+    process.env.TABLE_PREFIX = 'hc-local-performance-reader-ambient-trap-';
+    try {
+      return createPerformanceSeedReaders({ doc, config: configB });
+    } finally {
+      if (ambientPrefix === undefined) delete process.env.TABLE_PREFIX;
+      else process.env.TABLE_PREFIX = ambientPrefix;
+    }
+  })();
   const anchor = '2026-08-11T12:00:00.000Z';
   const input = { contacts: 22, units: 3, placements: 4, tours: 4, conversations: 5, messagesPerConversation: 2, broadcasts: 2, recipientsPerBroadcast: 3 };
 

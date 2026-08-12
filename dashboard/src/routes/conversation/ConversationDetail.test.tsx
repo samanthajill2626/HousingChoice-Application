@@ -1,4 +1,4 @@
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { cleanup, render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { ApiError } from '../../api/index.js';
@@ -106,7 +106,15 @@ beforeEach(() => {
     Promise.resolve({ nextCursor: null, contacts: params.type === 'tenant' ? [CANDIDATE] : [] }),
   );
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  // UNMOUNT BEFORE RESTORING (fix wave 2). The group view's member effect re-runs
+  // on a debounced live signal, so a timer scheduled by one test can fire while a
+  // component is still mounted at teardown - and once the api mocks are restored
+  // the call returns undefined and the effect crashes on `.then`, failing whatever
+  // test happens to be running. Explicit cleanup makes the ordering deterministic.
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('ConversationDetail dispatch', () => {
   it('renders the group view for a relay_group conversation', async () => {

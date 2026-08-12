@@ -25,12 +25,14 @@ import type {
 const fsFaults = vi.hoisted(() => ({
   stagedSensitiveValue: null as string | null,
   stagingRemoveFailures: 0,
+  failStagingBlankWrites: false,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs/promises')>();
   const actualReadFile = actual.readFile as (...args: unknown[]) => Promise<unknown>;
   const actualRm = actual.rm as (...args: unknown[]) => Promise<void>;
+  const actualWriteFile = actual.writeFile as (...args: unknown[]) => Promise<void>;
   return {
     ...actual,
     readFile: async (...args: unknown[]) => {
@@ -52,6 +54,15 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
       await actualRm(...args);
     },
+    writeFile: async (...args: unknown[]) => {
+      const path = String(args[0]);
+      if (fsFaults.failStagingBlankWrites && path.includes('-staging') && args[1] === '') {
+        const error = new Error('locked staging content') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      await actualWriteFile(...args);
+    },
   };
 });
 
@@ -60,6 +71,7 @@ const createdRoots: string[] = [];
 afterEach(async () => {
   fsFaults.stagedSensitiveValue = null;
   fsFaults.stagingRemoveFailures = 0;
+  fsFaults.failStagingBlankWrites = false;
   await Promise.all(createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -555,6 +567,33 @@ describe('writePerformanceReport', () => {
     });
     await expect(readdir(join(outputRoot, `${input.runId}-staging`)))
       .rejects.toMatchObject({ code: 'ENOENT' });
+    const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
+    expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
+    expect(await readdir(join(outputRoot, `${input.runId}-quarantined`))).toEqual(['quarantine.json']);
+  });
+
+  it('retains only verified-empty staging files when all directory removal attempts are exhausted', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-99990000');
+    const sensitiveValue = 'locked.post.write@example.com';
+    fsFaults.stagedSensitiveValue = sensitiveValue;
+    fsFaults.stagingRemoveFailures = 100;
+    fsFaults.failStagingBlankWrites = true;
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({
+      status: 'privacy_failure',
+      directoryName: `${input.runId}-quarantined`,
+      reasonCategories: ['email_address'],
+    });
+    const stagingDirectory = join(outputRoot, `${input.runId}-staging`);
+    const stagingFiles = await readdir(stagingDirectory);
+    expect(stagingFiles.sort()).toEqual(['report.md', 'requests.jsonl', 'summary.json']);
+    const stagingTexts = await Promise.all(stagingFiles.map((fileName) => (
+      readFile(join(stagingDirectory, fileName), 'utf8')
+    )));
+    expect(stagingTexts).toEqual(['', '', '']);
     const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
     expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
     expect(await readdir(join(outputRoot, `${input.runId}-quarantined`))).toEqual(['quarantine.json']);

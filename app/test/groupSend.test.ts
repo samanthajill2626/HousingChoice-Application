@@ -633,9 +633,12 @@ describe('groupSend - adapter failures become typed refusals', () => {
     // which serializes every enumerable key straight into CloudWatch. It is now
     // wrapped in a domain refusal carrying a SUMMARY and no config - which also
     // means the route maps it instead of 500ing.
-    const err = await f
+    const err: Error & { code?: string } = await f
       .send({ conversationId: 'group-1', body: 'hi' })
-      .then(() => new Error('expected a throw'), (e: unknown) => e as Error & { code?: string });
+      .then(
+        () => new Error('expected a throw'),
+        (e: unknown) => e as Error & { code?: string },
+      );
     expect(err).toBeInstanceOf(GroupRailUnavailableError);
     expect(err.code).toBe('group_rail_unavailable');
     expect(err.message).not.toContain('twilio exploded'); // the raw message is not the wrapper's

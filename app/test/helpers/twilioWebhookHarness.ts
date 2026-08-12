@@ -1248,6 +1248,27 @@ export function createFakeWorld(): FakeWorld {
       crossCheckBalances.set(pairKey, { balance, ...(since !== undefined && { since }) });
       return balance >= 0 ? 'matched' : 'credit';
     },
+    // The classic filing RECEIPT + its window read (last-chance verification).
+    // MODELLED, not stubbed, like the rest of this ledger: the wiring suite
+    // drives a real sweep over rows the real service wrote through this fake, so
+    // a receipt store that never returned anything would let a false alarm pass.
+    async recordCrossCheckClassicReceipt(pairKey, receipt) {
+      const rows = crossCheckClassicReceipts.get(pairKey) ?? [];
+      rows.push({ providerSid: receipt.providerSid, filedAt: receipt.filedAt });
+      rows.sort((a, b) => (a.filedAt < b.filedAt ? -1 : 1));
+      crossCheckClassicReceipts.set(pairKey, rows);
+    },
+    async claimCrossCheckClassicInWindow(pairKey, fromIso, toIso) {
+      // CLAIMED, not read - one receipt is evidence about ONE filing, so it
+      // reconciles ONE pending row. Modelled, because a fake that handed the
+      // same receipt to every overdue row would hide exactly that.
+      const rows = crossCheckClassicReceipts.get(pairKey) ?? [];
+      const i = rows.findIndex((r) => r.filedAt >= fromIso && r.filedAt <= toIso);
+      if (i < 0) return undefined;
+      const [claimed] = rows.splice(i, 1);
+      crossCheckClassicReceipts.set(pairKey, rows);
+      return claimed;
+    },
     async releaseCrossCheckPending(pairKey) {
       const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
       if (state.balance > 0) {
@@ -3232,6 +3253,11 @@ export function createFakeWorld(): FakeWorld {
   const crossCheckDueRows = new Map<string, GroupDueRow>();
   const crossCheckPending = new Map<string, PendingCrossCheckEvent[]>();
   const crossCheckBalances = new Map<string, CrossCheckPairState>();
+  /** Classic filing RECEIPTS per pair - the sweep's last-chance evidence. */
+  const crossCheckClassicReceipts = new Map<
+    string,
+    Array<{ providerSid: string; filedAt: string }>
+  >();
   const groupRailEnqueues: GroupRailEnqueueRequest[] = [];
   const groupRailEnqueuer: GroupRailEnqueuer = {
     async enqueueGroupRail(request) {

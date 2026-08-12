@@ -325,6 +325,15 @@ export function buildGroupSendDueRow(input: {
 //     credit is later consumed by a genuinely UNMATCHED event, which then never
 //     goes pending and never alarms - the guardrail silently reporting health
 //     while detection is down. The ledger must be dedupe-safe on BOTH sides.
+//  5. CLASSIC FILING RECEIPT, `cls#<filedAt>#<SMxx>` on the PAIR partition -
+//     written ONLY when a filing arrived and the ledger could not count it
+//     against any pending row (the `group_crosscheck_pending_row_missing`
+//     branch). The balance records how many filings arrived, never WHEN, so it
+//     cannot answer the sweep's last-chance question - "did a filing this
+//     ledger lost track of land inside this event's window?" - and that
+//     question is the difference between a false alarm and a real one. Claimed
+//     (conditional delete) rather than read, so one lost filing reconciles
+//     exactly one pending row. Healthy traffic writes none of these at all.
 
 /** Due-row discriminator for a cross-check event awaiting its classic filing. */
 export const GROUP_CROSSCHECK_DUE_KIND = 'group_crosscheck_event';
@@ -465,6 +474,32 @@ const CROSSCHECK_EVENT_PREFIX = 'evt2#';
 function crossCheckEventSortKey(deadlineIso: string, messageSid: string): string {
   return `${CROSSCHECK_EVENT_PREFIX}${deadlineIso}#${messageSid}`;
 }
+
+/**
+ * CLASSIC FILING RECEIPT prefix (last-chance verification, 2026-08-12).
+ *
+ * The signed balance answers "how many", never "when". The sweep's last-chance
+ * check needs "did a classic filing from this author reach this rail INSIDE the
+ * pending window", so each filing leaves one timestamp-sorted receipt on its own
+ * pair partition and the check is a single bounded range Query. `cls#` sorts
+ * before both `evt2#` and `state`, and no bound of the receipt range can reach
+ * either.
+ */
+const CROSSCHECK_CLASSIC_PREFIX = 'cls#';
+
+/** Sort key for one classic filing receipt: time-ordered, sid-unique. */
+function crossCheckClassicSortKey(filedAtIso: string, providerSid: string): string {
+  return `${CROSSCHECK_CLASSIC_PREFIX}${filedAtIso}#${providerSid}`;
+}
+
+/**
+ * Slack either side of the pending window for the last-chance check. The two
+ * webhooks fire off ONE carrier message, so a filing can land marginally before
+ * the event that predicted it; and a sweep runs after the deadline, so a filing
+ * can land marginally after. A minute covers both without widening the window
+ * enough to reach a different message's traffic.
+ */
+export const GROUP_CROSSCHECK_LASTCHANCE_SLACK_MS = 60 * 1000;
 
 /** Deadline-prefixed due sort key for an unmatched cross-check event. */
 export function groupCrossCheckDueSortKey(deadlineIso: string, messageSid: string): string {
@@ -1333,6 +1368,33 @@ export interface MessagesRepo {
     nowIso: string,
     expiresAt: number,
   ): Promise<'matched' | 'credit'>;
+  /**
+   * Leave a timestamped RECEIPT that a classic group filing reached this pair
+   * and the ledger could NOT count it against a pending event - the sweep's
+   * last-chance evidence (see CROSSCHECK_CLASSIC_PREFIX). Written only on that
+   * one branch, so healthy traffic pays nothing and a receipt's existence
+   * already means "a filing this ledger lost track of".
+   */
+  recordCrossCheckClassicReceipt(
+    pairKey: string,
+    receipt: { providerSid: string; filedAt: string; conversationSid: string; memberKey: string },
+    expiresAt: number,
+  ): Promise<void>;
+  /**
+   * CLAIM the oldest classic filing receipt for this pair with a `filedAt`
+   * inside [fromIso, toIso], or `undefined` when there is none.
+   *
+   * A CLAIM, NOT A READ, for the same reason `claimOldestCrossCheckPending` is:
+   * one receipt is evidence about exactly ONE filing, so it must reconcile
+   * exactly ONE pending row. A plain read would let a single lost filing
+   * silence every overdue row whose window it happened to fall in - which is
+   * the one-for-one accounting the whole ledger exists to keep.
+   */
+  claimCrossCheckClassicInWindow(
+    pairKey: string,
+    fromIso: string,
+    toIso: string,
+  ): Promise<{ providerSid: string; filedAt: string } | undefined>;
   /**
    * Give an ALARMED pending event back to the balance. The sweep has stopped
    * waiting for it, so it must stop counting as pending - otherwise a very late
@@ -2866,6 +2928,68 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       );
       const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? -1);
       return balance >= 0 ? 'matched' : 'credit';
+    },
+
+    async recordCrossCheckClassicReceipt(pairKey, receipt, expiresAt) {
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: pairKey,
+            tsMsgId: crossCheckClassicSortKey(receipt.filedAt, receipt.providerSid),
+            provider_sid: receipt.providerSid,
+            filed_at: receipt.filedAt,
+            conversation_sid: receipt.conversationSid,
+            member_key: receipt.memberKey,
+            // Cleanup only, on the same 7-day horizon as the rest of the ledger.
+            expires_at: expiresAt,
+          },
+        }),
+      );
+    },
+
+    async claimCrossCheckClassicInWindow(pairKey, fromIso, toIso) {
+      const { Items } = await doc.send(
+        new QueryCommand({
+          TableName: table,
+          KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
+          ExpressionAttributeValues: {
+            ':p': pairKey,
+            ':lo': `${CROSSCHECK_CLASSIC_PREFIX}${fromIso}`,
+            // '~' (0x7E) sorts after the '#' separator, so the upper bound
+            // includes a receipt filed at exactly `toIso` and excludes later ones.
+            ':hi': `${CROSSCHECK_CLASSIC_PREFIX}${toIso}~`,
+          },
+          // The sweep is reading rows a filing may have written moments ago and
+          // deciding whether to raise an ERROR on their absence, so read lag
+          // alone must not be able to produce that ERROR - the same reason the
+          // pending claim is consistent.
+          ConsistentRead: true,
+          ScanIndexForward: true,
+          Limit: CROSSCHECK_CLAIM_ATTEMPTS,
+        }),
+      );
+      for (const raw of (Items ?? []) as Array<Record<string, unknown>>) {
+        try {
+          await doc.send(
+            new DeleteCommand({
+              TableName: table,
+              Key: { conversationId: pairKey, tsMsgId: String(raw['tsMsgId']) },
+              // Inspected, not assumed: a concurrent sweep pass may have taken
+              // this receipt, and it is evidence about ONE filing only.
+              ConditionExpression: 'attribute_exists(conversationId)',
+            }),
+          );
+        } catch (err) {
+          if (err instanceof ConditionalCheckFailedException) continue; // lost it; try the next
+          throw err;
+        }
+        return {
+          providerSid: typeof raw['provider_sid'] === 'string' ? raw['provider_sid'] : '',
+          filedAt: typeof raw['filed_at'] === 'string' ? raw['filed_at'] : '',
+        };
+      }
+      return undefined;
     },
 
     async releaseCrossCheckPending(pairKey) {

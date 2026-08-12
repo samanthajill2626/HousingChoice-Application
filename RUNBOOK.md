@@ -1679,6 +1679,8 @@ log events (see "Reading logs" and "Alarms"):
 | `group_crosscheck_inbound_missing` | ERROR | A message reached the Conversation and never reached the classic webhook. The envelope may be gone. |
 | `group_send_receipts_stale` | ERROR | A group send's recipients are still non-terminal past the deadline. The receipts webhook is likely dead or misconfigured - re-check step 3. |
 | `group_crosscheck_channel_quiet` | WARN | Railed threads took classic inbound for 24h while the cross-check recorded nothing. The MONITOR is dead, not the feature. |
+| `group_crosscheck_lastchance_reconciled` | INFO | A pending event was about to alarm, and the sweep found the receipt of a classic filing that really did land in its window - so it reconciled quietly instead. NOT an outage: it is the counter for "how often the ledger's count is wrong on healthy traffic". A steady trickle is expected; a sharp rise means the ledger is losing claims and is worth a look on its own. |
+| `group_crosscheck_lastchance_read_failed` | WARN | The last-chance receipt read failed, so the sweep alarmed on the ledger alone. Any `group_crosscheck_inbound_missing` in the same window may be false. |
 | `group_inbound_heartbeat_quiet` | WARN | No group-origin INBOUND for seven days while group threads exist. Staff replies deliberately do NOT quiet this - only inbound (and a just-migrated thread's grace window) does. |
 | `group_envelope_missing` | WARN | The tripwire: an MMS shaped like a group with no envelope. One is not news; a run of them is. |
 | `group_rail_ensure_failed` | WARN | One thread could not get a rail. It is inbound-only until it does. Remedy: "Resolving a rail failure" in step 4. |

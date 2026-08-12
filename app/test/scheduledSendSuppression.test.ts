@@ -272,6 +272,12 @@ function makeSendFakes(
     resolveCrossCheckPending: async () => {
       throw new Error('resolveCrossCheckPending: not used in this suite');
     },
+    recordCrossCheckClassicReceipt: async () => {
+      throw new Error('recordCrossCheckClassicReceipt: not used in this suite');
+    },
+    claimCrossCheckClassicInWindow: async () => {
+      throw new Error('claimCrossCheckClassicInWindow: not used in this suite');
+    },
   };
   const auditRepo: AuditRepo = {
     append: async () => {},

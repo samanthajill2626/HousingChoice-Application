@@ -23,7 +23,9 @@
 //     win the race and neither order is a fault);
 //   - a credit older than the match window is NOT consumable, so a quiet period
 //     cannot bank credits that mask a later genuine miss;
-//   - anything still pending past its deadline alarms ONCE, from the T6.3 sweep.
+//   - anything still pending past its deadline alarms ONCE, from the T6.3 sweep
+//     - unless the LAST-CHANCE check finds a receipt proving a filing really did
+//     arrive in that window and the ledger simply lost it (see the sweep).
 //
 // THE LEDGER IS A CLAIM, NOT A CHECK-THEN-ACT (fix wave 5, adversarial 3/9).
 // "Either can win the race and neither order is a fault" is the stated intent,
@@ -63,6 +65,7 @@ import {
   GROUP_CROSSCHECK_DUE_KIND,
   GROUP_CROSSCHECK_DUE_PARTITION,
   GROUP_CROSSCHECK_GRACE_MS,
+  GROUP_CROSSCHECK_LASTCHANCE_SLACK_MS,
   type MessagesRepo,
 } from '../repos/messagesRepo.js';
 import { normalizeToE164 } from '../lib/phone.js';
@@ -130,6 +133,8 @@ export interface GroupCrossCheckDeps {
     | 'claimCrossCheckClassic'
     | 'recordCrossCheckEvent'
     | 'bumpCrossCheckClassic'
+    | 'recordCrossCheckClassicReceipt'
+    | 'claimCrossCheckClassicInWindow'
     | 'releaseCrossCheckPending'
     | 'claimOldestCrossCheckPending'
     | 'resolveCrossCheckPending'
@@ -144,6 +149,8 @@ export interface GroupCrossCheckDeps {
   graceMs?: number;
   creditWindowMs?: number;
   cleanupMs?: number;
+  /** Slack either side of the pending window for the last-chance check. */
+  lastChanceSlackMs?: number;
 }
 
 /** How many overdue rows one sweep pass will handle. */
@@ -161,6 +168,7 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
   const graceMs = deps.graceMs ?? GROUP_CROSSCHECK_GRACE_MS;
   const creditWindowMs = deps.creditWindowMs ?? GROUP_CROSSCHECK_CREDIT_MS;
   const cleanupMs = deps.cleanupMs ?? GROUP_CROSSCHECK_CLEANUP_MS;
+  const lastChanceSlackMs = deps.lastChanceSlackMs ?? GROUP_CROSSCHECK_LASTCHANCE_SLACK_MS;
 
   function businessNumber(): string | undefined {
     if (deps.businessNumber !== undefined) return deps.businessNumber;
@@ -352,6 +360,34 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
             },
             'cross-check balance reported a pending event with no claimable row (an alarm that just resolved it, claim contention, or a pre-wave row outside the claim range)',
           );
+          // THE LAST-CHANCE RECEIPT (2026-08-12). This branch - and only this
+          // branch - is a filing that REALLY ARRIVED and that the ledger could
+          // not count against any pending row. Every residual false
+          // `group_crosscheck_inbound_missing` comes through here: the row this
+          // filing paid for is still sitting in the deadline partition and will
+          // raise the one alarm that means "the undocumented envelope may be
+          // gone" about a message the classic webhook filed correctly.
+          //
+          // So leave a timestamped receipt the sweep can consult before it
+          // alarms. Deliberately NOT written on the healthy paths (a matched +
+          // claimed filing, or a banked credit whose event has not arrived yet):
+          // those cost nothing and need no evidence, so the receipt's mere
+          // existence already means "a filing this ledger lost track of", and
+          // healthy traffic pays no extra write at all.
+          //
+          // Downstream of the provider-SID dedupe claim above, so a Twilio
+          // redelivery cannot leave a second one. Best effort inside the same
+          // try: the message is filed either way.
+          await messages.recordCrossCheckClassicReceipt(
+            pairKey,
+            {
+              providerSid: record.providerSid ?? '',
+              filedAt: at.toISOString(),
+              conversationSid: record.conversationSid,
+              memberKey,
+            },
+            cleanupAt(at),
+          );
           return;
         }
         log.info(
@@ -404,6 +440,85 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           author: row.author ?? '',
           deadlineAt: row.deadlineAt,
         };
+
+        // LAST-CHANCE VERIFICATION, before the ERROR (2026-08-12).
+        //
+        // Everything above this line is a COUNT, and the residual false-alarm
+        // shape this ledger still has ends in exactly one place: a classic
+        // filing that genuinely arrived, paid the balance, and then failed to
+        // CLAIM the row it paid for - the `group_crosscheck_pending_row_missing`
+        // WARN (a sweep/claim race, claim contention, a pre-wave row). That row
+        // then raises the ONE signal that says the undocumented envelope may be
+        // gone, about a message the classic webhook filed correctly.
+        // `groupDelivery.ts` prices that: false firing "trains the operator to
+        // ignore the one alarm that matters".
+        //
+        // So ask the record a second, independent question before alarming: is
+        // there a RECEIPT from a filing on this pair that the ledger could not
+        // count, dated inside this event's pending window? Exactly ONE bounded
+        // Query per would-be alarm, answered by a durable row rather than by the
+        // counter already known to be wrong.
+        //
+        // IT STAYS ONE-FOR-ONE, which is the property the whole ledger is built
+        // on. The receipt is CLAIMED, not read: one lost filing reconciles one
+        // pending row and no more, so two overdue rows can never both be
+        // silenced by a single arrival. And the receipt is written only on that
+        // uncounted branch, so healthy traffic leaves none at all.
+        //
+        // IF DETECTION TRULY BREAKS, no classic filing lands, no receipt is ever
+        // written, and every pending row alarms exactly as it always did - which
+        // is the failure this whole mechanism exists for.
+        //
+        // Bounded, and never fatal: a read failure falls through to the alarm.
+        const deadline = Date.parse(row.deadlineAt);
+        let reconciledBy: { providerSid: string; filedAt: string } | undefined;
+        if (Number.isFinite(deadline)) {
+          try {
+            reconciledBy = await messages.claimCrossCheckClassicInWindow(
+              row.ref.conversationId,
+              new Date(deadline - graceMs - lastChanceSlackMs).toISOString(),
+              new Date(deadline + lastChanceSlackMs).toISOString(),
+            );
+          } catch (err) {
+            log.warn(
+              {
+                err,
+                event: 'group_crosscheck_lastchance_read_failed',
+                conversationSid: alarm.conversationSid,
+              },
+              'last-chance classic-filing check failed - alarming on the ledger alone',
+            );
+          }
+        }
+
+        if (reconciledBy !== undefined) {
+          // QUIET. The books are squared exactly as they are for an alarm -
+          // resolve the rows, then release the slot only if this pass is what
+          // removed the pair row - which is also exactly what a match leaves
+          // behind: rows gone, balance decremented once.
+          const removed = await messages.resolveCrossCheckPending(
+            row.ref.conversationId,
+            row.ref.tsMsgId,
+            row.sortKey,
+          );
+          if (removed) await messages.releaseCrossCheckPending(row.ref.conversationId);
+          // The counter an operator watches for "how often is the ledger's count
+          // wrong on healthy traffic". A rising rate is a real signal about the
+          // ledger; it is not an outage.
+          log.info(
+            {
+              event: 'group_crosscheck_lastchance_reconciled',
+              messageSid: alarm.messageSid,
+              conversationSid: alarm.conversationSid,
+              deadlineAt: alarm.deadlineAt,
+              classicProviderSid: reconciledBy.providerSid,
+              classicFiledAt: reconciledBy.filedAt,
+            },
+            'pending cross-check event reconciled by a classic filing that really landed in its window - not alarming',
+          );
+          continue;
+        }
+
         // THE ALARM. ERROR, because this is the one signal that says the
         // undocumented envelope may have gone away: a message reached the
         // Conversation and never reached the classic webhook.

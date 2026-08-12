@@ -82,10 +82,21 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
   }, 120_000);
 
   let seq = 0;
-  function harness() {
+  /**
+   * `loseClaim` models the ONE production shape the last-chance verification
+   * exists for: a classic filing that really arrived, moved the balance, and
+   * then failed to CLAIM the pending row it paid for (the
+   * `group_crosscheck_pending_row_missing` WARN - a sweep/claim race, claim
+   * contention, or a pre-wave row). Everything else in the ledger is the real
+   * repo; only the claim is made to come back empty.
+   */
+  function harness(opts: { loseClaim?: boolean } = {}) {
     seq += 1;
     const rail = `CH${String(seq).padStart(10, '0')}${randomUUID().replace(/-/g, '')}`.slice(0, 34);
-    const messages = createMessagesRepo({ doc, env: testEnv });
+    const real = createMessagesRepo({ doc, env: testEnv });
+    const messages = opts.loseClaim
+      ? { ...real, claimOldestCrossCheckPending: async () => undefined }
+      : real;
     const stamps: Array<{ id: string; at: string }> = [];
     const settings = {
       async putGroupTimestamp(id: string, at: string) {
@@ -267,6 +278,97 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
       expect(await h.sweep('2026-08-11T12:00:01.000Z')).toEqual([]);
       expect(h.log.error).not.toHaveBeenCalled();
       await h.sweep(); // resolve it so it does not leak into a later sweep
+    });
+
+    // LAST-CHANCE VERIFICATION (2026-08-12, planner-approved). The ledger is a
+    // COUNT heuristic, and every residual false-alarm shape it still has ends
+    // the same way: a classic filing that genuinely arrived, paid the balance,
+    // and did not manage to claim the pending row it paid for. That row then
+    // logs `group_crosscheck_inbound_missing` at ERROR - the ONE signal that
+    // says the undocumented `OtherRecipients{N}` envelope may be gone - about a
+    // message the classic webhook filed correctly. False firing "trains the
+    // operator to ignore the one alarm that matters".
+    //
+    // So before alarming, the sweep asks a SECOND, independent question of the
+    // record: did a classic group filing from this author land on this rail
+    // inside the pending window? Every filing leaves a timestamped `cls#`
+    // receipt on its own pair partition, so that is ONE bounded Query per
+    // would-be alarm and it is answered by the ledger's own durable rows rather
+    // than by a counter that is already known to be off.
+    //
+    // WHAT IT DELIBERATELY DOES NOT DO is make the count exact. If detection
+    // truly breaks, NO classic filing lands, no receipt exists, and the alarm
+    // fires exactly as before - which is the failure the mechanism is for. The
+    // cost is that a window carrying OTHER traffic from the same author can
+    // absorb one genuinely missed message. That trade is the module's own stated
+    // purpose: "is the classic channel still carrying group traffic", not "was
+    // this exact message filed".
+    it('a would-be alarm whose classic filing DID land is reconciled QUIETLY, not alarmed', async () => {
+      const h = harness({ loseClaim: true });
+      await h.crossCheck.recordConversationEvent(h.event());
+      // The filing arrives (inside the pending window) and loses its claim - the
+      // exact interleave that used to end in a false ERROR five minutes later.
+      h.setNow('2026-08-11T12:00:30.000Z');
+      await h.classic();
+      expect(h.log.warn).toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'group_crosscheck_pending_row_missing' }),
+        expect.any(String),
+      );
+
+      expect(await h.sweep()).toEqual([]);
+      expect(h.log.error).not.toHaveBeenCalled();
+      expect(h.log.info).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: 'group_crosscheck_lastchance_reconciled',
+          conversationSid: h.rail,
+        }),
+        expect.any(String),
+      );
+
+      // THE BOOKS ARE SQUARE, exactly as a match would have left them: the row
+      // is gone (a second sweep is silent) and the slot was given back, so the
+      // next event is not absorbed by a stranded +1.
+      h.log.info.mockClear();
+      expect(await h.sweep('2026-08-11T14:00:00.000Z')).toEqual([]);
+      h.setNow('2026-08-11T15:00:00.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+      expect(await h.sweep('2026-08-11T16:00:00.000Z')).toHaveLength(1);
+    });
+
+    it('a GENUINE miss - no classic filing at all - still alarms, and reconciles nothing', async () => {
+      const h = harness({ loseClaim: true });
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      expect(await h.sweep()).toHaveLength(1);
+      expect(h.log.error).toHaveBeenCalledWith(
+        expect.objectContaining({ event: ALARM, conversationSid: h.rail }),
+        'conversation-bound inbound missing from classic webhook',
+      );
+      expect(h.log.info).not.toHaveBeenCalledWith(
+        expect.objectContaining({ event: 'group_crosscheck_lastchance_reconciled' }),
+        expect.any(String),
+      );
+    });
+
+    it('ONE lost filing reconciles ONE row - a later row outside its window still alarms', async () => {
+      // Both halves of the bound in one pass: the receipt is CLAIMED (so it
+      // cannot silence a second row) and it is WINDOWED (so a filing from an
+      // earlier period is not evidence about a later event). Either one alone
+      // would let a single lost filing mask a real detection outage.
+      const h = harness({ loseClaim: true });
+      await h.crossCheck.recordConversationEvent(h.event()); // pending at 12:00
+      h.setNow('2026-08-11T12:00:30.000Z');
+      await h.classic(); // arrives, loses its claim -> leaves ONE receipt
+
+      // A second event hours later, with no filing of its own.
+      h.setNow('2026-08-11T18:00:00.000Z');
+      await h.crossCheck.recordConversationEvent(h.event());
+
+      // Both rows are overdue in this sweep. The first is reconciled by the
+      // receipt; the second is out of its window AND the receipt is spent.
+      const alarms = await h.sweep('2026-08-11T19:00:00.000Z');
+      expect(alarms).toHaveLength(1);
+      expect(alarms[0]!.deadlineAt).toBe('2026-08-11T18:05:00.000Z');
     });
 
     it('a STALE credit does not mask a later genuine miss', async () => {

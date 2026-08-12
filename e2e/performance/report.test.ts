@@ -1,3 +1,4 @@
+import { watch } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -463,13 +464,18 @@ describe('writePerformanceReport', () => {
       .toContain('Partial run reason: `browser_failure`');
   });
 
-  it('quarantines sensitive final bytes and returns filenames plus reason categories only', async () => {
+  it('preflights sensitive artifact strings before creating a staging directory or writing their bytes', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-33334444');
     const sensitiveValue = 'private.person@example.com';
     input.samples[0] = sample(`/${sensitiveValue}`, 'cold', 0);
+    const changedPaths: string[] = [];
+    const watcher = watch(outputRoot, { persistent: false });
+    watcher.on('change', (_eventType, fileName) => changedPaths.push(String(fileName)));
 
     const result = await writePerformanceReport(input);
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    watcher.close();
 
     expect(result).toEqual({
       status: 'privacy_failure',
@@ -481,6 +487,8 @@ describe('writePerformanceReport', () => {
       reasonCategories: ['email_address'],
     });
     await expect(readdir(join(outputRoot, input.runId))).rejects.toMatchObject({ code: 'ENOENT' });
+    expect(changedPaths).not.toContain(`${input.runId}-staging`);
+    await expect(readdir(join(outputRoot, `${input.runId}-staging`))).rejects.toMatchObject({ code: 'ENOENT' });
     const quarantineDirectory = join(outputRoot, `${input.runId}-quarantined`);
     const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
     expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);

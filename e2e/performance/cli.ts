@@ -39,6 +39,9 @@ import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './sel
 export interface CliReportResult {
   exitCode: number;
   status: string;
+  directoryName?: string;
+  files?: string[];
+  reasonCategories?: string[];
 }
 
 export interface CliRuntime {
@@ -122,6 +125,25 @@ function hermeticSeedCountsLine(config: RunConfig): string | null {
   return `performance_seed_counts=${JSON.stringify(counts)}\n`;
 }
 
+function safeTerminalValues(value: unknown, pattern: RegExp): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((entry): entry is string => (
+    typeof entry === 'string' && pattern.test(entry)
+  )))].sort();
+}
+
+function writeReportOutput(report: CliReportResult, stdout: (text: string) => void): void {
+  const directoryName = typeof report.directoryName === 'string'
+    && /^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/u.test(report.directoryName)
+    ? report.directoryName
+    : null;
+  if (directoryName !== null) stdout(`performance_report=${directoryName}\n`);
+  if (report.status !== 'privacy_failure') return;
+  const files = safeTerminalValues(report.files, /^[a-z][a-z0-9._-]{0,127}$/u);
+  const reasonCategories = safeTerminalValues(report.reasonCategories, /^[a-z][a-z0-9_]{1,63}$/u);
+  stdout(`performance_privacy_failure=${JSON.stringify({ files, reasonCategories })}\n`);
+}
+
 async function closeQuietly(runtime: CliRuntime, dashboard: unknown): Promise<boolean> {
   try {
     await runtime.closeDashboard(dashboard);
@@ -189,6 +211,7 @@ export async function runProfiler(
       await runtime.warmup(config, dashboard, auth);
       const collected = await runtime.collect(config, dashboard, auth);
       const report = await runtime.report(config, collected);
+      writeReportOutput(report, stdout);
       exitCode = report.exitCode === 0 ? 0 : 1;
     } catch (error) {
       stderr(`${closedReason(error)}\n`);
@@ -222,6 +245,7 @@ export async function runProfiler(
     if (config.target === 'local') await runtime.warmup(config, dashboard, auth);
     const collected = await runtime.collect(config, dashboard, auth);
     const report = await runtime.report(config, collected);
+    writeReportOutput(report, stdout);
     return report.exitCode === 0 ? 0 : 1;
   } catch (error) {
     stderr(`${closedReason(error)}\n`);
@@ -1093,7 +1117,6 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         ...(value['selfQa'] !== undefined && { selfQa: value['selfQa'] as import('./selfQa.js').SelfQaResult }),
         ...(baselineJson !== undefined && { baselineJson }),
       });
-      process.stdout.write(`performance_report=${result.directoryName}\n`);
       return result as CliReportResult;
     },
     async closeDashboard(value): Promise<void> {

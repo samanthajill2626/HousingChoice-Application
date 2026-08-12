@@ -330,6 +330,31 @@ describe('top-level profiler sequencing', () => {
     }
   });
 
+  it('prints a fixed safe privacy failure record without candidate content', async () => {
+    const stdout = vi.fn();
+    const sensitiveValue = 'private.person@example.com';
+    const value = runtime([], {
+      report: vi.fn(async () => ({
+        exitCode: 1,
+        status: 'privacy_failure',
+        directoryName: '20260812T123456789Z-33334444-quarantined',
+        files: ['summary.json', 'report.md', sensitiveValue],
+        reasonCategories: ['email_address', sensitiveValue],
+      })),
+    });
+
+    await expect(runProfiler(['hermetic'], {
+      configDeps,
+      loadRuntime: vi.fn(async () => value),
+      stdout,
+    })).resolves.toBe(1);
+
+    const output = stdout.mock.calls.map(([text]) => text as string).join('');
+    expect(output).toContain('performance_report=20260812T123456789Z-33334444-quarantined\n');
+    expect(output).toContain('performance_privacy_failure={"files":["report.md","summary.json"],"reasonCategories":["email_address"]}\n');
+    expect(output).not.toContain(sensitiveValue);
+  });
+
   it('propagates a finalized checkpoint mismatch report as nonzero without another lifecycle pass', async () => {
     const events: string[] = [];
     const value = runtime(events, {

@@ -782,8 +782,6 @@ export async function writePerformanceReport(
   if (await pathExists(stagingDirectory) || await pathExists(quarantineDirectory)) {
     throw new Error('run_directory_exists');
   }
-  await mkdir(stagingDirectory);
-
   const config = cloneConfig(input.config);
   const target = cloneTarget(input.target);
   const samples = input.samples.map(cloneSample);
@@ -903,6 +901,33 @@ export async function writePerformanceReport(
     artifactTexts.set('comparison.md', comparisonMarkdown(comparison));
   }
 
+  const candidateTexts = files.map((fileName) => ({
+    fileName,
+    text: artifactTexts.get(fileName)!,
+  }));
+  const preflightPrivacyFailures = scanArtifactFiles(candidateTexts);
+  if (preflightPrivacyFailures.length > 0) {
+    const reasonCategories = [...new Set(preflightPrivacyFailures.flatMap((failure) => failure.reasonCategories))].sort();
+    await mkdir(quarantineDirectory);
+    await writeFile(join(quarantineDirectory, 'quarantine.json'), json({
+      runId,
+      status: 'privacy_failure',
+      reason: 'privacy_scan_failed',
+      files,
+      reasonCategories,
+    }), 'utf8');
+    return {
+      status: 'privacy_failure',
+      exitCode: 1,
+      runId,
+      directoryName: `${runId}-quarantined`,
+      files,
+      reason: 'privacy_scan_failed',
+      reasonCategories,
+    };
+  }
+
+  await mkdir(stagingDirectory);
   await Promise.all(files.map((fileName) =>
     writeFile(join(stagingDirectory, fileName), artifactTexts.get(fileName)!, 'utf8')));
   const stagedTexts = await Promise.all(files.map(async (fileName) => ({

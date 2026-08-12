@@ -4,6 +4,7 @@ import {
   NEVER_INTERCEPTED_PATHS,
   PROFILER_CONTEXT_OPTIONS,
   FirewallAttributionError,
+  FirewallHandlerError,
   FirewallPhaseError,
   UnknownFirewallMethodError,
   createFirewallRecordingToken,
@@ -21,9 +22,15 @@ class FakeSession implements FirewallCdpSession {
   readonly handlers = new Map<string, Array<(event: never) => void>>();
   frameUrl = `${ORIGIN}/source`;
   detached = false;
+  continueRequestFailure: Error | null = null;
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     this.sent.push({ method, params });
+    if (method === 'Fetch.continueRequest' && this.continueRequestFailure !== null) {
+      const error = this.continueRequestFailure;
+      this.continueRequestFailure = null;
+      throw error;
+    }
     if (method === 'Page.getFrameTree') {
       return { frameTree: { frame: { id: 'main', url: this.frameUrl } } };
     }
@@ -63,10 +70,14 @@ class FakePage {
   }
 }
 
-function paused(method: string, path: string): FirewallPausedRequest {
+function paused(method: string, path: string, referrer?: string): FirewallPausedRequest {
   return {
     requestId: `${method}-${path}`,
-    request: { method, url: `${ORIGIN}${path}` },
+    request: {
+      method,
+      url: `${ORIGIN}${path}`,
+      ...(referrer === undefined ? {} : { headers: { Referer: referrer } }),
+    },
     resourceType: 'Fetch',
     frameId: 'main',
   };
@@ -129,7 +140,34 @@ describe('performance request firewall', () => {
     await controller.dispose();
   });
 
-  it('classifies warm writes from protocol frame state even after the driver URL has advanced', async () => {
+  it('ignores only an invalidated paused-read race and latches every other continue failure', async () => {
+    const page = new FakePage();
+    page.session.continueRequestFailure = new Error(
+      'Protocol error (Fetch.continueRequest): Invalid InterceptionId.',
+    );
+    const controller = await installRequestFirewall({
+      page,
+      firstPartyOrigin: ORIGIN,
+      currentToken: () => null,
+    });
+
+    page.session.emitPaused(paused('GET', '/api/contacts'));
+    await expect(controller.assertHealthy()).resolves.toBeUndefined();
+    await controller.dispose();
+
+    const fatalPage = new FakePage();
+    fatalPage.session.continueRequestFailure = new Error('Protocol transport failed');
+    const fatal = await installRequestFirewall({
+      page: fatalPage,
+      firstPartyOrigin: ORIGIN,
+      currentToken: () => null,
+    });
+    fatalPage.session.emitPaused(paused('GET', '/api/contacts'));
+    await expect(fatal.assertHealthy()).rejects.toBeInstanceOf(FirewallHandlerError);
+    await fatal.dispose();
+  });
+
+  it('classifies warm writes from immutable request referrers after the frame URL has advanced', async () => {
     const page = new FakePage();
     const token = createFirewallRecordingToken({
       mode: 'warm',
@@ -137,18 +175,24 @@ describe('performance request firewall', () => {
       sourcePageUrl: `${ORIGIN}/inbox`,
       destinationPageUrl: `${ORIGIN}/conversations/conv-safe`,
     });
-    page.currentUrl = `${ORIGIN}/inbox`;
-    page.session.frameUrl = `${ORIGIN}/inbox`;
     const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
 
     page.currentUrl = `${ORIGIN}/conversations/conv-safe`;
-    page.session.emitPaused(paused('POST', '/api/conversations/conv-safe/read'));
-    await controller.assertHealthy();
     page.session.emit('Page.navigatedWithinDocument', {
       frameId: 'main',
       url: `${ORIGIN}/conversations/conv-safe`,
     });
-    page.session.emitPaused(paused('POST', '/api/conversations/conv-safe/read'));
+    page.session.emitPaused(paused(
+      'POST',
+      '/api/conversations/conv-safe/read',
+      `${ORIGIN}/inbox`,
+    ));
+    await controller.assertHealthy();
+    page.session.emitPaused(paused(
+      'POST',
+      '/api/conversations/conv-safe/read',
+      `${ORIGIN}/conversations/conv-safe`,
+    ));
     await controller.assertHealthy();
 
     expect(token.evidence().map((row) => row.phase)).toEqual(['source_click', 'destination_mount']);

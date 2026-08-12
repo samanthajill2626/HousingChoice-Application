@@ -13,7 +13,7 @@ type BlockedWritePhase = BlockedWrite['phase'];
 
 export interface FirewallPausedRequest {
   requestId: string;
-  request: { method: string; url: string };
+  request: { method: string; url: string; headers?: Record<string, string> };
   resourceType?: string;
   frameId?: string;
 }
@@ -220,6 +220,18 @@ export interface InstallRequestFirewallInput {
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const WRITE_METHODS = new Set<WriteMethod>(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+function isInvalidatedPausedRequest(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('Invalid InterceptionId');
+}
+
+function requestReferrer(headers: Record<string, string> | undefined): string | null {
+  if (headers === undefined) return null;
+  for (const [name, value] of Object.entries(headers)) {
+    if (name.toLowerCase() === 'referer' && value.length > 0) return value;
+  }
+  return null;
+}
+
 export async function installRequestFirewall(input: InstallRequestFirewallInput): Promise<FirewallController> {
   const firstPartyOrigin = normalizedOrigin(input.firstPartyOrigin);
   const sanitize = input.sanitize ?? sanitizeRequestUrl;
@@ -237,15 +249,22 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
       ? error
       : new FirewallHandlerError();
   };
+  const continuePausedRequest = async (requestId: string): Promise<void> => {
+    try {
+      await session.send('Fetch.continueRequest', { requestId });
+    } catch (error) {
+      if (!isInvalidatedPausedRequest(error)) throw error;
+    }
+  };
 
   const handle = async (event: FirewallPausedRequest): Promise<void> => {
     const method = event.request.method.toUpperCase();
     if (!isFirewallScopedUrl(event.request.url, firstPartyOrigin)) {
-      await session.send('Fetch.continueRequest', { requestId: event.requestId });
+      await continuePausedRequest(event.requestId);
       return;
     }
     if (READ_METHODS.has(method)) {
-      await session.send('Fetch.continueRequest', { requestId: event.requestId });
+      await continuePausedRequest(event.requestId);
       return;
     }
     await session.send('Fetch.failRequest', { requestId: event.requestId, errorReason: 'BlockedByClient' });
@@ -261,9 +280,10 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
     let phase: BlockedWritePhase;
     try {
       phase = token.phaseFor(
-        event.frameId === undefined
-          ? input.page.url()
-          : frameUrls.get(event.frameId) ?? input.page.url(),
+        requestReferrer(event.request.headers)
+          ?? (event.frameId === undefined
+            ? input.page.url()
+            : frameUrls.get(event.frameId) ?? input.page.url()),
       );
     } catch (error) {
       latch(error);

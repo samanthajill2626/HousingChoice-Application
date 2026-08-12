@@ -77,9 +77,10 @@ export async function postInboundSms(
   return { status: res.status(), body: await res.text() };
 }
 
-/** XML-unescape a TwiML text node (the webhook XML-escapes filed copy: & < > " ').
- *  Reverses `escapeXml` in app/src/routes/webhooks/twilio.ts so a filed constant
- *  with raw `&`/`'` (e.g. "Msg & data", "You're") compares equal to the reply. */
+/** XML-unescape a TwiML text node (& < > " ').
+ *  Historically the reverse of the webhook's `escapeXml` (removed with the
+ *  keyword-reply path, 2026-08-12); retained because voice TwiML and other
+ *  XML-escaped fixtures still flow through the fake's assertions. */
 function unescapeXml(s: string): string {
   return s
     .replace(/&lt;/g, '<')

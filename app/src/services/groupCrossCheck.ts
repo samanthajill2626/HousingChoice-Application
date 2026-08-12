@@ -362,11 +362,18 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           );
           // THE LAST-CHANCE RECEIPT (2026-08-12). This branch - and only this
           // branch - is a filing that REALLY ARRIVED and that the ledger could
-          // not count against any pending row. Every residual false
+          // not count against any pending row. The DOMINANT residual false
           // `group_crosscheck_inbound_missing` comes through here: the row this
           // filing paid for is still sitting in the deadline partition and will
           // raise the one alarm that means "the undocumented envelope may be
-          // gone" about a message the classic webhook filed correctly.
+          // gone" about a message the classic webhook filed correctly. (One
+          // rarer shape stays uncovered on purpose: if the event half's
+          // balance ADD throws mid-sequence, the filing banks a credit and
+          // returns before this branch - that alarm still fires falsely. A
+          // receipt on the credit branch would be written on ordinary healthy
+          // classic-first traffic and could then silence GENUINE misses, which
+          // is the worse trade. See recordCrossCheckEvent's "THE RESIDUAL,
+          // PRICED HONESTLY".)
           //
           // So leave a timestamped receipt the sweep can consult before it
           // alarms. Deliberately NOT written on the healthy paths (a matched +
@@ -511,10 +518,16 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
               messageSid: alarm.messageSid,
               conversationSid: alarm.conversationSid,
               deadlineAt: alarm.deadlineAt,
-              classicProviderSid: reconciledBy.providerSid,
-              classicFiledAt: reconciledBy.filedAt,
+              // WINDOW WITNESS, not a join: the receipt proves A classic
+              // filing landed on this (rail, author) inside the window. On a
+              // busy pair the oldest-first sweep can attribute a later
+              // message's receipt to an earlier row - the alarm COUNT stays
+              // correct; the named sid is the witness, not necessarily the
+              // row's own filing.
+              witnessProviderSid: reconciledBy.providerSid,
+              witnessFiledAt: reconciledBy.filedAt,
             },
-            'pending cross-check event reconciled by a classic filing that really landed in its window - not alarming',
+            'pending cross-check event reconciled by a classic filing that landed in its window - not alarming',
           );
           continue;
         }

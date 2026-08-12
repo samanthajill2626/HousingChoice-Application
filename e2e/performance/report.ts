@@ -7,6 +7,7 @@ import { aggregateSamples, buildRankings } from './aggregate.js';
 import { validateObservedRequestRoles } from './collect.js';
 import { compareRuns } from './compare.js';
 import type { SafeRunConfig } from './config.js';
+import { serializeSelfQaResult, type SelfQaResult } from './selfQa.js';
 import { scanArtifactFiles, type PrivacyViolationCode } from './redact.js';
 import {
   ROUTES,
@@ -116,10 +117,11 @@ export interface WritePerformanceReportInput {
   baselineJson?: string;
   partialReason?: FailureReasonCode;
   checkpointBranches?: readonly ContractCheckpointBranch[];
+  selfQa?: SelfQaResult;
 }
 
 interface WrittenReportResult {
-  status: 'written' | 'partial' | 'comparison_failure' | 'checkpoint_mismatch';
+  status: 'written' | 'partial' | 'comparison_failure' | 'checkpoint_mismatch' | 'self_qa_mismatch';
   exitCode: 0 | 1;
   runId: string;
   directoryName: string;
@@ -837,6 +839,7 @@ export async function writePerformanceReport(
       renderedCount: integer(input.relayDomCheck.renderedCount),
       shortfall: input.relayDomCheck.shortfall === true,
     },
+    ...(input.selfQa !== undefined && { selfQa: serializeSelfQaResult(input.selfQa) }),
     warnings: [] as string[],
     comparison: { status: comparisonStatus },
     artifacts: [] as string[],
@@ -938,6 +941,15 @@ export async function writePerformanceReport(
   if (checkpoint?.status === 'mismatch') {
     return {
       status: 'checkpoint_mismatch',
+      exitCode: 1,
+      runId,
+      directoryName: runId,
+      files,
+    };
+  }
+  if (input.selfQa?.status === 'fail') {
+    return {
+      status: 'self_qa_mismatch',
       exitCode: 1,
       runId,
       directoryName: runId,

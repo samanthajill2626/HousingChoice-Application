@@ -804,6 +804,39 @@ async function bindResolved(
   return { kind: 'resolved', coldPath: href, warmHref: href, branch };
 }
 
+export interface BoundSelfQaFixtures {
+  contact_detail: string;
+  conversation_detail: string;
+  tour_id: string;
+  placement_id: string;
+}
+
+export function resolveBoundSelfQaDetail(
+  routeKey: string,
+  fixtures: Readonly<BoundSelfQaFixtures>,
+  dom: ResolverDom,
+): Promise<ResolverResult> {
+  if (routeKey === '/contacts/:contactId') {
+    return bindResolved(dom, `/contacts/${fixtures.contact_detail}`, {
+      kind: 'contact_detail', contactType: 'tenant', landlordUnitCount: 0,
+    });
+  }
+  if (routeKey === '/conversations/:conversationId') {
+    return bindResolved(dom, `/conversations/${fixtures.conversation_detail}`, { kind: 'none' });
+  }
+  if (routeKey === '/tours/:tourId') {
+    return bindResolved(dom, `/tours/${fixtures.tour_id}`, {
+      kind: 'thread_detail', thread: 'group_thread',
+    });
+  }
+  if (routeKey === '/placements/:placementId') {
+    return bindResolved(dom, `/placements/${fixtures.placement_id}`, {
+      kind: 'thread_detail', thread: 'group_thread',
+    });
+  }
+  throw new Error('self_qa_bound_route_invalid');
+}
+
 export async function resolveContactDetail(api: ResolverApi, dom: ResolverDom): Promise<ResolverResult> {
   let cursor: string | undefined;
   do {

@@ -34,6 +34,7 @@ import type {
 import type { RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
 import type { PageStoreSnapshot } from './readiness.js';
+import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
 
 export interface CliReportResult {
   exitCode: number;
@@ -578,7 +579,16 @@ function resolverFor(
   api: ResolverApi,
   dom: ResolverDom,
   routes: typeof import('./routes.js'),
+  selfQaBindings?: Readonly<SelfQaFixtureBindings>,
 ): Promise<ResolverResult> {
+  if (selfQaBindings !== undefined && (
+    route.key === '/contacts/:contactId'
+    || route.key === '/conversations/:conversationId'
+    || route.key === '/tours/:tourId'
+    || route.key === '/placements/:placementId'
+  )) {
+    return routes.resolveBoundSelfQaDetail(route.key, selfQaBindings, dom);
+  }
   switch (route.resolver) {
     case 'static':
       return Promise.resolve({
@@ -623,6 +633,67 @@ interface DefaultDashboard {
   storageState: { cookies: unknown[]; origins: unknown[] } | null;
 }
 
+async function runSupplementalSelfQaProbes(input: {
+  browser: Browser;
+  baseUrl: string;
+  storageState: { cookies: unknown[]; origins: unknown[] };
+  bindings: Readonly<SelfQaFixtureBindings>;
+  firewall: typeof import('./firewall.js');
+  selfQa: typeof import('./selfQa.js');
+}): Promise<SelfQaAttempt[]> {
+  const attempts: SelfQaAttempt[] = [];
+  const context = await input.browser.newContext({
+    baseURL: input.baseUrl,
+    storageState: input.storageState as never,
+    serviceWorkers: 'block',
+  });
+  const state = { token: null as FirewallRecordingToken | null };
+  await input.firewall.installRequestFirewall({
+    context: context as never,
+    firstPartyOrigin: input.baseUrl,
+    currentToken: () => state.token,
+  });
+  const page = await context.newPage();
+  try {
+    await page.goto(absoluteUrl(input.baseUrl, '/inbox'));
+    const href = `/contacts/${input.bindings.inbox_row}`;
+    const link = page.locator(`a[href="${href}"]`).first();
+    await link.waitFor({ state: 'visible', timeout: 120_000 });
+    state.token = input.firewall.createFirewallRecordingToken({
+      mode: 'warm',
+      firstPartyOrigin: input.baseUrl,
+      sourcePageUrl: absoluteUrl(input.baseUrl, '/inbox'),
+      destinationPageUrl: absoluteUrl(input.baseUrl, href),
+    });
+    await link.click();
+    await page.waitForURL((url) => url.pathname === href, { timeout: 120_000 });
+    await page.waitForTimeout(750);
+    attempts.push(...input.selfQa.supplementalAttempts('inbox_row', state.token.evidence()));
+
+    state.token = null;
+    await page.goto(absoluteUrl(input.baseUrl, '/email'));
+    const list = page.getByRole('list', { name: 'Unmatched email', exact: true });
+    await list.waitFor({ state: 'visible', timeout: 120_000 });
+    const row = list.locator(':scope > li').nth(input.bindings.unmatched_row_index);
+    const expand = row.locator('button[aria-expanded]').first();
+    await expand.waitFor({ state: 'visible', timeout: 120_000 });
+    state.token = input.firewall.createFirewallRecordingToken({
+      mode: 'warm',
+      firstPartyOrigin: input.baseUrl,
+      sourcePageUrl: absoluteUrl(input.baseUrl, '/email'),
+      destinationPageUrl: absoluteUrl(input.baseUrl, '/email'),
+      noNavigationProbe: true,
+    });
+    await expand.click();
+    await page.waitForTimeout(750);
+    attempts.push(...input.selfQa.supplementalAttempts('unmatched_email', state.token.evidence()));
+  } finally {
+    state.token = null;
+    await context.close();
+  }
+  return attempts;
+}
+
 async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
   const playwright = await import('@playwright/test');
   const authModule = await import('./auth.js');
@@ -632,6 +703,8 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
   const readinessModule = await import('./readiness.js');
   const routesModule = await import('./routes.js');
   const reportModule = await import('./report.js');
+  const selfQaModule = await import('./selfQa.js');
+  const seedModule = await import('../../app/src/lib/seed/performance.js');
   const samplingModules: SamplingModules = {
     collect: collectModule,
     firewall: firewallModule,
@@ -653,6 +726,8 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
   if (config.target === 'hermetic') lifecycleModule = await import('./lifecycle.js');
   let targetMetadata: unknown = null;
   let activeLifecycle: DefaultLifecycle | null = null;
+  let selfQaBindings: Readonly<SelfQaFixtureBindings> | undefined;
+  let selfQaBefore: SelfQaSnapshot | undefined;
 
   const dashboardRequest = (dashboard: DefaultDashboard) => async (
     path: '/auth/dev-login' | '/auth/me' | '/api/system/flags',
@@ -820,6 +895,22 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           try { return await response.json(); } catch { return {}; }
         },
       };
+      const selfQaApi = {
+        async get(path: string, query?: Readonly<Record<string, string>>): Promise<unknown> {
+          const response = await dashboard.authContext.request.get(path, { params: query });
+          if (response.status() < 200 || response.status() >= 300) throw new Error('self_qa_snapshot_failed');
+          try { return await response.json(); } catch { throw new Error('self_qa_snapshot_failed'); }
+        },
+      };
+      const selectedRoutes = runConfig.selfQa === null
+        ? routesModule.ROUTES
+        : selfQaModule.routesForSelfQa(runConfig.selfQa, routesModule.ROUTES);
+      if (runConfig.selfQa !== null) {
+        if (runConfig.target !== 'hermetic' || runConfig.seed === null) throw new Error('self_qa_target_invalid');
+        const privateFixtures = seedModule.resolvePerformanceSelfQaFixtures(runConfig.seed);
+        selfQaBindings = await selfQaModule.proveSelfQaFixtures(privateFixtures, selfQaApi);
+        selfQaBefore = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+      }
       const coldDom: ResolverDom = {
         hasExactLink: async () => true,
         browserNow: async () => new Date(),
@@ -831,25 +922,30 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           browser,
           storageState: dashboard.storageState,
           target: runConfig.target,
-          routes: routesModule.ROUTES,
+          routes: selectedRoutes,
           coldRepeats: runConfig.coldRepeats,
           warmRepeats: runConfig.warmRepeats,
           routeOrderSeed: runConfig.routeOrderSeed,
           sourceTimeoutMs: runConfig.sourceTimeoutMs,
           ...(runConfig.seed !== null && { expectedRelayLinkCount: runConfig.seed.relayGroupCount }),
-          resolveCold: (route) => resolverFor(route, resolverApi, coldDom, routesModule),
+          resolveCold: (route) => resolverFor(route, resolverApi, coldDom, routesModule, selfQaBindings),
           resolveWarm: (route, samplePage) => {
             const realPage = samplePage as RealPage;
             const dom: ResolverDom = {
               async hasExactLink(href): Promise<boolean> {
                 const link = realPage.rawPage.locator(`a[href="${href}"]`).first();
-                return await link.count() > 0 && await link.isVisible();
+                try {
+                  await link.waitFor({ state: 'visible', timeout: runConfig.sourceTimeoutMs });
+                  return true;
+                } catch {
+                  return false;
+                }
               },
               async browserNow(): Promise<Date> {
                 return new Date(await realPage.rawPage.evaluate(() => Date.now()));
               },
             };
-            return resolverFor(route, resolverApi, dom, routesModule);
+            return resolverFor(route, resolverApi, dom, routesModule, selfQaBindings);
           },
           instrumentationFor: (route, mode, repeat) => createRealInstrumentation({
             route,
@@ -878,6 +974,42 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         };
       }
       activeLifecycle?.assertAlive();
+      let selfQa: import('./selfQa.js').SelfQaResult | undefined;
+      if (runConfig.selfQa !== null) {
+        if (selfQaBindings === undefined || selfQaBefore === undefined) throw new Error('self_qa_fixture_proof_failed');
+        const supplementalAttempts = runConfig.selfQa === 'full'
+          ? await runSupplementalSelfQaProbes({
+              browser: dashboard.browser as Browser,
+              baseUrl: dashboard.baseUrl,
+              storageState: dashboard.storageState,
+              bindings: selfQaBindings,
+              firewall: firewallModule,
+              selfQa: selfQaModule,
+            })
+          : [];
+        const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
+        const attempts = [
+          ...selfQaModule.attemptsFromSamples(result.samples),
+          ...supplementalAttempts,
+        ];
+        selfQa = selfQaModule.evaluateSelfQa({
+          mode: runConfig.selfQa,
+          routes: selectedRoutes,
+          samples: result.samples,
+          requests,
+          branches: result.branches,
+          attempts,
+          stateChecks: selfQaModule.compareSelfQaSnapshots(selfQaBefore, selfQaAfter),
+          relayDomCheck: result.relayDomCheck,
+          supplementalSampleCount: 0,
+          reportProof: {
+            privacyScanRequired: true,
+            countManifest: runConfig.seed !== null,
+            coldRanking: true,
+            warmRanking: true,
+          },
+        });
+      }
       return {
         samples: result.samples,
         requests,
@@ -889,6 +1021,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         viewport: collectModule.DESKTOP_CHROME_SAMPLE_CONTEXT.viewport,
         target: dashboard.targetMetadata,
         ...(partialReason !== undefined && { partialReason }),
+        ...(selfQa !== undefined && { selfQa }),
       };
     },
     async report(runConfig, collected): Promise<CliReportResult> {
@@ -913,6 +1046,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         relayDomCheck: value['relayDomCheck'] as null,
         checkpointBranches: value['checkpointBranches'] as never[],
         ...(value['partialReason'] === 'browser_failure' && { partialReason: 'browser_failure' as const }),
+        ...(value['selfQa'] !== undefined && { selfQa: value['selfQa'] as import('./selfQa.js').SelfQaResult }),
         ...(baselineJson !== undefined && { baselineJson }),
       });
       process.stdout.write(`performance_report=${result.directoryName}\n`);

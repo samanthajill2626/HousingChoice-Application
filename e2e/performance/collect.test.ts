@@ -23,7 +23,7 @@ import {
   type RouteDefinition,
 } from './routes.js';
 import type { InMemoryStorageState } from './auth.js';
-import type { SampleResult, TargetKind } from './types.js';
+import type { BlockedWrite, SampleResult, TargetKind } from './types.js';
 
 const REQUIRED_CONTACTS: EndpointContract[] = [{
   endpointTemplate: '/api/contacts', queryKeys: ['limit', 'type'], requirement: 'required',
@@ -77,14 +77,16 @@ describe('CDP request collection', () => {
     expect(ended.pendingCount).toBe(0);
     expect(ended.requests.map((row) => row.outcome)).toEqual(['aborted', 'failed']);
     expect(ended.requests.map((row) => [row.status, row.transferBytes])).toEqual([[null, null], [null, null]]);
-    expect(ended.satisfiedRequired).toEqual(['/api/contacts?limit&type']);
+    expect(ended.satisfiedRequired).toEqual([]);
   });
 
   it('retains sanitized evidence for a request still in flight at sample timeout', () => {
     const value = collector();
     start(value, 'hung', 10.25, 'http://127.0.0.1:9111/api/contacts?type=tenant&limit=100');
 
-    expect(value.endSample('sample-1').requests).toEqual([expect.objectContaining({
+    const ended = value.endSample('sample-1');
+    expect(ended.requestCount).toBe(1);
+    expect(ended.requests).toEqual([expect.objectContaining({
       endpointTemplate: '/api/contacts',
       queryKeys: ['limit', 'type'],
       startOffsetMs: 250,
@@ -95,6 +97,15 @@ describe('CDP request collection', () => {
       outcome: 'failed',
       requestRole: 'required',
     })]);
+  });
+
+  it('does not flush another sample token and preserves the active request', () => {
+    const value = collector();
+    start(value, 'hung', 10.25, 'http://127.0.0.1:9111/api/contacts?type=tenant&limit=100');
+
+    expect(value.endSample('stale-token')).toMatchObject({ requestCount: 0, requests: [] });
+    expect(value.snapshot('sample-1').pendingCount).toBe(1);
+    expect(value.endSample('sample-1')).toMatchObject({ requestCount: 1 });
   });
 
   it('retains both redirect hops without overwriting the first hop timing', () => {
@@ -436,10 +447,12 @@ class FakeSamplingContext implements SampleBrowserContext {
   readonly events: string[];
   readonly page: FakeSamplingPage;
   closed = false;
+  readonly closeEvidence: BlockedWrite[];
 
-  constructor(events: string[]) {
+  constructor(events: string[], closeEvidence: BlockedWrite[] = []) {
     this.events = events;
     this.page = new FakeSamplingPage(events);
+    this.closeEvidence = closeEvidence;
   }
 
   async installBasePageStore(): Promise<void> {
@@ -451,21 +464,23 @@ class FakeSamplingContext implements SampleBrowserContext {
     return this.page;
   }
 
-  async close(): Promise<void> {
+  async close(): Promise<BlockedWrite[]> {
     this.closed = true;
     this.events.push('close-context');
+    return this.closeEvidence.map((write) => ({ ...write }));
   }
 }
 
 class FakeSamplingBrowser implements SampleBrowser {
   readonly contexts: FakeSamplingContext[] = [];
   readonly options: unknown[] = [];
+  readonly closeEvidenceByContext = new Map<number, BlockedWrite[]>();
   nextEvents: string[] | null = null;
 
   async newContext(options: unknown): Promise<SampleBrowserContext> {
     const events = this.nextEvents ?? [];
     this.nextEvents = null;
-    const context = new FakeSamplingContext(events);
+    const context = new FakeSamplingContext(events, this.closeEvidenceByContext.get(this.contexts.length));
     this.options.push(options);
     this.contexts.push(context);
     return context;
@@ -581,6 +596,27 @@ describe('cold and warm sampling protocol', () => {
     })).rejects.toThrow('collector_failed');
     expect(browser.contexts[1]!.closed).toBe(true);
     expect(browser.contexts).toHaveLength(2);
+  });
+
+  it('retains blocked writes delivered during cold-context teardown as out-of-sample evidence', async () => {
+    const browser = new FakeSamplingBrowser();
+    browser.closeEvidenceByContext.set(0, [{
+      method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
+    }]);
+
+    const result = await collectColdSample({
+      browser,
+      storageState: STORAGE_STATE,
+      route: ROUTES[0]!,
+      repeat: 0,
+      resolved: resolved('/'),
+      instrumentation: new FakeInstrumentation([]),
+      token: 'cold-trailing',
+    });
+
+    expect(result.blockedWrites).toContainEqual({
+      method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
+    });
   });
 
   it('discards warm source preparation and begins every collector immediately before the exact href click', async () => {
@@ -832,6 +868,73 @@ describe('run ordering and warmup policy', () => {
       { mode: 'warm', repeat: 0, status: 'ok' },
     ]);
     expect(browser.contexts[0]?.closed).toBe(true);
+  });
+
+  it('stops between samples after cancellation instead of driving a detached browser operation', async () => {
+    const browser = new FakeSamplingBrowser();
+    const controller = new AbortController();
+    const routes = ROUTES.slice(0, 2);
+    let cancelled = false;
+
+    await expect(collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target: 'hermetic',
+      routes,
+      coldRepeats: 1,
+      warmRepeats: 1,
+      routeOrderSeed: 7,
+      sourceTimeoutMs: 100,
+      signal: controller.signal,
+      resolveCold: async (route) => resolved(route.key),
+      resolveWarm: async (route, page) => {
+        (page as FakeSamplingPage).hrefs.add(route.source.href);
+        return resolved(route.source.href);
+      },
+      instrumentationFor: (route, mode, repeat) => {
+        const value = new FakeInstrumentation([]);
+        const collect = value.collectSample.bind(value);
+        value.collectSample = async (input) => {
+          const result = await collect(input);
+          if (mode === 'cold' && repeat === 0 && !cancelled) {
+            cancelled = true;
+            controller.abort({ reason: 'interrupted' });
+          }
+          return result;
+        };
+        return value;
+      },
+    })).rejects.toMatchObject({ reason: 'interrupted' });
+  });
+
+  it('retains warmup and warm-context teardown writes in measured artifacts', async () => {
+    const browser = new FakeSamplingBrowser();
+    const evidence: BlockedWrite = {
+      method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
+    };
+    browser.closeEvidenceByContext.set(0, [evidence]);
+    browser.closeEvidenceByContext.set(2, [evidence]);
+    const route = ROUTES[0]!;
+
+    const result = await collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target: 'hermetic',
+      routes: [route],
+      coldRepeats: 1,
+      warmRepeats: 1,
+      routeOrderSeed: 7,
+      sourceTimeoutMs: 100,
+      resolveCold: async () => resolved('/'),
+      resolveWarm: async (_route, page) => {
+        (page as FakeSamplingPage).hrefs.add('/');
+        return resolved('/');
+      },
+      instrumentationFor: (_route, mode, repeat) => new FakeInstrumentation([], undefined),
+    });
+
+    expect(result.samples[0]!.blockedWrites.filter((write) => write.phase === 'out_of_sample')).toHaveLength(1);
+    expect(result.samples[1]!.blockedWrites.filter((write) => write.phase === 'out_of_sample')).toHaveLength(1);
   });
 
   it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {

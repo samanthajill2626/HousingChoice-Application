@@ -31,7 +31,7 @@ import type {
   ResolverResult,
   RouteDefinition,
 } from './routes.js';
-import type { RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
+import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
@@ -58,10 +58,9 @@ export interface CliRuntime {
   authenticateHermetic(config: RunConfig, dashboard: unknown): Promise<unknown>;
   authenticateLocal(config: RunConfig, dashboard: unknown): Promise<unknown>;
   authenticateHosted(config: RunConfig, dashboard: unknown): Promise<unknown>;
-  installFirewall(config: RunConfig, dashboard: unknown, auth: unknown): Promise<void>;
   warmup(config: RunConfig, dashboard: unknown, auth: unknown): Promise<void>;
-  collect(config: RunConfig, dashboard: unknown, auth: unknown): Promise<unknown>;
-  report(config: RunConfig, collected: unknown): Promise<CliReportResult>;
+  collect(config: RunConfig, dashboard: unknown, auth: unknown, signal?: AbortSignal): Promise<unknown>;
+  report(config: RunConfig, collected: unknown, signal?: AbortSignal): Promise<CliReportResult>;
   closeDashboard(dashboard: unknown): Promise<void>;
   cleanupHermetic(lifecycle: unknown): Promise<unknown>;
   installHermeticSignalHandlers?(lifecycle: unknown): () => void;
@@ -73,6 +72,8 @@ export interface RunProfilerDeps {
   stdout?: (text: string) => void;
   stderr?: (text: string) => void;
   processEvents?: ProfilerProcessEventSource;
+  stdinIsTTY?: boolean;
+  forceExit?: (code: number) => void;
 }
 
 export interface ProfilerProcessEventSource {
@@ -83,22 +84,42 @@ export interface ProfilerProcessEventSource {
 export function installProfilerProcessHandlers(
   controller: AbortController,
   source: ProfilerProcessEventSource = process,
+  options: { onForceExitRequested?: () => void } = {},
 ): () => void {
-  const handle = (): void => {
+  let terminationSignalCount = 0;
+  const handleSignal = (): void => {
+    terminationSignalCount += 1;
+    if (terminationSignalCount > 1) {
+      options.onForceExitRequested?.();
+      return;
+    }
     if (!controller.signal.aborted) controller.abort({ reason: 'interrupted' });
   };
-  const events = ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const;
-  for (const event of events) source.on(event, handle);
+  const handleCrash = (): void => {
+    if (!controller.signal.aborted) controller.abort({ reason: 'crashed' });
+    options.onForceExitRequested?.();
+  };
+  for (const event of ['SIGINT', 'SIGTERM'] as const) source.on(event, handleSignal);
+  for (const event of ['uncaughtException', 'unhandledRejection'] as const) source.on(event, handleCrash);
   return () => {
-    for (const event of events) source.off(event, handle);
+    for (const event of ['SIGINT', 'SIGTERM'] as const) source.off(event, handleSignal);
+    for (const event of ['uncaughtException', 'unhandledRejection'] as const) source.off(event, handleCrash);
   };
 }
 
 async function abortable<T>(signal: AbortSignal, operation: () => Promise<T>): Promise<T> {
-  if (signal.aborted) throw { reason: 'interrupted' };
+  const abortReason = (): { reason: string } => (
+    typeof signal.reason === 'object'
+    && signal.reason !== null
+    && 'reason' in signal.reason
+    && typeof signal.reason.reason === 'string'
+      ? { reason: signal.reason.reason }
+      : { reason: 'interrupted' }
+  );
+  if (signal.aborted) throw abortReason();
   let onAbort!: () => void;
   const aborted = new Promise<never>((_resolve, reject) => {
-    onAbort = () => reject({ reason: 'interrupted' });
+    onAbort = () => reject(abortReason());
     signal.addEventListener('abort', onAbort, { once: true });
   });
   try {
@@ -135,6 +156,15 @@ function cleanupFailure(value: unknown): {
     || candidate['recoveryCommand'] !== 'npm run e2e:stop'
   ) return null;
   return { lane: candidate['lane'] as number, recoveryCommand: 'npm run e2e:stop' };
+}
+
+function ownerMarkerFailure(value: unknown): string | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const candidate = value as Record<string, unknown>;
+  return candidate['reason'] === 'existing_session_live'
+    && candidate['markerPath'] === 'e2e/.artifacts/performance-session.json'
+    ? 'existing_session_live marker="e2e/.artifacts/performance-session.json"\n'
+    : null;
 }
 
 function hermeticSeedCountsLine(config: RunConfig): string | null {
@@ -211,6 +241,11 @@ export async function runProfiler(
     return 0;
   }
 
+  if (config.target === 'local' && (deps.stdinIsTTY ?? process.stdin.isTTY === true) !== true) {
+    stderr('local_tty_required\n');
+    return 1;
+  }
+
   if (config.target === 'hermetic') {
     const countsLine = hermeticSeedCountsLine(config);
     if (countsLine !== null) stdout(countsLine);
@@ -224,9 +259,12 @@ export async function runProfiler(
     return 1;
   }
   const abortController = new AbortController();
+  let forceExitRequested = false;
+  const forceExit = deps.forceExit ?? ((code: number) => process.exit(code));
   const detachFatalHandlers = installProfilerProcessHandlers(
     abortController,
     deps.processEvents ?? process,
+    { onForceExitRequested: () => { forceExitRequested = true; } },
   );
   const signal = abortController.signal;
 
@@ -236,12 +274,16 @@ export async function runProfiler(
       lifecycle = await abortable(signal, () => runtime.startHermetic(config, signal));
     } catch (error) {
       const failure = cleanupFailure(error);
-      if (failure !== null) {
+      const markerFailure = ownerMarkerFailure(error);
+      if (markerFailure !== null) {
+        stderr(markerFailure);
+      } else if (failure !== null) {
         stderr(`cleanup_failed lane=${failure.lane} recovery="${failure.recoveryCommand}"\n`);
       } else {
         stderr(`${closedReason(error)}\n`);
       }
       detachFatalHandlers();
+      if (forceExitRequested) forceExit(1);
       return 1;
     }
 
@@ -253,10 +295,9 @@ export async function runProfiler(
       await abortable(signal, () => runtime.reseedHermetic(config, lifecycle));
       dashboard = await abortable(signal, () => runtime.openDashboard(config, lifecycle));
       const auth = await abortable(signal, () => runtime.authenticateHermetic(config, dashboard));
-      await abortable(signal, () => runtime.installFirewall(config, dashboard, auth));
       await abortable(signal, () => runtime.warmup(config, dashboard, auth));
-      const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth));
-      const report = await abortable(signal, () => runtime.report(config, collected));
+      const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth, signal));
+      const report = await abortable(signal, () => runtime.report(config, collected, signal));
       writeReportOutput(report, stdout);
       exitCode = report.exitCode === 0 ? 0 : 1;
     } catch (error) {
@@ -277,6 +318,7 @@ export async function runProfiler(
       }
       detachSignals?.();
       detachFatalHandlers();
+      if (forceExitRequested) forceExit(1);
     }
     return exitCode;
   }
@@ -288,10 +330,9 @@ export async function runProfiler(
     const auth = config.target === 'local'
       ? await abortable(signal, () => runtime.authenticateLocal(config, dashboard))
       : await abortable(signal, () => runtime.authenticateHosted(config, dashboard));
-    await abortable(signal, () => runtime.installFirewall(config, dashboard, auth));
     if (config.target === 'local') await abortable(signal, () => runtime.warmup(config, dashboard, auth));
-    const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth));
-    const report = await abortable(signal, () => runtime.report(config, collected));
+    const collected = await abortable(signal, () => runtime.collect(config, dashboard, auth, signal));
+    const report = await abortable(signal, () => runtime.report(config, collected, signal));
     writeReportOutput(report, stdout);
     return report.exitCode === 0 ? 0 : 1;
   } catch (error) {
@@ -300,6 +341,7 @@ export async function runProfiler(
   } finally {
     if (dashboard !== undefined) await closeQuietly(runtime, dashboard);
     detachFatalHandlers();
+    if (forceExitRequested) forceExit(1);
   }
 }
 
@@ -313,6 +355,22 @@ export async function main(
 ): Promise<void> {
   const code = await runProfiler(argv, deps);
   (deps.processLike ?? process).exitCode = code;
+}
+
+export async function runDirectMain(
+  argv: string[] = process.argv.slice(2),
+  deps: MainDeps = {},
+): Promise<void> {
+  try {
+    await main(argv, deps);
+  } catch {
+    (deps.processLike ?? process).exitCode = 1;
+    try {
+      (deps.stderr ?? ((text: string) => process.stderr.write(text)))('crashed\n');
+    } catch {
+      // A closed terminal pipe must not turn the nonzero exit into another crash.
+    }
+  }
 }
 
 function escapeRegex(value: string): string {
@@ -469,7 +527,7 @@ interface SamplingModules {
   routes: typeof import('./routes.js');
 }
 
-function createRealSampleBrowser(input: {
+export function createRealSampleBrowser(input: {
   browser: Browser;
   baseUrl: string;
   modules: SamplingModules;
@@ -503,12 +561,17 @@ function createRealSampleBrowser(input: {
             pageStoreInstaller: input.modules.readiness.pageStoreInstaller,
           });
         },
-        async close(): Promise<void> {
+        async close(): Promise<BlockedWrite[]> {
+          const trailingWrites: BlockedWrite[] = [];
           try {
-            await Promise.all(firewalls.map((firewall) => firewall.dispose()));
+            await Promise.all(firewalls.map(async (firewall) => {
+              await firewall.dispose();
+              trailingWrites.push(...firewall.drainOutOfSampleEvidence());
+            }));
           } finally {
             await context.close();
           }
+          return trailingWrites;
         },
       };
     },
@@ -598,7 +661,7 @@ export function createRealInstrumentation(input: {
         if (level !== null) collector?.noteConsole(token, level, message.text(), performance.now());
       };
       page.rawPage.on('console', consoleListener);
-      page.contextState.token = input.modules.firewall.createFirewallRecordingToken(
+      const recordingToken = input.modules.firewall.createFirewallRecordingToken(
         input.mode === 'cold'
           ? {
               mode: 'cold',
@@ -613,6 +676,8 @@ export function createRealInstrumentation(input: {
               ...(begin.sourcePageUrl === begin.destinationPageUrl && { noNavigationProbe: true }),
             },
       );
+      for (const write of page.firewall.drainOutOfSampleEvidence()) recordingToken.record(write);
+      page.contextState.token = recordingToken;
       if (input.mode === 'warm') {
         await page.rawPage.evaluate(({ sampleToken }) => {
           const host = globalThis as typeof globalThis & {
@@ -770,7 +835,6 @@ interface DefaultDashboard {
     close(): Promise<void>;
   };
   baseUrl: string;
-  firewallInstalled: boolean;
   targetMetadata: unknown;
   storageState: { cookies: unknown[]; origins: unknown[] } | null;
 }
@@ -807,6 +871,7 @@ async function runSupplementalSelfQaProbes(input: {
       sourcePageUrl: absoluteUrl(input.baseUrl, '/inbox'),
       destinationPageUrl: absoluteUrl(input.baseUrl, href),
     });
+    for (const write of firewall.drainOutOfSampleEvidence()) state.token.record(write);
     await link.click();
     await page.waitForURL((url) => url.pathname === href, { timeout: 120_000 });
     await page.waitForTimeout(750);
@@ -827,14 +892,22 @@ async function runSupplementalSelfQaProbes(input: {
       destinationPageUrl: absoluteUrl(input.baseUrl, '/email'),
       noNavigationProbe: true,
     });
+    for (const write of firewall.drainOutOfSampleEvidence()) state.token.record(write);
     await expand.click();
     await page.waitForTimeout(750);
     await firewall.assertHealthy();
     attempts.push(...input.selfQa.supplementalAttempts('unmatched_email', state.token.evidence()));
   } finally {
     state.token = null;
-    await firewall.dispose();
-    await context.close();
+    try {
+      await firewall.dispose();
+      attempts.push(...input.selfQa.supplementalAttempts(
+        'unmatched_email',
+        firewall.drainOutOfSampleEvidence(),
+      ));
+    } finally {
+      await context.close();
+    }
   }
   return attempts;
 }
@@ -945,7 +1018,6 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         browser,
         authContext,
         baseUrl,
-        firewallInstalled: false,
         targetMetadata,
         storageState: null,
       } as DefaultDashboard;
@@ -1009,17 +1081,13 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
       dashboard.targetMetadata = targetMetadata;
       return auth;
     },
-    async installFirewall(_runConfig, value): Promise<void> {
-      const dashboard = value as DefaultDashboard;
-      dashboard.firewallInstalled = true;
-    },
     async warmup(): Promise<void> {
       // collectRunSamples owns the discarded warmup; this phase pins its place
       // before collection and remains an explicit sequencing seam for tests.
     },
-    async collect(runConfig, value): Promise<unknown> {
+    async collect(runConfig, value, _auth, signal): Promise<unknown> {
       const dashboard = value as DefaultDashboard;
-      if (!dashboard.firewallInstalled || dashboard.storageState === null) {
+      if (dashboard.storageState === null) {
         throw new Error('unexpected_failure');
       }
       activeLifecycle?.assertAlive();
@@ -1068,6 +1136,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           warmRepeats: runConfig.warmRepeats,
           routeOrderSeed: runConfig.routeOrderSeed,
           sourceTimeoutMs: runConfig.sourceTimeoutMs,
+          signal,
           ...(runConfig.seed !== null && { expectedRelayLinkCount: runConfig.seed.relayGroupCount }),
           resolveCold: (route) => resolverFor(route, resolverApi, coldDom, routesModule, selfQaBindings),
           resolveWarm: (route, samplePage) => {
@@ -1100,8 +1169,9 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
             requests,
           }),
         });
-      } catch {
+      } catch (error) {
         activeLifecycle?.assertAlive();
+        if (firewallModule.isFirewallSafetyError(error)) throw error;
         partialReason = 'browser_failure';
         result = {
           samples: [],
@@ -1165,7 +1235,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         ...(selfQa !== undefined && { selfQa }),
       };
     },
-    async report(runConfig, collected): Promise<CliReportResult> {
+    async report(runConfig, collected, signal): Promise<CliReportResult> {
       const value = collected as Record<string, unknown>;
       let baselineJson: string | undefined;
       if (runConfig.baselinePath !== null) {
@@ -1189,6 +1259,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         ...(value['partialReason'] === 'browser_failure' && { partialReason: 'browser_failure' as const }),
         ...(value['selfQa'] !== undefined && { selfQa: value['selfQa'] as import('./selfQa.js').SelfQaResult }),
         ...(baselineJson !== undefined && { baselineJson }),
+        signal,
       });
       return result as CliReportResult;
     },
@@ -1215,4 +1286,6 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
 
 const direct = process.argv[1] !== undefined
   && pathToFileURL(process.argv[1]).href === import.meta.url;
-if (direct) void main();
+if (direct) {
+  void runDirectMain();
+}

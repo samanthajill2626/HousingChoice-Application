@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   assertProfilerPingIdentity,
   profilerOwnerToken,
+  sendProfilerFailure,
   sendProfilerReady,
 } from '../../scripts/lib/profilerOwnership.mjs';
 
@@ -33,11 +34,36 @@ describe('profiler launcher ownership contract', () => {
     })).toThrowError('profiler_owner_identity_mismatch');
   });
 
+  it('shares the same owner assertion while allowing an explicitly unverified revision pair', () => {
+    expect(assertProfilerPingIdentity({
+      expectedCommit: null,
+      expectedOwnerToken: TOKEN,
+      body: { appCommit: 'abcdef1', profilerOwnerToken: TOKEN },
+      allowUnverifiedRevision: true,
+    })).toEqual({
+      expectedCommit: null,
+      targetAppCommit: 'abcdef1',
+      targetVersionStatus: 'unverified',
+    });
+  });
+
   it('sends readiness only through the direct child IPC channel', () => {
     const send = vi.fn();
     sendProfilerReady(TOKEN, send);
     expect(send).toHaveBeenCalledWith({ type: 'e2e-session-ready' });
     expect(() => sendProfilerReady(TOKEN, undefined)).toThrowError('profiler_ipc_unavailable');
     expect(() => sendProfilerReady(null, undefined)).not.toThrow();
+  });
+
+  it('sends only allowlisted launcher refusal categories over IPC', () => {
+    const send = vi.fn();
+    sendProfilerFailure(TOKEN, new Error('profiler_app_port_occupied'), send);
+    sendProfilerFailure(TOKEN, new Error('private.person@example.test'), send);
+
+    expect(send.mock.calls).toEqual([
+      [{ type: 'e2e-session-failed', reason: 'profiler_app_port_occupied' }],
+      [{ type: 'e2e-session-failed', reason: 'launcher_failed_before_ready' }],
+    ]);
+    expect(JSON.stringify(send.mock.calls)).not.toContain('private.person');
   });
 });

@@ -119,6 +119,7 @@ export interface WritePerformanceReportInput {
   partialReason?: FailureReasonCode;
   checkpointBranches?: readonly ContractCheckpointBranch[];
   selfQa?: SelfQaResult;
+  signal?: AbortSignal;
 }
 
 interface WrittenReportResult {
@@ -360,6 +361,7 @@ function nullableFinite(value: unknown): number | null {
 }
 
 function routeKey(value: unknown): string {
+  if (value === '/' && ROUTE_KEYS.has('/')) return '/';
   return typeof value === 'string' && SAFE_ROUTE_KEY.test(value) && ROUTE_KEYS.has(value)
     ? value
     : 'invalid_route';
@@ -448,7 +450,11 @@ function cloneBlockedWrite(write: BlockedWrite): BlockedWrite {
   return {
     method: ['POST', 'PUT', 'PATCH', 'DELETE'].includes(write.method) ? write.method : 'POST',
     endpointTemplate: endpointTemplate(write.endpointTemplate),
-    phase: write.phase === 'source_click' ? 'source_click' : 'destination_mount',
+    phase: write.phase === 'source_click'
+      ? 'source_click'
+      : write.phase === 'destination_mount'
+        ? 'destination_mount'
+        : 'out_of_sample',
   };
 }
 
@@ -548,7 +554,7 @@ function browserMetadata(config: SafeRunConfig, browser: ReportBrowserInput): Br
     channel: config.browserChannel,
     version,
     major: Number.parseInt(version.split('.')[0]!, 10),
-    httpCache: 'preserved',
+    httpCache: 'not_disabled_by_interception',
     viewport: {
       width: integer(browser.viewport.width),
       height: integer(browser.viewport.height),
@@ -825,24 +831,32 @@ async function closeStagedArtifactHandles(artifacts: readonly StagedArtifactHand
 
 async function scrubStagingArtifacts(
   stagingDirectory: string,
+  files: readonly string[],
   artifacts: readonly StagedArtifactHandle[],
 ): Promise<void> {
-  let contentScrubbed = false;
-  for (let attempt = 0; attempt < PRIVACY_SCRUB_ATTEMPTS && !contentScrubbed; attempt += 1) {
-    try {
-      await Promise.all(artifacts.map(async ({ handle }) => {
+  const ownedHandles = new Map(artifacts.map((artifact) => [artifact.fileName, artifact.handle]));
+  const scrubbed = await Promise.all(files.map(async (fileName) => {
+    for (let attempt = 0; attempt < PRIVACY_SCRUB_ATTEMPTS; attempt += 1) {
+      let handle = attempt === 0 ? ownedHandles.get(fileName) : undefined;
+      let reopened = false;
+      try {
+        if (handle === undefined) {
+          handle = await open(join(stagingDirectory, fileName), 'r+');
+          reopened = true;
+        }
         await handle.truncate(0);
         await handle.sync();
-      }));
-      const retainedStats = await Promise.all(artifacts.map(({ handle }) => handle.stat()));
-      contentScrubbed = retainedStats.every(({ size }) => size === 0);
-    } catch {
-      contentScrubbed = false;
+        const stat = await handle.stat();
+        if (stat.size === 0) return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return true;
+      } finally {
+        if (reopened && handle !== undefined) await handle.close().catch(() => undefined);
+      }
+      if (attempt + 1 < PRIVACY_SCRUB_ATTEMPTS) await waitForPrivacyScrubRetry();
     }
-    if (!contentScrubbed && attempt + 1 < PRIVACY_SCRUB_ATTEMPTS) {
-      await waitForPrivacyScrubRetry();
-    }
-  }
+    return !await pathExists(join(stagingDirectory, fileName));
+  }));
   await Promise.allSettled(artifacts.map(({ handle }) => handle.close()));
 
   for (let attempt = 0; attempt < PRIVACY_SCRUB_ATTEMPTS; attempt += 1) {
@@ -859,7 +873,7 @@ async function scrubStagingArtifacts(
     }
   }
 
-  if (!contentScrubbed) throw new Error('privacy_scrub_failed');
+  if (!scrubbed.every(Boolean)) throw new ReportWriteError('privacy_scrub_failed');
 }
 
 async function writeStagedArtifacts(
@@ -876,15 +890,25 @@ async function writeStagedArtifacts(
   }
 }
 
-async function reopenStagedArtifacts(
-  stagingDirectory: string,
-  files: readonly string[],
-  artifacts: StagedArtifactHandle[],
-): Promise<void> {
-  for (const fileName of files) {
-    const handle = await open(join(stagingDirectory, fileName), 'r+');
-    artifacts.push({ fileName, handle });
+class ReportWriteError extends Error {
+  readonly reason: string;
+
+  constructor(reason: string) {
+    super(reason);
+    this.name = 'ReportWriteError';
+    this.reason = reason;
   }
+}
+
+function throwIfReportAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted !== true) return;
+  const reason = typeof signal.reason === 'object'
+    && signal.reason !== null
+    && 'reason' in signal.reason
+    && (signal.reason.reason === 'interrupted' || signal.reason.reason === 'crashed')
+      ? signal.reason.reason
+      : 'interrupted';
+  throw new ReportWriteError(reason);
 }
 
 export function createPerformanceRunId(
@@ -898,6 +922,7 @@ export function createPerformanceRunId(
 export async function writePerformanceReport(
   input: WritePerformanceReportInput,
 ): Promise<WritePerformanceReportResult> {
+  throwIfReportAborted(input.signal);
   const runId = input.runId ?? createPerformanceRunId();
   if (!SAFE_RUN_ID.test(runId)) throw new Error('invalid_run_id');
   await mkdir(input.outputRoot, { recursive: true });
@@ -1055,9 +1080,10 @@ export async function writePerformanceReport(
 
   await mkdir(stagingDirectory);
   let stagedArtifacts: StagedArtifactHandle[] = [];
-  let failureReason = 'artifact_scan_failed';
+  let failureReason = 'artifact_write_failed';
   try {
     await writeStagedArtifacts(stagingDirectory, files, artifactTexts, stagedArtifacts);
+    failureReason = 'artifact_scan_failed';
     const stagedTexts = await Promise.all(files.map(async (fileName) => ({
       fileName,
       text: await readFile(join(stagingDirectory, fileName), 'utf8'),
@@ -1065,8 +1091,9 @@ export async function writePerformanceReport(
     const privacyFailures = scanArtifactFiles(stagedTexts);
     if (privacyFailures.length > 0) {
       const reasonCategories = [...new Set(privacyFailures.flatMap((failure) => failure.reasonCategories))].sort();
-      await scrubStagingArtifacts(stagingDirectory, stagedArtifacts);
+      await scrubStagingArtifacts(stagingDirectory, files, stagedArtifacts);
       stagedArtifacts = [];
+      failureReason = 'privacy_quarantine_failed';
       await mkdir(quarantineDirectory);
       await writeFile(join(quarantineDirectory, 'quarantine.json'), json({
         runId,
@@ -1088,17 +1115,21 @@ export async function writePerformanceReport(
 
     await closeStagedArtifactHandles(stagedArtifacts);
     stagedArtifacts = [];
+    throwIfReportAborted(input.signal);
     try {
       await rename(stagingDirectory, finalDirectory);
     } catch {
       failureReason = 'artifact_publish_failed';
-      await reopenStagedArtifacts(stagingDirectory, files, stagedArtifacts);
-      throw new Error(failureReason);
+      throw new ReportWriteError(failureReason);
     }
-  } catch {
-    await scrubStagingArtifacts(stagingDirectory, stagedArtifacts);
+  } catch (error) {
+    try {
+      await scrubStagingArtifacts(stagingDirectory, files, stagedArtifacts);
+    } catch {
+      throw new ReportWriteError('privacy_scrub_failed');
+    }
     stagedArtifacts = [];
-    throw new Error(failureReason);
+    throw error instanceof ReportWriteError ? error : new ReportWriteError(failureReason);
   } finally {
     await Promise.allSettled(stagedArtifacts.map(({ handle }) => handle.close()));
   }

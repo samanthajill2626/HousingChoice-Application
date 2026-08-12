@@ -18,6 +18,7 @@ import { defaultProbe } from '../e2e/support/lane.mjs';
 import {
   assertProfilerPingIdentity,
   profilerOwnerToken as parseProfilerOwnerToken,
+  sendProfilerFailure,
   sendProfilerReady,
 } from './lib/profilerOwnership.mjs';
 
@@ -59,14 +60,10 @@ const fakeUrl = `http://127.0.0.1:${ports.fake}`;
 // for Twilio signature verification. Must match on both sides.
 const publicBaseUrl = `http://127.0.0.1:${ports.publicBase}`;
 
-// Write the per-worktree state file so Task 3 fixtures + e2e-reseed/stop can
-// read the resolved lane without re-probing. Written early (before children
-// start) so any crash still leaves a readable file.
-mkdirSync(artifactsDir, { recursive: true });
-writeFileSync(
-  laneFile,
-  JSON.stringify(
+function laneStateText() {
+  return JSON.stringify(
     {
+      launcherPid: process.pid,
       lane,
       ports,
       urls: { app: appUrl, dashboard: dashboardUrl, fake: fakeUrl, publicBase: publicBaseUrl },
@@ -76,8 +73,24 @@ writeFileSync(
     },
     null,
     2,
-  ),
-);
+  );
+}
+
+function writeOwnedSessionState() {
+  mkdirSync(artifactsDir, { recursive: true });
+  writeFileSync(pidFile, String(process.pid));
+  writeFileSync(laneFile, laneStateText());
+}
+
+function removeOwnedSessionState() {
+  try {
+    if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) rmSync(pidFile);
+  } catch { /* replacement or prior cleanup wins */ }
+  try {
+    const state = JSON.parse(readFileSync(laneFile, 'utf8'));
+    if (state?.launcherPid === process.pid) rmSync(laneFile);
+  } catch { /* replacement or prior cleanup wins */ }
+}
 
 // The current checkout's commit, stamped into BOTH the app and the dashboard at
 // launch so the e2e preflight (e2e/support/preflight.ts) can detect a STALE
@@ -404,7 +417,7 @@ function shutdown(code = 0) {
   }
   log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
-  try { rmSync(pidFile, { force: true }); } catch { /* best-effort */ }
+  removeOwnedSessionState();
   setTimeout(() => process.exit(code), 500);
 }
 
@@ -429,7 +442,10 @@ async function restartBackend() {
     await verifyProfilerChildIdentity();
     log('app + worker + fake-twilio back up');
   } catch (err) {
-    log(`restart health check failed: ${String(err)}`);
+    log(activeProfilerOwnerToken === null
+      ? `restart health check failed: ${String(err)}`
+      : 'restart health check failed: profiler_identity_refused');
+    if (activeProfilerOwnerToken !== null) shutdown(1);
   } finally {
     restarting = false;
   }
@@ -439,7 +455,9 @@ async function main() {
   const parentPid = process.ppid;
   activeProfilerOwnerToken = parseProfilerOwnerToken(rawProfilerOwnerToken);
 
-  mkdirSync(artifactsDir, { recursive: true });
+  if (activeProfilerOwnerToken !== null && typeof process.send !== 'function') {
+    throw new Error('profiler_ipc_unavailable');
+  }
 
   // SELF-HEAL: if a stale session.pid exists, kill that launcher tree first.
   if (existsSync(pidFile)) {
@@ -451,7 +469,23 @@ async function main() {
       await new Promise((r) => setTimeout(r, 500));
     }
   }
-  writeFileSync(pidFile, String(process.pid));
+
+  if (activeProfilerOwnerToken !== null) {
+    for (const [label, port] of [
+      ['app', ports.app],
+      ['dashboard', ports.dashboard],
+      ['fake', ports.fake],
+      ['public_base', ports.publicBase],
+    ]) {
+      if (!await defaultProbe(port, '127.0.0.1')) {
+        throw new Error(`profiler_${label}_port_occupied`);
+      }
+    }
+  }
+
+  // State becomes visible only after this launcher has proved the lane has no
+  // live session marker and every profiler-owned port is free.
+  writeOwnedSessionState();
 
   if (!existsSync(sentinel)) writeFileSync(sentinel, '0');
 
@@ -527,6 +561,11 @@ async function main() {
 }
 
 main().catch((err) => {
-  log(`fatal: ${String(err)}`);
+  sendProfilerFailure(
+    activeProfilerOwnerToken,
+    err,
+    typeof process.send === 'function' ? (message) => process.send(message) : undefined,
+  );
+  log(activeProfilerOwnerToken === null ? `fatal: ${String(err)}` : 'fatal: profiler_launcher_failed');
   shutdown(1);
 });

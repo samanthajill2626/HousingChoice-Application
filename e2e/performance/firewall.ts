@@ -13,6 +13,7 @@ type BlockedWritePhase = BlockedWrite['phase'];
 
 export interface FirewallPausedRequest {
   requestId: string;
+  networkId?: string;
   request: { method: string; url: string; headers?: Record<string, string> };
   resourceType?: string;
   frameId?: string;
@@ -26,6 +27,7 @@ interface FirewallFrameTree {
 export interface FirewallCdpSession {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>;
   on(event: string, listener: (value: never) => void): this;
+  off?(event: string, listener: (value: never) => void): this;
   detach(): Promise<void>;
 }
 
@@ -36,6 +38,7 @@ export interface FirewallPage {
 
 export interface FirewallController {
   assertHealthy(): Promise<void>;
+  drainOutOfSampleEvidence(): BlockedWrite[];
   dispose(): Promise<void>;
 }
 
@@ -82,6 +85,26 @@ export class FirewallHandlerError extends Error {
     super('firewall_handler_failed');
     this.name = 'FirewallHandlerError';
   }
+}
+
+export class FirewallEscapedWriteError extends Error {
+  readonly reason = 'uncataloged_write_escaped_firewall';
+  readonly evidence: Pick<BlockedWrite, 'method' | 'endpointTemplate'>;
+
+  constructor(evidence: Pick<BlockedWrite, 'method' | 'endpointTemplate'>) {
+    super('uncataloged_write_escaped_firewall');
+    this.name = 'FirewallEscapedWriteError';
+    this.evidence = Object.freeze({ ...evidence });
+  }
+}
+
+export function isFirewallSafetyError(error: unknown): boolean {
+  return error instanceof FirewallConfigurationError
+    || error instanceof FirewallPhaseError
+    || error instanceof UnknownFirewallMethodError
+    || error instanceof FirewallAttributionError
+    || error instanceof FirewallHandlerError
+    || error instanceof FirewallEscapedWriteError;
 }
 
 export type FirewallRecordingTokenInput =
@@ -185,8 +208,10 @@ const MUTATION_PATHS = firstPartyMutationPaths();
 const MUTATION_PATH_REGEXES = MUTATION_PATHS.map(pathTemplateRegex);
 
 function pathToFetchPatterns(origin: string, path: string): string[] {
-  if (path.includes('/:')) return [`${origin}${path.replace(/:[A-Za-z][A-Za-z0-9]*/gu, '*')}`];
-  return [`${origin}${path}`, `${origin}${path}?*`];
+  const expanded = path.includes('/:')
+    ? `${origin}${path.replace(/:[A-Za-z][A-Za-z0-9]*/gu, '*')}`
+    : `${origin}${path}`;
+  return [expanded, `${expanded}?*`];
 }
 
 export function firewallRequestPatterns(firstPartyOrigin: string): string[] {
@@ -220,6 +245,18 @@ export interface InstallRequestFirewallInput {
 const READ_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 const WRITE_METHODS = new Set<WriteMethod>(['POST', 'PUT', 'PATCH', 'DELETE']);
 
+function isFirstPartyApiClassUrl(rawUrl: string, firstPartyOrigin: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    return url.origin === firstPartyOrigin
+      && (url.pathname.startsWith('/api/')
+        || url.pathname.startsWith('/auth/')
+        || url.pathname.startsWith('/__dev/'));
+  } catch {
+    return false;
+  }
+}
+
 function isInvalidatedPausedRequest(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Invalid InterceptionId');
 }
@@ -240,14 +277,27 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   let failure: Error | null = null;
   let failureObserved = false;
   const pending = new Set<Promise<void>>();
+  const outOfSampleEvidence: BlockedWrite[] = [];
+  const pausedNetworkIds = new Set<string>();
+  const watchdogCandidates = new Map<string, Pick<BlockedWrite, 'method' | 'endpointTemplate'>>();
   const frameUrls = new Map<string, string>();
   const latch = (error: unknown): void => {
     if (disposed || failure !== null) return;
     failure = error instanceof FirewallPhaseError
       || error instanceof UnknownFirewallMethodError
       || error instanceof FirewallAttributionError
+      || error instanceof FirewallEscapedWriteError
       ? error
       : new FirewallHandlerError();
+  };
+  const drainPending = async (): Promise<void> => {
+    while (pending.size > 0) await Promise.allSettled([...pending]);
+  };
+  const settleProtocolEvents = async (): Promise<void> => {
+    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await drainPending();
+    const escaped = watchdogCandidates.values().next().value;
+    if (escaped !== undefined) latch(new FirewallEscapedWriteError(escaped));
   };
   const continuePausedRequest = async (requestId: string): Promise<void> => {
     try {
@@ -258,6 +308,9 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   };
 
   const handle = async (event: FirewallPausedRequest): Promise<void> => {
+    if (event.networkId !== undefined) {
+      if (!watchdogCandidates.delete(event.networkId)) pausedNetworkIds.add(event.networkId);
+    }
     const method = event.request.method.toUpperCase();
     if (!isFirewallScopedUrl(event.request.url, firstPartyOrigin)) {
       await continuePausedRequest(event.requestId);
@@ -272,9 +325,19 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
       latch(new UnknownFirewallMethodError());
       return;
     }
+    const sanitized = sanitize({
+      rawUrl: event.request.url,
+      method,
+      firstPartyOrigin,
+      resourceType: event.resourceType ?? 'Fetch',
+    });
     const token = input.currentToken();
     if (token === null) {
-      latch(new FirewallAttributionError());
+      outOfSampleEvidence.push({
+        method: method as WriteMethod,
+        endpointTemplate: sanitized.endpointTemplate,
+        phase: 'out_of_sample',
+      });
       return;
     }
     let phase: BlockedWritePhase;
@@ -289,18 +352,40 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
       latch(error);
       return;
     }
-    const sanitized = sanitize({
-      rawUrl: event.request.url,
-      method,
-      firstPartyOrigin,
-      resourceType: event.resourceType ?? 'Fetch',
-    });
     token.record({ method: method as WriteMethod, endpointTemplate: sanitized.endpointTemplate, phase });
   };
 
-  session.on('Fetch.requestPaused', (value) => {
+  const onRequestPaused = (value: never): void => {
     const task = handle(value as FirewallPausedRequest).catch(latch).finally(() => pending.delete(task));
     pending.add(task);
+  };
+  session.on('Fetch.requestPaused', onRequestPaused);
+  session.on('Network.requestWillBeSent', (value) => {
+    const event = value as unknown as {
+      requestId?: string;
+      request?: { method?: string; url?: string };
+      type?: string;
+    };
+    const requestId = event.requestId;
+    const method = event.request?.method?.toUpperCase();
+    const rawUrl = event.request?.url;
+    if (
+      typeof requestId !== 'string'
+      || typeof rawUrl !== 'string'
+      || !WRITE_METHODS.has(method as WriteMethod)
+      || !isFirstPartyApiClassUrl(rawUrl, firstPartyOrigin)
+    ) return;
+    if (pausedNetworkIds.delete(requestId)) return;
+    const sanitized = sanitize({
+      rawUrl,
+      method: method!,
+      firstPartyOrigin,
+      resourceType: event.type ?? 'Fetch',
+    });
+    watchdogCandidates.set(requestId, {
+      method: method as WriteMethod,
+      endpointTemplate: sanitized.endpointTemplate,
+    });
   });
   session.on('Page.frameNavigated', (value) => {
     const event = value as unknown as { frame?: { id?: string; url?: string } };
@@ -326,25 +411,31 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
     for (const child of tree.childFrames ?? []) rememberFrameTree(child);
   };
   rememberFrameTree(frameTreeResult.frameTree);
+  await session.send('Network.enable');
   await session.send('Fetch.enable', {
     patterns: firewallRequestPatterns(firstPartyOrigin).map((urlPattern) => ({ urlPattern })),
   });
 
   return Object.freeze({
     async assertHealthy(): Promise<void> {
-      await Promise.allSettled([...pending]);
+      await settleProtocolEvents();
       if (failure !== null) {
         failureObserved = true;
         throw failure;
       }
     },
+    drainOutOfSampleEvidence(): BlockedWrite[] {
+      return outOfSampleEvidence.splice(0).map((write) => ({ ...write }));
+    },
     async dispose(): Promise<void> {
       if (disposed) return;
-      await Promise.allSettled([...pending]);
+      await settleProtocolEvents();
+      await session.send('Fetch.disable').catch(() => undefined);
+      await session.send('Network.disable').catch(() => undefined);
+      await session.send('Page.disable').catch(() => undefined);
+      await settleProtocolEvents();
       const unobservedFailure = failureObserved ? null : failure;
       disposed = true;
-      await session.send('Fetch.disable').catch(() => undefined);
-      await session.send('Page.disable').catch(() => undefined);
       await session.detach().catch(() => undefined);
       if (unobservedFailure !== null) throw unobservedFailure;
     },

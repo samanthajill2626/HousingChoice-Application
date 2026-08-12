@@ -85,17 +85,20 @@ explicitly instead of left in conflict:
    interactive login browser, keeps the resulting authentication state in memory
    only, requires an admin session, and refuses unless `/api/system/flags`
    returns `env: "dev"`.
-5. After target verification and authentication, a request firewall intercepts
-   first-party API-class paths (`/api/**`, `/auth/**`, `/__dev/**`) and blocks
-   every `POST`, `PUT`, `PATCH`, and `DELETE` on them before it reaches the
-   network, recording each blocked write in sanitized form. Paths outside that
-   scope (`/public/**`, `/unit-media/**`, the direct-to-storage upload origin)
-   are not intercepted; they are read-only in practice because D6 exercises no
-   workflow control that writes to them. The end-to-end proof is scoped to
-   match: the full-registry self-QA's state assertions (section 15.3) prove no
-   ENUMERATED automatic write surface changed state, and the mechanically
-   derived mutation-path inventory (section 6) is what keeps that enumeration
-   complete as the dashboard grows.
+5. After target verification and authentication, a request firewall installs
+   browser-side CDP Fetch patterns derived from the mechanically checked
+   dashboard mutation catalog. Every matching `POST`, `PUT`, `PATCH`, and
+   `DELETE` is blocked before it reaches the network and recorded in sanitized
+   form, while static assets, Vite modules, unrelated reads, and `/api/events`
+   do not cross the interception boundary. An AST completeness gate, an exact
+   two-way catalog match, and a runtime CDP Network watchdog form the safety
+   chain: a first-party API-class write that is absent from the catalog and
+   therefore escapes Fetch creates sanitized evidence and fails the run with
+   its own closed reason. Paths outside the cataloged first-party scope
+   (`/public/**`, `/unit-media/**`, the direct-to-storage upload origin) remain
+   read-only in the D6 workflow. The full-registry self-QA's state assertions
+   (section 15.3) additionally prove that no ENUMERATED automatic write surface
+   changed state.
 6. The runner measures three cold and three warm samples per route by default.
    Both repeat counts are configurable.
 7. Routes are ranked separately by cold and warm median meaningful-ready time.
@@ -298,46 +301,59 @@ Navigation is not inherently read-only in the current dashboard. At minimum:
 Therefore the profiler must enforce read-only behavior at the browser context,
 not by assuming every page is passive.
 
-For every measured context:
+For every measured page:
 
-- interception is scoped, not blanket: only first-party API-class paths
-  (`/api/**`, `/auth/**`, `/__dev/**`) are intercepted, so static-asset and
-  Vite module traffic never pays a driver round trip;
+- interception is scoped, not blanket: CDP Fetch patterns are generated from
+  every cataloged first-party mutation path under `/api/**`, `/auth/**`, or
+  `/__dev/**`, including both the base pattern and a `?*` query variant;
+- static assets, Vite modules, unrelated reads, public paths, media paths, and
+  direct-to-storage origins do not match those patterns and never pay a driver
+  round trip;
 - a named never-intercepted list excludes streaming endpoints - at minimum
   `/api/events` - so no permanently open streamed response is ever routed
   through the interceptor;
-- on intercepted paths, allow `GET`, `HEAD`, and `OPTIONS`, and block `POST`,
+- on matched paths, allow `GET`, `HEAD`, and `OPTIONS`, and block `POST`,
   `PUT`, `PATCH`, and `DELETE` before the request reaches the network;
-- the interception scope is a named constant recorded in the manifest and is
-  part of baseline comparability;
+- the ratified catalog-derived scope is recorded in the manifest and is part
+  of baseline comparability (`scope ratified 2026-08-12,
+  INTERCEPTION_SCOPE_VERSION 2`);
 - block service workers as one-line defense in depth - no service worker is
   registered in the dashboard today, so this guards a future worker, not a
   live threat;
 - record the attempted method, a sanitized endpoint template, and a phase tag
-  (`source_click` or `destination_mount`) so a write fired by the warm click on
-  the source page is distinguishable from the destination's own mount write;
+  (`source_click`, `destination_mount`, or `out_of_sample`) so a write fired by
+  the warm click on the source page is distinguishable from the destination's
+  own mount write and from evidence outside an active sample;
 - never record the body, headers, cookies, or raw URL;
 - make blocked requests visible in the route result and top-level report;
 - fail the run if a method outside the known HTTP method set is observed on an
-  intercepted path.
+  intercepted path;
+- run a CDP Network watchdog beside Fetch and fail with
+  `uncataloged_write_escaped_firewall` plus sanitized method/template evidence
+  if any first-party `POST`, `PUT`, `PATCH`, or `DELETE` is not matched by the
+  catalog-derived Fetch scope.
 
 Interception has a per-request cost even when scoped. The scoped design exists
-so that the cost lands only on API-class requests and is identical across
-routes, repeats, and baselines.
+so that the cost lands only on requests matching cataloged mutation endpoints
+and is identical across routes, repeats, and baselines. The profiler does not
+issue `Network.setCacheDisabled`; the manifest records
+`browser.httpCache: "not_disabled_by_interception"` as an instrumentation fact,
+not as a guarantee about browser cache implementation details.
 
-Two proofs keep the scope honest. A mutation-path inventory test (section 15.1)
-is mechanically derived, not hand-maintained: a source-level scan of
+Three proofs keep the scope honest. A mutation-path inventory test (section 15.1)
+is mechanically derived, not hand-maintained: an AST scan of
 `dashboard/src` finds every request initiated with a write method - the typed
 endpoints module's non-GET functions plus any direct `fetch` call - and the
-test fails when a found call site is absent from the checked-in catalog, or
-when a cataloged navigation-reachable endpoint falls outside the intercepted
-path scope. A future mutation added anywhere in the dashboard therefore fails
-the test until it is cataloged and covered, rather than silently bypassing the
-firewall. The navigation-reachable subset today is the mark-read family across
-contact, conversation, inbox row, email row, and the tour/placement channel
-tabs. And the full-registry
-self-QA run (section 15.3) asserts app state unchanged for EACH enumerated
-automatic write surface, not just one of them.
+test fails when a method or path cannot be proved statically. The resulting
+discoveries and checked-in catalog must match exactly in both directions, and
+every cataloged first-party mutation path must generate an interception
+pattern. A future mutation therefore fails the gate until it is cataloged. At
+runtime, the Network watchdog catches any remaining first-party API-class write
+that was not paused by Fetch. The navigation-reachable subset today is the
+mark-read family across contact, conversation, inbox row, email row, and the
+tour/placement channel tabs. Finally, the full-registry self-QA run (section
+15.3) asserts app state unchanged for EACH enumerated automatic write surface,
+not just one of them.
 
 A blocked mount-time mark-read is expected evidence, not a profiler failure. The
 route remains measurable when the application treats the failed mark-read as

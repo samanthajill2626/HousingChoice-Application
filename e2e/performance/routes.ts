@@ -680,7 +680,7 @@ export function assertObservedGets(
 ): { missingRequired: EndpointContract[]; undeclared: EndpointContract[] } {
   const declarationShapes = new Set(declared.map((contract) => `${contract.endpointTemplate}?${contract.queryKeys.join('&')}`));
   const observedShapes = new Set(observed
-    .filter((contract) => contract.outcome !== 'aborted')
+    .filter((contract) => contract.outcome === undefined || contract.outcome === 'finished')
     .map((contract) => `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`));
   return {
     missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(`${contract.endpointTemplate}?${contract.queryKeys.join('&')}`)),

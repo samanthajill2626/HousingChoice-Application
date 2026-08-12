@@ -110,7 +110,7 @@ describe('performance target safety proofs', () => {
     })).rejects.toMatchObject({ reason: 'target_prefix_mismatch' });
   });
 
-  it('requires exact nonempty commit and owner-token identity for a hermetic child', async () => {
+  it('rejects unequal known revisions while preserving the adjudicated unverified fallback', async () => {
     await expect(verifyHermeticTarget({
       appBaseUrl: 'http://127.0.0.1:9301',
       rawFetch: vi.fn().mockResolvedValue(response(200, {
@@ -129,13 +129,34 @@ describe('performance target safety proofs', () => {
       rawFetch: vi.fn().mockResolvedValue(response(200, {
         dev: true,
         tablePrefix: 'hc-local-3-',
+        appCommit: 'abcdef1',
+        profilerOwnerToken: OWNER_TOKEN,
+      })),
+      expectedTablePrefix: 'hc-local-3-',
+      profilerCommit: null,
+      expectedOwnerToken: OWNER_TOKEN,
+    })).resolves.toMatchObject({
+      profilerCommit: null,
+      targetAppCommit: 'abcdef1',
+      targetVersionStatus: 'unverified',
+    });
+
+    await expect(verifyHermeticTarget({
+      appBaseUrl: 'http://127.0.0.1:9301',
+      rawFetch: vi.fn().mockResolvedValue(response(200, {
+        dev: true,
+        tablePrefix: 'hc-local-3-',
         appCommit: '',
         profilerOwnerToken: OWNER_TOKEN,
       })),
       expectedTablePrefix: 'hc-local-3-',
       profilerCommit: 'abcdef1',
       expectedOwnerToken: OWNER_TOKEN,
-    })).rejects.toMatchObject({ reason: 'target_revision_mismatch' });
+    })).resolves.toMatchObject({
+      profilerCommit: 'abcdef1',
+      targetAppCommit: null,
+      targetVersionStatus: 'unverified',
+    });
 
     await expect(verifyHermeticTarget({
       appBaseUrl: 'http://127.0.0.1:9301',

@@ -1,5 +1,6 @@
 import { execFile } from 'node:child_process';
 import type { TargetKind, TargetMetadata } from './types.js';
+import { assertProfilerPingIdentity } from '../../scripts/lib/profilerOwnership.mjs';
 
 export type TargetFailureReason =
   | 'target_base_url_invalid'
@@ -200,22 +201,28 @@ export async function verifyHermeticTarget(deps: {
     throw new SafeTargetError('hermetic', 'target_prefix_mismatch');
   }
   const profilerCommit = normalizeGitRevision(deps.profilerCommit);
-  const targetAppCommit = normalizeGitRevision(body['appCommit']);
-  if (profilerCommit === null || targetAppCommit === null || profilerCommit !== targetAppCommit) {
-    throw new SafeTargetError('hermetic', 'target_revision_mismatch');
-  }
-  if (
-    !/^[a-f0-9]{32}$/u.test(deps.expectedOwnerToken)
-    || body['profilerOwnerToken'] !== deps.expectedOwnerToken
-  ) {
-    throw new SafeTargetError('hermetic', 'target_owner_mismatch');
+  let identity: ReturnType<typeof assertProfilerPingIdentity>;
+  try {
+    identity = assertProfilerPingIdentity({
+      expectedCommit: profilerCommit,
+      expectedOwnerToken: deps.expectedOwnerToken,
+      body,
+      allowUnverifiedRevision: true,
+    });
+  } catch (error) {
+    throw new SafeTargetError(
+      'hermetic',
+      error instanceof Error && error.message === 'profiler_owner_identity_mismatch'
+        ? 'target_owner_mismatch'
+        : 'target_revision_mismatch',
+    );
   }
   return metadata(
     'hermetic',
     'hermetic_lane',
     profilerCommit,
-    targetAppCommit,
-    'verified',
+    identity.targetAppCommit,
+    identity.targetVersionStatus,
   );
 }
 

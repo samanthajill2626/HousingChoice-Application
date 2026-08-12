@@ -274,6 +274,17 @@ describe('compareRuns', () => {
     expect(comparison.warnings).toEqual(['target_version_unverified']);
   });
 
+  it('scopes target-version warnings to missing target revisions', () => {
+    const baseline = run([sample('/shared', 'cold', 0)], {
+      revisions: { profilerCommit: null, targetAppCommit: '1234567' },
+    });
+    const current = run([sample('/shared', 'cold', 0)], {
+      revisions: { profilerCommit: null, targetAppCommit: '1234567' },
+    });
+
+    expect(compareRuns(baseline, current).warnings).toEqual([]);
+  });
+
   it('rejects schema differences instead of calling them an environment mismatch', () => {
     const baseline = run([sample('/shared', 'cold', 0)]);
     const current = run([sample('/shared', 'cold', 0)], { schemaVersion: 2 });

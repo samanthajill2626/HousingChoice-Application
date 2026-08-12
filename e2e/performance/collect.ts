@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { devices } from '@playwright/test';
 import type { InMemoryStorageState } from './auth.js';
-import { PROFILER_CONTEXT_OPTIONS } from './firewall.js';
+import { PROFILER_CONTEXT_OPTIONS, isFirewallSafetyError } from './firewall.js';
 import {
   ROUTES,
   CONTRACT_SOURCE_LEDGER,
@@ -371,7 +371,7 @@ export class NetworkCollector {
       ? Math.max(0, encodedDataLength)
       : null;
     const key = contractShape(pending.sanitized);
-    if (outcome !== 'aborted') {
+    if (outcome === 'finished') {
       this.#completedFullUrls.add(pending.rawUrl);
       if (this.#expectedShapes.has(key)) this.#satisfiedRequired.add(key);
     }
@@ -428,6 +428,24 @@ export class NetworkCollector {
   }
 
   endSample(token: string): EndedNetworkSample {
+    if (token !== this.#token) {
+      return {
+        pendingCount: 0,
+        lastQualifyingOffsetMs: null,
+        requestCount: 0,
+        requests: [],
+        resourceCountsByClass: createEmptyResourceCounts(),
+        resourceRequestCount: 0,
+        resourceTransferBytes: 0,
+        apiRequestCount: 0,
+        apiTransferBytes: 0,
+        backgroundRequestCount: 0,
+        backgroundTransferBytes: 0,
+        satisfiedRequired: [],
+        consoleCategories: {},
+        blockedWrites: [],
+      };
+    }
     const snapshot = this.snapshot(token);
     for (const [requestId, pending] of this.#inFlight) {
       this.#inFlight.delete(requestId);
@@ -454,6 +472,7 @@ export class NetworkCollector {
     }
     return {
       ...snapshot,
+      requestCount: this.#requests.length,
       requests: this.#requests.map((row) => ({ ...row, queryKeys: [...row.queryKeys] })),
       resourceCountsByClass: { ...this.#resourceCounts },
       resourceRequestCount: this.#resourceRequestCount,
@@ -511,7 +530,7 @@ export interface SampleBrowserContext {
   // The real adapter installs readiness.pageStoreInstaller on the context.
   installBasePageStore(): Promise<void>;
   newPage(): Promise<SamplePage>;
-  close(): Promise<void>;
+  close(): Promise<void | BlockedWrite[]>;
 }
 
 export interface SampleBrowser {
@@ -582,6 +601,7 @@ export async function collectColdSample(input: CollectColdSampleInput): Promise<
 
   const token = input.token ?? randomUUID();
   const context = await input.browser.newContext(contextOptions(input.storageState));
+  let completed: SampleResult | null = null;
   try {
     await context.installBasePageStore();
     const page = await context.newPage();
@@ -604,9 +624,13 @@ export async function collectColdSample(input: CollectColdSampleInput): Promise<
       mode: 'cold',
       repeat: input.repeat,
     });
-    return normalizeBlockedWriteDependency(result);
+    completed = normalizeBlockedWriteDependency(result);
+    return completed;
   } finally {
-    await context.close();
+    const trailingWrites = await context.close();
+    if (completed !== null && trailingWrites !== undefined) {
+      completed.blockedWrites.push(...trailingWrites);
+    }
   }
 }
 
@@ -728,6 +752,7 @@ export interface CollectRunSamplesInput {
   warmRepeats: number;
   routeOrderSeed: number;
   sourceTimeoutMs: number;
+  signal?: AbortSignal;
   expectedRelayLinkCount?: number;
   resolveCold(route: RouteDefinition): Promise<ResolverResult>;
   resolveWarm(route: RouteDefinition, page: SamplePage): Promise<ResolverResult>;
@@ -737,6 +762,17 @@ export interface CollectRunSamplesInput {
     repeat: number,
   ): SampleInstrumentation;
   tokenFactory?: (mode: SampleMode, repeat: number, route: RouteDefinition) => string;
+}
+
+function throwIfCollectionAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted !== true) return;
+  const reason = typeof signal.reason === 'object'
+    && signal.reason !== null
+    && 'reason' in signal.reason
+    && (signal.reason.reason === 'interrupted' || signal.reason.reason === 'crashed')
+      ? signal.reason.reason
+      : 'interrupted';
+  throw { reason };
 }
 
 function assertRepeatCount(value: number): void {
@@ -780,12 +816,14 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
   const tokenFor = input.tokenFactory ?? ((mode, repeat, route) => `${mode}-${repeat}-${route.key}-${randomUUID()}`);
   const baseOrder = deterministicRouteOrder(input.routes, input.routeOrderSeed);
   const shouldWarmup = input.target !== 'hosted-dev';
+  const preMeasurementWrites: BlockedWrite[] = [];
+  throwIfCollectionAborted(input.signal);
 
   if (shouldWarmup) {
     const warmupRoute = ROUTES[0]!;
     try {
       const resolved = await input.resolveCold(warmupRoute);
-      await collectColdSample({
+      const warmupResult = await collectColdSample({
         browser: input.browser,
         storageState: input.storageState,
         route: warmupRoute,
@@ -794,7 +832,10 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
         instrumentation: input.instrumentationFor(warmupRoute, 'cold', -1),
         token: tokenFor('cold', -1, warmupRoute),
       });
-    } catch {
+      preMeasurementWrites.push(...warmupResult.blockedWrites.filter((write) => write.phase === 'out_of_sample'));
+    } catch (error) {
+      throwIfCollectionAborted(input.signal);
+      if (isFirewallSafetyError(error)) throw error;
       // Warmup is deliberately unmeasured. Its context is closed by the cold
       // collector, and a later measured failure is retained symbolically.
     }
@@ -804,12 +845,13 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
     const ordered = rotate(baseOrder, repeat);
     orders.push({ mode: 'cold', repeat, routeKeys: ordered.map((route) => route.key) });
     for (const route of ordered) {
+      throwIfCollectionAborted(input.signal);
       try {
         const resolved = await input.resolveCold(route);
         if (resolved.kind === 'resolved') {
           branches.push({ routeKey: route.key, mode: 'cold', repeat, branch: resolved.branch });
         }
-        samples.push(await collectColdSample({
+        const sample = await collectColdSample({
           browser: input.browser,
           storageState: input.storageState,
           route,
@@ -817,8 +859,12 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
           resolved,
           instrumentation: input.instrumentationFor(route, 'cold', repeat),
           token: tokenFor('cold', repeat, route),
-        }));
-      } catch {
+        });
+        if (preMeasurementWrites.length > 0) sample.blockedWrites.push(...preMeasurementWrites.splice(0));
+        samples.push(sample);
+      } catch (error) {
+        throwIfCollectionAborted(input.signal);
+        if (isFirewallSafetyError(error)) throw error;
         samples.push(browserFailureSample(route.key, 'cold', repeat));
       }
     }
@@ -833,6 +879,7 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
       const ordered = rotate(baseOrder, repeat);
       orders.push({ mode: 'warm', repeat, routeKeys: ordered.map((route) => route.key) });
       for (const route of ordered) {
+        throwIfCollectionAborted(input.signal);
         try {
           const result = await collectWarmSample({
             page,
@@ -861,13 +908,19 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
               shortfall: renderedCount < input.expectedRelayLinkCount,
             };
           }
-        } catch {
+        } catch (error) {
+          throwIfCollectionAborted(input.signal);
+          if (isFirewallSafetyError(error)) throw error;
           samples.push(browserFailureSample(route.key, 'warm', repeat));
         }
       }
     }
   } finally {
-    await warmContext.close();
+    const trailingWrites = await warmContext.close();
+    if (trailingWrites !== undefined && trailingWrites.length > 0) {
+      const lastSample = samples.at(-1);
+      if (lastSample !== undefined) lastSample.blockedWrites.push(...trailingWrites);
+    }
   }
 
   return {

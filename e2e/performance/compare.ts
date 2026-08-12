@@ -163,17 +163,15 @@ export function compareRuns(baseline: ComparisonRun, current: ComparisonRun): Co
     .map(entryRef);
   const baselineRevisions = normalizeRevisionPair(baseline.revisions);
   const currentRevisions = normalizeRevisionPair(current.revisions);
-  const revisionValues = [
-    baselineRevisions.profilerCommit,
+  const targetRevisions = [
     baselineRevisions.targetAppCommit,
-    currentRevisions.profilerCommit,
     currentRevisions.targetAppCommit,
   ];
 
   return {
     control: mismatches.length === 0 ? 'controlled' : 'uncontrolled',
     mismatches,
-    warnings: revisionValues.some((revision) => revision === null)
+    warnings: targetRevisions.some((revision) => revision === null)
       ? ['target_version_unverified']
       : [],
     revisions: {

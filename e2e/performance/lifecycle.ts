@@ -1,5 +1,6 @@
-import { spawn } from 'node:child_process';
+import { execFileSync, spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import { mkdir, open, readFile, rm } from 'node:fs/promises';
 import { dirname, join, resolve } from 'node:path';
 import type { Readable } from 'node:stream';
@@ -10,6 +11,7 @@ import { isAlive as processIsAlive, killTree as killProcessTree } from '../../sc
 const READY_PREFIX = '[e2e-session] ready';
 const READY_LINE_LIMIT = 4_096;
 const RECOVERY_COMMAND = 'npm run e2e:stop';
+const OWNER_MARKER_RECOVERY_PATH = 'e2e/.artifacts/performance-session.json';
 
 export function defaultPerformanceRepoRoot(moduleUrl = import.meta.url): string {
   return resolve(dirname(fileURLToPath(moduleUrl)), '..', '..');
@@ -23,6 +25,16 @@ export type LifecycleFailureReason =
   | 'launcher_closed_before_ready'
   | 'launcher_start_timeout'
   | 'launcher_interrupted'
+  | 'launcher_failed_before_ready'
+  | 'profiler_existing_session_live'
+  | 'profiler_app_port_occupied'
+  | 'profiler_dashboard_port_occupied'
+  | 'profiler_fake_port_occupied'
+  | 'profiler_public_base_port_occupied'
+  | 'profiler_ping_failed'
+  | 'profiler_commit_identity_mismatch'
+  | 'profiler_owner_identity_mismatch'
+  | 'profiler_ipc_unavailable'
   | 'lane_state_mismatch'
   | 'pid_state_mismatch'
   | 'owned_launcher_reaped'
@@ -32,6 +44,7 @@ export class SafeLifecycleError extends Error {
   readonly reason: LifecycleFailureReason;
   readonly lane?: number;
   readonly recoveryCommand?: typeof RECOVERY_COMMAND;
+  readonly markerPath?: typeof OWNER_MARKER_RECOVERY_PATH;
 
   constructor(reason: LifecycleFailureReason, lane?: number) {
     super(reason);
@@ -40,13 +53,20 @@ export class SafeLifecycleError extends Error {
     this.reason = reason;
     if (lane !== undefined) this.lane = lane;
     if (reason === 'cleanup_failed') this.recoveryCommand = RECOVERY_COMMAND;
+    if (reason === 'existing_session_live') this.markerPath = OWNER_MARKER_RECOVERY_PATH;
   }
 
-  toJSON(): { reason: LifecycleFailureReason; lane?: number; recoveryCommand?: typeof RECOVERY_COMMAND } {
+  toJSON(): {
+    reason: LifecycleFailureReason;
+    lane?: number;
+    recoveryCommand?: typeof RECOVERY_COMMAND;
+    markerPath?: typeof OWNER_MARKER_RECOVERY_PATH;
+  } {
     return {
       reason: this.reason,
       ...(this.lane !== undefined && { lane: this.lane }),
       ...(this.recoveryCommand !== undefined && { recoveryCommand: this.recoveryCommand }),
+      ...(this.markerPath !== undefined && { markerPath: this.markerPath }),
     };
   }
 }
@@ -93,6 +113,7 @@ export interface LifecycleDeps {
   cleanupPollMs?: number;
   ownerPid?: number;
   ownerToken?: () => string;
+  processIdentity?: (pid: number) => string | null;
   signal?: AbortSignal;
 }
 
@@ -239,29 +260,57 @@ function defaultKillOwnedLauncher(pid: number): void {
 interface OwnerMarker {
   path: string;
   text: string;
-  token: string;
 }
 
-function markerRecord(value: unknown): { pid: number; ownerToken: string } | null {
+function markerRecord(value: unknown): { pid: number; pidIdentity: string } | null {
   const record = object(value);
   return record !== null
     && Number.isSafeInteger(record['pid'])
     && (record['pid'] as number) > 0
-    && typeof record['ownerToken'] === 'string'
-    && /^[a-f0-9]{32}$/u.test(record['ownerToken'])
-      ? { pid: record['pid'] as number, ownerToken: record['ownerToken'] }
+    && typeof record['pidIdentity'] === 'string'
+    && /^[A-Za-z0-9:._+-]{1,128}$/u.test(record['pidIdentity'])
+      ? { pid: record['pid'] as number, pidIdentity: record['pidIdentity'] }
       : null;
+}
+
+function defaultProcessIdentity(pid: number): string | null {
+  if (!Number.isSafeInteger(pid) || pid <= 0) return null;
+  try {
+    if (process.platform === 'win32') {
+      const command = `$p = Get-CimInstance Win32_Process -Filter "ProcessId = ${pid}"; if ($null -ne $p) { $p.CreationDate.ToUniversalTime().ToString("o") }`;
+      const value = execFileSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+        encoding: 'utf8',
+        windowsHide: true,
+      }).trim();
+      return /^[A-Za-z0-9:._+-]{1,128}$/u.test(value) ? value : null;
+    }
+    if (process.platform === 'linux') {
+      const stat = readFileSync(`/proc/${pid}/stat`, 'utf8');
+      const fields = stat.slice(stat.lastIndexOf(')') + 2).trim().split(/\s+/u);
+      const startTicks = fields[19];
+      return startTicks !== undefined && /^[0-9]+$/u.test(startTicks) ? `linux-${startTicks}` : null;
+    }
+    const value = execFileSync('ps', ['-o', 'lstart=', '-p', String(pid)], {
+      encoding: 'utf8',
+      windowsHide: true,
+    }).trim().replace(/\s+/gu, '_');
+    return /^[A-Za-z0-9:._+-]{1,128}$/u.test(value) ? value : null;
+  } catch {
+    return null;
+  }
 }
 
 async function acquireOwnerMarker(input: {
   artifactsDir: string;
   pid: number;
-  token: string;
   isAlive: (pid: number) => boolean;
+  processIdentity: (pid: number) => string | null;
 }): Promise<OwnerMarker> {
   await mkdir(input.artifactsDir, { recursive: true });
   const path = join(input.artifactsDir, 'performance-session.json');
-  const text = `${JSON.stringify({ pid: input.pid, ownerToken: input.token })}\n`;
+  const pidIdentity = input.processIdentity(input.pid);
+  if (pidIdentity === null) throw new SafeLifecycleError('owner_marker_failed');
+  const text = `${JSON.stringify({ pid: input.pid, pidIdentity })}\n`;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
       const handle = await open(path, 'wx', 0o600);
@@ -271,7 +320,7 @@ async function acquireOwnerMarker(input: {
       } finally {
         await handle.close();
       }
-      return { path, text, token: input.token };
+      return { path, text };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
         throw new SafeLifecycleError('owner_marker_failed');
@@ -282,14 +331,17 @@ async function acquireOwnerMarker(input: {
       } catch {
         continue;
       }
-      let existing: { pid: number; ownerToken: string } | null = null;
+      let existing: { pid: number; pidIdentity: string } | null = null;
       try {
         existing = markerRecord(JSON.parse(existingText));
       } catch {
         // Malformed stale state is safe to replace only after compare-before-delete.
       }
       if (existing !== null && input.isAlive(existing.pid)) {
-        throw new SafeLifecycleError('existing_session_live');
+        const liveIdentity = input.processIdentity(existing.pid);
+        if (liveIdentity === null || liveIdentity === existing.pidIdentity) {
+          throw new SafeLifecycleError('existing_session_live');
+        }
       }
       try {
         if (await readFile(path, 'utf8') === existingText) await rm(path);
@@ -405,6 +457,27 @@ function waitForReady(child: LifecycleChild, timeoutMs: number, signal?: AbortSi
   if (signal?.aborted === true) onAbort();
   const onMessage = (message: unknown): void => {
     const value = object(message);
+    if (value?.['type'] === 'e2e-session-failed') {
+      const reason = value['reason'];
+      const allowed = new Set<LifecycleFailureReason>([
+        'launcher_failed_before_ready',
+        'profiler_existing_session_live',
+        'profiler_app_port_occupied',
+        'profiler_dashboard_port_occupied',
+        'profiler_fake_port_occupied',
+        'profiler_public_base_port_occupied',
+        'profiler_ping_failed',
+        'profiler_commit_identity_mismatch',
+        'profiler_owner_identity_mismatch',
+        'profiler_ipc_unavailable',
+      ]);
+      if (typeof reason !== 'string' || !allowed.has(reason as LifecycleFailureReason) || ready || closed) return;
+      ready = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      failReady(new SafeLifecycleError(reason as LifecycleFailureReason));
+      return;
+    }
     if (value?.['type'] !== 'e2e-session-ready') return;
     if (ready || closed) return;
     ready = true;
@@ -450,6 +523,7 @@ export async function startOwnedHermeticLifecycle(
   const pidFile = join(artifactsDir, 'session.pid');
   const laneFile = join(artifactsDir, 'lane.json');
   const isAlive = deps.isAlive ?? processIsAlive;
+  const processIdentity = deps.processIdentity ?? defaultProcessIdentity;
   const killTree = deps.killTree ?? defaultKillOwnedLauncher;
   const now = deps.now ?? Date.now;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((resolveSleep) => setTimeout(resolveSleep, ms)));
@@ -458,8 +532,8 @@ export async function startOwnedHermeticLifecycle(
   const marker = await acquireOwnerMarker({
     artifactsDir,
     pid: deps.ownerPid ?? process.pid,
-    token: ownerToken,
     isAlive,
+    processIdentity,
   });
   const existingPid = await readPid(pidFile);
   if (existingPid !== null && isAlive(existingPid)) {

@@ -15,6 +15,13 @@ const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
 const pidFile = path.join(artifactsDir, 'session.pid');
 const laneFile = path.join(artifactsDir, 'lane.json');
+const profilerMarkerFile = path.join(artifactsDir, 'performance-session.json');
+function readText(pathName) {
+  try { return readFileSync(pathName, 'utf8'); } catch { return null; }
+}
+const originalPidText = readText(pidFile);
+const originalLaneText = readText(laneFile);
+const hasProfilerMarker = existsSync(profilerMarkerFile);
 
 // Read lane.json to know which lane we're stopping.
 let laneJson = null;
@@ -28,7 +35,7 @@ if (existsSync(laneFile)) {
 
 // Determine whether a session appears to be running at all.
 const hasPid = existsSync(pidFile);
-if (!laneJson && !hasPid) {
+if (!laneJson && !hasPid && !hasProfilerMarker) {
   process.stdout.write('[e2e-stop] no running session found (lane.json and session.pid both absent) — nothing to stop\n');
   process.exit(0);
 }
@@ -61,6 +68,17 @@ if (laneJson?.ports) {
 }
 
 // Remove the state files so a stale lane.json / session.pid can't mislead the next run.
-try { rmSync(pidFile, { force: true }); } catch {}
-try { rmSync(laneFile, { force: true }); } catch {}
-process.stdout.write('[e2e-stop] lane.json + session.pid removed\n');
+try {
+  if (originalPidText !== null && readFileSync(pidFile, 'utf8') === originalPidText) rmSync(pidFile);
+} catch {}
+try {
+  if (originalLaneText !== null && readFileSync(laneFile, 'utf8') === originalLaneText) rmSync(laneFile);
+} catch {}
+try {
+  const markerText = readFileSync(profilerMarkerFile, 'utf8');
+  const marker = JSON.parse(markerText);
+  if (Number.isSafeInteger(marker?.pid) && marker.pid > 0 && !isAlive(marker.pid)) {
+    if (readFileSync(profilerMarkerFile, 'utf8') === markerText) rmSync(profilerMarkerFile);
+  }
+} catch {}
+process.stdout.write('[e2e-stop] stale owned session state cleanup complete\n');

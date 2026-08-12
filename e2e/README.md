@@ -175,14 +175,21 @@ The profiler performs navigation and exact read-oriented row-link clicks only. I
 does not exercise workflow actions, forms, uploads, or media controls. Before any
 measured navigation it installs browser-side CDP Fetch patterns derived from the
 mechanically checked mutation catalog. The patterns cover cataloged first-party
-`/api/**`, `/auth/**`, and `/__dev/**` mutation paths. Matching reads continue and
-every matching `POST`, `PUT`, `PATCH`, and `DELETE` is blocked before the network and
-recorded only as a sanitized method, endpoint template, and `source_click` or
-`destination_mount` phase. Static assets, Vite modules, and unrelated reads do not
-cross the driver interception boundary. CDP interception preserves the browser HTTP
-cache; `summary.json` records this as `browser.httpCache: "preserved"`. Mount-time
-and row-click mark-read attempts are expected blocked evidence, not proof of a
-failed run.
+`/api/**`, `/auth/**`, and `/__dev/**` mutation paths, with base and query-bearing
+variants for every template. Matching reads continue and every matching `POST`,
+`PUT`, `PATCH`, and `DELETE` is blocked before the network and recorded only as a
+sanitized method, endpoint template, and `source_click`, `destination_mount`, or
+`out_of_sample` phase. Static assets, Vite modules, and unrelated reads do not cross
+the driver interception boundary. The profiler does not call
+`Network.setCacheDisabled`; `summary.json` records the narrower instrumentation fact
+as `browser.httpCache: "not_disabled_by_interception"`. Mount-time and row-click
+mark-read attempts are expected blocked evidence, not proof of a failed run.
+
+The catalog is held complete by an AST inventory and exact two-way catalog match.
+A CDP Network watchdog independently observes first-party API-class writes. If a
+write is not paused by the catalog-derived Fetch patterns, the profiler emits only
+its sanitized method and endpoint template, fails with
+`uncataloged_write_escaped_firewall`, and still runs owned cleanup.
 
 This is a navigation-only guarantee, not a blanket network sandbox. Public paths
 under `/public/**`, media reads under `/unit-media/**`, and direct storage origins

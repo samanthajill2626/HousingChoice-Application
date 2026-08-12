@@ -40,7 +40,7 @@ export interface BrowserMetadata {
   channel: 'chromium' | 'chrome';
   version: string;
   major: number;
-  httpCache: 'preserved';
+  httpCache: 'not_disabled_by_interception';
   viewport: { width: number; height: number };
 }
 
@@ -52,7 +52,7 @@ export interface RuntimeMetadata {
 export interface BlockedWrite {
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';
   endpointTemplate: string;
-  phase: 'source_click' | 'destination_mount';
+  phase: 'source_click' | 'destination_mount' | 'out_of_sample';
 }
 
 export type ResourceClass = 'document' | 'script' | 'style' | 'font' | 'image' | 'api' | 'other';

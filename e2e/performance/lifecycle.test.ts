@@ -89,6 +89,7 @@ function bootDeps(artifacts: string, child: FakeChild, alive: { value: boolean }
     resolveLane,
     spawnChild,
     isAlive: vi.fn<(pid: number) => boolean>(() => alive.value),
+    processIdentity: vi.fn<(pid: number) => string | null>((pid) => `identity-${pid}`),
     killTree,
     startupTimeoutMs: 500,
   };
@@ -121,10 +122,9 @@ describe('owned hermetic lifecycle startup', () => {
 
     const markerPath = join(artifacts, 'performance-session.json');
     const marker = JSON.parse(await readFile(markerPath, 'utf8')) as Record<string, unknown>;
-    expect(marker).toMatchObject({ pid: process.pid });
-    expect(marker['ownerToken']).toMatch(/^[a-f0-9]{32}$/u);
+    expect(marker).toEqual({ pid: process.pid, pidIdentity: `identity-${process.pid}` });
     expect(firstDeps.spawnChild.mock.calls[0]?.[2].env).toMatchObject({
-      E2E_PROFILER_OWNER_TOKEN: marker['ownerToken'],
+      E2E_PROFILER_OWNER_TOKEN: expect.stringMatching(/^[a-f0-9]{32}$/u),
     });
 
     const secondDeps = bootDeps(artifacts, new FakeChild(5_432), { value: true });
@@ -139,6 +139,33 @@ describe('owned hermetic lifecycle startup', () => {
     const first = await firstStarting;
     await first.cleanup();
     await expect(readFile(markerPath, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' });
+  });
+
+  it('distinguishes a live owner from a recycled pid and names the recovery marker', async () => {
+    const liveArtifacts = await tempArtifacts();
+    const markerName = join(liveArtifacts, 'performance-session.json');
+    await writeFile(markerName, JSON.stringify({ pid: 777, pidIdentity: 'identity-777' }), 'utf8');
+    const liveDeps = bootDeps(liveArtifacts, new FakeChild(), { value: true });
+
+    await expect(startOwnedHermeticLifecycle(liveDeps)).rejects.toMatchObject({
+      reason: 'existing_session_live',
+      markerPath: 'e2e/.artifacts/performance-session.json',
+    });
+    expect(liveDeps.resolveLane).not.toHaveBeenCalled();
+
+    const recycledArtifacts = await tempArtifacts();
+    await writeFile(
+      join(recycledArtifacts, 'performance-session.json'),
+      JSON.stringify({ pid: 777, pidIdentity: 'identity-before-recycle' }),
+      'utf8',
+    );
+    const child = new FakeChild();
+    const recycledDeps = bootDeps(recycledArtifacts, child, { value: true });
+    const starting = startOwnedHermeticLifecycle(recycledDeps);
+    await vi.waitFor(() => expect(recycledDeps.spawnChild).toHaveBeenCalledOnce());
+    await writeOwnedState(recycledArtifacts, child.pid);
+    signalReady(child);
+    await expect(starting).resolves.toMatchObject({ childPid: child.pid });
   });
 
   it('refuses a live same-worktree session before lane resolution or spawning', async () => {
@@ -238,6 +265,23 @@ describe('owned hermetic lifecycle startup', () => {
     expect(JSON.stringify(caught)).not.toContain('private.person');
     expect(JSON.stringify(caught)).not.toContain('contact-123');
     expect(deps.killTree).toHaveBeenCalledWith(child.pid);
+  });
+
+  it('surfaces a closed launcher refusal delivered over IPC', async () => {
+    const artifacts = await tempArtifacts();
+    const child = new FakeChild();
+    const deps = bootDeps(artifacts, child, { value: true });
+    const starting = startOwnedHermeticLifecycle(deps);
+    await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
+    child.emit('message', {
+      type: 'e2e-session-failed',
+      reason: 'profiler_app_port_occupied',
+    });
+
+    await expect(starting).rejects.toMatchObject({
+      reason: 'profiler_app_port_occupied',
+      lane: 3,
+    });
   });
 
   it('hard-times-out startup and cleans the retained child', async () => {

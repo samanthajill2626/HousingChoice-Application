@@ -6,12 +6,13 @@ import {
   main,
   performanceArtifactRoot,
   readPageStoreSnapshot,
+  runDirectMain,
   runProfiler,
   type CliRuntime,
 } from './cli.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
-import type { SampleInstrumentation } from './collect.js';
+import type { SampleBrowser, SampleInstrumentation } from './collect.js';
 
 function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRuntime {
   const phase = <T>(name: string, value: T) => vi.fn(async () => {
@@ -27,7 +28,6 @@ function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRunt
     authenticateHermetic: phase('auth-hermetic', { storageState: {} }),
     authenticateLocal: phase('auth-local', { storageState: {} }),
     authenticateHosted: phase('auth-hosted', { storageState: {} }),
-    installFirewall: phase('firewall', undefined),
     warmup: phase('warmup', undefined),
     collect: phase('collect', { samples: [] }),
     report: phase('report', { exitCode: 0, status: 'written' }),
@@ -44,16 +44,37 @@ const configDeps = {
 };
 
 describe('top-level profiler sequencing', () => {
-  it('turns signals and fatal process events into a closed abort without retaining raw errors', () => {
+  it('classifies signals separately from crashes and unregisters every process handler', () => {
     for (const event of ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const) {
       const source = new EventEmitter();
       const controller = new AbortController();
       const detach = installProfilerProcessHandlers(controller, source as never);
       source.emit(event, new Error('private.person@example.test'));
       expect(controller.signal.aborted).toBe(true);
+      expect(controller.signal.reason).toEqual({
+        reason: event === 'SIGINT' || event === 'SIGTERM' ? 'interrupted' : 'crashed',
+      });
       expect(JSON.stringify(controller.signal.reason)).not.toContain('private.person');
       detach();
+      expect(source.eventNames()).toEqual([]);
     }
+  });
+
+  it('requests a forced exit after a second termination signal', () => {
+    const source = new EventEmitter();
+    const controller = new AbortController();
+    const onForceExitRequested = vi.fn();
+    const detach = installProfilerProcessHandlers(
+      controller,
+      source as never,
+      { onForceExitRequested },
+    );
+
+    source.emit('SIGINT');
+    expect(onForceExitRequested).not.toHaveBeenCalled();
+    source.emit('SIGINT');
+    expect(onForceExitRequested).toHaveBeenCalledOnce();
+    detach();
   });
 
   it('aligns the Node clock to the midpoint of the CDP timestamp round trip', async () => {
@@ -107,6 +128,7 @@ describe('top-level profiler sequencing', () => {
       contextState,
       firewall: {
         assertHealthy: vi.fn(async () => undefined),
+        drainOutOfSampleEvidence: vi.fn(() => []),
         dispose: vi.fn(async () => undefined),
       },
       baseUrl: 'http://127.0.0.1:9111',
@@ -160,6 +182,35 @@ describe('top-level profiler sequencing', () => {
     expect(contextState.token).toBeNull();
     expect(off).toHaveBeenCalledOnce();
     expect(detach).toHaveBeenCalledOnce();
+  });
+
+  it('makes every sampled page wait for a real per-page firewall installation', async () => {
+    const cliModule = await import('./cli.js') as typeof import('./cli.js') & {
+      createRealSampleBrowser?: (input: unknown) => SampleBrowser;
+    };
+    expect(cliModule.createRealSampleBrowser).toBeTypeOf('function');
+    if (cliModule.createRealSampleBrowser === undefined) return;
+    const installRequestFirewall = vi.fn(async () => {
+      throw { reason: 'invalid_firewall_configuration' };
+    });
+    const rawPage = {};
+    const rawContext = {
+      newPage: vi.fn(async () => rawPage),
+      close: vi.fn(async () => undefined),
+    };
+    const browser = cliModule.createRealSampleBrowser({
+      browser: { newContext: vi.fn(async () => rawContext) },
+      baseUrl: 'http://127.0.0.1:9111',
+      modules: {
+        readiness: { installPageStoreInitScript: vi.fn() },
+        firewall: { installRequestFirewall },
+      },
+    } as never);
+    const context = await browser.newContext({});
+
+    await expect(context.newPage()).rejects.toMatchObject({ reason: 'invalid_firewall_configuration' });
+    expect(rawContext.newPage).toHaveBeenCalledOnce();
+    expect(installRequestFirewall).toHaveBeenCalledOnce();
   });
 
   it('degrades an unavailable auxiliary page snapshot to null without exposing the browser error', async () => {
@@ -273,7 +324,7 @@ describe('top-level profiler sequencing', () => {
     });
     expect(exit).toBe(0);
     expect(events).toEqual([
-      'start', 'verify', 'reseed', 'dashboard', 'auth-hermetic', 'firewall',
+      'start', 'verify', 'reseed', 'dashboard', 'auth-hermetic',
       'warmup', 'collect', 'report', 'close-dashboard', 'cleanup',
     ]);
   });
@@ -302,8 +353,35 @@ describe('top-level profiler sequencing', () => {
     expect(stderr).toHaveBeenCalledWith('interrupted\n');
   });
 
+  it('reports a crash category, cleans owned state, and only then forces nonzero exit', async () => {
+    const events: string[] = [];
+    const processEvents = new EventEmitter();
+    const forceExit = vi.fn((code: number) => events.push(`force-exit-${code}`));
+    const value = runtime(events, {
+      verifyHermetic: vi.fn(async () => {
+        events.push('verify');
+        await new Promise<void>(() => undefined);
+      }),
+    });
+    const stderr = vi.fn();
+    const running = runProfiler(['hermetic'], {
+      configDeps,
+      loadRuntime: vi.fn(async () => value),
+      processEvents: processEvents as never,
+      stderr,
+      forceExit,
+    });
+    await vi.waitFor(() => expect(value.verifyHermetic).toHaveBeenCalledOnce());
+    processEvents.emit('uncaughtException', new Error('private.person@example.test'));
+
+    await expect(running).resolves.toBe(1);
+    expect(events.slice(-2)).toEqual(['cleanup', 'force-exit-1']);
+    expect(stderr.mock.calls).toEqual([['crashed\n']]);
+    expect(JSON.stringify(stderr.mock.calls)).not.toContain('private.person');
+  });
+
   it('always cleans hermetic startup, profiling, report, browser, and privacy failures', async () => {
-    for (const failure of ['verifyHermetic', 'reseedHermetic', 'openDashboard', 'authenticateHermetic', 'installFirewall', 'warmup', 'collect', 'report'] as const) {
+    for (const failure of ['verifyHermetic', 'reseedHermetic', 'openDashboard', 'authenticateHermetic', 'warmup', 'collect', 'report'] as const) {
       const events: string[] = [];
       const value = runtime(events, {
         [failure]: vi.fn(async () => {
@@ -349,15 +427,31 @@ describe('top-level profiler sequencing', () => {
       configDeps,
       loadRuntime: vi.fn(async () => value),
       stdout,
+      stdinIsTTY: true,
     })).resolves.toBe(0);
     expect(events).toEqual([
-      'local-proof', 'dashboard', 'auth-local', 'firewall', 'warmup',
+      'local-proof', 'dashboard', 'auth-local', 'warmup',
       'collect', 'report', 'close-dashboard',
     ]);
     expect(value.startHermetic).not.toHaveBeenCalled();
     expect(value.reseedHermetic).not.toHaveBeenCalled();
     expect(value.cleanupHermetic).not.toHaveBeenCalled();
     expect(stdout).not.toHaveBeenCalled();
+  });
+
+  it('refuses noninteractive local mode before runtime loading or target traffic', async () => {
+    const loadRuntime = vi.fn();
+    const stderr = vi.fn();
+
+    await expect(runProfiler(['local', '--base-url=http://localhost:5174'], {
+      configDeps,
+      loadRuntime,
+      stderr,
+      stdinIsTTY: false,
+    })).resolves.toBe(1);
+
+    expect(loadRuntime).not.toHaveBeenCalled();
+    expect(stderr.mock.calls).toEqual([['local_tty_required\n']]);
   });
 
   it('runs hosted headed login/admin/env proof/firewall/collect/report without seed or warmup', async () => {
@@ -370,7 +464,7 @@ describe('top-level profiler sequencing', () => {
       stdout,
     })).resolves.toBe(0);
     expect(events).toEqual([
-      'dashboard', 'auth-hosted', 'firewall', 'collect', 'report', 'close-dashboard',
+      'dashboard', 'auth-hosted', 'collect', 'report', 'close-dashboard',
     ]);
     expect(value.startHermetic).not.toHaveBeenCalled();
     expect(value.verifyLocal).not.toHaveBeenCalled();
@@ -388,7 +482,7 @@ describe('top-level profiler sequencing', () => {
       loadRuntime: vi.fn(async () => slower),
     })).resolves.toBe(0);
 
-    for (const phase of ['verifyLocal', 'authenticateHosted', 'installFirewall', 'collect', 'report'] as const) {
+    for (const phase of ['verifyLocal', 'authenticateHosted', 'collect', 'report'] as const) {
       const value = runtime([], { [phase]: vi.fn(async () => { throw new Error('closed_failure'); }) });
       const argv = phase === 'verifyLocal'
         ? ['local', '--base-url=http://localhost:5174']
@@ -398,6 +492,7 @@ describe('top-level profiler sequencing', () => {
       await expect(runProfiler(argv, {
         configDeps,
         loadRuntime: vi.fn(async () => value),
+        stdinIsTTY: true,
       })).resolves.toBe(1);
     }
   });
@@ -450,5 +545,34 @@ describe('top-level profiler sequencing', () => {
       configDeps,
     });
     expect(processLike.exitCode).toBe(1);
+  });
+
+  it('keeps a top-level stdout EPIPE nonzero after owned cleanup even when stderr is also closed', async () => {
+    const events: string[] = [];
+    const value = runtime(events, {
+      report: vi.fn(async () => ({
+        exitCode: 0,
+        status: 'written',
+        directoryName: '20260812T123456789Z-eeee5555',
+      })),
+    });
+    const processLike = { exitCode: undefined as number | undefined };
+    const closedPipe = (): never => { throw Object.assign(new Error('closed pipe'), { code: 'EPIPE' }); };
+    let stdoutWrites = 0;
+    const closeAfterSeed = (): void => {
+      stdoutWrites += 1;
+      if (stdoutWrites > 1) closedPipe();
+    };
+
+    await expect(runDirectMain(['hermetic'], {
+      processLike,
+      configDeps,
+      loadRuntime: vi.fn(async () => value),
+      stdout: closeAfterSeed,
+      stderr: closedPipe,
+    })).resolves.toBeUndefined();
+
+    expect(processLike.exitCode).toBe(1);
+    expect(events).toContain('cleanup');
   });
 });

@@ -29,6 +29,8 @@ const fsFaults = vi.hoisted(() => ({
   stagingRemoveFailures: 0,
   failStagingBlankWrites: false,
   failStagingRename: false,
+  closeStagingHandlesOnSensitiveMutation: false,
+  stagingHandles: [] as Array<{ close(): Promise<void> }>,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -37,14 +39,23 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actualRm = actual.rm as (...args: unknown[]) => Promise<void>;
   const actualWriteFile = actual.writeFile as (...args: unknown[]) => Promise<void>;
   const actualRename = actual.rename as (...args: unknown[]) => Promise<void>;
+  const actualOpen = actual.open as (...args: unknown[]) => Promise<import('node:fs/promises').FileHandle>;
   return {
     ...actual,
+    open: async (...args: unknown[]) => {
+      const handle = await actualOpen(...args);
+      if (String(args[0]).includes('-staging')) fsFaults.stagingHandles.push(handle);
+      return handle;
+    },
     readFile: async (...args: unknown[]) => {
       const path = String(args[0]);
       if (fsFaults.stagedSensitiveValue !== null && path.includes('-staging')) {
         const value = fsFaults.stagedSensitiveValue;
         fsFaults.stagedSensitiveValue = null;
         await actual.writeFile(path, value, 'utf8');
+        if (fsFaults.closeStagingHandlesOnSensitiveMutation) {
+          await Promise.allSettled(fsFaults.stagingHandles.map((handle) => handle.close()));
+        }
       }
       if (path.includes('-staging')) {
         fsFaults.stagingReadCount += 1;
@@ -95,6 +106,8 @@ afterEach(async () => {
   fsFaults.stagingRemoveFailures = 0;
   fsFaults.failStagingBlankWrites = false;
   fsFaults.failStagingRename = false;
+  fsFaults.closeStagingHandlesOnSensitiveMutation = false;
+  fsFaults.stagingHandles = [];
   await Promise.all(createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -300,6 +313,8 @@ describe('writePerformanceReport', () => {
       queryKeys: [...conditional.queryKeys],
     }] }).mismatchCodes).toEqual([]);
     expect(evaluate({ requests: [] }).mismatchCodes).toContain('missing_required_endpoint');
+    expect(evaluate({ requests: [{ ...baseRequest, outcome: 'failed' }] }).mismatchCodes)
+      .toContain('missing_required_endpoint');
     expect(evaluate({ requests: [{ ...baseRequest, endpointTemplate: '/api/settings', queryKeys: [] }] }).mismatchCodes)
       .toEqual(expect.arrayContaining(['missing_required_endpoint', 'unexpected_endpoint']));
     expect(evaluate({ requests: [{ ...baseRequest, unmatchedApi: true }] }).mismatchCodes).toContain('unmatched_api');
@@ -424,12 +439,17 @@ describe('writePerformanceReport', () => {
       channel: 'chromium',
       version: '140.0.7339.12',
       major: 140,
-      httpCache: 'preserved',
+      httpCache: 'not_disabled_by_interception',
       viewport: { width: 1280, height: 720 },
     });
     expect(summary.runtime.node).toMatch(/^\d+\.\d+\.\d+/u);
     expect(summary.runtime.os).toMatch(/^(?:aix|darwin|freebsd|linux|openbsd|sunos|win32)\/(?:arm|arm64|ia32|loong64|mips|mipsel|ppc|ppc64|riscv64|s390|s390x|x64)$/u);
     expect(summary.samples[0].rawRequests).toBeUndefined();
+    expect(summary.samples[0].blockedWrites).toEqual([{
+      method: 'POST',
+      endpointTemplate: '/api/inbox/:contactId/read',
+      phase: 'destination_mount',
+    }]);
     expect(summary.requests).toBeUndefined();
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
@@ -467,6 +487,27 @@ describe('writePerformanceReport', () => {
     expect((summaryText + requestsText + report).includes(secret)).toBe(false);
   });
 
+  it('preserves out-of-sample blocked-write evidence without assigning a sample phase', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-eeee4444');
+    input.samples[0] = sample('/contacts', 'cold', 0, {
+      blockedWrites: [{
+        method: 'POST',
+        endpointTemplate: '/api/inbox/:contactId/read',
+        phase: 'out_of_sample',
+      }],
+    });
+
+    await writePerformanceReport(input);
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.samples[0].blockedWrites).toEqual([{
+      method: 'POST',
+      endpointTemplate: '/api/inbox/:contactId/read',
+      phase: 'out_of_sample',
+    }]);
+  });
+
   it('adds comparison files only when a valid baseline is supplied', async () => {
     const outputRoot = await artifactRoot();
     const baselineInput = reportInput(outputRoot, '20260812T123456789Z-aabbccdd');
@@ -492,6 +533,41 @@ describe('writePerformanceReport', () => {
     expect(comparison.matched[0].metrics.readyMs.absolute).toBe(100);
     expect(await readFile(join(outputRoot, currentInput.runId, 'comparison.md'), 'utf8'))
       .toContain('Target app revision changed: no');
+  });
+
+  it('round-trips every registry route through artifacts and a generated baseline', async () => {
+    const outputRoot = await artifactRoot();
+    const routeKeys = ROUTES.map((route) => route.key);
+    const baselineInput = reportInput(outputRoot, '20260812T123456790Z-11223344');
+    baselineInput.samples = routeKeys.map((key) => sample(key, 'cold', 0));
+    baselineInput.requests = routeKeys.map((key) => request(key, 'cold', 0));
+    baselineInput.routeOrders = [{ mode: 'cold', repeat: 0, routeKeys }];
+
+    await expect(writePerformanceReport(baselineInput)).resolves.toMatchObject({ status: 'written' });
+    const baselineJson = await readFile(join(outputRoot, baselineInput.runId, 'summary.json'), 'utf8');
+    const baseline = JSON.parse(baselineJson) as Record<string, any>;
+
+    expect(baseline.samples.map((row: SampleResult) => row.routeKey)).toEqual(routeKeys);
+    expect(baseline.routeOrders[0].routeKeys).toEqual(routeKeys);
+    expect(baseline.warmup.routeKey).toBe('/');
+    expect(baseline.aggregates.map((row: { routeKey: string }) => row.routeKey)).toEqual(routeKeys);
+    expect(baseline.rankings.cold.readyMs.some((row: { routeKey: string }) => row.routeKey === '/')).toBe(true);
+
+    const currentInput = {
+      ...reportInput(outputRoot, '20260812T123456790Z-55667788'),
+      samples: routeKeys.map((key) => sample(key, 'cold', 0)),
+      requests: routeKeys.map((key) => request(key, 'cold', 0)),
+      routeOrders: [{ mode: 'cold' as const, repeat: 0, routeKeys }],
+      baselineJson,
+    };
+    const current = await writePerformanceReport(currentInput);
+
+    expect(current).toMatchObject({ status: 'written', exitCode: 0 });
+    const comparison = JSON.parse(await readFile(
+      join(outputRoot, currentInput.runId, 'comparison.json'),
+      'utf8',
+    )) as Record<string, unknown>;
+    expect(comparison['mismatches']).toEqual([]);
   });
 
   it('replaces unsafe route keys before they reach any artifact', async () => {
@@ -657,6 +733,30 @@ describe('writePerformanceReport', () => {
     expect(await readdir(join(outputRoot, `${input.runId}-quarantined`))).toEqual(['quarantine.json']);
   });
 
+  it('reopens closed staging handles and preserves the privacy failure category', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-12121212');
+    const sensitiveValue = 'closed.handle.private@example.com';
+    fsFaults.stagedSensitiveValue = sensitiveValue;
+    fsFaults.closeStagingHandlesOnSensitiveMutation = true;
+    fsFaults.stagingRemoveFailures = 100;
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({
+      status: 'privacy_failure',
+      reason: 'privacy_scan_failed',
+      reasonCategories: ['email_address'],
+    });
+    const stagingDirectory = join(outputRoot, `${input.runId}-staging`);
+    const stagingFiles = await readdir(stagingDirectory);
+    const stagingTexts = await Promise.all(stagingFiles.map((fileName) => (
+      readFile(join(stagingDirectory, fileName), 'utf8')
+    )));
+    expect(stagingTexts).toEqual(stagingFiles.map(() => ''));
+    expect(stagingTexts.join('')).not.toContain(sensitiveValue);
+  });
+
   it('scrubs owned staged handles when the exact-byte scan fails after a private mutation', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-aaaabbbb');
@@ -705,5 +805,17 @@ describe('writePerformanceReport', () => {
 
     await expect(writePerformanceReport(input)).rejects.toThrowError('run_directory_exists');
     expect(await readdir(join(outputRoot, input.runId))).toEqual([]);
+  });
+
+  it('refuses publication when the run is already cancelled', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-34343434');
+    const controller = new AbortController();
+    controller.abort({ reason: 'interrupted' });
+
+    await expect(writePerformanceReport({ ...input, signal: controller.signal }))
+      .rejects.toMatchObject({ reason: 'interrupted' });
+    await expect(readdir(join(outputRoot, input.runId))).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(readdir(join(outputRoot, `${input.runId}-staging`))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 });

@@ -3,7 +3,6 @@ import {
   INTERCEPTION_SCOPE_VERSION,
   NEVER_INTERCEPTED_PATHS,
   PROFILER_CONTEXT_OPTIONS,
-  FirewallAttributionError,
   FirewallHandlerError,
   FirewallPhaseError,
   UnknownFirewallMethodError,
@@ -23,6 +22,7 @@ class FakeSession implements FirewallCdpSession {
   frameUrl = `${ORIGIN}/source`;
   detached = false;
   continueRequestFailure: Error | null = null;
+  pausedDuringFetchDisable: FirewallPausedRequest | null = null;
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     this.sent.push({ method, params });
@@ -33,6 +33,11 @@ class FakeSession implements FirewallCdpSession {
     }
     if (method === 'Page.getFrameTree') {
       return { frameTree: { frame: { id: 'main', url: this.frameUrl } } };
+    }
+    if (method === 'Fetch.disable' && this.pausedDuringFetchDisable !== null) {
+      const event = this.pausedDuringFetchDisable;
+      this.pausedDuringFetchDisable = null;
+      this.emitPaused(event);
     }
     return {};
   }
@@ -104,6 +109,31 @@ describe('performance request firewall', () => {
     expect(patterns.some((pattern) => pattern.includes('/assets/'))).toBe(false);
     expect(patterns.some((pattern) => pattern.includes('/api/events'))).toBe(false);
     expect(sentMethods(page)).not.toContain('Network.setCacheDisabled');
+    await controller.dispose();
+  });
+
+  it('pauses a query-bearing templated mutation before the network', async () => {
+    const page = new FakePage();
+    const token = createFirewallRecordingToken({
+      mode: 'cold', firstPartyOrigin: ORIGIN, destinationPageUrl: `${ORIGIN}/tours/tour-safe`,
+    });
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
+    const enable = page.session.sent.find((row) => row.method === 'Fetch.enable');
+    const patterns = (enable?.params?.['patterns'] as Array<{ urlPattern: string }>).map((row) => row.urlPattern);
+
+    expect(patterns).toContain(`${ORIGIN}/api/tours/*/reminders/*/send-now?*`);
+    page.session.emitPaused(paused(
+      'POST',
+      '/api/tours/tour-safe/reminders/reminder-safe/send-now?force=send_now',
+    ));
+    await controller.assertHealthy();
+
+    expect(token.evidence()).toEqual([{
+      method: 'POST',
+      endpointTemplate: '/api/tours/:tourId/reminders/:reminderId/send-now',
+      phase: 'destination_mount',
+    }]);
+    expect(sentMethods(page)).toContain('Fetch.failRequest');
     await controller.dispose();
   });
 
@@ -199,14 +229,40 @@ describe('performance request firewall', () => {
     await controller.dispose();
   });
 
-  it('records tokenless writes and callback failures in a run-level error channel', async () => {
+  it('records tokenless writes as out-of-sample evidence without poisoning later samples', async () => {
     const page = new FakePage();
     const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
     page.session.emitPaused(paused('POST', '/api/inbox/contact-safe/read'));
 
-    await expect(controller.assertHealthy()).rejects.toBeInstanceOf(FirewallAttributionError);
+    await expect(controller.assertHealthy()).resolves.toBeUndefined();
+    expect((controller as never as { drainOutOfSampleEvidence(): unknown }).drainOutOfSampleEvidence()).toEqual([{
+      method: 'POST',
+      endpointTemplate: '/api/inbox/:contactId/read',
+      phase: 'out_of_sample',
+    }]);
+    expect((controller as never as { drainOutOfSampleEvidence(): unknown }).drainOutOfSampleEvidence()).toEqual([]);
     expect(sentMethods(page)).toContain('Fetch.failRequest');
-    await controller.dispose();
+    await expect(controller.dispose()).resolves.toBeUndefined();
+  });
+
+  it('fails closed when the runtime watchdog sees an uncataloged first-party write escape Fetch', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'escaped-1',
+      request: { method: 'POST', url: `${ORIGIN}/api/new-uncataloged-mutation?contact=private` },
+      type: 'Fetch',
+    });
+
+    await expect(controller.assertHealthy()).rejects.toMatchObject({
+      reason: 'uncataloged_write_escaped_firewall',
+      evidence: {
+        method: 'POST',
+        endpointTemplate: 'unmatched_api',
+      },
+    });
+    expect(JSON.stringify(controller)).not.toContain('private');
+    await controller.dispose().catch(() => undefined);
   });
 
   it('latches third-page and unknown-method failures without rejecting the CDP callback', async () => {
@@ -242,11 +298,32 @@ describe('performance request firewall', () => {
 
   it('surfaces an unobserved handler failure during disposal after releasing CDP state', async () => {
     const page = new FakePage();
-    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
-    page.session.emitPaused(paused('POST', '/api/inbox/contact-safe/read'));
+    const token = createFirewallRecordingToken({
+      mode: 'warm',
+      firstPartyOrigin: ORIGIN,
+      sourcePageUrl: `${ORIGIN}/inbox`,
+      destinationPageUrl: `${ORIGIN}/conversations/conv-safe`,
+    });
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => token });
+    page.session.emitPaused(paused(
+      'POST',
+      '/api/inbox/contact-safe/read',
+      `${ORIGIN}/settings/team`,
+    ));
 
-    await expect(controller.dispose()).rejects.toBeInstanceOf(FirewallAttributionError);
+    await expect(controller.dispose()).rejects.toBeInstanceOf(FirewallPhaseError);
     expect(sentMethods(page)).toContain('Fetch.disable');
+    expect(page.session.detached).toBe(true);
+  });
+
+  it('drains and fails closed for a paused request delivered while Fetch is disabling', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.pausedDuringFetchDisable = paused('PROPFIND', '/api/contacts');
+
+    await expect(controller.dispose()).rejects.toBeInstanceOf(UnknownFirewallMethodError);
+
+    expect(sentMethods(page)).toContain('Fetch.failRequest');
     expect(page.session.detached).toBe(true);
   });
 });

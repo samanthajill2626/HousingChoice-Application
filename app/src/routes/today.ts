@@ -72,6 +72,7 @@ import {
   type ToursRepo,
 } from '../repos/toursRepo.js';
 import { createExtractionRepo, type ExtractionRepo } from '../repos/extractionRepo.js';
+import { GROUP_DETECTION_ORIGIN } from '../services/groupMembers.js';
 import { isMemberSuppressed } from '../services/relayAnnouncements.js';
 
 // --- C7 wire contract (VERBATIM — the frontend imports the same shapes) ------
@@ -640,6 +641,25 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       warnIfCapped('contacts:triage', page.items.length);
       for (const contact of page.items) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;
+        // GROUP-DETECTION STUBS ARE NOT A TODAY ROW (fix wave 5, adversarial 30).
+        // Detection mints a contact for EVERY unseen roster member as
+        // (unknown, needs_review) - the exact partition this block reads - so
+        // one inbound from a six-person carrier group put five "New unknown
+        // contact" rows into `needs_you_now` in a single shot, none of them
+        // de-duped (group members deliberately get no 1:1 thread minted, so the
+        // conversation-row de-dupe above cannot see them). Worse, this Query is
+        // hard-capped and the byTypeStatus GSI's range key is `status`, not a
+        // timestamp, so there is NO recency ordering: past the page limit,
+        // genuinely new unknown contacts became permanently invisible here.
+        //
+        // Their triage surface is the GROUP THREAD, which is where a human can
+        // actually tell who these people are - and Today already states that
+        // group conversations are structurally absent from it. This makes the
+        // contacts they create absent too, rather than only the conversations.
+        // A stub that a human later triages loses `needs_review` and leaves this
+        // partition anyway; a real unknown caller who TEXTED still surfaces
+        // through the conversation-row source above.
+        if (contact.origin === GROUP_DETECTION_ORIGIN) continue;
         // De-dupe by phone: if this person already emitted an unknown_1to1
         // conversation row above, skip the contact (prefer the conversation —
         // it carries the unread and is the actionable triage target). A

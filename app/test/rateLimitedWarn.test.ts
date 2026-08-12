@@ -80,3 +80,78 @@ describe('createRateLimitedWarn (group-texting T3.7)', () => {
     expect(warns[1]?.fields['providerSid']).toBe('MM3');
   });
 });
+
+// THE TWO DEFECTS THESE PIN (fix wave 5, adversarial 21).
+describe('the throttle cannot be blinded, and cannot hide a burst', () => {
+  it('a BACKWARDS clock step restarts the window instead of suppressing forever', () => {
+    const { warns, logger } = fakeLogger();
+    let clock = 3_600_000;
+    const warn = createRateLimitedWarn({ logger, intervalMs: 100, now: () => clock });
+    warn({}, 'x');
+    expect(warns).toHaveLength(1);
+
+    // NTP correction / VM snapshot restore: 30 minutes backwards. `at - last`
+    // is now hugely negative, which is `< intervalMs` - so the old code
+    // suppressed EVERY call until wall-clock time caught back up.
+    clock = 3_600_000 - 30 * 60_000;
+    warn({ providerSid: 'MM2' }, 'x');
+
+    const emitted = warns.filter((w) => w.message === 'x');
+    expect(emitted).toHaveLength(2);
+    expect(emitted[1]?.fields['providerSid']).toBe('MM2');
+    // ...and the step itself is reported, not swallowed.
+    expect(
+      warns.some((w) => w.fields['event'] === 'rate_limited_warn_clock_stepped_back'),
+    ).toBe(true);
+  });
+
+  it('a burst followed by SILENCE still reports its tally when the window closes', () => {
+    const { warns, logger } = fakeLogger();
+    let clock = 0;
+    const due: { fn: () => void; at: number }[] = [];
+    const warn = createRateLimitedWarn({
+      logger,
+      intervalMs: 100,
+      now: () => clock,
+      schedule: (fn, ms) => due.push({ fn, at: clock + ms }),
+    });
+
+    warn({ providerSid: 'MM1' }, 'x'); // emitted
+    for (let i = 0; i < 40; i += 1) {
+      clock = 10 + i;
+      warn({ providerSid: `MM${i + 2}` }, 'x'); // all suppressed
+    }
+    expect(warns).toHaveLength(1);
+
+    // The flood stops. Nothing else will ever call this damper.
+    clock = 200;
+    for (const d of due) d.fn();
+
+    expect(warns).toHaveLength(2);
+    expect(warns[1]?.fields['suppressedCount']).toBe(40);
+    expect(warns[1]?.fields['trailingFlush']).toBe(true);
+  });
+
+  it('the trailing flush is a no-op when the tally was already drained by an emission', () => {
+    const { warns, logger } = fakeLogger();
+    let clock = 0;
+    const due: { fn: () => void; at: number }[] = [];
+    const warn = createRateLimitedWarn({
+      logger,
+      intervalMs: 100,
+      now: () => clock,
+      schedule: (fn, ms) => due.push({ fn, at: clock + ms }),
+    });
+
+    warn({}, 'x');
+    clock = 10;
+    warn({}, 'x'); // suppressed -> schedules a flush
+    clock = 150;
+    warn({}, 'x'); // emits, draining the tally
+
+    for (const d of due) d.fn();
+
+    expect(warns).toHaveLength(2);
+    expect(warns[1]?.fields['suppressedCount']).toBe(1);
+  });
+});

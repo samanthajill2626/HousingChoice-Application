@@ -28,6 +28,7 @@ import {
 } from '../../lib/events.js';
 // FIX 4: the relay roster fields now live in toConversationUpdatedEvent — the
 // inbound relay path uses the one shared builder (no separate relay builder).
+import { summarizeError } from '../../lib/errors.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
 import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
@@ -76,7 +77,11 @@ import {
 } from '../../services/groupEnvelope.js';
 import { groupIdentity, type GroupExclusionSet } from '../../services/groupIdentity.js';
 import { groupMemberKey, resolveGroupMembers } from '../../services/groupMembers.js';
-import { hasActiveGroupRail, type GroupRailEnqueuer } from '../../services/groupRail.js';
+import {
+  hasActiveGroupRail,
+  MAX_RAIL_MEMBERS,
+  type GroupRailEnqueuer,
+} from '../../services/groupRail.js';
 import { createGroupRailEnqueuer } from '../../jobs/groupRail.js';
 import { createGroupCrossCheck, type GroupCrossCheck } from '../../services/groupCrossCheck.js';
 import { convertConnectingRelayGroupToGroupText } from '../../services/groupConvert.js';
@@ -832,9 +837,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // is pure property access on the already-parsed body, so this costs no I/O.
     const envelopeBearing = parseOtherRecipients(msg.params).length > 0;
     if (envelopeBearing) {
-      warnEnvelopeUnminted(
+      warnEnvelopeViaClosedRelay(
         { event: 'group_envelope_via_closed_relay_group', providerSid: MessageSid },
-        'a carrier group envelope arrived on a pool number whose groups are all CLOSED - intercepted into the sender 1:1 WITH the extraction marker, no native thread minted',
+        'a carrier group envelope arrived on a pool number whose groups are all CLOSED - intercepted into the sender 1:1, no native thread minted',
       );
     }
 
@@ -866,10 +871,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // Provenance: the pool number this reached only matches From on the CLOSED
       // group <group.conversationId>. The dashboard badges the 1:1 bubble off it.
       viaClosedGroup: group.conversationId,
-      // Fail-open group filing (spec 5.4 / invariant 13.1): the envelope proves
-      // this MAY be carrier-group content, so AI fact extraction must not read
-      // it as this one contact's own speech.
-      ...(envelopeBearing && { groupAmbiguousOrigin: true }),
+      // NO EXTRACTION MARKER HERE (fix wave 5, adversarial 20/32). This is a
+      // PRE-EXISTING relay code path, and `groupAmbiguousOrigin` is PERMANENT:
+      // jobs/extraction.ts filters a marked message out of every transcript
+      // window for the life of the message. Stamping it here silently and
+      // irreversibly removed messages on a shipped relay surface from fact
+      // extraction - a regression of relay behavior, which invariant 13.6 says
+      // this feature does not touch. The envelope is still detected and still
+      // ALARMS above (that is the part worth keeping); the routing and the
+      // filing stay exactly as relay shipped them. `viaClosedGroup` remains the
+      // provenance the dashboard badges the bubble off.
+      //
+      // The wider ruling on coupling a permanent extraction marker to a
+      // group-shape heuristic is tracked in docs/issues/tripwire-extraction-scope.md.
       ...(Body !== undefined && Body.length > 0 && { body: Body }),
       ...(mediaUrls.length > 0 && { mediaUrls }),
     });
@@ -948,6 +962,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   const GROUP_EXCLUSION_CACHE_TTL_MS = 60_000;
   /** Minimum gap between tripwire WARNs (spec 8.1 - the signal is the RATE). */
   const GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS = 5 * 60_000;
+  /**
+   * Minimum gap between rail re-enqueues for a thread whose last attempt FAILED
+   * (fix wave 5, adversarial 35). Long enough that a chatty group cannot flood
+   * the shared jobs queue with certain-to-fail work, short enough that a genuine
+   * transient (a 429 during a migration burst) still heals within a few minutes.
+   */
+  const RAIL_REQUEUE_BACKOFF_MS = 5 * 60_000;
 
   let poolNumberCache: { at: number; numbers: string[] } | undefined;
   const warnEnvelopeMissing = createRateLimitedWarn({
@@ -955,13 +976,28 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
   });
   /**
-   * The invariant-13.1 alarm for an envelope-bearing inbound we file 1:1 without
-   * minting a native thread (business number unset, or the message landed on a
-   * pool/other org number). ITS OWN damper, not the tripwire's: sharing one
-   * would let a chatty misconfiguration starve the tripwire signal, and the two
-   * say completely different things.
+   * PER-EVENT DAMPERS (fix wave 5, adversarial 15). These three say completely
+   * different things and must not share one throttle. They used to: ONE closure
+   * served `group_envelope_via_closed_relay_group`,
+   * `group_detection_unconfigured` and `group_envelope_off_business_number`, and
+   * `group_detection_unconfigured` IS the chatty one - an unset
+   * BUSINESS_PHONE_NUMBER fires it on every envelope-bearing inbound. Its
+   * emissions refreshed the shared `lastEmittedAt`, so for the whole window the
+   * other two - the events that say "a group envelope landed on a number we do
+   * not own" - were never emitted at all, and whichever event next won carried
+   * the COMBINED `suppressedCount`, mis-attributing hundreds of occurrences to
+   * the wrong event. This is the same reasoning that already gave the tripwire
+   * its own damper, applied inside the unminted family.
    */
-  const warnEnvelopeUnminted = createRateLimitedWarn({
+  const warnEnvelopeViaClosedRelay = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+  const warnDetectionUnconfigured = createRateLimitedWarn({
+    logger: log,
+    intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
+  });
+  const warnEnvelopeOffBusinessNumber = createRateLimitedWarn({
     logger: log,
     intervalMs: GROUP_ENVELOPE_MISSING_WARN_INTERVAL_MS,
   });
@@ -1025,6 +1061,46 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     providerSid: string,
   ): Promise<void> {
     if (reason === 'rail_missing' && hasActiveGroupRail(thread)) return;
+    // BACK-OFF ON A KNOWN-FAILING RAIL (fix wave 5, adversarial 35). Branch (b)
+    // re-enqueues on EVERY inbound to a rail-less group thread, which is exactly
+    // right for the create-then-crash window it exists to close - but for a
+    // thread whose rail can never be built (a landline member -> Twilio 50407,
+    // a roster past the participant cap) it fed a certain-to-fail job into the
+    // SHARED jobs queue that relay fan-out, broadcasts and tour reminders use,
+    // once per inbound, forever, with no back-off at all.
+    //
+    // This is also the READER `rail_failed` never had (adversarial 10). It only
+    // means anything now that a successful finalize CLEARS the field, so a
+    // healed thread is not held back by a failure it recovered from.
+    if (reason === 'rail_missing') {
+      const roster = thread.participants ?? [];
+      if (roster.length === 0 || roster.length > MAX_RAIL_MEMBERS) {
+        // STRUCTURAL: no retry can change this, so do not queue one at all. The
+        // thread stays inbound-only and the thread view says so.
+        log.info(
+          {
+            event: 'group_rail_requeue_skipped',
+            conversationId: thread.conversationId,
+            reason: 'roster_unrailable',
+            memberCount: roster.length,
+          },
+          'group rail not re-enqueued - the roster can never be railed',
+        );
+        return;
+      }
+      const failedAt = Date.parse(String(thread.rail_failed?.at ?? ''));
+      if (Number.isFinite(failedAt) && Date.now() - failedAt < RAIL_REQUEUE_BACKOFF_MS) {
+        log.info(
+          {
+            event: 'group_rail_requeue_backoff',
+            conversationId: thread.conversationId,
+            sinceFailureMs: Date.now() - failedAt,
+          },
+          'group rail re-enqueue skipped - a recent attempt failed and the back-off has not elapsed',
+        );
+        return;
+      }
+    }
     try {
       const outcome = await groupRail.enqueueGroupRail({
         conversationId: thread.conversationId,
@@ -1087,6 +1163,45 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         { err, event: 'group_exclusions_unavailable', providerSid: MessageSid },
         'group exclusion set unavailable - refusing to derive a group id, filed to the sender 1:1 with the extraction marker',
       );
+      // A REDELIVERY OF AN ALREADY-FILED GROUP MESSAGE MUST NOT BE RE-FILED 1:1
+      // (fix wave 5, adversarial 18). This cold-start refusal is the ONE
+      // transient fail-open path in the feature, and the (ii.5) redelivery guard
+      // sits BELOW it - so delivery 1 could classify the message as a group,
+      // append it to thread G, and then 5xx downstream (media mirroring runs
+      // before the ack), and delivery 2 - hitting a cold pool cache - fell
+      // straight through to the 1:1 pipeline. That pipeline calls
+      // `createOrGetByParticipantPhone` unconditionally, MATERIALIZING an empty
+      // needs-triage 1:1 for the group sender (the exact row numberSuppression
+      // and the group path both go out of their way never to create), and it
+      // runs the keyword handler WITHOUT `suppressReply`, so a group `STOP`
+      // could draw a TwiML reply the group path never sends.
+      //
+      // The sid pointer already knows. If this message lives on a GROUP thread,
+      // the first delivery's filing stands: ack and stop. Best effort - a failed
+      // pointer read falls through to the pre-fix behaviour, never a lost
+      // message (invariant 13.3).
+      try {
+        const filed = await messages.getByProviderSid(MessageSid);
+        if (filed !== undefined) {
+          const where = await conversations.getById(filed.conversationId);
+          if (where?.type === 'group_text') {
+            log.warn(
+              {
+                event: 'group_inbound_redelivery_already_group_filed',
+                providerSid: MessageSid,
+                conversationId: filed.conversationId,
+              },
+              'group exclusion set unavailable on a REDELIVERY of a message already filed to its group thread - acking without minting a 1:1',
+            );
+            return { handled: true };
+          }
+        }
+      } catch (readErr) {
+        log.error(
+          { err: summarizeError(readErr), providerSid: MessageSid },
+          'group inbound: redelivery pre-check failed after an exclusion-set failure - falling through to the 1:1 pipeline',
+        );
+      }
       return { handled: false };
     }
 
@@ -1710,12 +1825,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // and the flood would bury the signal.
       groupAmbiguousOrigin = true;
       if (config.businessPhoneNumber === undefined) {
-        warnEnvelopeUnminted(
+        warnDetectionUnconfigured(
           { event: 'group_detection_unconfigured', providerSid: MessageSid },
           'a group envelope arrived but BUSINESS_PHONE_NUMBER is unset - group detection is OFF, filed as 1:1 WITH the extraction marker',
         );
       } else {
-        warnEnvelopeUnminted(
+        warnEnvelopeOffBusinessNumber(
           { event: 'group_envelope_off_business_number', providerSid: MessageSid },
           'a carrier group envelope arrived on a NON-business number (pool or other org number) - filed as 1:1 WITH the extraction marker, no native thread minted (A6)',
         );
@@ -1880,6 +1995,17 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body,
       OptOutType,
       MessageSid,
+      // THE APP SENDS NOTHING FOR GROUP-ORIGIN CONTENT (fix wave 5, adversarial
+      // 18). `others.length > 0` is POSITIVE proof this inbound carried a
+      // carrier-group envelope; it only reaches the 1:1 pipeline because a
+      // fail-open path declined to mint a thread for it. Spec 4.4 and the group
+      // branch's own ack both say the app never replies to a group inbound -
+      // Twilio's standard opt-out auto-reply answers the sender 1:1 (issue
+      // twilio-standard-optout-double-reply owns that coupling) - so the
+      // KEYWORD is still processed and the opt-out still recorded; only OUR
+      // reply is suppressed. Deliberately scoped to a real envelope, NOT to the
+      // tripwire heuristic, which legitimately matches ordinary 1:1 MMS.
+      ...(others.length > 0 && { suppressReply: true }),
     });
 
     // (5) MMS media — mirror each MediaUrl{i} into S3 (streams only). Runs before

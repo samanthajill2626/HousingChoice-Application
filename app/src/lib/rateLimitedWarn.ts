@@ -28,6 +28,12 @@ export interface RateLimitedWarnOptions {
   intervalMs: number;
   /** Injectable clock (tests); `Date.now` otherwise. */
   now?: () => number;
+  /**
+   * Injectable "run this once, `ms` from now" seam for the TRAILING FLUSH
+   * (fix wave 5, adversarial 21). Defaults to an UNREF'd `setTimeout`, so a
+   * pending flush never holds the process open. Tests pass a manual scheduler.
+   */
+  schedule?: (fn: () => void, ms: number) => void;
 }
 
 /**
@@ -40,16 +46,69 @@ export function createRateLimitedWarn(
 ): (fields: Record<string, unknown>, message: string) => void {
   const log = opts.logger ?? defaultLogger;
   const now = opts.now ?? Date.now;
+  const schedule =
+    opts.schedule ??
+    ((fn: () => void, ms: number): void => {
+      setTimeout(fn, ms).unref();
+    });
   let lastEmittedAt: number | undefined;
   let suppressed = 0;
+  let flushPending = false;
+  let lastFields: Record<string, unknown> = {};
+  let lastMessage = '';
+
+  /**
+   * THE TRAILING FLUSH. `suppressed` used to be reported only on the NEXT
+   * emission, so a burst of N inside one window followed by silence - or a task
+   * replacement - never reported N at all. That is exactly the shape a
+   * detection outage produces (a flood, then the traffic stops), and it
+   * contradicted this module's own claim that "the throttle can never hide the
+   * true rate". So the tally is drained when the window closes, whether or not
+   * anything else happens.
+   */
+  function scheduleFlush(): void {
+    if (flushPending) return;
+    flushPending = true;
+    const at = lastEmittedAt ?? now();
+    schedule(() => {
+      flushPending = false;
+      if (suppressed === 0) return;
+      const suppressedCount = suppressed;
+      suppressed = 0;
+      lastEmittedAt = now();
+      log.warn(
+        { ...lastFields, suppressedCount, trailingFlush: true },
+        lastMessage,
+      );
+    }, Math.max(0, at + opts.intervalMs - now()));
+  }
 
   return (fields, message) => {
     const at = now();
-    if (lastEmittedAt !== undefined && at - lastEmittedAt < opts.intervalMs) {
+    const elapsed = lastEmittedAt === undefined ? undefined : at - lastEmittedAt;
+    // A BACKWARDS CLOCK STEP MUST NOT BLIND THE THROTTLE (fix wave 5,
+    // adversarial 21). `at - lastEmittedAt < intervalMs` is true for every
+    // NEGATIVE difference, so an NTP correction or a VM snapshot restore
+    // suppressed EVERY call until wall-clock time caught back up - a 30-minute
+    // backwards step blinded the tripwire for 35 minutes, which is precisely
+    // the window in which a detection outage would be invisible. Time going
+    // backwards is not "too soon"; it means the clock is untrustworthy, so the
+    // window is restarted and this call is emitted.
+    if (elapsed !== undefined && elapsed < 0) {
+      log.warn(
+        { event: 'rate_limited_warn_clock_stepped_back', backwardsMs: -elapsed },
+        'the rate-limited WARN clock stepped backwards - restarting the throttle window',
+      );
+    } else if (elapsed !== undefined && elapsed < opts.intervalMs) {
       suppressed += 1;
+      lastFields = fields;
+      lastMessage = message;
+      scheduleFlush();
       return;
     }
     lastEmittedAt = at;
+    lastFields = fields;
+    lastMessage = message;
     const suppressedCount = suppressed;
     suppressed = 0;
     log.warn({ ...fields, suppressedCount }, message);

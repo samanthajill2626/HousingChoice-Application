@@ -923,6 +923,38 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(forOne).toMatchObject({ refType: 'contact', who: 'One Only', why: '1 suggestion(s)' });
   });
 
+  // THE DEFECT THIS PINS (fix wave 5, adversarial 30). Group detection mints a
+  // contact for EVERY unseen roster member as (unknown, needs_review) - the
+  // exact byTypeStatus partition Today reads as its human triage queue - and
+  // group members deliberately get no 1:1 thread, so the conversation-row
+  // de-dupe cannot see them. One inbound from a six-person carrier group put
+  // five "New unknown contact" rows into needs_you_now in a single shot, and
+  // past the hard page cap (whose GSI range key is the STATUS, not a timestamp,
+  // so there is no recency ordering) genuinely new unknown contacts became
+  // permanently invisible in that block.
+  it('EXCLUDES group-detection contact stubs, and still shows a real unknown contact', async () => {
+    world.contacts.push({
+      contactId: 'c-groupstub',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110001',
+      origin: 'group_detection',
+      group_participation_at: '2026-08-11T12:00:00.000Z',
+    } as ContactItem);
+    world.contacts.push({
+      contactId: 'c-realunknown',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110099',
+    } as ContactItem);
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.map((r) => r.refId)).toEqual(['c-realunknown']);
+  });
+
   it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });

@@ -27,6 +27,14 @@ export interface TokenBucketOptions {
    * tests pass 0 for deterministic timing.
    */
   maxJitterMs?: number;
+  /**
+   * The DEADLINE timer for a bounded acquire's queue wait (fix wave 4, item 4).
+   * Deliberately NOT `sleep`: `sleep` models pacing that really elapses and a
+   * test's fake clock advances with it, whereas this one races the queue and is
+   * abandoned the moment the queue wins. Defaults to an UNREF'd real timer, so a
+   * loser that is left to expire can never hold the process open at shutdown.
+   */
+  queueTimeout?: (ms: number) => Promise<void>;
 }
 
 export class TokenBucket {
@@ -34,6 +42,7 @@ export class TokenBucket {
   readonly refillPerSec: number;
   private readonly now: () => number;
   private readonly sleep: (ms: number) => Promise<void>;
+  private readonly queueTimeout: (ms: number) => Promise<void>;
   private readonly maxJitterMs: number;
   private tokens: number;
   private lastRefill: number;
@@ -43,6 +52,13 @@ export class TokenBucket {
    * "see" tokens and overshoot the rate. Each acquire chains onto the prior.
    */
   private tail: Promise<void> = Promise.resolve();
+  /**
+   * How many acquires are in the queue right now (running one included). A
+   * bounded acquire arms a deadline timer ONLY when this says somebody is ahead
+   * of it - otherwise there is no queue to be stuck behind and the timer would
+   * be pure cost on the common path.
+   */
+  private waiting = 0;
 
   constructor(opts: TokenBucketOptions) {
     if (!(opts.capacity > 0)) throw new Error('TokenBucket: capacity must be > 0');
@@ -51,6 +67,10 @@ export class TokenBucket {
     this.refillPerSec = opts.refillPerSec;
     this.now = opts.now ?? Date.now;
     this.sleep = opts.sleep ?? ((ms) => delay(ms));
+    // UNREF'd: the race's loser is abandoned rather than cancelled, and a
+    // ref'd timer would then keep the event loop alive for the rest of the
+    // caller's bound (20s on the one interactive path) every time the queue won.
+    this.queueTimeout = opts.queueTimeout ?? ((ms) => delay(ms, undefined, { ref: false }));
     this.maxJitterMs = opts.maxJitterMs ?? 25;
     // Start full so the first burst (up to capacity) is immediate.
     this.tokens = opts.capacity;
@@ -89,6 +109,22 @@ export class TokenBucket {
    * INTERACTIVE caller passes a bound so an Express request is never held open
    * indefinitely behind other waiters.
    *
+   * "QUEUE TIME INCLUDED" IS NOW TRUE (fix wave 4, item 4). It was written as
+   * the intent and implemented as a check AFTER `await prior`: the deadline was
+   * consulted the instant this acquire reached the front of the line, so a
+   * request queued behind a long draw sat for the whole of that draw and only
+   * then discovered its own bound had expired minutes ago. The bound described
+   * the pacing wait and not the wait the operator experienced, which is the one
+   * it exists to cap. The queue wait is now RACED against the deadline, so the
+   * refusal arrives at the bound rather than after the queue.
+   *
+   * A waiter that loses that race LEAVES THE QUEUE WITHOUT RELEASING ITS PLACE
+   * to whoever chained behind it: its tail is resolved when the PREDECESSOR
+   * finishes, not immediately, so the next waiter takes this one's position in
+   * line instead of jumping ahead of the acquire that is still draining. FIFO
+   * against one budget is the property that keeps the shared rate honest, and a
+   * timeout must not be a way around it.
+   *
    * A BOUNDED DRAW CAN SPEND PART OF ITS BUDGET (fix wave 3, conformance 3). The
    * instalment loop deducts as it goes, so a draw that gives up at the bound has
    * already paid for the instalments it took - at the shipped default rate of
@@ -101,15 +137,39 @@ export class TokenBucket {
     const want = Math.max(count, 1);
     const deadline = opts.timeoutMs === undefined ? undefined : this.now() + opts.timeoutMs;
     // Chain onto the prior acquire so waiters drain in order against one budget.
+    const queuedAhead = this.waiting;
+    this.waiting += 1;
     const prior = this.tail;
     let release!: () => void;
     this.tail = new Promise<void>((resolve) => {
       release = resolve;
     });
-    await prior;
+
+    // THE QUEUE IS PART OF THE WAIT, AND IT IS NOW RACED (fix wave 4, item 4).
+    // N sends ahead of this one is exactly how an interactive request ends up
+    // parked for minutes, and a deadline consulted only AFTER `await prior`
+    // could not see any of it. The timer is armed only when somebody really is
+    // ahead - with an empty queue `prior` is already settled and the race would
+    // be pure cost.
+    if (opts.timeoutMs !== undefined && queuedAhead > 0) {
+      const timedOut = await Promise.race([
+        prior.then(() => false),
+        this.queueTimeout(opts.timeoutMs).then(() => true),
+      ]);
+      if (timedOut) {
+        // Leave the line without letting the waiter behind us jump the acquire
+        // that is still draining: our tail resolves when the PREDECESSOR does.
+        this.waiting -= 1;
+        void prior.then(release, release);
+        throw new TokenBucketBusyError(want, opts.timeoutMs, 0);
+      }
+    } else {
+      await prior;
+    }
+
     try {
-      // The FIFO queue is part of the wait: N sends ahead of this one is exactly
-      // how an interactive request ends up parked for minutes.
+      // Reached the front of the queue, but the pacing wait ahead may already be
+      // past the bound (the common case at the shipped 1/sec tier).
       if (deadline !== undefined && this.now() >= deadline) {
         // Nothing drawn yet - this one really did spend nothing.
         throw new TokenBucketBusyError(want, opts.timeoutMs as number, 0);
@@ -138,6 +198,7 @@ export class TokenBucket {
       }
       throw new Error('TokenBucket.acquire: exceeded retry guard — is the clock advancing?');
     } finally {
+      this.waiting -= 1;
       release();
     }
   }

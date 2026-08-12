@@ -761,6 +761,47 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+const PRIVACY_SCRUB_ATTEMPTS = 4;
+const PRIVACY_SCRUB_RETRY_MS = 25;
+
+async function waitForPrivacyScrubRetry(): Promise<void> {
+  await new Promise<void>((resolve) => setTimeout(resolve, PRIVACY_SCRUB_RETRY_MS));
+}
+
+async function scrubStagingArtifacts(stagingDirectory: string, files: readonly string[]): Promise<void> {
+  let contentScrubbed = false;
+  for (let attempt = 0; attempt < PRIVACY_SCRUB_ATTEMPTS && !contentScrubbed; attempt += 1) {
+    try {
+      await Promise.all(files.map((fileName) => writeFile(join(stagingDirectory, fileName), '', 'utf8')));
+      const retainedTexts = await Promise.all(files.map((fileName) => (
+        readFile(join(stagingDirectory, fileName), 'utf8')
+      )));
+      contentScrubbed = retainedTexts.every((text) => text.length === 0);
+    } catch {
+      contentScrubbed = false;
+    }
+    if (!contentScrubbed && attempt + 1 < PRIVACY_SCRUB_ATTEMPTS) {
+      await waitForPrivacyScrubRetry();
+    }
+  }
+
+  for (let attempt = 0; attempt < PRIVACY_SCRUB_ATTEMPTS; attempt += 1) {
+    try {
+      await rm(stagingDirectory, {
+        recursive: true,
+        force: false,
+        maxRetries: PRIVACY_SCRUB_ATTEMPTS,
+        retryDelay: PRIVACY_SCRUB_RETRY_MS,
+      });
+      return;
+    } catch {
+      if (attempt + 1 < PRIVACY_SCRUB_ATTEMPTS) await waitForPrivacyScrubRetry();
+    }
+  }
+
+  if (!contentScrubbed) throw new Error('privacy_scrub_failed');
+}
+
 export function createPerformanceRunId(
   now: Date = new Date(),
   suffix: Uint8Array = randomBytes(4),
@@ -937,7 +978,7 @@ export async function writePerformanceReport(
   const privacyFailures = scanArtifactFiles(stagedTexts);
   if (privacyFailures.length > 0) {
     const reasonCategories = [...new Set(privacyFailures.flatMap((failure) => failure.reasonCategories))].sort();
-    await rm(stagingDirectory, { recursive: true, force: false });
+    await scrubStagingArtifacts(stagingDirectory, files);
     await mkdir(quarantineDirectory);
     await writeFile(join(quarantineDirectory, 'quarantine.json'), json({
       runId,

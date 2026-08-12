@@ -2,7 +2,7 @@ import { watch } from 'node:fs';
 import { mkdtemp, mkdir, readFile, readdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SafeRunConfig } from './config.js';
 import {
   createPerformanceRunId,
@@ -22,9 +22,44 @@ import type {
   TargetMetadata,
 } from './types.js';
 
+const fsFaults = vi.hoisted(() => ({
+  stagedSensitiveValue: null as string | null,
+  stagingRemoveFailures: 0,
+}));
+
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  const actualReadFile = actual.readFile as (...args: unknown[]) => Promise<unknown>;
+  const actualRm = actual.rm as (...args: unknown[]) => Promise<void>;
+  return {
+    ...actual,
+    readFile: async (...args: unknown[]) => {
+      const path = String(args[0]);
+      if (fsFaults.stagedSensitiveValue !== null && path.includes('-staging')) {
+        const value = fsFaults.stagedSensitiveValue;
+        fsFaults.stagedSensitiveValue = null;
+        await actual.writeFile(path, value, 'utf8');
+      }
+      return await actualReadFile(...args);
+    },
+    rm: async (...args: unknown[]) => {
+      const path = String(args[0]);
+      if (fsFaults.stagingRemoveFailures > 0 && path.endsWith('-staging')) {
+        fsFaults.stagingRemoveFailures -= 1;
+        const error = new Error('transient staging lock') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      await actualRm(...args);
+    },
+  };
+});
+
 const createdRoots: string[] = [];
 
 afterEach(async () => {
+  fsFaults.stagedSensitiveValue = null;
+  fsFaults.stagingRemoveFailures = 0;
   await Promise.all(createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -502,6 +537,27 @@ describe('writePerformanceReport', () => {
       reasonCategories: ['email_address'],
     });
     expect(JSON.stringify(result).includes('private.person')).toBe(false);
+  });
+
+  it('scrubs post-write private bytes before retrying a transient staging removal failure', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-77778888');
+    const sensitiveValue = 'post.write.private@example.com';
+    fsFaults.stagedSensitiveValue = sensitiveValue;
+    fsFaults.stagingRemoveFailures = 1;
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({
+      status: 'privacy_failure',
+      directoryName: `${input.runId}-quarantined`,
+      reasonCategories: ['email_address'],
+    });
+    await expect(readdir(join(outputRoot, `${input.runId}-staging`)))
+      .rejects.toMatchObject({ code: 'ENOENT' });
+    const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
+    expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
+    expect(await readdir(join(outputRoot, `${input.runId}-quarantined`))).toEqual(['quarantine.json']);
   });
 
   it('refuses to overwrite an extant final run directory', async () => {

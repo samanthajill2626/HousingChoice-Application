@@ -22,7 +22,31 @@ export type FailureReasonCode =
   | 'source_not_ready'
   | 'cleanup_failed'
   | 'privacy_scan_failed'
+  | 'comparison_failed'
   | 'unexpected_failure';
+
+export type ReportRunStatus = 'complete' | 'partial';
+
+export type ReportWarningCode =
+  | 'background_noise'
+  | 'client_truncated'
+  | 'comparison_failed'
+  | 'partial_run'
+  | 'target_version_unverified'
+  | 'unmatched_api';
+
+export interface BrowserMetadata {
+  name: 'chromium';
+  channel: 'chromium' | 'chrome';
+  version: string;
+  major: number;
+  viewport: { width: number; height: number };
+}
+
+export interface RuntimeMetadata {
+  os: string;
+  node: string;
+}
 
 export interface BlockedWrite {
   method: 'POST' | 'PUT' | 'PATCH' | 'DELETE';

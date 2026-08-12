@@ -31,6 +31,16 @@ export type PrivacyViolationCode =
   | 'ulid'
   | 'uuid';
 
+export interface ArtifactTextInput {
+  fileName: string;
+  text: string;
+}
+
+export interface ArtifactPrivacyFailure {
+  fileName: string;
+  reasonCategories: PrivacyViolationCode[];
+}
+
 function safeNumericFact(value: unknown, min: number, max: number): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && Number.isInteger(value) && value >= min && value <= max
     ? value
@@ -138,4 +148,11 @@ export function scanArtifactText(text: string): PrivacyViolationCode[] {
     }
   }
   return [...violations].sort();
+}
+
+export function scanArtifactFiles(files: readonly ArtifactTextInput[]): ArtifactPrivacyFailure[] {
+  return files.flatMap(({ fileName, text }) => {
+    const reasonCategories = scanArtifactText(text);
+    return reasonCategories.length === 0 ? [] : [{ fileName, reasonCategories }];
+  }).sort((left, right) => left.fileName.localeCompare(right.fileName));
 }

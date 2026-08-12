@@ -7,6 +7,7 @@ import {
 } from './templates.js';
 import {
   reduceCaughtFailure,
+  scanArtifactFiles,
   scanArtifactText,
 } from './redact.js';
 
@@ -194,6 +195,16 @@ describe('artifact privacy scan', () => {
 
   it.each(idCases)('rejects %s IDs', (_label, value) => {
     expect(scanArtifactText(`prefix-${value}-suffix`)).not.toEqual([]);
+  });
+
+  it('scans every named final artifact and reports only filenames and closed categories', () => {
+    expect(scanArtifactFiles([
+      { fileName: 'summary.json', text: '{"schemaVersion":1}' },
+      { fileName: 'requests.jsonl', text: '{"endpointTemplate":"/api/contacts"}\n' },
+      { fileName: 'report.md', text: 'private.person@example.com' },
+    ])).toEqual([
+      { fileName: 'report.md', reasonCategories: ['email_address'] },
+    ]);
   });
 
   it.each([

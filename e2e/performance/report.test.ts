@@ -28,6 +28,7 @@ const fsFaults = vi.hoisted(() => ({
   stagingReadCount: 0,
   stagingRemoveFailures: 0,
   failStagingBlankWrites: false,
+  failStagingRename: false,
 }));
 
 vi.mock('node:fs/promises', async (importOriginal) => {
@@ -35,6 +36,7 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   const actualReadFile = actual.readFile as (...args: unknown[]) => Promise<unknown>;
   const actualRm = actual.rm as (...args: unknown[]) => Promise<void>;
   const actualWriteFile = actual.writeFile as (...args: unknown[]) => Promise<void>;
+  const actualRename = actual.rename as (...args: unknown[]) => Promise<void>;
   return {
     ...actual,
     readFile: async (...args: unknown[]) => {
@@ -73,6 +75,14 @@ vi.mock('node:fs/promises', async (importOriginal) => {
       }
       await actualWriteFile(...args);
     },
+    rename: async (...args: unknown[]) => {
+      if (fsFaults.failStagingRename && String(args[0]).endsWith('-staging')) {
+        const error = new Error('locked staging rename') as NodeJS.ErrnoException;
+        error.code = 'EPERM';
+        throw error;
+      }
+      await actualRename(...args);
+    },
   };
 });
 
@@ -84,6 +94,7 @@ afterEach(async () => {
   fsFaults.stagingReadCount = 0;
   fsFaults.stagingRemoveFailures = 0;
   fsFaults.failStagingBlankWrites = false;
+  fsFaults.failStagingRename = false;
   await Promise.all(createdRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
@@ -631,6 +642,25 @@ describe('writePerformanceReport', () => {
     expect(stagingTexts).toEqual(['', '', '']);
     const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
     expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
+  });
+
+  it('reopens and scrubs every known staging file when publication rename and removal fail', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-ccccdddd');
+    fsFaults.failStagingRename = true;
+    fsFaults.stagingRemoveFailures = 100;
+    fsFaults.failStagingBlankWrites = true;
+
+    await expect(writePerformanceReport(input)).rejects.toThrowError('artifact_publish_failed');
+
+    const stagingDirectory = join(outputRoot, `${input.runId}-staging`);
+    const stagingFiles = await readdir(stagingDirectory);
+    expect(stagingFiles.sort()).toEqual(['report.md', 'requests.jsonl', 'summary.json']);
+    const stagingTexts = await Promise.all(stagingFiles.map((fileName) => (
+      readFile(join(stagingDirectory, fileName), 'utf8')
+    )));
+    expect(stagingTexts).toEqual(['', '', '']);
+    await expect(readdir(join(outputRoot, input.runId))).rejects.toMatchObject({ code: 'ENOENT' });
   });
 
   it('refuses to overwrite an extant final run directory', async () => {

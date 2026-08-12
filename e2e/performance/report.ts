@@ -830,6 +830,17 @@ async function writeStagedArtifacts(
   }
 }
 
+async function reopenStagedArtifacts(
+  stagingDirectory: string,
+  files: readonly string[],
+  artifacts: StagedArtifactHandle[],
+): Promise<void> {
+  for (const fileName of files) {
+    const handle = await open(join(stagingDirectory, fileName), 'r+');
+    artifacts.push({ fileName, handle });
+  }
+}
+
 export function createPerformanceRunId(
   now: Date = new Date(),
   suffix: Uint8Array = randomBytes(4),
@@ -998,6 +1009,7 @@ export async function writePerformanceReport(
 
   await mkdir(stagingDirectory);
   let stagedArtifacts: StagedArtifactHandle[] = [];
+  let failureReason = 'artifact_scan_failed';
   try {
     await writeStagedArtifacts(stagingDirectory, files, artifactTexts, stagedArtifacts);
     const stagedTexts = await Promise.all(files.map(async (fileName) => ({
@@ -1030,11 +1042,17 @@ export async function writePerformanceReport(
 
     await closeStagedArtifactHandles(stagedArtifacts);
     stagedArtifacts = [];
-    await rename(stagingDirectory, finalDirectory);
+    try {
+      await rename(stagingDirectory, finalDirectory);
+    } catch {
+      failureReason = 'artifact_publish_failed';
+      await reopenStagedArtifacts(stagingDirectory, files, stagedArtifacts);
+      throw new Error(failureReason);
+    }
   } catch {
     await scrubStagingArtifacts(stagingDirectory, stagedArtifacts);
     stagedArtifacts = [];
-    throw new Error('artifact_scan_failed');
+    throw new Error(failureReason);
   } finally {
     await Promise.allSettled(stagedArtifacts.map(({ handle }) => handle.close()));
   }

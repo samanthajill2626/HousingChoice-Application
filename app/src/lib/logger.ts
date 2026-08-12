@@ -6,7 +6,7 @@
 // mirrors isOrphanLogLine() below and alarms when any appear. Entrypoints wrap
 // process lifecycle (boot/shutdown) in a bootId context so even those lines
 // are correlated.
-import { pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
+import { destination as pinoDestination, pino, type DestinationStream, type Logger, type LoggerOptions } from 'pino';
 import { getContext } from './context.js';
 
 export type { Logger } from 'pino';
@@ -83,8 +83,25 @@ export function devLogTailEnabled(env: NodeJS.ProcessEnv = process.env): boolean
   return typeof env['DYNAMODB_ENDPOINT'] === 'string' && env['DYNAMODB_ENDPOINT'].length > 0;
 }
 
+/**
+ * Cheap pre-filter so the ring does NOT `JSON.parse` every log line (fix wave
+ * 5, adversarial 37). The overwhelmingly common line is INFO or DEBUG, which
+ * the ring discards - parsing it first made the whole logging hot path in local
+ * dev and every e2e lane pay for a full parse it then threw away. pino
+ * serializes `level` as the first field, so a string scan settles it. A line
+ * that does not match the fast shape falls through to the parse, so nothing is
+ * ever dropped by the optimization itself.
+ */
+function mayBeRetained(line: string): boolean {
+  const at = line.indexOf('"level":');
+  if (at === -1) return true; // unknown shape - let the parser decide
+  const level = Number.parseInt(line.slice(at + 8, at + 12), 10);
+  return !Number.isFinite(level) || level >= DEV_LOG_TAIL_MIN_LEVEL;
+}
+
 /** Parse one serialized pino line and retain it when it is WARN or worse. */
 function captureDevLogLine(line: string): void {
+  if (!mayBeRetained(line)) return;
   let parsed: DevLogLine;
   try {
     parsed = JSON.parse(line) as DevLogLine;
@@ -102,12 +119,26 @@ function captureDevLogLine(line: string): void {
  * A destination that forwards every line to `base` unchanged AND retains the
  * WARN+ ones in the ring. Exported so a unit test can build one over a capture
  * stream instead of stdout.
+ *
+ * PASSTHROUGH, WITH PINO'S OWN DESTINATION UNDERNEATH (fix wave 5, adversarial
+ * 37). The default base is `pino.destination(1)` - the SAME sonic-boom writer
+ * `pino(options)` installs when this wrapper is absent - rather than a raw
+ * `process.stdout.write`, so enabling the tail no longer swaps out the buffered
+ * fast path for every pre-existing log line in local dev and every e2e lane.
+ * With the level pre-filter above, a discarded line now costs one `indexOf` and
+ * one `parseInt`.
+ *
+ * DEV-ONLY RESIDENCY, STATED PLAINLY (doc 9): the ring holds up to
+ * DEV_LOG_TAIL_CAPACITY serialized WARN+ lines in process memory, with whatever
+ * fields those lines carried. It is gated by `devLogTailEnabled()` - the same
+ * triple gate as the `/__dev/*` router - so it cannot exist in a deployed
+ * process, and `/__dev/logtail/clear` empties it.
  */
 export function createDevLogTailStream(base?: DestinationStream): DestinationStream {
+  const sink = base ?? pinoDestination(1);
   return {
     write(line: string): void {
-      if (base) base.write(line);
-      else process.stdout.write(line);
+      sink.write(line);
       captureDevLogLine(line);
     },
   };
@@ -157,6 +188,24 @@ export function createLogger(opts: CreateLoggerOptions = {}): Logger {
         'req.headers.cookie',
         'req.headers["x-origin-verify"]',
         'req.headers["x-bridge-token"]',
+        // VENDOR SDK ERRORS (fix wave 5, adversarial 4). pino's default `err`
+        // serializer copies every enumerable key, and axios (which the Twilio
+        // SDK uses) hangs the whole request `config` off the error - including
+        // `headers.Authorization` (Basic base64 of the API key sid and secret)
+        // and `data` (the form-encoded body: phone numbers, message text). Both
+        // casings are listed because pino's redact is CASE-SENSITIVE and axios
+        // writes the capitalized header name.
+        //
+        // This is defense in depth, not the fix: a call site that can receive a
+        // vendor error must log `summarizeError(err)` (lib/errors.ts) rather
+        // than the error object. Redaction only covers the paths it is told
+        // about, and the next SDK will invent a new one.
+        'err.config.headers.Authorization',
+        'err.config.headers.authorization',
+        'err.config.data',
+        'err.response.config.headers.Authorization',
+        'err.response.config.headers.authorization',
+        'err.response.config.data',
       ],
       censor: '[REDACTED]',
     },

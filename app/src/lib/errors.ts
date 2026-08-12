@@ -13,6 +13,49 @@ function toError(value: unknown): Error {
   return value instanceof Error ? value : new Error(String(value));
 }
 
+/** The safe fields of an error summary. See `summarizeError`. */
+export interface ErrorSummary {
+  name: string;
+  message: string;
+  code?: string;
+  status?: number;
+}
+
+/**
+ * THE SAFE SHAPE FOR LOGGING A VENDOR SDK ERROR (fix wave 5, adversarial 4).
+ *
+ * pino's default `err` serializer copies EVERY enumerable key of the error it
+ * is handed. A Twilio SDK network failure is a raw `AxiosError`, and axios sets
+ * `this.config = config` as an own enumerable property - so `log.warn({ err })`
+ * writes `config.headers.Authorization` (Basic base64 of the API key sid and
+ * secret) and `config.data` (the form-encoded request body: every member's
+ * phone number, and the full message text) straight into CloudWatch. The
+ * logger's `redact` list cannot save us there: the paths do not match and
+ * pino's redact is case-sensitive.
+ *
+ * So a call site that can receive a vendor error logs THIS instead of the error
+ * object: name, message, and the two vendor discriminators worth having. It
+ * copies nothing it was not asked for, so a future SDK cannot smuggle a new
+ * field into a log line by adding an enumerable property.
+ */
+export function summarizeError(value: unknown): ErrorSummary {
+  const err = toError(value);
+  const raw = err as unknown as { code?: unknown; status?: unknown; response?: { status?: unknown } };
+  const code = typeof raw.code === 'string' ? raw.code : undefined;
+  const status =
+    typeof raw.status === 'number'
+      ? raw.status
+      : typeof raw.response?.status === 'number'
+        ? raw.response.status
+        : undefined;
+  return {
+    name: err.name,
+    message: err.message,
+    ...(code !== undefined && { code }),
+    ...(status !== undefined && { status }),
+  };
+}
+
 /**
  * Install uncaughtException / unhandledRejection handlers.
  * uncaughtException: log fatal (full stack), flush, exit 1.

@@ -109,6 +109,81 @@ describe('verifyGroupIdentityFingerprint', () => {
     expect(err.message).toMatch(/RUNBOOK/);
   });
 
+  // A TRANSIENT READ FAILURE IS NOT A MISMATCH (fix wave 5, adversarial 28).
+  // This guard runs before `app.listen` AND before the worker polls, with no
+  // try/catch on either side, so an unguarded throw here took the WHOLE product
+  // down - 1:1 SMS, voice, email, relay, the dashboard API, none of which
+  // previously had any DynamoDB dependency at boot. A few seconds of
+  // settings-table throttling during an ECS roll became a restart loop.
+  describe('transient failures retry; only a VERIFIED mismatch is fatal on sight', () => {
+    /** A store that throws `failures` times, then behaves. */
+    function flakyStore(failures: number): GroupFingerprintStore & { calls: number } {
+      let left = failures;
+      const state = {
+        calls: 0,
+        async claimGroupIdentityFingerprint(): Promise<GroupFingerprintClaim> {
+          state.calls += 1;
+          if (left > 0) {
+            left -= 1;
+            throw new Error('ProvisionedThroughputExceededException');
+          }
+          return { outcome: 'created' };
+        },
+      };
+      return state;
+    }
+
+    const noSleep = async (): Promise<void> => {};
+
+    it('a transient throw is retried and the boot SUCCEEDS', async () => {
+      const store = flakyStore(2);
+      await expect(
+        verifyGroupIdentityFingerprint({
+          store,
+          excludedNumbers: ['+15550001111'],
+          deployed: true,
+          logger,
+          sleep: noSleep,
+        }),
+      ).resolves.toBe('created');
+      expect(store.calls).toBe(3);
+    });
+
+    it('exhausting the retries is still fatal, with a DISTINCT message that is not a mismatch', async () => {
+      const store = flakyStore(99);
+      const err = await verifyGroupIdentityFingerprint({
+        store,
+        excludedNumbers: ['+15550001111'],
+        deployed: true,
+        logger,
+        sleep: noSleep,
+      }).then(
+        () => new Error('expected a throw'),
+        (e: unknown) => e as Error,
+      );
+
+      expect(store.calls).toBe(3);
+      expect(err.message).toMatch(/NOT a mismatch/);
+      expect(err.message).toMatch(/settings-table/);
+      // It must NOT send the operator down the migration path.
+      expect(err.message).not.toMatch(/thread-merge/);
+    });
+
+    it('a MISMATCH is fatal on the FIRST look - no retries soften it', async () => {
+      const store = fakeStore(groupIdentityFingerprint(['+15550001111']));
+      await expect(
+        verifyGroupIdentityFingerprint({
+          store,
+          excludedNumbers: ['+15550002222'],
+          deployed: true,
+          logger,
+          sleep: noSleep,
+        }),
+      ).rejects.toThrow(/migration/i);
+      expect(store.calls).toBe(1);
+    });
+  });
+
   it('SKIPS entirely on a local/hermetic stack (never touches the store)', async () => {
     const store = fakeStore(groupIdentityFingerprint(['+15550009999']));
     await expect(

@@ -293,9 +293,21 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   const drainPending = async (): Promise<void> => {
     while (pending.size > 0) await Promise.allSettled([...pending]);
   };
-  const settleProtocolEvents = async (): Promise<void> => {
-    await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  const protocolBarrier = async (): Promise<void> => {
+    try {
+      await session.send('Page.getFrameTree');
+    } catch {
+      latch(new FirewallHandlerError());
+    }
     await drainPending();
+  };
+  const settleProtocolEvents = async (): Promise<void> => {
+    await drainPending();
+    if (watchdogCandidates.size === 0) return;
+    await protocolBarrier();
+    if (watchdogCandidates.size === 0) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    await protocolBarrier();
     const escaped = watchdogCandidates.values().next().value;
     if (escaped !== undefined) latch(new FirewallEscapedWriteError(escaped));
   };

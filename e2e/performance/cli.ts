@@ -35,6 +35,31 @@ import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, TargetMet
 import { terminalAlternativeVisible } from './readiness.js';
 import type { PageStoreSnapshot } from './readiness.js';
 import type { SelfQaAttempt, SelfQaFixtureBindings, SelfQaSnapshot } from './selfQa.js';
+import { allEndpointTemplates } from './templates.js';
+
+const SAFE_FIREWALL_ENDPOINTS = new Set<string>([...allEndpointTemplates(), 'unmatched_api']);
+
+export interface EscapedWriteFailureEvidence {
+  reason: 'uncataloged_write_escaped_firewall';
+  method: BlockedWrite['method'];
+  endpointTemplate: string;
+}
+
+export function classifyEscapedWriteFailure(error: unknown): EscapedWriteFailureEvidence | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const value = error as Record<string, unknown>;
+  if (value['reason'] !== 'uncataloged_write_escaped_firewall') return null;
+  if (typeof value['evidence'] !== 'object' || value['evidence'] === null) return null;
+  const evidence = value['evidence'] as Record<string, unknown>;
+  if (!['POST', 'PUT', 'PATCH', 'DELETE'].includes(String(evidence['method']))) return null;
+  if (typeof evidence['endpointTemplate'] !== 'string'
+    || !SAFE_FIREWALL_ENDPOINTS.has(evidence['endpointTemplate'])) return null;
+  return {
+    reason: 'uncataloged_write_escaped_firewall',
+    method: evidence['method'] as BlockedWrite['method'],
+    endpointTemplate: evidence['endpointTemplate'],
+  };
+}
 
 export function performanceArtifactRoot(moduleUrl = import.meta.url): string {
   const repoRoot = resolve(dirname(fileURLToPath(moduleUrl)), '..', '..');
@@ -74,6 +99,7 @@ export interface RunProfilerDeps {
   processEvents?: ProfilerProcessEventSource;
   stdinIsTTY?: boolean;
   forceExit?: (code: number) => void;
+  forceExitGraceMs?: number;
 }
 
 export interface ProfilerProcessEventSource {
@@ -260,12 +286,39 @@ export async function runProfiler(
   }
   const abortController = new AbortController();
   let forceExitRequested = false;
+  let forceExitIssued = false;
+  let forceExitTimer: ReturnType<typeof setTimeout> | null = null;
   const forceExit = deps.forceExit ?? ((code: number) => process.exit(code));
+  const forceExitGraceMs = Number.isSafeInteger(deps.forceExitGraceMs)
+    && (deps.forceExitGraceMs ?? 0) >= 0
+    ? deps.forceExitGraceMs!
+    : 15_000;
+  const issueForceExit = (): void => {
+    if (forceExitIssued) return;
+    forceExitIssued = true;
+    forceExit(1);
+  };
+  const requestForceExit = (): void => {
+    forceExitRequested = true;
+    forceExitTimer ??= setTimeout(issueForceExit, forceExitGraceMs);
+  };
   const detachFatalHandlers = installProfilerProcessHandlers(
     abortController,
     deps.processEvents ?? process,
-    { onForceExitRequested: () => { forceExitRequested = true; } },
+    { onForceExitRequested: requestForceExit },
   );
+  let fatalHandlersDetached = false;
+  const finishFatalHandlers = (): void => {
+    if (!fatalHandlersDetached) {
+      fatalHandlersDetached = true;
+      detachFatalHandlers();
+    }
+    if (forceExitTimer !== null) {
+      clearTimeout(forceExitTimer);
+      forceExitTimer = null;
+    }
+    if (forceExitRequested) issueForceExit();
+  };
   const signal = abortController.signal;
 
   if (config.target === 'hermetic') {
@@ -282,8 +335,7 @@ export async function runProfiler(
       } else {
         stderr(`${closedReason(error)}\n`);
       }
-      detachFatalHandlers();
-      if (forceExitRequested) forceExit(1);
+      finishFatalHandlers();
       return 1;
     }
 
@@ -317,8 +369,7 @@ export async function runProfiler(
         exitCode = 1;
       }
       detachSignals?.();
-      detachFatalHandlers();
-      if (forceExitRequested) forceExit(1);
+      finishFatalHandlers();
     }
     return exitCode;
   }
@@ -340,8 +391,7 @@ export async function runProfiler(
     return 1;
   } finally {
     if (dashboard !== undefined) await closeQuietly(runtime, dashboard);
-    detachFatalHandlers();
-    if (forceExitRequested) forceExit(1);
+    finishFatalHandlers();
   }
 }
 
@@ -633,6 +683,7 @@ export function createRealInstrumentation(input: {
     async beginSample(begin): Promise<void> {
       page = begin.page as RealPage;
       await page.firewall.assertHealthy();
+      begin.onOutOfSampleWrites?.(page.firewall.drainOutOfSampleEvidence());
       adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
@@ -676,7 +727,6 @@ export function createRealInstrumentation(input: {
               ...(begin.sourcePageUrl === begin.destinationPageUrl && { noNavigationProbe: true }),
             },
       );
-      for (const write of page.firewall.drainOutOfSampleEvidence()) recordingToken.record(write);
       page.contextState.token = recordingToken;
       if (input.mode === 'warm') {
         await page.rawPage.evaluate(({ sampleToken }) => {
@@ -846,8 +896,9 @@ async function runSupplementalSelfQaProbes(input: {
   bindings: Readonly<SelfQaFixtureBindings>;
   firewall: typeof import('./firewall.js');
   selfQa: typeof import('./selfQa.js');
-}): Promise<SelfQaAttempt[]> {
+}): Promise<{ attempts: SelfQaAttempt[]; outOfSampleWrites: BlockedWrite[] }> {
   const attempts: SelfQaAttempt[] = [];
+  const outOfSampleWrites: BlockedWrite[] = [];
   const context = await input.browser.newContext({
     baseURL: input.baseUrl,
     storageState: input.storageState as never,
@@ -871,7 +922,7 @@ async function runSupplementalSelfQaProbes(input: {
       sourcePageUrl: absoluteUrl(input.baseUrl, '/inbox'),
       destinationPageUrl: absoluteUrl(input.baseUrl, href),
     });
-    for (const write of firewall.drainOutOfSampleEvidence()) state.token.record(write);
+    outOfSampleWrites.push(...firewall.drainOutOfSampleEvidence());
     await link.click();
     await page.waitForURL((url) => url.pathname === href, { timeout: 120_000 });
     await page.waitForTimeout(750);
@@ -892,7 +943,7 @@ async function runSupplementalSelfQaProbes(input: {
       destinationPageUrl: absoluteUrl(input.baseUrl, '/email'),
       noNavigationProbe: true,
     });
-    for (const write of firewall.drainOutOfSampleEvidence()) state.token.record(write);
+    outOfSampleWrites.push(...firewall.drainOutOfSampleEvidence());
     await expand.click();
     await page.waitForTimeout(750);
     await firewall.assertHealthy();
@@ -901,15 +952,12 @@ async function runSupplementalSelfQaProbes(input: {
     state.token = null;
     try {
       await firewall.dispose();
-      attempts.push(...input.selfQa.supplementalAttempts(
-        'unmatched_email',
-        firewall.drainOutOfSampleEvidence(),
-      ));
+      outOfSampleWrites.push(...firewall.drainOutOfSampleEvidence());
     } finally {
       await context.close();
     }
   }
-  return attempts;
+  return { attempts, outOfSampleWrites };
 }
 
 async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
@@ -1124,7 +1172,8 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         hasExactLink: async () => true,
         browserNow: async () => new Date(),
       };
-      let partialReason: 'browser_failure' | undefined;
+      let partialReason: 'browser_failure' | 'uncataloged_write_escaped_firewall' | undefined;
+      let safetyFailure: EscapedWriteFailureEvidence | undefined;
       let result: CollectRunSamplesResult;
       try {
         result = await collectModule.collectRunSamples({
@@ -1171,8 +1220,14 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         });
       } catch (error) {
         activeLifecycle?.assertAlive();
-        if (firewallModule.isFirewallSafetyError(error)) throw error;
-        partialReason = 'browser_failure';
+        const escaped = classifyEscapedWriteFailure(error);
+        if (escaped !== null) {
+          partialReason = escaped.reason;
+          safetyFailure = escaped;
+        } else {
+          if (firewallModule.isFirewallSafetyError(error)) throw error;
+          partialReason = 'browser_failure';
+        }
         result = {
           samples: [],
           orders: [],
@@ -1182,26 +1237,36 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           lowSampleCount: true,
           relayDomCheck: null,
           branches: [],
+          outOfSampleWrites: [],
         };
       }
       activeLifecycle?.assertAlive();
       let selfQa: import('./selfQa.js').SelfQaResult | undefined;
       if (runConfig.selfQa !== null) {
         if (selfQaBindings === undefined || selfQaBefore === undefined) throw new Error('self_qa_fixture_proof_failed');
-        const supplementalAttempts = runConfig.selfQa === 'full'
-          ? await runSupplementalSelfQaProbes({
+        let supplemental = { attempts: [] as SelfQaAttempt[], outOfSampleWrites: [] as BlockedWrite[] };
+        if (runConfig.selfQa === 'full') {
+          try {
+            supplemental = await runSupplementalSelfQaProbes({
               browser: dashboard.browser as Browser,
               baseUrl: dashboard.baseUrl,
               storageState: dashboard.storageState,
               bindings: selfQaBindings,
               firewall: firewallModule,
               selfQa: selfQaModule,
-            })
-          : [];
+            });
+          } catch (error) {
+            const escaped = classifyEscapedWriteFailure(error);
+            if (escaped === null) throw error;
+            partialReason = escaped.reason;
+            safetyFailure = escaped;
+          }
+        }
+        result.outOfSampleWrites.push(...supplemental.outOfSampleWrites);
         const selfQaAfter = await selfQaModule.reduceSelfQaSnapshot(selfQaBindings, selfQaApi);
         const attempts = [
           ...selfQaModule.attemptsFromSamples(result.samples),
-          ...supplementalAttempts,
+          ...supplemental.attempts,
         ];
         selfQa = selfQaModule.evaluateSelfQa({
           mode: runConfig.selfQa,
@@ -1210,6 +1275,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
           requests,
           branches: result.branches,
           attempts,
+          outOfSampleWrites: result.outOfSampleWrites,
           stateChecks: selfQaModule.compareSelfQaSnapshots(selfQaBefore, selfQaAfter),
           relayDomCheck: result.relayDomCheck,
           supplementalSampleCount: 0,
@@ -1228,10 +1294,12 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         warmup: result.warmup,
         relayDomCheck: result.relayDomCheck,
         checkpointBranches: result.branches,
+        outOfSampleWrites: result.outOfSampleWrites,
         browserVersion: dashboard.browser.version(),
         viewport: collectModule.DESKTOP_CHROME_SAMPLE_CONTEXT.viewport,
         target: dashboard.targetMetadata,
         ...(partialReason !== undefined && { partialReason }),
+        ...(safetyFailure !== undefined && { safetyFailure }),
         ...(selfQa !== undefined && { selfQa }),
       };
     },
@@ -1256,7 +1324,12 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         warmup: value['warmup'] as { performed: boolean; routeKey: string | null },
         relayDomCheck: value['relayDomCheck'] as null,
         checkpointBranches: value['checkpointBranches'] as never[],
+        outOfSampleWrites: value['outOfSampleWrites'] as never[],
         ...(value['partialReason'] === 'browser_failure' && { partialReason: 'browser_failure' as const }),
+        ...(value['partialReason'] === 'uncataloged_write_escaped_firewall' && {
+          partialReason: 'uncataloged_write_escaped_firewall' as const,
+        }),
+        ...(value['safetyFailure'] !== undefined && { safetyFailure: value['safetyFailure'] as never }),
         ...(value['selfQa'] !== undefined && { selfQa: value['selfQa'] as import('./selfQa.js').SelfQaResult }),
         ...(baselineJson !== undefined && { baselineJson }),
         signal,

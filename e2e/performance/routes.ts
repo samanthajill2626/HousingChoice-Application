@@ -13,7 +13,11 @@ export type RouteContractBranch =
   | { kind: 'none' }
   | { kind: 'contact_detail'; contactType: 'tenant' | 'landlord' | 'other'; landlordUnitCount: number }
   | { kind: 'unit_detail'; hasLandlord: boolean }
-  | { kind: 'thread_detail'; thread: 'group_thread' | 'person_thread' };
+  | {
+      kind: 'thread_detail';
+      thread: 'group_thread' | 'person_thread';
+      expectsMountWrite: boolean;
+    };
 
 export type LocatorExactness = 'exact' | 'prefix' | 'contains' | 'regex' | 'role_only';
 
@@ -709,9 +713,11 @@ export function expectedBlockedWrites(
     rows.push(tuple('conversation_detail', '/api/conversations/:conversationId/read', 'destination_mount'));
   } else if (route.blockedSurface === 'thread_detail') {
     if (branch.kind !== 'thread_detail') throw new Error('route_branch_mismatch');
-    rows.push(branch.thread === 'group_thread'
-      ? tuple('group_thread', '/api/conversations/:conversationId/read', 'destination_mount')
-      : tuple('person_thread', '/api/inbox/:contactId/read', 'destination_mount'));
+    if (branch.expectsMountWrite) {
+      rows.push(branch.thread === 'group_thread'
+        ? tuple('group_thread', '/api/conversations/:conversationId/read', 'destination_mount')
+        : tuple('person_thread', '/api/inbox/:contactId/read', 'destination_mount'));
+    }
   } else if (route.blockedSurface === 'contact_inbox_probe') {
     if (mode === 'warm') rows.push(tuple('contact_inbox_probe', '/api/inbox/:contactId/read', 'source_click'));
     rows.push(tuple('contact_inbox_probe', '/api/inbox/:contactId/read', 'destination_mount'));
@@ -839,12 +845,12 @@ export function resolveBoundSelfQaDetail(
   }
   if (routeKey === '/tours/:tourId') {
     return bindResolved(dom, `/tours/${fixtures.tour_id}`, {
-      kind: 'thread_detail', thread: 'group_thread',
+      kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });
   }
   if (routeKey === '/placements/:placementId') {
     return bindResolved(dom, `/placements/${fixtures.placement_id}`, {
-      kind: 'thread_detail', thread: 'group_thread',
+      kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true,
     });
   }
   throw new Error('self_qa_bound_route_invalid');
@@ -887,6 +893,46 @@ export function computeTourWindow(now: Date): { from: string; to: string } {
   return { from: start.toISOString(), to: end.toISOString() };
 }
 
+function positiveUnread(row: Record<string, unknown>): boolean {
+  return typeof row.unread_count === 'number'
+    && Number.isSafeInteger(row.unread_count)
+    && row.unread_count > 0;
+}
+
+function conversationInvolves(row: Record<string, unknown>, contactId: string): boolean {
+  return Array.isArray(row.participants) && row.participants.some((participant) => {
+    const value = object(participant);
+    return value.contactId === contactId;
+  });
+}
+
+async function threadDetailBranch(
+  api: ResolverApi,
+  row: Record<string, unknown>,
+  groupField: 'groupThreadId' | 'group_thread',
+): Promise<RouteContractBranch> {
+  const groupId = stringField(row, groupField);
+  const tenantId = stringField(row, 'tenantId');
+  const page = object(await api.get('/api/conversations', {}));
+  const conversations = rowsFrom(page, 'conversations');
+  if (groupId !== undefined) {
+    return {
+      kind: 'thread_detail',
+      thread: 'group_thread',
+      expectsMountWrite: conversations.some((conversation) =>
+        stringField(conversation, 'conversationId') === groupId && positiveUnread(conversation)),
+    };
+  }
+  return {
+    kind: 'thread_detail',
+    thread: 'person_thread',
+    expectsMountWrite: tenantId !== undefined && conversations.some((conversation) =>
+      conversation.type !== 'relay_group'
+      && positiveUnread(conversation)
+      && conversationInvolves(conversation, tenantId)),
+  };
+}
+
 export async function resolveTourDetail(api: ResolverApi, dom: ResolverDom): Promise<ResolverResult> {
   const range = computeTourWindow(await dom.browserNow());
   const page = object(await api.get('/api/tours', range));
@@ -894,9 +940,11 @@ export async function resolveTourDetail(api: ResolverApi, dom: ResolverDom): Pro
     .filter((row) => row.status === 'scheduled' && stringField(row, 'tourId') !== undefined)
     .sort((left, right) => (stringField(left, 'scheduledAt') ?? '').localeCompare(stringField(right, 'scheduledAt') ?? ''))[0];
   if (match === undefined) return { kind: 'skip', reason: 'fixture_absent' };
-  return bindResolved(dom, `/tours/${stringField(match, 'tourId')!}`, {
-    kind: 'thread_detail', thread: stringField(match, 'groupThreadId') !== undefined ? 'group_thread' : 'person_thread',
-  });
+  return bindResolved(
+    dom,
+    `/tours/${stringField(match, 'tourId')!}`,
+    await threadDetailBranch(api, match, 'groupThreadId'),
+  );
 }
 
 export async function resolvePlacementDetail(api: ResolverApi, dom: ResolverDom): Promise<ResolverResult> {
@@ -908,9 +956,11 @@ export async function resolvePlacementDetail(api: ResolverApi, dom: ResolverDom)
       return stringField(row, 'placementId') !== undefined && stage !== 'moved_in' && stage !== 'lost';
     });
     if (match !== undefined) {
-      return bindResolved(dom, `/placements/${stringField(match, 'placementId')!}`, {
-        kind: 'thread_detail', thread: stringField(match, 'group_thread') !== undefined ? 'group_thread' : 'person_thread',
-      });
+      return bindResolved(
+        dom,
+        `/placements/${stringField(match, 'placementId')!}`,
+        await threadDetailBranch(api, match, 'group_thread'),
+      );
     }
     cursor = typeof page.nextCursor === 'string' && page.nextCursor.length > 0 ? page.nextCursor : undefined;
   } while (cursor !== undefined);

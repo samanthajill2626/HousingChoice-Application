@@ -190,6 +190,13 @@ A CDP Network watchdog independently observes first-party API-class writes. If a
 write is not paused by the catalog-derived Fetch patterns, the profiler emits only
 its sanitized method and endpoint template, fails with
 `uncataloged_write_escaped_firewall`, and still runs owned cleanup.
+The watchdog waits for a CDP protocol barrier plus a bounded grace re-check before
+confirming an escape. A confirmed escape produces a partial sanitized report with
+the method/template evidence before returning nonzero.
+
+Writes observed without an active sample token are stored once in the run-level
+`outOfSampleWrites` list. They are never charged to the next or previous route;
+contract-checkpoint and self-QA modes fail them under a dedicated proof.
 
 This is a navigation-only guarantee, not a blanket network sandbox. Public paths
 under `/public/**`, media reads under `/unit-media/**`, and direct storage origins
@@ -295,6 +302,10 @@ npm run e2e:stop
 It reaps the lane processes and clears the session/lane state files. Confirm the
 ports are free before rerunning; never kill shared MCP browser processes.
 
+The first interrupt starts owned cleanup. A second interrupt allows 15 seconds for
+cleanup and then forces a nonzero exit, so a wedged browser cannot hold the command
+open indefinitely.
+
 ### DynamoDB Local integration proof
 
 The performance seed integration suite follows the repository's Docker-optional test
@@ -371,6 +382,7 @@ starting children:
 
 ```json
 {
+  "launcherPid": 4321,
   "lane": 1,
   "ports": { "app": 9101, "dashboard": 9111, "fake": 9121, "publicBase": 9131 },
   "urls":  { "app": "http://127.0.0.1:9101", "dashboard": "http://127.0.0.1:9111",
@@ -383,7 +395,10 @@ starting children:
 
 The helper scripts (`e2e:reseed`, `e2e:restart`, `e2e:stop`) read this file to
 target the running lane. It is gitignored. `e2e:stop` removes it on teardown so a
-stale file cannot mislead the next run.
+stale file cannot mislead the next run. Ordinary launcher shutdown deliberately
+retains it after removing the matching `session.pid`, because `e2e:stop` needs the
+lane ports to reap orphaned app and public-base listeners. Profiler cleanup removes
+it only after its exact `launcherPid` is dead and the lane number still matches.
 
 ### 127.0.0.1 convention
 

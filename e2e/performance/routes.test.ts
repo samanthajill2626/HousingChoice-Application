@@ -36,8 +36,8 @@ const EXPECTED_KEYS = [
 
 const NONE = { kind: 'none' } as const;
 const THREADS: RouteContractBranch[] = [
-  { kind: 'thread_detail', thread: 'group_thread' },
-  { kind: 'thread_detail', thread: 'person_thread' },
+  { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true },
+  { kind: 'thread_detail', thread: 'person_thread', expectsMountWrite: true },
 ];
 
 const SHELL_SHAPES = [
@@ -405,6 +405,9 @@ describe('endpoint and write contracts', () => {
       expect([...expectedBlockedWrites(route, 'cold', THREADS[1]!)]).toContain(
         'person_thread|POST|/api/inbox/:contactId/read|destination_mount',
       );
+      expect([...expectedBlockedWrites(route, 'cold', {
+        kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: false,
+      })]).toEqual([]);
     }
     expect([...expectedBlockedWrites(CONTACT_INBOX_PROBE, 'warm', NONE)]).toEqual([
       'contact_inbox_probe|POST|/api/inbox/:contactId/read|source_click',
@@ -449,8 +452,8 @@ describe('representative resolvers', () => {
     const branches: RouteContractBranch[] = [
       { kind: 'contact_detail', contactType: 'landlord', landlordUnitCount: 17 },
       { kind: 'unit_detail', hasLandlord: true },
-      { kind: 'thread_detail', thread: 'group_thread' },
-      { kind: 'thread_detail', thread: 'person_thread' },
+      { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true },
+      { kind: 'thread_detail', thread: 'person_thread', expectsMountWrite: false },
     ];
     expect(branches).toEqual(branches.map((branch) => ({ ...branch })));
     expect(JSON.stringify(branches)).not.toMatch(/private|contactId|unitId|conversationId/);
@@ -520,12 +523,34 @@ describe('representative resolvers', () => {
       { tourId: 'tour-canceled', status: 'canceled', scheduledAt: range.from },
       { tourId: 'tour-private', status: 'scheduled', scheduledAt: range.to, groupThreadId: 'conv-private' },
     ] }]);
+    api.pages.set('/api/conversations?', [{ conversations: [
+      { conversationId: 'conv-private', type: 'relay_group', unread_count: 0, participants: [] },
+    ] }]);
     const result = await resolveTourDetail(api, new FakeDom(new Set(['/tours/tour-private']), resolverNow));
     expect(result).toMatchObject({
       kind: 'resolved', warmHref: '/tours/tour-private',
-      branch: { kind: 'thread_detail', thread: 'group_thread' },
+      branch: { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: false },
     });
     expect(api.calls[0]).toContain(range.from);
     expect(api.calls[0]).not.toContain('2026-08-11');
+  });
+
+  it('derives placement person-thread write eligibility from the same first conversation page as the UI', async () => {
+    const api = new FakeApi();
+    api.pages.set('/api/placements?', [{ placements: [{
+      placementId: 'placement-private', tenantId: 'tenant-private', stage: 'collect_rta',
+    }], nextCursor: null }]);
+    api.pages.set('/api/conversations?', [{ conversations: [{
+      conversationId: 'person-private', type: 'tenant_1to1', unread_count: 3,
+      participants: [{ contactId: 'tenant-private' }],
+    }] }]);
+
+    await expect(resolvePlacementDetail(
+      api,
+      new FakeDom(new Set(['/placements/placement-private'])),
+    )).resolves.toMatchObject({
+      kind: 'resolved',
+      branch: { kind: 'thread_detail', thread: 'person_thread', expectsMountWrite: true },
+    });
   });
 });

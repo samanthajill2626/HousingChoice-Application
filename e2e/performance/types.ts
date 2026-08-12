@@ -1,5 +1,5 @@
 export const PERFORMANCE_SCHEMA_VERSION = 1 as const;
-export const INTERCEPTION_SCOPE_VERSION = 2 as const;
+export const INTERCEPTION_SCOPE_VERSION = 3 as const;
 
 export type TargetKind = 'hermetic' | 'local' | 'hosted-dev';
 export type SampleMode = 'cold' | 'warm';
@@ -23,6 +23,7 @@ export type FailureReasonCode =
   | 'cleanup_failed'
   | 'privacy_scan_failed'
   | 'comparison_failed'
+  | 'uncataloged_write_escaped_firewall'
   | 'unexpected_failure';
 
 export type ReportRunStatus = 'complete' | 'partial';
@@ -33,6 +34,7 @@ export type ReportWarningCode =
   | 'comparison_failed'
   | 'partial_run'
   | 'target_version_unverified'
+  | 'out_of_sample_write'
   | 'unmatched_api';
 
 export interface BrowserMetadata {

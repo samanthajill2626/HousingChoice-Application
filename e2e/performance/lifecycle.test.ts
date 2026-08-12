@@ -58,9 +58,15 @@ function signalReady(child: FakeChild): void {
   child.emit('message', { type: 'e2e-session-ready' });
 }
 
-async function writeOwnedState(artifacts: string, pid: number, lane: LifecycleLane = LANE): Promise<void> {
+async function writeOwnedState(
+  artifacts: string,
+  pid: number,
+  lane: LifecycleLane = LANE,
+  launcherPid: number = pid,
+): Promise<void> {
   await writeFile(join(artifacts, 'session.pid'), String(pid), 'utf8');
   await writeFile(join(artifacts, 'lane.json'), JSON.stringify({
+    launcherPid,
     lane: lane.lane,
     ports: lane.ports,
     urls: {
@@ -243,9 +249,22 @@ describe('owned hermetic lifecycle startup', () => {
     const deps = bootDeps(artifacts, child, alive);
     const starting = startOwnedHermeticLifecycle(deps);
     await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
-    await writeOwnedState(artifacts, 999);
+    await writeOwnedState(artifacts, 999, LANE, child.pid);
     signalReady(child);
     await expect(starting).rejects.toMatchObject({ reason: 'pid_state_mismatch' });
+    expect(deps.killTree).toHaveBeenCalledWith(child.pid);
+  });
+
+  it('requires lane.json launcherPid to equal the retained child pid', async () => {
+    const artifacts = await tempArtifacts();
+    const child = new FakeChild();
+    const alive = { value: true };
+    const deps = bootDeps(artifacts, child, alive);
+    const starting = startOwnedHermeticLifecycle(deps);
+    await vi.waitFor(() => expect(deps.spawnChild).toHaveBeenCalledOnce());
+    await writeOwnedState(artifacts, child.pid, LANE, 9_999);
+    signalReady(child);
+    await expect(starting).rejects.toMatchObject({ reason: 'lane_state_mismatch' });
     expect(deps.killTree).toHaveBeenCalledWith(child.pid);
   });
 
@@ -378,6 +397,19 @@ describe('owned cleanup', () => {
     await session.cleanup();
     expect(await readFile(join(artifacts, 'session.pid'), 'utf8')).toBe('9999');
     expect(JSON.parse(await readFile(join(artifacts, 'lane.json'), 'utf8'))).toEqual({ lane: 9 });
+  });
+
+  it('preserves a foreign live launcher lane marker even when it reuses the same lane number', async () => {
+    const artifacts = await tempArtifacts();
+    const { session } = await readySession(artifacts);
+    await writeOwnedState(artifacts, session.childPid, LANE, 9_999);
+
+    await session.cleanup();
+
+    expect(JSON.parse(await readFile(join(artifacts, 'lane.json'), 'utf8'))).toMatchObject({
+      launcherPid: 9_999,
+      lane: LANE.lane,
+    });
   });
 
   it('accepts death on the final cleanup tick', async () => {

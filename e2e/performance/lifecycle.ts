@@ -234,9 +234,14 @@ async function readLaneState(path: string): Promise<Record<string, unknown> | nu
   }
 }
 
-function exactLaneState(value: Record<string, unknown> | null, expected: LifecycleLane): boolean {
+function exactLaneState(
+  value: Record<string, unknown> | null,
+  expected: LifecycleLane,
+  launcherPid: number,
+): boolean {
   if (value === null) return false;
-  return value['lane'] === expected.lane
+  return value['launcherPid'] === launcherPid
+    && value['lane'] === expected.lane
     && exactPorts(value['ports'], expected.ports)
     && value['tablePrefix'] === expected.tablePrefix;
 }
@@ -370,9 +375,9 @@ async function removeIfMatchingPid(path: string, pid: number): Promise<void> {
   }
 }
 
-async function removeIfMatchingLane(path: string, lane: number): Promise<void> {
+async function removeIfMatchingLane(path: string, lane: number, launcherPid: number): Promise<void> {
   const state = await readLaneState(path);
-  if (state?.['lane'] !== lane) return;
+  if (state?.['lane'] !== lane || state['launcherPid'] !== launcherPid) return;
   try {
     await rm(path);
   } catch {
@@ -410,7 +415,7 @@ async function cleanupOwnedChild(input: CleanupContext): Promise<LifecycleCleanu
     }
     if (!alive) {
       await removeIfMatchingPid(input.pidFile, input.pid);
-      await removeIfMatchingLane(input.laneFile, input.lane);
+      await removeIfMatchingLane(input.laneFile, input.lane, input.pid);
       await removeIfMatchingMarker(input.marker);
       return { status: 'cleaned', lane: input.lane };
     }
@@ -598,7 +603,7 @@ export async function startOwnedHermeticLifecycle(
   try {
     await childState.ready;
     const state = await readLaneState(laneFile);
-    if (!exactLaneState(state, lane)) {
+    if (!exactLaneState(state, lane, pid)) {
       throw new SafeLifecycleError('lane_state_mismatch', lane.lane);
     }
     if (await readPid(pidFile) !== pid) {

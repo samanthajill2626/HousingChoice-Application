@@ -8,7 +8,7 @@
 // path kills each tracked child directly — full Linux/CI teardown is validated
 // separately when CI is set up.
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, watchFile } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ensureDbStarted, LOCAL_ENDPOINT } from './db.mjs';
@@ -21,6 +21,7 @@ import {
   sendProfilerFailure,
   sendProfilerReady,
 } from './lib/profilerOwnership.mjs';
+import { removeOwnedSessionState } from './lib/sessionState.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 // The entity-centric dashboard the e2e specs drive.
@@ -80,16 +81,6 @@ function writeOwnedSessionState() {
   mkdirSync(artifactsDir, { recursive: true });
   writeFileSync(pidFile, String(process.pid));
   writeFileSync(laneFile, laneStateText());
-}
-
-function removeOwnedSessionState() {
-  try {
-    if (readFileSync(pidFile, 'utf8').trim() === String(process.pid)) rmSync(pidFile);
-  } catch { /* replacement or prior cleanup wins */ }
-  try {
-    const state = JSON.parse(readFileSync(laneFile, 'utf8'));
-    if (state?.launcherPid === process.pid) rmSync(laneFile);
-  } catch { /* replacement or prior cleanup wins */ }
 }
 
 // The current checkout's commit, stamped into BOTH the app and the dashboard at
@@ -417,7 +408,7 @@ function shutdown(code = 0) {
   }
   log('shutting down — stopping app, worker, web, fake-twilio (DynamoDB + MinIO containers left running)');
   for (const name of [...children.keys()]) killChild(name);
-  removeOwnedSessionState();
+  removeOwnedSessionState({ pidFile, laneFile, launcherPid: process.pid });
   setTimeout(() => process.exit(code), 500);
 }
 

@@ -201,6 +201,13 @@ Hermetic mode owns its lifecycle:
 If startup or profiling fails, cleanup is still attempted. A failed cleanup is
 reported with the exact lane and normal `npm run e2e:stop` recovery command; the
 runner never kills a process selected only by a broad process name.
+Startup and cleanup require both the lane number and `lane.json.launcherPid` to
+match the retained child. The shared launcher removes only its matching
+`session.pid` during ordinary shutdown and leaves `lane.json` for `e2e:stop` to
+reap orphaned app/public-base listeners; profiler-owned cleanup removes the lane
+file only after the exact child is dead and both fields still match. The first
+SIGINT/SIGTERM starts owned cleanup. A second signal starts a 15-second forced-exit
+deadline so wedged cleanup cannot keep the process alive forever.
 
 Known limitation, stated rather than pretended away: the pre-flight refusal
 protects only one direction. A full suite or interactive session started later
@@ -316,14 +323,17 @@ For every measured page:
   `PUT`, `PATCH`, and `DELETE` before the request reaches the network;
 - the ratified catalog-derived scope is recorded in the manifest and is part
   of baseline comparability (`scope ratified 2026-08-12,
-  INTERCEPTION_SCOPE_VERSION 2`);
+  INTERCEPTION_SCOPE_VERSION 3`); version 2 predates the query-bearing pattern
+  widening and is intentionally not baseline-compatible with this scope;
 - block service workers as one-line defense in depth - no service worker is
   registered in the dashboard today, so this guards a future worker, not a
   live threat;
 - record the attempted method, a sanitized endpoint template, and a phase tag
   (`source_click`, `destination_mount`, or `out_of_sample`) so a write fired by
   the warm click on the source page is distinguishable from the destination's
-  own mount write and from evidence outside an active sample;
+  own mount write and from evidence outside an active sample. `out_of_sample`
+  evidence is retained once at run scope, never assigned to a neighboring
+  route, and has its own contract/self-QA mismatch code;
 - never record the body, headers, cookies, or raw URL;
 - make blocked requests visible in the route result and top-level report;
 - fail the run if a method outside the known HTTP method set is observed on an
@@ -331,7 +341,11 @@ For every measured page:
 - run a CDP Network watchdog beside Fetch and fail with
   `uncataloged_write_escaped_firewall` plus sanitized method/template evidence
   if any first-party `POST`, `PUT`, `PATCH`, or `DELETE` is not matched by the
-  catalog-derived Fetch scope.
+  catalog-derived Fetch scope. Before latching an escape, use a real CDP
+  round-trip barrier and one bounded grace re-check so a later-dispatched
+  matching `Fetch.requestPaused` can clear the candidate. A confirmed escape
+  writes a partial sanitized artifact containing the reason and method/template
+  evidence before the run exits nonzero.
 
 Interception has a per-request cost even when scoped. The scoped design exists
 so that the cost lands only on requests matching cataloged mutation endpoints
@@ -360,6 +374,12 @@ route remains measurable when the application treats the failed mark-read as
 best effort. If a blocked write prevents a route from reaching its ready state,
 that route is reported as `blocked_write_dependency` rather than silently timed
 out or permitting the write.
+
+Tour and placement detail resolvers retain one additional sanitized branch fact:
+whether the initially selected group or tenant channel has positive unread on
+the same first `/api/conversations` page used by the UI. Their mount-write set is
+required only when that fact is true. The scale-1 self-QA fixtures prove the
+unread group branch and continue to require the write there.
 
 The firewall applies to hermetic measurements too. This keeps all repeats
 read-only and comparable after the synthetic dataset has been created.

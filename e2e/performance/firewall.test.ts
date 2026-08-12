@@ -23,6 +23,7 @@ class FakeSession implements FirewallCdpSession {
   detached = false;
   continueRequestFailure: Error | null = null;
   pausedDuringFetchDisable: FirewallPausedRequest | null = null;
+  pausedAfterNextFrameTree: FirewallPausedRequest | null = null;
 
   async send(method: string, params?: Record<string, unknown>): Promise<unknown> {
     this.sent.push({ method, params });
@@ -32,6 +33,11 @@ class FakeSession implements FirewallCdpSession {
       throw error;
     }
     if (method === 'Page.getFrameTree') {
+      if (this.pausedAfterNextFrameTree !== null) {
+        const event = this.pausedAfterNextFrameTree;
+        this.pausedAfterNextFrameTree = null;
+        setTimeout(() => this.emitPaused(event), 0);
+      }
       return { frameTree: { frame: { id: 'main', url: this.frameUrl } } };
     }
     if (method === 'Fetch.disable' && this.pausedDuringFetchDisable !== null) {
@@ -95,7 +101,7 @@ function sentMethods(page: FakePage): string[] {
 describe('performance request firewall', () => {
   it('blocks service workers and publishes the scoped CDP interception version', () => {
     expect(PROFILER_CONTEXT_OPTIONS).toEqual({ serviceWorkers: 'block' });
-    expect(INTERCEPTION_SCOPE_VERSION).toBe(2);
+    expect(INTERCEPTION_SCOPE_VERSION).toBe(3);
   });
 
   it('pushes only cataloged first-party mutation patterns into the browser', async () => {
@@ -263,6 +269,24 @@ describe('performance request firewall', () => {
     });
     expect(JSON.stringify(controller)).not.toContain('private');
     await controller.dispose().catch(() => undefined);
+  });
+
+  it('waits for a protocol barrier and grace re-check before declaring a paired write escaped', async () => {
+    const page = new FakePage();
+    const controller = await installRequestFirewall({ page, firstPartyOrigin: ORIGIN, currentToken: () => null });
+    page.session.pausedAfterNextFrameTree = {
+      ...paused('POST', '/api/inbox/contact-safe/read'),
+      networkId: 'paired-after-barrier',
+    };
+    page.session.emit('Network.requestWillBeSent', {
+      requestId: 'paired-after-barrier',
+      request: { method: 'POST', url: `${ORIGIN}/api/inbox/contact-safe/read` },
+      type: 'Fetch',
+    });
+
+    await expect(controller.assertHealthy()).resolves.toBeUndefined();
+    expect(sentMethods(page)).toContain('Fetch.failRequest');
+    await controller.dispose();
   });
 
   it('latches third-page and unknown-method failures without rejecting the CDP callback', async () => {

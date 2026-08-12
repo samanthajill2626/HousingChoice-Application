@@ -426,10 +426,10 @@ describe('writePerformanceReport', () => {
     expect(summary.schemaVersion).toBe(1);
     expect(Object.keys(summary).sort()).toEqual([
       'aggregates', 'artifacts', 'browser', 'comparison', 'config', 'environment',
-      'interceptionScopeVersion', 'manifest', 'rankings', 'relayDomCheck', 'revisions',
+      'interceptionScopeVersion', 'manifest', 'outOfSampleWrites', 'rankings', 'relayDomCheck', 'revisions',
       'routeOrders', 'run', 'runtime', 'samples', 'schemaVersion', 'target', 'warmup', 'warnings',
     ].sort());
-    expect(summary.interceptionScopeVersion).toBe(2);
+    expect(summary.interceptionScopeVersion).toBe(3);
     expect(summary.config.target).toBe('hermetic');
     expect(summary.config.baseUrl).toBeUndefined();
     expect(summary.target.rawHost).toBeUndefined();
@@ -487,25 +487,33 @@ describe('writePerformanceReport', () => {
     expect((summaryText + requestsText + report).includes(secret)).toBe(false);
   });
 
-  it('preserves out-of-sample blocked-write evidence without assigning a sample phase', async () => {
+  it('preserves out-of-sample evidence at run scope and emits its own checkpoint mismatch', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-eeee4444');
-    input.samples[0] = sample('/contacts', 'cold', 0, {
-      blockedWrites: [{
+    input.config = { ...input.config, contractCheckpoint: true };
+    Object.assign(input, {
+      outOfSampleWrites: [{
         method: 'POST',
         endpointTemplate: '/api/inbox/:contactId/read',
         phase: 'out_of_sample',
       }],
     });
 
-    await writePerformanceReport(input);
+    const result = await writePerformanceReport(input);
 
     const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
-    expect(summary.samples[0].blockedWrites).toEqual([{
+    expect(result).toMatchObject({ status: 'checkpoint_mismatch', exitCode: 1 });
+    expect(summary.samples.every((row: SampleResult) => row.blockedWrites.every((write) => write.phase !== 'out_of_sample'))).toBe(true);
+    expect(summary.outOfSampleWrites).toEqual([{
       method: 'POST',
       endpointTemplate: '/api/inbox/:contactId/read',
       phase: 'out_of_sample',
     }]);
+    const checkpoint = JSON.parse(await readFile(
+      join(outputRoot, input.runId, 'contract-observations.json'),
+      'utf8',
+    ));
+    expect(checkpoint.mismatchCodes).toContain('out_of_sample_blocked_write');
   });
 
   it('adds comparison files only when a valid baseline is supplied', async () => {
@@ -643,6 +651,28 @@ describe('writePerformanceReport', () => {
     expect(summary.run).toEqual({ status: 'partial', reason: 'browser_failure' });
     expect(await readFile(join(outputRoot, input.runId, 'report.md'), 'utf8'))
       .toContain('Partial run reason: `browser_failure`');
+  });
+
+  it('publishes sanitized escaped-write evidence in the partial artifact', async () => {
+    const outputRoot = await artifactRoot();
+    const input = {
+      ...reportInput(outputRoot, '20260812T123456789Z-55551111'),
+      partialReason: 'uncataloged_write_escaped_firewall' as const,
+      safetyFailure: {
+        reason: 'uncataloged_write_escaped_firewall' as const,
+        method: 'POST' as const,
+        endpointTemplate: 'unmatched_api',
+      },
+    };
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'partial', exitCode: 1 });
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.run).toEqual({ status: 'partial', reason: 'uncataloged_write_escaped_firewall' });
+    expect(summary.safetyFailure).toEqual(input.safetyFailure);
+    const markdown = await readFile(join(outputRoot, input.runId, 'report.md'), 'utf8');
+    expect(markdown).toContain('Escaped write: `POST unmatched_api`');
   });
 
   it('preflights sensitive artifact strings before creating a staging directory or writing their bytes', async () => {

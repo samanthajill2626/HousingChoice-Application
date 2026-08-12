@@ -598,8 +598,9 @@ describe('cold and warm sampling protocol', () => {
     expect(browser.contexts).toHaveLength(2);
   });
 
-  it('retains blocked writes delivered during cold-context teardown as out-of-sample evidence', async () => {
+  it('retains cold-context teardown writes as run-level out-of-sample evidence', async () => {
     const browser = new FakeSamplingBrowser();
+    const outOfSampleWrites: BlockedWrite[] = [];
     browser.closeEvidenceByContext.set(0, [{
       method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
     }]);
@@ -612,9 +613,13 @@ describe('cold and warm sampling protocol', () => {
       resolved: resolved('/'),
       instrumentation: new FakeInstrumentation([]),
       token: 'cold-trailing',
+      onOutOfSampleWrites: (writes: readonly BlockedWrite[]) => {
+        outOfSampleWrites.push(...writes);
+      },
     });
 
-    expect(result.blockedWrites).toContainEqual({
+    expect(result.blockedWrites).toEqual([]);
+    expect(outOfSampleWrites).toContainEqual({
       method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
     });
   });
@@ -626,7 +631,7 @@ describe('cold and warm sampling protocol', () => {
     const route = ROUTES.find((candidate) => candidate.key === '/tours/:tourId')!;
     page.hrefs.add('/tours/tour-private');
     const instrumentation = new FakeInstrumentation(events);
-    const branch = { kind: 'thread_detail', thread: 'group_thread' } as const;
+    const branch = { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true } as const;
 
     const sample = await collectWarmSample({
       page,
@@ -907,7 +912,7 @@ describe('run ordering and warmup policy', () => {
     })).rejects.toMatchObject({ reason: 'interrupted' });
   });
 
-  it('retains warmup and warm-context teardown writes in measured artifacts', async () => {
+  it('retains warmup and warm-context teardown writes without assigning them to samples', async () => {
     const browser = new FakeSamplingBrowser();
     const evidence: BlockedWrite = {
       method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'out_of_sample',
@@ -933,8 +938,8 @@ describe('run ordering and warmup policy', () => {
       instrumentationFor: (_route, mode, repeat) => new FakeInstrumentation([], undefined),
     });
 
-    expect(result.samples[0]!.blockedWrites.filter((write) => write.phase === 'out_of_sample')).toHaveLength(1);
-    expect(result.samples[1]!.blockedWrites.filter((write) => write.phase === 'out_of_sample')).toHaveLength(1);
+    expect(result.samples.every((sample) => sample.blockedWrites.every((write) => write.phase !== 'out_of_sample'))).toBe(true);
+    expect(result.outOfSampleWrites).toEqual([evidence, evidence]);
   });
 
   it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {

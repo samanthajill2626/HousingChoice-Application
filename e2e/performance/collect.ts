@@ -546,6 +546,7 @@ export interface BeginProtocolSampleInput {
   repeat: number;
   destinationPageUrl: string;
   sourcePageUrl?: string;
+  onOutOfSampleWrites?(writes: readonly BlockedWrite[]): void;
 }
 
 export interface CollectProtocolSampleInput {
@@ -592,6 +593,7 @@ export interface CollectColdSampleInput {
   resolved: ResolverResult;
   instrumentation: SampleInstrumentation;
   token?: string;
+  onOutOfSampleWrites?: (writes: readonly BlockedWrite[]) => void;
 }
 
 export async function collectColdSample(input: CollectColdSampleInput): Promise<SampleResult> {
@@ -614,6 +616,7 @@ export async function collectColdSample(input: CollectColdSampleInput): Promise<
       mode: 'cold',
       repeat: input.repeat,
       destinationPageUrl: input.resolved.coldPath,
+      onOutOfSampleWrites: input.onOutOfSampleWrites ?? (() => undefined),
     });
     await page.goto(input.resolved.coldPath);
     const result = await input.instrumentation.collectSample({
@@ -628,9 +631,7 @@ export async function collectColdSample(input: CollectColdSampleInput): Promise<
     return completed;
   } finally {
     const trailingWrites = await context.close();
-    if (completed !== null && trailingWrites !== undefined) {
-      completed.blockedWrites.push(...trailingWrites);
-    }
+    if (trailingWrites !== undefined) input.onOutOfSampleWrites?.(trailingWrites);
   }
 }
 
@@ -643,6 +644,7 @@ export interface CollectWarmSampleInput {
   instrumentation: SampleInstrumentation;
   token?: string;
   onResolvedBranch?: (branch: RouteContractBranch) => void;
+  onOutOfSampleWrites?: (writes: readonly BlockedWrite[]) => void;
 }
 
 export async function collectWarmSample(input: CollectWarmSampleInput): Promise<SampleResult> {
@@ -669,6 +671,7 @@ export async function collectWarmSample(input: CollectWarmSampleInput): Promise<
       repeat: input.repeat,
       sourcePageUrl: input.route.source.path,
       destinationPageUrl: resolved.warmHref,
+      onOutOfSampleWrites: input.onOutOfSampleWrites ?? (() => undefined),
     });
     if (!await input.page.clickExactHref(resolved.warmHref)) {
       return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, 'fixture_not_navigable');
@@ -734,6 +737,7 @@ export interface CollectRunSamplesResult {
   lowSampleCount: boolean;
   relayDomCheck: RelayDomCheck | null;
   branches: SampleBranchObservation[];
+  outOfSampleWrites: BlockedWrite[];
 }
 
 export interface SampleBranchObservation {
@@ -816,14 +820,17 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
   const tokenFor = input.tokenFactory ?? ((mode, repeat, route) => `${mode}-${repeat}-${route.key}-${randomUUID()}`);
   const baseOrder = deterministicRouteOrder(input.routes, input.routeOrderSeed);
   const shouldWarmup = input.target !== 'hosted-dev';
-  const preMeasurementWrites: BlockedWrite[] = [];
+  const outOfSampleWrites: BlockedWrite[] = [];
+  const retainOutOfSampleWrites = (writes: readonly BlockedWrite[]): void => {
+    outOfSampleWrites.push(...writes.filter((write) => write.phase === 'out_of_sample'));
+  };
   throwIfCollectionAborted(input.signal);
 
   if (shouldWarmup) {
     const warmupRoute = ROUTES[0]!;
     try {
       const resolved = await input.resolveCold(warmupRoute);
-      const warmupResult = await collectColdSample({
+      await collectColdSample({
         browser: input.browser,
         storageState: input.storageState,
         route: warmupRoute,
@@ -831,8 +838,8 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
         resolved,
         instrumentation: input.instrumentationFor(warmupRoute, 'cold', -1),
         token: tokenFor('cold', -1, warmupRoute),
+        onOutOfSampleWrites: retainOutOfSampleWrites,
       });
-      preMeasurementWrites.push(...warmupResult.blockedWrites.filter((write) => write.phase === 'out_of_sample'));
     } catch (error) {
       throwIfCollectionAborted(input.signal);
       if (isFirewallSafetyError(error)) throw error;
@@ -859,8 +866,8 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
           resolved,
           instrumentation: input.instrumentationFor(route, 'cold', repeat),
           token: tokenFor('cold', repeat, route),
+          onOutOfSampleWrites: retainOutOfSampleWrites,
         });
-        if (preMeasurementWrites.length > 0) sample.blockedWrites.push(...preMeasurementWrites.splice(0));
         samples.push(sample);
       } catch (error) {
         throwIfCollectionAborted(input.signal);
@@ -892,6 +899,7 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
             onResolvedBranch: (branch) => branches.push({
               routeKey: route.key, mode: 'warm', repeat, branch,
             }),
+            onOutOfSampleWrites: retainOutOfSampleWrites,
           });
           samples.push(result);
           if (
@@ -917,10 +925,7 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
     }
   } finally {
     const trailingWrites = await warmContext.close();
-    if (trailingWrites !== undefined && trailingWrites.length > 0) {
-      const lastSample = samples.at(-1);
-      if (lastSample !== undefined) lastSample.blockedWrites.push(...trailingWrites);
-    }
+    if (trailingWrites !== undefined) retainOutOfSampleWrites(trailingWrites);
   }
 
   return {
@@ -930,5 +935,6 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
     lowSampleCount: input.coldRepeats < 3 || input.warmRepeats < 3,
     relayDomCheck,
     branches,
+    outOfSampleWrites,
   };
 }

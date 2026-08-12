@@ -128,7 +128,7 @@ Define these in `e2e/performance/types.ts` and keep later modules on these names
 
 ```ts
 export const PERFORMANCE_SCHEMA_VERSION = 1 as const;
-export const INTERCEPTION_SCOPE_VERSION = 1 as const;
+export const INTERCEPTION_SCOPE_VERSION = 3 as const;
 
 export type TargetKind = 'hermetic' | 'local' | 'hosted-dev';
 export type SampleMode = 'cold' | 'warm';
@@ -747,8 +747,9 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
 
 **Firewall contract:**
 
-- Register the Playwright route with a URL predicate that matches first-party `/api/**`, `/auth/**`,
-  and `/__dev/**` except exact pathname `/api/events`. The stream is on a named never-matched list:
+- Enable CDP Fetch with browser-side URL patterns generated from every cataloged first-party
+  `/api/**`, `/auth/**`, and `/__dev/**` mutation template, including base and `?*` variants.
+  Static/Vite traffic never matches a pattern. `/api/events` is on a named never-matched list:
   no profiler route handler, sanitizer, recorder, or `continue()` call may ever observe it. Allow
   GET, HEAD, OPTIONS. Abort POST, PUT,
   PATCH, DELETE before the fake origin observes them. Fail on any other method in the scoped set.
@@ -763,6 +764,10 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
   write under its fresh token as `source_click`. This special case is probe metadata, not a mutable
   runtime phase toggle; it covers unmatched-email expansion without weakening third-page failure
   for normal warm navigation.
+- Run a CDP Network watchdog beside Fetch. Correlate `Network.requestWillBeSent` to
+  `Fetch.requestPaused` by network id, then use a real CDP round-trip barrier plus one bounded grace
+  re-check before latching `uncataloged_write_escaped_firewall`. Confirmed escapes retain only the
+  sanitized method/template and flow through partial report publication before nonzero exit.
 
 - [ ] Before generating the catalog, add independent positive controls against the scanner's raw
   discovered set. Require both `markInboxRead` branches, `markConversationRead`,
@@ -1173,8 +1178,9 @@ the adjudicated spec erratum stated at the top of this plan.
 Resolvers use authenticated GETs and page according to the real endpoint contract, keep IDs only
 in closure memory, and return either `{ kind: 'resolved', coldPath, warmHref, branch }` or an
 explicit skip reason. `branch` is the matching sanitized `RouteContractBranch`; contact and unit
-resolvers retain the type/count or landlord-presence facts above, and tour/placement retain the
-group/person choice. They never write an ID to evidence. Warm detail locators are
+resolvers retain the type/count or landlord-presence facts above. Tour/placement retain the
+group/person choice plus `expectsMountWrite`, derived from positive unread on the same first
+`/api/conversations` page the channel hook uses. They never write an ID to evidence. Warm detail locators are
 `page.getByRole('link').filter({ has: page.locator('[href="<exact in-memory href>"]') })` or the
 equivalent exact `locator('a[href=...]')` plus role assertion; they never select by domain text.
 They never click Load more. Broadcast selection is restricted to the first 50 API rows and inbox
@@ -1199,7 +1205,11 @@ The resolver request contracts are explicit:
   exact link on `/tours`;
 - placement: page `/api/placements` by cursor, choose the first active row under API order, then
   require its exact link on `/placements`
-  (`dashboard/src/routes/placements/usePlacements.ts:50-64,214-225`);
+  (`dashboard/src/routes/placements/usePlacements.ts:50-64,214-225`). For both tour and placement,
+  GET the first `/api/conversations` page and derive group unread by exact conversation id or person
+  unread by the tenant participant on non-relay rows, matching
+  `dashboard/src/routes/tours/useTourChannels.ts:106-152,192-206` and
+  `dashboard/src/routes/placements/usePlacementChannels.ts:107-153,196-218`;
 - conversation: GET `/api/inbox?filter=all&limit=30`, choose the first `relay_group` row from the
   additively merged relay rows, then require its exact `/conversations/...` link on `/inbox`
   (`dashboard/src/routes/inbox/useInbox.ts:46-155`);
@@ -1234,10 +1244,10 @@ The resolver request contracts are explicit:
   shell requests, warm excludes shell and `WARM_SOURCE_GETS`, required entries fail when missing,
   absent conditional continuations/fallbacks pass, observed conditional entries still require an
   exact declaration, tenant/landlord/other contact branches differ, unit landlord presence differs,
-  group/person branches differ, returned arrays are immutable, and an undeclared query key fails. Also
+  group/person and unread/read branches differ, returned arrays are immutable, and an undeclared query key fails. Also
   deep-compare `expectedBlockedWrites` as sets for cold/warm conversation detail, the two
   tour/placement branches, and both supplemental row probes; include the legitimate two-phase
-  same-template warm cases.
+  same-template warm cases, and prove a read branch expects no mount write.
 - [ ] Run `npm test -w @housingchoice/e2e -- routes`. Expected: fail, then pass after registry and
   resolvers exist.
 - [ ] Run `npm run typecheck` and commit the Task 7 paths.
@@ -1403,6 +1413,10 @@ silently treating it as useful data.
 - A blocked write is expected evidence. If the route reaches ready, status is `ok`; if the blocked
   write prevents readiness, use `blocked_write_dependency`. Missing fixture/link/source uses the
   exact skip statuses from `SampleStatus`.
+- Drain writes observed with no active token into one run-level `outOfSampleWrites` collection.
+  Never attach them to the next or previous sample. Contract checkpoint and self-QA each fail them
+  with a dedicated `out_of_sample_blocked_write`/`outOfSampleWritesAbsent` proof instead of a
+  fabricated surface tuple.
 - In hermetic mode only, compare rendered inbox relay-group link count by role/href pattern with the
   generated relay manifest. Record only counts and a shortfall boolean.
 
@@ -1481,7 +1495,8 @@ silently treating it as useful data.
   `e2e/.artifacts/performance/<run-id>/`.
 - `summary.json` is the versioned manifest, samples, aggregates, route orders, warnings, target
   metadata, explicit normalized `profilerCommit`/`targetAppCommit` pair,
-  browser/channel/viewport/OS/Node, per-resource-class counts, background-noise counts, and no raw
+  browser/channel/viewport/OS/Node, per-resource-class counts, background-noise counts,
+  run-level out-of-sample writes, optional escaped-write method/template evidence, and no raw
   requests array. It records `INTERCEPTION_SCOPE_VERSION` and only `SafeRunConfig` plus
   `TargetMetadata`, never `RunConfig`. `requests.jsonl` contains one sanitized `RequestEvidence`
   per line.
@@ -1495,7 +1510,9 @@ silently treating it as useful data.
   every final byte with `scanArtifactText`, and rename to final only on success. On failure rename
   staging to `<run-id>-quarantined`, print filenames plus reason categories only, and return a
   privacy-failure result. Never print offending content.
-- Browser crashes and fatal profiler errors write a partial sanitized summary/report when possible.
+- Browser crashes and confirmed watchdog escapes write a partial sanitized summary/report when possible.
+  A watchdog escape records only `uncataloged_write_escaped_firewall`, the write method, and the
+  allowlisted endpoint template.
   Partial and quarantined output use the same closed reason codes; they never persist raw caught
   errors for a later scan to discover.
 
@@ -1541,11 +1558,13 @@ silently treating it as useful data.
   raw emails, paths, and IDs.
 - Wait for the line beginning with the ASCII prefix `[e2e-session] ready` with a hard startup
   timeout; do not exact-match the full line because its real suffix contains non-ASCII text. Then read
-  `lane.json`, confirm exact lane/ports/prefix, read `session.pid`, and require it equals the child
+  `lane.json`, confirm exact lane/ports/prefix and `launcherPid`, read `session.pid`, and require both
+  pid fields equal the child
   PID. Verify `/__dev/ping` prefix and normalized revision pair from Task 4 before reseed.
 - On any error, SIGINT, SIGTERM, or normal finish, call `killTree(child.pid)` only. Remove
-  `session.pid` only if it still contains that child PID; remove `lane.json` only if it still
-  describes that lane. After `killTree`, poll injected `isAlive(child.pid)` every 100 ms for at
+  `session.pid` only if it still contains that child PID; remove `lane.json` only if both its lane
+  and `launcherPid` still describe that exact child. Ordinary `e2e:session` shutdown removes its
+  matching pid file but retains `lane.json` for `e2e:stop` orphan-port recovery. After `killTree`, poll injected `isAlive(child.pid)` every 100 ms for at
   most 10 seconds. Delete matching state files only after the child is proven dead. On deadline,
   preserve both state files, return `cleanup_failed`, and print only the lane plus the static
   recovery command. Never call `e2e:stop` during normal owned cleanup and never select by process
@@ -1553,6 +1572,9 @@ silently treating it as useful data.
 - If cleanup cannot prove completion, print lane and the recovery command `npm run e2e:stop`, set
   nonzero, and preserve profile artifacts. If another e2e run reaps the profiler later, detect the
   dead child and fail rather than attaching to the replacement.
+- First SIGINT/SIGTERM aborts the active phase and starts owned cleanup. A second termination signal
+  or a process-level crash starts a 15-second force-exit deadline; cleanup may finish sooner, but a
+  wedged browser or cleanup operation cannot defer nonzero process exit indefinitely.
 - Hermetic order is parse/validate, same-worktree preflight, resolve/spawn, verify ping, call the
   app-port reseed with item-count-scaled timeout, switch to the dashboard-origin browser/request
   context for dev-login, `/auth/me`, every `/api/**` read, and all remaining work, authenticate,
@@ -1707,6 +1729,10 @@ npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --con
   identical templates with route/probe symbolic surfaces before disposing raw IDs. De-duplicate
   repeated identical attempts, then require set equality: every required tuple appears and no
   tuple outside the closed union appears. Two legitimate phases for one template are not an error.
+  Tour/placement ordinary routes condition their mount tuple on `expectsMountWrite`; the bound
+  scale-1 self-QA branches set it true because fixture proof requires positive group unread.
+- Keep tokenless firewall evidence out of all surface attempts. Require the dedicated
+  `outOfSampleWritesAbsent` proof in both narrow and full self-QA.
 - Assert every measured route's observed API templates are a subset of its declared set; no
   `unmatched_api`; inbox rendered relay count matches the generated manifest; outbox count is
   unchanged; output exists and passes the same final privacy scan; report has count manifest plus

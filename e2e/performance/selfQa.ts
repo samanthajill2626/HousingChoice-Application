@@ -64,6 +64,7 @@ export interface EvaluateSelfQaInput {
   requests: readonly RequestEvidence[];
   branches: readonly SelfQaBranchObservation[];
   attempts: readonly SelfQaAttempt[];
+  outOfSampleWrites?: readonly BlockedWrite[];
   stateChecks: readonly SelfQaStateCheck[];
   relayDomCheck: { expectedCount: number; renderedCount: number; shortfall: boolean } | null;
   supplementalSampleCount: number;
@@ -89,6 +90,7 @@ export interface SelfQaResult {
   coldRanking: boolean;
   warmRanking: boolean;
   writeTuplesMatch: boolean;
+  outOfSampleWritesAbsent: boolean;
 }
 
 const NARROW_KEYS = Object.freeze([
@@ -310,7 +312,9 @@ export function attemptsFromSamples(samples: readonly SampleResult[]): SelfQaAtt
             ? 'placement_group'
             : null;
     if (surface === null) return [];
-    return sample.blockedWrites.map((write) => ({ surface, mode: sample.mode, ...write }));
+    return sample.blockedWrites
+      .filter((write) => write.phase !== 'out_of_sample')
+      .map((write) => ({ surface, mode: sample.mode, ...write }));
   });
 }
 
@@ -349,8 +353,10 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     .map((check) => ({ surface: check.surface, unchanged: check.unchanged === true }));
   const stateMatches = stateChecks.length === SURFACE_ORDER.length && stateChecks.every((check) => check.unchanged);
   const supplementalExcluded = input.supplementalSampleCount === 0;
+  const outOfSampleWritesAbsent = (input.outOfSampleWrites ?? []).length === 0;
   const pass = writeTuplesMatch && sampleCardinalityMatches && endpointSubsetValue && noUnmatchedApi
-    && relayCountMatches && stateMatches && supplementalExcluded && input.reportProof.privacyScanRequired
+    && relayCountMatches && stateMatches && supplementalExcluded && outOfSampleWritesAbsent
+    && input.reportProof.privacyScanRequired
     && input.reportProof.countManifest && input.reportProof.coldRanking && input.reportProof.warmRanking;
   return {
     mode: input.mode,
@@ -371,6 +377,7 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
     coldRanking: input.reportProof.coldRanking,
     warmRanking: input.reportProof.warmRanking,
     writeTuplesMatch,
+    outOfSampleWritesAbsent,
   };
 }
 
@@ -396,5 +403,6 @@ export function serializeSelfQaResult(result: SelfQaResult): SelfQaResult {
     coldRanking: result.coldRanking === true,
     warmRanking: result.warmRanking === true,
     writeTuplesMatch: result.writeTuplesMatch === true,
+    outOfSampleWritesAbsent: result.outOfSampleWritesAbsent === true,
   };
 }

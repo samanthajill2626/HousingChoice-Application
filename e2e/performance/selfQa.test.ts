@@ -104,7 +104,7 @@ const branches = ROUTES.flatMap((route) => (['cold', 'warm'] as const).map((mode
     : route.key === '/listings/:unitId'
       ? ({ kind: 'unit_detail', hasLandlord: true } as const)
       : route.key === '/tours/:tourId' || route.key === '/placements/:placementId'
-        ? ({ kind: 'thread_detail', thread: 'group_thread' } as const)
+        ? ({ kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true } as const)
         : ({ kind: 'none' } as const),
 })));
 
@@ -176,10 +176,10 @@ describe('self-QA fixture and state guardian', () => {
       kind: 'resolved', coldPath: `/conversations/${bindings.conversation_detail}`,
     });
     await expect(resolveBoundSelfQaDetail('/tours/:tourId', bindings, dom)).resolves.toMatchObject({
-      kind: 'resolved', coldPath: `/tours/${bindings.tour_id}`, branch: { kind: 'thread_detail', thread: 'group_thread' },
+      kind: 'resolved', coldPath: `/tours/${bindings.tour_id}`, branch: { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true },
     });
     await expect(resolveBoundSelfQaDetail('/placements/:placementId', bindings, dom)).resolves.toMatchObject({
-      kind: 'resolved', coldPath: `/placements/${bindings.placement_id}`, branch: { kind: 'thread_detail', thread: 'group_thread' },
+      kind: 'resolved', coldPath: `/placements/${bindings.placement_id}`, branch: { kind: 'thread_detail', thread: 'group_thread', expectsMountWrite: true },
     });
   });
 });
@@ -215,6 +215,28 @@ describe('self-QA closed proof evaluator', () => {
       { surface: 'conversation_detail', mode: 'warm', ...writes[0] },
       { surface: 'conversation_detail', mode: 'warm', ...writes[1] },
     ]);
+  });
+
+  it('keeps out-of-sample writes out of surface tuples and fails their dedicated proof', () => {
+    const writes = [{
+      method: 'POST' as const,
+      endpointTemplate: '/api/inbox/:contactId/read',
+      phase: 'out_of_sample' as const,
+    }];
+    expect(attemptsFromSamples([sample('/contacts/:contactId', 'warm', writes)])).toEqual([]);
+    const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.key, mode as 'cold' | 'warm')));
+    const result = evaluateSelfQa({
+      mode: 'full', routes: ROUTES, samples, requests: [], branches,
+      attempts: expectedAttempts('full'),
+      outOfSampleWrites: writes,
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
+      supplementalSampleCount: 0,
+      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+    });
+    expect(result.status).toBe('fail');
+    expect(result.outOfSampleWritesAbsent).toBe(false);
+    expect(result.writeTuplesMatch).toBe(true);
   });
 
   it('preserves supplemental phases while keeping unmatched source-only', () => {
@@ -276,8 +298,8 @@ describe('self-QA closed proof evaluator', () => {
     expect(JSON.stringify(safe)).not.toContain('raw-contact-a');
     expect(Object.keys(safe).sort()).toEqual([
       'coldOk', 'coldRanking', 'countManifest', 'endpointSubset', 'mode', 'noUnmatchedApi',
-      'outboxUnchanged', 'privacyScanRequired', 'relayCountMatches', 'routeCount', 'sampleCardinalityMatches',
-      'sampleCount', 'stateChecks', 'status', 'supplementalExcluded', 'warmOk', 'warmRanking', 'writeTuplesMatch',
+      'outOfSampleWritesAbsent', 'outboxUnchanged', 'privacyScanRequired', 'relayCountMatches', 'routeCount',
+      'sampleCardinalityMatches', 'sampleCount', 'stateChecks', 'status', 'supplementalExcluded', 'warmOk', 'warmRanking', 'writeTuplesMatch',
     ]);
   });
 
@@ -301,6 +323,7 @@ describe('self-QA closed proof evaluator', () => {
         relayCountMatches: true, sampleCardinalityMatches: true, supplementalExcluded: true,
         privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true,
         writeTuplesMatch: true,
+        outOfSampleWritesAbsent: true,
       });
       const written = await writePerformanceReport({ ...base, runId: '20260812T120000000Z-12345678', selfQa: proof } as never);
       expect(written.exitCode).toBe(0);

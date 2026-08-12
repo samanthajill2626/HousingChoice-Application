@@ -2,6 +2,7 @@ import { EventEmitter } from 'node:events';
 import { describe, expect, it, vi } from 'vitest';
 import {
   captureCdpClockAlignment,
+  classifyEscapedWriteFailure,
   installProfilerProcessHandlers,
   main,
   performanceArtifactRoot,
@@ -10,6 +11,7 @@ import {
   runProfiler,
   type CliRuntime,
 } from './cli.js';
+import { FirewallEscapedWriteError } from './firewall.js';
 import type { RunConfig } from './config.js';
 import { ROUTES } from './routes.js';
 import type { SampleBrowser, SampleInstrumentation } from './collect.js';
@@ -44,6 +46,19 @@ const configDeps = {
 };
 
 describe('top-level profiler sequencing', () => {
+  it('reduces escaped-write failures to allowlisted evidence for partial reporting', () => {
+    const error = new FirewallEscapedWriteError({ method: 'POST', endpointTemplate: 'unmatched_api' });
+    Object.assign(error, { rawUrl: 'https://dashboard.example.test/api/private?email=person@example.test' });
+    expect(classifyEscapedWriteFailure(error)).toEqual({
+      reason: 'uncataloged_write_escaped_firewall',
+      method: 'POST',
+      endpointTemplate: 'unmatched_api',
+    });
+    expect(classifyEscapedWriteFailure({
+      reason: 'uncataloged_write_escaped_firewall',
+      evidence: { method: 'POST', endpointTemplate: '/api/private/person@example.test' },
+    })).toBeNull();
+  });
   it('classifies signals separately from crashes and unregisters every process handler', () => {
     for (const event of ['SIGINT', 'SIGTERM', 'uncaughtException', 'unhandledRejection'] as const) {
       const source = new EventEmitter();
@@ -378,6 +393,45 @@ describe('top-level profiler sequencing', () => {
     expect(events.slice(-2)).toEqual(['cleanup', 'force-exit-1']);
     expect(stderr.mock.calls).toEqual([['crashed\n']]);
     expect(JSON.stringify(stderr.mock.calls)).not.toContain('private.person');
+  });
+
+  it('forces a nonzero exit after the second signal grace even when cleanup is wedged', async () => {
+    const events: string[] = [];
+    const processEvents = new EventEmitter();
+    let releaseCleanup!: () => void;
+    const cleanupBlocked = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+    const value = runtime(events, {
+      verifyHermetic: vi.fn(async () => {
+        events.push('verify');
+        await new Promise<void>(() => undefined);
+      }),
+      cleanupHermetic: vi.fn(async () => {
+        events.push('cleanup-started');
+        await cleanupBlocked;
+        events.push('cleanup-finished');
+        return { status: 'cleaned', lane: 7 };
+      }),
+    });
+    const forceExit = vi.fn();
+    const running = runProfiler(['hermetic'], {
+      configDeps,
+      loadRuntime: vi.fn(async () => value),
+      processEvents: processEvents as never,
+      stderr: vi.fn(),
+      forceExit,
+      forceExitGraceMs: 5,
+    });
+    await vi.waitFor(() => expect(value.verifyHermetic).toHaveBeenCalledOnce());
+    processEvents.emit('SIGINT');
+    await vi.waitFor(() => expect(value.cleanupHermetic).toHaveBeenCalledOnce());
+    processEvents.emit('SIGINT');
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    const forcedWhileCleanupWasBlocked = forceExit.mock.calls.length > 0;
+    releaseCleanup();
+    await running;
+
+    expect(forcedWhileCleanupWasBlocked).toBe(true);
+    expect(forceExit).toHaveBeenCalledWith(1);
   });
 
   it('always cleans hermetic startup, profiling, report, browser, and privacy failures', async () => {

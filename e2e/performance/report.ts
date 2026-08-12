@@ -62,6 +62,7 @@ const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'cleanup_failed',
   'privacy_scan_failed',
   'comparison_failed',
+  'uncataloged_write_escaped_firewall',
   'unexpected_failure',
 ];
 const ENDPOINT_TEMPLATES: ReadonlySet<string> = new Set([
@@ -111,15 +112,23 @@ export interface WritePerformanceReportInput {
   target: TargetMetadata;
   samples: readonly SampleResult[];
   requests: readonly RequestEvidence[];
+  outOfSampleWrites?: readonly BlockedWrite[];
   routeOrders: readonly ReportRouteOrder[];
   browser: ReportBrowserInput;
   warmup: ReportWarmup;
   relayDomCheck: ReportRelayDomCheck | null;
   baselineJson?: string;
   partialReason?: FailureReasonCode;
+  safetyFailure?: ReportSafetyFailure;
   checkpointBranches?: readonly ContractCheckpointBranch[];
   selfQa?: SelfQaResult;
   signal?: AbortSignal;
+}
+
+export interface ReportSafetyFailure {
+  reason: 'uncataloged_write_escaped_firewall';
+  method: BlockedWrite['method'];
+  endpointTemplate: string;
 }
 
 interface WrittenReportResult {
@@ -160,6 +169,7 @@ export type ContractCheckpointMismatchCode =
   | 'unmatched_api'
   | 'undeclared_background'
   | 'missing_blocked_write'
+  | 'out_of_sample_blocked_write'
   | 'wrong_blocked_write_tuple';
 
 export interface ContractEndpointObservation {
@@ -190,6 +200,7 @@ export interface EvaluateContractCheckpointInput {
   samples: readonly SampleResult[];
   requests: readonly RequestEvidence[];
   branches: readonly ContractCheckpointBranch[];
+  outOfSampleWrites?: readonly BlockedWrite[];
   requireCompleteRegistry?: boolean;
 }
 
@@ -197,6 +208,7 @@ export interface ContractCheckpointEvaluation {
   status: 'pass' | 'mismatch';
   mismatchCodes: ContractCheckpointMismatchCode[];
   observations: ContractCheckpointObservation[];
+  outOfSampleWrites: BlockedWrite[];
 }
 
 function sampleKey(routeKeyValue: string, mode: SampleMode, repeat: number): string {
@@ -216,7 +228,7 @@ function symbolicBranch(branch: RouteContractBranch): string {
   if (branch.kind === 'unit_detail') {
     return branch.hasLandlord ? 'unit_detail_with_landlord' : 'unit_detail_without_landlord';
   }
-  return `${branch.thread}`;
+  return `${branch.thread}_${branch.expectsMountWrite ? 'unread' : 'read'}`;
 }
 
 function endpointShape(value: { endpointTemplate: string; queryKeys: readonly string[] }): string {
@@ -340,11 +352,16 @@ export function evaluateContractCheckpoint(
       mismatches: [...mismatches].sort(),
     });
   }
-  const mismatchCodes = [...new Set(observations.flatMap((row) => row.mismatches))].sort();
+  const outOfSampleWrites = (input.outOfSampleWrites ?? []).map(cloneBlockedWrite);
+  const mismatchCodes = [...new Set([
+    ...observations.flatMap((row) => row.mismatches),
+    ...(outOfSampleWrites.length > 0 ? ['out_of_sample_blocked_write' as const] : []),
+  ])].sort();
   return {
     status: mismatchCodes.length === 0 ? 'pass' : 'mismatch',
     mismatchCodes,
     observations,
+    outOfSampleWrites,
   };
 }
 
@@ -455,6 +472,15 @@ function cloneBlockedWrite(write: BlockedWrite): BlockedWrite {
       : write.phase === 'destination_mount'
         ? 'destination_mount'
         : 'out_of_sample',
+  };
+}
+
+function cloneSafetyFailure(value: ReportSafetyFailure | undefined): ReportSafetyFailure | null {
+  if (value?.reason !== 'uncataloged_write_escaped_firewall') return null;
+  return {
+    reason: 'uncataloged_write_escaped_firewall',
+    method: ['POST', 'PUT', 'PATCH', 'DELETE'].includes(value.method) ? value.method : 'POST',
+    endpointTemplate: endpointTemplate(value.endpointTemplate),
   };
 }
 
@@ -698,6 +724,8 @@ function reportMarkdown(input: {
   files: readonly string[];
   partialReason: FailureReasonCode | null;
   comparisonStatus: 'not_requested' | 'written' | 'failed';
+  outOfSampleWrites: readonly BlockedWrite[];
+  safetyFailure: ReportSafetyFailure | null;
 }): string {
   const lines = [
     '# Page Performance Profile',
@@ -713,6 +741,9 @@ function reportMarkdown(input: {
     lines.push('- WARNING: `target_version_unverified`');
   }
   if (input.partialReason !== null) lines.push(`- Partial run reason: \`${input.partialReason}\``);
+  if (input.safetyFailure !== null) {
+    lines.push(`- Escaped write: \`${input.safetyFailure.method} ${input.safetyFailure.endpointTemplate}\``);
+  }
   lines.push('', '## Count manifest', '');
   if (input.config.seed === null) {
     lines.push('No hermetic count manifest is available for this target.');
@@ -755,6 +786,17 @@ function reportMarkdown(input: {
     ? ['| none | - | - | 0 |']
     : [...blocked.values()].map(({ value, count }) =>
       `| ${value.method} | ${value.endpointTemplate} | ${value.phase} | ${count} |`)));
+  lines.push('', '## Out-of-sample blocked writes', '', '| Method | Endpoint | Count |', '| --- | --- | ---: |');
+  const detached = new Map<string, { value: BlockedWrite; count: number }>();
+  for (const write of input.outOfSampleWrites) {
+    const key = `${write.method}|${write.endpointTemplate}`;
+    const prior = detached.get(key);
+    detached.set(key, { value: write, count: (prior?.count ?? 0) + 1 });
+  }
+  lines.push(...(detached.size === 0
+    ? ['| none | - | 0 |']
+    : [...detached.values()].map(({ value, count }) =>
+      `| ${value.method} | ${value.endpointTemplate} | ${count} |`)));
   const unmatchedCount = input.requests.filter((request) => request.unmatchedApi).length;
   lines.push('', '## Unmatched APIs', '', `- Count: ${unmatchedCount}`);
   lines.push('', '## Resource request classes', '', '| Class | Count |', '| --- | ---: |');
@@ -937,12 +979,14 @@ export async function writePerformanceReport(
   const target = cloneTarget(input.target);
   const samples = input.samples.map(cloneSample);
   const requests = input.requests.map(cloneRequest);
+  const outOfSampleWrites = (input.outOfSampleWrites ?? []).map(cloneBlockedWrite);
   const checkpoint = config.contractCheckpoint
     ? evaluateContractCheckpoint({
         routes: ROUTES,
         samples,
         requests,
         branches: input.checkpointBranches ?? [],
+        outOfSampleWrites,
         requireCompleteRegistry: true,
       })
     : null;
@@ -960,6 +1004,7 @@ export async function writePerformanceReport(
   const partialReason = input.partialReason && FAILURE_REASONS.includes(input.partialReason)
     ? input.partialReason
     : null;
+  const safetyFailure = cloneSafetyFailure(input.safetyFailure);
 
   const summary: Record<string, unknown> = {
     schemaVersion: PERFORMANCE_SCHEMA_VERSION,
@@ -976,6 +1021,7 @@ export async function writePerformanceReport(
     runtime: runtimeMetadata(),
     environment,
     samples,
+    outOfSampleWrites,
     aggregates,
     rankings,
     routeOrders: cloneOrders(input.routeOrders),
@@ -988,6 +1034,7 @@ export async function writePerformanceReport(
       renderedCount: integer(input.relayDomCheck.renderedCount),
       shortfall: input.relayDomCheck.shortfall === true,
     },
+    ...(safetyFailure !== null && { safetyFailure }),
     ...(input.selfQa !== undefined && { selfQa: serializeSelfQaResult(input.selfQa) }),
     warnings: [] as string[],
     comparison: { status: comparisonStatus },
@@ -1015,6 +1062,7 @@ export async function writePerformanceReport(
     ...(samples.some((sample) => sample.clientTruncated) ? ['client_truncated'] : []),
     ...(samples.some((sample) => sample.backgroundRequestCount > 0) ? ['background_noise'] : []),
     ...(requests.some((request) => request.unmatchedApi) ? ['unmatched_api'] : []),
+    ...(outOfSampleWrites.length > 0 ? ['out_of_sample_write'] : []),
     ...(partialReason !== null ? ['partial_run'] : []),
     ...(comparisonStatus === 'failed' ? ['comparison_failed'] : []),
   ];
@@ -1038,6 +1086,8 @@ export async function writePerformanceReport(
     files,
     partialReason,
     comparisonStatus,
+    outOfSampleWrites,
+    safetyFailure,
   }));
   if (checkpoint !== null) {
     artifactTexts.set('contract-observations.json', json({
@@ -1045,6 +1095,7 @@ export async function writePerformanceReport(
       status: checkpoint.status,
       mismatchCodes: checkpoint.mismatchCodes,
       observations: checkpoint.observations,
+      outOfSampleWrites: checkpoint.outOfSampleWrites,
     }));
   }
   if (comparison !== null) {

@@ -4,6 +4,7 @@ import type { InMemoryStorageState } from './auth.js';
 import { PROFILER_CONTEXT_OPTIONS } from './firewall.js';
 import {
   ROUTES,
+  CONTRACT_SOURCE_LEDGER,
   resolverSkipSampleResult,
   type EndpointContract,
   type ResolverResult,
@@ -41,24 +42,24 @@ function shape(endpointTemplate: EndpointTemplate, queryKeys: readonly string[] 
 // removed from the readiness quiet window. The broadcast sending interval is
 // absent: the terminal-fixture resolver makes seeing it contract drift.
 const BACKGROUND_REFRESH_DECLARATIONS: BackgroundRefreshDeclaration[] = [
-  { sourceFingerprint: 'dashboard/src/routes/settings/useSystemStatus.ts:124-132', trigger: 'timer', shapes: [shape('/api/system/alarms')] },
-  { sourceFingerprint: 'dashboard/src/routes/tours/RemindersPanel.tsx:188-208', trigger: 'timer', shapes: [shape('/api/tours/:tourId/reminders')] },
-  { sourceFingerprint: 'dashboard/src/routes/placements/usePlacementNudges.ts:96-116', trigger: 'timer', shapes: [shape('/api/placements/:placementId/nudges')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.systemAlarms, trigger: 'timer', shapes: [shape('/api/system/alarms')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.tourReminders, trigger: 'timer', shapes: [shape('/api/tours/:tourId/reminders')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.placementNudges, trigger: 'timer', shapes: [shape('/api/placements/:placementId/nudges')] },
   {
-    sourceFingerprint: 'dashboard/src/app/UnreadContext.tsx:19,52-115', trigger: 'sse',
+    sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unreadShell, trigger: 'sse',
     shapes: [shape('/api/inbox', ['filter', 'limit']), shape('/api/unmatched-email', ['filter'])],
   },
-  { sourceFingerprint: 'dashboard/src/routes/today/useToday.ts:39,126-145', trigger: 'sse', shapes: [shape('/api/today', ['day', 'toursFrom', 'toursTo'])] },
-  { sourceFingerprint: 'dashboard/src/routes/inbox/useInbox.ts:49,139-155', trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
-  { sourceFingerprint: 'dashboard/src/routes/email/useUnmatchedEmail.ts:69,142-158', trigger: 'sse', shapes: [shape('/api/unmatched-email', ['filter'])] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.today, trigger: 'sse', shapes: [shape('/api/today', ['day', 'toursFrom', 'toursTo'])] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.inbox, trigger: 'sse', shapes: [shape('/api/inbox', ['filter', 'limit'])] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.unmatchedEmail, trigger: 'sse', shapes: [shape('/api/unmatched-email', ['filter'])] },
   {
-    sourceFingerprint: 'dashboard/src/routes/shared/useRoster.ts:98-137', trigger: 'sse',
+    sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.roster, trigger: 'sse',
     shapes: [shape('/api/tours/:tourId/roster'), shape('/api/placements/:placementId/roster')],
   },
-  { sourceFingerprint: 'dashboard/src/routes/tours/useTourChannels.ts:100,221-241', trigger: 'sse', shapes: [shape('/api/conversations')] },
-  { sourceFingerprint: 'dashboard/src/routes/placements/usePlacementChannels.ts:101,229-249', trigger: 'sse', shapes: [shape('/api/conversations')] },
-  { sourceFingerprint: 'dashboard/src/routes/contact/useContactTimeline.ts:91,320-337', trigger: 'sse', shapes: [shape('/api/contacts/:contactId/timeline')] },
-  { sourceFingerprint: 'dashboard/src/routes/broadcasts/useBroadcastResults.ts:41,120-138', trigger: 'sse', shapes: [shape('/api/broadcasts/:broadcastId/results')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.tourChannels, trigger: 'sse', shapes: [shape('/api/conversations')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.placementChannels, trigger: 'sse', shapes: [shape('/api/conversations')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.contactTimeline, trigger: 'sse', shapes: [shape('/api/contacts/:contactId/timeline')] },
+  { sourceFingerprint: CONTRACT_SOURCE_LEDGER.background.broadcastResults, trigger: 'sse', shapes: [shape('/api/broadcasts/:broadcastId/results')] },
 ];
 
 export const BACKGROUND_REFRESH_GETS: readonly BackgroundRefreshDeclaration[] = Object.freeze(
@@ -68,6 +69,40 @@ export const BACKGROUND_REFRESH_GETS: readonly BackgroundRefreshDeclaration[] = 
 const BACKGROUND_SHAPES = new Set(
   BACKGROUND_REFRESH_GETS.flatMap((declaration) => declaration.shapes.map(contractShape)),
 );
+
+const BACKGROUND_SHELL_SHAPES = new Set([
+  '/api/inbox?filter&limit',
+  '/api/unmatched-email?filter',
+]);
+
+export interface ObservedRequestRoleIssue {
+  code: 'undeclared_background';
+  endpointTemplate: string;
+  queryKeys: string[];
+}
+
+export function validateObservedRequestRoles(
+  requests: readonly RequestEvidence[],
+): ObservedRequestRoleIssue[] {
+  const issues = new Map<string, ObservedRequestRoleIssue>();
+  for (const request of requests) {
+    if (request.requestRole === 'required') continue;
+    const key = contractShape(request);
+    const declared = request.requestRole === 'background_refresh'
+      ? BACKGROUND_SHAPES.has(key)
+      : BACKGROUND_SHELL_SHAPES.has(key);
+    if (!declared) {
+      issues.set(key, {
+        code: 'undeclared_background',
+        endpointTemplate: request.endpointTemplate,
+        queryKeys: [...request.queryKeys].sort(),
+      });
+    }
+  }
+  return [...issues.values()].sort((left, right) =>
+    contractShape(left).localeCompare(contractShape(right)),
+  );
+}
 
 const STREAM_PATH = '/api/events';
 
@@ -259,7 +294,7 @@ export class NetworkCollector {
     if (completed && this.#terminalVisible && this.#satisfiedRequired.has(key) && BACKGROUND_SHAPES.has(key)) {
       return { role: 'background_refresh', forceUnmatched: false };
     }
-    return { role: 'required', forceUnmatched: completed && !BACKGROUND_SHAPES.has(key) };
+    return { role: 'required', forceUnmatched: sanitized.resourceClass === 'api' && !expected };
   }
 
   requestWillBeSent(token: string, event: RequestStartEvent): void {
@@ -551,6 +586,7 @@ export interface CollectWarmSampleInput {
   resolve: () => Promise<ResolverResult>;
   instrumentation: SampleInstrumentation;
   token?: string;
+  onResolvedBranch?: (branch: RouteContractBranch) => void;
 }
 
 export async function collectWarmSample(input: CollectWarmSampleInput): Promise<SampleResult> {
@@ -565,6 +601,7 @@ export async function collectWarmSample(input: CollectWarmSampleInput): Promise<
   }
 
   const token = input.token ?? randomUUID();
+  input.onResolvedBranch?.(resolved.branch);
   await input.instrumentation.beginSample({
     page: input.page,
     token,
@@ -632,6 +669,14 @@ export interface CollectRunSamplesResult {
   warmup: { performed: boolean; routeKey: string | null };
   lowSampleCount: boolean;
   relayDomCheck: RelayDomCheck | null;
+  branches: SampleBranchObservation[];
+}
+
+export interface SampleBranchObservation {
+  routeKey: string;
+  mode: SampleMode;
+  repeat: number;
+  branch: RouteContractBranch;
 }
 
 export interface CollectRunSamplesInput {
@@ -658,6 +703,32 @@ function assertRepeatCount(value: number): void {
   if (!Number.isSafeInteger(value) || value <= 0) throw new Error('invalid_repeat_count');
 }
 
+function browserFailureSample(routeKey: string, mode: SampleMode, repeat: number): SampleResult {
+  return {
+    routeKey,
+    mode,
+    repeat,
+    status: 'failed',
+    readyMs: null,
+    navigation: { ttfbMs: null, domContentLoadedMs: null, loadMs: null },
+    paint: { fcpMs: null, lcpMs: null },
+    longTasks: { totalMs: 0, maxMs: 0, count: 0 },
+    domElements: null,
+    apiRequestCount: 0,
+    apiTransferBytes: 0,
+    resourceRequestCount: 0,
+    resourceTransferBytes: 0,
+    resourceCountsByClass: { document: 0, script: 0, style: 0, font: 0, image: 0, api: 0, other: 0 },
+    backgroundRequestCount: 0,
+    backgroundTransferBytes: 0,
+    blockedWrites: [],
+    consoleCategories: {},
+    clientTruncated: false,
+    terminalState: 'unknown',
+    reason: 'browser_failure',
+  };
+}
+
 export async function collectRunSamples(input: CollectRunSamplesInput): Promise<CollectRunSamplesResult> {
   assertRepeatCount(input.coldRepeats);
   assertRepeatCount(input.warmRepeats);
@@ -665,38 +736,51 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
 
   const samples: SampleResult[] = [];
   const orders: SampleOrderRecord[] = [];
+  const branches: SampleBranchObservation[] = [];
   const tokenFor = input.tokenFactory ?? ((mode, repeat, route) => `${mode}-${repeat}-${route.key}-${randomUUID()}`);
   const baseOrder = deterministicRouteOrder(input.routes, input.routeOrderSeed);
   const shouldWarmup = input.target !== 'hosted-dev';
 
   if (shouldWarmup) {
     const warmupRoute = ROUTES[0]!;
-    const resolved = await input.resolveCold(warmupRoute);
-    await collectColdSample({
-      browser: input.browser,
-      storageState: input.storageState,
-      route: warmupRoute,
-      repeat: -1,
-      resolved,
-      instrumentation: input.instrumentationFor(warmupRoute, 'cold', -1),
-      token: tokenFor('cold', -1, warmupRoute),
-    });
+    try {
+      const resolved = await input.resolveCold(warmupRoute);
+      await collectColdSample({
+        browser: input.browser,
+        storageState: input.storageState,
+        route: warmupRoute,
+        repeat: -1,
+        resolved,
+        instrumentation: input.instrumentationFor(warmupRoute, 'cold', -1),
+        token: tokenFor('cold', -1, warmupRoute),
+      });
+    } catch {
+      // Warmup is deliberately unmeasured. Its context is closed by the cold
+      // collector, and a later measured failure is retained symbolically.
+    }
   }
 
   for (let repeat = 0; repeat < input.coldRepeats; repeat += 1) {
     const ordered = rotate(baseOrder, repeat);
     orders.push({ mode: 'cold', repeat, routeKeys: ordered.map((route) => route.key) });
     for (const route of ordered) {
-      const resolved = await input.resolveCold(route);
-      samples.push(await collectColdSample({
-        browser: input.browser,
-        storageState: input.storageState,
-        route,
-        repeat,
-        resolved,
-        instrumentation: input.instrumentationFor(route, 'cold', repeat),
-        token: tokenFor('cold', repeat, route),
-      }));
+      try {
+        const resolved = await input.resolveCold(route);
+        if (resolved.kind === 'resolved') {
+          branches.push({ routeKey: route.key, mode: 'cold', repeat, branch: resolved.branch });
+        }
+        samples.push(await collectColdSample({
+          browser: input.browser,
+          storageState: input.storageState,
+          route,
+          repeat,
+          resolved,
+          instrumentation: input.instrumentationFor(route, 'cold', repeat),
+          token: tokenFor('cold', repeat, route),
+        }));
+      } catch {
+        samples.push(browserFailureSample(route.key, 'cold', repeat));
+      }
     }
   }
 
@@ -709,29 +793,36 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
       const ordered = rotate(baseOrder, repeat);
       orders.push({ mode: 'warm', repeat, routeKeys: ordered.map((route) => route.key) });
       for (const route of ordered) {
-        const result = await collectWarmSample({
-          page,
-          route,
-          repeat,
-          sourceTimeoutMs: input.sourceTimeoutMs,
-          resolve: () => input.resolveWarm(route, page),
-          instrumentation: input.instrumentationFor(route, 'warm', repeat),
-          token: tokenFor('warm', repeat, route),
-        });
-        samples.push(result);
-        if (
-          input.target === 'hermetic' &&
-          input.expectedRelayLinkCount !== undefined &&
-          route.key === '/inbox' &&
-          result.status === 'ok' &&
-          relayDomCheck === null
-        ) {
-          const renderedCount = await page.countRelayConversationLinks();
-          relayDomCheck = {
-            expectedCount: input.expectedRelayLinkCount,
-            renderedCount,
-            shortfall: renderedCount < input.expectedRelayLinkCount,
-          };
+        try {
+          const result = await collectWarmSample({
+            page,
+            route,
+            repeat,
+            sourceTimeoutMs: input.sourceTimeoutMs,
+            resolve: () => input.resolveWarm(route, page),
+            instrumentation: input.instrumentationFor(route, 'warm', repeat),
+            token: tokenFor('warm', repeat, route),
+            onResolvedBranch: (branch) => branches.push({
+              routeKey: route.key, mode: 'warm', repeat, branch,
+            }),
+          });
+          samples.push(result);
+          if (
+            input.target === 'hermetic' &&
+            input.expectedRelayLinkCount !== undefined &&
+            route.key === '/inbox' &&
+            result.status === 'ok' &&
+            relayDomCheck === null
+          ) {
+            const renderedCount = await page.countRelayConversationLinks();
+            relayDomCheck = {
+              expectedCount: input.expectedRelayLinkCount,
+              renderedCount,
+              shortfall: renderedCount < input.expectedRelayLinkCount,
+            };
+          }
+        } catch {
+          samples.push(browserFailureSample(route.key, 'warm', repeat));
         }
       }
     }
@@ -745,5 +836,6 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
     warmup: shouldWarmup ? { performed: true, routeKey: '/' } : { performed: false, routeKey: null },
     lowSampleCount: input.coldRepeats < 3 || input.warmRepeats < 3,
     relayDomCheck,
+    branches,
   };
 }

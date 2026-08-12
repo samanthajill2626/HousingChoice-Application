@@ -42,6 +42,20 @@ function networkFrom(
 }
 
 describe('meaningful readiness', () => {
+  it('matches any all-visible terminal alternative and rejects partial alternatives', async () => {
+    const { terminalAlternativeVisible } = await import('./readiness.js');
+    const visible = new Set(['checkbox', 'environment', 'alarms-empty', 'errors-list']);
+    const alternatives = [
+      ['checkbox', 'environment', 'alarms-list', 'errors-list'],
+      ['checkbox', 'environment', 'alarms-empty', 'errors-list'],
+    ] as const;
+    await expect(terminalAlternativeVisible(alternatives, async (key) => visible.has(key)))
+      .resolves.toBe(true);
+    visible.delete('environment');
+    await expect(terminalAlternativeVisible(alternatives, async (key) => visible.has(key)))
+      .resolves.toBe(false);
+  });
+
   it('uses the later network event when terminal UI appears first', async () => {
     const clock = new FakeClock();
     const result = await waitForMeaningfulReady({

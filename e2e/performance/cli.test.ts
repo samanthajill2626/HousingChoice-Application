@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { main, runProfiler, type CliRuntime } from './cli.js';
+import { main, readPageStoreSnapshot, runProfiler, type CliRuntime } from './cli.js';
 import type { RunConfig } from './config.js';
 
 function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRuntime {
@@ -33,6 +33,15 @@ const configDeps = {
 };
 
 describe('top-level profiler sequencing', () => {
+  it('degrades an unavailable auxiliary page snapshot to null without exposing the browser error', async () => {
+    const read = vi.fn(async () => {
+      throw new Error('private.person@example.test browser target closed');
+    });
+
+    await expect(readPageStoreSnapshot(read)).resolves.toBeNull();
+    expect(read).toHaveBeenCalledOnce();
+  });
+
   it('parse failures and print-config perform zero runtime, network, lifecycle, or browser work', async () => {
     const loadRuntime = vi.fn();
     await expect(runProfiler(['bad-target'], { loadRuntime, configDeps })).resolves.toBe(1);
@@ -151,6 +160,21 @@ describe('top-level profiler sequencing', () => {
         loadRuntime: vi.fn(async () => value),
       })).resolves.toBe(1);
     }
+  });
+
+  it('propagates a finalized checkpoint mismatch report as nonzero without another lifecycle pass', async () => {
+    const events: string[] = [];
+    const value = runtime(events, {
+      report: vi.fn(async () => {
+        events.push('checkpoint-report');
+        return { exitCode: 1, status: 'checkpoint_mismatch' };
+      }),
+    });
+    await expect(runProfiler([
+      'hermetic', '--scale=1', '--cold-repeats=1', '--warm-repeats=1', '--contract-checkpoint',
+    ], { configDeps, loadRuntime: vi.fn(async () => value) })).resolves.toBe(1);
+    expect(events).toContain('checkpoint-report');
+    expect(events.at(-1)).toBe('cleanup');
   });
 
   it('main sets the supplied process exit code instead of throwing raw failures', async () => {

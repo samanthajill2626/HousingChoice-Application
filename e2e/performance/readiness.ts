@@ -45,6 +45,18 @@ export interface ReadinessResult extends ReadinessNetworkSnapshot {
   polls: number;
 }
 
+export async function terminalAlternativeVisible<T>(
+  alternatives: readonly (readonly T[])[],
+  visible: (contract: T) => Promise<boolean>,
+): Promise<boolean> {
+  for (const alternative of alternatives) {
+    if (alternative.length === 0) continue;
+    const states = await Promise.all(alternative.map((contract) => visible(contract)));
+    if (states.every(Boolean)) return true;
+  }
+  return false;
+}
+
 function normalizedOffset(value: number, origin: number, scale: number): number | null {
   if (!Number.isFinite(value) || !Number.isFinite(origin) || value < origin) return null;
   return Math.round((value - origin) * scale * 1_000) / 1_000;

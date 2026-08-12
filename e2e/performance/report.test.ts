@@ -5,8 +5,15 @@ import { afterEach, describe, expect, it } from 'vitest';
 import type { SafeRunConfig } from './config.js';
 import {
   createPerformanceRunId,
+  evaluateContractCheckpoint,
   writePerformanceReport,
 } from './report.js';
+import {
+  ROUTES,
+  expectedBlockedWrites,
+  expectedGets,
+  type RouteContractBranch,
+} from './routes.js';
 import type {
   RequestEvidence,
   ResourceClass,
@@ -182,6 +189,116 @@ describe('createPerformanceRunId', () => {
 });
 
 describe('writePerformanceReport', () => {
+  it('evaluates every checkpoint mismatch class while preserving absent conditionals', () => {
+    const route = ROUTES.find((candidate) => candidate.key === '/contacts/tenants')!;
+    const branch = { kind: 'none' } as const;
+    const required = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'required')!;
+    const conditional = expectedGets(route, 'warm', branch).find((entry) => entry.requirement === 'conditional')!;
+    const baseSample = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const baseRequest: RequestEvidence = {
+      ...request(route.key, 'warm', 0),
+      endpointTemplate: required.endpointTemplate,
+      queryKeys: [...required.queryKeys],
+      requestRole: 'required',
+      unmatchedApi: false,
+    };
+    const evaluate = (overrides: {
+      sample?: SampleResult;
+      requests?: RequestEvidence[];
+      branches?: Array<{ routeKey: string; mode: 'cold' | 'warm'; repeat: number; branch: RouteContractBranch }>;
+    } = {}) => evaluateContractCheckpoint({
+      routes: [route],
+      samples: [overrides.sample ?? baseSample],
+      requests: overrides.requests ?? [baseRequest],
+      branches: overrides.branches ?? [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+    });
+
+    expect(evaluate().mismatchCodes).toEqual([]);
+    expect(evaluate({ requests: [baseRequest, {
+      ...baseRequest,
+      endpointTemplate: conditional.endpointTemplate,
+      queryKeys: [...conditional.queryKeys],
+    }] }).mismatchCodes).toEqual([]);
+    expect(evaluate({ requests: [] }).mismatchCodes).toContain('missing_required_endpoint');
+    expect(evaluate({ requests: [{ ...baseRequest, endpointTemplate: '/api/settings', queryKeys: [] }] }).mismatchCodes)
+      .toEqual(expect.arrayContaining(['missing_required_endpoint', 'unexpected_endpoint']));
+    expect(evaluate({ requests: [{ ...baseRequest, unmatchedApi: true }] }).mismatchCodes).toContain('unmatched_api');
+    expect(evaluate({ requests: [{ ...baseRequest, requestRole: 'background_refresh' }] }).mismatchCodes)
+      .toContain('undeclared_background');
+    expect(evaluate({ sample: { ...baseSample, terminalState: 'unknown' } }).mismatchCodes)
+      .toContain('unresolved_terminal');
+    expect(evaluate({ sample: { ...baseSample, blockedWrites: [{
+      method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount',
+    }] } }).mismatchCodes).toContain('wrong_blocked_write_tuple');
+    expect(evaluate({ branches: [] }).mismatchCodes).toContain('unresolved_branch');
+    expect(evaluate({ sample: { ...baseSample, status: 'timeout', reason: 'ready_timeout' } }).mismatchCodes)
+      .toContain('sample_failure');
+  });
+
+  it('does not mutate or auto-edit route contracts while building observations', () => {
+    const before = JSON.stringify(ROUTES);
+    evaluateContractCheckpoint({ routes: ROUTES.slice(0, 1), samples: [], requests: [], branches: [] });
+    expect(JSON.stringify(ROUTES)).toBe(before);
+  });
+
+  it('allows guarded automatic writes to be absent but rejects any tuple outside the allowlist', () => {
+    const route = ROUTES.find((candidate) => candidate.key === '/conversations/:conversationId')!;
+    const branch = { kind: 'none' } as const;
+    const base = sample(route.key, 'warm', 0, { blockedWrites: [], terminalState: 'populated' });
+    const declared = expectedGets(route, 'warm', branch).filter((entry) => entry.requirement === 'required');
+    const requests = declared.map((entry) => ({
+      ...request(route.key, 'warm', 0),
+      endpointTemplate: entry.endpointTemplate,
+      queryKeys: [...entry.queryKeys],
+    }));
+    const evaluate = (value: SampleResult) => evaluateContractCheckpoint({
+      routes: [route], samples: [value], requests,
+      branches: [{ routeKey: route.key, mode: 'warm', repeat: 0, branch }],
+    });
+
+    expect(evaluate(base).mismatchCodes).not.toContain('wrong_blocked_write_tuple');
+    expect(evaluate({ ...base, blockedWrites: [{
+      method: 'POST', endpointTemplate: '/api/inbox/:contactId/read', phase: 'destination_mount',
+    }] }).mismatchCodes).toContain('wrong_blocked_write_tuple');
+  });
+
+  it('finalizes a sanitized checkpoint mismatch artifact before returning nonzero', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-c0ffee00');
+    input.config = { ...input.config, contractCheckpoint: true };
+    input.samples = [sample('/contacts/tenants', 'warm', 0, {
+      blockedWrites: [], terminalState: 'unknown', status: 'timeout', reason: 'ready_timeout',
+    })];
+    input.requests = [{
+      ...request('/contacts/tenants', 'warm', 0),
+      endpointTemplate: '/api/settings',
+      queryKeys: [],
+      unmatchedApi: true,
+    }];
+    Object.assign(input, {
+      checkpointBranches: [{
+        routeKey: '/contacts/tenants', mode: 'warm', repeat: 0, branch: { kind: 'none' },
+      }],
+    });
+    const secret = 'private.person@example.com';
+    Object.assign(input.samples[0] as object, { rawUrl: secret, caughtError: new Error(secret) });
+
+    const result = await writePerformanceReport(input);
+
+    expect(result).toMatchObject({ status: 'checkpoint_mismatch', exitCode: 1 });
+    expect(result.files).toContain('contract-observations.json');
+    const text = await readFile(join(outputRoot, input.runId, 'contract-observations.json'), 'utf8');
+    const artifact = JSON.parse(text);
+    expect(artifact.status).toBe('mismatch');
+    expect(artifact.mismatchCodes).toEqual(expect.arrayContaining([
+      'missing_sample', 'sample_failure', 'unmatched_api', 'unexpected_endpoint',
+      'unresolved_terminal',
+    ]));
+    expect(text).not.toContain(secret);
+    expect(text).not.toMatch(/https?:\/\//u);
+    expect(JSON.stringify(artifact.observations[0])).not.toContain('rawUrl');
+  });
+
   it('writes only the exact current-run artifacts with allowlisted schema and ranked Markdown', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-abcd1234');

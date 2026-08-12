@@ -4,10 +4,18 @@ import { arch, platform } from 'node:os';
 import { join } from 'node:path';
 import type { PerformanceSeedManifest } from '../../app/src/lib/seed/performance.js';
 import { aggregateSamples, buildRankings } from './aggregate.js';
+import { validateObservedRequestRoles } from './collect.js';
 import { compareRuns } from './compare.js';
 import type { SafeRunConfig } from './config.js';
 import { scanArtifactFiles, type PrivacyViolationCode } from './redact.js';
-import { ROUTES } from './routes.js';
+import {
+  ROUTES,
+  assertObservedGets,
+  expectedBlockedWrites,
+  expectedGets,
+  type RouteContractBranch,
+  type RouteDefinition,
+} from './routes.js';
 import { allEndpointTemplates } from './templates.js';
 import {
   INTERCEPTION_SCOPE_VERSION,
@@ -107,10 +115,11 @@ export interface WritePerformanceReportInput {
   relayDomCheck: ReportRelayDomCheck | null;
   baselineJson?: string;
   partialReason?: FailureReasonCode;
+  checkpointBranches?: readonly ContractCheckpointBranch[];
 }
 
 interface WrittenReportResult {
-  status: 'written' | 'partial' | 'comparison_failure';
+  status: 'written' | 'partial' | 'comparison_failure' | 'checkpoint_mismatch';
   exitCode: 0 | 1;
   runId: string;
   directoryName: string;
@@ -129,6 +138,204 @@ interface PrivacyFailureResult {
 }
 
 export type WritePerformanceReportResult = WrittenReportResult | PrivacyFailureResult;
+
+export interface ContractCheckpointBranch {
+  routeKey: string;
+  mode: SampleMode;
+  repeat: number;
+  branch: RouteContractBranch;
+}
+
+export type ContractCheckpointMismatchCode =
+  | 'missing_sample'
+  | 'sample_failure'
+  | 'unresolved_branch'
+  | 'unresolved_terminal'
+  | 'missing_required_endpoint'
+  | 'unexpected_endpoint'
+  | 'unmatched_api'
+  | 'undeclared_background'
+  | 'wrong_blocked_write_tuple';
+
+export interface ContractEndpointObservation {
+  endpointTemplate: string;
+  queryKeys: string[];
+  multiplicity: number;
+  outcome: RequestEvidence['outcome'];
+  role: RequestEvidence['requestRole'];
+}
+
+export interface ContractCheckpointObservation {
+  routeKey: string;
+  mode: SampleMode;
+  selectedBranch: string;
+  terminal: SampleResult['terminalState'];
+  endpoints: ContractEndpointObservation[];
+  backgroundRoles: Array<{
+    endpointTemplate: string;
+    queryKeys: string[];
+    role: 'background_refresh' | 'background_shell';
+  }>;
+  blockedWrites: string[];
+  mismatches: ContractCheckpointMismatchCode[];
+}
+
+export interface EvaluateContractCheckpointInput {
+  routes: readonly RouteDefinition[];
+  samples: readonly SampleResult[];
+  requests: readonly RequestEvidence[];
+  branches: readonly ContractCheckpointBranch[];
+  requireCompleteRegistry?: boolean;
+}
+
+export interface ContractCheckpointEvaluation {
+  status: 'pass' | 'mismatch';
+  mismatchCodes: ContractCheckpointMismatchCode[];
+  observations: ContractCheckpointObservation[];
+}
+
+function sampleKey(routeKeyValue: string, mode: SampleMode, repeat: number): string {
+  return `${routeKeyValue}|${mode}|${repeat}`;
+}
+
+function symbolicBranch(branch: RouteContractBranch): string {
+  if (branch.kind === 'none') return 'none';
+  if (branch.kind === 'contact_detail') {
+    if (branch.contactType === 'landlord') {
+      return branch.landlordUnitCount > 0
+        ? 'contact_detail_landlord_with_units'
+        : 'contact_detail_landlord_without_units';
+    }
+    return `contact_detail_${branch.contactType}`;
+  }
+  if (branch.kind === 'unit_detail') {
+    return branch.hasLandlord ? 'unit_detail_with_landlord' : 'unit_detail_without_landlord';
+  }
+  return `${branch.thread}`;
+}
+
+function endpointShape(value: { endpointTemplate: string; queryKeys: readonly string[] }): string {
+  return `${value.endpointTemplate}?${[...value.queryKeys].sort().join('&')}`;
+}
+
+function blockedShape(value: BlockedWrite): string {
+  return `${value.method}|${value.endpointTemplate}|${value.phase}`;
+}
+
+function observedEndpoints(requests: readonly RequestEvidence[]): ContractEndpointObservation[] {
+  const rows = new Map<string, ContractEndpointObservation>();
+  for (const request of requests.filter((row) => row.originClass === 'first_party' && row.resourceClass === 'api')) {
+    const queryKeys = [...request.queryKeys].sort();
+    const key = `${request.endpointTemplate}?${queryKeys.join('&')}|${request.outcome}|${request.requestRole}`;
+    const prior = rows.get(key);
+    rows.set(key, {
+      endpointTemplate: endpointTemplate(request.endpointTemplate),
+      queryKeys,
+      multiplicity: (prior?.multiplicity ?? 0) + 1,
+      outcome: request.outcome,
+      role: request.requestRole,
+    });
+  }
+  return [...rows.values()].sort((left, right) =>
+    `${endpointShape(left)}|${left.role}|${left.outcome}`
+      .localeCompare(`${endpointShape(right)}|${right.role}|${right.outcome}`),
+  );
+}
+
+export function evaluateContractCheckpoint(
+  input: EvaluateContractCheckpointInput,
+): ContractCheckpointEvaluation {
+  const routeByKey = new Map(input.routes.map((route) => [route.key, route]));
+  const branches = new Map(input.branches.map((row) => [
+    sampleKey(row.routeKey, row.mode, row.repeat),
+    row.branch,
+  ]));
+  const samples = new Map(input.samples.map((sample) => [
+    sampleKey(sample.routeKey, sample.mode, sample.repeat),
+    sample,
+  ]));
+  const keys = new Set([...samples.keys(), ...branches.keys()]);
+  if (input.requireCompleteRegistry === true) {
+    for (const route of input.routes) {
+      for (const mode of ['cold', 'warm'] as const) keys.add(sampleKey(route.key, mode, 0));
+    }
+  }
+
+  const observations: ContractCheckpointObservation[] = [];
+  for (const key of [...keys].sort()) {
+    const [routeKeyValue, rawMode, rawRepeat] = key.split('|');
+    const mode = rawMode === 'warm' ? 'warm' : 'cold';
+    const repeat = Number.parseInt(rawRepeat ?? '0', 10);
+    const route = routeByKey.get(routeKeyValue ?? '');
+    if (route === undefined) continue;
+    const sample = samples.get(key);
+    const branch = branches.get(key);
+    const requests = input.requests.filter((request) =>
+      request.routeKey === route.key && request.mode === mode && request.repeat === repeat,
+    );
+    const mismatches = new Set<ContractCheckpointMismatchCode>();
+    if (sample === undefined) mismatches.add('missing_sample');
+    if (sample !== undefined && sample.status !== 'ok') mismatches.add('sample_failure');
+    if (branch === undefined) mismatches.add('unresolved_branch');
+    if (sample === undefined || sample.terminalState === 'unknown') mismatches.add('unresolved_terminal');
+    if (requests.some((request) => request.unmatchedApi)) mismatches.add('unmatched_api');
+    if (validateObservedRequestRoles(requests).length > 0) mismatches.add('undeclared_background');
+
+    if (branch !== undefined) {
+      const declared = expectedGets(route, mode, branch);
+      const requiredObserved = requests
+        .filter((request) =>
+          request.originClass === 'first_party'
+          && request.resourceClass === 'api'
+          && request.method === 'GET'
+          && request.requestRole === 'required',
+        )
+        .map((request) => ({
+          endpointTemplate: endpointTemplate(request.endpointTemplate) as never,
+          queryKeys: [...request.queryKeys],
+          requirement: 'required' as const,
+          outcome: request.outcome,
+        }));
+      const endpointResult = assertObservedGets(declared, requiredObserved);
+      if (endpointResult.missingRequired.length > 0) mismatches.add('missing_required_endpoint');
+      if (endpointResult.undeclared.length > 0) mismatches.add('unexpected_endpoint');
+
+      const expectedWrites = new Set([...expectedBlockedWrites(route, mode, branch)].map((tuple) =>
+        tuple.split('|').slice(1).join('|'),
+      ));
+      const actualWrites = new Set((sample?.blockedWrites ?? []).map(blockedShape));
+      if ([...actualWrites].some((tuple) => !expectedWrites.has(tuple))) {
+        mismatches.add('wrong_blocked_write_tuple');
+      }
+    }
+
+    const endpoints = observedEndpoints(requests);
+    observations.push({
+      routeKey: route.key,
+      mode,
+      selectedBranch: branch === undefined ? 'unresolved' : symbolicBranch(branch),
+      terminal: sample?.terminalState ?? 'unknown',
+      endpoints,
+      backgroundRoles: endpoints
+        .filter((row): row is ContractEndpointObservation & {
+          role: 'background_refresh' | 'background_shell';
+        } => row.role !== 'required')
+        .map((row) => ({
+          endpointTemplate: row.endpointTemplate,
+          queryKeys: [...row.queryKeys],
+          role: row.role,
+        })),
+      blockedWrites: [...new Set((sample?.blockedWrites ?? []).map(blockedShape))].sort(),
+      mismatches: [...mismatches].sort(),
+    });
+  }
+  const mismatchCodes = [...new Set(observations.flatMap((row) => row.mismatches))].sort();
+  return {
+    status: mismatchCodes.length === 0 ? 'pass' : 'mismatch',
+    mismatchCodes,
+    observations,
+  };
+}
 
 function integer(value: unknown, fallback = 0): number {
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0 ? value : fallback;
@@ -579,6 +786,15 @@ export async function writePerformanceReport(
   const target = cloneTarget(input.target);
   const samples = input.samples.map(cloneSample);
   const requests = input.requests.map(cloneRequest);
+  const checkpoint = config.contractCheckpoint
+    ? evaluateContractCheckpoint({
+        routes: ROUTES,
+        samples,
+        requests,
+        branches: input.checkpointBranches ?? [],
+        requireCompleteRegistry: true,
+      })
+    : null;
   const browser = browserMetadata(config, input.browser);
   const environment = comparisonEnvironment(config, browser, samples);
   const routeMetadata = ROUTES.map((route) => ({
@@ -637,6 +853,7 @@ export async function writePerformanceReport(
 
   const files = [
     ...(comparison === null ? [] : ['comparison.json', 'comparison.md']),
+    ...(checkpoint === null ? [] : ['contract-observations.json']),
     'report.md',
     'requests.jsonl',
     'summary.json',
@@ -670,6 +887,14 @@ export async function writePerformanceReport(
     partialReason,
     comparisonStatus,
   }));
+  if (checkpoint !== null) {
+    artifactTexts.set('contract-observations.json', json({
+      schemaVersion: PERFORMANCE_SCHEMA_VERSION,
+      status: checkpoint.status,
+      mismatchCodes: checkpoint.mismatchCodes,
+      observations: checkpoint.observations,
+    }));
+  }
   if (comparison !== null) {
     artifactTexts.set('comparison.json', json(comparison));
     artifactTexts.set('comparison.md', comparisonMarkdown(comparison));
@@ -708,6 +933,15 @@ export async function writePerformanceReport(
       directoryName: runId,
       files,
       reason: 'comparison_failed',
+    };
+  }
+  if (checkpoint?.status === 'mismatch') {
+    return {
+      status: 'checkpoint_mismatch',
+      exitCode: 1,
+      runId,
+      directoryName: runId,
+      files,
     };
   }
   return { status: 'written', exitCode: 0, runId, directoryName: runId, files };

@@ -30,7 +30,8 @@ export interface TerminalContract {
   populated: readonly LocatorContract[];
   empty: readonly LocatorContract[];
   error: readonly LocatorContract[];
-  combine: 'any' | 'all';
+  populatedAlternatives: readonly (readonly LocatorContract[])[];
+  emptyAlternatives: readonly (readonly LocatorContract[])[];
 }
 
 export interface WarmSourceContract {
@@ -135,16 +136,56 @@ function terminal(
   empty: readonly LocatorContract[],
   error: readonly LocatorContract[],
   structure: readonly LocatorContract[] = [],
-  combine: 'any' | 'all' = 'any',
+  populatedCombine: 'any' | 'all' = 'any',
+  emptyCombine: 'any' | 'all' = populatedCombine,
 ): TerminalContract {
+  const alternatives = (
+    contracts: readonly LocatorContract[],
+    combine: 'any' | 'all',
+  ): readonly (readonly LocatorContract[])[] => Object.freeze(
+    combine === 'all'
+      ? [Object.freeze([...contracts])]
+      : contracts.map((contract) => Object.freeze([contract])),
+  );
   return Object.freeze({
     viewportDependency: 'desktop_chrome' as const,
     structure: Object.freeze([...structure]),
     populated: Object.freeze([...populated]),
     empty: Object.freeze([...empty]),
     error: Object.freeze([...error]),
-    combine,
+    populatedAlternatives: alternatives(populated, populatedCombine),
+    emptyAlternatives: alternatives(empty, emptyCombine),
   });
+}
+
+function terminalAlternatives(
+  populatedAlternatives: readonly (readonly LocatorContract[])[],
+  emptyAlternatives: readonly (readonly LocatorContract[])[],
+  error: readonly LocatorContract[],
+  structure: readonly LocatorContract[] = [],
+): TerminalContract {
+  const populated = populatedAlternatives.flat();
+  const empty = emptyAlternatives.flat();
+  return Object.freeze({
+    viewportDependency: 'desktop_chrome' as const,
+    structure: Object.freeze([...structure]),
+    populated: Object.freeze([...populated]),
+    empty: Object.freeze([...empty]),
+    error: Object.freeze([...error]),
+    populatedAlternatives: Object.freeze(populatedAlternatives.map((row) => Object.freeze([...row]))),
+    emptyAlternatives: Object.freeze(emptyAlternatives.map((row) => Object.freeze([...row]))),
+  });
+}
+
+function crossProduct(
+  fixed: readonly LocatorContract[],
+  ...choices: readonly (readonly LocatorContract[])[]
+): readonly (readonly LocatorContract[])[] {
+  let rows: LocatorContract[][] = [[...fixed]];
+  for (const choice of choices) {
+    rows = rows.flatMap((row) => choice.map((contract) => [...row, contract]));
+  }
+  return rows;
 }
 
 const COLD_SHELL_GETS = Object.freeze([
@@ -284,6 +325,7 @@ const TOUR_ACTIVE_TERMINAL = terminal(
   [locator('text', 'No tours scheduled in the next 30 days.'), locator('text', 'No unbooked tour requests.')],
   [L.alert],
   [locator('region', 'Upcoming tours'), locator('region', 'Needs booking')],
+  'any',
   'all',
 );
 const TOUR_CLOSED_TERMINAL = terminal([locator('list', 'Closed tours list')], [locator('text', 'No closed or canceled tours yet.')], [L.alert]);
@@ -303,45 +345,59 @@ function emailTerminal(quarantine: boolean): TerminalContract {
   );
 }
 const BROADCAST_TERMINAL = terminal([locator('list', 'Property sends')], [locator('text', 'No sends yet')], [L.alert]);
-const TEAM_TERMINAL = terminal([locator('table', undefined, 'role_only')], [locator('text', '^No teammates yet', 'prefix')], [L.alert]);
+const TEAM_TERMINAL = terminal([locator('table', undefined, 'role_only')], [locator('text', 'No teammates yet', 'prefix')], [L.alert]);
 const TEMPLATE_TERMINAL = terminal([locator('textbox', '^Missed-call auto-text [0-9]+/320$', 'regex')], [], [L.alert]);
 const NOTIFICATION_TERMINAL = terminal([locator('heading', 'Notifications')], [], [L.alert]);
-const VOICE_TERMINAL = terminal(
-  [locator('textbox', 'Your mobile number'), locator('text', 'Your cell'), locator('status', undefined, 'role_only')], [], [L.alert], [], 'any',
-);
-const SYSTEM_TERMINAL = terminal(
+const VOICE_TERMINAL = terminalAlternatives(
   [
-    locator('checkbox', 'Pause automated messages overnight'),
-    locator('listitem', '^Environment: ', 'prefix'),
-    locator('list', undefined, 'role_only', 'Alarms'),
-    locator('text', 'Available in deployed environments.', 'exact', 'Alarms'),
-    locator('text', 'No alarms configured for this environment.', 'exact', 'Alarms'),
-    locator('list', undefined, 'role_only', 'Recent errors'),
-    locator('text', 'Available in deployed environments.', 'exact', 'Recent errors'),
-    locator('text', 'No recent errors in this window.', 'exact', 'Recent errors'),
-  ], [], [L.alert], [locator('heading', 'Alarms'), locator('heading', 'Recent errors')], 'all',
+    [locator('textbox', 'Your mobile number')],
+    [locator('text', 'Your cell'), locator('status', undefined, 'role_only')],
+  ],
+  [],
+  [L.alert],
+);
+const SYSTEM_CHECKBOX = locator('checkbox', 'Pause automated messages overnight');
+const SYSTEM_ENVIRONMENT = locator('listitem', 'Environment: ', 'prefix');
+const SYSTEM_ALARM_STATES = [
+  locator('list', undefined, 'role_only', 'Alarms'),
+  locator('text', 'Available in deployed environments.', 'exact', 'Alarms'),
+  locator('text', 'No alarms configured for this environment.', 'exact', 'Alarms'),
+] as const;
+const SYSTEM_ERROR_STATES = [
+  locator('list', undefined, 'role_only', 'Recent errors'),
+  locator('text', 'Available in deployed environments.', 'exact', 'Recent errors'),
+  locator('text', 'No recent errors in this window.', 'exact', 'Recent errors'),
+] as const;
+const SYSTEM_TERMINAL = terminalAlternatives(
+  crossProduct([SYSTEM_CHECKBOX, SYSTEM_ENVIRONMENT], SYSTEM_ALARM_STATES, SYSTEM_ERROR_STATES),
+  [],
+  [L.alert],
+  [locator('heading', 'Alarms'), locator('heading', 'Recent errors')],
 );
 const AI_RUN_TERMINAL = terminal([locator('list', 'AI runs')], [locator('text', 'No extraction runs match this scope.')], [L.alert]);
-const NUMBER_TERMINAL = terminal(
-  [
-    locator('text', 'Not set', 'exact', 'Our number'),
-    locator('text', '^(?:\\([0-9]{3}\\) [0-9]{3}-[0-9]{4}|\\+[0-9]{8,15})$', 'regex', 'Our number'),
-    locator('list', 'Pool number counts'),
-  ],
-  [locator('text', 'No group text numbers yet - a number is provisioned with the first group text.')],
+const NUMBER_STATES = [
+  locator('text', 'Not set', 'exact', 'Our number'),
+  locator('text', '^(?:\\([0-9]{3}\\) [0-9]{3}-[0-9]{4}|\\+[0-9]{8,15})$', 'regex', 'Our number'),
+] as const;
+const POOL_NUMBER_STATES = [
+  locator('list', 'Pool number counts'),
+  locator('text', 'No group text numbers yet - a number is provisioned with the first group text.'),
+] as const;
+const NUMBER_TERMINAL = terminalAlternatives(
+  crossProduct([], NUMBER_STATES, POOL_NUMBER_STATES),
+  [],
   [locator('text', "Couldn't load our number."), L.alert],
   [locator('heading', 'Our number'), locator('heading', 'Group text numbers')],
-  'all',
 );
 const CONTACT_DETAIL_TERMINAL = terminal(
-  [locator('heading', '^Details(?: Edit)?$', 'regex'), locator('region', 'Communications and activity')], [], [L.alert], [], 'all',
+  [locator('heading', '^Details(?: Edit contact details)?$', 'regex'), locator('region', 'Communications and activity')], [], [L.alert], [], 'all',
 );
 const UNIT_DETAIL_TERMINAL = terminal([locator('heading', undefined, 'role_only'), locator('heading', 'Photos')], [], [L.alert], [], 'all');
 const TOUR_DETAIL_TERMINAL = terminal([locator('link', 'Back to tours')], [], [L.alert]);
 const PLACEMENT_DETAIL_TERMINAL = terminal([locator('link', 'Back to placements')], [], [L.alert]);
 const CONVERSATION_DETAIL_TERMINAL = terminal([locator('text', 'Group text'), locator('link', 'Back to inbox')], [], [L.alert], [], 'all');
 const BROADCAST_DETAIL_TERMINAL = terminal(
-  [locator('heading', 'Recipients'), locator('list', undefined, 'role_only', 'Recipients')],
+  [locator('list', 'Recipients')],
   [locator('text', 'No recipients recorded yet.')], [L.alert], [locator('heading', 'Recipients')],
 );
 
@@ -400,7 +456,16 @@ function row(input: RowInput): RouteDefinition {
 const NAV_TODAY = (target: string, label: string, gets: readonly EndpointContract[]) => source('/', L.today, 'link', label, target, gets);
 const CONTACT_SOURCE = (target: string, label: string, gets: readonly EndpointContract[]) => source('/contacts', L.contacts, 'link', label, target, gets);
 const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templates', gets: readonly EndpointContract[] = TEMPLATE_GETS) =>
-  source(from, L.settings, 'tab', label, target, gets);
+  source(
+    from,
+    from === '/settings/team'
+      ? locator('table', undefined, 'role_only')
+      : locator('textbox', '^Missed-call auto-text [0-9]+/320$', 'regex'),
+    'tab',
+    label,
+    target,
+    gets,
+  );
 
 export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ key: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -432,6 +497,111 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ key: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', INBOX_GETS), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
   row({ key: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
 ]);
+
+export const CONTRACT_SOURCE_LEDGER = Object.freeze({
+  endpoints: Object.freeze({
+    '/': { base: 'dashboard/src/routes/today/useToday.ts:41-74' },
+    '/contacts': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
+    '/contacts/tenants': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
+    '/contacts/landlords': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
+    '/contacts/unknown': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
+    '/contacts/deleted': { base: 'dashboard/src/routes/contacts/useContacts.ts:14-99' },
+    '/listings': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
+    '/listings/deleted': { base: 'dashboard/src/routes/listings/useListings.ts:10-60' },
+    '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
+    '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
+    '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
+    '/inbox': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    '/email': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
+    '/email/quarantine': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
+    '/broadcasts': { base: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108' },
+    '/settings/team': { base: 'dashboard/src/routes/settings/useTeam.ts:16-37' },
+    '/settings/templates': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62' },
+    '/settings/notifications': { base: 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100' },
+    '/settings/voice': { base: 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176' },
+    '/settings/system': { base: 'dashboard/src/routes/settings/useSettings.ts:18-62; dashboard/src/routes/settings/useSystemStatus.ts:77-132' },
+    '/settings/ai-runs': { base: 'dashboard/src/routes/settings/aiRuns/useAiRuns.ts:32-105' },
+    '/settings/numbers': { base: 'dashboard/src/routes/settings/NumbersSection.tsx:89-164,232-253' },
+    '/contacts/:contactId': { base: 'dashboard/src/routes/contact/useContactFile.ts:79-165; dashboard/src/routes/contact/useContactTimeline.ts:130-185,320-337' },
+    '/listings/:unitId': { base: 'dashboard/src/routes/listing/useListing.ts:110-185; dashboard/src/routes/listing/ListingDetail.tsx:184-185' },
+    '/tours/:tourId': { base: 'dashboard/src/routes/tours/useTourChannels.ts:100-289; dashboard/src/routes/shared/useRoster.ts:75-137' },
+    '/placements/:placementId': { base: 'dashboard/src/routes/placements/usePlacementChannels.ts:101-299; dashboard/src/routes/shared/useRoster.ts:75-137' },
+    '/conversations/:conversationId': { base: 'dashboard/src/routes/conversation/ConversationDetail.tsx:173-214' },
+    '/broadcasts/:broadcastId': { base: 'dashboard/src/routes/broadcasts/useBroadcastResults.ts:41-155' },
+  } as const),
+  branches: Object.freeze({
+    contact_detail_tenant: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
+    contact_detail_landlord_with_units: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
+    contact_detail_other: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
+    unit_detail_with_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
+    unit_detail_without_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
+    tour_group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:164-289',
+    tour_person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:164-289',
+    placement_group_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:165-299',
+    placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:165-299',
+  } as const),
+  terminals: Object.freeze({
+    '/': 'dashboard/src/routes/today/Today.tsx:27-31,172-188',
+    '/contacts': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/contacts/tenants': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/contacts/landlords': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/contacts/unknown': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/contacts/deleted': 'dashboard/src/routes/contacts/ContactsList.tsx:232,290-301',
+    '/listings': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
+    '/listings/deleted': 'dashboard/src/routes/listings/ListingsList.tsx:144,248-257',
+    '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
+    '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
+    '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
+    '/inbox': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    '/email': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
+    '/email/quarantine': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
+    '/broadcasts': 'dashboard/src/routes/broadcasts/BroadcastsList.tsx:130-140',
+    '/settings/team': 'dashboard/src/routes/settings/TeamSection.tsx:42-91',
+    '/settings/templates': 'dashboard/src/routes/settings/TemplatesSection.tsx:62-108',
+    '/settings/notifications': 'dashboard/src/routes/settings/NotificationsSection.tsx:22-100',
+    '/settings/voice': 'dashboard/src/routes/settings/VoiceSection.tsx:93-127,176',
+    '/settings/system': 'dashboard/src/routes/settings/QuietHoursSection.tsx:135-155; dashboard/src/routes/settings/FlagPills.tsx:41-69; dashboard/src/routes/settings/AlarmGrid.tsx:43-95; dashboard/src/routes/settings/RecentErrors.tsx:69-129',
+    '/settings/ai-runs': 'dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47',
+    '/settings/numbers': 'dashboard/src/routes/settings/NumbersSection.tsx:150-164,232-253',
+    '/contacts/:contactId': 'dashboard/src/routes/contact/ContactDetail.tsx:151-164; dashboard/src/routes/contact/TenantFile.tsx:152; dashboard/src/routes/contact/Card.tsx:18-25',
+    '/listings/:unitId': 'dashboard/src/routes/listing/ListingDetail.tsx:1180-1187',
+    '/tours/:tourId': 'dashboard/src/routes/tours/TourDetail.tsx:551',
+    '/placements/:placementId': 'dashboard/src/routes/placements/PlacementDetail.tsx:515',
+    '/conversations/:conversationId': 'dashboard/src/routes/conversation/ConversationDetail.tsx:379',
+    '/broadcasts/:broadcastId': 'dashboard/src/routes/broadcasts/BroadcastResults.tsx:159-162',
+  } as const),
+  resolvers: Object.freeze({
+    static: 'dashboard/src/App.tsx:117-249; dashboard/src/app/nav.ts:55-100',
+    contact: 'dashboard/src/routes/contacts/useContacts.ts:14-99',
+    unit: 'dashboard/src/routes/listings/useListings.ts:10-60',
+    tour: 'dashboard/src/routes/tours/useTours.ts:37-72',
+    placement: 'dashboard/src/routes/placements/usePlacements.ts:50-64,214-225',
+    conversation: 'dashboard/src/routes/inbox/useInbox.ts:46-103',
+    broadcast: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108',
+  } as const),
+  blockedWrites: Object.freeze({
+    contact_detail: 'dashboard/src/routes/contact/useMarkContactRead.ts:15-47; dashboard/src/api/endpoints.ts:1493-1503',
+    conversation_detail: 'dashboard/src/routes/conversation/ConversationDetail.tsx:210-214; dashboard/src/api/endpoints.ts:822-830',
+    group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:252-289; dashboard/src/routes/placements/usePlacementChannels.ts:262-299',
+    person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:252-289; dashboard/src/routes/placements/usePlacementChannels.ts:262-299',
+    contact_inbox_probe: 'dashboard/src/routes/inbox/InboxRow.tsx:73; dashboard/src/routes/inbox/useInbox.ts:180-212',
+    unmatched_email_probe: 'dashboard/src/routes/email/UnmatchedRow.tsx:98-116; dashboard/src/routes/email/useUnmatchedEmail.ts:181-195',
+  } as const),
+  background: Object.freeze({
+    systemAlarms: 'dashboard/src/routes/settings/useSystemStatus.ts:124-132',
+    tourReminders: 'dashboard/src/routes/tours/RemindersPanel.tsx:188-208',
+    placementNudges: 'dashboard/src/routes/placements/usePlacementNudges.ts:96-116',
+    unreadShell: 'dashboard/src/app/UnreadContext.tsx:19,52-115',
+    today: 'dashboard/src/routes/today/useToday.ts:39,126-145',
+    inbox: 'dashboard/src/routes/inbox/useInbox.ts:49,139-155',
+    unmatchedEmail: 'dashboard/src/routes/email/useUnmatchedEmail.ts:69,142-158',
+    roster: 'dashboard/src/routes/shared/useRoster.ts:98-137',
+    tourChannels: 'dashboard/src/routes/tours/useTourChannels.ts:100,221-241',
+    placementChannels: 'dashboard/src/routes/placements/usePlacementChannels.ts:101,229-249',
+    contactTimeline: 'dashboard/src/routes/contact/useContactTimeline.ts:91,320-337',
+    broadcastResults: 'dashboard/src/routes/broadcasts/useBroadcastResults.ts:41,120-138',
+  } as const),
+});
 
 export const CONTACT_INBOX_PROBE: ProbeDefinition = Object.freeze({ key: 'contact_inbox_probe', blockedSurface: 'contact_inbox_probe' });
 export const UNMATCHED_EMAIL_PROBE: ProbeDefinition = Object.freeze({ key: 'unmatched_email_probe', blockedSurface: 'unmatched_email_probe' });
@@ -476,7 +646,18 @@ export function expectedGets(
   mode: SampleMode,
   branch: RouteContractBranch,
 ): readonly EndpointContract[] {
-  const destination = selectedDestination(route, branch);
+  let destination = selectedDestination(route, branch);
+  if (mode === 'warm' && route.key === '/email/quarantine') {
+    destination = destination.map((contract) => contract.endpointTemplate === '/api/unmatched-email'
+      ? contract
+      : { ...contract, requirement: 'conditional' });
+  } else if (mode === 'warm' && route.key === '/tours/closed') {
+    destination = destination.map((contract) => contract.endpointTemplate === '/api/tours'
+      && contract.queryKeys.length === 1
+      && contract.queryKeys[0] === 'status'
+      ? contract
+      : { ...contract, requirement: 'conditional' });
+  }
   return freezeContracts(mode === 'cold' ? [...COLD_SHELL_GETS, ...destination] : destination);
 }
 

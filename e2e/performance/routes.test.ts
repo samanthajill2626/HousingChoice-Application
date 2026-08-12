@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import {
   APP_ROUTE_EXCLUSIONS,
   CONTACT_INBOX_PROBE,
+  CONTRACT_SOURCE_LEDGER,
   ROUTES,
   UNMATCHED_EMAIL_PROBE,
   assertObservedGets,
@@ -72,8 +73,11 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     ...CONTACT_DELETED_SHAPES, ...UNIT_SHAPES, ...UNIT_DELETED_SHAPES,
   ],
   '/tours/closed': [
-    '/api/tours?from&to#required', '/api/tours?status#required', ...CONTACT_SHAPES,
-    ...CONTACT_DELETED_SHAPES, ...UNIT_SHAPES, ...UNIT_DELETED_SHAPES,
+    '/api/tours?from&to#conditional', '/api/tours?status#required',
+    ...CONTACT_SHAPES.map((value) => value.replace('#required', '#conditional')),
+    ...CONTACT_DELETED_SHAPES.map((value) => value.replace('#required', '#conditional')),
+    ...UNIT_SHAPES.map((value) => value.replace('#required', '#conditional')),
+    ...UNIT_DELETED_SHAPES.map((value) => value.replace('#required', '#conditional')),
   ],
   '/placements': [
     '/api/placements?#required', '/api/placements?cursor#conditional',
@@ -83,7 +87,10 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
   ],
   '/inbox': ['/api/inbox?filter&limit#required'],
   '/email': ['/api/unmatched-email?filter#required', ...CONTACT_SHAPES],
-  '/email/quarantine': ['/api/unmatched-email?filter#required', ...CONTACT_SHAPES],
+  '/email/quarantine': [
+    '/api/unmatched-email?filter#required',
+    ...CONTACT_SHAPES.map((value) => value.replace('#required', '#conditional')),
+  ],
   '/broadcasts': ['/api/broadcasts?limit#required'],
   '/settings/team': ['/api/users?#required'],
   '/settings/templates': ['/api/settings?#required'],
@@ -256,6 +263,73 @@ describe('route registry completeness', () => {
     expect(ROUTES.find((route) => route.key === '/tours/:tourId')?.sourceLoadScaleBearing).toBe(false);
     expect(ROUTES.find((route) => route.key === '/placements/:placementId')?.sourceLoadScaleBearing).toBe(false);
   });
+
+  it('cites every endpoint binding, branch, terminal, resolver, blocked write, and background rule', () => {
+    const citation = /^[A-Za-z0-9_./-]+\.(?:ts|tsx):\d+(?:-\d+)?(?:,[0-9-]+)*(?:; [A-Za-z0-9_./-]+\.(?:ts|tsx):\d+(?:-\d+)?(?:,[0-9-]+)*)*$/u;
+    const cited = (value: string | undefined): void => {
+      expect(value).toBeTypeOf('string');
+      expect(value).toMatch(citation);
+    };
+    const endpointSources = CONTRACT_SOURCE_LEDGER.endpoints as Readonly<Record<string, { base: string }>>;
+    const terminalSources = CONTRACT_SOURCE_LEDGER.terminals as Readonly<Record<string, string>>;
+
+    for (const route of ROUTES) {
+      cited(endpointSources[route.key]?.base);
+      cited(terminalSources[route.key]);
+      cited(CONTRACT_SOURCE_LEDGER.resolvers[route.resolver]);
+    }
+    for (const branch of [
+      'contact_detail_tenant', 'contact_detail_landlord_with_units', 'contact_detail_other',
+      'unit_detail_with_landlord', 'unit_detail_without_landlord',
+      'tour_group_thread', 'tour_person_thread',
+      'placement_group_thread', 'placement_person_thread',
+    ] as const) cited(CONTRACT_SOURCE_LEDGER.branches[branch]);
+    for (const surface of [
+      'contact_detail', 'conversation_detail', 'group_thread', 'person_thread',
+      'contact_inbox_probe', 'unmatched_email_probe',
+    ] as const) cited(CONTRACT_SOURCE_LEDGER.blockedWrites[surface]);
+    expect(Object.keys(CONTRACT_SOURCE_LEDGER.background)).toHaveLength(12);
+    for (const source of Object.values(CONTRACT_SOURCE_LEDGER.background)) cited(source);
+  });
+
+  it('models terminal alternatives without requiring mutually exclusive states together', () => {
+    const tours = ROUTES.find((route) => route.key === '/tours')!;
+    expect(tours.terminal.populatedAlternatives).toHaveLength(2);
+    expect(tours.terminal.populatedAlternatives.every((alternative) => alternative.length === 1)).toBe(true);
+    expect(tours.terminal.emptyAlternatives).toHaveLength(1);
+    expect(tours.terminal.emptyAlternatives[0]).toHaveLength(2);
+
+    const system = ROUTES.find((route) => route.key === '/settings/system')!;
+    expect(system.terminal.populatedAlternatives).toHaveLength(9);
+    expect(system.terminal.populatedAlternatives.every((alternative) => alternative.length === 4)).toBe(true);
+    expect(system.terminal.populatedAlternatives[0]?.[1]).toMatchObject({
+      role: 'listitem', name: 'Environment: ', exactness: 'prefix',
+    });
+
+    const numbers = ROUTES.find((route) => route.key === '/settings/numbers')!;
+    expect(numbers.terminal.populatedAlternatives).toHaveLength(4);
+    expect(numbers.terminal.populatedAlternatives.every((alternative) => alternative.length === 2)).toBe(true);
+
+    const voice = ROUTES.find((route) => route.key === '/settings/voice')!;
+    expect(voice.terminal.populatedAlternatives.map((alternative) => alternative.length)).toEqual([1, 2]);
+
+    const broadcast = ROUTES.find((route) => route.key === '/broadcasts/:broadcastId')!;
+    expect(broadcast.terminal.populatedAlternatives).toHaveLength(1);
+    expect(broadcast.terminal.populatedAlternatives[0]).toHaveLength(1);
+    expect(broadcast.terminal.populatedAlternatives[0]?.[0]).toMatchObject({
+      role: 'list', name: 'Recipients', exactness: 'exact',
+    });
+    expect(broadcast.terminal.emptyAlternatives).toHaveLength(1);
+  });
+
+  it('waits for the selected settings source data branch before timing the tab click', () => {
+    const templates = ROUTES.find((route) => route.key === '/settings/templates')!;
+    expect(templates.source.path).toBe('/settings/team');
+    expect(templates.source.ready).toMatchObject({ role: 'table', exactness: 'role_only' });
+    const system = ROUTES.find((route) => route.key === '/settings/system')!;
+    expect(system.source.path).toBe('/settings/templates');
+    expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
+  });
 });
 
 describe('endpoint and write contracts', () => {
@@ -265,7 +339,12 @@ describe('endpoint and write contracts', () => {
       const warm = expectedGets(route, 'warm', branch);
       const cold = expectedGets(route, 'cold', branch);
       const expectedWarm = EXPECTED_WARM[route.key as keyof typeof EXPECTED_WARM];
-      const expectedCold = [...new Set([...SHELL_SHAPES, ...expectedWarm])];
+      const coldDestination = route.key === '/tours/closed'
+        ? EXPECTED_WARM['/tours']
+        : route.key === '/email/quarantine'
+          ? EXPECTED_WARM['/email']
+          : expectedWarm;
+      const expectedCold = [...new Set([...SHELL_SHAPES, ...coldDestination])];
       expect(shape(warm), `${route.key} warm`).toEqual(expectedWarm);
       expect(shape(cold), `${route.key} cold`).toEqual(expectedCold);
       expect(Object.isFrozen(warm)).toBe(true);
@@ -331,6 +410,13 @@ describe('endpoint and write contracts', () => {
     expect(Object.isFrozen(frozen)).toBe(true);
     expect((frozen as unknown as { add?: unknown }).add).toBeUndefined();
     expect(ROUTES).toHaveLength(28);
+  });
+
+  it('matches the current contact detail heading including its accessible edit action', () => {
+    const contact = ROUTES.find((route) => route.key === '/contacts/:contactId')!;
+    expect(contact.terminal.populated[0]).toMatchObject({
+      role: 'heading', name: '^Details(?: Edit contact details)?$', exactness: 'regex',
+    });
   });
 });
 

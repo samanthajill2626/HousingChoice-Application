@@ -32,6 +32,8 @@ import type {
   RouteDefinition,
 } from './routes.js';
 import type { RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
+import { terminalAlternativeVisible } from './readiness.js';
+import type { PageStoreSnapshot } from './readiness.js';
 
 export interface CliReportResult {
   exitCode: number;
@@ -221,7 +223,10 @@ function namedMatcher(contract: LocatorContract): string | RegExp | undefined {
 
 function locatorRoot(page: Page, contract: LocatorContract): Page | Locator {
   if (contract.scope === undefined) return page;
-  return page.getByRole('heading', { name: contract.scope, exact: true }).locator('..');
+  return page.getByRole('region', { name: contract.scope, exact: true }).or(
+    page.getByRole('heading', { name: contract.scope, exact: true })
+      .locator('xpath=ancestor::*[@aria-labelledby][1]'),
+  );
 }
 
 function locatorFor(page: Page, contract: LocatorContract): Locator {
@@ -258,9 +263,25 @@ async function groupVisible(
 
 async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
   if (await groupVisible(page, route.terminal.error, 'any')) return 'error';
-  if (await groupVisible(page, route.terminal.populated, route.terminal.combine)) return 'populated';
-  if (await groupVisible(page, route.terminal.empty, route.terminal.combine)) return 'empty';
+  if (await terminalAlternativeVisible(
+    route.terminal.populatedAlternatives,
+    (contract) => visible(page, contract),
+  )) return 'populated';
+  if (await terminalAlternativeVisible(
+    route.terminal.emptyAlternatives,
+    (contract) => visible(page, contract),
+  )) return 'empty';
   return 'unknown';
+}
+
+export async function readPageStoreSnapshot(
+  read: () => Promise<PageStoreSnapshot | null>,
+): Promise<PageStoreSnapshot | null> {
+  try {
+    return await read();
+  } catch {
+    return null;
+  }
 }
 
 interface RealPage extends SamplePage {
@@ -494,18 +515,24 @@ function createRealInstrumentation(input: {
               const values = await Promise.all(route.terminal.structure.map((contract) => visible(page!.rawPage, contract)));
               return values.every(Boolean);
             },
-            terminalState: () => terminalState(page!.rawPage, route),
+            async terminalState(): Promise<SampleResult['terminalState']> {
+              const state = await terminalState(page!.rawPage, route);
+              if (state !== 'unknown') collector?.markTerminalVisible(token);
+              return state;
+            },
           },
         });
         for (const write of page.contextState.token?.evidence() ?? []) collector.noteBlockedWrite(token, write);
         const ended = collector.endSample(token);
         input.requests.push(...ended.requests);
-        const pageSnapshot = await page.rawPage.evaluate(({ sampleToken }) => {
-          const host = globalThis as typeof globalThis & {
-            __hcPerformanceStore?: { endSample(value: string): unknown };
-          };
-          return host.__hcPerformanceStore?.endSample(sampleToken) ?? null;
-        }, { sampleToken: token }) as import('./readiness.js').PageStoreSnapshot | null;
+        const pageSnapshot = await readPageStoreSnapshot(async () => (
+          await page!.rawPage.evaluate(({ sampleToken }) => {
+            const host = globalThis as typeof globalThis & {
+              __hcPerformanceStore?: { endSample(value: string): unknown };
+            };
+            return host.__hcPerformanceStore?.endSample(sampleToken) ?? null;
+          }, { sampleToken: token }) as PageStoreSnapshot | null
+        ));
         const metrics = input.modules.collect.summarizePageMetrics({
           mode: input.mode,
           page: pageSnapshot ?? {
@@ -847,6 +874,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
             : { performed: true, routeKey: '/' },
           lowSampleCount: true,
           relayDomCheck: null,
+          branches: [],
         };
       }
       activeLifecycle?.assertAlive();
@@ -856,6 +884,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         routeOrders: result.orders,
         warmup: result.warmup,
         relayDomCheck: result.relayDomCheck,
+        checkpointBranches: result.branches,
         browserVersion: dashboard.browser.version(),
         viewport: collectModule.DESKTOP_CHROME_SAMPLE_CONTEXT.viewport,
         target: dashboard.targetMetadata,
@@ -882,6 +911,7 @@ async function loadDefaultRuntime(config: RunConfig): Promise<CliRuntime> {
         },
         warmup: value['warmup'] as { performed: boolean; routeKey: string | null },
         relayDomCheck: value['relayDomCheck'] as null,
+        checkpointBranches: value['checkpointBranches'] as never[],
         ...(value['partialReason'] === 'browser_failure' && { partialReason: 'browser_failure' as const }),
         ...(baselineJson !== undefined && { baselineJson }),
       });

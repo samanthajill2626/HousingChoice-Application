@@ -9,6 +9,7 @@ import {
   createEmptyResourceCounts,
   deterministicRouteOrder,
   summarizePageMetrics,
+  validateObservedRequestRoles,
   type SampleBrowser,
   type SampleBrowserContext,
   type SampleInstrumentation,
@@ -146,6 +147,15 @@ describe('CDP request collection', () => {
 });
 
 describe('checked-in background policy', () => {
+  it('rejects undeclared background shapes without reclassifying them', () => {
+    expect(validateObservedRequestRoles([{
+      ...requestEvidence('/api/settings', 'background_refresh'),
+    }])).toEqual([{ code: 'undeclared_background', endpointTemplate: '/api/settings', queryKeys: [] }]);
+    expect(validateObservedRequestRoles([{
+      ...requestEvidence('/api/system/alarms', 'background_refresh'),
+    }])).toEqual([]);
+  });
+
   it('is source-fingerprinted from every timer and SSE reader and excludes the sending poll', () => {
     expect(BACKGROUND_REFRESH_GETS.map((row) => row.sourceFingerprint)).toEqual([
       'dashboard/src/routes/settings/useSystemStatus.ts:124-132',
@@ -248,7 +258,7 @@ describe('checked-in background policy', () => {
     ]);
   });
 
-  it('leaves an undeclared exact repeat unmatched and foreground', () => {
+  it('keeps repeated declared non-background work foreground without inventing drift', () => {
     const settings: EndpointContract[] = [{ endpointTemplate: '/api/settings', queryKeys: [], requirement: 'required' }];
     const value = collector('warm', settings);
     const url = 'http://127.0.0.1:9111/api/settings';
@@ -258,9 +268,21 @@ describe('checked-in background policy', () => {
     start(value, 'repeat', 10.3, url);
     value.loadingFinished('sample-1', { requestId: 'repeat', timestamp: 10.4, encodedDataLength: 1 });
 
-    expect(value.endSample('sample-1').requests[1]).toMatchObject({ requestRole: 'required', unmatchedApi: true });
+    expect(value.endSample('sample-1').requests[1]).toMatchObject({ requestRole: 'required', unmatchedApi: false });
   });
 });
+
+function requestEvidence(
+  endpointTemplate: string,
+  requestRole: 'required' | 'background_refresh' | 'background_shell',
+): import('./types.js').RequestEvidence {
+  return {
+    routeKey: '/fixture', mode: 'warm', repeat: 0, method: 'GET', resourceClass: 'api',
+    originClass: 'first_party', endpointTemplate, queryKeys: [], startOffsetMs: 0,
+    durationMs: 1, ttfbMs: 1, status: 200, transferBytes: 1, outcome: 'finished',
+    requestRole, unmatchedApi: false,
+  };
+}
 
 describe('numeric page and console instrumentation', () => {
   it('maps console input immediately to stable categories without retaining text', () => {
@@ -656,6 +678,37 @@ describe('run ordering and warmup policy', () => {
     if (warmup) expect(result.samples.every((sample) => sample.repeat >= 0)).toBe(true);
   });
 
+  it('discards a failed unmeasured warmup and still records every measured sample', async () => {
+    const browser = new FakeSamplingBrowser();
+    const route = ROUTES[0]!;
+    const result = await collectRunSamples({
+      browser,
+      storageState: STORAGE_STATE,
+      target: 'hermetic',
+      routes: [route],
+      coldRepeats: 1,
+      warmRepeats: 1,
+      routeOrderSeed: 7,
+      sourceTimeoutMs: 100,
+      resolveCold: async () => resolved('/'),
+      resolveWarm: async (_route, page) => {
+        (page as FakeSamplingPage).hrefs.add('/');
+        return resolved('/');
+      },
+      instrumentationFor: (_route, _mode, repeat) => {
+        const value = new FakeInstrumentation([]);
+        value.throwOnCollect = repeat === -1;
+        return value;
+      },
+    });
+
+    expect(result.samples.map(({ mode, repeat, status }) => ({ mode, repeat, status }))).toEqual([
+      { mode: 'cold', repeat: 0, status: 'ok' },
+      { mode: 'warm', repeat: 0, status: 'ok' },
+    ]);
+    expect(browser.contexts[0]?.closed).toBe(true);
+  });
+
   it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {
     const browser = new FakeSamplingBrowser();
     const inbox = ROUTES.find((route) => route.key === '/inbox')!;
@@ -685,10 +738,10 @@ describe('run ordering and warmup policy', () => {
     expect(Object.keys(result.relayDomCheck ?? {}).sort()).toEqual(['expectedCount', 'renderedCount', 'shortfall']);
   });
 
-  it('closes the reused warm context when destination collection throws', async () => {
+  it('retains a sanitized failed sample and closes the warm context when destination collection throws', async () => {
     const browser = new FakeSamplingBrowser();
     const route = ROUTES[0]!;
-    await expect(collectRunSamples({
+    const result = await collectRunSamples({
       browser,
       storageState: STORAGE_STATE,
       target: 'hosted-dev',
@@ -707,7 +760,11 @@ describe('run ordering and warmup policy', () => {
         value.throwOnCollect = mode === 'warm';
         return value;
       },
-    })).rejects.toThrow('collector_failed');
+    });
+    expect(result.samples.at(-1)).toMatchObject({
+      routeKey: '/', mode: 'warm', status: 'failed', reason: 'browser_failure',
+    });
+    expect(JSON.stringify(result)).not.toContain('collector_failed');
     expect(browser.contexts.at(-1)?.closed).toBe(true);
   });
 });

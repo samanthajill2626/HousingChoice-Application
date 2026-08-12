@@ -1361,6 +1361,43 @@ Verify after the push and before the deploy: confirm the key is present and
 non-blank in the pushed parameter set, then confirm the deployed app's boot log
 carries no `GROUP_IDENTITY_EXCLUDED_NUMBERS` error and the fingerprint pinned.
 
+### 1b. AT DEPLOY, ON ANY STAGE THAT ALREADY RAN AN EARLIER BUILD OF THIS BRANCH: drop the cross-check ledger rows
+
+**Dev only in practice.** Prod has never run the cross-check, so it has no rows
+to drop and this step is a no-op there. Dev has, and the ledger's shape changed
+twice on this branch.
+
+**Why.** The cross-check keeps one `state` item per (rail, member) pair holding a
+signed balance, plus one `evt2#` pending row per event and one `groupdue#xc` due
+row. A pending row written by an EARLIER build was counted in that balance, is
+invisible to the current claim (the row prefix moved `evt#` -> `evt2#`), and
+carries no `counted` marker - so the sweep will not give its slot back either.
+Each affected pair therefore carries a permanent `+N` skew, and while it burns
+off, each classic filing reports matched, finds nothing claimable, logs
+`group_crosscheck_pending_row_missing`, and its own event alarms
+`group_crosscheck_inbound_missing` for a healthy message. With the 5-minute
+grace, N is 1 for essentially every affected pair - one false alarm each - but
+the skew is free to remove and there is no reason to carry it.
+
+**Safe by construction.** These rows are a liveness heuristic with a 5-minute
+grace and a 7-day TTL. They hold no product data, nothing reads them across a
+deploy, and the ledger rebuilds itself from the next event on each pair. Deleting
+them costs at most one window's matching - which the deploy costs anyway.
+
+**What to delete** in `hc-<env>-messages`: every item whose `conversationId`
+begins with `groupxc#` (the per-pair `state` item and its `evt2#`/`evt#` pending
+rows) and every item in the `groupdue#xc` partition. Leave `groupdue#send` alone
+- that is the delivery-staleness sweep, not this one.
+
+```powershell
+$v = @{':xc'=@{S='groupxc#'};':due'=@{S='groupdue#xc'}} | ConvertTo-Json -Compress; aws dynamodb scan --table-name hc-dev-messages --projection-expression 'conversationId,tsMsgId' --filter-expression 'begins_with(conversationId, :xc) OR conversationId = :due' --expression-attribute-values $v --profile housingchoice --region us-east-1 --no-cli-pager --output json | ConvertFrom-Json | ForEach-Object { $_.Items } | ForEach-Object { aws dynamodb delete-item --table-name hc-dev-messages --key (@{conversationId=@{S=$_.conversationId.S};tsMsgId=@{S=$_.tsMsgId.S}} | ConvertTo-Json -Compress) --profile housingchoice --region us-east-1 --no-cli-pager }
+```
+
+Run the `scan` half alone first and read the count - the same dry-run-then-commit
+discipline as every other destructive step here. A `wipe:dev` makes this step
+unnecessary (it empties the table outright). The scan is unpaginated: if it
+reports a `LastEvaluatedKey`, re-run it until it does not.
+
 ### 2. Production preflight (before the migration window)
 
 0. **MMS-ENABLED CAMPAIGN APPROVAL - the gate on outbound existing at all.**

@@ -153,18 +153,80 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     client.destroy();
   }, 120_000);
 
-  it('isolates namespaces, resolves physical/index readers, and reseeds deterministically', async () => {
+  it('keeps all injected route readers on the supplied namespace and reseeds deterministically', async () => {
     const manifest = await resetPerformanceData({ config: configB, input, anchor });
     expect(manifest.contacts).toBe(22);
-    expect((await readers.contacts.listByType('tenant', { limit: 2 })).items).toHaveLength(2);
+
+    const firstContactPage = await readers.contacts.listByType('tenant', { limit: 2 });
+    expect(firstContactPage.items).toHaveLength(2);
+    expect(firstContactPage.lastEvaluatedKey).toBeDefined();
+    const secondContactPage = await readers.contacts.listByType('tenant', {
+      limit: 2,
+      exclusiveStartKey: firstContactPage.lastEvaluatedKey,
+    });
+    expect(secondContactPage.items.length).toBeGreaterThan(0);
+    expect(secondContactPage.items.map((item) => item.contactId)).not.toEqual(
+      firstContactPage.items.map((item) => item.contactId),
+    );
+    expect(await readers.contacts.getById('perf-contact-00001')).toBeDefined();
+    expect((await readers.contacts.listByType('landlord', { limit: 20 })).items.length).toBeGreaterThan(0);
+    expect((await readers.contacts.listByType('unknown', { limit: 20 })).items.length).toBeGreaterThan(0);
+    expect((await readers.contacts.listByType('tenant', { deleted: true, limit: 20 })).items.length).toBeGreaterThan(0);
+
     expect(await readers.units.getById('perf-unit-00000')).toBeDefined();
+    expect((await readers.units.list({ limit: 20 })).items.some((item) => item.unitId === 'perf-unit-00001')).toBe(true);
+    expect((await readers.units.list({ deleted: true, limit: 20 })).items.length).toBeGreaterThan(0);
+    expect((await readers.units.listByLandlord('perf-contact-00006')).items.length).toBeGreaterThan(0);
+    expect((await readers.units.listByStatus('available')).items.length).toBeGreaterThan(0);
+
     expect(await readers.placements.getById('perf-placement-00000')).toBeDefined();
+    expect((await readers.placements.list({ limit: 20 })).items.some((item) => item.placementId === 'perf-placement-00001')).toBe(true);
+    expect((await readers.placements.listByTenant('perf-contact-00001')).items.length).toBeGreaterThan(0);
+    expect((await readers.placements.listByUnit('perf-unit-00000')).items.length).toBeGreaterThan(0);
+    expect((await readers.placements.listByStage('send_application')).items.length).toBeGreaterThan(0);
+
     expect(await readers.tours.get('perf-tour-00000')).toBeDefined();
+    expect((await readers.tours.listByTenant('perf-contact-00001')).length).toBeGreaterThan(0);
+    expect((await readers.tours.listByUnit('perf-unit-00000')).length).toBeGreaterThan(0);
+    expect((await readers.tours.listByScheduledRange(anchor, '2026-09-11T12:00:00.000Z')).length).toBeGreaterThan(0);
+    expect((await readers.tours.listByStatus('requested')).length).toBeGreaterThan(0);
+
     expect(await readers.conversations.getById('perf-conversation-00000')).toBeDefined();
+    expect((await readers.conversations.listByLastActivity({ status: 'open', limit: 20 })).items.length).toBeGreaterThan(0);
+    expect(await readers.conversations.listRelayGroups('open')).toMatchObject({ truncated: false });
     expect(await readers.messages.listByConversation('perf-conversation-00000')).toHaveLength(2);
+
     expect(await readers.broadcasts.getById('perf-broadcast-00000')).toBeDefined();
-    expect((await readers.unmatchedEmail.listByStatus('unmatched')).items.length).toBeGreaterThan(0);
-    expect(await readers.contactVocabulary.get()).toEqual(expect.any(Object));
+    expect((await readers.broadcasts.list({ limit: 20 })).items.some((item) => item.broadcastId === 'perf-broadcast-00000')).toBe(true);
+
+    const unmatched = await readers.unmatchedEmail.listByStatus('unmatched');
+    expect(unmatched.items).toHaveLength(2);
+    expect(await readers.unmatchedEmail.getById(unmatched.items[0]!.unmatchedId)).toBeDefined();
+
+    expect((await readers.users.listAll()).some((user) => user.userId === 'user-0001')).toBe(true);
+    expect(await readers.settings.getOrgSettings()).toMatchObject({ quietHoursEnabled: false });
+    expect(await readers.aiRuns.listByEntity('global')).toEqual({ entries: [] });
+    expect(await readers.poolNumbers.listByState('active')).toEqual([]);
+    expect(await readers.placementNudges.listByPlacement('perf-placement-00000')).toEqual([]);
+    expect(await readers.placementDeadlines.listByPlacement('perf-placement-00000')).toEqual([]);
+    expect(await readers.placementDeadlines.listDue('9999-12-31T23:59:59.999Z', { limit: 50 })).toEqual([]);
+    expect(await readers.placementDeadlines.listAllPending({ limit: 50 })).toEqual([]);
+    expect(await readers.tourReminders.listByTour('perf-tour-00000')).toEqual([]);
+    expect(await readers.activityEvents.listByContact('perf-contact-00001')).toEqual({ items: [] });
+    expect(await readers.listingSends.listByContact('perf-contact-00001')).toEqual([]);
+    expect(await readers.listingSends.listByUnit('perf-unit-00000')).toEqual([]);
+    expect(await readers.pendingRosterActions.listByOwner({ ownerType: 'tour', ownerId: 'perf-tour-00000' })).toEqual([]);
+    expect(await readers.suggestionResolution.listJournals('perf-contact-00001')).toEqual([]);
+    expect(await readers.audit.listByEntity('placements#perf-placement-00000')).toEqual([]);
+    expect((await readers.audit.listByEntity('placements#placement-0001')).length).toBeGreaterThan(0);
+    expect(await readers.contactVocabulary.get()).toEqual({
+      roles: [],
+      relationshipRoles: [],
+      fieldLabels: [],
+    });
+    expect(await readers.extraction.listSuggestionsByContact('perf-contact-00001')).toEqual([]);
+    expect(await readers.extraction.listPending({ limit: 50 })).toEqual([]);
+
     expect(await doc.send(new GetCommand({ TableName: nsA.tableNameFor('contacts'), Key: { contactId: 'sentinel-a' } }))).toHaveProperty('Item.contactId', 'sentinel-a');
 
     const physicalContacts = `${prefixB}contacts`;
@@ -174,5 +236,29 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     await resetPerformanceData({ config: configB, input, anchor });
     const second = ordered((await doc.send(new ScanCommand({ TableName: physicalContacts }))).Items);
     expect(second).toEqual(first);
-  }, 120_000);
+  }, 180_000);
+
+  it('returns the full maximum generated relay-group share without truncation', async () => {
+    const maximumRelayInput = {
+      contacts: 0,
+      units: 0,
+      placements: 0,
+      tours: 0,
+      conversations: 5_000,
+      messagesPerConversation: 0,
+      broadcasts: 0,
+      recipientsPerBroadcast: 0,
+    };
+    const manifest = await resetPerformanceData({ config: configB, input: maximumRelayInput, anchor });
+    expect(manifest.relayGroupCount).toBe(1_000);
+
+    const open = await readers.conversations.listRelayGroups('open');
+    const connecting = await readers.conversations.listRelayGroups('connecting');
+    expect(open).toMatchObject({ truncated: false });
+    expect(connecting).toMatchObject({ truncated: false });
+    expect(open.items).toHaveLength(500);
+    expect(connecting.items).toHaveLength(500);
+    expect(open.items.every((item) => item.relay_status === 'relay_group#open')).toBe(true);
+    expect(connecting.items.every((item) => item.relay_status === 'relay_group#connecting')).toBe(true);
+  }, 300_000);
 });

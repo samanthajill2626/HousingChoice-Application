@@ -30,6 +30,19 @@ export interface GroupFingerprintStore {
 }
 
 /**
+ * The fingerprint RECORD ITSELF is broken - it exists but carries no hash (fix
+ * wave 2, adversarial 33). Retrying cannot help and the operator remedy is
+ * completely different from an availability problem, so it is typed, not
+ * retried, and reported in its own words.
+ */
+export class GroupFingerprintCorruptError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'GroupFingerprintCorruptError';
+  }
+}
+
+/**
  * The fingerprint: sha256 over the SORTED, deduped list. Order and duplicates in
  * the env value are not semantic, so they must not move the hash - only the SET
  * of numbers may.
@@ -88,6 +101,25 @@ export async function verifyGroupIdentityFingerprint(opts: {
       break;
     } catch (err) {
       lastError = err;
+      // A CORRUPT RECORD IS NOT AN OUTAGE (fix wave 2, adversarial 33). Reading
+      // it again returns the same broken row, and the fix is a human editing or
+      // deleting that record - which, unlike a mismatch, does NOT fork thread
+      // ids as long as the list itself is unchanged. Say so, once, and stop.
+      if (err instanceof GroupFingerprintCorruptError) {
+        log.error(
+          { err: summarizeError(err), event: 'group_fingerprint_record_corrupt' },
+          'the group identity fingerprint record exists but carries no hash - refusing to boot',
+        );
+        throw new Error(
+          'The GROUP_IDENTITY_EXCLUDED_NUMBERS fingerprint record exists in the settings table ' +
+            'but carries no hash. This is NOT a mismatch and NOT an availability problem: the ' +
+            'record itself is corrupt (hand-edited, or a partial write). Inspect the ' +
+            `${'group identity fingerprint'} settings row. If GROUP_IDENTITY_EXCLUDED_NUMBERS has ` +
+            'NOT changed since this environment was first deployed, deleting that record is safe ' +
+            'and the next boot re-pins it. If the list HAS changed, deleting it silently forks ' +
+            'every affected group thread - follow the migration procedure instead.',
+        );
+      }
       if (attempt === attempts) break;
       log.warn(
         { attempt, attempts, err: summarizeError(err) },
@@ -110,7 +142,9 @@ export async function verifyGroupIdentityFingerprint(opts: {
         'changed, and no migration is implied. It is a settings-table availability or ' +
         'permissions problem (throttling, a 5xx, a missing table, or an IAM policy that does not ' +
         'cover it). Refusing to start rather than serving with an unverified identity contract. ' +
-        `Underlying error: ${summarizeError(lastError).message}`,
+        // The SUMMARY, never the raw message (fix wave 2, adversarial 10): this
+        // string is operator-facing and the underlying error can be a vendor's.
+        `Underlying error: ${JSON.stringify(summarizeError(lastError))}`,
     );
   }
 

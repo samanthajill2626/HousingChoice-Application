@@ -206,6 +206,20 @@ export function createLogger(opts: CreateLoggerOptions = {}): Logger {
         'err.response.config.headers.Authorization',
         'err.response.config.headers.authorization',
         'err.response.config.data',
+        // THE REQUEST OBJECT CARRIES THE SAME CREDENTIAL (fix wave 2,
+        // adversarial 5). axios also sets `this.request = request`, and Node's
+        // `http.ClientRequest` has an OWN-ENUMERABLE `_header`: the entire
+        // serialized request head, `Authorization: Basic <base64(sid:secret)>`
+        // included. The wave-1 list covered `config` only, so every generic
+        // `log.error({ err })` on a NETWORK-failed Twilio call - the Express
+        // error handler among them - still wrote the credential. `response.data`
+        // is listed for the same reason: it is the vendor's own echo of the
+        // request on some failures.
+        'err.request._header',
+        'err.request._headers',
+        'err.response.request._header',
+        'err.response.request._headers',
+        'err.response.data',
       ],
       censor: '[REDACTED]',
     },

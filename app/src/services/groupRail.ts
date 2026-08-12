@@ -211,6 +211,25 @@ function buildParticipantMap(participants: GroupParticipantRef[]): Record<string
 }
 
 /** Roster phones the rail's map does not cover. */
+/**
+ * The stored `rail_failed.reason` for a thrown vendor error.
+ *
+ * NEVER `err.message` (fix wave 2, adversarial 10). This string is PERSISTED on
+ * the conversation row and surfaced to staff, and this project's own written
+ * ruling (jobs/groupRail.ts) is that these strings can name members: Twilio's
+ * address/validation family echoes the offending parameter into its message
+ * ("The 'To' number +1555... is not a valid phone number"). The summary carries
+ * a name, a numeric vendor code and a status - enough to diagnose, nothing a
+ * vendor authors.
+ */
+function railFailureReason(err: unknown): string {
+  const summary = summarizeError(err);
+  const parts = [summary.name];
+  if (summary.code !== undefined) parts.push(`code ${summary.code}`);
+  if (summary.status !== undefined) parts.push(`status ${summary.status}`);
+  return parts.join(', ');
+}
+
 function missingFromMap(members: ConversationParticipant[], map: Record<string, string>): string[] {
   const covered = new Set(Object.values(map));
   return members.filter((m) => !covered.has(groupMemberKey(m.phone))).map((m) => m.phone);
@@ -342,7 +361,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
           participants = created.participants;
         }
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const reason = railFailureReason(err);
         log.warn(
           { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
           'group rail creation failed - the thread stays inbound-only',
@@ -364,7 +383,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       try {
         participants ??= await port.fetchParticipants(ref.conversationSid);
       } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err);
+        const reason = railFailureReason(err);
         log.warn(
           { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
           'group rail participant read failed - the thread stays inbound-only',
@@ -412,7 +431,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
           participantMap = buildParticipantMap(participants);
           missing = missingFromMap(members, participantMap);
         } catch (err) {
-          const reason = err instanceof Error ? err.message : String(err);
+          const reason = railFailureReason(err);
           log.warn(
             { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
             'group rail participant repair failed - the thread stays inbound-only',

@@ -20,7 +20,10 @@ import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
 import { isValidHhMm, isValidIanaTimezone } from '../lib/quietHours.js';
 import { DEFAULT_MISSED_CALL_AUTOTEXT } from '../lib/smsCompliance.js';
-import type { GroupFingerprintClaim } from '../services/groupIdentityFingerprint.js';
+import {
+  GroupFingerprintCorruptError,
+  type GroupFingerprintClaim,
+} from '../services/groupIdentityFingerprint.js';
 import type { RepoDeps } from './conversationsRepo.js';
 
 /** The singleton org-settings item id (per-user rows would use other ids later). */
@@ -323,7 +326,11 @@ export function createSettingsRepo(deps: RepoDeps = {}): SettingsRepo {
         );
         const stored = (Item as { hash?: unknown } | undefined)?.hash;
         if (typeof stored !== 'string' || stored.length === 0) {
-          throw new Error(
+          // TYPED, so the boot guard does not retry it three times and then
+          // report a CORRUPT record as an availability problem (fix wave 2,
+          // adversarial 33). The record is right there; reading it again will
+          // return the same broken row every time.
+          throw new GroupFingerprintCorruptError(
             'group identity fingerprint exists per the conditional put but carries no hash',
           );
         }

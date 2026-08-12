@@ -17,9 +17,20 @@
 //      basis, so this should be unreachable;
 //   5. no rail -> ensureGroupRail INLINE (the send-time backstop of spec 6.1).
 //
-// Suppressed members are NOT excluded app-side (spec 4.4): Twilio drops them
-// per-recipient with a 21610 receipt, which is what records the suppression.
-// Excluding them here would silently change who is in the group text.
+// Suppressed members are NOT excluded app-side (spec 4.4): we post to the whole
+// conversation and Twilio decides per recipient. Excluding them here would
+// silently change who is in the group text - and a roster change is a NEW thread
+// identity by construction (spec 4.1), so it would fork every other member's
+// handset thread.
+//
+// WHAT WE DO INSTEAD, and why (live QA round 2, L3): Twilio does not merely drop
+// a suppressed member's copy, it SKIPS THE PARTICIPANT - no leg, no delivery
+// attempt, no 21610, and therefore NO DELIVERY RECEIPT, EVER. So a slot seeded
+// `queued` for a member we already know is suppressed can never move, and the
+// per-send staleness sweep raised a FALSE "receipts silent" ERROR on every send
+// to that group. The suppression state is already available through the
+// number-scoped seam at this point, so we SEED that member's slot terminal
+// (see services/groupDelivery). Labelling, not excluding.
 //
 // SEND-INTENT is documented PARITY with every existing send path: no
 // exactly-once guarantee exists anywhere in this app (a lost HTTP response plus
@@ -57,9 +68,11 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import { deriveGroupDeliveryStatus, suppressedSlot } from './groupDelivery.js';
 import { groupMemberKey } from './groupMembers.js';
 import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
 import { createGroupRailService, hasActiveGroupRail, type GroupRailEnsurer } from './groupRail.js';
+import { readNumberSuppression } from './numberSuppression.js';
 import { ConversationNotFoundError, SendRefusedError, SmsSendingDisabledError } from './sendMessage.js';
 
 /**
@@ -146,7 +159,14 @@ export interface GroupSendServiceDeps {
   logger?: Logger;
   groupConversations?: GroupConversationsPort;
   // Narrow Picks so a test fake is four functions, not a whole repo.
-  conversationsRepo?: Pick<ConversationsRepo, 'getById' | 'touchLastActivity'>;
+  // `findByParticipantPhone` is the READ half of the number-scoped suppression
+  // seam (services/numberSuppression) - the same seam the roster chip and the
+  // 21610 receipts path use, so the delivery slot and the member chip can never
+  // disagree about one handset.
+  conversationsRepo?: Pick<
+    ConversationsRepo,
+    'getById' | 'touchLastActivity' | 'findByParticipantPhone'
+  >;
   messagesRepo?: Pick<MessagesRepo, 'append'>;
   contactsRepo?: Pick<ContactsRepo, 'findByPhone'>;
   auditRepo?: Pick<AuditRepo, 'append'>;
@@ -306,8 +326,35 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
     //   - the staleness DUE ROW, which after spec 16.2 is the ONLY detector of
     //     a dead receipts webhook. Enqueuing it after the append would leave a
     //     window where a send exists with nothing watching it.
+    // (7a) THE SEED, and the one place a known-suppressed member is labelled.
+    // Read through the SAME number-scoped seam the roster chip reads, passing
+    // the contact we already resolved above so this adds no contact read. A
+    // read FAILURE is not an answer: it falls back to `queued`, which is the
+    // pre-existing behavior (worst case, the old false alarm) rather than
+    // mislabelling a reachable member as opted out.
     const deliveryRecipients: Record<string, RelayRecipientDelivery> = {};
-    for (const member of members) deliveryRecipients[groupMemberKey(member.phone)] = { status: 'queued' };
+    for (const { member, contact } of resolved) {
+      const key = groupMemberKey(member.phone);
+      let suppressed = false;
+      try {
+        const state = await readNumberSuppression(
+          { contactsRepo: contacts, conversationsRepo: conversations },
+          member.phone,
+          { contact },
+        );
+        suppressed = state.suppressed;
+      } catch (err) {
+        log.warn(
+          { err, conversationId, contactId: contact?.contactId },
+          'group send: suppression read failed - member slot seeded queued (a stuck slot is recoverable; a wrong "opted out" label is not)',
+        );
+      }
+      deliveryRecipients[key] = suppressed ? suppressedSlot() : { status: 'queued' };
+    }
+    // Spec 4.3: the aggregate derives from the slots. It is `queued` for an
+    // ordinary send and only differs when EVERY member is suppressed - a send
+    // that reaches nobody and will never receive a receipt to say so.
+    const seededStatus = deriveGroupDeliveryStatus(Object.values(deliveryRecipients));
 
     const at = now();
     const deadlineAt = new Date(at.getTime() + GROUP_SEND_STALENESS_MS).toISOString();
@@ -324,7 +371,8 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       direction: 'outbound',
       author,
       body,
-      deliveryStatus: 'queued',
+      deliveryStatus: seededStatus.status,
+      ...(seededStatus.errorCode !== undefined && { errorCode: seededStatus.errorCode }),
       deliveryRecipients,
       groupRailSnapshot: { conversationSid: conversationSid as string, participantMap },
       dueRow: buildGroupSendDueRow({
@@ -364,7 +412,7 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       conversationId,
       tsMsgId: appended.tsMsgId,
       direction: 'outbound',
-      deliveryStatus: 'queued',
+      deliveryStatus: seededStatus.status,
     });
     events.emit('conversation.updated', toConversationUpdatedEvent(touched));
 
@@ -382,7 +430,7 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       conversationId,
       providerSid: posted.messageSid,
       tsMsgId: appended.tsMsgId,
-      status: 'queued',
+      status: seededStatus.status,
     };
   };
 }

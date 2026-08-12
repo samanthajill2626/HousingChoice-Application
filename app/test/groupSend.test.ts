@@ -81,6 +81,14 @@ function makeFakes(
     businessPhoneNumber?: string | undefined;
     rail?: GroupRailEnsurer;
     port?: Partial<GroupConversationsPort>;
+    /** 1:1 threads the number-scoped suppression seam reads (T3.5). A SECONDARY
+     *  number carries its opt-out here, never on the contact flag. */
+    oneToOneThreads?: ConversationItem[];
+    /** Make the suppression READ throw, to prove the send survives it. */
+    failSuppressionRead?: boolean;
+    /** phone -> the contact it resolves to, for numbers that are NOT that
+     *  contact's primary (an attached second handset). */
+    attachedNumbers?: Record<string, ContactItem>;
   } = {},
 ): Fakes {
   const members = overrides.members ?? [ANN, MARCUS];
@@ -103,6 +111,12 @@ function makeFakes(
     overrides.contacts ??
     members.map((m) => consentingContact(m.contactId, m.phone));
   const contactsByPhone = new Map(contacts.map((c) => [c.phone ?? '', c]));
+  // POINTER-AWARE lookups: an ATTACHED second number resolves to the contact
+  // whose PRIMARY is a different number. That asymmetry is the whole reason
+  // suppression is number-scoped, so a fake that cannot express it cannot test it.
+  for (const [phone, contact] of Object.entries(overrides.attachedNumbers ?? {})) {
+    contactsByPhone.set(phone, contact);
+  }
 
   const fakes = {
     conversation,
@@ -159,6 +173,13 @@ function makeFakes(
       touchLastActivity: async (_id, previewText, ts) => {
         fakes.touched.push({ previewText, ts });
         return conversation;
+      },
+      // The READ half of the number-scoped suppression seam. It must NEVER see
+      // the group thread itself (spec 4.4 forbids sms_opt_out on a group), which
+      // is structurally guaranteed here: a group_text carries no participant_phone.
+      findByParticipantPhone: async (phone) => {
+        if (overrides.failSuppressionRead === true) throw new Error('index unavailable');
+        return (overrides.oneToOneThreads ?? []).filter((c) => c.participant_phone === phone);
       },
     },
     messagesRepo: {
@@ -384,7 +405,7 @@ describe('groupSend - refusals, in order', () => {
     );
   });
 
-  it('does NOT exclude a suppressed member app-side - Twilio filters per recipient and the 21610 receipt records it', async () => {
+  it('does NOT exclude a suppressed member app-side - the post still addresses the whole conversation', async () => {
     const optedOut = {
       ...consentingContact('contact-marcus', '+16175550222'),
       sms_opt_out: true,
@@ -395,6 +416,122 @@ describe('groupSend - refusals, in order', () => {
       'phone#+16175550111',
       'phone#+16175550222',
     ]);
+    // ONE post, into the rail, with no per-member addressing anywhere: dropping
+    // a participant would be a roster change, and a roster change is a NEW
+    // thread identity (spec 4.1) that forks every other member's handset thread.
+    expect(f.posted).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LIVE QA ROUND 2, L3 - the known-suppressed member's slot
+// ---------------------------------------------------------------------------
+//
+// GROUND TRUTH, established live against the Messages API: after a member opted
+// out, a group send produced NO Twilio message record for that leg at all.
+// Conversations SKIPS the participant - no leg, no delivery attempt, no 21610,
+// and therefore NO RECEIPT, EVER. A slot seeded `queued` for them can never
+// move, so the per-send staleness sweep raised a FALSE "group delivery receipts
+// silent - check Conversations service webhook config" ERROR on every send to
+// that group, pointing the operator at a perfectly healthy webhook.
+describe('groupSend - seeding a KNOWN-suppressed member terminal (L3)', () => {
+  const optedOutPrimary = {
+    ...consentingContact('contact-marcus', '+16175550222'),
+    sms_opt_out: true,
+  } as ContactItem;
+
+  it('seeds the suppressed member TERMINAL and everyone else queued', async () => {
+    const f = makeFakes({
+      contacts: [consentingContact('contact-ann', '+16175550111'), optedOutPrimary],
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+
+    expect(f.appended[0]?.deliveryRecipients).toEqual({
+      'phone#+16175550111': { status: 'queued' },
+      'phone#+16175550222': { status: 'undelivered', errorCode: 'contact_opted_out' },
+    });
+  });
+
+  it('leaves EVERY slot queued when nobody is suppressed', async () => {
+    const f = makeFakes();
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.appended[0]?.deliveryRecipients).toEqual({
+      'phone#+16175550111': { status: 'queued' },
+      'phone#+16175550222': { status: 'queued' },
+    });
+    expect(f.appended[0]?.deliveryStatus).toBe('queued');
+  });
+
+  it('reads suppression at the NUMBER scope, not the contact - a secondary number counts', async () => {
+    // The contact flag is authoritative for the PRIMARY number only; a member
+    // who silenced a SECOND handset carries it on that number's own 1:1 thread.
+    // Missing that leaves exactly the stuck slot the alarm then blames on a
+    // webhook.
+    const f = makeFakes({
+      members: [ANN, member('+16175550999', 'contact-marcus', 'Marcus second')],
+      contacts: [
+        consentingContact('contact-ann', '+16175550111'),
+        consentingContact('contact-marcus', '+16175550222'),
+      ],
+      // +16175550999 is Marcus's SECOND handset: it resolves to his contact,
+      // whose own `phone` (the primary) is a different number entirely.
+      attachedNumbers: {
+        '+16175550999': consentingContact('contact-marcus', '+16175550222'),
+      },
+      oneToOneThreads: [
+        {
+          conversationId: 'one-to-one-marcus-second',
+          type: 'tenant',
+          status: 'open',
+          ai_mode: 'auto',
+          created_at: '2026-08-01T00:00:00.000Z',
+          last_activity_at: '2026-08-01T00:00:00.000Z',
+          participant_phone: '+16175550999',
+          sms_opt_out: true,
+        } as unknown as ConversationItem,
+      ],
+    });
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.appended[0]?.deliveryRecipients?.['phone#+16175550999']).toEqual({
+      status: 'undelivered',
+      errorCode: 'contact_opted_out',
+    });
+  });
+
+  it('falls back to `queued` when the suppression read FAILS, never to a wrong label', async () => {
+    // A stuck slot is recoverable (the operator re-sends); telling staff a
+    // reachable member opted out is not. The send itself must survive either way.
+    const f = makeFakes({
+      contacts: [
+        consentingContact('contact-ann', '+16175550111'),
+        consentingContact('contact-marcus', '+16175550222'),
+      ],
+      failSuppressionRead: true,
+    });
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(out.providerSid).toBe('IMposted1');
+    expect(f.appended[0]?.deliveryRecipients).toEqual({
+      'phone#+16175550111': { status: 'queued' },
+      'phone#+16175550222': { status: 'queued' },
+    });
+  });
+
+  it('derives the AGGREGATE as undelivered when EVERY member is suppressed (L4)', async () => {
+    // Nothing was sent to anyone, and no receipt will ever arrive to say so, so
+    // leaving the message `queued` would be a send that never finishes.
+    const f = makeFakes({
+      contacts: [
+        { ...consentingContact('contact-ann', '+16175550111'), sms_opt_out: true } as ContactItem,
+        optedOutPrimary,
+      ],
+    });
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+    expect(f.appended[0]?.deliveryStatus).toBe('undelivered');
+    expect(f.appended[0]?.errorCode).toBe('contact_opted_out');
+    expect(out.status).toBe('undelivered');
+    expect(f.emitted.find((e) => e.event === 'message.persisted')?.payload).toMatchObject({
+      deliveryStatus: 'undelivered',
+    });
   });
 });
 

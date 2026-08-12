@@ -30,6 +30,7 @@ import {
   type MessagesRepo,
   type RelayRecipientDelivery,
 } from '../repos/messagesRepo.js';
+import { SUPPRESSED_ERROR_CODE } from './groupDelivery.js';
 import { createGroupReceiptsService, type GroupReceiptsService } from './groupReceipts.js';
 
 /**
@@ -45,6 +46,26 @@ export const GROUP_TERMINAL_DELIVERY_STATUSES: ReadonlySet<string> = new Set([
 
 export function isGroupDeliveryTerminal(status: string | undefined): boolean {
   return status !== undefined && GROUP_TERMINAL_DELIVERY_STATUSES.has(status);
+}
+
+/**
+ * Is this SLOT something the alarm should stop waiting on?
+ *
+ * Terminal by STATUS, or terminal because we already know NO RECEIPT WILL EVER
+ * ARRIVE for it. Live QA round 2 established that Twilio SKIPS a suppressed
+ * participant outright - no leg, no delivery attempt, no 21610 - so a leg
+ * carrying the synthetic suppression code is not pending, it is finished. Before
+ * this, one opted-out member made EVERY send to that group raise the false
+ * "receipts silent - check Conversations service webhook config" ERROR, pointing
+ * the operator at a webhook that was perfectly healthy.
+ *
+ * The send path seeds such a slot `undelivered` (already terminal by status), so
+ * the code clause is DEFENSE IN DEPTH: the alarm's real contract is "a receipt we
+ * will never get is not a lost receipt", and keying on the code as well makes
+ * that true no matter which terminal status a suppressed leg is written with.
+ */
+export function isGroupSlotTerminal(slot: Pick<RelayRecipientDelivery, 'status' | 'errorCode'>): boolean {
+  return isGroupDeliveryTerminal(slot.status) || slot.errorCode === SUPPRESSED_ERROR_CODE;
 }
 
 export type StalenessOutcome =
@@ -126,7 +147,7 @@ export function createGroupSendStaleness(
     // "empty map" branch would be dead code. A genuinely empty map here means
     // the seed itself failed, which is a real non-terminal state - report it.
     const stuck = slotsOf(message)
-      .filter(([, slot]) => !isGroupDeliveryTerminal(slot.status))
+      .filter(([, slot]) => !isGroupSlotTerminal(slot))
       .map(([memberKey, slot]) => ({ memberKey, status: slot.status }));
     return { outcome: stuck.length > 0 ? 'alarmed' : 'cleared', stuck };
   }

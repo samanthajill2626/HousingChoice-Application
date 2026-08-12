@@ -25,9 +25,11 @@ import {
   GROUP_SEND_STALENESS_MS,
   type RelayRecipientDelivery,
 } from '../src/repos/messagesRepo.js';
+import { suppressedSlot } from '../src/services/groupDelivery.js';
 import {
   createGroupSendStaleness,
   isGroupDeliveryTerminal,
+  isGroupSlotTerminal,
 } from '../src/services/groupSendStaleness.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -60,6 +62,30 @@ describe('group-local terminal predicate (A18)', () => {
     expect(isGroupDeliveryTerminal('sent')).toBe(false);
     expect(isGroupDeliveryTerminal('queued')).toBe(false);
     expect(isGroupDeliveryTerminal(undefined)).toBe(false);
+  });
+});
+
+// LIVE QA ROUND 2, L3. Twilio SKIPS a suppressed participant - no leg, no
+// attempt, no 21610 - so no receipt will EVER arrive for that member. Treating
+// their slot as pending made every send to a group containing one opted-out
+// member raise the false "receipts silent" ERROR, which trains the operator to
+// ignore the only alarm that detects a genuinely dead receipts webhook.
+describe('slot-level terminality: a leg no receipt will ever arrive for (L3)', () => {
+  it('counts a SUPPRESSED slot as terminal, however it is spelled', () => {
+    expect(isGroupSlotTerminal(suppressedSlot())).toBe(true);
+    // Defense in depth: the alarm's contract is about receipts that will never
+    // come, so the synthetic code alone settles it - independent of the status
+    // the seed happens to use.
+    expect(isGroupSlotTerminal({ status: 'queued', errorCode: 'contact_opted_out' })).toBe(true);
+  });
+
+  it('still counts an ordinary pending slot as NON-terminal', () => {
+    expect(isGroupSlotTerminal({ status: 'queued' })).toBe(false);
+    expect(isGroupSlotTerminal({ status: 'sent' })).toBe(false);
+    // A REAL carrier failure keeps its own code and is terminal on status.
+    expect(isGroupSlotTerminal({ status: 'failed', errorCode: '30007' })).toBe(true);
+    // A pending slot with an unrelated code is still pending.
+    expect(isGroupSlotTerminal({ status: 'sent', errorCode: '30003' })).toBe(false);
   });
 });
 
@@ -193,6 +219,44 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
     expect(outcome.alarmed).toBe(0);
     expect(outcome.cleared).toBe(1);
+  });
+
+  it('a KNOWN-SUPPRESSED member does NOT raise the false receipts-silent alarm (L3)', async () => {
+    // The live shape exactly: one member opted out, one delivered. Twilio never
+    // created the opted-out leg, so no receipt can ever move that slot.
+    await groupSend({
+      'phone#+15551110020': { status: 'delivered' },
+      'phone#+15551110021': suppressedSlot(),
+    });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+    const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(outcome.alarmed).toBe(0);
+    expect(outcome.cleared).toBe(1);
+    expect(log.error).not.toHaveBeenCalled();
+  });
+
+  it('and the SAME send with that member left `queued` still alarms - the alarm is intact', async () => {
+    // The discriminator. Without the seed the slot is a bare `queued`, and this
+    // is the false ERROR the operator saw on every send to that group. Keeping
+    // it proves the fix is a LABEL, not a weakening of the alarm.
+    const send = await groupSend({
+      'phone#+15551110022': { status: 'delivered' },
+      'phone#+15551110023': { status: 'queued' },
+    });
+    const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
+
+    const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);
+
+    expect(outcome.alarmed).toBe(1);
+    expect(log.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        event: 'group_send_receipts_stale',
+        conversationId: send.conversationId,
+      }),
+      'group delivery receipts silent - check Conversations service webhook config',
+    );
   });
 
   it('does NOT alarm before the deadline', async () => {

@@ -40,6 +40,7 @@ import {
   type MessagesRepo,
   type ParkedGroupReceipt,
 } from '../repos/messagesRepo.js';
+import { deriveGroupDeliveryStatus, SUPPRESSED_ERROR_CODE } from './groupDelivery.js';
 import { applyNumberSuppression, readNumberSuppression } from './numberSuppression.js';
 
 /** Twilio's per-recipient opt-out refusal. */
@@ -47,15 +48,12 @@ export const OPT_OUT_ERROR_CODE = '21610';
 
 /**
  * What a 21610 leg's slot records instead of the raw Twilio code (S4's open
- * question N11, ruled by the orchestrator). `contact_opted_out` is the value
- * the rest of the app ALREADY reads: the timeline's "N members opted out" note
- * counts it, and the delivery rollup excludes those legs from `delivered N/M`
- * rather than painting the chip red. Leaving the raw `21610` there would render
- * a suppressed member as a hard FAILURE and leave the note silent - a
- * suppression the UI cannot see is not a suppression. The relay fan-out writes
- * this same synthetic code for the same reason.
+ * question N11, ruled by the orchestrator). Defined in `services/groupDelivery`
+ * so the SEND path can seed the same value for a member it already knows is
+ * suppressed (L3), and re-exported here because this module is where the rest of
+ * the app has always imported it from.
  */
-export const SUPPRESSED_ERROR_CODE = 'contact_opted_out';
+export { SUPPRESSED_ERROR_CODE };
 
 /**
  * How long to wait once before deciding an IMxx is genuinely unknown. The send
@@ -154,6 +152,8 @@ export interface GroupReceiptsServiceDeps {
   messagesRepo?: Pick<
     MessagesRepo,
     | 'getByProviderSid'
+    | 'getByTsMsgId'
+    | 'updateDeliveryStatus'
     | 'updateRecipientDeliveryStatus'
     | 'setRecipientDeliverySid'
     | 'parkGroupReceipt'
@@ -275,6 +275,59 @@ export function createGroupReceiptsService(
     );
   }
 
+  /**
+   * Derive and write the message's AGGREGATE `delivery_status` from its slots
+   * (spec 4.3 - "the aggregate derives as relay/broadcast conventions do").
+   *
+   * WHY IT RE-READS. Two receipts for one message land concurrently. Deriving
+   * from the copy this call already holds means each one sees only its own
+   * transition, both derive `queued`, both skip - and the aggregate stays
+   * `queued` on a fully delivered send. That is the broadcast-DLR-rollup race,
+   * and it is why this takes one point GET (both key parts are in hand) after
+   * its own write has committed: the LAST writer's re-read is after every other
+   * writer's commit, so somebody always sees the finished picture. Our own
+   * transition is merged in regardless, so an eventually-consistent read can
+   * never lose the change we just made.
+   *
+   * BEST-EFFORT: the per-member slots are the truth the thread renders, and this
+   * is a derived summary. A failure here must never fail a receipt that was
+   * already applied, so it is logged and swallowed.
+   */
+  async function rollUpAggregate(
+    message: MessageItem,
+    applied: { memberKey: string; status: DeliveryStatus; errorCode: string | undefined },
+  ): Promise<void> {
+    try {
+      const fresh = await messages.getByTsMsgId(message.conversationId, message.tsMsgId);
+      const slots = { ...(fresh ?? message).delivery_recipients };
+      slots[applied.memberKey] = {
+        ...slots[applied.memberKey],
+        status: applied.status,
+        ...(applied.errorCode !== undefined && { errorCode: applied.errorCode }),
+      };
+      const rollup = deriveGroupDeliveryStatus(Object.values(slots));
+      // `queued` is the seeded value: writing it would fail the forward-only
+      // guard and log a spurious "would regress" line on every ordinary receipt.
+      if (rollup.status === 'queued') return;
+      if (rollup.status === (fresh ?? message).delivery_status) return;
+      await messages.updateDeliveryStatus(
+        (fresh ?? message).provider_sid,
+        rollup.status,
+        rollup.errorCode,
+      );
+    } catch (err) {
+      log.warn(
+        {
+          err,
+          event: 'group_delivery_rollup_failed',
+          conversationId: message.conversationId,
+          providerSid: message.provider_sid,
+        },
+        'group aggregate delivery_status derivation failed - the per-member slots are still correct',
+      );
+    }
+  }
+
   async function applyToMessage(
     message: MessageItem,
     input: GroupReceiptInput,
@@ -314,6 +367,12 @@ export function createGroupReceiptsService(
       },
     );
     if (applied) {
+      // Spec 4.3's aggregate, derived from the slots this transition just moved.
+      await rollUpAggregate(message, {
+        memberKey,
+        status: ruling.status,
+        errorCode: effectiveErrorCode,
+      });
       // REFRESH THE UI. A per-recipient delivery move re-renders the group
       // thread, exactly as it re-renders the relay thread - the relay status
       // route emits this same event immediately after its own successful

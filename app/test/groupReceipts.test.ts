@@ -10,7 +10,7 @@ import { createEventBus, type AppEventName } from '../src/lib/events.js';
 import { createLogger } from '../src/lib/logger.js';
 import type { ContactItem } from '../src/repos/contactsRepo.js';
 import type { ConversationItem } from '../src/repos/conversationsRepo.js';
-import type { MessageItem, ParkedGroupReceipt } from '../src/repos/messagesRepo.js';
+import type { DeliveryStatus, MessageItem, ParkedGroupReceipt } from '../src/repos/messagesRepo.js';
 import { allowedPriorStatuses } from '../src/repos/messagesRepo.js';
 import {
   conversationsStatusRuling,
@@ -121,6 +121,20 @@ function makeFakes(
     now: () => new Date('2026-08-11T13:05:00.000Z'),
     messagesRepo: {
       getByProviderSid: async (sid) => messages.find((m) => m.provider_sid === sid),
+      getByTsMsgId: async (conversationId, tsMsgId) =>
+        messages.find((m) => m.conversationId === conversationId && m.tsMsgId === tsMsgId),
+      // The AGGREGATE writer (spec 4.3). Forward-only, exactly like the repo, so
+      // a test can prove the derivation never regresses a finished message.
+      updateDeliveryStatus: async (sid, status, errorCode) => {
+        const item = messages.find((m) => m.provider_sid === sid);
+        if (!item) return false;
+        if (!allowedPriorStatuses(status).includes(item.delivery_status as DeliveryStatus)) {
+          return false;
+        }
+        item.delivery_status = status;
+        if (errorCode !== undefined) item.error_code = errorCode;
+        return true;
+      },
       updateRecipientDeliveryStatus: async (
         conversationId,
         tsMsgId,
@@ -389,6 +403,83 @@ describe('the SSE push that makes the rollup live', () => {
     await f.service.drainParked('IMposted1');
 
     expect(f.emitted.map((e) => e.event)).toEqual(['message.persisted']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LIVE QA ROUND 2, L4 - the aggregate delivery_status
+// ---------------------------------------------------------------------------
+//
+// LIVE: both outbound group messages read `delivery_status: queued` with every
+// per-member slot `delivered`. Neither groupSend nor this service ever wrote the
+// field, though spec 4.3 requires it to derive as relay/broadcast conventions
+// do. It survived review because the thread view reads the SLOTS, so the wrong
+// aggregate is invisible exactly where a human would have noticed it.
+describe('the AGGREGATE delivery_status (spec 4.3, L4)', () => {
+  const aggregate = (f: Fakes): string | undefined =>
+    f.messages.find((m) => m.provider_sid === 'IMposted1')?.delivery_status;
+
+  it('stays `queued` while a leg is still queued - nothing is asserted early', async () => {
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    expect(aggregate(f)).toBe('queued');
+  });
+
+  it('moves to `sent` once every leg has left Twilio', async () => {
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'sent' });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBmarcus', status: 'sent' });
+    expect(aggregate(f)).toBe('sent');
+  });
+
+  it('FINALIZES at `delivered` when every leg lands - the live defect', async () => {
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBmarcus', status: 'delivered' });
+    expect(aggregate(f)).toBe('delivered');
+  });
+
+  it('finalizes AROUND a suppressed leg rather than waiting for a receipt that never comes', async () => {
+    // The L3 seed: Twilio skipped this participant, so the aggregate must not
+    // count them - otherwise one opted-out member freezes every send at queued.
+    const f = makeFakes({
+      message: outboundGroupMessage({
+        delivery_recipients: {
+          [ANN_KEY]: { status: 'queued' },
+          [MARCUS_KEY]: { status: 'undelivered', errorCode: SUPPRESSED_ERROR_CODE },
+        },
+      }),
+    });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    expect(aggregate(f)).toBe('delivered');
+  });
+
+  it('reports a real carrier failure, with its code', async () => {
+    const f = makeFakes();
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBmarcus',
+      status: 'failed',
+      errorCode: '30007',
+    });
+    const message = f.messages.find((m) => m.provider_sid === 'IMposted1');
+    expect(message?.delivery_status).toBe('failed');
+    expect(message?.error_code).toBe('30007');
+  });
+
+  it('a 21610 leg does NOT make the message a failure', async () => {
+    // The synthetic code exists precisely so a suppression is not painted as a
+    // hard failure. A group text that reached everybody else is `delivered`.
+    const f = makeFakes({ contacts: [] });
+    await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBmarcus',
+      status: 'undelivered',
+      errorCode: '21610',
+    });
+    await f.service.applyReceipt({ messageSid: 'IMposted1', participantSid: 'MBann', status: 'delivered' });
+    expect(aggregate(f)).toBe('delivered');
   });
 });
 

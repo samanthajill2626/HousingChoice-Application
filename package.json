@@ -38,6 +38,7 @@
     "e2e:reseed": "node scripts/e2e-reseed.mjs",
     "e2e:stop": "node scripts/e2e-stop.mjs",
     "e2e:report": "npm run report -w @housingchoice/e2e",
+    "perf:pages": "tsx e2e/performance/cli.ts",
     "lint": "eslint .",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "deploy:dev": "node scripts/deploy.mjs dev",

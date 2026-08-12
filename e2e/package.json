@@ -6,6 +6,7 @@
   "scripts": {
     "e2e": "playwright test",
     "report": "playwright show-report .artifacts/html-report",
+    "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json"
   },
   "devDependencies": {

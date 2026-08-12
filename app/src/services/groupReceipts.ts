@@ -26,7 +26,29 @@
 // so `queued` can never be re-applied. A receipt that beats its own append has
 // to wait for the append, which is exactly what parking is.
 //
+// THE INLINE BUDGET, MEASURED (fix wave 5, conformance F3). Spec 7 sizes this
+// handler at "two bounded writes ... anything heavier moves behind
+// jobs.enqueue()", citing Twilio's 5s Conversations-webhook timeout. What one
+// `applyReceipt` actually performs, worst case and sequentially:
+//   1. the provider-sid read;
+//   2. on a miss, a 250ms sleep plus a SECOND read (UNKNOWN_MESSAGE_RETRY_DELAY_MS);
+//   3. a conversation read, only when the message's own MBxx snapshot misses;
+//   4. on a 21610 leg only: a contact read, a suppression read, a
+//      createOrGetByParticipantPhone write, an opt-out write and an audit write;
+//   5. the guarded slot update - the authoritative write;
+//   6. a re-read plus the aggregate write.
+// That is up to ~8 round trips plus one deliberate 250ms sleep: comfortably
+// inside 5s at DynamoDB single-digit-ms latencies, and nowhere near "two
+// writes". The excess is not incidental - spec 15.2a MANDATES the park-and-retry
+// that forces (2), and (4) is the suppression bookkeeping nobody else does.
+// Moving any of it behind jobs.enqueue() would break the one property the whole
+// path is built on: a receipt is applied, or it is parked, before we ack. So the
+// budget prose is superseded here deliberately, and this is the record of it -
+// the constraint that actually binds is the 5s wall clock, which is measured
+// against, not the write count.
+//
 // PII (doc 9): ids, codes and counts only.
+import { summarizeError } from '../lib/errors.js';
 import { appEvents, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { conversationTypeFor } from '../lib/voiceMasking.js';
@@ -72,6 +94,24 @@ export const MAX_PARKED_GROUP_RECEIPTS = 10;
 
 /** Cleanup horizon for a parked receipt. TTL is never the drain (spec 15.5). */
 export const PARKED_RECEIPT_CLEANUP_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * How long a park may sit before its eventual drain is worth a WARN.
+ *
+ * THE COUNTER FOR AN ORPHANED PARK, AND ITS HONEST LIMIT (fix wave 5,
+ * conformance F9). A park whose message row NEVER appears is reaped only by the
+ * 24h TTL, silently. There is no sweep that could find it: parked receipts live
+ * one partition per IMxx (`groupreceipt#<IMxx>`), so enumerating them across
+ * messages would be a table scan or a new GSI - neither of which this feature's
+ * scale justifies. What IS countable without either is the PAIR of events this
+ * module already emits per receipt: `group_receipt_parked` at park time and
+ * `group_receipt_drained` at drain time. Their difference over a window is the
+ * orphan rate, and it is a CloudWatch metric filter away. This threshold adds
+ * the third signal - a park that was drained, but far too late - so a slow
+ * append and a never-appended message are distinguishable rather than both
+ * being silence.
+ */
+export const PARKED_RECEIPT_STALE_MS = 15 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // The EXPLICIT Conversations delivery-status map
@@ -351,7 +391,31 @@ export function createGroupReceiptsService(
 
     let effectiveErrorCode = input.errorCode;
     if (input.errorCode === OPT_OUT_ERROR_CODE) {
-      await recordSuppression(memberKey, message, input.channelMessageSid);
+      // BEST EFFORT, LIKE EVERY OTHER DERIVED BOOKKEEPING STEP IN THIS MODULE
+      // (fix wave 5, adversarial 8). recordSuppression performs four to six repo
+      // operations, and it runs BEFORE the authoritative slot write. Unguarded,
+      // any one of them throwing propagated out of applyReceipt into the route's
+      // catch-all, which logs and returns 200 - so the delivery outcome was
+      // never written, the receipt was not parked (parking only happens on an
+      // unknown IMxx), Twilio did not redeliver because we returned 200 by
+      // design, and ten minutes later sweepSendStaleness alarmed
+      // `group_send_receipts_stale` at ERROR pointing the operator at a
+      // perfectly healthy webhook. The receipt is the fact; the suppression
+      // bookkeeping is derived from it, and derived work never takes the fact
+      // down with it (see rollUpAggregate, which already says exactly this).
+      try {
+        await recordSuppression(memberKey, message, input.channelMessageSid);
+      } catch (err) {
+        log.warn(
+          {
+            err: summarizeError(err),
+            event: 'group_receipt_suppression_failed',
+            conversationId: message.conversationId,
+            providerSid: input.messageSid,
+          },
+          'group 21610 suppression bookkeeping failed - the delivery receipt is still applied',
+        );
+      }
       effectiveErrorCode = SUPPRESSED_ERROR_CODE;
     }
 
@@ -414,6 +478,17 @@ export function createGroupReceiptsService(
     input: GroupReceiptInput,
     ruling: { status: DeliveryStatus },
   ): Promise<GroupReceiptOutcome> {
+    // BEST EFFORT BY CONSTRUCTION, AND NOW MUCH TIGHTER (fix wave 5,
+    // adversarial 17). DynamoDB cannot make a Put conditional on a PARTITION's
+    // cardinality, only on the item being written - so a true cardinality fence
+    // would need a counter item and a transaction on every park, which is real
+    // cost on a 5s-budget webhook handler to defend a bound whose only job is
+    // stopping row accrual. What the read below now is, instead, is STRONGLY
+    // CONSISTENT (see listParkedGroupReceipts), which removes read lag as a way
+    // to blow past the cap and leaves only a genuine same-instant interleave.
+    // Exceeding the bound by a few rows under that interleave is accepted: the
+    // rows carry a 24h TTL and the route is signature-gated, so the harm is
+    // bounded either way.
     const existing = await messages.listParkedGroupReceipts(input.messageSid);
     const isNewSlot = !existing.some((p) => p.participantSid === input.participantSid);
     if (isNewSlot && existing.length >= MAX_PARKED_GROUP_RECEIPTS) {
@@ -527,6 +602,21 @@ export function createGroupReceiptsService(
         }
         await messages.deleteParkedGroupReceipt(providerSid, receipt.participantSid);
         drained += 1;
+        // A park that sat far longer than the send path's drain window means the
+        // message row took minutes to exist (or never did until the staleness
+        // sweep found it). Countable, per receipt (fix wave 5, conformance F9).
+        const ageMs = Date.parse(receipt.parkedAt);
+        if (Number.isFinite(ageMs) && now().getTime() - ageMs >= PARKED_RECEIPT_STALE_MS) {
+          log.warn(
+            {
+              event: 'group_receipt_park_stale',
+              providerSid,
+              parkedAt: receipt.parkedAt,
+              ageMs: now().getTime() - ageMs,
+            },
+            'a parked group delivery receipt sat well past its drain window before being applied',
+          );
+        }
       }
       log.info(
         { event: 'group_receipts_drained', providerSid, drained },

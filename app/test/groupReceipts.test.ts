@@ -41,7 +41,7 @@ interface Fakes {
   /** `onPark` fires INSIDE parkGroupReceipt - models the append committing
    *  mid-park. Held in its own object because makeFakes returns a SPREAD copy,
    *  so a field set on the result would never reach the closure. */
-  hooks: { onPark?: () => void };
+  hooks: { onPark?: () => void; onContactRead?: () => void };
   capture: LogCapture;
   service: ReturnType<typeof createGroupReceiptsService>;
 }
@@ -91,7 +91,7 @@ function makeFakes(
   };
   const conversations = new Map<string, ConversationItem>([['group-1', conversation]]);
   const contacts = overrides.contacts ?? [];
-  const hooks: { onPark?: () => void } = {};
+  const hooks: { onPark?: () => void; onContactRead?: () => void } = {};
   const capture = createLogCapture();
 
   const fakes = {
@@ -210,8 +210,12 @@ function makeFakes(
       },
     },
     contactsRepo: {
-      findByPhone: async (phone) =>
-        contacts.find((c) => c.phone === phone || c.phones?.some((p) => p.phone === phone)),
+      findByPhone: async (phone) => {
+        // A seam for the ONE failure adversarial 8 is about: suppression
+        // bookkeeping throwing before the authoritative slot write.
+        hooks.onContactRead?.();
+        return contacts.find((c) => c.phone === phone || c.phones?.some((p) => p.phone === phone));
+      },
       setFlag: async (contactId, flag) => {
         fakes.flagWrites.push({ contactId, flag, value: true });
         const c = contacts.find((x) => x.contactId === contactId);
@@ -791,6 +795,49 @@ describe('21610 - the suppression bookkeeping nobody else does', () => {
 
     expect(f.contacts[0]?.sms_opt_out).toBe(false);
     expect(f.conversations.get('1to1-+16175550222')?.sms_opt_out).toBe(false);
+  });
+
+  // THE DEFECT THIS PINS (fix wave 5, adversarial 8). recordSuppression runs
+  // BEFORE the authoritative slot write and performs four to six repo
+  // operations. Unguarded, any one of them throwing propagated out of
+  // applyReceipt into the route's catch-all, which logs and returns 200. So:
+  // the slot stayed `queued`, the receipt was NOT parked (parking only happens
+  // on an unknown IMxx), Twilio did not redeliver because we returned 200 by
+  // design, and ten minutes later sweepSendStaleness alarmed
+  // `group_send_receipts_stale` at ERROR - pointing the operator at a webhook
+  // that was working perfectly. Derived bookkeeping never takes the fact down.
+  it('a suppression-bookkeeping FAILURE still applies the delivery receipt, and says so', async () => {
+    const f = makeFakes({
+      contacts: [
+        {
+          contactId: 'c-marcus',
+          type: 'tenant',
+          status: 'active',
+          phone: '+16175550222',
+          created_at: '2026-08-01T00:00:00.000Z',
+          updated_at: '2026-08-01T00:00:00.000Z',
+        } as ContactItem,
+      ],
+    });
+    f.hooks.onContactRead = () => {
+      throw new Error('ProvisionedThroughputExceededException');
+    };
+
+    const outcome = await f.service.applyReceipt({
+      messageSid: 'IMposted1',
+      participantSid: 'MBmarcus',
+      status: 'failed',
+      errorCode: '21610',
+    });
+
+    // The receipt is the FACT and it landed - terminal, and labelled suppressed.
+    expect(outcome.outcome).toBe('applied');
+    expect(slot(f, MARCUS_KEY)?.status).toBe('failed');
+    expect(slot(f, MARCUS_KEY)?.errorCode).toBe(SUPPRESSED_ERROR_CODE);
+    // ...and the bookkeeping failure is visible rather than silent.
+    expect(
+      f.capture.atLevel(WARN).some((l) => l['event'] === 'group_receipt_suppression_failed'),
+    ).toBe(true);
   });
 
   it('records nothing but still applies the status when the number has no contact record', async () => {

@@ -643,6 +643,12 @@ describe('group detection: filing (T3.3)', () => {
     // PROCESSED, which is the half that never moved.
     expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
 
+    // Snapshot the books AFTER the STOP so the HELP half below is measured on
+    // its OWN writes only.
+    const conversationsAfterStop = new Set(world.conversations.keys());
+    const optOutSetsAfterStop = world.optOutSets.length;
+    const flagWritesAfterStop = world.flagWrites.length;
+
     const help = await signedTwilioPost(
       app,
       SMS_PATH,
@@ -653,6 +659,11 @@ describe('group detection: filing (T3.3)', () => {
       }),
     );
     expect(help.text).not.toContain('<Message>');
+    // The discriminating half (mirrors the group-HELP test): HELP mints NO extra
+    // conversation - the lazy 1:1 thunk is never resolved - and writes NO flags.
+    expect(new Set(world.conversations.keys())).toEqual(conversationsAfterStop);
+    expect(world.optOutSets).toHaveLength(optOutSetsAfterStop);
+    expect(world.flagWrites).toHaveLength(flagWritesAfterStop);
   });
 
   it('CORRUPT ENVELOPE: a STOP filed 1:1 for a GROUP reason is processed and draws no app reply', async () => {
@@ -1482,9 +1493,12 @@ describe('group detection: a REDELIVERY after a transient exclusion-set failure'
     );
 
     expect(res.status).toBe(200);
-    // The KEYWORD is still processed (the opt-out is recorded); only OUR reply
-    // is suppressed - Twilio's own standard opt-out auto-reply answers the
-    // sender 1:1 (issue twilio-standard-optout-double-reply owns that coupling).
+    // The KEYWORD is still processed - the opt-out IS recorded - while the app
+    // itself answers nothing. Twilio owns every keyword reply now (Advanced
+    // Opt-Out, configured with our filed copy); the coupling this used to defer
+    // to is discharged in docs/issues/twilio-standard-optout-double-reply.md,
+    // which is RESOLVED.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
     expect(res.text).not.toMatch(/<Message>/);
   });
 });

@@ -226,10 +226,13 @@ export type InboundKeywordKind = 'help' | 'opt_out' | 'opt_in';
  * OptOutType on a message regardless of its body. What bounds it is that Twilio
  * matches the EXACT keyword message, the same rule this function applies to the
  * body - a full sentence like "please stop sending tour reminders" is NOT
- * stamped and NOT classified, so it still fans out on the open relay path. That
- * is asserted here and verified live by the dev keyword canary's sentence probe
- * (RUNBOOK "Keyword auto-replies (Advanced Opt-Out)"). The open-path opt-in
- * narrowing continues to guard the bare-YES case.
+ * stamped and NOT classified, so it still fans out on the open relay path.
+ * Only OUR half of that is unit-asserted (app/test/smsCompliance.test.ts pins
+ * that such a sentence with NO OptOutType classifies as undefined); that Twilio
+ * declines to stamp it in the first place is Twilio-side behavior, covered ONLY
+ * by the dev keyword canary's sentence probe (RUNBOOK "Keyword auto-replies
+ * (Advanced Opt-Out)"). The open-path opt-in narrowing continues to guard the
+ * bare-YES case.
  */
 export function classifyInboundKeyword(
   body: string | undefined,

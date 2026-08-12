@@ -523,14 +523,20 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // used by BOTH the fan-out guard AND the keyword-processing block below so
     // they can never diverge.
     //
-    // W4 (SF-2) OptOutType coupling: we run with Twilio Advanced Opt-Out OFF
-    // (A2P checklist). classifyInboundKeyword returns a kind on OptOutType alone
-    // regardless of body; were Advanced Opt-Out ever flipped ON, a full sentence
-    // "stop the listings but keep the tour" would carry OptOutType=STOP and be
-    // treated as a command here, swallowing it from the group. That is the
-    // compliance-correct direction (Twilio also actions the opt-out itself), and
-    // the W3 narrowing already guards the opt-in (YES) case - keep Advanced
-    // Opt-Out OFF so human sentences are never reclassified.
+    // W4 (SF-2) OptOutType coupling, REWRITTEN 2026-08-12 - the premise flipped.
+    // Advanced Opt-Out is now ON, configured with OUR filed copy (RUNBOOK
+    // "Keyword auto-replies (Advanced Opt-Out)"), so classifyInboundKeyword
+    // trusting OptOutType is the LIVE intended path here, not a hypothetical.
+    // It is bounded because Twilio stamps OptOutType on EXACT keyword messages
+    // only (Twilio docs, and the dev keyword canary's sentence probe): a full
+    // sentence like "stop the listings but keep the tour" is NOT stamped, so it
+    // is not reclassified and still fans out as ordinary group content. The W3
+    // narrowing above additionally guards the bare-YES opt-in case.
+    //
+    // Operators must NOT turn Advanced Opt-Out back OFF: it is the ONLY source
+    // of keyword confirmations now - the app composes and sends none - so
+    // flipping it off silently removes every STOP/HELP/START reply while this
+    // code keeps recording as if nothing changed.
     const kind = classifyInboundKeyword(Body, msg.params['OptOutType']);
     // A keyword is a command by default; an opt-in narrows to command ONLY when
     // the sender is currently suppressed. This ONE boolean drives both the

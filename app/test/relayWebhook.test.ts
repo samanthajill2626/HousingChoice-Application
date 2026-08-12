@@ -802,11 +802,15 @@ describe('open-path keyword handling (relay-open-path-stop)', () => {
     );
     expect(res.status).toBe(200);
     // Fail CLOSED: an indeterminate suppression state is treated as a command, so
-    // the YES is NOT relayed. The absent fan-out to Bob/Carol is now the WHOLE
-    // proof - the command path used to answer with the welcome copy, and since
-    // Twilio owns that reply the TwiML is empty on both branches.
+    // the YES is NOT relayed. TwiML is empty on BOTH branches now (Twilio owns
+    // the reply), so the absent fan-out to Bob/Carol is one half of the proof...
     expect(res.text).not.toContain('<Message>');
     expect(world.sent).toHaveLength(0);
+    // ...and the other half is that keyword processing actually RAN: the opt-in
+    // cleared suppression on Alice's own 1:1. The sibling unsuppressed-YES test
+    // above asserts optOutSets is EMPTY, so this is the signal that separates
+    // the command path from the content path.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([false]);
   });
 
   it('a body merely CONTAINING a keyword fans out normally with empty TwiML and no flags', async () => {

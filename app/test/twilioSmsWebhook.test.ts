@@ -681,9 +681,14 @@ describe('POST /webhooks/twilio/sms - A2P/CTIA keywords (TWILIO owns the replies
     expect(STOP_CONFIRMATION).toContain('unsubscribed');
   });
 
-  it('HELP -> EMPTY TwiML, no suppression change (and the filed copy carries NO phone number)', async () => {
+  it('HELP -> EMPTY TwiML, no suppression change, and NO consent stamp (isHelp\'s one surviving job)', async () => {
     const { app, world } = makeWebhookHarness();
-    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE, consent_method: 'inbound_text' });
+    // Seeded deliberately WITHOUT consent_method. A PLAIN inbound from an
+    // existing no-consent contact stamps inbound_text (see the test below);
+    // HELP must NOT, because a request for help is not an affirmative opt-in.
+    // That exclusion (`!isHelp` in the plain-inbound stamp condition) is the
+    // ONLY behavior `isHelp` still has, so this is what pins it.
+    world.contacts.push({ contactId: 'contact-T', type: 'tenant', phone: TENANT_PHONE });
 
     const res = await signedTwilioPost(app, SMS_PATH, inboundSmsParams({ Body: 'HELP', MessageSid: 'SMkwhelp' }));
 
@@ -695,6 +700,10 @@ describe('POST /webhooks/twilio/sms - A2P/CTIA keywords (TWILIO owns the replies
     // HELP never changes suppression.
     expect(world.flagWrites).toHaveLength(0);
     expect(world.optOutSets).toHaveLength(0);
+    // ...and never confers consent (mirrors the STOP-is-a-revocation test).
+    const contact = world.contacts.find((c) => c.contactId === 'contact-T')!;
+    expect(contact.consent_method).toBeUndefined();
+    expect(contact.consent_at).toBeUndefined();
   });
 
   it('opt-in (START) -> clears suppression + stamps inbound_text consent, and replies NOTHING', async () => {

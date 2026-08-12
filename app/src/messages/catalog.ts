@@ -305,6 +305,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   // still the SOURCE OF TRUTH the console is configured FROM: the copy is
   // authored, reviewed and version-controlled here, and the RUNBOOK's
   // copy-change procedure is edit-constant -> update-console -> canary.
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
   'keyword.stop': {
     id: 'keyword.stop',
     default: STOP_CONFIRMATION,
@@ -313,6 +314,7 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     channel: 'sms',
     vars: [],
   },
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
   'keyword.help': {
     id: 'keyword.help',
     default: HELP_REPLY,

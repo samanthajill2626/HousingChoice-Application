@@ -75,8 +75,10 @@ Twilio stamps `OptOutType` on the inbound, and `classifyInboundKeyword` already
 prefers it over the body. Twilio matches the EXACT keyword message, the same
 rule the body branch applies, so a sentence such as "please stop sending tour
 reminders" is neither stamped nor classified and still fans out on the open
-relay path. Asserted in `app/test/smsCompliance.test.ts`; verified live by the
-keyword canary's sentence probe.
+relay path. Only our half is unit-asserted: `app/test/smsCompliance.test.ts`
+pins that such a sentence carrying NO `OptOutType` classifies as undefined.
+Whether Twilio stamps it is Twilio-side behavior we cannot assert in a unit
+test, and is covered ONLY by the keyword canary's live sentence probe.
 
 ## Coupling (now discharged)
 

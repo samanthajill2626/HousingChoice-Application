@@ -22,6 +22,15 @@ import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
 // path that also fired a classic status callback would arrive carrying an SMxx
 // the app has no row for. Spec 16.2 says that path does not exist; this is the
 // regression pin that keeps it that way.
+//
+// READ THIS BEFORE TOUCHING THAT ASSERTION (spec 16.2 amendment 5). It pins a
+// regression IN THE FAKE - that the fake never starts emitting classic status
+// callbacks for a Conversations-originated send. It is NOT coverage of the
+// app's unknown-SID path, and a later reader must not mistake it for the
+// latter and delete the app-side care it appears to prove. The app's handling
+// of an unknown provider SID (park, bounded retry, then the ERROR this
+// assertion watches for) is covered by its own unit tests and is load-bearing
+// in production regardless of what this spec asserts.
 const NEXT = process.env['E2E_DASHBOARD_URL'] ?? 'http://127.0.0.1:5174';
 const BUSINESS = process.env['BUSINESS_PHONE_NUMBER'] ?? '+15550009999';
 

@@ -95,7 +95,9 @@ the others still deliver.
 In the fake-phones UI the seam is the **"Carrier group recipients"** picker in the
 1:1 pane: tick one or more other handsets and the next send becomes a carrier
 group text. It is named "Carrier group" and never "Group text" on purpose - the
-left rail's "Group texts" section means relay groups.
+left rail's "Relay groups" section is the OTHER product (masked, pool-number
+inference), and the dashboard's own chip for THIS product is "Group text", so a
+third use of that label would make every spec selector ambiguous.
 
 ## Relay groups (masked, pool-number-fronted)
 

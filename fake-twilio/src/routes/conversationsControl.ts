@@ -6,10 +6,11 @@
 // same convention sesControl.ts documents, and the reason mounting order here
 // is not load-bearing.
 //
-// NAMING (deliberate, r7 G.4): the fake-phones rail ALREADY has a section
-// literally called "Group texts" meaning RELAY groups (pool-number inference).
-// Everything this file adds says CARRIER group, so a spec's `getByText` can
-// never be ambiguous between two different products.
+// NAMING (deliberate, r7 G.4): the fake-phones rail already has a section for
+// the OTHER product - headed "Relay groups" (pool-number inference) since the
+// group-texting S1 rename. Everything this file adds says CARRIER group, and
+// the dashboard chip for this product is "Group text", so a spec's `getByText`
+// can never be ambiguous between the two products.
 import { Router } from 'express';
 import type { FakeTwilioEngine } from '../engine/engine.js';
 import type { ConversationsEngine } from '../engine/conversationsEngine.js';

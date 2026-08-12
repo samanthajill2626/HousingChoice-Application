@@ -99,8 +99,9 @@
 
 /* --- Native CARRIER group picker (group-texting S8). Sits between the log and
    the composer, so it reads as "who this next message is addressed to". Named
-   "Carrier group" throughout, never "Group text" - the left rail's "Group texts"
-   section is RELAY groups, a different product. --- */
+   "Carrier group" throughout, never "Group text" - the left rail's "Relay
+   groups" section is a different product, and "Group text" is already the
+   dashboard's chip for this one. --- */
 .carrierGroup {
   flex: 0 0 auto;
   margin: 0;

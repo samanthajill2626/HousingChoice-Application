@@ -109,9 +109,10 @@ describe('App shell', () => {
   });
 
   // The NATIVE CARRIER group seam. Named "Carrier group recipients" and never
-  // "Group text": the left rail's "Group texts" section means RELAY groups, a
-  // different product, and one label for two things makes every selector
-  // ambiguous. These three tests pin the switch, not the transport.
+  // "Group text": the left rail's "Relay groups" section is a different
+  // product, and "Group text" is already the dashboard's chip for this one, so
+  // one label for two things would make every selector ambiguous. These three
+  // tests pin the switch, not the transport.
   it('with no carrier-group recipient picked, a send stays an ordinary 1:1', async () => {
     const user = userEvent.setup();
     render(<App />);

@@ -1298,12 +1298,39 @@ the service scope received everything. An earlier draft of this checklist had a
 global-webhook step; following it would have silently killed the cross-check
 guardrail. One webhook, on the default Conversations service, with BOTH filters.
 
-### 1. Before anything else: the identity list
+### 1. RANK 1, BEFORE ANY DEPLOY OF THIS BRANCH: push GROUP_IDENTITY_EXCLUDED_NUMBERS
 
-`GROUP_IDENTITY_EXCLUDED_NUMBERS` must be the import export's `ownNumbers` MINUS
-the business number, set and deployed BEFORE detection goes live (see the section
-above - this is an identity contract, not config). The migration command refuses
-the whole run on a mismatch, by design.
+**Deploying this branch to prod without pushing this var FIRST is a FULL STACK
+OUTAGE.** `loadConfig()` throws when `MESSAGING_DRIVER=twilio`,
+`NODE_ENV=production` and `GROUP_IDENTITY_EXCLUDED_NUMBERS` is unset, blank, or
+not per-entry E.164 - and `loadConfig()` runs at IMPORT time in EVERY process
+(app and worker alike). So the failure is not "group texting is degraded": the
+app does not boot, the worker does not boot, and nothing about the rest of the
+product works. Rank 1 means rank 1: this happens before the deploy, not as part
+of the migration window below.
+
+**There is no infra wiring for it.** `GROUP_IDENTITY_EXCLUDED_NUMBERS` appears in
+no `.tf` and in no deploy script - the only references outside the app are
+`scripts/dev.mjs` and `scripts/e2e-session.mjs`, which inject the literal `none`
+for local/hermetic lanes. The var reaches a deployed stack ONLY through whatever
+pushes `.env.prod` (`npm run secrets:sync -- prod`, edit, `npm run secrets:push
+-- prod`). This is exactly `BUSINESS_PHONE_NUMBER`'s existing pattern, so it is
+consistent rather than novel - but it means the push is a manual, ordered,
+easy-to-forget prerequisite with an outage on the other side of forgetting it.
+
+The value itself: the import export's `ownNumbers` MINUS the business number, or
+the literal `none` if the org truly has no other number that could appear in a
+carrier group (see the identity-contract section above - this is an identity
+contract, not config, and it is IMMUTABLE once fingerprinted). Note that
+`.env.prod.example` now ships the valid default `none`, so `secrets:sync` will
+hand you a bootable value; that is precisely why deciding whether `none` is
+CORRECT for prod is an explicit signed-off step here rather than something a bad
+boot would have caught for you. The migration command refuses the whole run on a
+mismatch with the export, by design.
+
+Verify after the push and before the deploy: confirm the key is present and
+non-blank in the pushed parameter set, then confirm the deployed app's boot log
+carries no `GROUP_IDENTITY_EXCLUDED_NUMBERS` error and the fingerprint pinned.
 
 ### 2. Production preflight (before the migration window)
 
@@ -1335,12 +1362,56 @@ the whole run on a mismatch, by design.
 On the DEFAULT Conversations service (the one the rails are created under):
 
 - Post-webhook URL: `https://<host>/webhooks/twilio/conversations`
+- Method: **HTTP POST**. Format: **`application/x-www-form-urlencoded`**. These
+  are Twilio's defaults, so the correct action is to LEAVE THEM ALONE - but state
+  them explicitly, because both are selectable in the console and both wrong
+  choices fail silently rather than loudly. A GET hits no route and returns 404
+  forever (the handler is POST-only). A JSON body is not parsed by
+  `express.urlencoded` and does not match the `X-Twilio-Signature` the signature
+  middleware recomputes over form parameters, so every receipt is a permanent
+  403. Neither shows up as an error in the Twilio console; the only symptom is
+  that group delivery state never updates and the cross-check guardrail alarms.
 - Filters: **`onDeliveryUpdated` AND `onMessageAdded`** - both, on this one URL.
   `onDeliveryUpdated` is the only source of group delivery state (classic status
   callbacks do NOT fire for Conversations sends - proved live), and
   `onMessageAdded` is the cross-check guardrail's entire input.
 - Do NOT set `X-Twilio-Webhook-Enabled` on our own posts: delivery receipts flow
   without it, and setting it would only add echoes of our own outbound.
+
+**MONITORING NOTE - the alarm flood that means Twilio changed its behavior.**
+The receipts module deliberately does NOT write a `syssid#` marker for
+Conversations legs (`app/src/services/groupReceipts.ts:5-9`), on the strength of
+a live measurement that classic status callbacks do not fire for
+Conversations-originated sends. That measurement is real evidence, not an
+assumption: the service-level "Delivery status callback" documented in the
+Twilio section above IS configured on the same Messaging Service every rail is
+pinned to, so the measurement was taken WITH the callback in place and the legs
+still did not call back.
+
+If Twilio's inheritance behavior ever changes, the signature is unmistakable:
+every per-leg `SMxx` starts reaching `/webhooks/twilio/status`, resolves to no
+message row, no relay pointer and no system marker, and logs `status callback
+for unknown provider SID after retry - delivery outcome dropped` at **ERROR**
+once per member per send. A three-member group sending ten times a day is thirty
+ERRORs a day out of nowhere - an alarm FLOOD, not a trickle, and the one in-app
+mitigation that would have absorbed it was deliberately removed.
+
+What an operator should do on seeing that flood:
+
+1. Confirm the shape before assuming a regression - the dropped SIDs are `SMxx`
+   (not `IMxx`), they arrive on `/webhooks/twilio/status`, and they correlate
+   one-per-member with recent GROUP sends rather than with 1:1 traffic.
+2. Confirm group delivery is otherwise HEALTHY. If `onDeliveryUpdated` receipts
+   are still landing, the flood is noise on a working path: delivery state is
+   correct and only the log is wrong. Do not react by changing the receipts
+   path.
+3. The cheap containment is at the Twilio end, not ours: detach the
+   service-level delivery status callback from the Messaging Service (1:1
+   delivery outcomes then go dark, so only do this knowingly and briefly), or
+   suppress the alarm on that one log line while the real fix is scoped.
+4. The real fix is to restore the `syssid#` marker for Conversations legs so the
+   status handler resolves them instead of erroring. That is a code change with
+   its own review; file it rather than hand-patching prod.
 
 ### 4. The migration run
 

@@ -75,10 +75,11 @@ function PhonePanel({
       </div>
 
       {/* NATIVE CARRIER group texting. Named "Carrier group" everywhere and
-          NEVER "Group text": the rail on the left already has a section
-          literally called "Group texts" meaning RELAY groups, and the dashboard
-          chip for THIS product is "Group text" - three labels for two products
-          would make every spec selector ambiguous.
+          NEVER "Group text": the rail on the left has a section for the OTHER
+          product, headed "Relay groups" (renamed from "Group texts" in the
+          group-texting S1 sweep), and the dashboard chip for THIS product is
+          "Group text" - reusing "Group text" here as well would put one label
+          on two products and make every spec selector ambiguous.
 
           Picking one or more recipients turns the next send from a 1:1 into a
           carrier group text: it still goes to the business number, but it

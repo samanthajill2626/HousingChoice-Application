@@ -185,8 +185,11 @@ export const TABLES: readonly TableSpec[] = [
     // partitions, each with its own authoritative consume step - TTL is only the
     // backstop that closes the unbounded-accrual gap when a consume never comes:
     //   - F12 parked SES events (`emailevent#<sesId>`, 7d)
-    //   - group-texting due rows (`groupdue#pending`, 30d) and parked group
-    //     receipts (`groupreceipt#<IMxx>`), where the horizon is deliberately far
+    //   - group-texting due rows (`groupdue#send` for the per-send delivery
+    //     staleness deadline and `groupdue#xc` for the cross-check deadline,
+    //     both 30d - see messagesRepo GROUP_SEND_DUE_PARTITION /
+    //     GROUP_CROSSCHECK_DUE_PARTITION) and parked group receipts
+    //     (`groupreceipt#<IMxx>`), where the horizon is deliberately far
     //     past the alarm deadline - spec 15.5: TTL is NEVER the alarm mechanism.
     ttlAttribute: 'expires_at',
   },

@@ -90,6 +90,22 @@ test('a carrier group MMS files as a group thread; silent members gain no consen
   // 1:1 timeline. That is the other half of the ruling.
   await expect(page.getByRole('heading', { name: 'Group threads' })).toBeVisible();
 
+  // 3b) THE FIELD-LEVEL HALF of the same ruling (spec 12 scenario 1 / plan
+  //     T8.3(1)): a SILENT member's contact row carries `group_participation_at`
+  //     and NO `consent_method`. The gate assertion below proves the BEHAVIOUR;
+  //     this proves the STATE the behaviour reads, so a future change that
+  //     stamps a consent method on detection fails here rather than silently
+  //     unlocking proactive sends. Read through the authenticated contacts API
+  //     (`page.request` carries the dev-login session) BEFORE the consent modal
+  //     is ever opened, so nothing in this spec could have written the field.
+  const strangerRes = await page.request.get(
+    `${NEXT}/api/contacts/${contactIdForPhone(STRANGER)}`,
+  );
+  expect(strangerRes.ok(), 'read the silent member through the contacts API').toBeTruthy();
+  const stranger = (await strangerRes.json()).contact as Record<string, unknown>;
+  expect(typeof stranger['group_participation_at']).toBe('string');
+  expect(stranger['consent_method']).toBeUndefined();
+
   // 4) THE CONSENT ASYMMETRY, proven through the real proactive gate rather
   //    than by reading a field. The stranger exists as a contact only because
   //    they were named on this group text, and a proactive send to them is

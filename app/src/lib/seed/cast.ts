@@ -822,7 +822,7 @@ const touredYesTenant = {
       type: 'sms',
       direction: 'outbound',
       author: 'teammate',
-      body: "I've set up a group text with the landlord to coordinate the time.",
+      body: "I've set up a group chat with the landlord to coordinate the time.",
       delivery_status: 'delivered',
       ts: CX,
     },

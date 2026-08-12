@@ -92,13 +92,28 @@ describe('TokenBucket', () => {
     // Every pre-existing caller is a background job and passes no bound. A group
     // send is the first INTERACTIVE one: N queued sends serialise FIFO, so an
     // unbounded wait holds N Express requests open with no ceiling at all (fix
-    // wave 2, adversarial 16). The throughput is not spent when it refuses.
+    // wave 2, adversarial 16).
     const clock = fakeTime();
     const bucket = new TokenBucket({ capacity: 1, refillPerSec: 1, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
     await bucket.acquire(1); // drains the bucket
     await expect(bucket.acquire(9, { timeoutMs: 2000 })).rejects.toBeInstanceOf(TokenBucketBusyError);
     // It refused INSIDE the bound rather than waiting the nine seconds out.
     expect(clock.waits.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(2000);
+  });
+
+  it('a refusal REPORTS the instalments it already drew, and never claims it spent nothing', async () => {
+    // The docstring used to promise "the throughput was never spent" (fix wave
+    // 3, conformance 3). At capacity 1 - the shipped default tier - every
+    // multi-member send is instalments, and the deadline check sits AFTER the
+    // deductions, so a refusal has typically paid for part of the draw.
+    const clock = fakeTime();
+    const bucket = new TokenBucket({ capacity: 1, refillPerSec: 1, now: clock.now, sleep: clock.sleep, maxJitterMs: 0 });
+    const err = await bucket.acquire(9, { timeoutMs: 2000 }).catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(TokenBucketBusyError);
+    const busy = err as TokenBucketBusyError;
+    expect(busy.spent).toBeGreaterThan(0);
+    expect(busy.message).toContain('not refunded');
+    expect(busy.message).not.toContain('nothing drawn');
   });
 
   it('a bounded acquire that CAN be paid inside the bound still resolves', async () => {

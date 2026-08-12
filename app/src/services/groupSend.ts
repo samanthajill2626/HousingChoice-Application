@@ -451,8 +451,15 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
     // BOUNDED, because this is the first INTERACTIVE acquirer. `acquire`
     // serialises waiters FIFO and (unbounded) never rejects, so N queued sends
     // held N Express requests open with no ceiling. Past the bound the send
-    // refuses with a retryable, staff-readable error and spends nothing.
-    if (tokenBucket !== null) {
+    // refuses with a retryable, staff-readable error. (A refusal may have drawn
+    // part of the instalments; TokenBucketBusyError.spent says how many.)
+    //
+    // ONE DRAW PER POST, INCLUDING THE HEAL RETRY (fix wave 3, conformance 4).
+    // The retry below emits a second full fan-out of N carrier messages, so
+    // drawing once would have been the one place a single request could put 2N
+    // messages on the wire for N tokens.
+    async function drawMeter(): Promise<void> {
+      if (tokenBucket === null) return;
       try {
         await tokenBucket.acquire(members.length, { timeoutMs: GROUP_SEND_METER_WAIT_MS });
       } catch (err) {
@@ -466,6 +473,7 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
         throw err;
       }
     }
+    await drawMeter();
 
     // (6) The post. The adapter owns the A2P kill switch (spec invariant 13.7);
     // its typed failures become SendRefusedErrors here, because the send route
@@ -503,6 +511,11 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
         }
         conversationSid = healed.twilioConversationSid;
         participantMap = healed.participantMap;
+        // The rebuilt rail is about to carry N more carrier messages, so it pays
+        // for them (fix wave 3, conformance 4). A meter that is busy here refuses
+        // the send exactly as it would have up front: the first post definitively
+        // did not deliver, so nothing is on the wire to be duplicated.
+        await drawMeter();
         try {
           posted = await postOnce(conversationSid);
         } catch (retryErr) {

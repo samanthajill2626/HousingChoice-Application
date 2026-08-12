@@ -88,6 +88,14 @@ export class TokenBucket {
    * pre-existing caller) pass nothing and keep the old unbounded behaviour; an
    * INTERACTIVE caller passes a bound so an Express request is never held open
    * indefinitely behind other waiters.
+   *
+   * A BOUNDED DRAW CAN SPEND PART OF ITS BUDGET (fix wave 3, conformance 3). The
+   * instalment loop deducts as it goes, so a draw that gives up at the bound has
+   * already paid for the instalments it took - at the shipped default rate of
+   * 1/sec every multi-member send is instalments, so this is the normal case,
+   * not an edge. Nothing is refunded: the tokens bought wall-clock pacing that
+   * really elapsed. The error carries what was spent so a caller never has to
+   * assume it was nothing.
    */
   async acquire(count = 1, opts: { timeoutMs?: number } = {}): Promise<void> {
     const want = Math.max(count, 1);
@@ -103,7 +111,8 @@ export class TokenBucket {
       // The FIFO queue is part of the wait: N sends ahead of this one is exactly
       // how an interactive request ends up parked for minutes.
       if (deadline !== undefined && this.now() >= deadline) {
-        throw new TokenBucketBusyError(want, opts.timeoutMs as number);
+        // Nothing drawn yet - this one really did spend nothing.
+        throw new TokenBucketBusyError(want, opts.timeoutMs as number, 0);
       }
       let remaining = want;
       // Guard against a runaway loop (a clock that never advances): bounded by
@@ -122,7 +131,8 @@ export class TokenBucket {
         const waitMs = Math.ceil((deficit / this.refillPerSec) * 1000);
         const jitter = this.maxJitterMs > 0 ? Math.floor(Math.random() * this.maxJitterMs) : 0;
         if (deadline !== undefined && this.now() + waitMs > deadline) {
-          throw new TokenBucketBusyError(want, opts.timeoutMs as number);
+          // Instalments already taken are NOT refunded - see `acquire`'s note.
+          throw new TokenBucketBusyError(want, opts.timeoutMs as number, want - remaining);
         }
         await this.sleep(waitMs + jitter);
       }
@@ -134,16 +144,28 @@ export class TokenBucket {
 }
 
 /**
- * The bounded wait expired before this draw could be paid. Thrown ONLY when a
- * caller asked for a bound; the throughput was never spent, so the caller is
- * free to refuse the work and let a human retry (fix wave 2, adversarial 16).
+ * The bounded wait expired before this draw could be paid IN FULL. Thrown ONLY
+ * when a caller asked for a bound (fix wave 2, adversarial 16).
+ *
+ * WHAT IT DOES NOT PROMISE (fix wave 3, conformance 3). This used to say "the
+ * throughput was never spent". For a draw larger than capacity that is false:
+ * the instalment loop deducts as it goes, so a nine-member send that gives up at
+ * a 20s bound against a 1/sec tier has already spent up to eight tokens and
+ * delivered nothing. `spent` says how many, and it is not refunded - the pacing
+ * those tokens bought really elapsed. The work itself is untouched either way,
+ * so refusing it and letting a human retry remains the right response.
  */
 export class TokenBucketBusyError extends Error {
   constructor(
     readonly wanted: number,
     readonly waitedMs: number,
+    /** Tokens already deducted in instalments before the bound expired. */
+    readonly spent: number = 0,
   ) {
-    super(`token bucket busy: ${wanted} token(s) not available within ${waitedMs}ms`);
+    super(
+      `token bucket busy: ${wanted} token(s) not available within ${waitedMs}ms` +
+        (spent > 0 ? ` (${spent} already drawn in instalments, not refunded)` : ' (nothing drawn)'),
+    );
     this.name = 'TokenBucketBusyError';
   }
 }

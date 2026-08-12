@@ -806,6 +806,38 @@ describe('groupSend - the A2P meter', () => {
     expect(metered.draws).toEqual([]);
   });
 
+  it('the HEAL RETRY draws again - one request never puts 2N messages on the wire for N tokens', async () => {
+    // The meter was drawn once, before the first post (fix wave 3, conformance
+    // 4). On the closed-rail heal path the retry emits a SECOND full fan-out of
+    // N carrier messages, so a single request was the one place that could
+    // outrun the tier the meter exists to hold.
+    const metered = meteredBucket({ capacity: 4, refillPerSec: 4 });
+    let attempts = 0;
+    const f = makeFakes({
+      deps: { tokenBucket: metered.bucket },
+      port: {
+        postGroupMessage: async () => {
+          attempts += 1;
+          if (attempts === 1) throw new GroupConversationsUnavailableError('the rail is closed or gone');
+          return { messageSid: 'IMhealed1', dateCreated: '2026-08-11T13:00:01.000Z' };
+        },
+      },
+      rail: {
+        ensureGroupRail: async () => ({
+          status: 'created',
+          twilioConversationSid: 'CHrail2',
+          participantMap: { MBann2: 'phone#+16175550111', MBmarcus2: 'phone#+16175550222' },
+        }),
+      },
+      clearGroupRail: async () => true,
+    });
+
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+
+    expect(attempts).toBe(2);
+    expect(metered.draws).toEqual([2, 2]);
+  });
+
   it('REFUSES with a staff-facing busy error rather than parking the request forever', async () => {
     // `acquire` never rejects and serialises waiters FIFO, so an interactive
     // send behind a queue held an Express request open with no bound at all.

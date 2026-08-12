@@ -398,6 +398,11 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
             },
             'the Conversation holding this rail UniqueName is closed - deleting it so a fresh rail can take the name',
           );
+          // A crash between this delete and the create below is recoverable
+          // (the deterministic UniqueName means the retry simply creates), but
+          // the thread stays unsendable until the dead claimant's rail_creating
+          // claim expires - up to RAIL_CLAIM_EXPIRY_MS (~5 min). Bounded and
+          // strictly better than the permanent refusal it replaced.
           await port.removeConversation(adopted.conversationSid);
           adopted = undefined;
         }

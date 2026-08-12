@@ -381,6 +381,11 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
      * which is now a STORED fact (the sid is cleared and `rail_failed` stamped),
      * so the re-enqueue path and the thread view can both see it.
      */
+    // WORST-CASE WALL CLOCK: a healed send performs TWO metered A2P draws (N
+    // tokens before the first post, N again before the post-heal retry), so an
+    // interactive request can pace for roughly double GROUP_SEND_METER_WAIT_MS's
+    // single-draw rationale before its one retry resolves. Accepted: heals are
+    // rare (a rail died mid-send) and the meter still bounds each draw.
     async function healRail(
       deadSid: string,
     ): Promise<{ twilioConversationSid: string; participantMap: Record<string, string> } | undefined> {

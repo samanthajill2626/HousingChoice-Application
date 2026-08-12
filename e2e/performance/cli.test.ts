@@ -44,14 +44,95 @@ describe('top-level profiler sequencing', () => {
 
   it('parse failures and print-config perform zero runtime, network, lifecycle, or browser work', async () => {
     const loadRuntime = vi.fn();
-    await expect(runProfiler(['bad-target'], { loadRuntime, configDeps })).resolves.toBe(1);
+    const invalidStdout = vi.fn();
+    const invalidStderr = vi.fn();
+    await expect(runProfiler(['hermetic', '--scale=101', '--baseline=invalid-config-sentinel.json'], {
+      loadRuntime,
+      configDeps,
+      stdout: invalidStdout,
+      stderr: invalidStderr,
+    })).resolves.toBe(1);
     expect(loadRuntime).not.toHaveBeenCalled();
+    expect(invalidStdout).not.toHaveBeenCalled();
+    expect(invalidStderr.mock.calls).toEqual([['configuration_invalid\n']]);
+    expect(JSON.stringify(invalidStderr.mock.calls)).not.toContain('invalid-config-sentinel');
 
     const stdout = vi.fn();
     await expect(runProfiler(['hermetic', '--print-config'], { loadRuntime, configDeps, stdout })).resolves.toBe(0);
     expect(loadRuntime).not.toHaveBeenCalled();
     expect(stdout).toHaveBeenCalledOnce();
+    expect(stdout.mock.calls[0]![0].trim().split(/\r?\n/u)).toHaveLength(1);
     expect(JSON.parse(stdout.mock.calls[0]![0])).toMatchObject({ target: 'hermetic' });
+  });
+
+  it('prints only the resolved hermetic count manifest before runtime loading and startup', async () => {
+    const events: string[] = [];
+    const value = runtime(events);
+    const expectedManifest = {
+      scale: 1,
+      contacts: 100,
+      units: 25,
+      placements: 50,
+      tours: 50,
+      conversations: 100,
+      messagesPerConversation: 10,
+      broadcasts: 10,
+      recipientsPerBroadcast: 25,
+      messageCount: 1000,
+      requestedRecipientCount: 250,
+      resolvedRecipientsPerBroadcast: 25,
+      resolvedRecipientCount: 250,
+      requestedRelayGroupCount: 20,
+      relayGroupCount: 20,
+      clippedRelayGroupCount: 0,
+      fixedUnmatchedEmailCount: 4,
+      physicalItemCount: 1339,
+      totalItemCount: 1589,
+    };
+    const expectedLine = `performance_seed_counts=${JSON.stringify(expectedManifest)}\n`;
+    const stdout = vi.fn((text: string) => events.push(`stdout:${text}`));
+    const loadRuntime = vi.fn(async () => {
+      events.push('load-runtime');
+      return value;
+    });
+
+    await expect(runProfiler([
+      'hermetic',
+      '--scale=1',
+      '--baseline=baseline-path-sentinel.json',
+    ], { configDeps, loadRuntime, stdout })).resolves.toBe(0);
+
+    expect(stdout.mock.calls).toEqual([[expectedLine]]);
+    expect(events.slice(0, 3)).toEqual([
+      `stdout:${expectedLine}`,
+      'load-runtime',
+      'start',
+    ]);
+    expect(JSON.parse(expectedLine.slice('performance_seed_counts='.length))).toEqual(expectedManifest);
+    expect(expectedLine).not.toContain('anchor');
+    expect(expectedLine).not.toContain('2026-08-12');
+    expect(expectedLine).not.toContain('baseline-path-sentinel');
+    expect(expectedLine).not.toContain('founder@example.com');
+    expect(expectedLine).not.toContain('hermetic');
+    expect(expectedLine).not.toContain('lean_tenant');
+  });
+
+  it('keeps the closed failure reason after the hermetic count line', async () => {
+    const stdout = vi.fn();
+    const stderr = vi.fn();
+    await expect(runProfiler(['hermetic'], {
+      configDeps,
+      stdout,
+      stderr,
+      loadRuntime: vi.fn(async () => {
+        throw { reason: 'target_proof_failed', secret: 'runtime-secret-sentinel' };
+      }),
+    })).resolves.toBe(1);
+
+    expect(stdout).toHaveBeenCalledOnce();
+    expect(stdout.mock.calls[0]![0]).toMatch(/^performance_seed_counts=\{/u);
+    expect(stderr.mock.calls).toEqual([['target_proof_failed\n']]);
+    expect(JSON.stringify([stdout.mock.calls, stderr.mock.calls])).not.toContain('runtime-secret-sentinel');
   });
 
   it('runs hermetic parse/start/verify/reseed/dashboard/auth/firewall/warmup/collect/report/final cleanup', async () => {
@@ -110,9 +191,11 @@ describe('top-level profiler sequencing', () => {
   it('runs local proof/TTY existing-user auth/firewall/warmup/collect/report without lifecycle or seed', async () => {
     const events: string[] = [];
     const value = runtime(events);
+    const stdout = vi.fn();
     await expect(runProfiler(['local', '--base-url=http://localhost:5174'], {
       configDeps,
       loadRuntime: vi.fn(async () => value),
+      stdout,
     })).resolves.toBe(0);
     expect(events).toEqual([
       'local-proof', 'dashboard', 'auth-local', 'firewall', 'warmup',
@@ -121,14 +204,17 @@ describe('top-level profiler sequencing', () => {
     expect(value.startHermetic).not.toHaveBeenCalled();
     expect(value.reseedHermetic).not.toHaveBeenCalled();
     expect(value.cleanupHermetic).not.toHaveBeenCalled();
+    expect(stdout).not.toHaveBeenCalled();
   });
 
   it('runs hosted headed login/admin/env proof/firewall/collect/report without seed or warmup', async () => {
     const events: string[] = [];
     const value = runtime(events);
+    const stdout = vi.fn();
     await expect(runProfiler(['hosted-dev', '--base-url=https://dev.example.test', '--headed'], {
       configDeps,
       loadRuntime: vi.fn(async () => value),
+      stdout,
     })).resolves.toBe(0);
     expect(events).toEqual([
       'dashboard', 'auth-hosted', 'firewall', 'collect', 'report', 'close-dashboard',
@@ -137,6 +223,7 @@ describe('top-level profiler sequencing', () => {
     expect(value.verifyLocal).not.toHaveBeenCalled();
     expect(value.reseedHermetic).not.toHaveBeenCalled();
     expect(value.warmup).not.toHaveBeenCalled();
+    expect(stdout).not.toHaveBeenCalled();
   });
 
   it('returns zero for slower valid comparisons and nonzero for closed safety/auth/privacy/browser failures', async () => {

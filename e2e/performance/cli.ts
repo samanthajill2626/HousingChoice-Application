@@ -95,6 +95,33 @@ function cleanupFailure(value: unknown): {
   return { lane: candidate['lane'] as number, recoveryCommand: 'npm run e2e:stop' };
 }
 
+function hermeticSeedCountsLine(config: RunConfig): string | null {
+  const seed = toSafeRunConfig(config).seed;
+  if (seed === null) return null;
+  const counts = {
+    scale: seed.scale,
+    contacts: seed.contacts,
+    units: seed.units,
+    placements: seed.placements,
+    tours: seed.tours,
+    conversations: seed.conversations,
+    messagesPerConversation: seed.messagesPerConversation,
+    broadcasts: seed.broadcasts,
+    recipientsPerBroadcast: seed.recipientsPerBroadcast,
+    messageCount: seed.messageCount,
+    requestedRecipientCount: seed.requestedRecipientCount,
+    resolvedRecipientsPerBroadcast: seed.resolvedRecipientsPerBroadcast,
+    resolvedRecipientCount: seed.resolvedRecipientCount,
+    requestedRelayGroupCount: seed.requestedRelayGroupCount,
+    relayGroupCount: seed.relayGroupCount,
+    clippedRelayGroupCount: seed.clippedRelayGroupCount,
+    fixedUnmatchedEmailCount: seed.fixedUnmatchedEmailCount,
+    physicalItemCount: seed.physicalItemCount,
+    totalItemCount: seed.totalItemCount,
+  };
+  return `performance_seed_counts=${JSON.stringify(counts)}\n`;
+}
+
 async function closeQuietly(runtime: CliRuntime, dashboard: unknown): Promise<boolean> {
   try {
     await runtime.closeDashboard(dashboard);
@@ -121,6 +148,11 @@ export async function runProfiler(
   if (config.printConfig) {
     stdout(`${JSON.stringify(toSafeRunConfig(config))}\n`);
     return 0;
+  }
+
+  if (config.target === 'hermetic') {
+    const countsLine = hermeticSeedCountsLine(config);
+    if (countsLine !== null) stdout(countsLine);
   }
 
   let runtime: CliRuntime;

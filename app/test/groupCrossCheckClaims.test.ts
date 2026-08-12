@@ -105,7 +105,9 @@ function ledgerDoc(
         if (condition.includes('#b <= :observed') && !(state.balance <= observed)) throw refused;
         if (condition.includes('#cs = :since') && state.since !== values[':since']) throw refused;
         state.balance += Number(values[':delta']);
-        if (String(input['UpdateExpression']).includes('REMOVE')) delete state.since;
+        if (String(input['UpdateExpression']).includes('#cs = :now')) {
+          state.since = String(values[':now']);
+        }
         return { Attributes: { balance: state.balance } };
       },
     },
@@ -253,8 +255,14 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
     expect(String(settle.input['UpdateExpression'])).toContain('ADD');
     // ...and moved by a DELTA off that reading, never by an overwrite.
     expect((settle.input['ExpressionAttributeValues'] as Record<string, unknown>)[':delta']).toBe(6);
-    // The reset REMOVEs the oldest-credit stamp so the next filing re-stamps it.
-    expect(String(settle.input['UpdateExpression'])).toContain('REMOVE');
+    // RE-STAMPED, NOT REMOVED (fix wave 3, adversarial 1). A survivor of the
+    // discard - a credit banked under this very write - would otherwise sit
+    // anchorless, and the event half's freshness condition passes on
+    // `attribute_not_exists(#cs)`: a classic-only outage could then stack credits
+    // that never age out and mask a real miss days later.
+    expect(String(settle.input['UpdateExpression'])).toContain('#cs = :now');
+    expect(String(settle.input['UpdateExpression'])).not.toContain('REMOVE');
+    expect((settle.input['ExpressionAttributeValues'] as Record<string, unknown>)[':now']).toBe(NOW);
     // Pinned to exactly the reading it was computed from.
     expect(String(settle.input['ConditionExpression'])).toContain('#cs = :since');
   });
@@ -277,7 +285,7 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
     const repo = createMessagesRepo({ doc: doc as never, env });
 
     expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
-    expect(String(sent[4]!.input['UpdateExpression'])).not.toContain('REMOVE');
+    expect(String(sent[4]!.input['UpdateExpression'])).not.toContain('#cs');
   });
 
   it('a credit banked CONCURRENTLY with the discard SURVIVES it', async () => {
@@ -309,7 +317,7 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
   });
 
   it('a discard that ran under it forces a re-read rather than double-discarding', async () => {
-    // Two events discard the same stale stack. The first REMOVEs the anchor, so
+    // Two events discard the same stale stack. The first MOVES the anchor, so
     // the second's write refuses and it re-decides against the post-discard
     // balance - it must not subtract the same five credits twice.
     const state: { balance: number; since?: string } = {
@@ -322,7 +330,7 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
         if (discarded) return;
         discarded = true;
         state.balance = 1; // the other event's discard landed first
-        delete state.since;
+        state.since = NOW; // ...and re-stamped the anchor to its own now
       },
     });
     const repo = createMessagesRepo({ doc: doc as never, env });

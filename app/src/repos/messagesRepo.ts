@@ -1471,9 +1471,18 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
    * PINNED WITHOUT BEING FROZEN. The write is conditioned on `#cs = :since` AND
    * `#b <= :observed`. While the balance is negative and `credit_since` is set,
    * the only moves possible are more credits (which make it lower - permitted,
-   * and the point) and another discard (which REMOVEs the anchor, so this one
+   * and the point) and another discard (which moves the anchor, so this one
    * refuses and re-reads rather than subtracting the same stack twice).
    * Contention here is bounded and rare: the common path never reaches it.
+   *
+   * THE ANCHOR IS RE-STAMPED, NOT REMOVED. Letting the survivors of a discard
+   * sit anchorless would make them consumable at ANY age, because the event
+   * half's freshness condition passes on `attribute_not_exists(#cs)` - so a
+   * classic-only outage could stack credits that never age out and mask a real
+   * miss days later. Those survivors were banked between this read and this
+   * write, so `nowIso` is their true age. On the ordinary outcome (a positive
+   * balance) the stamp is inert: both halves consult it only while the balance
+   * is negative, and the next filing that opens a credit run re-stamps it.
    *
    * REMAINING BY DESIGN (conformance 5): credits banked before the read that are
    * individually fresh still go with the stale ones, because the ledger tracks
@@ -1484,6 +1493,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
   async function discardStaleCredits(
     pairKey: string,
     notBeforeIso: string,
+    nowIso: string,
     expiresAt: number,
   ): Promise<number> {
     const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
@@ -1507,7 +1517,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             TableName: table,
             Key: key,
             UpdateExpression: stale
-              ? 'ADD #b :delta SET #e = :exp REMOVE #cs'
+              ? 'ADD #b :delta SET #e = :exp, #cs = :now'
               : 'ADD #b :delta SET #e = :exp',
             // `<=`, not `=`: a credit banked under this write is exactly what
             // must SURVIVE it, and the anchor equality is what stops two
@@ -1522,6 +1532,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
               ':delta': delta,
               ':exp': expiresAt,
               ':observed': observed,
+              ...(stale && { ':now': nowIso }),
               ...(stale && since !== undefined && { ':since': since }),
             },
             ReturnValues: 'UPDATED_NEW',
@@ -2628,7 +2639,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async recordCrossCheckEvent(event, bounds) {
-      const { notBeforeIso, expiresAt } = bounds;
+      const { notBeforeIso, nowIso, expiresAt } = bounds;
       const pairKey = event.pairKey;
       const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
       const pairSortKey = crossCheckEventSortKey(event.deadlineAt, event.messageSid);
@@ -2716,7 +2727,7 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
-        balance = await discardStaleCredits(pairKey, notBeforeIso, expiresAt);
+        balance = await discardStaleCredits(pairKey, notBeforeIso, nowIso, expiresAt);
       }
 
       if (balance <= 0) {

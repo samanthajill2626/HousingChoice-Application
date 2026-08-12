@@ -1209,7 +1209,12 @@ export function createFakeWorld(): FakeWorld {
       const balance = state.balance + delta;
       crossCheckBalances.set(event.pairKey, {
         balance,
-        ...(!staleCredits && state.since !== undefined && { since: state.since }),
+        // A discard RE-STAMPS the anchor rather than removing it: anything that
+        // survived it was banked in the same instant, and an anchorless negative
+        // balance would be consumable at any age.
+        ...(staleCredits
+          ? { since: bounds.nowIso }
+          : state.since !== undefined && { since: state.since }),
       });
       if (balance <= 0) return 'credit' as const;
       // Pending: the rows land WITH the balance, never separately.

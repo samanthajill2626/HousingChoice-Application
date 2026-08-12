@@ -153,6 +153,14 @@ const UNTRIAGED_CONTACT_STATUSES: ReadonlySet<string> = new Set(['needs_review']
  */
 const GROUP_FETCH_LIMIT = 100;
 
+/**
+ * How many pages the untriaged-contacts read will walk past excluded rows (fix
+ * wave 2, adversarial 6). Bounded so a partition made entirely of group stubs
+ * costs a fixed handful of Queries rather than an unbounded walk, and generous
+ * enough to clear the ~600 stubs a full cutover import can mint.
+ */
+const TRIAGE_MAX_PAGES = 10;
+
 /** A human-friendly per-deadline-type label used in `why`. */
 const DEADLINE_WHY: Record<PlacementDeadlineType, string> = {
   rta_window: 'RTA window closing',
@@ -634,14 +642,38 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
     // The (type=unknown, status=needs_review) byTypeStatus partition IS the human
     // triage queue — one bounded Query, never a Scan.
     {
-      const page = await contacts.listByType('unknown', {
-        status: 'needs_review',
-        limit: GROUP_FETCH_LIMIT,
-      });
-      warnIfCapped('contacts:triage', page.items.length);
-      for (const contact of page.items) {
+      // FILL THE PAGE PAST THE STUBS (fix wave 2, adversarial 6). DynamoDB
+      // applies `Limit` at the index BEFORE any filter, and every row in the
+      // `unknown#needs_review` partition carries the identical sort key - so
+      // intra-partition order is stable and the same 100 rows come back every
+      // time. Once enough group-detection stubs sort ahead of the real unknown
+      // contacts, filtering them at display rendered an EMPTY block, forever,
+      // which reads as "nothing needs triage": a loud problem turned silent.
+      // The exclusion is pushed into the Query (saves work, not page slots) AND
+      // the read pages until it has a real page or runs out, bounded so a
+      // partition made entirely of stubs cannot spin.
+      const triaged: ContactItem[] = [];
+      let cursor: Record<string, unknown> | undefined;
+      for (let page = 0; page < TRIAGE_MAX_PAGES; page += 1) {
+        const read = await contacts.listByType('unknown', {
+          status: 'needs_review',
+          limit: GROUP_FETCH_LIMIT,
+          // Their triage surface is the GROUP THREAD, which is where a human can
+          // actually tell who these people are.
+          excludeOrigin: GROUP_DETECTION_ORIGIN,
+          ...(cursor !== undefined && { exclusiveStartKey: cursor }),
+        });
+        triaged.push(...read.items);
+        cursor = read.lastEvaluatedKey;
+        if (cursor === undefined || triaged.length >= GROUP_FETCH_LIMIT) break;
+      }
+      warnIfCapped('contacts:triage', triaged.length);
+      for (const contact of triaged) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;
-        // GROUP-DETECTION STUBS ARE NOT A TODAY ROW (fix wave 5, adversarial 30).
+        // GROUP-DETECTION STUBS ARE NOT A TODAY ROW (fix wave 5, adversarial 30;
+        // moved to the QUERY + a fill loop above in fix wave 2, adversarial 6 -
+        // this line is now the belt to that braces, and covers a stub written
+        // before the `origin` marker existed).
         // Detection mints a contact for EVERY unseen roster member as
         // (unknown, needs_review) - the exact partition this block reads - so
         // one inbound from a six-person carrier group put five "New unknown

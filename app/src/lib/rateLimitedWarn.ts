@@ -36,14 +36,34 @@ export interface RateLimitedWarnOptions {
   schedule?: (fn: () => void, ms: number) => void;
 }
 
+/** A rate-limited warn, plus the drain a shutdown hook calls. */
+export type RateLimitedWarn = ((fields: Record<string, unknown>, message: string) => void) & {
+  /** Emit any suppressed tally NOW. Safe to call repeatedly; no-op when empty. */
+  drain: () => void;
+};
+
+/**
+ * Every live rate-limited warn in this process.
+ *
+ * The trailing flush is an UNREF'd timer, so a rolling deploy inside the window
+ * still dropped up to `intervalMs` (5 minutes) of suppressed count - the "task
+ * replacement" case the flush's own docstring names (fix wave 2, adversarial
+ * 26). The entrypoints drain this on SIGTERM/SIGINT, which is the only moment
+ * that loss is knowable and preventable.
+ */
+const liveWarns = new Set<RateLimitedWarn>();
+
+/** Flush every rate-limited warn's pending tally. Called from shutdown hooks. */
+export function drainRateLimitedWarns(): void {
+  for (const warn of liveWarns) warn.drain();
+}
+
 /**
  * A `warn(fields, message)` function that emits at most once per `intervalMs`.
  * The emitted line always carries `suppressedCount`: how many calls were
  * swallowed since the previous emission (0 on a clean first hit).
  */
-export function createRateLimitedWarn(
-  opts: RateLimitedWarnOptions,
-): (fields: Record<string, unknown>, message: string) => void {
+export function createRateLimitedWarn(opts: RateLimitedWarnOptions): RateLimitedWarn {
   const log = opts.logger ?? defaultLogger;
   const now = opts.now ?? Date.now;
   const schedule =
@@ -83,7 +103,7 @@ export function createRateLimitedWarn(
     }, Math.max(0, at + opts.intervalMs - now()));
   }
 
-  return (fields, message) => {
+  const emit = (fields: Record<string, unknown>, message: string): void => {
     const at = now();
     const elapsed = lastEmittedAt === undefined ? undefined : at - lastEmittedAt;
     // A BACKWARDS CLOCK STEP MUST NOT BLIND THE THROTTLE (fix wave 5,
@@ -113,4 +133,15 @@ export function createRateLimitedWarn(
     suppressed = 0;
     log.warn({ ...fields, suppressedCount }, message);
   };
+
+  const warn = emit as RateLimitedWarn;
+  warn.drain = (): void => {
+    if (suppressed === 0) return;
+    const suppressedCount = suppressed;
+    suppressed = 0;
+    lastEmittedAt = now();
+    log.warn({ ...lastFields, suppressedCount, trailingFlush: true }, lastMessage);
+  };
+  liveWarns.add(warn);
+  return warn;
 }

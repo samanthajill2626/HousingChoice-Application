@@ -214,6 +214,16 @@ export interface ContactItem {
    */
   origin?: string;
   /**
+   * IN-PROGRESS IMPORT RETRACT (ISO 8601; lib/import/apply.ts). Written as the
+   * non-destructive atomic guard at the top of a workbook `drop` retract, and
+   * removed again if the retract ends up KEEPING the contact. A contact that
+   * still carries it is a retract that DIED HALFWAY, which the next
+   * `import:apply` reports and resumes - that read is the field's reason to
+   * exist, and a write with no reader would be the very defect the same change
+   * removed `imported_sender_phone` for.
+   */
+  import_retract_started_at?: string;
+  /**
    * Staff-set tenant voucher expiration (ISO 8601) — the SOURCE of the
    * `voucher_expiration` placement deadline (placement-deadline-model §6). Set via
    * the contact create/triage API (allowlisted, canonicalized like consent_at);
@@ -401,6 +411,13 @@ export interface ListContactsOpts {
    * "Deleted" view). Applied as a FilterExpression on `deleted_at`.
    */
   deleted?: boolean;
+  /**
+   * Drop rows carrying this `origin` (fix wave 2, adversarial 6). A
+   * FilterExpression, so it saves the CALLER work but NOT the page slot -
+   * DynamoDB applies `Limit` at the index first. A caller that must not go blind
+   * behind a wall of excluded rows therefore also has to page (see today.ts).
+   */
+  excludeOrigin?: string;
 }
 
 export interface ContactsRepo {
@@ -797,11 +814,17 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       names['#del'] = 'deleted_at';
       const deletedFilter =
         opts.deleted === true ? 'attribute_exists(#del)' : 'attribute_not_exists(#del)';
+      const filters = [deletedFilter];
+      if (opts.excludeOrigin !== undefined) {
+        names['#origin'] = 'origin';
+        values[':excludedOrigin'] = opts.excludeOrigin;
+        filters.push('(attribute_not_exists(#origin) OR #origin <> :excludedOrigin)');
+      }
       const input: QueryCommandInput = {
         TableName: table,
         IndexName: 'byTypeStatus',
         KeyConditionExpression: keyExpr,
-        FilterExpression: deletedFilter,
+        FilterExpression: filters.join(' AND '),
         ExpressionAttributeNames: names,
         ExpressionAttributeValues: values,
         ...(opts.limit !== undefined && { Limit: opts.limit }),

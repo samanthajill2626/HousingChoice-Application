@@ -154,4 +154,41 @@ describe('the throttle cannot be blinded, and cannot hide a burst', () => {
     expect(warns).toHaveLength(2);
     expect(warns[1]?.fields['suppressedCount']).toBe(1);
   });
+
+  it('drain() reports the tally a SHUTDOWN would otherwise lose', async () => {
+    // THE OTHER HALF OF THE SAME DOCSTRING (fix wave 2, adversarial 26). The
+    // trailing flush is an UNREF'd timer, so the "task replacement" case it
+    // names - a rolling deploy inside the window - still dropped up to
+    // `intervalMs` (5 minutes in production) of suppressed count. The
+    // entrypoints now drain on SIGTERM/SIGINT.
+    const { drainRateLimitedWarns } = await import('../src/lib/rateLimitedWarn.js');
+    const { warns, logger } = fakeLogger();
+    let clock = 0;
+    const warn = createRateLimitedWarn({
+      logger,
+      intervalMs: 100,
+      now: () => clock,
+      schedule: () => {
+        /* the timer never fires: the process is going away */
+      },
+    });
+
+    warn({ event: 'x' }, 'first');
+    clock = 10;
+    warn({ event: 'x' }, 'first');
+    warn({ event: 'x' }, 'first');
+
+    warn.drain();
+
+    expect(warns).toHaveLength(2);
+    expect(warns[1]?.fields['suppressedCount']).toBe(2);
+    expect(warns[1]?.fields['trailingFlush']).toBe(true);
+    // A second drain has nothing left to say.
+    warn.drain();
+    expect(warns).toHaveLength(2);
+    // ...and the process-wide drain reaches it too (what the shutdown hook calls).
+    warn({ event: 'x' }, 'first');
+    drainRateLimitedWarns();
+    expect(warns).toHaveLength(3);
+  });
 });

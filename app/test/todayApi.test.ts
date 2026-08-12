@@ -955,6 +955,40 @@ describe('today action-queue API (BE6/C7)', () => {
     expect(rows.map((r) => r.refId)).toEqual(['c-realunknown']);
   });
 
+  it('a real unknown contact still surfaces behind MORE THAN A PAGE of group stubs', async () => {
+    // THE DEFECT (fix wave 2, adversarial 6). Wave 1 filtered the stubs at
+    // DISPLAY, but DynamoDB applies `Limit` at the index before anything
+    // application-side runs - so 100 rows are drawn from the whole
+    // `unknown#needs_review` partition and only then filtered. Every row in that
+    // partition carries the identical sort key, so intra-partition order is
+    // stable and the SAME 100 come back every time: once enough group stubs sort
+    // ahead of the real unknowns, the block rendered ZERO rows, every time,
+    // which reads as "nothing needs triage". Wave 1 turned a loud problem into a
+    // silent one; the page has to be FILLED past the stubs, not merely cleaned.
+    for (let i = 0; i < 120; i += 1) {
+      world.contacts.push({
+        contactId: `c-stub-${String(i).padStart(3, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555200${String(i).padStart(4, '0')}`,
+        origin: 'group_detection',
+        group_participation_at: '2026-08-11T12:00:00.000Z',
+      } as ContactItem);
+    }
+    world.contacts.push({
+      contactId: 'c-realunknown-behind',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15551110098',
+    } as ContactItem);
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.map((r) => r.refId)).toContain('c-realunknown-behind');
+  });
+
   it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {
     seedTenant('t-env', 'En', 'Velope');
     await seedTour({ tourId: 'tour-env', tenantId: 't-env', scheduledAt: todayNoonIso() });

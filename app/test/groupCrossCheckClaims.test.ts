@@ -312,7 +312,10 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
     // Two events discard the same stale stack. The first REMOVEs the anchor, so
     // the second's write refuses and it re-decides against the post-discard
     // balance - it must not subtract the same five credits twice.
-    const state = { balance: -5, since: '2026-08-11T10:00:00.000Z' };
+    const state: { balance: number; since?: string } = {
+      balance: -5,
+      since: '2026-08-11T10:00:00.000Z',
+    };
     let discarded = false;
     const { doc } = ledgerDoc(state, {
       beforeSettle: () => {

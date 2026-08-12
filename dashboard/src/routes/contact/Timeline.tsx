@@ -70,6 +70,14 @@ function sendFailureMessage(err: unknown): string {
         return 'This group text has too many members to send as a group - reply one to one from the member links.';
       case 'group_rail_unavailable':
         return 'This group text is not connected for sending yet - try again in a moment.';
+      // RETRYABLE, and said differently on purpose: the group IS connected, the
+      // attempt failed (a network blip, a provider 5xx) or the shared sending
+      // meter is backed up. "Not connected yet" would send staff looking for a
+      // setup problem that does not exist.
+      case 'group_send_failed':
+        return "That didn't send - the connection to our messaging provider failed. Try again.";
+      case 'group_send_busy':
+        return 'Sending is backed up right now - try again in a moment.';
       case 'group_text_media_not_supported':
         return 'Group texts are text only for now - remove the attachment to send.';
     }

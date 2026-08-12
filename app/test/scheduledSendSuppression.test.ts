@@ -172,6 +172,9 @@ function makeSendFakes(
     claimRailCreation: async () => {
       throw new Error('claimRailCreation: not used in this suite');
     },
+    clearGroupRail: async () => {
+      throw new Error('clearGroupRail: not used in this suite');
+    },
     recordRailFailure: async () => {
       throw new Error('recordRailFailure: not used in this suite');
     },
@@ -254,17 +257,14 @@ function makeSendFakes(
     claimCrossCheckEvent: async () => {
       throw new Error('claimCrossCheckEvent: not used in this suite');
     },
-    bumpCrossCheckEvent: async () => {
-      throw new Error('bumpCrossCheckEvent: not used in this suite');
+    recordCrossCheckEvent: async () => {
+      throw new Error('recordCrossCheckEvent: not used in this suite');
     },
     bumpCrossCheckClassic: async () => {
       throw new Error('bumpCrossCheckClassic: not used in this suite');
     },
     releaseCrossCheckPending: async () => {
       throw new Error('releaseCrossCheckPending: not used in this suite');
-    },
-    putCrossCheckPending: async () => {
-      throw new Error('putCrossCheckPending: not used in this suite');
     },
     claimOldestCrossCheckPending: async () => {
       throw new Error('claimOldestCrossCheckPending: not used in this suite');

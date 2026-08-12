@@ -522,11 +522,20 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
       // Conversations service, every rail eventually auto-closes and the FIRST
       // thing that notices is a staff send. Untranslated it surfaced as a bare
       // 500 that tells staff nothing; translated, the send route's existing
-      // `group_rail_unavailable` mapping says what happened, and the ensure path
-      // re-detects the closed state on the next attempt.
+      // `group_rail_unavailable` mapping says what happened, and the service
+      // DROPS the dead sid and rebuilds through ensureGroupRail (fix wave 2,
+      // adversarial 2 - wave 1's "the ensure path re-detects it" was fiction,
+      // because ensureGroupRail never re-reads Twilio).
+      //
+      // VENDOR CODES, NOT A BARE 404 (same finding). `status === 404` also
+      // matches a misconfigured Conversations service or account SID, which is a
+      // deployment fault, not a closed rail - swallowing it as "the rail is
+      // gone" would send every thread into a rebuild loop against an account
+      // that cannot hold rails at all. 20404 IS the resource-not-found code, so
+      // a genuine vanished conversation is still caught.
       const code = twilioErrorCode(err);
       const status = twilioStatus(err);
-      if (status === 409 || status === 404 || code === '50353' || code === '20404') {
+      if (status === 409 || code === '50353' || code === '20404') {
         this.log.warn(
           { event: 'group_rail_post_refused', conversationSid: input.conversationSid, code, status },
           'Conversations refused a post to this rail - it is closed, or it no longer exists',

@@ -857,6 +857,20 @@ export interface ConversationsRepo {
     claimToken: string,
   ): Promise<void>;
   /**
+   * DROP a rail that Twilio has told us is CLOSED or GONE, so the ensure path
+   * can build a new one (fix wave 2, adversarial 2). `ensureGroupRail` returns
+   * the STORED rail whenever the sid is stamped and the map covers the roster -
+   * it never re-reads Twilio - so a rail that closes after creation was
+   * previously unhealable: every send failed on the same dead sid, forever,
+   * and `hasActiveGroupRail` kept the re-enqueue path from helping either.
+   *
+   * CONDITIONAL ON THE SID WE SAW. A concurrent healer may already have stamped
+   * a fresh rail; clearing unconditionally would delete THAT one. Returns true
+   * when this call is the one that cleared it. Never throws on a lost
+   * condition - losing means someone else already fixed it.
+   */
+  clearGroupRail(conversationId: string, expectedSid: string): Promise<boolean>;
+  /**
    * FENCED rail finalize: stamp `twilio_conversation_sid` + the MBxx -> member
    * key map and CLEAR the `rail_creating` claim, CONDITIONAL on the caller still
    * owning that claim (`rail_creating.token === claimToken`). Returns the
@@ -2141,6 +2155,33 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
         // Someone else owns the claim now (or the row is gone). Their outcome is
         // the live one; ours is stale by definition.
         log.warn({ conversationId }, 'group text rail failure record lost its claim');
+      }
+    },
+
+    async clearGroupRail(conversationId, expectedSid) {
+      try {
+        await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: { conversationId },
+            // The map goes with the sid: a map without a sid describes a rail
+            // that no longer exists, and every receipt mapped through it would
+            // be attributed to a dead conversation.
+            UpdateExpression: 'REMOVE twilio_conversation_sid, twilio_participant_map',
+            ConditionExpression: 'attribute_exists(conversationId) AND twilio_conversation_sid = :sid',
+            ExpressionAttributeValues: { ':sid': expectedSid },
+          }),
+        );
+        log.warn(
+          { event: 'group_rail_cleared', conversationId },
+          'group text rail dropped - Twilio reported it closed or gone, so the ensure path can build a new one',
+        );
+        return true;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // Someone healed it first (or the row is gone). Theirs is the live rail.
+        log.info({ conversationId }, 'group text rail clear skipped - the stored rail is no longer the one we saw');
+        return false;
       }
     },
 

@@ -34,14 +34,37 @@ import {
   GroupMemberNoConsentError,
   GroupRailUnavailableError,
   GroupRosterEmptyError,
+  GroupSendBusyError,
+  GroupSendFailedError,
   GroupTooManyMembersError,
   NotAGroupTextError,
   MAX_SENDABLE_GROUP_MEMBERS,
   type GroupSendServiceDeps,
 } from '../src/services/groupSend.js';
 import type { GroupRailEnsurer } from '../src/services/groupRail.js';
+import { TokenBucket } from '../src/lib/tokenBucket.js';
 
 const NOW = new Date('2026-08-11T13:00:00.000Z');
+
+/**
+ * Fake clock + sleep for a REAL TokenBucket (the same shape tokenBucket.test.ts
+ * uses): sleeping advances the clock and records the wait, so what a send SPENDS
+ * on the A2P meter is observable without stubbing the bucket's arithmetic.
+ */
+function fakeBucketTime() {
+  let nowMs = 0;
+  const waits: number[] = [];
+  return {
+    now: () => nowMs,
+    sleep: async (ms: number) => {
+      waits.push(ms);
+      nowMs += ms;
+    },
+    get waits() {
+      return waits;
+    },
+  };
+}
 
 function member(phone: string, contactId: string, name?: string): ConversationParticipant {
   return { contactId, phone, ...(name !== undefined && { name }) };
@@ -92,6 +115,8 @@ function makeFakes(
     attachedNumbers?: Record<string, ContactItem>;
     /** Extra service deps passed through verbatim (the A2P meter seam). */
     deps?: Partial<GroupSendServiceDeps>;
+    /** The closed-rail drop, so a test can watch the heal sequence. */
+    clearGroupRail?: (conversationId: string, expectedSid: string) => Promise<boolean>;
   } = {},
 ): Fakes {
   const members = overrides.members ?? [ANN, MARCUS];
@@ -185,6 +210,7 @@ function makeFakes(
         if (overrides.failSuppressionRead === true) throw new Error('index unavailable');
         return (overrides.oneToOneThreads ?? []).filter((c) => c.participant_phone === phone);
       },
+      clearGroupRail: overrides.clearGroupRail ?? (async () => true),
     },
     messagesRepo: {
       append: async (message) => {
@@ -639,8 +665,10 @@ describe('groupSend - adapter failures become typed refusals', () => {
         () => new Error('expected a throw'),
         (e: unknown) => e as Error & { code?: string },
       );
-    expect(err).toBeInstanceOf(GroupRailUnavailableError);
-    expect(err.code).toBe('group_rail_unavailable');
+    // The CODE changed in fix wave 2 (adversarial 2 / conformance F4): a generic
+    // post failure is a RETRYABLE send failure, not "this thread has no rail".
+    expect(err).toBeInstanceOf(GroupSendFailedError);
+    expect(err.code).toBe('group_send_failed');
     expect(err.message).not.toContain('twilio exploded'); // the raw message is not the wrapper's
     expect(f.appended).toEqual([]);
     expect(f.audits).toEqual([]);
@@ -656,6 +684,8 @@ describe('groupSend - refusal codes are the ones the route maps', () => {
       new GroupMemberDeletedError('c', 'Marcus').code,
       new GroupMemberNoConsentError('c', 'Marcus').code,
       new GroupRailUnavailableError('c', 'why').code,
+      new GroupSendFailedError('c', 'why').code,
+      new GroupSendBusyError('c').code,
     ];
     expect(codes).toEqual([
       'not_a_group_text',
@@ -664,6 +694,8 @@ describe('groupSend - refusal codes are the ones the route maps', () => {
       'group_member_deleted',
       'group_member_no_consent',
       'group_rail_unavailable',
+      'group_send_failed',
+      'group_send_busy',
     ]);
     expect(new GroupTooManyMembersError('c', 10)).toBeInstanceOf(SendRefusedError);
   });
@@ -692,26 +724,179 @@ describe('messagesRepo due-row helpers', () => {
 // handsets, so a burst of group replies ate the throughput those paths are
 // being paced against.
 describe('groupSend - the A2P meter', () => {
-  it('draws ONE token PER MEMBER before posting, not one per post', async () => {
+  /**
+   * A REAL bucket on a fake clock, wrapped only to RECORD the draws.
+   *
+   * The wave-1 tests injected `{ acquire: async (n) => draws.push(n) }`, which
+   * records the requested count and performs no arithmetic - so they proved the
+   * call site passes N and could not see that the bucket charged 1 (it clamped
+   * to capacity, and capacity is 1 at the shipped default rate). This wrapper
+   * delegates to the real TokenBucket, so what is asserted is what is SPENT.
+   */
+  function meteredBucket(opts: { capacity: number; refillPerSec: number }) {
+    const clock = fakeBucketTime();
+    const real = new TokenBucket({
+      capacity: opts.capacity,
+      refillPerSec: opts.refillPerSec,
+      now: clock.now,
+      sleep: clock.sleep,
+      maxJitterMs: 0,
+    });
     const draws: number[] = [];
+    return {
+      clock,
+      draws,
+      bucket: {
+        acquire: async (n = 1, o: { timeoutMs?: number } = {}) => {
+          draws.push(n);
+          await real.acquire(n, o);
+        },
+      },
+    };
+  }
+
+  it('SPENDS one token per member - a nine-member post costs nine, not one', async () => {
+    // THE DEFECT (fix wave 2, adversarial 3 / conformance F3). `acquire(9)` was
+    // clamped to capacity, and capacity is `max(1, A2P_RATE_LIMIT_PER_SEC)` with
+    // a shipped default of 1.0 - so nine carrier messages drew ONE token. At
+    // 1/sec a nine-token draw with a full bucket costs 8 refills of real waiting;
+    // one token would cost none.
+    const metered = meteredBucket({ capacity: 1, refillPerSec: 1 });
+    const nine = Array.from({ length: 9 }, (_, i) =>
+      member(`+161755501${String(i).padStart(2, '0')}`, `contact-${i}`, `Member ${i}`),
+    );
     const f = makeFakes({
-      deps: { tokenBucket: { acquire: async (n = 1) => void draws.push(n) } },
+      members: nine,
+      contacts: nine.map((m) => consentingContact(m.contactId, m.phone)),
+      deps: { tokenBucket: metered.bucket },
     });
 
     await f.send({ conversationId: 'group-1', body: 'hi' });
 
-    expect(draws).toEqual([2]); // the fixture roster is Ann + Marcus
+    expect(metered.draws).toEqual([9]);
+    // Eight one-second refills: the ninth message really was paced.
+    expect(metered.clock.waits.reduce((a, b) => a + b, 0)).toBe(8000);
   });
 
   it('spends NOTHING on a send that is going to be refused', async () => {
-    const draws: number[] = [];
+    const metered = meteredBucket({ capacity: 4, refillPerSec: 4 });
     const f = makeFakes({
       conversation: { participants: [] },
-      deps: { tokenBucket: { acquire: async (n = 1) => void draws.push(n) } },
+      deps: { tokenBucket: metered.bucket },
     });
 
     await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toThrow();
-    expect(draws).toEqual([]);
+    expect(metered.draws).toEqual([]);
+  });
+
+  it('spends NOTHING when the A2P kill switch is going to refuse the post', async () => {
+    // The meter used to be drawn BEFORE the kill switch, which lives inside the
+    // adapter (fix wave 2, adversarial 16). Under the pre-A2P prod posture
+    // (SMS_SENDING_ENABLED=false) EVERY attempt spent throughput and then
+    // refused - the one configuration where nothing may be spent at all.
+    const metered = meteredBucket({ capacity: 4, refillPerSec: 4 });
+    const f = makeFakes({
+      smsSendingEnabled: false,
+      deps: { tokenBucket: metered.bucket },
+    });
+
+    await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toBeInstanceOf(
+      SmsSendingDisabledError,
+    );
+    expect(metered.draws).toEqual([]);
+  });
+
+  it('REFUSES with a staff-facing busy error rather than parking the request forever', async () => {
+    // `acquire` never rejects and serialises waiters FIFO, so an interactive
+    // send behind a queue held an Express request open with no bound at all.
+    const metered = meteredBucket({ capacity: 1, refillPerSec: 0.01 }); // 100s per token
+    const f = makeFakes({ deps: { tokenBucket: metered.bucket } });
+
+    const err = await f.send({ conversationId: 'group-1', body: 'hi' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SendRefusedError);
+    expect((err as SendRefusedError).code).toBe('group_send_busy');
+  });
+});
+
+describe('groupSend - a failed post says WHICH kind of failure it was', () => {
+  it('a TRANSIENT post failure is retryable, NOT "this thread has no rail"', async () => {
+    // Wave 1 translated EVERY non-kill-switch failure into
+    // `group_rail_unavailable` (fix wave 2, adversarial 2 / conformance F4). A
+    // network timeout, a 429 or a 500 then told staff the thread has no rail -
+    // the thread's rail is fine and retrying is the correct response.
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => {
+          throw Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        },
+      },
+    });
+
+    const err = await f.send({ conversationId: 'group-1', body: 'hi' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SendRefusedError);
+    expect((err as SendRefusedError).code).toBe('group_send_failed');
+  });
+
+  it('a CLOSED rail is dropped and REBUILT through ensureGroupRail, then the post retried', async () => {
+    // The promised recovery was fictional: `ensureGroupRail` returns the STORED
+    // rail whenever the sid is stamped, and nothing cleared the sid - so a rail
+    // that closed after creation failed every send forever, unhealable.
+    let attempts = 0;
+    const postedTo: string[] = [];
+    const cleared: { conversationId: string; sid: string }[] = [];
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async (input) => {
+          attempts += 1;
+          postedTo.push(input.conversationSid);
+          if (attempts === 1) {
+            throw new GroupConversationsUnavailableError('the rail is closed or gone');
+          }
+          return { messageSid: 'IMhealed1', dateCreated: '2026-08-11T13:00:01.000Z' };
+        },
+      },
+      rail: {
+        ensureGroupRail: async () => ({
+          status: 'created',
+          twilioConversationSid: 'CHrail2',
+          participantMap: { MBann2: 'phone#+16175550111', MBmarcus2: 'phone#+16175550222' },
+        }),
+      },
+      clearGroupRail: async (conversationId, sid) => {
+        cleared.push({ conversationId, sid });
+        return true;
+      },
+    });
+
+    const out = await f.send({ conversationId: 'group-1', body: 'hi' });
+
+    expect(cleared).toEqual([{ conversationId: 'group-1', sid: 'CHrail1' }]);
+    expect(attempts).toBe(2);
+    // The retry posted into the NEW rail, and the snapshot records that one.
+    expect(postedTo).toEqual(['CHrail1', 'CHrail2']);
+    expect(f.appended[0]?.groupRailSnapshot?.conversationSid).toBe('CHrail2');
+    expect(out.providerSid).toBe('IMhealed1');
+  });
+
+  it('a CLOSED rail that cannot be rebuilt refuses as rail-unavailable, loudly', async () => {
+    const f = makeFakes({
+      port: {
+        postGroupMessage: async () => {
+          throw new GroupConversationsUnavailableError('the rail is closed or gone');
+        },
+      },
+      rail: {
+        ensureGroupRail: async () => ({ status: 'failed', reason: 'Conversation CHrail1 is closed' }),
+      },
+      clearGroupRail: async () => true,
+    });
+
+    const err = await f.send({ conversationId: 'group-1', body: 'hi' }).catch((e: unknown) => e);
+
+    expect(err).toBeInstanceOf(SendRefusedError);
+    expect((err as SendRefusedError).code).toBe('group_rail_unavailable');
   });
 });
 

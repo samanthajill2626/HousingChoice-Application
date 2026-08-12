@@ -201,6 +201,9 @@ function makeCaptureFakes(seed: { participants?: ConversationParticipant[]; cont
     claimRailCreation: async () => {
       throw new Error('claimRailCreation: not used in this suite');
     },
+    clearGroupRail: async () => {
+      throw new Error('clearGroupRail: not used in this suite');
+    },
     recordRailFailure: async () => {
       throw new Error('recordRailFailure: not used in this suite');
     },

@@ -23,7 +23,8 @@ const { loadConfig } = await import('./lib/config.js');
 const { newBootId, runWithContext } = await import('./lib/context.js');
 const { dispatchJob, registeredJobNames } = await import('./jobs/jobs.js');
 const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
-const { TokenBucket } = await import('./lib/tokenBucket.js');
+const { sharedA2pBucket } = await import('./lib/tokenBucket.js');
+const { drainRateLimitedWarns } = await import('./lib/rateLimitedWarn.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -92,10 +93,15 @@ if (config.eventBridgeUrl) {
 // admit a single message. The bucket starts full, so the first burst is up to
 // `capacity` messages immediately; thereafter sends are paced at `refillPerSec`
 // tokens/sec (the sustained A2P rate).
-const a2pBucket = new TokenBucket({
-  capacity: Math.max(1, config.a2pRateLimitPerSec),
-  refillPerSec: config.a2pRateLimitPerSec,
-});
+//
+// BUILT THROUGH THE SHARED CONSTRUCTOR (fix wave 2, adversarial 31). The app
+// path uses `sharedA2pBucket`, which memoizes one instance per process and
+// applies this exact sizing; hand-rolling a second `new TokenBucket` here meant
+// one semantic written twice and a future worker-side group send would get a
+// SECOND bucket inside this same process. The meter has always been
+// per-process (app and worker are separate tasks in a deployed stack); what
+// this removes is a second one inside ONE process.
+const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
 
 // Register EVERY job handler (retrySend, relay fan-out + intro, broadcast,
 // missed-call auto-text) through the single shared registry — the worker
@@ -484,6 +490,10 @@ function shutdown(signal: NodeJS.Signals): void {
   if (shuttingDown) return;
   shuttingDown = true;
   runWithContext(bootContext, () => {
+    // Same drain as the app process (fix wave 2, adversarial 26): the throttled
+    // WARN tally is held in an unref'd timer and would otherwise be lost on a
+    // rolling deploy inside the window.
+    drainRateLimitedWarns();
     logger.info({ signal }, 'shutdown signal received — worker draining');
   });
   clearInterval(keepAlive);

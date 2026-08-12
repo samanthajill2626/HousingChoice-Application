@@ -46,7 +46,7 @@ import { summarizeError } from '../lib/errors.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
-import { sharedA2pBucket, type TokenBucket } from '../lib/tokenBucket.js';
+import { sharedA2pBucket, TokenBucketBusyError, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createGroupConversationsAdapter,
   GroupConversationsUnavailableError,
@@ -141,6 +141,47 @@ export class GroupRailUnavailableError extends SendRefusedError {
   }
 }
 
+/**
+ * The post failed for a reason that says NOTHING about the rail - a network
+ * timeout, a 429, a 5xx (fix wave 2, adversarial 2 / conformance F4). Wave 1
+ * translated every such failure into `group_rail_unavailable`, which told staff
+ * the thread has no rail when the rail is fine and RETRYING is the right move -
+ * the opposite of what a rail refusal conveys. Separate code, retryable status,
+ * so the two diagnoses can never be confused again.
+ */
+export class GroupSendFailedError extends SendRefusedError {
+  constructor(conversationId: string, reason: string) {
+    super(
+      `group text ${conversationId} could not be sent right now: ${reason}`,
+      'group_send_failed',
+    );
+  }
+}
+
+/**
+ * The A2P meter could not pay this send inside its bound (fix wave 2,
+ * adversarial 16). Interactive, so it refuses rather than parking the Express
+ * request behind the queue indefinitely. Nothing was spent and nothing was
+ * posted - a retry is exactly right.
+ */
+export class GroupSendBusyError extends SendRefusedError {
+  constructor(conversationId: string) {
+    super(
+      `group text ${conversationId} is waiting on outbound throughput - try again in a moment`,
+      'group_send_busy',
+    );
+  }
+}
+
+/**
+ * How long an interactive group send may wait on the shared A2P meter before it
+ * refuses. Nine members at the shipped 1/sec default is ~8s of legitimate
+ * pacing, so the bound has to clear that with room; past it the queue is deep
+ * enough that a staff member is better told to try again than left watching a
+ * spinner. Well inside any reverse-proxy idle timeout.
+ */
+export const GROUP_SEND_METER_WAIT_MS = 20_000;
+
 // --- Service ----------------------------------------------------------------
 
 export interface GroupSendInput {
@@ -170,7 +211,7 @@ export interface GroupSendServiceDeps {
   // disagree about one handset.
   conversationsRepo?: Pick<
     ConversationsRepo,
-    'getById' | 'touchLastActivity' | 'findByParticipantPhone'
+    'getById' | 'touchLastActivity' | 'findByParticipantPhone' | 'clearGroupRail'
   >;
   messagesRepo?: Pick<MessagesRepo, 'append'>;
   contactsRepo?: Pick<ContactsRepo, 'findByPhone'>;
@@ -184,11 +225,17 @@ export interface GroupSendServiceDeps {
   now?: () => Date;
   /**
    * The shared A2P meter (fix wave 5, adversarial 34). ONE group post becomes
-   * up to nine carrier messages, so it draws N tokens for N members from the
-   * SAME bucket relay fan-out, broadcasts and missed-call auto-text draw from -
-   * otherwise a burst of group replies silently eats throughput those paths are
-   * being paced against. Defaults to the process-wide instance; a test may pass
-   * its own (or `null` to opt out entirely).
+   * up to nine carrier messages, so it draws N tokens for N members - and the
+   * draw is now PAID in full rather than clamped to capacity (fix wave 2,
+   * adversarial 3). Defaults to the process-wide instance; a test may pass its
+   * own (or `null` to opt out entirely).
+   *
+   * PER-PROCESS, exactly like every other metered path (fix wave 2, conformance
+   * F3). In a deployed app/worker split this bucket is the APP's while relay
+   * fan-out, broadcasts and missed-call auto-text draw from the WORKER's, so the
+   * combined rate is per-task - the meter has always had that property and this
+   * does not change it. Only in local/in-process mode is it literally the same
+   * instance the jobs use. Do not describe it as one bucket across processes.
    */
   tokenBucket?: Pick<TokenBucket, 'acquire'> | null;
 }
@@ -322,46 +369,152 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       throw new GroupRailUnavailableError(conversationId, 'BUSINESS_PHONE_NUMBER is not configured');
     }
 
-    // (5b) THE A2P METER, before the post (fix wave 5, adversarial 34). One
-    // token per carrier message, and this post becomes one per member - the
-    // same accounting relayFanOut applies per leg. Drawn AFTER every refusal
-    // gate above, so a send that is going to be refused never spends throughput
-    // the broadcast pacer needs. `acquire` sleeps; it never rejects.
-    if (tokenBucket !== null) await tokenBucket.acquire(members.length);
+    /** One post attempt at a given rail. */
+    async function postOnce(sid: string) {
+      return port.postGroupMessage({ conversationSid: sid, author: businessNumber as string, body });
+    }
 
-    // (6) The post. The adapter owns the A2P kill switch (spec invariant 13.7);
-    // both of its typed failures become SendRefusedErrors here, because the send
-    // route maps ONLY that family - an untranslated throw would 500 and tell
-    // staff nothing.
-    let posted;
-    try {
-      posted = await port.postGroupMessage({
-        conversationSid: conversationSid as string,
-        author: businessNumber,
-        body,
-      });
-    } catch (err) {
-      if (err instanceof AdapterSmsSendingDisabledError) throw new SmsSendingDisabledError();
-      if (err instanceof GroupConversationsUnavailableError) {
-        throw new GroupRailUnavailableError(conversationId, err.message);
+    /**
+     * Drop a rail Twilio has told us is closed or gone and build a new one
+     * through the ONE authoritative ensure path. `undefined` means the thread
+     * genuinely has no rail right now - which the caller reports as such, and
+     * which is now a STORED fact (the sid is cleared and `rail_failed` stamped),
+     * so the re-enqueue path and the thread view can both see it.
+     */
+    async function healRail(
+      deadSid: string,
+    ): Promise<{ twilioConversationSid: string; participantMap: Record<string, string> } | undefined> {
+      try {
+        await conversations.clearGroupRail(conversationId, deadSid);
+      } catch (err) {
+        // A failed clear leaves the stored rail in place, so the ensure below
+        // will hand back the same dead sid and the retry will refuse cleanly.
+        log.error(
+          { conversationId, err: summarizeError(err), event: 'group_rail_clear_failed' },
+          'could not drop the closed Conversations rail - the thread stays pinned to it until this succeeds',
+        );
       }
-      // NOTHING RAW LEAVES THIS CATCH (fix wave 5, adversarial 4). A network
-      // failure inside the Twilio SDK is a bare AxiosError whose enumerable
-      // `config` carries the Authorization header and the POST body - here,
-      // `Author=+1...&Body=<the full message text>`. Rethrowing it unchanged
-      // sent it straight past api.ts's SendRefusedError-only catch into the
-      // Express handler's `log.error({ err })`, which serializes every
-      // enumerable key. Wrap it in a domain error that carries a SUMMARY and no
-      // config, so the 500 path still says what happened and says nothing else.
+      const ensured = await rail.ensureGroupRail({ conversationId, members });
+      if (ensured.twilioConversationSid === undefined) {
+        log.error(
+          {
+            conversationId,
+            railStatus: ensured.status,
+            reason: ensured.reason,
+            event: 'group_rail_rebuild_failed',
+          },
+          'the closed Conversations rail could not be rebuilt - this group text is inbound-only until it can be',
+        );
+        return undefined;
+      }
+      return {
+        twilioConversationSid: ensured.twilioConversationSid,
+        participantMap: ensured.participantMap ?? {},
+      };
+    }
+
+    /**
+     * NOTHING RAW LEAVES THIS PATH (fix wave 5, adversarial 4). A network
+     * failure inside the Twilio SDK is a bare AxiosError whose enumerable
+     * `config` carries the Authorization header and the POST body - here,
+     * `Author=+1...&Body=<the full message text>`. Rethrowing it unchanged sent
+     * it straight past api.ts's SendRefusedError-only catch into the Express
+     * handler's `log.error({ err })`, which serializes every enumerable key. The
+     * summary carries a name, a vendor code and a status, and nothing else.
+     */
+    function translatePostFailure(err: unknown): SendRefusedError {
       const summary = summarizeError(err);
       log.error(
         { conversationId, err: summary, event: 'group_send_post_failed' },
         'group send post to the Conversations rail failed',
       );
-      throw new GroupRailUnavailableError(
+      return new GroupSendFailedError(
         conversationId,
-        `posting to the rail failed: ${summary.name}${summary.code !== undefined ? ` (${summary.code})` : ''}`,
+        `${summary.name}${summary.code !== undefined ? ` (${summary.code})` : ''}`,
       );
+    }
+
+    // (5a) THE KILL SWITCH, BEFORE THE METER (fix wave 2, adversarial 16). The
+    // A2P kill switch is enforced INSIDE the adapter (invariant 13.7) so no
+    // direct-adapter caller can bypass it - but that is AFTER the draw, so under
+    // the pre-A2P production posture (SMS_SENDING_ENABLED=false) every attempt
+    // spent throughput and then refused. This is an ordering guard, not a second
+    // enforcement point: the adapter still owns the refusal.
+    if (config.smsSendingEnabled === false) throw new SmsSendingDisabledError();
+
+    // (5b) THE A2P METER (fix wave 5, adversarial 34; corrected in wave 2). One
+    // token per carrier message, and this post becomes one per member - the same
+    // accounting relayFanOut applies per leg. Drawn AFTER every refusal gate
+    // above, so a send that is going to be refused never spends throughput the
+    // broadcast pacer needs.
+    //
+    // BOUNDED, because this is the first INTERACTIVE acquirer. `acquire`
+    // serialises waiters FIFO and (unbounded) never rejects, so N queued sends
+    // held N Express requests open with no ceiling. Past the bound the send
+    // refuses with a retryable, staff-readable error and spends nothing.
+    if (tokenBucket !== null) {
+      try {
+        await tokenBucket.acquire(members.length, { timeoutMs: GROUP_SEND_METER_WAIT_MS });
+      } catch (err) {
+        if (err instanceof TokenBucketBusyError) {
+          log.warn(
+            { conversationId, memberCount: members.length, event: 'group_send_meter_busy' },
+            'group send refused: the shared A2P meter could not admit this send inside its wait bound',
+          );
+          throw new GroupSendBusyError(conversationId);
+        }
+        throw err;
+      }
+    }
+
+    // (6) The post. The adapter owns the A2P kill switch (spec invariant 13.7);
+    // its typed failures become SendRefusedErrors here, because the send route
+    // maps ONLY that family - an untranslated throw would 500 and tell staff
+    // nothing.
+    //
+    // A CLOSED OR GONE RAIL IS HEALED, ONCE (fix wave 2, adversarial 2). The
+    // recovery wave 1's comment promised did not exist: `ensureGroupRail`
+    // returns the STORED rail whenever the sid is stamped and the map covers the
+    // roster, and nothing cleared the sid - so a rail that auto-closed after
+    // creation failed EVERY send to that thread, forever, with a 409 no operator
+    // action could clear. Dropping the dead sid (conditionally, so a concurrent
+    // healer is never clobbered) is what makes the ensure path re-detect it.
+    let posted;
+    try {
+      posted = await postOnce(conversationSid as string);
+    } catch (err) {
+      if (err instanceof AdapterSmsSendingDisabledError) throw new SmsSendingDisabledError();
+      if (err instanceof GroupConversationsUnavailableError) {
+        // ERROR, not the adapter's WARN: this is the alarmed channel, and a rail
+        // dying under a live thread is exactly what the alarm is for (wave 1
+        // dropped it to a WARN and the 409 path logged nothing at all).
+        log.error(
+          {
+            conversationId,
+            conversationSid,
+            event: 'group_rail_closed_detected',
+            err: summarizeError(err),
+          },
+          'the Conversations rail refused a post because it is closed or gone - dropping it and rebuilding',
+        );
+        const healed = await healRail(conversationSid as string);
+        if (healed === undefined) {
+          throw new GroupRailUnavailableError(conversationId, 'the rail is closed and could not be rebuilt');
+        }
+        conversationSid = healed.twilioConversationSid;
+        participantMap = healed.participantMap;
+        try {
+          posted = await postOnce(conversationSid);
+        } catch (retryErr) {
+          if (retryErr instanceof AdapterSmsSendingDisabledError) throw new SmsSendingDisabledError();
+          if (retryErr instanceof GroupConversationsUnavailableError) {
+            throw new GroupRailUnavailableError(conversationId, 'the rebuilt rail refused this post too');
+          }
+          throw translatePostFailure(retryErr);
+        }
+      } else {
+        throw translatePostFailure(err);
+      }
     }
 
     // (7) Persist. ONE transactional append carries three things that must not

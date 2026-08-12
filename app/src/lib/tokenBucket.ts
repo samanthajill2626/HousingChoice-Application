@@ -71,12 +71,27 @@ export class TokenBucket {
   /**
    * Acquire `count` tokens, awaiting availability. Resolves immediately when
    * enough tokens are on hand; otherwise sleeps for the exact deficit-refill
-   * time (+ jitter) and retries. count is clamped to capacity (a single
-   * request can never want more than the bucket can ever hold). Calls are
-   * serialised FIFO so the shared rate is honoured under concurrency.
+   * time (+ jitter) and retries. Calls are serialised FIFO so the shared rate
+   * is honoured under concurrency.
+   *
+   * A DRAW LARGER THAN CAPACITY IS PAID IN FULL, NOT CLAMPED (fix wave 2,
+   * adversarial 3 / conformance F3). `count` used to be clamped to capacity,
+   * and capacity is `max(1, a2pRateLimitPerSec)` - so at the SHIPPED default
+   * rate of 1/sec a nine-member group post drew exactly ONE token for nine
+   * carrier messages. The meter read as if it metered and did not. Beyond
+   * capacity the draw is now taken in capacity-sized instalments against the
+   * same serialised budget, which costs the same wall-clock time the rate
+   * implies (9 messages at 1/sec = ~9s of throughput) and can never overdraw.
+   *
+   * `timeoutMs` bounds the TOTAL wait, queue time included, and rejects with
+   * `TokenBucketBusyError` when it is exceeded. Background jobs (every
+   * pre-existing caller) pass nothing and keep the old unbounded behaviour; an
+   * INTERACTIVE caller passes a bound so an Express request is never held open
+   * indefinitely behind other waiters.
    */
-  async acquire(count = 1): Promise<void> {
-    const want = Math.min(Math.max(count, 1), this.capacity);
+  async acquire(count = 1, opts: { timeoutMs?: number } = {}): Promise<void> {
+    const want = Math.max(count, 1);
+    const deadline = opts.timeoutMs === undefined ? undefined : this.now() + opts.timeoutMs;
     // Chain onto the prior acquire so waiters drain in order against one budget.
     const prior = this.tail;
     let release!: () => void;
@@ -85,23 +100,51 @@ export class TokenBucket {
     });
     await prior;
     try {
+      // The FIFO queue is part of the wait: N sends ahead of this one is exactly
+      // how an interactive request ends up parked for minutes.
+      if (deadline !== undefined && this.now() >= deadline) {
+        throw new TokenBucketBusyError(want, opts.timeoutMs as number);
+      }
+      let remaining = want;
       // Guard against a runaway loop (a clock that never advances): bounded by
       // a generous iteration cap — in practice one or two sleeps suffice.
       for (let guard = 0; guard < 100_000; guard++) {
         this.refill();
-        if (this.tokens >= want) {
-          this.tokens -= want;
-          return;
+        // Take at most one bucketful at a time; a larger draw pays instalments.
+        const instalment = Math.min(remaining, this.capacity);
+        if (this.tokens >= instalment) {
+          this.tokens -= instalment;
+          remaining -= instalment;
+          if (remaining <= 0) return;
+          continue;
         }
-        const deficit = want - this.tokens;
+        const deficit = instalment - this.tokens;
         const waitMs = Math.ceil((deficit / this.refillPerSec) * 1000);
         const jitter = this.maxJitterMs > 0 ? Math.floor(Math.random() * this.maxJitterMs) : 0;
+        if (deadline !== undefined && this.now() + waitMs > deadline) {
+          throw new TokenBucketBusyError(want, opts.timeoutMs as number);
+        }
         await this.sleep(waitMs + jitter);
       }
       throw new Error('TokenBucket.acquire: exceeded retry guard — is the clock advancing?');
     } finally {
       release();
     }
+  }
+}
+
+/**
+ * The bounded wait expired before this draw could be paid. Thrown ONLY when a
+ * caller asked for a bound; the throughput was never spent, so the caller is
+ * free to refuse the work and let a human retry (fix wave 2, adversarial 16).
+ */
+export class TokenBucketBusyError extends Error {
+  constructor(
+    readonly wanted: number,
+    readonly waitedMs: number,
+  ) {
+    super(`token bucket busy: ${wanted} token(s) not available within ${waitedMs}ms`);
+    this.name = 'TokenBucketBusyError';
   }
 }
 
@@ -120,6 +163,12 @@ export class TokenBucket {
  * therefore per-ECS-task, exactly like the existing bucket - the meter has
  * always been per-process, and this makes the group path no worse than the
  * paths beside it while closing the "nine messages, zero tokens" hole.
+ *
+ * PER PROCESS, NOT ACROSS THEM (fix wave 2, conformance F3). In a deployed
+ * app/worker split the app draws from its own instance and the worker from
+ * its own; both are built HERE (worker.ts calls this too, fix wave 2,
+ * adversarial 31) so the sizing cannot drift, but no comment anywhere should
+ * claim the two processes share a budget. They never have.
  */
 let sharedBucket: TokenBucket | undefined;
 

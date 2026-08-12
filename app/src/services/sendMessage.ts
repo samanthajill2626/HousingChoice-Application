@@ -62,6 +62,12 @@ export class SendRefusedError extends Error {
       | 'group_member_deleted'
       | 'group_member_no_consent'
       | 'group_rail_unavailable'
+      // A post that failed for a reason that says nothing about the rail
+      // (network, 429, 5xx) and one the shared A2P meter could not admit inside
+      // its wait bound. Both are RETRYABLE - deliberately distinct from
+      // `group_rail_unavailable`, which means the thread has nowhere to post.
+      | 'group_send_failed'
+      | 'group_send_busy'
       | 'sms_sending_disabled',
   ) {
     super(message);

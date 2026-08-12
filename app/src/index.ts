@@ -13,6 +13,7 @@ const { newBootId, runWithContext } = await import('./lib/context.js');
 const { buildApp } = await import('./app.js');
 const { maybeLoadDevRouter } = await import('./lib/devRoutes.js');
 const { configureOutboundQueue, configureScheduler, dispatchJob } = await import('./jobs/jobs.js');
+const { drainRateLimitedWarns } = await import('./lib/rateLimitedWarn.js');
 
 // Process-lifecycle correlation: boot/shutdown log lines carry this bootId as
 // their correlationId so container starts never trip the orphan-log alarm.
@@ -85,7 +86,12 @@ if (config.jobsQueueUrl) {
   // rate ceil would let a burst exceed the A2P tier), floored at 1. The bucket
   // starts full → first burst up to `capacity`, then paced at `refillPerSec`/s.
   // The SAME memoized instance the app's group-send route draws from (fix wave
-  // 5, adversarial 34) - a meter that is not shared is not a meter.
+  // 5, adversarial 34) - a meter that is not shared is not a meter. TRUE OF
+  // THIS BRANCH ONLY (fix wave 2, conformance F3): with JOBS_QUEUE_URL set, the
+  // jobs run in the WORKER process against the worker's own bucket, so app and
+  // worker each meter their own traffic. That is how every metered path in this
+  // codebase has always worked; it is stated here so nobody reads this line as
+  // a cross-process guarantee.
   const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
   registerAllJobHandlers({ tokenBucket: a2pBucket });
   configureOutboundQueue(
@@ -166,6 +172,12 @@ const server = runWithContext(bootContext, () =>
 
 function shutdown(signal: NodeJS.Signals): void {
   runWithContext(bootContext, () => {
+    // DRAIN THE THROTTLED TALLIES FIRST (fix wave 2, adversarial 26). The
+    // trailing flush is an unref'd timer, so a rolling deploy inside the window
+    // silently dropped up to 5 minutes of suppressed count - exactly the "task
+    // replacement" case the throttle's own docstring names. This is the last
+    // moment that loss is preventable.
+    drainRateLimitedWarns();
     logger.info({ signal }, 'shutdown signal received — closing server');
     server.close(() => {
       logger.info('server closed — exiting');

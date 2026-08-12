@@ -169,6 +169,11 @@ const REFUSAL_STATUS: Record<SendRefusedError['code'], number> = {
   group_member_deleted: 409,
   group_member_no_consent: 409,
   group_rail_unavailable: 409,
+  // RETRYABLE, and therefore 503 rather than 409 (fix wave 2, adversarial 2 /
+  // conformance F4): the rail is fine, the attempt failed. A 409 told staff the
+  // thread has no rail on every network blip, which is the opposite diagnosis.
+  group_send_failed: 503,
+  group_send_busy: 503,
   // A2P kill-switch (pre-A2P): SMS sending disabled → 503 (matches the relay
   // provisioning kill-switch's 503 posture).
   sms_sending_disabled: 503,

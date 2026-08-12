@@ -378,6 +378,25 @@ describe('ensureGroupRail', () => {
     expect(calls.claims).toBe(0);
   });
 
+  // THE DEFECT THIS PINS (fix wave 5, adversarial 19). There was an upper bound
+  // on the roster and no lower one, and EVERY rail validation is vacuous on the
+  // empty set - `missingFromMap([], anything)` is `[]`. So an empty roster
+  // sailed through validation, `setTwilioConversation` stamped a sid with an
+  // EMPTY participant map, and `hasActiveGroupRail` then reported `true` for a
+  // rail that can reach nobody - which suppresses the `rail_missing` re-enqueue
+  // that would otherwise heal it.
+  it('refuses an EMPTY roster loudly, before any Twilio call - a rail to nobody is not a rail', async () => {
+    const { repo, calls } = makeRepo(threadRow({ participants: [] }));
+    const { port, created } = makePort();
+
+    const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: [] });
+
+    expect(result.status).toBe('failed');
+    expect(result.reason).toMatch(/EMPTY roster/);
+    expect(created).toHaveLength(0);
+    expect(calls.claims).toBe(0);
+  });
+
   it('an adapter outage is a rail-less FAILURE that releases its claim, never a throw', async () => {
     const { repo, row } = makeRepo();
     const { port } = makePort({

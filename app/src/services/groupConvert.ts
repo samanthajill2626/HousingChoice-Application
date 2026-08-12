@@ -27,7 +27,8 @@
 // PII (doc 9): logs conversationId + counts only - never a member phone.
 import { contactIdForPhone, conversationIdForGroup } from '../lib/import/ids.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
-import type { ContactsRepo } from '../repos/contactsRepo.js';
+import { GROUP_DETECTION_ORIGIN } from './groupMembers.js';
+import type { ContactItem, ContactsRepo } from '../repos/contactsRepo.js';
 import type {
   ConversationItem,
   ConversationParticipant,
@@ -91,9 +92,14 @@ export interface GroupConvertResult {
   /** Member contacts that were already stamped (convergence, not work). */
   membersAlreadyStamped: number;
   /**
-   * Member contactIds with NO contact record at all - the phones the import
-   * dropped or never merged into a person. Reported, never created here:
-   * minting contacts is detection's job (and it stamps its own origin marker).
+   * Roster slots whose contact record was ABSENT and which this call RE-MINTED
+   * as a group-scoped stub (see remintMemberStub).
+   */
+  membersReminted: number;
+  /**
+   * Member contactIds with NO contact record at all AND which could not be
+   * re-minted (the create itself failed). A residual entry here is a thread that
+   * can receive and can never reply, so the migration report gates on it.
    */
   membersMissing: string[];
   /** The roster as it stands after this call (empty when refused). */
@@ -123,6 +129,7 @@ function refuse(conversationId: string, refusal: GroupConvertRefusal): GroupConv
     namesBackfilled: 0,
     membersStamped: 0,
     membersAlreadyStamped: 0,
+    membersReminted: 0,
     membersMissing: [],
     members: [],
   };
@@ -231,6 +238,66 @@ async function backfillRosterNames(
 }
 
 /**
+ * RE-MINT the contact stub behind a roster slot whose contact record is GONE
+ * (adversarial finding 2).
+ *
+ * THE HOLE THIS FILLS. A workbook `drop` on a group member skips the contact
+ * write (and retracts an earlier one), but the group roster deliberately KEEPS
+ * the member - a group thread's identity IS its full sorted roster, so removing
+ * one would leave a row that cannot describe its own thread. `backfillRoster`
+ * then fills the empty slot with a well-formed `contactIdForPhone(phone)` that
+ * has NO ROW BEHIND IT, and from that moment `groupSend` refuses EVERY outbound
+ * on the thread - its consent fence is a WHOLE-SEND refusal, and nothing
+ * re-resolves an existing thread's roster, so it never self-heals. The founder's
+ * only signal used to be a warning line in a report that simultaneously printed
+ * COMPLETE.
+ *
+ * WHAT IS MINTED, and what deliberately is NOT. Exactly detection's stub
+ * (services/groupMembers.ts stubFor): `unknown`/`needs_review` because seeing
+ * somebody on a group envelope says nothing about who they are, the
+ * `group_detection` origin marker so the import's own `retractImported` refuses
+ * to delete it again, and `group_participation_at` as the group consent BASIS.
+ * NO `consent_method`, NO `consent_at`, NO `capture_source` - those are what
+ * `hasSmsConsent` and `consentMethodFromCaptureSource` read, and stamping any of
+ * them would hand a group member proactive 1:1 sendability the drop was meant to
+ * deny. The `drop` therefore still holds for every 1:1 and history purpose; only
+ * the GROUP roster slot comes back.
+ */
+async function remintMemberStub(
+  member: ConversationParticipant,
+  at: string,
+  contactsRepo: Pick<ContactsRepo, 'createIfAbsent' | 'stampGroupParticipation'>,
+  log: Logger,
+): Promise<'reminted' | 'stamped' | 'already' | 'missing'> {
+  const stub: ContactItem = {
+    contactId: member.contactId,
+    type: 'unknown',
+    status: 'needs_review',
+    phone: member.phone,
+    origin: GROUP_DETECTION_ORIGIN,
+    group_participation_at: at,
+    created_at: at,
+  };
+  try {
+    const created = await contactsRepo.createIfAbsent(stub);
+    // Lost a same-id race (live detection minted it between our stamp and our
+    // create): the row exists now, so the only thing left is the basis stamp.
+    if (!created) return contactsRepo.stampGroupParticipation(member.contactId, at);
+    log.info(
+      { contactId: member.contactId },
+      'group text conversion: RE-MINTED a group member stub for a roster slot whose contact record was absent (group_participation_at only, never consent_method)',
+    );
+    return 'reminted';
+  } catch (err) {
+    log.error(
+      { err, contactId: member.contactId },
+      'group text conversion: re-minting an absent member stub FAILED - the thread cannot send until this contact exists',
+    );
+    return 'missing';
+  }
+}
+
+/**
  * Everything that must be true AFTER the type transition, re-applied on EVERY
  * call: the roster backfill and the per-member consent-basis stamps.
  *
@@ -284,19 +351,40 @@ async function converge(
   const named = await backfillRosterNames(filled.members, contactsRepo, log);
 
   if (filled.backfilled > 0 || named.backfilled > 0) {
-    const updated = await conversationsRepo.backfillGroupTextRoster(conversationId, named.members);
-    // A lost condition means the row stopped being a group thread under us,
-    // which nothing in v1 does; keep the roster we know about.
+    // The roster we READ is the precondition (fix wave 5, adversarial 27): the
+    // bulk runner and the inline auto-convert can converge one thread at the
+    // same instant, and this is a whole-array overwrite. A loser gets
+    // `undefined` and keeps the roster it derived rather than clobbering the
+    // winner's - which for v1 is the same set of members either way, differing
+    // at most in a `name` one side resolved and the other did not.
+    const updated = await conversationsRepo.backfillGroupTextRoster(
+      conversationId,
+      named.members,
+      roster,
+    );
+    // A lost condition means the row stopped being a group thread under us (or
+    // another converge won the race); keep the roster we know about.
     roster = (updated?.participants as ConversationParticipant[] | undefined) ?? named.members;
     contactIdsBackfilled = filled.backfilled;
   }
 
   let membersStamped = 0;
   let membersAlreadyStamped = 0;
+  let membersReminted = 0;
   const membersMissing: string[] = [];
   for (const member of roster) {
     if (typeof member.contactId !== 'string' || member.contactId.length === 0) continue;
-    const stamped = await contactsRepo.stampGroupParticipation(member.contactId, at);
+    let stamped = await contactsRepo.stampGroupParticipation(member.contactId, at);
+    // `missing` is not a report line, it is a BRICKED THREAD - re-mint rather
+    // than narrate (see remintMemberStub).
+    if (stamped === 'missing') {
+      const outcome = await remintMemberStub(member, at, contactsRepo, log);
+      if (outcome === 'reminted') {
+        membersReminted += 1;
+        continue;
+      }
+      stamped = outcome;
+    }
     if (stamped === 'stamped') membersStamped += 1;
     else if (stamped === 'already') membersAlreadyStamped += 1;
     else membersMissing.push(member.contactId);
@@ -310,6 +398,7 @@ async function converge(
     namesBackfilled: named.backfilled,
     membersStamped,
     membersAlreadyStamped,
+    membersReminted,
     membersMissing,
     members: roster,
   };

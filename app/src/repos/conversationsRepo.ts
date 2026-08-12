@@ -263,10 +263,16 @@ export interface ConversationItem {
    * `group_text` only: the last rail-creation FAILURE ({at, reason}). Written by
    * ensureGroupRail when Twilio refused the roster (a 50407-class member), when
    * the conversation came back closed/failed, or when the participant map did
-   * not cover the roster. It is a REPORT, not a fence - a later successful
-   * ensure simply stamps the sid; the record stays as the reason this thread was
-   * inbound-only for a while, and the migration report reads the same reason
-   * string live.
+   * not cover the roster. It is a REPORT, not a fence - it never blocks a retry,
+   * and the migration report reads the same reason string live.
+   *
+   * CLEARED BY A SUCCESSFUL FENCED FINALIZE (fix wave 5, adversarial 10), so it
+   * answers "is this rail broken NOW", which is the question spec 14's cutover
+   * gate asks. Left uncleared it over-reported: a thread that hit a 429 on one
+   * participant and succeeded on the retry a minute later read as a permanent
+   * failure forever, indistinguishable from a landline member that can never be
+   * railed. Readers: the convergence report (lib/import/convertGroups.ts) and
+   * the rail re-enqueue back-off (routes/webhooks/twilio.ts).
    */
   rail_failed?: { at: string; reason: string };
   [key: string]: unknown;
@@ -892,10 +898,17 @@ export interface ConversationsRepo {
    * roster (the contactId backfill) without touching type or status. Conditional
    * on the row still being a group thread, so it can never resurrect a roster
    * onto something else. `undefined` when that condition did not hold.
+   *
+   * `expectedPrior` is the roster the caller READ before deriving `members`.
+   * Pass it whenever one exists: this is a whole-array overwrite and two
+   * converge paths can run against one thread concurrently, so without it the
+   * later write wins wholesale (fix wave 5, adversarial 27). A caller that gets
+   * `undefined` back should re-read rather than retry blindly.
    */
   backfillGroupTextRoster(
     conversationId: string,
     members: ConversationParticipant[],
+    expectedPrior?: ConversationParticipant[],
   ): Promise<ConversationItem | undefined>;
 }
 
@@ -2140,8 +2153,19 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
             // The sid and its MBxx map land together (a sid without a map makes
             // late receipts unattributable), and the claim is cleared in the same
             // write so the rail is never "done" while still marked in-flight.
+            //
+            // AND `rail_failed` GOES WITH IT (fix wave 5, adversarial 10). It
+            // used to be written on every non-terminal path and cleared by
+            // nothing, so a thread whose rail failed once and succeeded a minute
+            // later was indistinguishable from one that never came back - and
+            // spec 14 makes "zero UNRESOLVED rail failures" a hard cutover gate
+            // over 132 real threads. A healed thread is not a failure. Clearing
+            // it HERE, inside the fenced finalize, is what makes the field mean
+            // "this rail is broken right now" rather than "this rail was broken
+            // at some point in its history".
             UpdateExpression:
-              'SET twilio_conversation_sid = :sid, twilio_participant_map = :map REMOVE #rc',
+              'SET twilio_conversation_sid = :sid, twilio_participant_map = :map ' +
+              'REMOVE #rc, rail_failed',
             // FENCING (spec 15.3): only the claimant that still owns the token may
             // finalize. An expired claimant waking up late fails here rather than
             // overwriting the newer claimant's live rail.
@@ -2211,16 +2235,31 @@ export function createConversationsRepo(deps: RepoDeps = {}): ConversationsRepo 
       }
     },
 
-    async backfillGroupTextRoster(conversationId, members) {
+    async backfillGroupTextRoster(conversationId, members, expectedPrior) {
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
             TableName: table,
             Key: { conversationId },
             UpdateExpression: 'SET participants = :members',
-            ConditionExpression: 'attribute_exists(conversationId) AND #type = :groupText',
+            // ROSTER-UNCHANGED PRECONDITION (fix wave 5, adversarial 27). This
+            // is a WHOLE-ARRAY overwrite derived from a `getById` earlier in the
+            // same call, and the bulk conversion runner and the inline
+            // auto-convert can converge one thread concurrently with no lock -
+            // so without this the later write won wholesale and could drop a
+            // `name` the other side had just resolved. The caller passes what it
+            // READ; a loser gets `undefined` and re-reads rather than clobbering.
+            // Omitted (undefined) means "no prior expectation" - the import path
+            // that mints the roster in the first place has nothing to compare.
+            ConditionExpression:
+              'attribute_exists(conversationId) AND #type = :groupText' +
+              (expectedPrior === undefined ? '' : ' AND participants = :prior'),
             ExpressionAttributeNames: { '#type': 'type' },
-            ExpressionAttributeValues: { ':groupText': 'group_text', ':members': members },
+            ExpressionAttributeValues: {
+              ':groupText': 'group_text',
+              ':members': members,
+              ...(expectedPrior !== undefined && { ':prior': expectedPrior }),
+            },
             ReturnValues: 'ALL_NEW',
           }),
         );

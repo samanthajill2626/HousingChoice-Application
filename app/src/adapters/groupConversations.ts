@@ -157,6 +157,14 @@ interface ConversationInstanceLike {
   sid: string;
   uniqueName?: string | null;
   state?: string | null;
+  /**
+   * Twilio's auto-close/auto-inactive timers. Spec 6.1 says ASSERT, DO NOT SET:
+   * we never send them, and the account default is null (spike snapshot
+   * conversations-global-config.json). Read here only so a configured timer is
+   * noticed the moment a rail is built, rather than months later when every
+   * rail has quietly auto-closed and a staff send is the first thing to fail.
+   */
+  timers?: Record<string, unknown> | null;
 }
 
 interface ParticipantInstanceLike {
@@ -343,6 +351,7 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
           participant: participants,
         });
         const attached = await this.fetchParticipants(created.sid);
+        this.assertNoTimers(created);
         this.log.info(
           { conversationSid: created.sid, participantCount: attached.length },
           'group rail created (ConversationWithParticipants)',
@@ -459,6 +468,32 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     }
   }
 
+  /**
+   * "No timers (account default null) - ASSERT, DO NOT SET" (spec 6.1). We
+   * never send timers; nothing verified they were absent (fix wave 5,
+   * conformance F2). If an inactive/closed timer is ever configured on the
+   * Conversations service or account, EVERY rail auto-closes on a schedule and
+   * the first thing to notice is a staff send failing weeks later - because
+   * `ensureGroupRail` returns a stored rail without re-reading Twilio state.
+   * The created Conversation echoes its effective timers, so the assertion is
+   * free: no extra call, WARN only, never a refusal (the rail is real and
+   * usable today; the timer is an operator problem).
+   */
+  private assertNoTimers(created: ConversationInstanceLike): void {
+    const timers = created.timers;
+    if (timers === undefined || timers === null) return;
+    const set = Object.entries(timers).filter(([, v]) => v !== null && v !== undefined);
+    if (set.length === 0) return;
+    this.log.warn(
+      {
+        event: 'group_rail_timers_configured',
+        conversationSid: created.sid,
+        timers: set.map(([k]) => k),
+      },
+      'the Conversations service has auto-close/auto-inactive TIMERS configured - group rails will close themselves and staff sends will start failing (spec 6.1 expects none)',
+    );
+  }
+
   async postGroupMessage(input: PostGroupMessageInput): Promise<PostGroupMessageResult> {
     // A2P kill switch (spec invariant 13.7), enforced INSIDE the adapter so no
     // direct-adapter caller can bypass it. Same error class the existing
@@ -473,9 +508,35 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
       );
     }
     // NO xTwilioWebhookEnabled: see the module header.
-    const message = await this.client.conversations.v1
-      .conversations(input.conversationSid)
-      .messages.create({ author: input.author, body: input.body });
+    let message;
+    try {
+      message = await this.client.conversations.v1
+        .conversations(input.conversationSid)
+        .messages.create({ author: input.author, body: input.body });
+    } catch (err) {
+      // A CLOSED (or vanished) RAIL IS AN ACTIONABLE REFUSAL, NOT A 500 (fix
+      // wave 5, conformance F2). Nothing asserts the account/service
+      // conversation timers, and `ensureGroupRail` returns a stored rail
+      // WITHOUT re-reading Twilio whenever the sid is stamped and the map covers
+      // the roster - so if an inactive/closed timer is ever configured on the
+      // Conversations service, every rail eventually auto-closes and the FIRST
+      // thing that notices is a staff send. Untranslated it surfaced as a bare
+      // 500 that tells staff nothing; translated, the send route's existing
+      // `group_rail_unavailable` mapping says what happened, and the ensure path
+      // re-detects the closed state on the next attempt.
+      const code = twilioErrorCode(err);
+      const status = twilioStatus(err);
+      if (status === 409 || status === 404 || code === '50353' || code === '20404') {
+        this.log.warn(
+          { event: 'group_rail_post_refused', conversationSid: input.conversationSid, code, status },
+          'Conversations refused a post to this rail - it is closed, or it no longer exists',
+        );
+        throw new GroupConversationsUnavailableError(
+          `the Conversations rail refused this post (${code ?? status ?? 'unknown'}) - it is closed or gone`,
+        );
+      }
+      throw err;
+    }
     const dateCreated =
       message.dateCreated instanceof Date ? message.dateCreated.toISOString() : new Date().toISOString();
     // PII (doc 9): SID + length only, never the body.

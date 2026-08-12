@@ -17,6 +17,10 @@
 // the create-then-crash-before-enqueue window.
 import { randomUUID } from 'node:crypto';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+// A raw Twilio SDK failure is an AxiosError carrying the request config - the
+// Authorization header and the whole roster in `data`. Every catch in this file
+// logs the SUMMARY, never the error object (fix wave 5, adversarial 4).
+import { summarizeError } from '../lib/errors.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import {
   createGroupConversationsAdapter,
@@ -246,6 +250,20 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       // is the one that cannot be stale.
       const members = thread.participants ?? request.members;
 
+      // AN EMPTY ROSTER IS REFUSED LOUDLY (fix wave 5, adversarial 19). There
+      // was an upper bound and no lower one, and every rail validation is
+      // VACUOUS on the empty set: `missingFromMap([], anything)` is `[]`, so an
+      // empty roster sailed through, `setTwilioConversation` stamped a sid with
+      // an empty participant map, and `hasActiveGroupRail` then reported `true`
+      // for a rail that can reach NOBODY - which suppresses the `rail_missing`
+      // re-enqueue that would otherwise heal it. A group thread with no members
+      // is a data fault, not a rail to build.
+      if (members.length === 0) {
+        const reason = 'group thread has an EMPTY roster - a rail would be able to reach nobody';
+        log.error({ event: 'group_rail_roster_empty', conversationId }, reason);
+        return { status: 'failed', reason };
+      }
+
       // Already railed AND verifiable: no claim, no Twilio call. This is the
       // overwhelmingly common case on a migration re-run.
       if (hasActiveGroupRail(thread)) {
@@ -326,7 +344,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         log.warn(
-          { err, event: 'group_rail_ensure_failed', conversationId },
+          { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
           'group rail creation failed - the thread stays inbound-only',
         );
         await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
@@ -348,7 +366,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
       } catch (err) {
         const reason = err instanceof Error ? err.message : String(err);
         log.warn(
-          { err, event: 'group_rail_ensure_failed', conversationId },
+          { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
           'group rail participant read failed - the thread stays inbound-only',
         );
         await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);
@@ -396,7 +414,7 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
         } catch (err) {
           const reason = err instanceof Error ? err.message : String(err);
           log.warn(
-            { err, event: 'group_rail_ensure_failed', conversationId },
+            { err: summarizeError(err), event: 'group_rail_ensure_failed', conversationId },
             'group rail participant repair failed - the thread stays inbound-only',
           );
           await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);

@@ -483,6 +483,47 @@ describe.skipIf(!reachable)('group_text conversation primitives against DynamoDB
       expect(retry.claimed).toBe(true);
     });
 
+    // THE DEFECT THIS PINS (fix wave 5, adversarial 10). `rail_failed` was
+    // written on every non-terminal path and cleared by NOTHING, and a grep of
+    // app/src, dashboard/src and e2e found no reader at all. So a thread whose
+    // rail hit a 429 on one participant and succeeded on the retry a minute
+    // later stayed marked failed forever - indistinguishable from a landline
+    // member that can never be railed - against spec 14's cutover gate of ZERO
+    // unresolved rail failures over 132 real threads. The field now answers "is
+    // this rail broken NOW", which is the question the gate actually asks, and
+    // the re-enqueue back-off in the inbound webhook reads it.
+    it('a successful FENCED finalize CLEARS rail_failed - a healed thread is not a failure', async () => {
+      const conversationId = nextId();
+      await conversations.createGroupTextThread({
+        conversationId,
+        members: [{ contactId: 'c-64b', phone: '+15550100084' }],
+      });
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-h1', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      await conversations.recordRailFailure(conversationId, 'throttled', NOW, 'token-h1');
+      expect((await conversations.getById(conversationId))?.rail_failed).toBeDefined();
+
+      // The retry succeeds.
+      await conversations.claimRailCreation(
+        conversationId,
+        { token: 'token-h2', at: NOW },
+        EXPIRED_BEFORE,
+      );
+      const finalized = await conversations.setTwilioConversation(
+        conversationId,
+        'CHhealed',
+        { MBhealed: 'phone#+15550100084' },
+        'token-h2',
+      );
+
+      expect(finalized?.twilio_conversation_sid).toBe('CHhealed');
+      expect(finalized?.rail_failed).toBeUndefined();
+      expect((await conversations.getById(conversationId))?.rail_failed).toBeUndefined();
+    });
+
     it('recordRailFailure by a non-owner writes nothing', async () => {
       const conversationId = nextId();
       await conversations.createGroupTextThread({

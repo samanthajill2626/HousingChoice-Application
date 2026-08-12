@@ -101,6 +101,11 @@ function world(
     async findByPhone(phone: string) {
       return [...contacts.values()].find((c) => c.phone === phone);
     },
+    // The read `backfillRosterNames` uses. It resolves BY ID, which is why a
+    // roster slot left pointing at an id with no row is nameless forever.
+    async getById(contactId: string) {
+      return contacts.get(contactId);
+    },
     async stampGroupParticipation(contactId: string, at: string) {
       stamps.push({ contactId, at });
       const contact = contacts.get(contactId);
@@ -275,6 +280,50 @@ describe('convertConnectingRelayGroupToGroupText', () => {
     const byPhone = [...w.contacts.values()].filter((c) => c.phone === MEMBER_B);
     expect(byPhone).toHaveLength(1);
     expect(byPhone[0]!.deleted_at).toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, item 5). The adopt branch stamped the
+  // person it found by phone and left the roster slot on its DERIVED id, on the
+  // reasoning that "the id is not what the send path resolves on". True of the
+  // send path and of nothing else: `backfillRosterNames` resolves BY ID, so the
+  // member stayed nameless forever - and the thread title is derived from the
+  // roster, so that person rendered as a bare phone number on the inbox row, the
+  // contact card and the thread header, permanently, with no path to recovery.
+  // Their member chip also linked to `/contacts/<derived id>`, which 404s, and
+  // the migration report - the cutover gate - carried a contact that does not
+  // exist.
+  it('RE-POINTS an adopted roster slot at the contact it really resolved to, and names it', async () => {
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
+    const handMadeId = 'contact-hand-made-1';
+    w.contacts.set(handMadeId, {
+      contactId: handMadeId,
+      type: 'tenant',
+      status: 'active',
+      phone: MEMBER_B,
+      firstName: 'Bea',
+      lastName: 'Nguyen',
+    } as ContactItem);
+
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    const slot = result.members.find((m) => m.phone === MEMBER_B);
+    // CONSEQUENCE 1 - the chip link. The slot points at the contact that exists,
+    // and no duplicate was minted under the derived id.
+    expect(slot?.contactId).toBe(handMadeId);
+    expect(w.contacts.has(contactIdForPhone(MEMBER_B))).toBe(false);
+    // CONSEQUENCE 2 - the name, which only becomes reachable once the id is
+    // right.
+    expect(slot?.name).toBe('Bea Nguyen');
+    // PERSISTED, not merely returned: the next reader of the row is the inbox.
+    const stored = w.conversations.get(GROUP_ID)?.participants as ConversationParticipant[];
+    expect(stored.find((m) => m.phone === MEMBER_B)).toMatchObject({
+      contactId: handMadeId,
+      name: 'Bea Nguyen',
+    });
+    // And the report counts the repair rather than reporting a clean run over a
+    // roster it silently corrected.
+    expect(result.contactIdsBackfilled).toBe(3);
+    expect(result.namesBackfilled).toBe(1);
   });
 
   it('refuses to mint when the pointer-aware lookup itself fails', async () => {

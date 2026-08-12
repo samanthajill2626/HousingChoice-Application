@@ -77,7 +77,13 @@ export interface GroupConvertResult {
    * text regardless of whether she had asked to relay-connect it.
    */
   importConnectRequested: boolean;
-  /** Roster entries whose empty `contactId` this call filled in. */
+  /**
+   * Roster entries whose `contactId` this call FILLED IN (it was empty) or
+   * CORRECTED (it was a derived id with no row behind it, and the person turned
+   * out to exist under another id - see `remintMemberStub`). Both are the same
+   * repair from the report's point of view: a roster slot that did not point at
+   * a real contact now does.
+   */
   contactIdsBackfilled: number;
   /**
    * Roster entries whose missing `name` this call filled in from the member's
@@ -276,35 +282,56 @@ async function backfillRosterNames(
  * bypass the soft-delete fence. NEVER MINT FOR A KNOWN PHONE - stamp the person
  * who is already there (including a soft-deleted one: the deleted fence is
  * groupSend's to enforce, and hiding the row from it is exactly the bug).
+ *
+ * AN ADOPTION IS REPORTED BACK, AND THE CALLER REWRITES THE SLOT (fix wave 4,
+ * item 5). The adopt branch used to leave the roster slot on its DERIVED id and
+ * say so in a comment - "the id is not what the send path resolves on", which is
+ * true of the send path and of nothing else. Everything that reads the slot by
+ * id was left pointing at an id with no row:
+ *   - `backfillRosterNames` does `getById(member.contactId)`, gets `undefined`,
+ *     and leaves the member NAMELESS forever - so the thread title, which is
+ *     derived from the roster, renders that person as a phone number on every
+ *     surface, permanently, with no path to recovery;
+ *   - the member chip links to `/contacts/<derived id>`, which 404s;
+ *   - the migration report - the cutover gate - carries a roster naming a
+ *     contact that does not exist.
+ * The adopted id is returned so `converge` can put it in the slot and persist it.
  */
 async function remintMemberStub(
   member: ConversationParticipant,
   at: string,
   contactsRepo: Pick<ContactsRepo, 'createIfAbsent' | 'stampGroupParticipation' | 'findByPhone'>,
   log: Logger,
-): Promise<'reminted' | 'stamped' | 'already' | 'missing'> {
+): Promise<{
+  outcome: 'reminted' | 'stamped' | 'already' | 'missing';
+  /** Set only when an EXISTING contact was adopted under a different id. */
+  adoptedContactId?: string;
+}> {
   try {
     const known = await contactsRepo.findByPhone(member.phone);
     if (known !== undefined) {
       // The roster slot's DERIVED id has no row, but this person does - under a
       // hand-made id, or as an attached second number of somebody else. The
       // thread is sendable through them, so all that is missing is the group
-      // consent basis. (The roster slot keeps its derived id: rewriting it is a
-      // roster overwrite this call has already performed, and the id is not what
-      // the send path resolves on.)
+      // consent basis. The slot is RE-POINTED at them by the caller (see the
+      // docstring): leaving it on an id with no row costs the member their name,
+      // permanently, and points their chip at a 404.
       const stamped = await contactsRepo.stampGroupParticipation(known.contactId, at);
       log.info(
         { contactId: known.contactId, stamped },
         'group text conversion: a roster slot with no record of its own resolved to an EXISTING contact by phone - stamped it instead of minting a duplicate',
       );
-      return stamped;
+      return {
+        outcome: stamped,
+        ...(known.contactId !== member.contactId && { adoptedContactId: known.contactId }),
+      };
     }
   } catch (err) {
     log.error(
       { err, contactId: member.contactId },
       'group text conversion: the pointer-aware member lookup FAILED - refusing to mint a possible duplicate for this phone',
     );
-    return 'missing';
+    return { outcome: 'missing' };
   }
 
   const stub: ContactItem = {
@@ -320,18 +347,20 @@ async function remintMemberStub(
     const created = await contactsRepo.createIfAbsent(stub);
     // Lost a same-id race (live detection minted it between our stamp and our
     // create): the row exists now, so the only thing left is the basis stamp.
-    if (!created) return contactsRepo.stampGroupParticipation(member.contactId, at);
+    if (!created) {
+      return { outcome: await contactsRepo.stampGroupParticipation(member.contactId, at) };
+    }
     log.info(
       { contactId: member.contactId },
       'group text conversion: RE-MINTED a group member stub for a roster slot whose contact record was absent (group_participation_at only, never consent_method)',
     );
-    return 'reminted';
+    return { outcome: 'reminted' };
   } catch (err) {
     log.error(
       { err, contactId: member.contactId },
       'group text conversion: re-minting an absent member stub FAILED - the thread cannot send until this contact exists',
     );
-    return 'missing';
+    return { outcome: 'missing' };
   }
 }
 
@@ -435,22 +464,60 @@ async function converge(
   let membersAlreadyStamped = 0;
   let membersReminted = 0;
   const membersMissing: string[] = [];
+  /** phone -> the EXISTING contact id an adopted roster slot must point at. */
+  const adoptions = new Map<string, string>();
   for (const member of roster) {
     if (typeof member.contactId !== 'string' || member.contactId.length === 0) continue;
     let stamped = await contactsRepo.stampGroupParticipation(member.contactId, at);
     // `missing` is not a report line, it is a BRICKED THREAD - re-mint rather
     // than narrate (see remintMemberStub).
     if (stamped === 'missing') {
-      const outcome = await remintMemberStub(member, at, contactsRepo, log);
-      if (outcome === 'reminted') {
+      const remint = await remintMemberStub(member, at, contactsRepo, log);
+      if (remint.adoptedContactId !== undefined) {
+        adoptions.set(member.phone, remint.adoptedContactId);
+      }
+      if (remint.outcome === 'reminted') {
         membersReminted += 1;
         continue;
       }
-      stamped = outcome;
+      stamped = remint.outcome;
     }
     if (stamped === 'stamped') membersStamped += 1;
     else if (stamped === 'already') membersAlreadyStamped += 1;
     else membersMissing.push(member.contactId);
+  }
+
+  // RE-POINT THE ADOPTED SLOTS AND PERSIST (fix wave 4, item 5). A slot whose
+  // derived id has no row, resolved by phone to a person who exists under
+  // another id, keeps pointing at the dead id unless this writes it back - and
+  // then `backfillRosterNames` can never resolve a name for them (it reads by
+  // id), so the thread title renders that member as a bare phone number forever
+  // and their chip links to a 404. The names pass is re-run over the repaired
+  // roster for exactly that reason: the adoption is what makes the name
+  // reachable, so it has to happen after it.
+  if (adoptions.size > 0) {
+    const repointed = roster.map((m) => {
+      const adopted = adoptions.get(m.phone);
+      return adopted === undefined ? m : { ...m, contactId: adopted };
+    });
+    const renamed = await backfillRosterNames(repointed, contactsRepo, log);
+    const updated = await conversationsRepo.backfillGroupTextRoster(
+      conversationId,
+      renamed.members,
+      roster,
+    );
+    if (updated === undefined) {
+      // Same rule as the backfill above: nothing written is nothing reported.
+      // The next convergence pass repeats the whole repair.
+      log.warn(
+        { conversationId, adopted: adoptions.size },
+        'group text convergence: re-pointing adopted roster slots LOST its precondition - nothing persisted, the counters stay put and the next run repeats it',
+      );
+    } else {
+      roster = (updated.participants as ConversationParticipant[] | undefined) ?? renamed.members;
+      contactIdsBackfilled += adoptions.size;
+      namesBackfilled += renamed.backfilled;
+    }
   }
 
   return {
@@ -503,7 +570,10 @@ export async function convertConnectingRelayGroupToGroupText(
   }
 
   const result = await converge(conversationId, converted, 'converted', opts, at);
-  // The transition itself carried the backfill; converge saw the filled roster
-  // and counted nothing.
-  return { ...result, contactIdsBackfilled: backfilled };
+  // The transition itself carried the FILL, so converge saw an already-filled
+  // roster and counted nothing for it - but it can still have CORRECTED a slot
+  // that pointed at a derived id with no row (fix wave 4, item 5). Overwriting
+  // rather than adding used to discard that repair from the report, which is the
+  // cutover gate.
+  return { ...result, contactIdsBackfilled: backfilled + result.contactIdsBackfilled };
 }

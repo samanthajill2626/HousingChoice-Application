@@ -659,17 +659,20 @@ async function retractImported(
   // check: the run that finds one says so and RESUMES it, rather than leaving
   // the operator to discover a half-destroyed person by accident. (Resuming is
   // what the code below already does; what was missing was saying it.)
+  //
+  // READ HERE, REPORTED BELOW (fix wave 4, item 6). The sentence used to be
+  // pushed at this point, which is BEFORE the guarded write that can refuse the
+  // whole retract - so a person who had joined a native group text got a report
+  // saying "RESUMING it now, their imported thread and messages are being
+  // removed again" immediately followed by "the contact was KEPT (GROUP
+  // MEMBER)": two contradictory sentences about one person, the first of them
+  // false, in the document the founder reads to decide whether the import went
+  // right. It is exactly the rule this same commit states thirty lines below -
+  // record the outcome, state it once, when it is a fact.
   const startedEarlier =
     typeof existing.Item.import_retract_started_at === 'string'
       ? existing.Item.import_retract_started_at
       : undefined;
-  if (startedEarlier !== undefined) {
-    warnings.push(
-      `${person.rowKey} (${person.phone}) carries an import retract that did NOT finish ` +
-        `(started ${startedEarlier}) - RESUMING it now. Their imported thread and messages are ` +
-        `being removed again; anything this import did not create is still kept.`,
-    );
-  }
 
   // ATOMIC GUARD, FIRST AND NON-DESTRUCTIVE. The roster set above was read before
   // this loop started, so a group thread created since then would slip past it;
@@ -714,6 +717,15 @@ async function retractImported(
       );
     }
     return;
+  }
+
+  // THE GUARD HELD, so the resume is now a fact rather than a prediction.
+  if (startedEarlier !== undefined) {
+    warnings.push(
+      `${person.rowKey} (${person.phone}) carries an import retract that did NOT finish ` +
+        `(started ${startedEarlier}) - RESUMING it now. Their imported thread and messages are ` +
+        `being removed again; anything this import did not create is still kept.`,
+    );
   }
 
   const conversationId = conversationIdFor1to1(person.phone);

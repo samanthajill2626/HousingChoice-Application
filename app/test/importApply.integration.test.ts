@@ -852,6 +852,56 @@ describe.skipIf(!reachable)('import:apply', () => {
     expect(await countMessages(conversationIdFor1to1(PHONES.tenantBusy))).toBe(0);
   });
 
+  // THE DEFECT THIS PINS (fix wave 4, item 6). The resume sentence was pushed
+  // BEFORE the guarded marker write that can refuse the whole retract, so a
+  // person who had joined a native group text got a report saying "RESUMING it
+  // now - their imported thread and messages are being removed again"
+  // immediately followed by "the contact was KEPT (GROUP MEMBER)": two
+  // contradictory sentences about one person, the first of them false, in the
+  // document the founder reads to decide whether the import went right. The same
+  // commit states the rule thirty lines further down - record the outcome, state
+  // it once, when it is a fact.
+  it('does NOT claim a half-finished retract was resumed when the group-member guard refuses it', async () => {
+    for (const t of TABLES) {
+      await deleteTableIfExists(client, table(t));
+      await ensureTable(client, getTableSpec(t), table(t));
+    }
+    await runApply({ doc, plan, review: cleanReview(), importedAt, env: testEnv });
+
+    const target = contactIdForPhone(PHONES.tenantBusy);
+    const { UpdateCommand: Update } = await import('@aws-sdk/lib-dynamodb');
+    // A retract died halfway AND the person has since joined a group text, so
+    // the guarded marker write refuses and nothing is retracted at all.
+    await doc.send(
+      new Update({
+        TableName: table('contacts'),
+        Key: { contactId: target },
+        UpdateExpression:
+          'SET import_retract_started_at = :at, group_participation_at = :joined',
+        ExpressionAttributeValues: {
+          ':at': '2026-08-11T09:00:00.000Z',
+          ':joined': '2026-08-12T00:00:00.000Z',
+        },
+      }),
+    );
+
+    const review = cleanReview();
+    [...review.contacts.values()].find((r) => r.phone === PHONES.tenantBusy)!.drop = 'Y';
+    const report = await runApply({ doc, plan, review, importedAt, env: testEnv });
+
+    // The report says they were KEPT...
+    expect(report.warnings.some((w) => w.includes('KEPT (GROUP MEMBER)'))).toBe(true);
+    // ...and never that their thread and messages were being removed again.
+    expect(report.warnings.some((w) => w.includes('did NOT finish'))).toBe(false);
+    expect(report.warnings.some((w) => w.includes('RESUMING it now'))).toBe(false);
+    // And the words match the world: nothing was destroyed.
+    const survivor = await doc.send(
+      new GetCommand({ TableName: table('contacts'), Key: { contactId: target } }),
+    );
+    expect(survivor.Item).toBeDefined();
+    expect(await countMessages(conversationIdFor1to1(PHONES.tenantBusy))).toBeGreaterThan(0);
+  });
+
   it('does not blame group text detection for a row the import itself created', async () => {
     // adversarial 37. import:convert-groups re-mints a dropped group member as a
     // group-scoped stub carrying `origin: group_detection`, and every later

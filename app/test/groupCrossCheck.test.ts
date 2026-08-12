@@ -443,30 +443,40 @@ describe.skipIf(!reachable)('group cross-check against DynamoDB Local', () => {
     it('a BACKLOG of overdue SEND due rows cannot hide an unmatched event', async () => {
       const messages = createMessagesRepo({ doc, env: testEnv });
       const backlog = 50;
-      await Promise.all(
-        Array.from({ length: backlog }, (_unused, i) => {
-          const providerSid = `IMstarveSend${String(i).padStart(4, '0')}`;
-          const conversationId = `convGroup:starve-${i}`;
-          const providerTs = new Date(Date.parse(T0) - (backlog - i) * 1000).toISOString();
-          return messages.append({
+      // SEEDED IN SMALL BATCHES, exactly like the mirror-image test in
+      // groupSendStaleness.test.ts (fix wave 3, gate-driven). Each of these is a
+      // TransactWrite, DynamoDB Local is single-threaded and shared with every
+      // other integration suite on the machine, and all 50 at once draws
+      // "timed out waiting for a lock" from the EMULATOR - an error whose own
+      // text says it would succeed against real DynamoDB. Not a product signal:
+      // the rows only have to exist before the sweep runs, which they still do.
+      const seedSend = (i: number): Promise<unknown> => {
+        const providerSid = `IMstarveSend${String(i).padStart(4, '0')}`;
+        const conversationId = `convGroup:starve-${i}`;
+        const providerTs = new Date(Date.parse(T0) - (backlog - i) * 1000).toISOString();
+        return messages.append({
+          conversationId,
+          providerSid,
+          providerTs,
+          type: 'sms',
+          direction: 'outbound',
+          author: 'teammate',
+          body: 'starve',
+          deliveryStatus: 'queued',
+          deliveryRecipients: { 'phone#+15550000001': { status: 'queued' } },
+          dueRow: buildGroupSendDueRow({
             conversationId,
+            tsMsgId: buildTsMsgId(providerTs, providerSid),
             providerSid,
-            providerTs,
-            type: 'sms',
-            direction: 'outbound',
-            author: 'teammate',
-            body: 'starve',
-            deliveryStatus: 'queued',
-            deliveryRecipients: { 'phone#+15550000001': { status: 'queued' } },
-            dueRow: buildGroupSendDueRow({
-              conversationId,
-              tsMsgId: buildTsMsgId(providerTs, providerSid),
-              providerSid,
-              deadlineAt: providerTs,
-            }),
-          });
-        }),
-      );
+            deadlineAt: providerTs,
+          }),
+        });
+      };
+      for (let start = 0; start < backlog; start += 5) {
+        await Promise.all(
+          Array.from({ length: Math.min(5, backlog - start) }, (_unused, k) => seedSend(start + k)),
+        );
+      }
 
       const h = harness();
       await h.crossCheck.recordConversationEvent(h.event());

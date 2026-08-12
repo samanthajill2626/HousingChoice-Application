@@ -380,5 +380,13 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
       'group delivery receipts silent - check Conversations service webhook config',
     );
     expect(outcome.alarmed).toBeGreaterThanOrEqual(1);
-  });
+    // AN EXPLICIT BUDGET, for the same reason seedHistory and seedProfile have
+    // one (fix wave 3, gate-driven). Batched seeding traded "timed out waiting
+    // for a lock" for ten sequential rounds of five writes against a
+    // single-threaded emulator that every other integration suite - and the
+    // human's own dev loop - is writing to at the same time. It timed out at the
+    // 60s default on a loaded box and passes in seconds alone, which is the
+    // signature docs/issues/dynamodb-local-cross-worktree-test-contention.md
+    // records: budget, never a hang.
+  }, 120_000);
 });

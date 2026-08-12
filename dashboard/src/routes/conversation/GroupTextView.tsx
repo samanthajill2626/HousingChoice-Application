@@ -35,6 +35,33 @@ import styles from './ConversationDetail.module.css';
  */
 export const MAX_SENDABLE_MEMBERS = 9;
 
+/**
+ * How often the member panel re-reads itself while the thread is open (fix wave
+ * 4, item 3).
+ *
+ * THE GAP THIS COVERS, stated plainly because it is a real product hole and not
+ * a nicety. The panel's beat is `thread.refetchSignal` - the debounced SSE tick
+ * - and SSE only ticks for events emitted ON THIS THREAD. Number-scoped
+ * suppression is not one of them: a member texting STOP to their 1:1 thread
+ * flips their suppression state through the 1:1 conversation row, which emits
+ * `message.persisted` for THAT conversation. Nothing is emitted here, so the
+ * group panel keeps rendering the member as reachable, and the header keeps
+ * saying nobody has opted out, until something else on this thread happens to
+ * tick or the operator reloads. (The reverse case - a member texting STOP INTO
+ * the group - does tick, because that inbound is filed on this thread.)
+ *
+ * A slow poll plus a refetch on window focus does not close that gap, it BOUNDS
+ * it: the panel is at most this stale, and returning to the tab is always
+ * fresh. The proper fix is a number-scoped suppression event fanned out to every
+ * thread the number is in, which is a server change with its own design, filed
+ * as `docs/issues/number-suppression-change-emits-no-cross-thread-event.md`
+ * rather than smuggled in here.
+ *
+ * Slow on purpose: this is a read of N contacts plus N suppression lookups, and
+ * the screen is one an operator leaves open.
+ */
+export const MEMBERS_REFRESH_MS = 60_000;
+
 /** The suppression chip's words. NEVER "opted out" flatly: the state is scoped
  *  to a NUMBER, and saying otherwise about a member who silenced a different
  *  number of theirs would be a lie staff would act on. */
@@ -110,6 +137,38 @@ export function GroupTextView({
   // the request we know about; the generation covers a response that was already
   // resolving when the next tick started, so a slow first read can never land on
   // top of a newer one.
+  //
+  // ...AND ON THREE OTHER BEATS (fix wave 4, item 3), because the SSE tick alone
+  // leaves the panel able to sit wrong indefinitely: a RETRY the operator can
+  // press, window FOCUS, and a slow INTERVAL. `membersRefreshTick` is what all
+  // three move; the effect is otherwise unchanged, so the generation guard and
+  // the abort still cover every one of them. See MEMBERS_REFRESH_MS for what
+  // this bounds and what it does not fix.
+  const [membersRefreshTick, setMembersRefreshTick] = useState(0);
+  const refreshMembers = (): void => {
+    setMembersRefreshTick((t) => t + 1);
+  };
+  useEffect(() => {
+    // VISIBILITY-GATED. An operator with the thread open in a background tab is
+    // the normal case on this screen, and polling a hidden tab spends N contact
+    // reads a minute to update pixels nobody is looking at. The focus listener
+    // is what makes coming back to the tab immediate, so the interval only has
+    // to cover the tab that is already in front of them.
+    const onFocus = (): void => {
+      refreshMembers();
+    };
+    window.addEventListener('focus', onFocus);
+    const timer = window.setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        refreshMembers();
+      }
+    }, MEMBERS_REFRESH_MS);
+    return () => {
+      window.removeEventListener('focus', onFocus);
+      window.clearInterval(timer);
+    };
+  }, []);
+
   const membersGenRef = useRef(0);
   useEffect(() => {
     membersGenRef.current += 1;
@@ -127,12 +186,32 @@ export function GroupTextView({
         // the header inventing a title from a different input - it is the header
         // reading the input it is about to be given. Silent otherwise, so a
         // snapshot that is already current re-renders nothing.
+        //
+        // WHERE THIS DIVERGES FROM THE SERVER, RECORDED RATHER THAN PRETENDED
+        // AWAY (fix wave 4, item 10). The route re-titles the stored snapshot
+        // only when a CONTACT's name differs from the roster's; the client
+        // cannot see those two inputs separately - it sees the resolved name the
+        // route already collapsed them into. Two consequences follow and both
+        // are accepted:
+        //   - if the route's own `backfillGroupTextRoster` write FAILS (it is
+        //     best-effort and logs a WARN), this header still adopts the fresher
+        //     names while the inbox row keeps the numbers. The panel and the
+        //     header agree, which is the pair an operator reads side by side;
+        //     the inbox catches up on the next successful read.
+        //   - on the FIRST open after a nameless stub is triaged into a real
+        //     contact, the header renders the snapshot's numbers and then
+        //     re-titles a beat later. That flicker is the price of not titling
+        //     the header from `members` directly (A13), which is what made the
+        //     divergence permanent.
+        // The comparison is TRIMMED on both sides so a whitespace-only
+        // difference - which the route does not consider stale and therefore
+        // never writes back - cannot re-title on every single open.
         const prior = headerRef.current.participants ?? [];
         let changed = false;
         const refreshed = prior.map((p) => {
           const resolved = roster.find((r) => r.phone === p.phone);
-          const name = resolved?.name;
-          if (name === undefined || name.length === 0 || name === p.name) return p;
+          const name = resolved?.name?.trim();
+          if (name === undefined || name.length === 0 || name === p.name?.trim()) return p;
           changed = true;
           return { ...p, name };
         });
@@ -151,21 +230,17 @@ export function GroupTextView({
     return () => {
       controller.abort();
     };
-  }, [conversationId, thread.refetchSignal]);
+  }, [conversationId, thread.refetchSignal, membersRefreshTick]);
 
-  // A NEW thread starts with no verdict of its own: a failure carried over from
-  // the thread the operator just left would be a claim about people who are not
-  // in this one. (The route param can change under a live mount.)
-  const lastConversationIdRef = useRef(conversationId);
-  useEffect(() => {
-    if (lastConversationIdRef.current === conversationId) return;
-    lastConversationIdRef.current = conversationId;
-    setMembersReadFailed(false);
-    setMembers(headerRoster);
-    // headerRoster is intentionally read, not depended on: this resets ONLY when
-    // the thread changes.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [conversationId]);
+  // THE PER-THREAD RESET EFFECT THAT USED TO LIVE HERE IS GONE (fix wave 4, item
+  // 10) - it could not run. It guarded against a stale `membersReadFailed`
+  // carrying from one thread to the next "under a live mount", but there is no
+  // live mount to carry across: `ConversationDetail`'s header effect calls
+  // `setStatus('loading')` synchronously on every `conversationId` change, which
+  // renders the spinner branch and UNMOUNTS this component. A fresh mount starts
+  // from `useState(false)` and the header's own roster, which is exactly what
+  // the effect was reaching for. Dead code that looks like a safety net is worse
+  // than no safety net: the next reader trusts it.
 
   // Viewing the thread marks it read - the inbox unread badge clears once seen.
   useEffect(() => {
@@ -375,9 +450,18 @@ export function GroupTextView({
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
           <div className={shell.rightInner}>
             <Card title="Members">
+              {/* STICKY, AND NOW ESCAPABLE (fix wave 4, item 3). The alert is
+               *  raised by a failure and lowered only by a SUCCESS, which was
+               *  right and left the operator with nothing to do about it but
+               *  reload the page: the panel's only other beat is an SSE tick
+               *  this thread may not produce for hours. A retry is one request
+               *  and it is the request the alert is about. */}
               {membersReadFailed ? (
                 <p role="alert" className={styles.error}>
-                  We couldn&apos;t load member details. Opt-out state may be missing.
+                  We couldn&apos;t load member details. Opt-out state may be missing.{' '}
+                  <button type="button" className={styles.linkBtn} onClick={refreshMembers}>
+                    Try again
+                  </button>
                 </p>
               ) : null}
               <ul className={styles.memberList} aria-label="Group members">

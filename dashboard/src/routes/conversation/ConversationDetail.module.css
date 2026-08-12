@@ -281,3 +281,22 @@
   color: var(--c-text-muted);
   font-size: var(--fs-xs);
 }
+
+/* An inline RETRY inside a sticky alert (fix wave 4, item 3). A button, never a
+   link: it performs an action rather than navigating, and the alert it sits in
+   is the one thing on the panel an operator could otherwise only clear with a
+   page reload. Styled as text so it reads as part of the sentence. */
+.linkBtn {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.linkBtn:focus-visible {
+  outline: 2px solid var(--c-focus-ring);
+  outline-offset: 2px;
+}

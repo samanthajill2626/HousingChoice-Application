@@ -41,6 +41,7 @@ vi.mock('../../api/index.js', async () => {
 });
 
 import { ConversationDetail } from './ConversationDetail.js';
+import { MEMBERS_REFRESH_MS } from './GroupTextView.js';
 
 const ANN: GroupMemberRow = {
   contactId: 'c-ann',
@@ -370,6 +371,88 @@ describe('GroupTextView - member panel', () => {
       } as never);
     });
     await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix wave 4, item 3 - a sticky alert with no way out is a dead end
+// ---------------------------------------------------------------------------
+//
+// The alert is raised by a failure and lowered only by a SUCCESS, which is
+// right. What was missing is any way to PRODUCE a success: the panel's only
+// beat was the debounced SSE tick, and SSE ticks only for events emitted on
+// THIS thread. A quiet group text produces none, so an operator whose read
+// failed once was stuck looking at "opt-out state may be missing" until they
+// reloaded the page - on the screen they use to decide whether to text a group.
+//
+// The same three beats also BOUND (they do not close) the number-scoped
+// suppression gap: a member texting STOP to their own 1:1 thread flips their
+// suppression through THAT conversation and emits nothing here. See
+// MEMBERS_REFRESH_MS in the component.
+describe('GroupTextView - recovering the member panel', () => {
+  it('offers a RETRY on the sticky alert, and a successful retry clears it', async () => {
+    getGroupMembers.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+      MARCUS,
+    ]);
+    fireEvent.click(screen.getByRole('button', { name: 'Try again' }));
+
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+    // ...and the retry really re-read: the state it was missing is now on screen.
+    expect(screen.getByText('Opted out')).toBeInTheDocument();
+  });
+
+  it('re-reads the panel when the operator comes back to the tab', async () => {
+    renderAt('gt-1');
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+
+    // A member texted STOP to their own 1:1 thread while this tab was in the
+    // background. Nothing was emitted on THIS thread, so no SSE tick will ever
+    // arrive to say so.
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+      MARCUS,
+    ]);
+    act(() => {
+      window.dispatchEvent(new Event('focus'));
+    });
+
+    await waitFor(() => expect(screen.getByText('Opted out')).toBeInTheDocument());
+  });
+
+  it('re-reads the panel on a slow interval while it is open and visible', async () => {
+    // The suite's setup already mocks the system clock, so this drives the timer
+    // through its REGISTRATION rather than by advancing time: what matters is
+    // that an interval is armed at the documented cadence and that firing it
+    // refetches. Both halves are asserted.
+    const ticks: { fn: () => void; ms: number }[] = [];
+    const setInterval = vi
+      .spyOn(window, 'setInterval')
+      .mockImplementation(((fn: () => void, ms: number) => {
+        ticks.push({ fn, ms });
+        return 1 as unknown as ReturnType<typeof window.setInterval>;
+      }) as never);
+    try {
+      renderAt('gt-1');
+      await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+      expect(ticks.some((t) => t.ms === MEMBERS_REFRESH_MS)).toBe(true);
+
+      getGroupMembers.mockResolvedValue([
+        { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+        MARCUS,
+      ]);
+      act(() => {
+        for (const tick of ticks) if (tick.ms === MEMBERS_REFRESH_MS) tick.fn();
+      });
+
+      await waitFor(() => expect(screen.getByText('Opted out')).toBeInTheDocument());
+    } finally {
+      setInterval.mockRestore();
+    }
   });
 });
 

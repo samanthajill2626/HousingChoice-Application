@@ -269,6 +269,33 @@ describe('GroupTextView - the transcript', () => {
     ).toBe(true);
   });
 
+  // LIVE QA ROUND 2, L6. Every member a carrier group detects is a bare stub
+  // with no name, so this - not the named case above - is what a real group
+  // thread renders. It used to attribute NOTHING, for every member, always.
+  it('attributes a NAMELESS member by their formatted number, not by nothing', async () => {
+    const nameless: GroupMemberRow = {
+      contactId: 'c-stub',
+      phone: '+16174707727',
+      suppressed: false,
+      suppressionScope: 'no_contact',
+    };
+    getGroupMembers.mockResolvedValue([ANN, nameless]);
+    getConversation.mockResolvedValue(
+      groupHeader({
+        participants: [
+          { contactId: ANN.contactId, phone: ANN.phone, name: ANN.name },
+          { contactId: nameless.contactId, phone: nameless.phone },
+        ],
+      }),
+    );
+    getConversationMessages.mockResolvedValue([msg({ relay_sender_key: 'phone#+16174707727' })]);
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('On my way')).toBeInTheDocument());
+    // Twice, for the same reason the named case is twice: the bubble's sender
+    // chip and the member panel's row, both spelling the number identically.
+    await waitFor(() => expect(screen.getAllByText('(617) 470-7727')).toHaveLength(2));
+  });
+
   it('refetches the transcript on a live message event', async () => {
     renderAt('gt-1');
     await waitFor(() => expect(getConversationMessages).toHaveBeenCalledTimes(1));
@@ -401,6 +428,53 @@ describe('GroupTextView - the composer (S5)', () => {
         screen.getAllByRole('status').some((el) => /One member has opted out/.test(el.textContent ?? '')),
       ).toBe(true),
     );
+  });
+
+  // LIVE QA ROUND 2, L5. The notice blamed the CARRIER for dropping the message.
+  // The live evidence says otherwise: Twilio skips the participant, so no leg is
+  // ever created and no carrier ever sees it. An operator told "their carrier
+  // drops it" would go hunting a carrier failure that does not exist.
+  it('does NOT blame the carrier for an opt-out - Twilio never sends the leg', async () => {
+    getGroupMembers.mockResolvedValue([{ ...ANN, suppressed: true, suppressionScope: 'primary' }, MARCUS]);
+    renderAt('gt-1');
+    const notice = await waitFor(() => {
+      const el = screen
+        .getAllByRole('status')
+        .find((n) => /opted out/.test(n.textContent ?? ''));
+      if (!el) throw new Error('the opt-out notice never rendered');
+      return el;
+    });
+    expect(notice.textContent).not.toMatch(/carrier drops it/i);
+    expect(notice.textContent).toMatch(/Twilio skips them/i);
+  });
+
+  // LIVE QA ROUND 2, L5 (layout). `twoPaneShell .left` is `display: flex` with
+  // the default ROW direction, so a notice rendered as a SIBLING of the timeline
+  // became its own column beside the conversation and squeezed the messages into
+  // a narrow slice. The pane must therefore hold exactly ONE flex child - the
+  // stack - with every notice inside it, above the timeline.
+  it('stacks the notices ABOVE the conversation instead of beside it', async () => {
+    getGroupMembers.mockResolvedValue([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' },
+      { ...MARCUS, deleted: true },
+    ]);
+    renderAt('gt-1');
+    const composer = await screen.findByLabelText('Reply message');
+    const notice = await waitFor(() => {
+      const el = screen.getAllByRole('status').find((n) => /opted out/.test(n.textContent ?? ''));
+      if (!el) throw new Error('the opt-out notice never rendered');
+      return el;
+    });
+    const stack = notice.parentElement;
+    expect(stack).not.toBeNull();
+    // Every notice AND the conversation live in the one stack...
+    expect(stack!.contains(composer)).toBe(true);
+    expect(
+      screen.getAllByRole('status').filter((n) => n.parentElement === stack).length,
+    ).toBeGreaterThan(1);
+    // ...and the flex-ROW pane above it has exactly that one child, so nothing
+    // can ever sit BESIDE the conversation again.
+    expect(stack!.parentElement!.children).toHaveLength(1);
   });
 
   it('renders the per-member delivery rollup on an outbound group message', async () => {

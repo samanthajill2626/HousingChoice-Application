@@ -196,9 +196,30 @@
   font-size: var(--fs-xs);
 }
 
+/* The group thread's LEFT pane stack.
+   `twoPaneShell .left` is `display:flex` with the default ROW direction, because
+   its only child everywhere else is the <Timeline>. GroupTextView adds notices
+   as SIBLINGS of the timeline, so each notice became its own flex COLUMN beside
+   the conversation - live QA round 2 (L5) saw one advisory line squeeze the
+   messages into a narrow centre slice. This wrapper restores the intended
+   stacking: notices above, the timeline taking the remaining height. */
+.groupLeftStack {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The same ground the <Timeline> paints below, so the notice strip reads as
+     the top of ONE comms pane rather than a separate slab above it. */
+  background: var(--c-comms-bg);
+}
+
 /* Read-only threshold banner: over the send cap the thread cannot be replied to
    as a group, so the banner sends staff to the per-member 1:1 links. */
 .groupBanner {
+  /* Never grow, never shrink: in the column stack a banner is a fixed strip and
+     the timeline below it takes every remaining pixel. */
+  flex: 0 0 auto;
   margin: var(--sp-3) var(--sp-3) 0;
   padding: var(--sp-2) var(--sp-3);
   border: 1px solid var(--c-border);
@@ -206,6 +227,19 @@
   background: var(--c-surface);
   color: var(--c-text);
   font-size: var(--fs-sm);
+}
+
+/* ADVISORY notice, deliberately quieter than .groupBanner. The two banners
+   above it describe states that BLOCK a send; an opted-out member does not -
+   the group text still goes out to everyone else. It is one muted line, so the
+   messages (the founder's primary surface) keep outranking it. */
+.groupNotice {
+  flex: 0 0 auto;
+  margin: var(--sp-2) var(--sp-3) 0;
+  padding: 0;
+  border: 0;
+  color: var(--c-text-muted);
+  font-size: var(--fs-xs);
 }
 
 /* Per-member state chip (opted out / deleted) - pushed to the row's end. */

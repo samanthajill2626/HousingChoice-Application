@@ -187,42 +187,57 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
         <div
           className={`${shell.left} ${pane === 'conversation' ? shell.paneActive : shell.paneHidden}`}
         >
-          {overCap ? (
-            <p role="status" className={styles.groupBanner}>
-              This group text has {members.length} members, more than the {MAX_SENDABLE_MEMBERS} a
-              group send can reach, so it is read-only. Reply to people one at a time from their
-              contact pages, linked under Members.
-            </p>
-          ) : null}
-          {deletedMembers.length > 0 ? (
-            <p role="status" className={styles.groupBanner}>
-              Sending is refused while a member is a deleted contact. Restore them, or reply one to
-              one from the member links.
-            </p>
-          ) : null}
-          {suppressedMembers.length > 0 ? (
-            <p role="status" className={styles.groupBanner}>
-              {suppressedMembers.length === 1 ? 'One member has' : `${suppressedMembers.length} members have`}{' '}
-              opted out. The group text still sends - their carrier drops it, and their delivery chip
-              says so.
-            </p>
-          ) : null}
-          <Timeline
-            status={thread.status}
-            items={thread.items}
-            upcoming={[]}
-            upcomingTimezone={undefined}
-            source="server"
-            canSend={canSend}
-            {...(canSend && { onSend })}
-            {...(overCap && {
-              readOnlyNote:
-                'Too many members to send as a group - reply one to one from the member links.',
-            })}
-            relayRoster={timelineRoster}
-            rosterKind="group_text"
-            resetScrollKey={conversationId}
-          />
+          {/* The notices and the timeline STACK. `shell.left` is a flex row (its
+           *  only child on every other page is the timeline), so rendering these
+           *  as bare siblings turned each one into a column beside the
+           *  conversation - the live-QA L5 report of a "huge left panel". */}
+          <div className={styles.groupLeftStack}>
+            {overCap ? (
+              <p role="status" className={styles.groupBanner}>
+                This group text has {members.length} members, more than the {MAX_SENDABLE_MEMBERS} a
+                group send can reach, so it is read-only. Reply to people one at a time from their
+                contact pages, linked under Members.
+              </p>
+            ) : null}
+            {deletedMembers.length > 0 ? (
+              <p role="status" className={styles.groupBanner}>
+                Sending is refused while a member is a deleted contact. Restore them, or reply one
+                to one from the member links.
+              </p>
+            ) : null}
+            {/* COPY CORRECTED (live QA round 2): this used to say "their carrier
+             *  drops it", which the live evidence contradicts. Twilio's
+             *  Conversations layer SKIPS an opted-out participant outright - it
+             *  never creates the leg, so the carrier never sees the message and
+             *  no delivery receipt is ever sent for it. Saying "their carrier
+             *  drops it" would send an operator looking for a carrier failure
+             *  that does not exist. */}
+            {suppressedMembers.length > 0 ? (
+              <p role="status" className={styles.groupNotice}>
+                {suppressedMembers.length === 1
+                  ? 'One member has'
+                  : `${suppressedMembers.length} members have`}{' '}
+                opted out. The group text still goes to everyone else - Twilio skips them, so their
+                phone never receives it and their delivery chip says so.
+              </p>
+            ) : null}
+            <Timeline
+              status={thread.status}
+              items={thread.items}
+              upcoming={[]}
+              upcomingTimezone={undefined}
+              source="server"
+              canSend={canSend}
+              {...(canSend && { onSend })}
+              {...(overCap && {
+                readOnlyNote:
+                  'Too many members to send as a group - reply one to one from the member links.',
+              })}
+              relayRoster={timelineRoster}
+              rosterKind="group_text"
+              resetScrollKey={conversationId}
+            />
+          </div>
         </div>
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
           <div className={shell.rightInner}>

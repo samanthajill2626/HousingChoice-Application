@@ -272,6 +272,9 @@ The e2e CLI imports only those pure exports; app runtime code never imports e2e 
 - `--contract-checkpoint` is hermetic-only, requires default scale 1 and one cold plus one warm
   repeat, and rejects all count/density overrides for the same reason as self-QA. It is the
   builder-only early live contract calibration in Task 13, not a way to bypass subset validation.
+- `--contract-checkpoint` and `--self-qa` are mutually exclusive. Reject either ordering of both
+  options during pure argument validation, before any lifecycle import, network call, or artifact
+  creation.
 - `--print-config` fully parses and validates, calls `toSafeRunConfig`, prints only that JSON, and
   exits before imports or calls that can inspect a pid file, open a browser, or access a URL. Its
   `seed` field is the safe resolved count/density manifest for `hermetic` and exactly `null` for
@@ -283,17 +286,20 @@ The e2e CLI imports only those pure exports; app runtime code never imports e2e 
   recipient dedupe with contacts zero, relay clipping, total cap, and one-anchor capture.
 - [ ] Write failing tests in `e2e/performance/config.test.ts` for every target/option combination,
   defaults, target refusals, comparison path parsing, table-driven rejection of every count and
-  density override under both self-QA modes, acceptance of route-order/timeout controls, and error messages
-  that contain option names but never option values that may be sensitive. Inject sentinel host,
+  density override under both self-QA modes, both orderings of the checkpoint/self-QA conflict,
+  acceptance of route-order/timeout controls, and error messages that contain option names but
+  never option values that may be sensitive. Inject sentinel host,
   email, baseline-path, credential, and redirect strings into internal `RunConfig`; stringify
   `SafeRunConfig` and assert every sentinel is absent. Assert hermetic `seed` is counts-only and
   local/hosted `seed` is null.
 - [ ] Add an end-to-end argv test that resolves the repository root from the test module and spawns
   `npm run --silent perf:pages -- hermetic --scale=7 --print-config` with `cwd` set to that root.
-  Require exit 0, empty stderr, exactly one trimmed JSON value on stdout, and
-  `contacts === 700`. Set a hard 60-second child timeout so cold Windows/npm/tsx startup under load
-  does not create a 15-second required-gate flake. This proves Windows/npm argument forwarding
-  without starting a lane.
+  Resolve the executable as `npm.cmd` on Windows and `npm` elsewhere with `shell: false`; do not
+  rely on platform shell lookup. Require exit 0, exactly one trimmed JSON value on stdout, and
+  `contacts === 700`. Treat stderr as bounded diagnostic input rather than a pass criterion; never
+  echo or persist it, and prove a synthetic warning does not corrupt stdout parsing. Set a hard
+  60-second child timeout so cold Windows/npm/tsx startup under load does not create a 15-second
+  required-gate flake. This proves Windows/npm argument forwarding without starting a lane.
 - [ ] Run `npm test -w @housingchoice/app -- performanceSeed` and
   `npm test -w @housingchoice/e2e -- config`. Expected: fail because the exports/scripts do not
   exist.
@@ -535,11 +541,16 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
 - [ ] Write the new DynamoDB Local suite only in
   `app/test/performanceSeed.integration.test.ts`. Follow the explicit `env: { TABLE_PREFIX }`
   dependency-injection pattern in `app/test/unitsRepo.integration.test.ts`, not the global
-  `process.env.TABLE_PREFIX` mutation in `seedProfile.integration.test.ts`. The new suite must
-  never call `describe.skip`/`it.skip` or return green when DynamoDB Local is unavailable: fail
-  setup with a stable `dynamodb_local_required` error. Create standard tables under two unique
-  high-number `hc-local-<positive>-` prefixes A and B, inject only B into the performance path, and
-  delete only those two named throwaway table sets in `afterAll`.
+  `process.env.TABLE_PREFIX` mutation in `seedProfile.integration.test.ts`. Preserve the repository's
+  Docker-optional default: when DynamoDB Local is unavailable and
+  `PERF_SEED_REQUIRE_DYNAMO` is absent, emit the stable warning
+  `performance_seed_integration_skipped_dynamodb_unavailable` and mark the suite skipped so an
+  ordinary Dockerless `npm test` remains green like its sibling integration suites. When
+  `PERF_SEED_REQUIRE_DYNAMO=1`, fail setup instead with stable error
+  `dynamodb_local_required`; this is the mandatory mode for every plan-owned targeted proof.
+  Create standard tables under two unique high-number `hc-local-<positive>-` prefixes A and B,
+  inject only B into the performance path, and delete only those two named throwaway table sets in
+  `afterAll`.
 - [ ] Update `seedProfile.integration.test.ts` only for the namespace signature and replace its
   process-global prefix mutation with explicit namespace/repository env injection. Update the
   other listed seed/reseed callers and tests in the same slice; preserve their existing coverage.
@@ -559,10 +570,13 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
 - [ ] Implement the writer, reset orchestration, and route. Reuse `resetLocalData`; do not copy its
   table-clear algorithm and do not call business routes or jobs.
 - [ ] Ensure Docker is available and start DynamoDB Local with `npm run db:start` if it is not
-  already reachable. Run `npm test -w @housingchoice/app -- performanceSeed`; require the output to
-  name the new integration file and report its tests passed, not skipped. Leave the shared
-  DynamoDB Local container running even if this task started it; never stop a shared container.
-  Expected: unit and integration tests pass without touching lane 0.
+  already reachable. Set `PERF_SEED_REQUIRE_DYNAMO=1` only in the targeted command's child
+  environment and run `npm test -w @housingchoice/app -- performanceSeed`; require the output to
+  name the new integration file and report its tests passed, not skipped. Prove separately that an
+  unreachable fake endpoint fails with `dynamodb_local_required` when the signal is set and loudly
+  skips when it is absent. Leave the shared DynamoDB Local container running even if this task
+  started it; never stop a shared container. Expected: unit and integration tests pass without
+  touching lane 0.
 - [ ] Run `npm run typecheck` and `npm test -w @housingchoice/app`.
 - [ ] Run bare `npm run e2e` after the shared reset/seed signature changes. If a documented flake
   appears, rerun once and record both results. Do not defer this shared-seed regression proof to
@@ -586,6 +600,14 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
 
 **Interfaces and order:**
 
+- The profiler has two transport classes. Raw app-port requests are limited to owned-lane proof
+  `GET /__dev/ping` and hermetic `POST /__dev/performance/reseed`. Send `/auth/dev-login`,
+  `/auth/me`, every `/api/**` request, and all other profiler reads through the dashboard origin
+  with its browser/request context so the Vite proxy supplies `x-origin-verify` locally and the
+  deployed origin path is preserved in hosted mode. Never copy, read, or synthesize the origin
+  secret in profiler code. This follows the pre-validator dev-router mount at
+  `app/src/app.ts:85`, origin validator at `app/src/app.ts:87`, post-validator auth/API mounts at
+  `app/src/app.ts:163-165`, and proxy header injection at `dashboard/vite.config.ts:13-16,57-69`.
 - `/auth/dev-login` body becomes `{ email?: unknown; requireExisting?: unknown }`.
   `requireExisting: true` returns 404 `{ error: 'dev_user_not_found' }` without calling invite.
   Absent or false preserves current auto-provision behavior. A non-boolean supplied value returns
@@ -608,9 +630,9 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
   wrong-stack refusal, while either null continues as `target_version_unverified`. Local records a
   nonempty ping commit without equality enforcement; hosted records null unless its authenticated
   proof exposes a validated revision. Emit the explicit revision pair in `TargetMetadata`.
-- Hermetic verifies `/__dev/ping` against the expected lane prefix and the revision rule above, calls
-  performance reseed on the app port, authenticates seeded founder with existing-user-only true,
-  and verifies admin.
+- Hermetic verifies `/__dev/ping` against the expected lane prefix and the revision rule above,
+  calls only performance reseed on the app port, then uses the dashboard-origin request context to
+  authenticate seeded founder with existing-user-only true and verify admin through `/auth/me`.
 - Firewall installation is not part of this task; Task 6 installs it immediately after the proofs
   and before any measured navigation.
 
@@ -619,10 +641,13 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
   is 400.
 - [ ] Add fake-fetch/request-context tests for loopback spelling, port, prefix, dev ping shape,
   hosted scheme, admin, exact env, timeout, local TTY refusal, typed-confirmation mismatch, and
-  memory-only storage state. Assert no filesystem write API is called from auth. Feed raw local and
-  hosted hosts, login emails, OAuth redirects, and response errors through target proof, then assert
-  `TargetMetadata` and every thrown safe failure contain only target kind, revision/proof status,
-  the normalized `profilerCommit`/`targetAppCommit` pair, and closed reason codes.
+  memory-only storage state. Assert raw app-port traffic is limited to ping and reseed; direct
+  app-port `/auth/me` and `/api/**` are never attempted, while dashboard-origin requests carry the
+  authenticated browser context. Assert no filesystem write API is called from auth. Feed raw
+  local and hosted hosts, login emails, OAuth redirects, and response errors through target proof,
+  then assert `TargetMetadata` and every thrown safe failure contain only target kind,
+  revision/proof status, the normalized `profilerCommit`/`targetAppCommit` pair, and closed reason
+  codes.
 - [ ] Run the targeted app/e2e tests and verify they fail.
 - [ ] Implement app auth first, then target/auth modules. Sanitize every thrown message; do not
   include raw redirect URLs or response bodies.
@@ -734,6 +759,10 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
   `source_click`, the resolved destination route is `destination_mount`, and any third page URL
   fails the sample. Do not use a shared mutable phase toggle; same-document React Router
   navigation can race such a toggle.
+- A declared no-navigation probe sets destination equal to source and classifies every intercepted
+  write under its fresh token as `source_click`. This special case is probe metadata, not a mutable
+  runtime phase toggle; it covers unmatched-email expansion without weakening third-page failure
+  for normal warm navigation.
 
 - [ ] Before generating the catalog, add independent positive controls against the scanner's raw
   discovered set. Require both `markInboxRead` branches, `markConversationRead`,
@@ -750,8 +779,9 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
   methods do not, `/api/events` remains open/usable and the interception-handler spy has zero calls
   for it, non-scoped static/public/storage requests are
   not intercepted, URL-at-interception phase tags separate source/destination writes under a
-  same-document navigation race, prior preparation writes are outside the sample token, and
-  dynamic/unknown methods fail.
+  same-document navigation race, the explicit source-equals-destination probe remains
+  `source_click`, prior preparation writes are outside the sample token, and dynamic/unknown
+  methods fail.
 - [ ] Run `npm test -w @housingchoice/e2e -- mutationCatalog firewall`. Expected: fail before
   implementation, then pass only when catalog and scanner agree.
 - [ ] Run `npm run typecheck` and root `npm test` to prove the new e2e workspace suite executes.
@@ -801,6 +831,13 @@ does not call Express routes; later hermetic self-QA covers the HTTP composition
 | `/placements/:placementId` | back link `Back to placements` | `/placements` exact href | first rendered active placement |
 | `/conversations/:conversationId` | text `Group text` plus `Back to inbox` | `/inbox` exact href | first readable relay-group inbox row |
 | `/broadcasts/:broadcastId` | recipients region | `/broadcasts` exact href | first-page sent/failed row only |
+
+All warm-source and terminal locators in this registry assume Task 9's existing Desktop Chrome
+viewport. The settings `<select>` variant and narrow two-pane `View` toggle are explicitly outside
+the measured contract; do not silently substitute their locators. This dependency comes from
+`dashboard/src/routes/settings/SettingsPage.tsx:13,26-50`,
+`dashboard/src/ui/twoPaneShell.module.css:126-169`, and
+`dashboard/src/routes/contact/ContactDetail.tsx:496-543`.
 
 **Checked-in endpoint contracts:**
 
@@ -853,9 +890,12 @@ changed call site and is later proved by Task 13's live checkpoint.
   `dashboard/src/routes/placements/usePlacements.ts:33,50-64,73-93,112-128,214-225`.
 - `INBOX_GETS`: `/api/inbox {filter,limit}`. `EMAIL_GETS`:
   `/api/unmatched-email {filter}` plus `CONTACT_LIVE_WALK`. `BROADCAST_LIST_GETS`:
-  `/api/broadcasts {limit}`. Sources: `dashboard/src/routes/inbox/useInbox.ts:46-155`,
+  `/api/broadcasts {limit}` because `BroadcastsList` initializes its filter to `all`; any non-`all`
+  filter would add `status` and is outside the route's passive default branch. Sources:
+  `dashboard/src/routes/inbox/useInbox.ts:46-155`,
   `dashboard/src/routes/email/useUnmatchedEmail.ts:67-158`,
   `dashboard/src/routes/email/EmailTriage.tsx:238`,
+  `dashboard/src/routes/broadcasts/BroadcastsList.tsx:43-46`, and
   `dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-50,89-97`.
 - Settings sets: `TEAM_GETS` is `/api/users {}`; `TEMPLATE_GETS` is `/api/settings {}`;
   `NOTIFICATION_GETS` is empty; `VOICE_GETS` is `/api/users/me {}`; `SYSTEM_GETS` is
@@ -883,11 +923,13 @@ changed call site and is later proved by Task 13's live checkpoint.
   `dashboard/src/routes/contact/useSuggestions.ts:46-72`,
   `dashboard/src/routes/contact/useContactFile.ts:91-152`, and
   `dashboard/src/routes/contact/useContactTimeline.ts:136-172,188-337`.
-- `UNIT_DETAIL_GETS`: `/api/units/:unitId {}`, `/api/contacts/:contactId {}`,
-  `/api/units {}`, `/api/placements {}`, `/api/units/:unitId/related {}`,
+- `UNIT_DETAIL_GETS`: `/api/units/:unitId {}`, `/api/units {}`, `/api/placements {}`,
+  `/api/units/:unitId/related {}`,
   `/api/units/:unitId/recipients {}`, `/api/units/:unitId/similar {}`,
   `/api/units/:unitId/activity {}`, `/api/tours {unitId}`, `CONTACT_LIVE_WALK`, and
-  `CONTACT_DELETED_WALK`. Source: `dashboard/src/routes/listing/useListing.ts:118-185` and
+  `CONTACT_DELETED_WALK`. A selected `unit_has_landlord` branch adds
+  `/api/contacts/:contactId {}`; `unit_without_landlord` does not issue it. Source:
+  `dashboard/src/routes/listing/useListing.ts:110-185` and
   `dashboard/src/routes/listing/ListingDetail.tsx:175-192`.
 - `TOUR_DETAIL_BASE_GETS`: `/api/tours/:tourId {}`, `/api/units/:unitId {}`,
   `/api/contacts/:contactId {}`, `/api/tours/:tourId/roster {}`, `/api/conversations {}`,
@@ -959,17 +1001,33 @@ changed call site and is later proved by Task 13's live checkpoint.
 
 The 28 route bindings are exact:
 
-For required-request enforcement, a cold sample's set is
-`COLD_SHELL_GETS union destination GET set`; a warm sample's set is its selected destination GET
-set. Background refresh policy is separate in Task 8 and never widens the required set.
-`/api/events` and `WARM_SOURCE_GETS` never enter measured destination evidence.
+For endpoint enforcement, every declaration carries
+`requirement: 'required' | 'conditional'`. `required` means the selected route branch must observe
+at least one non-aborted completion of that exact template/query-key shape. `conditional` means the
+shape is allowed when its runtime precondition occurs but its absence is not a mismatch. An
+observed conditional endpoint must still match exactly and cannot satisfy a different required
+entry. Pagination continuations and only the 404 compatibility fallbacks named above are
+conditional. All other passive mount calls are required after applying the selected branch.
 
-Implement that rule once as
-`expectedGets(route: RouteDefinition, mode: 'cold' | 'warm'): readonly EndpointContract[]`.
-It returns a newly frozen, deduplicated union of `COLD_SHELL_GETS` and the bound destination set for
-cold, and the frozen destination set alone for warm; callers cannot mutate registry constants.
-Both the collector and self-QA exact-subset gate call this function rather than assembling their
-own allowlists.
+Define the sanitized, ID-free `RouteContractBranch` union as `{ kind: 'none' }`,
+`{ kind: 'contact_detail'; contactType: 'tenant' | 'landlord' | 'other'; landlordUnitCount: number }`,
+`{ kind: 'unit_detail'; hasLandlord: boolean }`, or
+`{ kind: 'thread_detail'; thread: 'group_thread' | 'person_thread' }`. The resolver records the
+matching branch in the sample closure before collection. Contact detail promotes tenant tours, or
+landlord tours when `landlordUnitCount > 0`, to required; the other branch omits them. Unit detail
+promotes the landlord contact only when `hasLandlord`. Tour and placement detail promote exactly
+the selected group/person set. Today and contact/person timeline 404 fallbacks remain conditional
+because their precondition is a response outcome, not a resolver choice.
+
+For a cold sample, evaluate `COLD_SHELL_GETS union selected destination declarations`; for warm,
+evaluate only the selected destination declarations. Background refresh policy is separate in
+Task 8 and never widens either requirement class. `/api/events` and `WARM_SOURCE_GETS` never enter
+measured destination evidence. Implement the rule once as
+`expectedGets(route: RouteDefinition, mode: 'cold' | 'warm', branch: RouteContractBranch): readonly EndpointContract[]`.
+It returns a newly frozen, deduplicated array whose entries retain their requirement class; callers
+cannot mutate registry constants. The collector, checkpoint, and self-QA subset gate call this
+function rather than assembling their own allowlists. A missing-endpoint failure applies only to a
+selected `required` entry.
 
 Define `expectedBlockedWrites(route, mode, branch)` as a frozen
 `ReadonlySet<BlockedWriteTuple>`, where a tuple is symbolic surface, method, sanitized template,
@@ -1011,6 +1069,10 @@ an exact-one-write rule from a set.
 
 Locators below are constructors, not captured content. Static `getByText`/`hasText` matching is
 allowed; code never calls `textContent`, `innerText`, or persists matched text.
+Never rely on Playwright's default substring behavior: a literal accessible name or static string
+is exact unless its entry explicitly says `prefix`, `contains`, or gives an anchored regular
+expression. Implement `prefix` as an anchored regular expression. A role-only locator has no
+`name` option; prose such as "mobile teammate list" is descriptive, not an accessible name.
 
 - `TODAY_TERMINAL`: populated is any role `list` named `Group texts to close`,
   `Needs you now`, `Tours today`, `Unreplied`, `Follow-ups due`, or
@@ -1030,10 +1092,11 @@ allowed; code never calls `textContent`, `innerText`, or persists matched text.
   `dashboard/src/routes/tours/ToursPage.tsx:250-346`.
 - `PLACEMENT_LIST_TERMINAL`: loaded structure is searchbox `Search placements`; populated is any
   descendant role `list`, empty is exact `No active placements.`, and error is role `alert` with
-  `We couldn't load placements.`. `INBOX_TERMINAL` uses role `list` named `Conversations`, exact
-  empty `No conversations yet` (or structural pending `The inbox turns on with its backend`), and
-  role `alert`. The generated hermetic result must take the populated branch. Sources:
-  `dashboard/src/routes/placements/PlacementsPage.tsx:152-173` and
+  exact `We couldn't load placements. Please try again.`. `INBOX_TERMINAL` uses role `list` named
+  `Conversations`, exact empty `No conversations yet` (or structural pending
+  `The inbox turns on with its backend`), and role `alert`. The generated hermetic result must take
+  the populated branch. Sources:
+  `dashboard/src/routes/placements/PlacementsPage.tsx:128-134,169-176` and
   `dashboard/src/routes/inbox/Inbox.tsx:53-75`.
 - `EMAIL_TERMINAL`: populated is role `list` named `Unmatched email` or `Quarantined email`; empty
   is exact `No unmatched email` or `Quarantine is empty` (or structural pending
@@ -1042,32 +1105,46 @@ allowed; code never calls `textContent`, `innerText`, or persists matched text.
   `Property sends`, exact empty `No sends yet`, or role `alert`. Sources:
   `dashboard/src/routes/email/EmailTriage.tsx:276-348` and
   `dashboard/src/routes/broadcasts/BroadcastsList.tsx:130-140`.
-- `TEAM_TERMINAL`: populated is role `table` or the mobile teammate role `list`; empty is static
-  prefix `No teammates yet`; error is role `alert`. `TEMPLATE_TERMINAL` is textbox
-  `Missed-call auto-text` or role `alert`. `NOTIFICATION_TERMINAL` is heading `Notifications`; it
-  has no tracked mount request and is classified populated once visible. `VOICE_TERMINAL` is a
+- `TEAM_TERMINAL`: at the contracted desktop viewport, populated is the role-only `table`; empty
+  is anchored prefix `^No teammates yet`; error is role `alert`. The narrow role-only teammate
+  `list` has no accessible name and is recorded only as an out-of-contract responsive alternative.
+  `TEMPLATE_TERMINAL` is textbox with anchored accessible-name regex
+  `^Missed-call auto-text [0-9]+/320$` or role `alert`. `NOTIFICATION_TERMINAL` is exact heading
+  `Notifications`; it has no tracked mount request or asynchronous data branch, so the heading is
+  produced in the same render as its device-capability content and heading plus settle is the
+  honest terminal. `VOICE_TERMINAL` is a
   textbox named `Your mobile number` for an unverified user, or exact static text `Your cell` plus
   role `status` for the seeded verified founder; error is role `alert`. Sources:
   `dashboard/src/routes/settings/TeamSection.tsx:42-91`,
-  `dashboard/src/routes/settings/TemplatesSection.tsx:185-190`,
-  `dashboard/src/routes/settings/NotificationsSection.tsx:22-32,97`, and
+  `dashboard/src/routes/settings/TemplatesSection.tsx:149-199`,
+  `dashboard/src/routes/settings/NotificationsSection.tsx:22-100`, and
   `dashboard/src/routes/settings/VoiceSection.tsx:93-127,176`.
-- `SYSTEM_TERMINAL` is compound: quiet-hours checkbox `Pause automated messages overnight`, the
-  heading `Go-live flags` with its descendant role `list`, and settled headings `Alarms` and
-  `Recent errors` must all be present; each AWS block may be a list, exact
-  deployed-environment/empty state, or role `alert`. Any alert classifies error; otherwise
-  populated. `AI_RUN_TERMINAL` uses role `list` named `AI runs`, exact
-  empty `No extraction runs match this scope.`, or role `alert`. `NUMBER_TERMINAL` requires the
-  `Our number` block to leave `Loading` and the admin pool to expose `Pool number counts`, exact
-  empty `No group text numbers yet - a number is provisioned with the first group text.`, or role
-  `alert`. Sources: `dashboard/src/routes/settings/QuietHoursSection.tsx:154`,
+- `SYSTEM_TERMINAL` is compound and every subcondition is required. First, the exact quiet-hours
+  checkbox `Pause automated messages overnight` proves the async settings branch loaded. Second,
+  the role `listitem` with anchored name `^Environment: ` proves the sibling flags list reached its
+  ready branch; do not scope a list beneath the `Go-live flags` heading. Third, the block containing
+  exact heading `Alarms` must independently expose a role-only `list`, exact
+  `Available in deployed environments.`, exact `No alarms configured for this environment.`, or
+  role `alert`. Fourth, the block containing exact heading `Recent errors` must independently
+  expose a role-only `list`, exact `Available in deployed environments.`, exact
+  `No recent errors in this window.`, or role `alert`. Any alert classifies error; all four
+  subconditions must otherwise resolve before populated. `AI_RUN_TERMINAL` uses role `list` named
+  `AI runs`, exact empty `No extraction runs match this scope.`, or role `alert`.
+  `NUMBER_TERMINAL` requires two independent positive branches. The `Our number` block must expose
+  exact `Couldn't load our number.`, exact `Not set`, or an allowlisted formatted-number match
+  `^(?:\([0-9]{3}\) [0-9]{3}-[0-9]{4}|\+[0-9]{8,15})$`; never use absence of `Loading` as its
+  signal and never retain the matched value. The admin pool must expose role `list` named
+  `Pool number counts`, exact empty
+  `No group text numbers yet - a number is provisioned with the first group text.`, or role
+  `alert`. Sources: `dashboard/src/routes/settings/QuietHoursSection.tsx:135-155`,
   `dashboard/src/routes/settings/FlagPills.tsx:41-69`,
-  `dashboard/src/routes/settings/AlarmGrid.tsx:43-91`,
-  `dashboard/src/routes/settings/RecentErrors.tsx:69-115`,
+  `dashboard/src/routes/settings/AlarmGrid.tsx:43-95`,
+  `dashboard/src/routes/settings/RecentErrors.tsx:69-129`,
   `dashboard/src/routes/settings/aiRuns/AiRunList.tsx:43-47`, and
-  `dashboard/src/routes/settings/NumbersSection.tsx:150,244-247`.
+  `dashboard/src/routes/settings/NumbersSection.tsx:150-164,232-253`.
 - Detail contracts have no empty branch; missing data is a resolver skip. The representative
-  tenant contact requires heading `Details` plus region `Communications and activity`; these are
+  tenant contact requires heading with anchored name `^Details(?: Edit)?$` plus exact region
+  `Communications and activity`; these are
   both visible at the desktop viewport and replace the narrow-only `View` toggle. Property uses a
   level-1 heading plus heading `Photos`; tour, placement, and
   conversation use exact links `Back to tours`, `Back to placements`, and `Back to inbox`;
@@ -1094,8 +1171,10 @@ detail, property detail, and conversation detail. It is false for tour detail an
 the adjudicated spec erratum stated at the top of this plan.
 
 Resolvers use authenticated GETs and page according to the real endpoint contract, keep IDs only
-in closure memory, and return either `{ kind: 'resolved', coldPath, warmHref }` or an explicit skip
-reason. They never write the ID to evidence. Warm detail locators are
+in closure memory, and return either `{ kind: 'resolved', coldPath, warmHref, branch }` or an
+explicit skip reason. `branch` is the matching sanitized `RouteContractBranch`; contact and unit
+resolvers retain the type/count or landlord-presence facts above, and tour/placement retain the
+group/person choice. They never write an ID to evidence. Warm detail locators are
 `page.getByRole('link').filter({ has: page.locator('[href="<exact in-memory href>"]') })` or the
 equivalent exact `locator('a[href=...]')` plus role assertion; they never select by domain text.
 They never click Load more. Broadcast selection is restricted to the first 50 API rows and inbox
@@ -1146,10 +1225,16 @@ The resolver request contracts are explicit:
   midnight to prove the live tour window is recomputed.
 - [ ] Assert every route expands to exactly the endpoint and terminal contracts above, every
   observed query-key set is one declared shape, stream/source GETs cannot enter destination
-  evidence, and a synthetic undeclared template makes the registry test fail.
+  evidence, every literal/regex locator carries its explicit exactness mode, and a synthetic
+  undeclared template makes the registry test fail. Prove the broadcast default `all` branch emits
+  `{limit}` and a non-default filter would emit the out-of-contract `{limit,status}` shape. Assert
+  every warm source and terminal declares the Desktop Chrome viewport dependency.
 - [ ] Deep-compare `expectedGets` for every one of the 28 route bindings in both modes, including
-  every exact query-key shape. Prove cold retains and accepts shell requests, warm excludes shell
-  and `WARM_SOURCE_GETS`, returned arrays are immutable, and an undeclared query key fails. Also
+  every exact query-key shape and selected `RouteContractBranch`. Prove cold retains and accepts
+  shell requests, warm excludes shell and `WARM_SOURCE_GETS`, required entries fail when missing,
+  absent conditional continuations/fallbacks pass, observed conditional entries still require an
+  exact declaration, tenant/landlord/other contact branches differ, unit landlord presence differs,
+  group/person branches differ, returned arrays are immutable, and an undeclared query key fails. Also
   deep-compare `expectedBlockedWrites` as sets for cold/warm conversation detail, the two
   tour/placement branches, and both supplemental row probes; include the legitimate two-phase
   same-template warm cases.
@@ -1222,9 +1307,10 @@ The resolver request contracts are explicit:
 - Background requests are preserved as sanitized `RequestEvidence`, counted only in
   `backgroundRequestCount/backgroundTransferBytes`, and surfaced as a background-noise warning.
   They do not reset readiness quiet, satisfy required endpoint contracts, enter primary API
-  count/byte rankings, or widen `expectedGets`. An endpoint not in the required set or the explicit
-  background map remains `unmatched_api` and fails self-QA. This separates real page-load work from
-  unrelated live SSE/poll noise without hiding it.
+  count/byte rankings, or widen `expectedGets`. An endpoint outside the selected
+  required/conditional declarations and the explicit background map remains `unmatched_api` and
+  fails self-QA. This separates real page-load work from unrelated live SSE/poll noise without
+  hiding it.
 
 Define one idempotent page-store installer used by every bootstrap. Register the base installer as
 an init script before navigation; it records PerformanceObserver entries for `longtask`, `paint`,
@@ -1298,8 +1384,9 @@ silently treating it as useful data.
   `beginSample` in the initial `about:blank`, because its store does not survive navigation.
 - Warm: reuse one authenticated context and shell. Before each sample navigate to the declared
   source and wait with the separate source timeout. Resolve the exact in-memory href and, for tour
-  or placement detail, retain only the conditional `group_thread`/`person_thread` branch enum in
-  the sample closure. Set firewall
+  or placement detail, retain the conditional `group_thread`/`person_thread` branch; retain the
+  contact-type/landlord-unit-count and unit-landlord-presence branches for their detail routes.
+  Store only the sanitized `RouteContractBranch` in the sample closure. Set firewall
   source/destination URL predicates, atomically call `beginSample` to clear every collector, start
   timing immediately before the exact accessible click, wait for destination ready, and collect.
   For warm samples, call page-side `beginSample(token, performance.now())` with `page.evaluate` in
@@ -1467,8 +1554,10 @@ silently treating it as useful data.
   nonzero, and preserve profile artifacts. If another e2e run reaps the profiler later, detect the
   dead child and fail rather than attaching to the replacement.
 - Hermetic order is parse/validate, same-worktree preflight, resolve/spawn, verify ping, call the
-  app-port reseed with item-count-scaled timeout, authenticate, install firewall, warmup, collect,
-  report, finally cleanup.
+  app-port reseed with item-count-scaled timeout, switch to the dashboard-origin browser/request
+  context for dev-login, `/auth/me`, every `/api/**` read, and all remaining work, authenticate,
+  install firewall, warmup, collect, report, finally cleanup. Assert no post-reseed raw app-port
+  business/auth request is possible.
 - Local order is parse/validate, ping/prefix proof, TTY confirmation, existing-user auth, install
   firewall, warmup, collect, report. It never imports or calls lifecycle/reseed functions.
 - Hosted order is parse/validate, headed login, admin/env proof, install firewall, collect, report.
@@ -1511,6 +1600,11 @@ silently treating it as useful data.
 - Modify: `e2e/performance/routes.test.ts`
 - Modify: `e2e/performance/readiness.ts`
 - Modify: `e2e/performance/readiness.test.ts`
+- Modify: `e2e/performance/collect.ts`
+- Modify: `e2e/performance/collect.test.ts`
+- Modify: `e2e/performance/firewall.ts`
+- Modify: `e2e/performance/firewall.test.ts`
+- Modify: `e2e/performance/templates.ts`
 - Modify: `e2e/performance/report.ts`
 - Modify: `e2e/performance/report.test.ts`
 
@@ -1523,11 +1617,12 @@ silently treating it as useful data.
   `contract-observations.json` beside the ordinary report: route key, mode, selected symbolic
   branch, terminal classification, observed endpoint templates/query-key sets/multiplicity/outcome,
   background roles, and blocked-write tuples. It contains no raw URLs, values, IDs, or content.
-- Normal subset enforcement remains enabled. Any observed required endpoint outside
-  `expectedGets`, missing required endpoint, unmatched API, wrong blocked-write tuple, unresolved
-  terminal, or undeclared background fingerprint makes the checkpoint exit nonzero after the
-  sanitized observation file is safely finalized. The diagnostic mode does not auto-edit source
-  and does not turn an unexpected endpoint into background noise.
+- Normal branch-aware subset enforcement remains enabled. Any observed endpoint outside the
+  selected required/conditional declarations, missing selected required endpoint, unmatched API,
+  wrong blocked-write tuple, unresolved terminal, or undeclared background fingerprint makes the
+  checkpoint exit nonzero after the sanitized observation file is safely finalized. Absence of a
+  conditional endpoint is not a failure. The diagnostic mode does not auto-edit source and does
+  not turn an unexpected endpoint into background noise.
 - For each failure, inspect the current dashboard call site and server/client contract. If evidence
   proves the checked-in contract wrong, update the named contract constant, its adjacent
   `CONTRACT_SOURCES` file:line citation, terminal/branch rule, and its unit expectation with a short
@@ -1535,10 +1630,16 @@ silently treating it as useful data.
   gate, never-matched stream rule, firewall, privacy scan, or 56-sample later gate. If code and
   contract agree, fix collector/readiness/resolver behavior instead. Rerun the focused unit tests
   and the whole live checkpoint after every correction wave.
+- Changing an endpoint between `required`, `conditional`, and `background_refresh` is a separately
+  audited correction. Name the exact dashboard call site and explain whether it is passive mount
+  work, a response-conditioned fallback, or a later timer/SSE refresh. Record every class change in
+  the checkpoint history and final handback; a citation alone is not sufficient.
 
 - [ ] Write failing CLI/report tests proving checkpoint mode is hermetic-only, scale/repeat locked,
   preserves a sanitized mismatch artifact, exits nonzero on every mismatch class, and cannot
-  mutate contract source automatically.
+  mutate contract source automatically. Cover missing required versus absent conditional entries
+  separately, every selected branch, and an audited requirement/background class change in the
+  checkpoint history.
 - [ ] Add a contract-source ledger in `routes.ts` that maps every endpoint set, terminal,
   resolver, blocked-write set, and background refresh rule to the current source citations
   recorded in Tasks 6, 7, and 8. Unit tests require every registry binding and conditional branch
@@ -1580,7 +1681,8 @@ npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --con
 - Both are hermetic-only. Resolve the six private scale-1 keys through
   `resolvePerformanceSelfQaFixtures`; fail before collection if any exact source link, ownership,
   back-reference, unread predicate, or pairwise separation proof differs from the generator
-  contract. Before profiling, use authenticated GETs to reduce each keyed fixture state into an
+  contract. Before profiling, use dashboard-origin authenticated GETs to reduce each keyed fixture
+  state into an
   in-memory map of unread/read scalars for contact detail, relay conversation detail, inbox row,
   unmatched-email row, tour group channel, and placement group channel, plus dev-outbox count.
   After profiling, repeat the GET reductions and compare. Persist only surface names and
@@ -1591,6 +1693,9 @@ npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --con
   activate only the keyed unread `unmatched_email` row's expansion control. Do not click any
   action inside the expanded email. The supplemental probes are not ranking samples and cannot
   satisfy the 56-sample cardinality.
+- Declare the unmatched-email expansion as a no-navigation probe: source and destination are both
+  `/email`, its fresh token starts immediately before activation, and every intercepted write is
+  classified `source_click` under Task 6's explicit source-equals-destination rule.
 - In full mode, define expected tuples as frozen sets per surface and mode. The required sets are:
   contact detail `{destination_mount /api/inbox/:contactId/read}`; cold conversation detail
   `{destination_mount /api/conversations/:conversationId/read}`; warm conversation detail
@@ -1666,6 +1771,9 @@ enforces.
   `load_scale_bearing: false`; record this as the adjudicated correction to the design's older docs
   enumeration without editing the spec. Document background poll/SSE counts separately from primary
   page-load metrics and `/api/events` as never intercepted.
+- [ ] Document the DynamoDB integration tradeoff: ordinary Dockerless `npm test` loudly skips this
+  suite to preserve repository convention, while plan-owned seed proofs set
+  `PERF_SEED_REQUIRE_DYNAMO=1` and cannot pass without executing it.
 - [ ] State clearly that local and hosted modes ship pre-merge with guard unit evidence only; their
   first end-to-end execution belongs to the human. State that local Vite evidence and hosted
   built/CDN evidence answer different questions and neither is production telemetry.
@@ -1687,8 +1795,11 @@ enforces.
   sync.
 - [ ] Require Docker and DynamoDB Local before the gates. Run `npm run db:start` if the shared
   endpoint is not reachable and leave it running. Run the targeted
-  `performanceSeed.integration.test.ts` suite once and require its filename/test count to appear as
-  passed, never skipped. A green root test without this execution evidence is not a valid handback.
+  `performanceSeed.integration.test.ts` suite once with `PERF_SEED_REQUIRE_DYNAMO=1` in that child
+  environment and require its filename/test count to appear as passed, never skipped. Remove the
+  signal before the bare gates; Docker remains available, and root `npm test` must also show that
+  file passed rather than the stable loud-skip warning. A green root test without the targeted
+  required-mode execution evidence is not a valid handback.
 - [ ] After the sync, run the required gates from `W:\tmp\page-performance-profiler`, bare and
   unpiped, one at a time:
 
@@ -1752,5 +1863,16 @@ repository:
     source-click plus destination-mount attempts for one template.
 14. The repeating timer/SSE inventory is complete, and background evidence is retained separately
     without satisfying readiness or required endpoint sets.
-15. DynamoDB Local integration tests cannot self-skip; final handback evidence names the targeted
-    suite and its passed test count while Docker is available.
+15. The branch-aware endpoint contract distinguishes required from conditional entries; missing
+    failures apply only to the selected required set, and every requirement/background class change
+    is justified by a cited call site and recorded in handback history.
+16. Every terminal locator declares exact, prefix, contains, anchored-regex, or role-only matching;
+    system AWS blocks wait for explicit terminal branches and the number route uses positive states.
+17. Raw app-port traffic is limited to owned ping and hermetic reseed; auth, `/auth/me`, `/api/**`,
+    resolver, and self-QA reads use the dashboard-origin browser/request context.
+18. No-navigation probes classify source-equals-destination writes as `source_click`, and
+    checkpoint/self-QA modes are mutually exclusive before side effects.
+19. Registry locators declare their Desktop Chrome dependency and the broadcast list contract cites
+    its default `all` filter branch.
+20. Docker-optional root tests emit a stable loud skip, while plan-owned targeted integration proof
+    sets `PERF_SEED_REQUIRE_DYNAMO=1`; final handback names the suite and passed test count.

@@ -398,6 +398,42 @@ const CROSSCHECK_CLAIM_PAGE_SIZE = 25;
 const CROSSCHECK_CLAIM_PAGES = 4;
 
 /**
+ * THE MID-TRANSITION WAIT (fix wave 4, item 2) - the window wave 3's paging left
+ * open, and the one interleaving in this ledger that arrives on ORDINARY
+ * traffic rather than after a fault.
+ *
+ * The event half writes the row, bumps the balance, THEN marks the row
+ * `counted`. Between the bump and the mark the pair's balance says "one event is
+ * pending" while no row is claimable. Twilio fires the classic webhook and the
+ * Conversations webhook off ONE carrier message, concurrently, so a classic
+ * filing landing inside that one-round-trip window is not exotic - it is the
+ * shape the ledger exists to arbitrate. When it happens:
+ *
+ *   - the filing's ADD takes the slot and reports `matched`;
+ *   - the claim finds zero COUNTED rows and returns undefined;
+ *   - the caller logs `group_crosscheck_pending_row_missing`;
+ *   - the mark then lands, and that row - already paid for by a filing that
+ *     really arrived - sits until its deadline and raises
+ *     `group_crosscheck_inbound_missing` at ERROR.
+ *
+ * That is a FALSE alarm on the one signal that says the undocumented
+ * `OtherRecipients` envelope may have gone away, on healthy traffic. There is no
+ * stolen-slot cascade behind it (the sweep's release is conditional on a
+ * positive balance and the balance is already square), so the cost is exactly
+ * one spurious ERROR plus one WARN - which is the cost that trains an operator
+ * to ignore the alarm.
+ *
+ * Unlike the shadowing defect, RE-READING HELPS HERE: the row genuinely changes
+ * under us, because the mark is one round trip behind the bump. So an empty read
+ * is re-tried a bounded number of times a short beat apart. It costs nothing on
+ * the ordinary path (a non-empty read never waits) and at most
+ * `READS * MS` on a pair that really has no claimable row - a rare case which
+ * ends in a WARN either way.
+ */
+const CROSSCHECK_MARK_WAIT_MS = 20;
+const CROSSCHECK_MARK_WAIT_READS = 2;
+
+/**
  * How many read-decide-write rounds the event half will take on one pair.
  *
  * Generous on purpose: the decision (matched-or-pending) depends on the balance
@@ -1254,7 +1290,11 @@ export interface MessagesRepo {
    * braces: a row is written UNCOUNTED and marked only once the bump has landed,
    * the claim consumes counted rows only, and an uncounted row is therefore a
    * pending row the balance does not account for - which is a state that occurs
-   * by design, not an invariant violation.
+   * by design, not an invariant violation. Because it occurs by design, the
+   * claim WAITS a bounded beat for the mark rather than reporting nothing
+   * claimable the instant it sees an empty read (fix wave 4, item 2): the window
+   * between (3) and (4) is one round trip, and a concurrent classic filing
+   * landing inside it is ordinary traffic, not a fault.
    *
    * THE RESIDUAL, PRICED HONESTLY (fix wave 3, adversarial 3). A throw between
    * the row writes and step (4) leaves rows uncounted. That costs one false
@@ -1309,6 +1349,14 @@ export interface MessagesRepo {
    * here, so an eventually-consistent read would miss it - and the delete is
    * CONDITIONAL with its result inspected, so two concurrent claimants can never
    * both take the same row. A loser retries against the next-oldest row.
+   *
+   * AN EMPTY READ IS RE-TRIED, BRIEFLY (fix wave 4, item 2). Callers reach this
+   * only after the balance said a slot exists, and the commonest way for that to
+   * be true with nothing claimable is that the event half's `SET counted` is
+   * still in flight one round trip behind its bump - an interleaving that arrives
+   * on ORDINARY traffic, because Twilio fires both webhooks off one carrier
+   * message. Left alone it cost a false `group_crosscheck_inbound_missing` ERROR
+   * for a message whose classic filing had arrived. See CROSSCHECK_MARK_WAIT_MS.
    */
   claimOldestCrossCheckPending(pairKey: string): Promise<PendingCrossCheckEvent | undefined>;
   /**
@@ -2884,7 +2932,18 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
 
       for (let attempt = 0; attempt < CROSSCHECK_CLAIM_ATTEMPTS; attempt += 1) {
-        const items = await readClaimable();
+        let items = await readClaimable();
+        // AN EMPTY READ IS NOT YET AN ANSWER (fix wave 4, item 2). This function
+        // is only ever reached when the balance has just said a pending event
+        // exists, and the commonest way for that to be true with nothing
+        // claimable is that the event half's `SET counted` is still in flight -
+        // one round trip behind the bump that sent us here. Waiting a beat and
+        // re-reading turns a false `group_crosscheck_inbound_missing` ERROR into
+        // the match it actually was. See CROSSCHECK_MARK_WAIT_MS.
+        for (let wait = 0; items.length === 0 && wait < CROSSCHECK_MARK_WAIT_READS; wait += 1) {
+          await new Promise((resolve) => setTimeout(resolve, CROSSCHECK_MARK_WAIT_MS));
+          items = await readClaimable();
+        }
         if (items.length === 0) return undefined;
         for (const item of items) {
           const sortKey = String(item['tsMsgId']);

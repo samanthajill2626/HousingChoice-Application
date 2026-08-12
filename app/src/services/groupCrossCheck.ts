@@ -337,6 +337,14 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           // in the balance but outside the current claim range. All are safe -
           // the balance already accounts for this filing - so this is a WARN
           // about a diagnosis, not an error about a loss.
+          //
+          // The cause that is NOT in that list any more (fix wave 4, item 2):
+          // an event whose balance bump landed while its `SET counted` was still
+          // in flight. That is ordinary concurrency - Twilio fires both webhooks
+          // off one carrier message - and it used to end in a FALSE
+          // `group_crosscheck_inbound_missing` ERROR at that row's deadline. The
+          // claim now waits a bounded beat for the mark, so reaching this WARN
+          // really does mean one of the three above.
           log.warn(
             {
               event: 'group_crosscheck_pending_row_missing',

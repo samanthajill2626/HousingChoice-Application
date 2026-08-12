@@ -120,11 +120,15 @@ function ledgerDoc(
  * can come back empty with a `LastEvaluatedKey` still pointing at more rows.
  * The repo's only filter is `counted = true`, so that is what is modelled.
  */
-function queryDoc(rows: Array<Record<string, unknown>>): {
+function queryDoc(
+  rows: Array<Record<string, unknown>>,
+  hooks: { beforeRead?: (readNumber: number) => void } = {},
+): {
   doc: { send: (cmd: unknown) => Promise<unknown> };
   sent: Sent[];
 } {
   const sent: Sent[] = [];
+  let reads = 0;
   return {
     sent,
     doc: {
@@ -132,6 +136,8 @@ function queryDoc(rows: Array<Record<string, unknown>>): {
         const command = cmd as { constructor: { name: string }; input: Record<string, unknown> };
         sent.push({ name: command.constructor.name, input: command.input });
         if (command.constructor.name !== 'QueryCommand') return {};
+        reads += 1;
+        hooks.beforeRead?.(reads);
         const input = command.input;
         const startKey = input['ExclusiveStartKey'] as { tsMsgId?: string } | undefined;
         const start =
@@ -496,12 +502,59 @@ describe('claiming a pending row is strongly consistent AND conditional', () => 
     expect(queries[1]!.input['ExclusiveStartKey']).toBeDefined();
   });
 
+  // THE DEFECT THIS PINS (fix wave 4, item 2) - the window wave 3's paging left
+  // open, and the only interleaving in this ledger that arrives on ORDINARY
+  // traffic rather than after a fault.
+  //
+  // The event half writes four times: pair row, due row, balance ADD, `SET
+  // counted`. Twilio fires the classic webhook and the Conversations webhook off
+  // ONE carrier message concurrently, so a classic filing landing between the
+  // ADD and the mark is the normal shape of contention, not an exotic one. When
+  // it lands there the filing's own ADD takes the slot and reports `matched`,
+  // the claim sees zero COUNTED rows, the filing logs
+  // `group_crosscheck_pending_row_missing` - and the row, paid for by a filing
+  // that really did arrive, then alarms at its deadline with
+  // `group_crosscheck_inbound_missing` at ERROR. A false firing of the ONE
+  // detector that says the undocumented envelope may have gone away.
+  //
+  // Unlike the shadowing defect above, re-reading DOES help here: the row really
+  // changes, because the mark is one round trip behind the bump.
+  it('WAITS for a COUNTED mark that is still in flight instead of alarming for a message that arrived', async () => {
+    const rows: Array<Record<string, unknown>> = [
+      {
+        tsMsgId: 'evt2#2026-08-11T12:05:00.000Z#IM1',
+        message_sid: 'IM1',
+        deadline_at: '2026-08-11T12:05:00.000Z',
+        conversation_sid: 'CH1',
+        author: '+15551110001',
+        // NOT counted yet: the balance ADD has landed, the mark has not.
+      },
+    ];
+    const { doc, sent } = queryDoc(rows, {
+      beforeRead: (n) => {
+        // The event half's `SET counted` lands while the claim is waiting.
+        if (n === 2) rows[0]!['counted'] = true;
+      },
+    });
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect((await repo.claimOldestCrossCheckPending(PAIR))?.messageSid).toBe('IM1');
+    expect(sent.filter((s) => s.name === 'QueryCommand').length).toBeGreaterThan(1);
+  });
+
   it('an empty pending range returns undefined without deleting anything', async () => {
-    const { doc, sent } = fakeDoc([() => ({ Items: [] })]);
+    // DECLARED TEST-SHAPE CHANGE (fix wave 4, item 2): the claim now re-reads a
+    // bounded number of times before accepting an empty answer, so a genuinely
+    // empty pair costs three Queries rather than one. What this asserts is
+    // unchanged and is the part that matters - nothing is DELETED, and the
+    // answer is still `undefined`.
+    const empty = (): { Items: never[] } => ({ Items: [] });
+    const { doc, sent } = fakeDoc([empty, empty, empty]);
     const repo = createMessagesRepo({ doc: doc as never, env });
 
     expect(await repo.claimOldestCrossCheckPending(PAIR)).toBeUndefined();
-    expect(sent).toHaveLength(1);
+    expect(sent).toHaveLength(3);
+    expect(sent.every((s) => s.name === 'QueryCommand')).toBe(true);
   });
 });
 

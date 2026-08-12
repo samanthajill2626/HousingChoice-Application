@@ -201,7 +201,12 @@ console.log(`    REFUSED              : ${report.totals.refused}`);
 console.log(`  contactIds backfilled  : ${report.totals.contactIdsBackfilled}`);
 console.log(`  member names backfilled: ${report.totals.namesBackfilled}`);
 console.log(`  members stamped        : ${report.totals.membersStamped}`);
-console.log(`  members with no record : ${report.totals.membersMissing}`);
+console.log(
+  `  members RE-MINTED      : ${report.totals.membersReminted} (a workbook drop kept on a group roster - group-scoped stub, NO sms consent)`,
+);
+console.log(
+  `  members with no record : ${report.totals.membersMissing} (non-zero means the run is INCOMPLETE)`,
+);
 console.log(`  rails created          : ${report.totals.railsCreated}`);
 console.log(`  rails already present  : ${report.totals.railsExisting}`);
 console.log(`  rails FAILED           : ${report.totals.railsFailed}`);

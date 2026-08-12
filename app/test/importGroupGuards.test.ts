@@ -290,7 +290,14 @@ describe('import retractImported - group member guard (T7.2)', () => {
     rosterContactIds?: string[];
     /** Throw instead of answering the group partition query. */
     rosterFails?: boolean;
-    /** Make the guarded contact delete lose its condition. */
+    /**
+     * Make the ATOMIC GUARD lose its condition.
+     *
+     * The guard is the conditional MARKER WRITE that now runs before anything is
+     * destroyed, not the contact delete - the delete moved to LAST so a
+     * mid-retract failure stays recoverable (adversarial finding 7). Both carry
+     * `attribute_not_exists(group_participation_at)`, so this matches either.
+     */
     deleteLoses?: boolean;
   }
 
@@ -324,9 +331,10 @@ describe('import retractImported - group member guard (T7.2)', () => {
       }
       if (
         world.deleteLoses &&
-        cmd.name === 'DeleteCommand' &&
+        (cmd.name === 'DeleteCommand' || cmd.name === 'UpdateCommand') &&
         tableName.includes('contacts') &&
-        (cmd.input.Key as { contactId?: string }).contactId === DROPPED_CONTACT_ID
+        (cmd.input.Key as { contactId?: string }).contactId === DROPPED_CONTACT_ID &&
+        String(cmd.input.ConditionExpression ?? '').includes('group_participation_at')
       ) {
         throw ccfe();
       }
@@ -391,8 +399,9 @@ describe('import retractImported - group member guard (T7.2)', () => {
     const warning = report.warnings.find((w) => w.includes(droppedRowKey));
     expect(warning).toContain('GROUP MEMBER');
     expect(warning).toContain('while this import was running');
-    // Nothing half-retracted: the guarded delete runs FIRST, so a refusal leaves
-    // the person's own thread and messages alone.
+    // Nothing half-retracted: the atomic guard is evaluated FIRST and destroys
+    // nothing when it loses, so a refusal leaves the person's own thread and
+    // messages alone (the contact delete itself now runs LAST).
     const messageDeletes = sent.filter(
       (c) => c.name === 'DeleteCommand' && String(c.input.TableName ?? '').includes('messages'),
     );

@@ -215,7 +215,11 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
     expect(contact.Item!.group_participation_at).toBe('2026-01-01T00:00:00.000Z');
   });
 
-  it('reports a missing contact rather than creating one', async () => {
+  it('RE-MINTS a group-scoped stub for a member whose contact record is absent', async () => {
+    // Against the real conditional create. A roster slot with no row behind it
+    // makes groupSend refuse EVERY outbound on the thread forever, and nothing
+    // re-resolves an existing thread's roster - so conversion mints the stub
+    // detection would have minted, minus anything that grants SMS consent.
     const g = nextGroup();
     const known = g.memberA;
     const orphan = g.memberB;
@@ -223,14 +227,45 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
     await seedContact(known);
 
     const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
-    expect(result.membersMissing).toEqual([contactIdForPhone(orphan)]);
+    expect(result.membersMissing).toEqual([]);
+    expect(result.membersReminted).toBe(1);
     const contact = await doc.send(
       new GetCommand({
         TableName: contactsTable,
         Key: { contactId: contactIdForPhone(orphan) },
       }),
     );
-    expect(contact.Item).toBeUndefined();
+    expect(contact.Item).toBeDefined();
+    expect(contact.Item!.origin).toBe('group_detection');
+    expect(contact.Item!.phone).toBe(orphan);
+    expect(contact.Item!.type).toBe('unknown');
+    expect(contact.Item!.status).toBe('needs_review');
+    expect(typeof contact.Item!.group_participation_at).toBe('string');
+    // The consent fields detection deliberately never writes.
+    expect(contact.Item!.consent_method).toBeUndefined();
+    expect(contact.Item!.consent_at).toBeUndefined();
+    expect(contact.Item!.capture_source).toBeUndefined();
+  });
+
+  it('re-running the conversion does not re-mint or overwrite the stub', async () => {
+    const g = nextGroup();
+    await seedImportedGroup(g);
+    await seedContact(g.memberA);
+
+    const first = await convertConnectingRelayGroupToGroupText(g.id, opts);
+    expect(first.membersReminted).toBe(1);
+    const stubId = contactIdForPhone(g.memberB);
+    const after = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: stubId } }),
+    );
+
+    const second = await convertConnectingRelayGroupToGroupText(g.id, opts);
+    expect(second.membersReminted).toBe(0);
+    expect(second.membersMissing).toEqual([]);
+    const again = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: stubId } }),
+    );
+    expect(again.Item!.group_participation_at).toBe(after.Item!.group_participation_at);
   });
 
   it('refuses a connected relay group and leaves the row untouched', async () => {

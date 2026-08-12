@@ -45,9 +45,15 @@ interface World {
   opts: GroupConvertOptions;
   /** Every stampGroupParticipation call, in order. */
   stamps: { contactId: string; at: string }[];
+  /** Every createIfAbsent call, in order (the re-mint path). */
+  creates: ContactItem[];
 }
 
-function world(row?: ConversationItem, contactIds: string[] = []): World {
+function world(
+  row?: ConversationItem,
+  contactIds: string[] = [],
+  opts: { createFails?: boolean } = {},
+): World {
   const conversations = new Map<string, ConversationItem>();
   if (row) conversations.set(row.conversationId, row);
   const contacts = new Map<string, ContactItem>();
@@ -55,6 +61,7 @@ function world(row?: ConversationItem, contactIds: string[] = []): World {
     contacts.set(contactId, { contactId, type: 'unknown' } as ContactItem);
   }
   const stamps: { contactId: string; at: string }[] = [];
+  const creates: ContactItem[] = [];
 
   const conversationsRepo = {
     async getById(id: string) {
@@ -95,9 +102,22 @@ function world(row?: ConversationItem, contactIds: string[] = []): World {
       contact.group_participation_at = at;
       return 'stamped' as const;
     },
+    async createIfAbsent(item: ContactItem) {
+      creates.push(item);
+      if (opts.createFails) throw new Error('ProvisionedThroughputExceededException');
+      if (contacts.has(item.contactId)) return false;
+      contacts.set(item.contactId, { ...item });
+      return true;
+    },
   } as unknown as ContactsRepo;
 
-  return { conversations, contacts, stamps, opts: { conversationsRepo, contactsRepo, at: AT } };
+  return {
+    conversations,
+    contacts,
+    stamps,
+    creates,
+    opts: { conversationsRepo, contactsRepo, at: AT },
+  };
 }
 
 const bothMembers = [contactIdForPhone(MEMBER_A), contactIdForPhone(MEMBER_B)];
@@ -164,13 +184,83 @@ describe('convertConnectingRelayGroupToGroupText', () => {
     }
   });
 
-  it('reports members with no contact record instead of creating them', async () => {
+  it('RE-MINTS a group-scoped stub for a roster slot whose contact record is absent', async () => {
+    // A workbook `drop` on a group member leaves the roster slot in place with
+    // NO contact row behind it, and groupSend's consent fence then refuses EVERY
+    // outbound on that thread forever (nothing re-resolves an existing thread's
+    // roster). The migration is the last place that can heal it.
     const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
     const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
 
     expect(result.membersStamped).toBe(1);
+    expect(result.membersReminted).toBe(1);
+    expect(result.membersMissing).toEqual([]);
+
+    const reminted = w.contacts.get(contactIdForPhone(MEMBER_B))!;
+    expect(reminted).toBeDefined();
+    expect(reminted.phone).toBe(MEMBER_B);
+    expect(reminted.origin).toBe('group_detection');
+    expect(reminted.group_participation_at).toBe(AT);
+    expect(reminted.type).toBe('unknown');
+    expect(reminted.status).toBe('needs_review');
+  });
+
+  it('grants the re-minted stub NO SMS consent of any kind', async () => {
+    // The drop still holds for 1:1 purposes. `consent_method` is the single
+    // predicate hasSmsConsent reads, and `capture_source` maps back to one - a
+    // stub carrying either would make a silently-added group member proactively
+    // sendable, which is exactly what the drop denied.
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
+    await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    expect(w.creates).toHaveLength(1);
+    const stub = w.creates[0]!;
+    expect(stub.consent_method).toBeUndefined();
+    expect(stub.consent_at).toBeUndefined();
+    expect(stub.capture_source).toBeUndefined();
+    expect(stub.sms_opt_out).toBeUndefined();
+    const stored = w.contacts.get(contactIdForPhone(MEMBER_B))!;
+    expect(stored.consent_method).toBeUndefined();
+    expect(stored.consent_at).toBeUndefined();
+  });
+
+  it('reports the member as MISSING when the re-mint itself fails', async () => {
+    // A residual `missing` is the one signal the cutover gate must not swallow:
+    // the thread can receive and can never reply.
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)], { createFails: true });
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    expect(result.membersReminted).toBe(0);
     expect(result.membersMissing).toEqual([contactIdForPhone(MEMBER_B)]);
     expect(w.contacts.has(contactIdForPhone(MEMBER_B))).toBe(false);
+  });
+
+  it('stamps rather than re-mints when the row reappears mid-convergence', async () => {
+    // createIfAbsent losing its condition means live detection minted the stub
+    // between our stamp and our create; the only thing left is the basis stamp.
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
+    const missingId = contactIdForPhone(MEMBER_B);
+    const stampFirst = w.opts.contactsRepo.stampGroupParticipation.bind(w.opts.contactsRepo);
+    let firstCall = true;
+    w.opts.contactsRepo.stampGroupParticipation = async (contactId: string, at: string) => {
+      if (contactId === missingId && firstCall) {
+        firstCall = false;
+        // Detection wins the race right after our read comes back empty.
+        w.contacts.set(missingId, {
+          contactId: missingId,
+          type: 'unknown',
+          phone: MEMBER_B,
+        } as ContactItem);
+        return 'missing' as const;
+      }
+      return stampFirst(contactId, at);
+    };
+
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+    expect(result.membersReminted).toBe(0);
+    expect(result.membersStamped).toBe(2);
+    expect(result.membersMissing).toEqual([]);
+    expect(w.contacts.get(missingId)!.group_participation_at).toBe(AT);
   });
 
   it('short-circuits the TRANSITION on a re-run but still converges', async () => {

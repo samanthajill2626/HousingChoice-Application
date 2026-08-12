@@ -51,7 +51,8 @@ interface World {
   base: Omit<ConvertGroupsOptions, 'expected'>;
 }
 
-function world(rows: ConversationItem[]): World {
+function world(rows: ConversationItem[], opts: { remintFails?: boolean } = {}): World {
+  const remintFails = opts.remintFails === true;
   const conversations = new Map(rows.map((r) => [r.conversationId, r]));
   const contacts = new Map<string, ContactItem>();
   for (const row of rows) {
@@ -97,6 +98,14 @@ function world(rows: ConversationItem[]): World {
       if (typeof contact.group_participation_at === 'string') return 'already' as const;
       contact.group_participation_at = at;
       return 'stamped' as const;
+    },
+    // The re-mint seam (adversarial finding 2): conversion mints a group-scoped
+    // stub for a roster slot whose contact record is absent.
+    async createIfAbsent(item: ContactItem) {
+      if (remintFails) throw new Error('ProvisionedThroughputExceededException');
+      if (contacts.has(item.contactId)) return false;
+      contacts.set(item.contactId, { ...item });
+      return true;
     },
   } as unknown as ContactsRepo;
 
@@ -376,9 +385,37 @@ describe('runConvertGroups', () => {
     expect(report.complete).toBe(false);
   });
 
-  it('reports members with no contact record and stays incomplete-free about it', async () => {
+  it('RE-MINTS a member with no contact record, and says so in the report', async () => {
+    // A workbook `drop` on a group member used to leave the roster slot pointing
+    // at a contact row that does not exist - which makes groupSend refuse EVERY
+    // outbound on that thread forever. Conversion is the last place that can
+    // heal it, so it mints the group-scoped stub rather than narrating the hole.
     const rows = [importedRow(MEMBERS[0])];
     const w = world(rows);
+    const droppedId = contactIdForPhone(MEMBERS[0]![1]!);
+    w.contacts.delete(droppedId);
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor(rows),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.totals.membersReminted).toBe(1);
+    expect(report.totals.membersMissing).toBe(0);
+    expect(w.contacts.get(droppedId)!.origin).toBe('group_detection');
+    expect(w.contacts.get(droppedId)!.group_participation_at).toBe(AT);
+    expect(w.contacts.get(droppedId)!.consent_method).toBeUndefined();
+    // The operator is told: this is data creation they did not ask for by hand.
+    expect(report.warnings.some((warning) => warning.includes('RE-MINTED'))).toBe(true);
+    expect(report.complete).toBe(true);
+  });
+
+  it('is INCOMPLETE when a member has no contact record and cannot be re-minted', async () => {
+    // `membersMissing` was summed and warned about but never gated, so a thread
+    // that can receive and can never reply reported COMPLETE. It is a term now.
+    const rows = [importedRow(MEMBERS[0])];
+    const w = world(rows, { remintFails: true });
     w.contacts.delete(contactIdForPhone(MEMBERS[0]![1]!));
 
     const report = await runConvertGroups({
@@ -387,11 +424,12 @@ describe('runConvertGroups', () => {
       rail: railStub(() => ({ status: 'created' })),
     });
 
+    expect(report.totals.membersReminted).toBe(0);
     expect(report.totals.membersMissing).toBe(1);
-    expect(report.warnings.some((warning) => warning.includes('no contact record'))).toBe(true);
-    // A dropped person with no contact record is a data fact, not a failed
-    // migration step - the run is still complete.
-    expect(report.complete).toBe(true);
+    expect(report.warnings.some((warning) => warning.includes('could NOT be re-minted'))).toBe(
+      true,
+    );
+    expect(report.complete).toBe(false);
   });
 
   it('processes a duplicated expected id exactly once', async () => {

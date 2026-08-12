@@ -125,6 +125,28 @@ export class GroupIdentityParityError extends Error {
   }
 }
 
+/**
+ * The parity gate as a single callable, so BOTH cutover commands run the SAME
+ * check rather than one of them inheriting it by accident (adversarial finding
+ * 6).
+ *
+ * It used to run only inside `runConvertGroups`, i.e. AFTER `import:apply` had
+ * already written 132 group conversations and their whole history at ids derived
+ * from the export's `ownNumbers`. If those numbers disagreed with the deployed
+ * `GROUP_IDENTITY_EXCLUDED_NUMBERS`, apply wrote an entire orphaned population
+ * and convert then refused to convert any of it - and nothing retracts group
+ * threads (docs/issues/import-group-thread-retraction.md). `scripts/import-apply.ts`
+ * now calls this before its first write, which closes that window at the cost of
+ * one function call.
+ */
+export function assertGroupIdentityParity(
+  ownNumbers: Iterable<string>,
+  exclusions: GroupExclusionSet,
+): void {
+  const parity = checkGroupIdentityParity(ownNumbers, exclusions);
+  if (!parity.ok) throw new GroupIdentityParityError(parity);
+}
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -164,6 +186,8 @@ export interface GroupConversionRow {
   namesBackfilled: number;
   membersStamped: number;
   membersAlreadyStamped: number;
+  /** Roster slots whose vanished contact record this run RE-MINTED as a stub. */
+  membersReminted: number;
   /** contactIds on the roster with no contact record behind them. */
   membersMissing: string[];
   rail: GroupRailResult['status'];
@@ -194,6 +218,7 @@ export interface GroupConversionReport {
     contactIdsBackfilled: number;
     namesBackfilled: number;
     membersStamped: number;
+    membersReminted: number;
     membersMissing: number;
     railsCreated: number;
     railsExisting: number;
@@ -217,9 +242,9 @@ export async function runConvertGroups(
   const at = options.at ?? new Date().toISOString();
 
   // BEFORE ANYTHING. A mismatch here means every id we are about to converge may
-  // be the wrong id.
-  const parity = checkGroupIdentityParity(options.ownNumbers, options.exclusions);
-  if (!parity.ok) throw new GroupIdentityParityError(parity);
+  // be the wrong id. Same call `scripts/import-apply.ts` makes before ITS first
+  // write - one gate, two commands.
+  assertGroupIdentityParity(options.ownNumbers, options.exclusions);
 
   const warnings: string[] = [];
   const rows: GroupConversionRow[] = [];
@@ -257,6 +282,7 @@ export async function runConvertGroups(
       namesBackfilled: converted.namesBackfilled,
       membersStamped: converted.membersStamped,
       membersAlreadyStamped: converted.membersAlreadyStamped,
+      membersReminted: converted.membersReminted,
       membersMissing: converted.membersMissing,
       // A refused row has no thread to rail; anything else gets the step on
       // EVERY run, converted-this-time or not.
@@ -286,10 +312,25 @@ export async function runConvertGroups(
       }
     }
 
+    if (converted.membersReminted > 0) {
+      // Said out loud because it is a DATA CREATION the operator did not ask for
+      // by hand: a workbook `drop` on a group member removes the contact record
+      // but never the roster slot, and a slot with no row behind it refuses
+      // EVERY outbound send on that thread forever (groupSend's consent fence is
+      // a whole-send refusal). The drop still stands for 1:1 and history
+      // purposes; what comes back is a group-scoped stub with NO consent method.
+      warnings.push(
+        `${group.rowKey ?? group.conversationId}: ${converted.membersReminted} roster member(s) ` +
+          `had NO contact record and were RE-MINTED as group-scoped stubs (origin ` +
+          `group_detection, group_participation_at only - no SMS consent). A workbook \`drop\` on ` +
+          `a group member is the known producer; the drop still holds for their 1:1 records.`,
+      );
+    }
     if (converted.membersMissing.length > 0) {
       warnings.push(
         `${group.rowKey ?? group.conversationId}: ${converted.membersMissing.length} roster ` +
-          `member(s) have no contact record - their chips will render from the phone alone.`,
+          `member(s) have no contact record and could NOT be re-minted - the thread cannot send ` +
+          `until they exist (every group send refuses on a member with no consent basis).`,
       );
     }
     rows.push(row);
@@ -312,6 +353,7 @@ export async function runConvertGroups(
     contactIdsBackfilled: rows.reduce((n, r) => n + r.contactIdsBackfilled, 0),
     namesBackfilled: rows.reduce((n, r) => n + r.namesBackfilled, 0),
     membersStamped: rows.reduce((n, r) => n + r.membersStamped, 0),
+    membersReminted: rows.reduce((n, r) => n + r.membersReminted, 0),
     membersMissing: rows.reduce((n, r) => n + r.membersMissing.length, 0),
     railsCreated: rows.filter((r) => r.rail === 'created').length,
     railsExisting: rows.filter((r) => r.rail === 'existing').length,
@@ -323,9 +365,19 @@ export async function runConvertGroups(
   // derived no ids at all, which on cutover day means the export was read
   // wrong. Reporting "COMPLETE: every expected group thread is a native group
   // text with a rail" for zero threads is the worst possible answer.
+  //
+  // `membersMissing` IS A TERM (adversarial finding 2). It was summed and warned
+  // about but never gated, so a roster slot pointing at a contact row that does
+  // not exist reported COMPLETE - while `groupSend`'s consent fence refused
+  // EVERY outbound on that thread forever and nothing self-heals it
+  // (`resolveGroupMembers` has one caller, the thread-CREATE branch). Conversion
+  // now re-mints such a slot, so a residual `membersMissing` means the re-mint
+  // ITSELF failed: a thread that can receive and can never reply is not a
+  // migrated thread, and the cutover gate must say so.
   const complete =
     rows.length > 0 &&
     totals.refused === 0 &&
+    totals.membersMissing === 0 &&
     totals.railsFailed === 0 &&
     totals.railsUnavailable === 0;
   if (rows.length === 0) {
@@ -371,6 +423,7 @@ async function convertRow(
       namesBackfilled: 0,
       membersStamped: 0,
       membersAlreadyStamped: 0,
+      membersReminted: 0,
       membersMissing: [],
       members: [],
     };

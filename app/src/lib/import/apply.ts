@@ -37,9 +37,11 @@ import {
   type DynamoDBDocumentClient,
 } from '@aws-sdk/lib-dynamodb';
 import { tableName } from '../config.js';
+import { normalizeToE164 } from '../phone.js';
 import type { TransitionSource } from '../statusModel.js';
 import type { ContactType } from '../../repos/contactsRepo.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
+import { groupMemberKey } from '../../services/groupMembers.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
 import { normalizeAddress } from './addresses.js';
 import type { CsvRow } from './csv.js';
@@ -80,6 +82,49 @@ const GROUP_TEXT_TYPE = 'group_text';
  * never import-owned and must survive a `drop`.
  */
 const GROUP_DETECTION_ORIGIN = 'group_detection';
+
+/**
+ * `relay_sender_key` for a STAFF-authored message on a group thread - the same
+ * `team` sentinel every live outbound group/relay send writes (`TEAM_SENDER_KEY`
+ * in jobs/relayFanOut.ts, read by the dashboard's `senderLabel` as "Team").
+ *
+ * A LOCAL LITERAL ON PURPOSE, mirroring GROUP_TEXT_TYPE above: importing
+ * jobs/relayFanOut.js would pull the messaging/media adapters and register job
+ * handlers as a side effect of running the import CLI. It cannot drift silently
+ * - importGroupAttribution.test.ts imports the real constant and pins it to this
+ * value.
+ */
+const TEAM_SENDER_KEY = 'team';
+
+/**
+ * Attribution for one imported message (adversarial finding 1).
+ *
+ * The importer used to record an inbound author ONLY as `imported_sender_phone`,
+ * a field with exactly one write and ZERO readers. Every multi-party surface in
+ * this app - the group thread view, the relay view, both seed profiles - resolves
+ * "who said this" from `relay_sender_key`, so all 132 migrated group transcripts
+ * rendered with no sender at all on the one view whose entire purpose is telling
+ * three people apart. Writing the key here (rather than teaching the dashboard a
+ * second convention) keeps ONE attribution field in the data model and makes
+ * imported history byte-identical in shape to live traffic:
+ *   - inbound  -> `phone#<E164>`, exactly `groupMemberKey(normalizeToE164(From)
+ *     ?? From)` as webhooks/twilio.ts writes it (spec 15.6: PHONE-scoped always,
+ *     never relayMemberKey, or two numbers of one contact collapse into one slot)
+ *   - outbound -> the `team` sentinel, as api.ts/groupSend write for a staff post
+ *
+ * GROUP THREADS ONLY. A 1:1 bubble has no multi-party attribution and must stay
+ * byte-for-byte what it was; `relay_sender_key` on a 1:1 row would be a new,
+ * unread field at best and a stray "Team" chip at worst.
+ */
+function importedGroupSenderKey(
+  isGroup: boolean,
+  direction: 'incoming' | 'outgoing',
+  from: string,
+): string | undefined {
+  if (!isGroup) return undefined;
+  if (direction !== 'incoming') return TEAM_SENDER_KEY;
+  return groupMemberKey(normalizeToE164(from) ?? from);
+}
 
 export interface ApplyOptions {
   doc: DynamoDBDocumentClient;
@@ -211,7 +256,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
       // partition walk, and a dry run never reads it at all (it never deletes).
       if (!dryRun) {
         groupRosterIds ??= await groupTextRosterContactIds(doc, table('conversations'));
-        await retractImported(doc, person, warnings, env, groupRosterIds);
+        await retractImported(doc, person, warnings, env, groupRosterIds, importedAt);
       }
       continue;
     }
@@ -334,6 +379,7 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
 
     for (const m of thread.messages) {
       const authorPhone = m.direction === 'incoming' ? normalizeFrom(m.from) : undefined;
+      const senderKey = importedGroupSenderKey(thread.isGroup, m.direction, m.from);
       await messageBatch.put({
         conversationId: thread.conversationId,
         tsMsgId: tsMsgId(m.createdAt, m.id),
@@ -350,6 +396,11 @@ export async function runApply(options: ApplyOptions): Promise<ApplyReport> {
         created_at: m.createdAt,
         imported_from: IMPORT_SOURCE,
         imported_at: importedAt,
+        // The READ field (see importedGroupSenderKey). `imported_sender_phone`
+        // stays beside it as import PROVENANCE - it is the raw `from` the export
+        // carried, unnormalized, which is worth keeping for a later forensic
+        // question that the derived key can no longer answer.
+        ...(senderKey !== undefined && { relay_sender_key: senderKey }),
         ...(authorPhone && { imported_sender_phone: authorPhone }),
       });
       report.messages.written += 1;
@@ -515,10 +566,23 @@ export function splitReviewedName(raw: string): { firstName: string; lastName: s
  * order of how early they can answer:
  *   1. the detection origin marker (the contact was never import-owned),
  *   2. the roster set walked once per run (covers every member, imported or not),
- *   3. an ATOMIC ConditionExpression on the delete itself
+ *   3. an ATOMIC ConditionExpression evaluated at DynamoDB
  *      (`attribute_not_exists(group_participation_at)`), which is what closes
  *      the read-then-delete race against live detection.
  * Every refusal is reported, never thrown.
+ *
+ * DESTRUCTION ORDER: MESSAGES -> THREAD -> CONTACT. DO NOT RE-INVERT IT.
+ * (adversarial finding 7 = conformance F7.) Deleting the contact first makes the
+ * REFUSAL path tidy but the FAILURE path unrecoverable: a throttle, 5xx or crash
+ * on the message Query below - after the contact row is already gone - leaves the
+ * 1:1 conversation and every message in it orphaned, and the next run's contact
+ * GetCommand finds nothing, returns early, and never sees that residue again.
+ * The contact row is the ONLY thing that makes an unfinished retract findable, so
+ * it is destroyed LAST and every intermediate failure stays idempotently
+ * retryable. The refusal is still atomic and still evaluated FIRST, because
+ * layer 3 is a CONDITIONAL MARKER WRITE (below) rather than the delete itself -
+ * it destroys nothing when it loses, and the delete keeps the same condition as
+ * defence in depth.
  */
 async function retractImported(
   doc: DynamoDBDocumentClient,
@@ -526,6 +590,7 @@ async function retractImported(
   warnings: string[],
   env: NodeJS.ProcessEnv,
   groupRosterContactIds: ReadonlySet<string>,
+  importedAt: string,
 ): Promise<void> {
   const contactsTable = tableName('contacts', env);
   const conversationsTable = tableName('conversations', env);
@@ -564,17 +629,22 @@ async function retractImported(
     return;
   }
 
-  // ATOMIC GUARD. The roster set above was read before this loop started, so a
-  // group thread created since then would slip past it; the condition is
-  // evaluated by DynamoDB at delete time and cannot be raced. Deliberately
-  // FIRST, before any message/thread deletion, so a refusal leaves nothing
-  // half-retracted.
+  // ATOMIC GUARD, FIRST AND NON-DESTRUCTIVE. The roster set above was read before
+  // this loop started, so a group thread created since then would slip past it;
+  // this condition is evaluated by DynamoDB and cannot be raced. It is a MARKER
+  // WRITE rather than the contact delete so the refusal still happens before
+  // anything is destroyed WITHOUT making the contact the first casualty (see the
+  // ordering rationale in the doc comment). The marker is also useful residue:
+  // a contact carrying `import_retract_started_at` and still having a thread is
+  // exactly a retract that died halfway.
   try {
     await doc.send(
-      new DeleteCommand({
+      new UpdateCommand({
         TableName: contactsTable,
         Key: { contactId: person.contactId },
+        UpdateExpression: 'SET import_retract_started_at = :retractAt',
         ConditionExpression: 'attribute_not_exists(group_participation_at)',
+        ExpressionAttributeValues: { ':retractAt': importedAt },
       }),
     );
   } catch (err) {
@@ -600,7 +670,7 @@ async function retractImported(
   if (foreign.length > 0) {
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but their thread has ${foreign.length} ` +
-        `message(s) this import did not create — the contact was removed, the thread was KEPT.`,
+        `message(s) this import did not create - the thread was KEPT, the contact was removed.`,
     );
   } else {
     for (const m of items) {
@@ -619,6 +689,29 @@ async function retractImported(
         new DeleteCommand({ TableName: conversationsTable, Key: { conversationId } }),
       );
     }
+  }
+
+  // LAST. Everything above is re-derivable from the export on a re-run; the
+  // contact row is what tells the NEXT run there is still a retract to finish,
+  // so it goes only once the rest is gone. It keeps the same atomic condition:
+  // a stamp that lands inside this narrow window still refuses, and the residue
+  // it leaves (a contact with no thread) is visible and re-runnable, unlike the
+  // orphan the old ordering produced.
+  try {
+    await doc.send(
+      new DeleteCommand({
+        TableName: contactsTable,
+        Key: { contactId: person.contactId },
+        ConditionExpression: 'attribute_not_exists(group_participation_at)',
+      }),
+    );
+  } catch (err) {
+    if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    warnings.push(
+      `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
+        `while their retract was running - the contact was KEPT (GROUP MEMBER). Their imported ` +
+        `1:1 thread was already removed; nothing that belongs to the group was touched.`,
+    );
   }
 }
 

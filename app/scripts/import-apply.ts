@@ -13,10 +13,16 @@
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
+import { loadConfig } from '../src/lib/config.js';
 import { getDocumentClient } from '../src/lib/dynamo.js';
 import { runApply } from '../src/lib/import/apply.js';
+import {
+  assertGroupIdentityParity,
+  GroupIdentityParityError,
+} from '../src/lib/import/convertGroups.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
+import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 
 function arg(flag: string): string | undefined {
   const i = process.argv.indexOf(flag);
@@ -115,6 +121,51 @@ console.log(`\ntarget endpoint : ${endpoint}`);
 console.log(`table prefix    : ${prefix}`);
 console.log(`mode            : ${dryRun ? 'DRY RUN (no writes)' : 'WRITE'}`);
 
+const doc = getDocumentClient();
+
+// GROUP-IDENTITY PARITY, BEFORE THE FIRST WRITE (adversarial finding 6).
+//
+// A group thread's conversationId is derived from its roster, and the roster is
+// whatever is left after our own org numbers are subtracted. If the export's
+// `ownNumbers` and the deployed GROUP_IDENTITY_EXCLUDED_NUMBERS disagree, every
+// group id this run is about to write is a DIFFERENT id from the one detection
+// will derive for the same carrier group. This check already existed - but only
+// downstream in import:convert-groups, i.e. after apply had written 132 group
+// conversations and all of their history, and the conversion then refused to
+// touch any of it. There is no group-thread retraction path
+// (docs/issues/import-group-thread-retraction.md), so those rows would be
+// permanent orphans in the staff inbox. It is the SAME exported function, run
+// here first. Deliberately before the write confirmation, so a --dry-run
+// rehearsal surfaces the mismatch too.
+let poolNumbers: string[] = [];
+try {
+  poolNumbers = (await createPoolNumbersRepo({ doc }).listActive()).map((p) => p.poolNumber);
+} catch (err) {
+  // Pool numbers are subtracted from BOTH sides, so failing to read them can only
+  // produce a FALSE mismatch - which refuses the run rather than writing wrongly.
+  console.warn(
+    `  ! could not read the pool numbers (${err instanceof Error ? err.message : String(err)}). ` +
+      'Comparing without them; a pool number in either list would show up as a mismatch.',
+  );
+}
+try {
+  const config = loadConfig();
+  assertGroupIdentityParity(plan.quo.ownNumbers, {
+    businessPhoneNumber: config.businessPhoneNumber,
+    poolNumbers,
+    configuredNumbers: config.groupIdentityExcludedNumbers,
+  });
+} catch (err) {
+  if (!(err instanceof GroupIdentityParityError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error(
+    'NOTHING WAS WRITTEN. Fix GROUP_IDENTITY_EXCLUDED_NUMBERS (or the export) so the two lists\n' +
+      'agree, then re-run - applying now would write every group thread under an id the\n' +
+      'conversion and live detection will not recognise, and group threads cannot be retracted.',
+  );
+  process.exit(1);
+}
+
 if (!dryRun && !yes) {
   console.log(
     '\nThis will write to the tables above. Re-run with --dry-run to preview, or --yes to proceed.',
@@ -123,7 +174,6 @@ if (!dryRun && !yes) {
 }
 
 const importedAt = new Date().toISOString();
-const doc = getDocumentClient();
 
 let lastLabel = '';
 const report = await runApply({

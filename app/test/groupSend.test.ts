@@ -37,6 +37,7 @@ import {
   GroupTooManyMembersError,
   NotAGroupTextError,
   MAX_SENDABLE_GROUP_MEMBERS,
+  type GroupSendServiceDeps,
 } from '../src/services/groupSend.js';
 import type { GroupRailEnsurer } from '../src/services/groupRail.js';
 
@@ -89,6 +90,8 @@ function makeFakes(
     /** phone -> the contact it resolves to, for numbers that are NOT that
      *  contact's primary (an attached second handset). */
     attachedNumbers?: Record<string, ContactItem>;
+    /** Extra service deps passed through verbatim (the A2P meter seam). */
+    deps?: Partial<GroupSendServiceDeps>;
   } = {},
 ): Fakes {
   const members = overrides.members ?? [ANN, MARCUS];
@@ -165,6 +168,7 @@ function makeFakes(
   } as AppConfig;
 
   const send = createGroupSendService({
+    ...overrides.deps,
     config,
     logger: createLogger({ level: 'silent' }),
     groupConversations: port,
@@ -258,6 +262,12 @@ describe('groupSend - the happy path', () => {
     expect(appended?.conversationId).toBe('group-1');
     expect(appended?.direction).toBe('outbound');
     expect(appended?.providerSid).toBe('IMposted1');
+    // WHO SAID THIS (fix wave 5, adversarial 12). Attribution on a multi-party
+    // timeline resolves from `relay_sender_key` by ONE rule; every other
+    // multi-party writer sets it and this one did not, so the optimistic "Team"
+    // chip the composer rendered VANISHED the moment the SSE-debounced refetch
+    // replaced the bubble with the server row.
+    expect(appended?.relaySenderKey).toBe('team');
     // The snapshot: the CH we posted into plus the MBxx map AS IT STOOD, so a
     // later rail recreation cannot orphan this message's receipts.
     expect(appended?.groupRailSnapshot).toEqual({
@@ -615,7 +625,20 @@ describe('groupSend - adapter failures become typed refusals', () => {
         },
       },
     });
-    await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toThrow('twilio exploded');
+    // NOTHING RAW LEAVES THE POST CATCH (fix wave 5, adversarial 4). A Twilio
+    // SDK network failure is a bare AxiosError whose enumerable `config` carries
+    // the Authorization header and the POST body - `Author=+1...&Body=<the full
+    // message text>`. Rethrowing it unchanged sent it past api.ts's
+    // SendRefusedError-only catch into the Express handler's `log.error({ err })`,
+    // which serializes every enumerable key straight into CloudWatch. It is now
+    // wrapped in a domain refusal carrying a SUMMARY and no config - which also
+    // means the route maps it instead of 500ing.
+    const err = await f
+      .send({ conversationId: 'group-1', body: 'hi' })
+      .then(() => new Error('expected a throw'), (e: unknown) => e as Error & { code?: string });
+    expect(err).toBeInstanceOf(GroupRailUnavailableError);
+    expect(err.code).toBe('group_rail_unavailable');
+    expect(err.message).not.toContain('twilio exploded'); // the raw message is not the wrapper's
     expect(f.appended).toEqual([]);
     expect(f.audits).toEqual([]);
   });
@@ -656,6 +679,36 @@ describe('messagesRepo due-row helpers', () => {
     // The '~' upper bound the sweep uses must include a row due exactly at now.
     expect(early < '2026-08-11T13:00:00.000Z~').toBe(true);
     expect(late < '2026-08-11T13:00:00.000Z~').toBe(false);
+  });
+});
+
+// THE DEFECT THIS PINS (fix wave 5, adversarial 34). relayFanOut draws ONE
+// token per member from the shared A2P bucket sized to keep combined outbound
+// under the registered tier; broadcasts and missed-call auto-text draw from the
+// same one. A group post drew NOTHING and Twilio fanned it out to up to NINE
+// handsets, so a burst of group replies ate the throughput those paths are
+// being paced against.
+describe('groupSend - the A2P meter', () => {
+  it('draws ONE token PER MEMBER before posting, not one per post', async () => {
+    const draws: number[] = [];
+    const f = makeFakes({
+      deps: { tokenBucket: { acquire: async (n = 1) => void draws.push(n) } },
+    });
+
+    await f.send({ conversationId: 'group-1', body: 'hi' });
+
+    expect(draws).toEqual([2]); // the fixture roster is Ann + Marcus
+  });
+
+  it('spends NOTHING on a send that is going to be refused', async () => {
+    const draws: number[] = [];
+    const f = makeFakes({
+      conversation: { participants: [] },
+      deps: { tokenBucket: { acquire: async (n = 1) => void draws.push(n) } },
+    });
+
+    await expect(f.send({ conversationId: 'group-1', body: 'hi' })).rejects.toThrow();
+    expect(draws).toEqual([]);
   });
 });
 

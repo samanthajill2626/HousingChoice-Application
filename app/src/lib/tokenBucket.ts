@@ -104,3 +104,36 @@ export class TokenBucket {
     }
   }
 }
+
+/**
+ * THE PROCESS-WIDE A2P BUCKET (fix wave 5, adversarial 34).
+ *
+ * `acquire()` is only a meter if everything that meters draws from the SAME
+ * instance. Relay fan-out, broadcasts and missed-call auto-text already share
+ * one, built at boot and handed to the job handlers. A GROUP SEND is the first
+ * metered outbound that runs in the APP process on an interactive route rather
+ * than in a job - and one group post is up to NINE carrier messages, so leaving
+ * it unmetered let a burst of group replies eat throughput that broadcasts and
+ * tour reminders are being paced against.
+ *
+ * Memoized per process, sized from the same config the boot path uses. It is
+ * therefore per-ECS-task, exactly like the existing bucket - the meter has
+ * always been per-process, and this makes the group path no worse than the
+ * paths beside it while closing the "nine messages, zero tokens" hole.
+ */
+let sharedBucket: TokenBucket | undefined;
+
+export function sharedA2pBucket(a2pRateLimitPerSec: number): TokenBucket {
+  sharedBucket ??= new TokenBucket({
+    // capacity == the EXACT per-second rate (not ceil - at a fractional rate
+    // ceil would let a burst exceed the tier), floored at 1.
+    capacity: Math.max(1, a2pRateLimitPerSec),
+    refillPerSec: a2pRateLimitPerSec,
+  });
+  return sharedBucket;
+}
+
+/** Test seam: drop the memoized instance so a suite can size its own. */
+export function resetSharedA2pBucket(): void {
+  sharedBucket = undefined;
+}

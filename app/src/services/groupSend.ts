@@ -42,15 +42,20 @@
 // to the staff member who already sees the roster on screen.
 import { mergeContext } from '../lib/context.js';
 import { loadConfig, type AppConfig } from '../lib/config.js';
+import { summarizeError } from '../lib/errors.js';
 import { appEvents, toConversationUpdatedEvent, type EventBus } from '../lib/events.js';
 import { logger as defaultLogger, type Logger } from '../lib/logger.js';
 import { hasSmsConsent } from '../lib/smsCompliance.js';
+import { sharedA2pBucket, type TokenBucket } from '../lib/tokenBucket.js';
 import {
   createGroupConversationsAdapter,
   GroupConversationsUnavailableError,
   type GroupConversationsPort,
 } from '../adapters/groupConversations.js';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../adapters/messaging.js';
+// The SAME team sentinel every other multi-party writer uses - imported, never
+// re-declared, so the dashboard's one attribution rule cannot drift from it.
+import { TEAM_SENDER_KEY } from '../jobs/relayFanOut.js';
 import { createAuditRepo, type AuditRepo } from '../repos/auditRepo.js';
 import { createContactsRepo, isDeleted, type ContactsRepo } from '../repos/contactsRepo.js';
 import {
@@ -177,6 +182,15 @@ export interface GroupSendServiceDeps {
   receipts?: GroupReceiptsService;
   /** Clock seam (the staleness deadline). */
   now?: () => Date;
+  /**
+   * The shared A2P meter (fix wave 5, adversarial 34). ONE group post becomes
+   * up to nine carrier messages, so it draws N tokens for N members from the
+   * SAME bucket relay fan-out, broadcasts and missed-call auto-text draw from -
+   * otherwise a burst of group replies silently eats throughput those paths are
+   * being paced against. Defaults to the process-wide instance; a test may pass
+   * its own (or `null` to opt out entirely).
+   */
+  tokenBucket?: Pick<TokenBucket, 'acquire'> | null;
 }
 
 export type GroupSendService = (input: GroupSendInput) => Promise<GroupSendOutcome>;
@@ -210,6 +224,17 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       config,
       ...(deps.logger !== undefined && { logger: deps.logger }),
     });
+  // `undefined` means "use the shared process bucket"; `null` means "no meter"
+  // (tests, and any caller that has already metered).
+  // A non-positive configured rate means "no A2P pacing in this environment"
+  // (the console/local stacks, and every unit suite) - there is no bucket to
+  // draw from, and TokenBucket refuses to be built with capacity 0.
+  const tokenBucket =
+    deps.tokenBucket !== undefined
+      ? deps.tokenBucket
+      : config.a2pRateLimitPerSec > 0
+        ? sharedA2pBucket(config.a2pRateLimitPerSec)
+        : null;
   const receipts =
     deps.receipts ??
     createGroupReceiptsService({ ...(deps.logger !== undefined && { logger: deps.logger }) });
@@ -297,6 +322,13 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       throw new GroupRailUnavailableError(conversationId, 'BUSINESS_PHONE_NUMBER is not configured');
     }
 
+    // (5b) THE A2P METER, before the post (fix wave 5, adversarial 34). One
+    // token per carrier message, and this post becomes one per member - the
+    // same accounting relayFanOut applies per leg. Drawn AFTER every refusal
+    // gate above, so a send that is going to be refused never spends throughput
+    // the broadcast pacer needs. `acquire` sleeps; it never rejects.
+    if (tokenBucket !== null) await tokenBucket.acquire(members.length);
+
     // (6) The post. The adapter owns the A2P kill switch (spec invariant 13.7);
     // both of its typed failures become SendRefusedErrors here, because the send
     // route maps ONLY that family - an untranslated throw would 500 and tell
@@ -313,7 +345,23 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       if (err instanceof GroupConversationsUnavailableError) {
         throw new GroupRailUnavailableError(conversationId, err.message);
       }
-      throw err;
+      // NOTHING RAW LEAVES THIS CATCH (fix wave 5, adversarial 4). A network
+      // failure inside the Twilio SDK is a bare AxiosError whose enumerable
+      // `config` carries the Authorization header and the POST body - here,
+      // `Author=+1...&Body=<the full message text>`. Rethrowing it unchanged
+      // sent it straight past api.ts's SendRefusedError-only catch into the
+      // Express handler's `log.error({ err })`, which serializes every
+      // enumerable key. Wrap it in a domain error that carries a SUMMARY and no
+      // config, so the 500 path still says what happened and says nothing else.
+      const summary = summarizeError(err);
+      log.error(
+        { conversationId, err: summary, event: 'group_send_post_failed' },
+        'group send post to the Conversations rail failed',
+      );
+      throw new GroupRailUnavailableError(
+        conversationId,
+        `posting to the rail failed: ${summary.name}${summary.code !== undefined ? ` (${summary.code})` : ''}`,
+      );
     }
 
     // (7) Persist. ONE transactional append carries three things that must not
@@ -373,6 +421,17 @@ export function createGroupSendService(deps: GroupSendServiceDeps = {}): GroupSe
       body,
       deliveryStatus: seededStatus.status,
       ...(seededStatus.errorCode !== undefined && { errorCode: seededStatus.errorCode }),
+      // WHO SAID THIS (fix wave 5, adversarial 12). Attribution on a multi-party
+      // timeline is resolved from `relay_sender_key` by ONE rule
+      // (dashboard/src/lib/memberAttribution.ts), and every other multi-party
+      // writer sets it - the 1:1/relay routes write TEAM_SENDER_KEY, inbound
+      // group detection writes the member key, announcements write the system
+      // key. This writer did not, so the optimistic "Team" chip the composer
+      // rendered VANISHED the moment the SSE-debounced refetch replaced the
+      // bubble with the server row: every inbound member bubble attributed,
+      // every team bubble not, and the operator watching their own attribution
+      // blink out.
+      relaySenderKey: TEAM_SENDER_KEY,
       deliveryRecipients,
       groupRailSnapshot: { conversationSid: conversationSid as string, participantMap },
       dueRow: buildGroupSendDueRow({

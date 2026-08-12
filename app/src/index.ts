@@ -79,15 +79,14 @@ if (config.jobsQueueUrl) {
   );
 } else {
   const { InProcessOutboundQueueAdapter } = await import('./adapters/scheduler.js');
-  const { TokenBucket } = await import('./lib/tokenBucket.js');
+  const { sharedA2pBucket } = await import('./lib/tokenBucket.js');
   const { registerAllJobHandlers } = await import('./jobs/registerHandlers.js');
   // FIX 6: capacity == the EXACT per-second rate (not ceil — at a fractional
   // rate ceil would let a burst exceed the A2P tier), floored at 1. The bucket
   // starts full → first burst up to `capacity`, then paced at `refillPerSec`/s.
-  const a2pBucket = new TokenBucket({
-    capacity: Math.max(1, config.a2pRateLimitPerSec),
-    refillPerSec: config.a2pRateLimitPerSec,
-  });
+  // The SAME memoized instance the app's group-send route draws from (fix wave
+  // 5, adversarial 34) - a meter that is not shared is not a meter.
+  const a2pBucket = sharedA2pBucket(config.a2pRateLimitPerSec);
   registerAllJobHandlers({ tokenBucket: a2pBucket });
   configureOutboundQueue(
     new InProcessOutboundQueueAdapter({

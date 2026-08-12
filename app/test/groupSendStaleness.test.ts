@@ -345,14 +345,14 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     // A full sweep batch of cross-check rows, every one of them OLDER than the
     // send's deadline, so they would sort ahead of it in a shared partition.
     const backlog = 50;
-    // SEQUENTIAL SETUP, deliberately. Each event is now four writes rather than
-    // two, and firing 200 of them at once at DynamoDB Local (single-threaded,
-    // and shared with every other integration suite on this machine) draws
-    // "timed out waiting for a lock" from the emulator - a harness limit, not a
-    // product one. Nothing about this test needs concurrency: the rows just have
-    // to exist before the sweep runs.
-    for (let i = 0; i < backlog; i += 1) {
-      await messages.recordCrossCheckEvent(
+    // SEEDED IN SMALL BATCHES, deliberately. Each event is now four writes
+    // rather than two, and DynamoDB Local is single-threaded and shared with
+    // every other integration suite on the machine: all 50 at once draws "timed
+    // out waiting for a lock" from the emulator, and strictly one at a time
+    // takes longer than this suite's timeout under load. Neither is a product
+    // signal - the rows only have to exist before the sweep runs.
+    const seedEvent = (i: number): Promise<'credit' | 'pending'> =>
+      messages.recordCrossCheckEvent(
         {
           pairKey: `groupxc#CHstarve#phone#+1555000${String(i).padStart(4, '0')}`,
           messageSid: `IMstarve${String(i).padStart(4, '0')}`,
@@ -365,6 +365,10 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
           nowIso: SENT_AT,
           expiresAt: Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
         },
+      );
+    for (let start = 0; start < backlog; start += 5) {
+      await Promise.all(
+        Array.from({ length: Math.min(5, backlog - start) }, (_unused, k) => seedEvent(start + k)),
       );
     }
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };

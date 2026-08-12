@@ -1,10 +1,6 @@
 import { test, expect, type Page, type APIRequestContext } from '@playwright/test';
-import {
-  registerParty,
-  sendGroupAsParty,
-  listConversations,
-  setDeliveryOutcome,
-} from '../../fixtures/fakeTwilio.js';
+import { registerParty, sendGroupAsParty, listConversations } from '../../fixtures/fakeTwilio.js';
+import { minutesFromNow, readLogTail, tickGuardrails } from '../../fixtures/groupText.js';
 import { conversationIdForGroup, contactIdForPhone } from '../../../app/src/lib/import/ids.js';
 
 // SPEC 3 - STOP on a group text, scoped to the person who sent it.
@@ -96,13 +92,13 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
   await expect(composer).toBeEnabled();
   await expect(page.getByRole('status').filter({ hasText: /opted out/ })).toBeVisible();
 
-  // 3) The next send PARTIALLY delivers: Ben's carrier drops it (21610), the
-  //    other two get it, and the rollup says so without painting a suppression
-  //    as a hard failure.
-  await setDeliveryOutcome(request, {
-    partyNumber: BEN,
-    profile: { kind: 'fail', failState: 'undelivered', errorCode: '21610' },
-  });
+  // 3) The next send PARTIALLY delivers. NOTHING IS ARMED HERE, and that is the
+  //    point: live QA round 2 established that Twilio SKIPS an opted-out
+  //    participant - no leg, no delivery attempt, no 21610, and NO DELIVERY
+  //    RECEIPT, EVER. The fake now models that silence (it used to fan out to
+  //    Ben and let this spec arm a 21610, which manufactured a receipt
+  //    production never sends). So Ben's slot can only be right if the SEND
+  //    labelled it from the suppression we already knew about.
   const partial = `Still on for Saturday ${stamp}`;
   await composer.fill(partial);
   // EXACT: a tenant's contact page also carries a "+ Send" aside whose
@@ -123,6 +119,24 @@ test('a group STOP suppresses the SENDER on their primary number, not the thread
       message: 'the delivery rollup never finalized LIVE around the opted-out leg (no reload)',
     })
     .toBeGreaterThan(0);
+  // The opted-out member is EXPLAINED on the bubble, not silently missing.
+  await expect(page.getByText(/1 member opted out/)).toBeVisible({ timeout: 15_000 });
+
+  // 3b) AND THE ALARM STAYS QUIET. This is the L3 regression, at the level it
+  //     actually bit: with Ben's slot left `queued` (no receipt will ever come
+  //     for him), the per-send staleness sweep raises
+  //     "group delivery receipts silent - check Conversations service webhook
+  //     config" on EVERY send to this group - and after spec 16.2 that alarm is
+  //     the ONLY detector of a genuinely dead receipts webhook, so false-firing
+  //     it teaches the operator to ignore the one alarm that matters.
+  await tickGuardrails(request, {
+    now: minutesFromNow(30),
+    duties: ['send_staleness'],
+  });
+  const stale = await readLogTail(request, { event: 'group_send_receipts_stale' });
+  expect(
+    stale.filter((l) => String(l['conversationId'] ?? '') === conversationId),
+  ).toHaveLength(0);
 
   // 4) Ben's OWN 1:1 is flagged. This is where the suppression has to live: a
   //    proactive send to him is refused, by the same gate that would refuse it

@@ -32,6 +32,20 @@
 //    adapter deliberately omits `X-Twilio-Webhook-Enabled`, and that omission is
 //    what keeps our own sends out of the guardrail cross-check's input. The fake
 //    honours the header so the contract is modelled rather than assumed.
+//
+//  * AN OPTED-OUT PARTICIPANT IS SKIPPED ENTIRELY (live QA round 2). This fake
+//    used to fan out to every member and let a spec ARM a 21610 for the
+//    opted-out one - which flattered the app, because real Twilio does no such
+//    thing. Verified against the Messages API after a member sent STOP: there is
+//    NO message record for that leg at all. The Conversations layer does not
+//    create the leg, does not attempt delivery, does not emit a 21610, and
+//    therefore never sends a delivery receipt for that participant. A fake that
+//    produces a receipt where production produces silence hides exactly the
+//    defect that silence causes (a slot stuck `queued` forever, and a FALSE
+//    "receipts silent" alarm on every later send), so it now skips them.
+//    SCOPE, deliberately: this models the CONVERSATIONS rail only. Nothing here
+//    changes 1:1 or relay fan-out behavior, which are separately reviewed
+//    surfaces with their own specs.
 import type { Clock } from './clock.js';
 import type { EventHub } from './eventHub.js';
 import type { Dispatcher, FakeTwilioEngine } from './engine.js';
@@ -84,12 +98,28 @@ export interface InjectMessageAddedInput {
   messageSid?: string;
 }
 
+/**
+ * Twilio's standard opt-out / opt-in keyword sets (the ones its Advanced
+ * Opt-Out feature intercepts before a message ever reaches an app). Matched on
+ * the WHOLE trimmed body, case-insensitively - "stop by at 5" is not a STOP,
+ * and treating it as one would silently mute a persona mid-spec.
+ */
+const OPT_OUT_KEYWORDS = new Set(['stop', 'stopall', 'unsubscribe', 'cancel', 'end', 'quit']);
+const OPT_IN_KEYWORDS = new Set(['start', 'yes', 'unstop']);
+
 export class ConversationsEngine {
   private readonly clock: Clock;
   private readonly dispatcher: Dispatcher;
   private readonly hub: EventHub;
   private readonly messaging: FakeTwilioEngine;
   private readonly store: ConversationsStore;
+  /**
+   * Addresses Twilio's own suppression list holds, built from the keywords it
+   * sees on inbound traffic. Observed through the shared hub rather than in a
+   * route handler, so a STOP counts whether it arrived as a 1:1 or as a carrier
+   * group text - the same way one messaging service's opt-out list does.
+   */
+  private readonly optedOut = new Set<string>();
   private sidSeq: number;
   /** Dispatch failures, surfaced through the messaging engine's ring buffer so
    *  there is ONE place a spec looks for a rejected webhook. */
@@ -108,8 +138,30 @@ export class ConversationsEngine {
     // second reset route to forget to call, and no stale CHxx map can leak
     // across specs.
     this.hub.subscribe((event) => {
-      if (event.type === 'reset') this.store.reset();
+      if (event.type === 'reset') {
+        this.store.reset();
+        this.optedOut.clear();
+        return;
+      }
+      // Twilio's suppression list is fed by the keywords it sees, not by
+      // anything the app tells it. Watching inbound traffic here is the same
+      // relationship, and it keeps the STOP/START pair working through the
+      // EXISTING control routes - no second arming API to keep in sync.
+      if (event.type === 'message.appended' && event.message.direction === 'inbound') {
+        this.noteKeyword(event.message.from, event.message.body);
+      }
     });
+  }
+
+  private noteKeyword(address: string, body: string | undefined): void {
+    const word = (body ?? '').trim().toLowerCase();
+    if (OPT_OUT_KEYWORDS.has(word)) this.optedOut.add(address);
+    else if (OPT_IN_KEYWORDS.has(word)) this.optedOut.delete(address);
+  }
+
+  /** Does Twilio's suppression list hold this address? (Inspection + tests.) */
+  isOptedOut(address: string): boolean {
+    return this.optedOut.has(address);
   }
 
   private mintSid(prefix: 'CH' | 'MB' | 'IM'): string {
@@ -192,16 +244,22 @@ export class ConversationsEngine {
     const members = this.store.memberParticipants(record);
     const from = business?.projectedAddress ?? input.author ?? '';
 
-    const legs = members.map((member) => ({
-      participantSid: member.sid,
-      address: member.address!,
-      channelMessageSid: this.messaging.appendConversationsLeg({
-        to: member.address!,
-        from,
-        ...(input.body !== undefined && { body: input.body }),
-      }),
-      state: 'queued' as DeliveryState,
-    }));
+    // SKIPPED, not failed. A participant on the suppression list gets no leg at
+    // all - no carrier message, no state, and (because the progression is
+    // scheduled per leg below) no `onDeliveryUpdated`, ever. That silence is the
+    // live ground truth, and it is what the app has to be correct against.
+    const legs = members
+      .filter((member) => !this.optedOut.has(member.address!))
+      .map((member) => ({
+        participantSid: member.sid,
+        address: member.address!,
+        channelMessageSid: this.messaging.appendConversationsLeg({
+          to: member.address!,
+          from,
+          ...(input.body !== undefined && { body: input.body }),
+        }),
+        state: 'queued' as DeliveryState,
+      }));
 
     const message = {
       sid,

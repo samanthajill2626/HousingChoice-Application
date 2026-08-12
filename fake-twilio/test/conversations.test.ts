@@ -246,6 +246,9 @@ describe('Conversations REST - posting a message', () => {
     expect(groups).toHaveLength(0);
   });
 
+  // ARMING models a 21610 Twilio reports for a leg it DID create (a carrier-level
+  // refusal we never saw a STOP for). It is NOT the opted-out case any more -
+  // see the skip tests below, which are what a handset STOP actually produces.
   it('honours an armed per-member 21610 through the SAME control API a 1:1 send uses', async () => {
     const { app, posted, clock } = makeApp();
     const { sid } = await createRail(app, 'conv-group-21610', [ANN, MARCUS]);
@@ -280,6 +283,99 @@ describe('Conversations REST - posting a message', () => {
     expect(receipts.filter((r) => r.params['ParticipantSid'] === annMb).at(-1)!.params['Status']).toBe(
       'delivered',
     );
+  });
+
+  // LIVE QA ROUND 2. GROUND TRUTH, from the Messages API after a member sent
+  // STOP: there is NO Twilio message record for that leg at all. Conversations
+  // SKIPS the participant. The fake used to fan out to everyone and let a spec
+  // arm a 21610 instead, which manufactured a receipt production never sends -
+  // and that receipt is exactly what hid the app defect (a slot stuck `queued`
+  // forever, raising a FALSE "receipts silent" alarm on every later send).
+  it('SKIPS an opted-out participant entirely - no leg, and no receipt EVER', async () => {
+    const { app, posted, clock } = makeApp();
+    const { sid } = await createRail(app, 'conv-group-optout', [ANN, MARCUS]);
+    await request(app).post('/control/personas/ad-hoc').send({ label: 'Marcus', role: 'tenant', number: MARCUS });
+
+    // Marcus stops. Twilio's own suppression list takes him, whatever the app does.
+    await request(app)
+      .post('/control/send-as-party')
+      .send({ from: MARCUS, body: 'STOP' });
+
+    await request(app)
+      .post(`/v1/Conversations/${sid}/Messages`)
+      .type('form')
+      .send({ Author: BUSINESS, Body: 'Still on for Saturday' });
+    clock.flush();
+
+    const participants = (await request(app).get(`/v1/Conversations/${sid}/Participants`)).body
+      .participants as { sid: string; messaging_binding: { address?: string } }[];
+    const marcusMb = participants.find((p) => p.messaging_binding.address === MARCUS)!.sid;
+    const annMb = participants.find((p) => p.messaging_binding.address === ANN)!.sid;
+
+    const receipts = posted.filter((p) => p.params['EventType'] === 'onDeliveryUpdated');
+    // NOT "an undelivered receipt" - NO receipt. Nothing will ever move his slot.
+    expect(receipts.filter((r) => r.params['ParticipantSid'] === marcusMb)).toHaveLength(0);
+    // The rest of the group is untouched: a partial send, not a failed one.
+    expect(
+      receipts.filter((r) => r.params['ParticipantSid'] === annMb).at(-1)!.params['Status'],
+    ).toBe('delivered');
+
+    // And no carrier message reached his handset either.
+    const threads = (await request(app).get('/control/threads')).body.threads as {
+      partyNumber: string;
+      messages: { body?: string }[];
+    }[];
+    const marcusThread = threads.find((t) => t.partyNumber === MARCUS);
+    expect(marcusThread?.messages.some((m) => m.body?.includes('Saturday'))).toBe(false);
+  });
+
+  it('START puts a skipped participant back in the fan-out', async () => {
+    const { app, posted, clock } = makeApp();
+    const { sid } = await createRail(app, 'conv-group-optin', [ANN, MARCUS]);
+    await request(app).post('/control/personas/ad-hoc').send({ label: 'Marcus', role: 'tenant', number: MARCUS });
+
+    await request(app).post('/control/send-as-party').send({ from: MARCUS, body: 'STOP' });
+    await request(app).post('/control/send-as-party').send({ from: MARCUS, body: 'START' });
+
+    await request(app)
+      .post(`/v1/Conversations/${sid}/Messages`)
+      .type('form')
+      .send({ Author: BUSINESS, Body: 'back in the room' });
+    clock.flush();
+
+    const marcusMb = ((await request(app).get(`/v1/Conversations/${sid}/Participants`)).body
+      .participants as { sid: string; messaging_binding: { address?: string } }[]).find(
+      (p) => p.messaging_binding.address === MARCUS,
+    )!.sid;
+    expect(
+      posted
+        .filter((p) => p.params['EventType'] === 'onDeliveryUpdated')
+        .filter((r) => r.params['ParticipantSid'] === marcusMb).at(-1)!.params['Status'],
+    ).toBe('delivered');
+  });
+
+  it('matches the WHOLE body, so "stop by at 5" never mutes a persona', async () => {
+    const { app, posted, clock } = makeApp();
+    const { sid } = await createRail(app, 'conv-group-nearmiss', [ANN, MARCUS]);
+    await request(app).post('/control/personas/ad-hoc').send({ label: 'Marcus', role: 'tenant', number: MARCUS });
+
+    await request(app).post('/control/send-as-party').send({ from: MARCUS, body: 'stop by at 5' });
+
+    await request(app)
+      .post(`/v1/Conversations/${sid}/Messages`)
+      .type('form')
+      .send({ Author: BUSINESS, Body: 'see you then' });
+    clock.flush();
+
+    const marcusMb = ((await request(app).get(`/v1/Conversations/${sid}/Participants`)).body
+      .participants as { sid: string; messaging_binding: { address?: string } }[]).find(
+      (p) => p.messaging_binding.address === MARCUS,
+    )!.sid;
+    expect(
+      posted
+        .filter((p) => p.params['EventType'] === 'onDeliveryUpdated')
+        .filter((r) => r.params['ParticipantSid'] === marcusMb),
+    ).not.toHaveLength(0);
   });
 
   it('produces NO onMessageAdded echo for our own post unless X-Twilio-Webhook-Enabled is set', async () => {

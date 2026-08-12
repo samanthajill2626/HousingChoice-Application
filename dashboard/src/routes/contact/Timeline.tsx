@@ -472,11 +472,16 @@ function MessageBubble({
   msg,
   onRetry,
   relayRoster,
+  rosterKind = 'relay',
 }: {
   msg: TimelineMessage;
   onRetry?: (msg: TimelineMessage) => void;
   /** Present in the relay-group view → enables sender attribution + delivered N/M. */
   relayRoster?: ConversationParticipant[];
+  /** Which product the roster belongs to. Only the sender chip reads it: a
+   *  nameless `group_text` member is attributed by formatted number (spec 4.2),
+   *  while relay keeps its prior no-line rendering (invariant 6). */
+  rosterKind?: RosterKind;
 }): React.JSX.Element {
   const [revealed, setRevealed] = useState(false);
   const outbound = msg.direction === 'outbound';
@@ -522,7 +527,7 @@ function MessageBubble({
   // name), resolved through the SHARED resolver so a relay bubble and a native
   // group_text bubble render identically. Undefined on a 1:1 bubble (no
   // relay_sender_key) -> no attribution line.
-  const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster);
+  const senderLabel = resolveSenderLabel(msg.relay_sender_key, relayRoster, rosterKind);
   const toneClass = delivery ? (TONE_CLASS[delivery.tone] ?? '') : '';
 
   // The transport - number - time line is hidden by default; a click/tap on the
@@ -792,10 +797,12 @@ function StreamItem({
   item,
   onRetry,
   relayRoster,
+  rosterKind,
 }: {
   item: TimelineItem;
   onRetry?: (msg: TimelineMessage) => void;
   relayRoster?: ConversationParticipant[];
+  rosterKind?: RosterKind;
 }): React.JSX.Element | null {
   switch (item.kind) {
     case 'message':
@@ -803,7 +810,12 @@ function StreamItem({
       return item.type === 'email' ? (
         <EmailCard msg={item} />
       ) : (
-        <MessageBubble msg={item} onRetry={onRetry} {...(relayRoster !== undefined && { relayRoster })} />
+        <MessageBubble
+          msg={item}
+          onRetry={onRetry}
+          {...(relayRoster !== undefined && { relayRoster })}
+          {...(rosterKind !== undefined && { rosterKind })}
+        />
       );
     case 'call':
       return <CallCard call={item} />;
@@ -1239,6 +1251,7 @@ export function Timeline(props: TimelineProps): React.JSX.Element {
                     item={item}
                     onRetry={onRetrySurfaced}
                     {...(relayRoster !== undefined && { relayRoster })}
+                    rosterKind={rosterKind}
                   />
                 ))}
               </div>

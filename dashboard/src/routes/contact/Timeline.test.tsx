@@ -971,6 +971,40 @@ describe('Timeline relay-group annotations', () => {
     renderTimeline({ items: [MESSAGE_OUT] });
     expect(screen.queryByText(/^delivered \d+\/\d+$/)).not.toBeInTheDocument();
   });
+
+  // INVARIANT 6, pinned. The group_text fix (L6) gives a NAMELESS member a
+  // formatted-number sender chip. Relay must keep rendering exactly what it
+  // rendered before: nothing. `rosterKind` defaults to 'relay', and this is the
+  // test that fails if that default is ever widened.
+  const NAMELESS_INBOUND: TimelineItem = {
+    kind: 'message',
+    id: 'r-nameless',
+    at: '2026-06-08T09:27:00',
+    conversationId: 'g1',
+    tsMsgId: 'r-nameless',
+    direction: 'inbound',
+    author: 'tenant',
+    type: 'sms',
+    delivery_status: 'delivered',
+    body: 'no name on this roster entry',
+    relay_sender_key: 'phone#+14045550999',
+  };
+  const NAMELESS_ROSTER = [{ contactId: 'c9', phone: '+14045550999' }];
+
+  it('RELAY: a nameless member still gets NO attribution line (rendering frozen)', () => {
+    renderTimeline({ items: [NAMELESS_INBOUND], relayRoster: NAMELESS_ROSTER });
+    expect(screen.getByText('no name on this roster entry')).toBeInTheDocument();
+    expect(screen.queryByText('(404) 555-0999')).not.toBeInTheDocument();
+  });
+
+  it('GROUP_TEXT: the same bubble and roster DO get the formatted-number chip', () => {
+    renderTimeline({
+      items: [NAMELESS_INBOUND],
+      relayRoster: NAMELESS_ROSTER,
+      rosterKind: 'group_text',
+    });
+    expect(screen.getByText('(404) 555-0999')).toBeInTheDocument();
+  });
 });
 
 describe('Timeline - closed-group provenance badge (relay number lifecycle)', () => {

@@ -63,8 +63,11 @@ describe('senderLabel', () => {
     expect(senderLabel('phone#+15555559999', roster)).toBeUndefined();
   });
 
-  it('is undefined for a matched member with no resolved name', () => {
+  it('is undefined for a matched RELAY member with no resolved name', () => {
+    // Invariant 6: relay's rendering is frozen. A nameless relay member still
+    // gets no attribution line, exactly as before the group_text fallback.
     expect(senderLabel('c3', [member({ contactId: 'c3', name: undefined })])).toBeUndefined();
+    expect(senderLabel('c3', [member({ contactId: 'c3', name: undefined })], 'relay')).toBeUndefined();
   });
 
   it('is undefined for an absent or empty sender key', () => {
@@ -90,5 +93,57 @@ describe('senderLabel', () => {
     expect(senderLabel('phone#+15555550777', [stub])).toBe('Stub Member');
     expect(senderLabel('c1', [stub])).toBeUndefined();
     expect(senderLabel('', [stub])).toBeUndefined();
+  });
+});
+
+// LIVE QA ROUND 2, L6. Every member a native carrier group detects is a bare
+// stub with only a phone number, so the no-name case is not an edge - it is the
+// ENTIRE population of a fresh group thread. Before this, no message in a group
+// thread was ever attributed to anyone.
+describe('senderLabel on a group_text roster (spec 4.2: names, ELSE formatted numbers)', () => {
+  const stub = (phone: string): ConversationParticipant => ({ contactId: '', phone });
+
+  it('attributes a NAMELESS member by their formatted phone number', () => {
+    expect(senderLabel('phone#+16174707727', [stub('+16174707727')], 'group_text')).toBe(
+      '(617) 470-7727',
+    );
+  });
+
+  it('attributes a nameless member carrying a contactId by number too', () => {
+    // The stub minted by detection HAS a contactId (a derived one) and still no
+    // name - which is exactly the shape live QA hit.
+    const detected: ConversationParticipant = { contactId: 'c-detected', phone: '+16783837896' };
+    expect(senderLabel('phone#+16783837896', [detected], 'group_text')).toBe('(678) 383-7896');
+    expect(senderLabel('c-detected', [detected], 'group_text')).toBe('(678) 383-7896');
+  });
+
+  it('still prefers a resolved name over the number', () => {
+    const named: ConversationParticipant = {
+      contactId: 'c5',
+      phone: '+15555550222',
+      name: 'Marcus Landlord',
+    };
+    expect(senderLabel('phone#+15555550222', [named], 'group_text')).toBe('Marcus Landlord');
+  });
+
+  it('treats a whitespace-only name as no name', () => {
+    const blank: ConversationParticipant = { contactId: 'c6', phone: '+15555550333', name: '   ' };
+    expect(senderLabel('c6', [blank], 'group_text')).toBe('(555) 555-0333');
+  });
+
+  it('returns a non-NANP number unchanged rather than mangling it', () => {
+    expect(senderLabel('phone#+442079460958', [stub('+442079460958')], 'group_text')).toBe(
+      '+442079460958',
+    );
+  });
+
+  it('is still undefined when the member has no number at all to fall back to', () => {
+    expect(senderLabel('c7', [{ contactId: 'c7', phone: '' }], 'group_text')).toBeUndefined();
+  });
+
+  it('leaves the sentinels and the unknown-key case alone', () => {
+    expect(senderLabel('team', [stub('+15555550111')], 'group_text')).toBe('Team');
+    expect(senderLabel('system', [stub('+15555550111')], 'group_text')).toBe('Automated');
+    expect(senderLabel('phone#+15555559999', [stub('+15555550111')], 'group_text')).toBeUndefined();
   });
 });

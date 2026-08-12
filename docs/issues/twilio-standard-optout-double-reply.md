@@ -36,3 +36,13 @@ ONLY STOP confirmation on group-origin keywords (the app deliberately sends
 nothing there; an app send to a just-STOPped member would 21610). If this
 issue resolves by disabling Twilio's standard replies, the group STOP
 confirmation must become an app-side send at that time.
+
+**Scope addendum (2026-08-12, planner review).** The reply-suppression
+coupling covers more than group-origin keywords: a GROUP-REASON DECLINE
+(corrupt/truncated envelope, unparseable address, exclusion-set cold start)
+files the message 1:1 on the business number and ALSO suppresses the app's
+keyword reply - so those paths share the same dependency on Twilio's
+standard auto-reply for the STOP confirmation. Conversely, the two paths
+that regained the app reply in fix wave 4 (envelope on a non-business
+number; BUSINESS_PHONE_NUMBER unset) would double-confirm if Twilio's
+standard reply proves live - the consistent-with-1:1 trade, priced here.

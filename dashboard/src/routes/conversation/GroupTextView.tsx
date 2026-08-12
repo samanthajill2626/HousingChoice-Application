@@ -188,10 +188,12 @@ export function GroupTextView({
         // snapshot that is already current re-renders nothing.
         //
         // WHERE THIS DIVERGES FROM THE SERVER, RECORDED RATHER THAN PRETENDED
-        // AWAY (fix wave 4, item 10). The route re-titles the stored snapshot
-        // only when a CONTACT's name differs from the roster's; the client
-        // cannot see those two inputs separately - it sees the resolved name the
-        // route already collapsed them into. Two consequences follow and both
+        // AWAY (fix wave 4, item 10; wording corrected post-verification). The
+        // staleness COMPARISON itself is fully reproducible client-side: the
+        // served `name` is contactName-else-rosterName, so served-vs-stored
+        // inequality holds exactly when the route's rosterNamesAreStale did.
+        // What the client genuinely cannot observe is whether the route's
+        // best-effort WRITE-BACK succeeded. Two consequences follow and both
         // are accepted:
         //   - if the route's own `backfillGroupTextRoster` write FAILS (it is
         //     best-effort and logs a WARN), this header still adopts the fresher

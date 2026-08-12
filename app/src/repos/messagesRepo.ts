@@ -426,9 +426,10 @@ const CROSSCHECK_CLAIM_PAGES = 4;
  * Unlike the shadowing defect, RE-READING HELPS HERE: the row genuinely changes
  * under us, because the mark is one round trip behind the bump. So an empty read
  * is re-tried a bounded number of times a short beat apart. It costs nothing on
- * the ordinary path (a non-empty read never waits) and at most
- * `READS * MS` on a pair that really has no claimable row - a rare case which
- * ends in a WARN either way.
+ * the ordinary path (a non-empty read never waits). The wait sits INSIDE the
+ * claim-attempt loop, so the true worst case is `ATTEMPTS * READS * MS`
+ * (~120ms) on a pair that reads non-empty but loses every conditional claim -
+ * a rare case which ends in a WARN either way.
  */
 const CROSSCHECK_MARK_WAIT_MS = 20;
 const CROSSCHECK_MARK_WAIT_READS = 2;

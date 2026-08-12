@@ -123,6 +123,16 @@ function importedGroupSenderKey(
 ): string | undefined {
   if (!isGroup) return undefined;
   if (direction !== 'incoming') return TEAM_SENDER_KEY;
+  // ACCEPTED PARITY BEHAVIOUR, recorded so it is not re-found (adversarial
+  // finding 36). An un-normalizable `from` ("Anonymous", a short code) falls
+  // back to the raw string, so this stores a key like `phone#Anonymous` for a
+  // message whose sender `counterpartiesOf` already dropped from the roster
+  // (quoSource.ts) while `buildThreadIndex` still files the message
+  // (threads.ts). `senderLabel` finds no roster match and returns undefined, so
+  // the bubble renders EXACTLY as it did before this field existed - and LIVE
+  // does the identical thing, because webhooks/twilio.ts writes the same
+  // `groupMemberKey(normalizeToE164(From) ?? From)`. Byte parity with live is
+  // the contract here; inventing a different fallback would break it.
   return groupMemberKey(normalizeToE164(from) ?? from);
 }
 
@@ -605,9 +615,21 @@ async function retractImported(
   // reason: a detection stub also fails that rule, but "we did not create it"
   // hides the fact that this person is in a live group conversation.
   if (existing.Item.origin === GROUP_DETECTION_ORIGIN) {
+    // ATTRIBUTION, CORRECTED (adversarial finding 37). This used to say "created
+    // by group text detection, NOT by the import" - which is false for the
+    // commonest producer of this exact row: `import:convert-groups` RE-MINTS a
+    // dropped group member as a group-scoped stub carrying this same origin, so
+    // the import's own cutover step wrote it. The refusal is right either way
+    // (the row is now a live group member's contact); what it may not do is send
+    // the operator looking for a detection event that never happened. Say the
+    // consequence instead, because it is the part that is surprising: from here
+    // on, this drop can never be applied to this person again.
     warnings.push(
-      `${person.rowKey} (${person.phone}) is marked drop but their contact record was created by ` +
-        `group text detection, not by the import - left untouched (GROUP MEMBER).`,
+      `${person.rowKey} (${person.phone}) is marked drop but their contact record is a ` +
+        `group-scoped stub (origin group_detection - minted by group text detection or by this ` +
+        `import's own convert-groups step when the drop removed a group member) - left untouched ` +
+        `(GROUP MEMBER). This drop is PERMANENTLY INOPERATIVE for them: every future run stops ` +
+        `here. Contact soft-delete in the app is the remaining lever.`,
     );
     return;
   }
@@ -629,31 +651,68 @@ async function retractImported(
     return;
   }
 
+  // THE MARKER'S READER (conformance F6 / adversarial finding 35). The field
+  // used to be a write with zero readers - the exact defect class this same
+  // change indicted `imported_sender_phone` for - while its own comment
+  // promised that "a contact carrying `import_retract_started_at` and still
+  // having a thread is exactly a retract that died halfway". This is that
+  // check: the run that finds one says so and RESUMES it, rather than leaving
+  // the operator to discover a half-destroyed person by accident. (Resuming is
+  // what the code below already does; what was missing was saying it.)
+  const startedEarlier =
+    typeof existing.Item.import_retract_started_at === 'string'
+      ? existing.Item.import_retract_started_at
+      : undefined;
+  if (startedEarlier !== undefined) {
+    warnings.push(
+      `${person.rowKey} (${person.phone}) carries an import retract that did NOT finish ` +
+        `(started ${startedEarlier}) - RESUMING it now. Their imported thread and messages are ` +
+        `being removed again; anything this import did not create is still kept.`,
+    );
+  }
+
   // ATOMIC GUARD, FIRST AND NON-DESTRUCTIVE. The roster set above was read before
   // this loop started, so a group thread created since then would slip past it;
   // this condition is evaluated by DynamoDB and cannot be raced. It is a MARKER
   // WRITE rather than the contact delete so the refusal still happens before
   // anything is destroyed WITHOUT making the contact the first casualty (see the
-  // ordering rationale in the doc comment). The marker is also useful residue:
-  // a contact carrying `import_retract_started_at` and still having a thread is
-  // exactly a retract that died halfway.
+  // ordering rationale in the doc comment).
+  //
+  // `attribute_exists(contactId)` IS LOAD-BEARING (adversarial finding 14).
+  // DynamoDB's UpdateItem CREATES an absent item, and `attribute_not_exists`
+  // alone is satisfied by one - so with two overlapping runs (the RUNBOOK says
+  // re-running is safe and expected) A could hard-delete this contact between
+  // our GetCommand above and this write, and B would MINT a phantom carrying
+  // nothing but `{contactId, import_retract_started_at}`. With no phone, type
+  // or status it sits on neither GSI, and every future run's `imported_from`
+  // check refuses to touch it: permanent residue that no run can ever see.
   try {
     await doc.send(
       new UpdateCommand({
         TableName: contactsTable,
         Key: { contactId: person.contactId },
         UpdateExpression: 'SET import_retract_started_at = :retractAt',
-        ConditionExpression: 'attribute_not_exists(group_participation_at)',
+        ConditionExpression:
+          'attribute_exists(contactId) AND attribute_not_exists(group_participation_at)',
         ExpressionAttributeValues: { ':retractAt': importedAt },
       }),
     );
   } catch (err) {
     if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
-    warnings.push(
-      `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
-        `while this import was running - the contact was KEPT (GROUP MEMBER) and their thread ` +
-        `was left untouched.`,
+    // TWO CAUSES NOW, and they are different events: the row is GONE (another
+    // run finished this retract first - nothing to report, and nothing to warn
+    // about) or it is still there carrying a group stamp. Re-read rather than
+    // asserting the one that used to be the only possibility.
+    const current = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: person.contactId } }),
     );
+    if (current.Item !== undefined) {
+      warnings.push(
+        `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
+          `while this import was running - the contact was KEPT (GROUP MEMBER) and their thread ` +
+          `was left untouched.`,
+      );
+    }
     return;
   }
 
@@ -667,12 +726,17 @@ async function retractImported(
   );
   const items = messages.Items ?? [];
   const foreign = items.filter((m) => m.imported_from !== IMPORT_SOURCE);
+  // WARNINGS ARE WRITTEN AFTER THE FACT, NEVER BEFORE IT (adversarial finding
+  // 25). The contact delete now happens ~30 lines below this point and can
+  // REFUSE, so a sentence written here about what happened to the contact is a
+  // PREDICTION - and the reorder made two of them predictions that can be
+  // false. Record the outcomes; state them once, at the bottom, when they are
+  // facts.
+  let threadRemoved = false;
   if (foreign.length > 0) {
-    warnings.push(
-      `${person.rowKey} (${person.phone}) is marked drop but their thread has ${foreign.length} ` +
-        `message(s) this import did not create - the thread was KEPT, the contact was removed.`,
-    );
+    // nothing destroyed on this path - see the summary at the end.
   } else {
+    threadRemoved = true;
     for (const m of items) {
       await doc.send(
         new DeleteCommand({
@@ -697,6 +761,7 @@ async function retractImported(
   // a stamp that lands inside this narrow window still refuses, and the residue
   // it leaves (a contact with no thread) is visible and re-runnable, unlike the
   // orphan the old ordering produced.
+  let contactRemoved = true;
   try {
     await doc.send(
       new DeleteCommand({
@@ -707,10 +772,40 @@ async function retractImported(
     );
   } catch (err) {
     if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    contactRemoved = false;
+  }
+
+  if (!contactRemoved) {
     warnings.push(
       `${person.rowKey} (${person.phone}) is marked drop but they joined a native group text ` +
-        `while their retract was running - the contact was KEPT (GROUP MEMBER). Their imported ` +
-        `1:1 thread was already removed; nothing that belongs to the group was touched.`,
+        `while their retract was running - the contact was KEPT (GROUP MEMBER). ` +
+        (threadRemoved
+          ? `Their imported 1:1 thread was already removed; nothing that belongs to the group was ` +
+            `touched.`
+          : `Their imported 1:1 thread was KEPT as well - it holds ${foreign.length} message(s) ` +
+            `this import did not create. Nothing that belongs to the group was touched.`),
+    );
+    // AND THE MARKER GOES (adversarial finding 35). It is residue that means
+    // "a retract is in progress", and this retract is over: the person is a
+    // live group member now, so leaving it stamped on their contact forever
+    // would make every future run report a half-finished retract that is not
+    // one. Conditional so it cannot mint the phantom finding 14 is about.
+    try {
+      await doc.send(
+        new UpdateCommand({
+          TableName: contactsTable,
+          Key: { contactId: person.contactId },
+          UpdateExpression: 'REMOVE import_retract_started_at',
+          ConditionExpression: 'attribute_exists(contactId)',
+        }),
+      );
+    } catch (err) {
+      if ((err as { name?: string }).name !== 'ConditionalCheckFailedException') throw err;
+    }
+  } else if (foreign.length > 0) {
+    warnings.push(
+      `${person.rowKey} (${person.phone}) is marked drop but their thread has ${foreign.length} ` +
+        `message(s) this import did not create - the thread was KEPT and the contact WAS removed.`,
     );
   }
 }

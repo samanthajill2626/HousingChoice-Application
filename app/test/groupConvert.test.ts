@@ -94,6 +94,13 @@ function world(
   } as unknown as ConversationsRepo;
 
   const contactsRepo = {
+    // The pointer-aware lookup the re-mint consults FIRST (adversarial 4): a
+    // member may already exist under a hand-made id, and minting the derived id
+    // anyway would duplicate a real person. Mirrors the real repo: soft-deleted
+    // rows are returned (routing ignores `deleted_at`).
+    async findByPhone(phone: string) {
+      return [...contacts.values()].find((c) => c.phone === phone);
+    },
     async stampGroupParticipation(contactId: string, at: string) {
       stamps.push({ contactId, at });
       const contact = contacts.get(contactId);
@@ -233,6 +240,56 @@ describe('convertConnectingRelayGroupToGroupText', () => {
     expect(result.membersReminted).toBe(0);
     expect(result.membersMissing).toEqual([contactIdForPhone(MEMBER_B)]);
     expect(w.contacts.has(contactIdForPhone(MEMBER_B))).toBe(false);
+  });
+
+  it('NEVER mints a duplicate for a phone that already has a contact under another id', async () => {
+    // adversarial 4. `stubFor` was copied from groupMembers.ts without the
+    // `findByPhone` that precedes it there, and `createIfAbsent` conditions on
+    // the contactId alone - so a member who exists under a hand-made id got a
+    // SECOND row carrying their phone. groupSend resolves members BY PHONE and
+    // findByPhone returns whichever row the index yields first, so the duplicate
+    // can hand the send path the fresh stub instead of the staff-deleted real
+    // contact and silently bypass the soft-delete fence.
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
+    const handMadeId = 'contact-hand-made-1';
+    w.contacts.set(handMadeId, {
+      contactId: handMadeId,
+      type: 'tenant',
+      status: 'active',
+      phone: MEMBER_B,
+      deleted_at: '2026-08-01T00:00:00.000Z',
+    } as ContactItem);
+
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    // Nothing was minted, and the derived id still has no row of its own.
+    expect(w.creates).toHaveLength(0);
+    expect(result.membersReminted).toBe(0);
+    expect(result.membersMissing).toEqual([]);
+    expect(w.contacts.has(contactIdForPhone(MEMBER_B))).toBe(false);
+    // The person we already had got the group consent basis instead.
+    expect(w.contacts.get(handMadeId)!.group_participation_at).toBe(AT);
+    // THE SOFT-DELETE FENCE STILL SEES THEM: exactly one row carries the phone,
+    // and it is the deleted one, so groupSend's findByPhone cannot be handed a
+    // fresh stub in its place.
+    const byPhone = [...w.contacts.values()].filter((c) => c.phone === MEMBER_B);
+    expect(byPhone).toHaveLength(1);
+    expect(byPhone[0]!.deleted_at).toBe('2026-08-01T00:00:00.000Z');
+  });
+
+  it('refuses to mint when the pointer-aware lookup itself fails', async () => {
+    // A read failure is not evidence that the phone is unknown, and minting on
+    // it is how a duplicate gets created.
+    const w = world(importedGroupRow(), [contactIdForPhone(MEMBER_A)]);
+    w.opts.contactsRepo.findByPhone = async () => {
+      throw new Error('ProvisionedThroughputExceededException');
+    };
+
+    const result = await convertConnectingRelayGroupToGroupText(GROUP_ID, w.opts);
+
+    expect(w.creates).toHaveLength(0);
+    expect(result.membersReminted).toBe(0);
+    expect(result.membersMissing).toEqual([contactIdForPhone(MEMBER_B)]);
   });
 
   it('stamps rather than re-mints when the row reappears mid-convergence', async () => {

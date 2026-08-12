@@ -17,8 +17,12 @@ import { loadConfig } from '../src/lib/config.js';
 import { getDocumentClient } from '../src/lib/dynamo.js';
 import { runApply } from '../src/lib/import/apply.js';
 import {
+  assertGroupIdentityEnvDeclared,
   assertGroupIdentityParity,
+  GroupIdentityEnvUndeclaredError,
   GroupIdentityParityError,
+  PoolNumbersUnavailableError,
+  readPoolNumbersForParity,
 } from '../src/lib/import/convertGroups.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
@@ -137,17 +141,42 @@ const doc = getDocumentClient();
 // permanent orphans in the staff inbox. It is the SAME exported function, run
 // here first. Deliberately before the write confirmation, so a --dry-run
 // rehearsal surfaces the mismatch too.
+//
+// THE GATE'S OWN PRECONDITION FIRST (adversarial finding 1). loadConfig() reads
+// ambient process.env and there is no dotenv here, so an unset
+// GROUP_IDENTITY_EXCLUDED_NUMBERS silently means "compare against nothing" and
+// refuses EVERY documented invocation, dry run included. Both vars must be
+// declared in THIS shell, and the refusal says which and where the value comes
+// from.
+try {
+  assertGroupIdentityEnvDeclared(process.env);
+} catch (err) {
+  if (!(err instanceof GroupIdentityEnvUndeclaredError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS WRITTEN.');
+  process.exit(1);
+}
+
 let poolNumbers: string[] = [];
 try {
-  poolNumbers = (await createPoolNumbersRepo({ doc }).listActive()).map((p) => p.poolNumber);
+  // Retried rather than degraded to `[]` (adversarial finding 22): pool numbers
+  // are subtracted from BOTH sides, so comparing without them turns any pool
+  // number in either list into a FALSE mismatch - a new single point of refusal
+  // on cutover day, and on the rehearsal dry run that is supposed to de-risk it.
+  poolNumbers = await readPoolNumbersForParity(() => createPoolNumbersRepo({ doc }).listActive(), {
+    onRetry: (attempt, err) =>
+      console.warn(
+        `  ! pool-number read failed (attempt ${attempt}): ` +
+          `${err instanceof Error ? err.message : String(err)} - retrying`,
+      ),
+  });
 } catch (err) {
-  // Pool numbers are subtracted from BOTH sides, so failing to read them can only
-  // produce a FALSE mismatch - which refuses the run rather than writing wrongly.
-  console.warn(
-    `  ! could not read the pool numbers (${err instanceof Error ? err.message : String(err)}). ` +
-      'Comparing without them; a pool number in either list would show up as a mismatch.',
-  );
+  if (!(err instanceof PoolNumbersUnavailableError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS WRITTEN.');
+  process.exit(1);
 }
+
 try {
   const config = loadConfig();
   assertGroupIdentityParity(plan.quo.ownNumbers, {
@@ -161,7 +190,9 @@ try {
   console.error(
     'NOTHING WAS WRITTEN. Fix GROUP_IDENTITY_EXCLUDED_NUMBERS (or the export) so the two lists\n' +
       'agree, then re-run - applying now would write every group thread under an id the\n' +
-      'conversion and live detection will not recognise, and group threads cannot be retracted.',
+      'conversion and live detection will not recognise, and group threads cannot be retracted.\n' +
+      'Both lists above came from THIS shell, not from the deployed stack: set them to the\n' +
+      'values the target stage is deployed with (RUNBOOK, cutover checklist step 1).',
   );
   process.exit(1);
 }

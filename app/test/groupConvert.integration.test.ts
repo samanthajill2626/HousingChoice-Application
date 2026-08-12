@@ -11,8 +11,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { createLogger } from '../src/lib/logger.js';
 import { getTableSpec } from '../src/lib/tables.js';
-import { createContactsRepo } from '../src/repos/contactsRepo.js';
-import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { createContactsRepo, isDeleted } from '../src/repos/contactsRepo.js';
+import {
+  createConversationsRepo,
+  type ConversationParticipant,
+} from '../src/repos/conversationsRepo.js';
 import { convertConnectingRelayGroupToGroupText } from '../src/services/groupConvert.js';
 import { contactIdForPhone, conversationIdForGroup } from '../src/lib/import/ids.js';
 import { createLogCapture } from './helpers/logCapture.js';
@@ -247,6 +250,56 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
     expect(contact.Item!.capture_source).toBeUndefined();
   });
 
+  it('resolves a known phone through the byPhone index instead of minting a DUPLICATE', async () => {
+    // adversarial 4, against the real GSI. `stubFor` was copied from
+    // groupMembers.ts without the `findByPhone` that module mandates ahead of
+    // it, and `createIfAbsent` conditions on `attribute_not_exists(contactId)`
+    // - which structurally cannot see a same-phone row under a hand-made id. A
+    // duplicate is not merely untidy: groupSend resolves members BY PHONE, and
+    // `findByPhone` returns whichever row the index yields FIRST, so a fresh
+    // stub can be handed to the send path in place of the staff-deleted real
+    // contact and silently bypass its soft-delete fence.
+    const g = nextGroup();
+    const handMadeId = `contact-hand-made-${randomUUID().slice(0, 8)}`;
+    await seedImportedGroup(g);
+    await seedContact(g.memberA);
+    await doc.send(
+      new PutCommand({
+        TableName: contactsTable,
+        Item: {
+          contactId: handMadeId,
+          phone: g.memberB,
+          type: 'tenant',
+          status: 'active',
+          deleted_at: '2026-08-01T00:00:00.000Z',
+        },
+      }),
+    );
+
+    const result = await convertConnectingRelayGroupToGroupText(g.id, opts);
+
+    expect(result.membersReminted).toBe(0);
+    expect(result.membersMissing).toEqual([]);
+    // The derived id has no row of its own - nothing was minted.
+    const derived = await doc.send(
+      new GetCommand({
+        TableName: contactsTable,
+        Key: { contactId: contactIdForPhone(g.memberB) },
+      }),
+    );
+    expect(derived.Item).toBeUndefined();
+    // The person we already had got the group consent basis.
+    const known = await doc.send(
+      new GetCommand({ TableName: contactsTable, Key: { contactId: handMadeId } }),
+    );
+    expect(known.Item!.group_participation_at).toBe(AT);
+    // THE SOFT-DELETE FENCE STILL SEES THEM: the phone resolves to the deleted
+    // contact, which is exactly what groupSend reads before it refuses.
+    const resolved = await contactsRepo.findByPhone(g.memberB);
+    expect(resolved?.contactId).toBe(handMadeId);
+    expect(isDeleted(resolved!)).toBe(true);
+  });
+
   it('re-running the conversion does not re-mint or overwrite the stub', async () => {
     const g = nextGroup();
     await seedImportedGroup(g);
@@ -266,6 +319,48 @@ describe.skipIf(!reachable)('convertConnectingRelayGroupToGroupText against Dyna
       new GetCommand({ TableName: contactsTable, Key: { contactId: stubId } }),
     );
     expect(again.Item!.group_participation_at).toBe(after.Item!.group_participation_at);
+  });
+
+  it('REFUSES a roster write whose prior roster changed under it - a real ConditionalCheckFailed', async () => {
+    // adversarial 24. `participants = :prior` is a list-of-maps equality
+    // precondition, and it had ZERO real-DynamoDB coverage: the webhook harness
+    // declares `backfillGroupTextRoster(conversationId, members)` and DROPS the
+    // third argument, so every test through it passes whether the condition
+    // works, always fails, or never fails. If DynamoDB answered a
+    // ValidationException instead of a ConditionalCheckFailedException the repo
+    // would RETHROW, `converge` would throw, the bulk runner would book the row
+    // `refused`, and `complete` could never become true - on the one command
+    // that runs at cutover. A RESOLVED `undefined` is the proof it is a CCFE:
+    // the repo swallows that one exception and rethrows everything else.
+    const g = nextGroup();
+    await seedImportedGroup(g);
+    await seedContact(g.memberA);
+    await seedContact(g.memberB);
+    await convertConnectingRelayGroupToGroupText(g.id, opts);
+
+    const stored = (await readConversation(g.id)).participants as ConversationParticipant[];
+    expect(stored).toHaveLength(2);
+
+    // Somebody else rewrote the roster after we read it (a `name` resolved by a
+    // concurrent converge is the realistic version).
+    const winner = stored.map((m) => ({ ...m, name: 'Winner' }));
+    expect(await conversationsRepo.backfillGroupTextRoster(g.id, winner, stored)).toBeDefined();
+
+    // Our write, still carrying the roster we read, must be REFUSED rather than
+    // clobbering the winner wholesale.
+    const loser = stored.map((m) => ({ ...m, name: 'Loser' }));
+    const refused = await conversationsRepo.backfillGroupTextRoster(g.id, loser, stored);
+    expect(refused).toBeUndefined();
+    const after = (await readConversation(g.id)).participants as ConversationParticipant[];
+    expect(after.map((m) => m.name)).toEqual(['Winner', 'Winner']);
+
+    // ...and the SAME call with the roster that is actually stored succeeds, so
+    // the refusal above is the precondition working rather than it never passing.
+    const accepted = await conversationsRepo.backfillGroupTextRoster(g.id, loser, winner);
+    expect(accepted).toBeDefined();
+    expect(
+      ((await readConversation(g.id)).participants as ConversationParticipant[]).map((m) => m.name),
+    ).toEqual(['Loser', 'Loser']);
   });
 
   it('refuses a connected relay group and leaves the row untouched', async () => {

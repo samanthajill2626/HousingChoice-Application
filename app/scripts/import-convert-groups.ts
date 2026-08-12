@@ -22,7 +22,11 @@ import { loadConfig } from '../src/lib/config.js';
 import { getDocumentClient } from '../src/lib/dynamo.js';
 import { groupReviewRowsByConversationId } from '../src/lib/import/apply.js';
 import {
+  GroupIdentityEnvUndeclaredError,
   GroupIdentityParityError,
+  PoolNumbersUnavailableError,
+  assertGroupIdentityEnvDeclared,
+  readPoolNumbersForParity,
   runConvertGroups,
   type ExpectedGroup,
 } from '../src/lib/import/convertGroups.js';
@@ -128,6 +132,19 @@ plan.threads.threads
     expected.push({ conversationId: thread.conversationId, rowKey });
   });
 
+// The parity gate's own precondition, before anything else it needs (see
+// import-apply.ts and assertGroupIdentityEnvDeclared): this command runs the
+// SAME comparison against the SAME ambient env, so the same undeclared shell
+// would refuse it for the same wrong reason - including the required dry run.
+try {
+  assertGroupIdentityEnvDeclared(process.env);
+} catch (err) {
+  if (!(err instanceof GroupIdentityEnvUndeclaredError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS CONVERTED.');
+  process.exit(1);
+}
+
 const config = loadConfig();
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? '(AWS default)';
 const prefix = process.env.TABLE_PREFIX ?? 'hc-local-';
@@ -145,17 +162,24 @@ const conversationsRepo = createConversationsRepo({ doc });
 const contactsRepo = createContactsRepo({ doc });
 // Pool numbers are subtracted from BOTH sides of the parity comparison, so they
 // only matter if one ever appears in the export or in the configured list.
-// Reading them makes the comparison exactly the one spec 4.1 names; failing to
-// read them is not fatal, because the worst case is a FALSE MISMATCH, which
-// refuses the run rather than converting anything wrongly.
+// Reading them makes the comparison exactly the one spec 4.1 names. A transient
+// failure is RETRIED and a persistent one ABORTS under its own name
+// (adversarial finding 22): degrading to `[]` turns a table-read problem into a
+// parity refusal that sends the operator to debug the exclusion list.
 let poolNumbers: string[] = [];
 try {
-  poolNumbers = (await createPoolNumbersRepo({ doc }).listActive()).map((p) => p.poolNumber);
+  poolNumbers = await readPoolNumbersForParity(() => createPoolNumbersRepo({ doc }).listActive(), {
+    onRetry: (attempt, err) =>
+      console.warn(
+        `  ! pool-number read failed (attempt ${attempt}): ` +
+          `${err instanceof Error ? err.message : String(err)} - retrying`,
+      ),
+  });
 } catch (err) {
-  console.warn(
-    `  ! could not read the pool numbers (${err instanceof Error ? err.message : String(err)}). ` +
-      'Comparing without them; a pool number in either list would show up as a mismatch.',
-  );
+  if (!(err instanceof PoolNumbersUnavailableError)) throw err;
+  console.error(`\n${err.message}`);
+  console.error('\nNOTHING WAS CONVERTED.');
+  process.exit(1);
 }
 
 let report;
@@ -211,6 +235,9 @@ console.log(`  rails created          : ${report.totals.railsCreated}`);
 console.log(`  rails already present  : ${report.totals.railsExisting}`);
 console.log(`  rails FAILED           : ${report.totals.railsFailed}`);
 console.log(`  rails NOT ATTEMPTED    : ${report.totals.railsUnavailable}`);
+console.log(
+  `  ADJUDICATION REQUIRED  : ${report.totals.railAdjudicationRequired} (roster empty or over the rail cap - no re-run can fix these)`,
+);
 console.log(
   `  connect-day-one flags  : ${report.totals.connectRequested} (reported only - they convert like the rest)`,
 );

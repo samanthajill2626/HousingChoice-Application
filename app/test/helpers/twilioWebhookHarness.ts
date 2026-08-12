@@ -785,6 +785,16 @@ export function createFakeWorld(): FakeWorld {
       delete conv.rail_creating;
     },
 
+    async clearGroupRail(conversationId, expectedSid) {
+      // Models the real ConditionExpression: only the caller that saw THIS sid
+      // may drop it, so a concurrent healer's fresh rail is never clobbered.
+      const conv = conversations.get(conversationId);
+      if (!conv || conv.twilio_conversation_sid !== expectedSid) return false;
+      delete conv.twilio_conversation_sid;
+      delete conv.twilio_participant_map;
+      return true;
+    },
+
     async setTwilioConversation(conversationId, sid, participantMap, claimToken) {
       const conv = conversations.get(conversationId);
       if (!conv || conv.rail_creating?.token !== claimToken) return undefined;
@@ -826,9 +836,23 @@ export function createFakeWorld(): FakeWorld {
       return conv;
     },
 
-    async backfillGroupTextRoster(conversationId, members) {
+    async backfillGroupTextRoster(conversationId, members, expectedPrior) {
       const conv = conversations.get(conversationId);
       if (!conv || conv.type !== 'group_text') return undefined;
+      // THE THIRD ARGUMENT IS HONOURED (adversarial 24). It used to be dropped
+      // from this signature, so every test through the harness passed whether
+      // the real `participants = :prior` precondition worked, always failed, or
+      // never failed. A caller that read a roster and lost the race gets
+      // `undefined` here, exactly as DynamoDB answers with a
+      // ConditionalCheckFailedException. Structural comparison stands in for
+      // DynamoDB's (key-order-independent) map equality; every producer in this
+      // codebase builds participants field-by-field in the same order.
+      if (
+        expectedPrior !== undefined &&
+        JSON.stringify(conv.participants ?? []) !== JSON.stringify(expectedPrior)
+      ) {
+        return undefined;
+      }
       conv.participants = members;
       return conv;
     },
@@ -1169,19 +1193,45 @@ export function createFakeWorld(): FakeWorld {
     // one signed counter per pair, moved atomically by both halves. Positive =
     // events awaiting their filings; negative = filings banked as credits, the
     // oldest of them at `since`.
-    async bumpCrossCheckEvent(pairKey, notBeforeIso) {
-      const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
-      if (state.balance < 0 && state.since !== undefined && state.since < notBeforeIso) {
-        // Stale credits are DISCARDED, never consumed.
-        crossCheckBalances.set(pairKey, { balance: 1 });
-        return 'pending';
-      }
-      const balance = state.balance + 1;
-      crossCheckBalances.set(pairKey, {
+    async recordCrossCheckEvent(
+      event: PendingCrossCheckEvent,
+      bounds: { notBeforeIso: string; nowIso: string; expiresAt: number },
+    ) {
+      const state = crossCheckBalances.get(event.pairKey) ?? { balance: 0 };
+      const staleCredits =
+        state.balance < 0 && state.since !== undefined && state.since < bounds.notBeforeIso;
+      // Stale credits are DISCARDED by a DELTA off the observed balance, never
+      // by an overwrite (fix wave 2, adversarial 8) - modelled here because the
+      // wiring suite is what proves the two halves agree.
+      const delta = staleCredits ? 1 - state.balance : 1;
+      const balance = state.balance + delta;
+      crossCheckBalances.set(event.pairKey, {
         balance,
-        ...(state.since !== undefined && { since: state.since }),
+        ...(!staleCredits && state.since !== undefined && { since: state.since }),
       });
-      return balance <= 0 ? 'credit' : 'pending';
+      if (balance <= 0) return 'credit' as const;
+      // Pending: the rows land WITH the balance, never separately.
+      const pending = crossCheckPending.get(event.pairKey) ?? [];
+      pending.push({ ...event });
+      pending.sort((a: PendingCrossCheckEvent, b: PendingCrossCheckEvent) =>
+        a.deadlineAt < b.deadlineAt ? -1 : 1,
+      );
+      crossCheckPending.set(event.pairKey, pending);
+      const sortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
+      crossCheckDueRows.set(sortKey, {
+        partition: GROUP_CROSSCHECK_DUE_PARTITION,
+        sortKey,
+        kind: GROUP_CROSSCHECK_DUE_KIND,
+        deadlineAt: event.deadlineAt,
+        ref: {
+          conversationId: event.pairKey,
+          tsMsgId: `evt2#${event.deadlineAt}#${event.messageSid}`,
+        },
+        providerSid: event.messageSid,
+        conversationSid: event.conversationSid,
+        author: event.author,
+      });
+      return 'pending' as const;
     },
     async bumpCrossCheckClassic(pairKey, nowIso) {
       const state = crossCheckBalances.get(pairKey) ?? { balance: 0 };
@@ -1200,25 +1250,6 @@ export function createFakeWorld(): FakeWorld {
         });
       }
     },
-    async putCrossCheckPending(event) {
-      const pending = crossCheckPending.get(event.pairKey) ?? [];
-      pending.push({ ...event });
-      pending.sort((a: PendingCrossCheckEvent, b: PendingCrossCheckEvent) =>
-        a.deadlineAt < b.deadlineAt ? -1 : 1,
-      );
-      crossCheckPending.set(event.pairKey, pending);
-      const sortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
-      crossCheckDueRows.set(sortKey, {
-        partition: GROUP_CROSSCHECK_DUE_PARTITION,
-        sortKey,
-        kind: GROUP_CROSSCHECK_DUE_KIND,
-        deadlineAt: event.deadlineAt,
-        ref: { conversationId: event.pairKey, tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}` },
-        providerSid: event.messageSid,
-        conversationSid: event.conversationSid,
-        author: event.author,
-      });
-    },
     async claimOldestCrossCheckPending(pairKey) {
       const pending = crossCheckPending.get(pairKey) ?? [];
       const oldest = pending.shift();
@@ -1230,12 +1261,17 @@ export function createFakeWorld(): FakeWorld {
       }
       return oldest;
     },
-    async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {
-      const pending = (crossCheckPending.get(pairKey) ?? []).filter(
-        (p) => p.messageSid !== messageSid,
-      );
+    async resolveCrossCheckPending(pairKey: string, pairSortKey: string, dueSortKey: string) {
+      // Keyed off the due row's own pointer, like the repo: the message sid is
+      // the last segment of the pair sort key.
+      const messageSid = pairSortKey.slice(pairSortKey.lastIndexOf('#') + 1);
+      const before = crossCheckPending.get(pairKey) ?? [];
+      const pending = before.filter((p) => p.messageSid !== messageSid);
       crossCheckPending.set(pairKey, pending);
-      crossCheckDueRows.delete(groupCrossCheckDueSortKey(deadlineAt, messageSid));
+      crossCheckDueRows.delete(dueSortKey);
+      // TRUE only when THIS call removed the pair row - the sweep releases the
+      // balance slot off exactly that (fix wave 2, adversarial 11).
+      return pending.length < before.length;
     },
   };
 
@@ -1364,15 +1400,33 @@ export function createFakeWorld(): FakeWorld {
       return contacts.find((c) => c.contactId === contactId);
     },
     async listByType(type, opts = {}) {
-      const items = contacts
+      const partition = contacts
         // BE1/A1: pointer items carry no real type/status -> invisible to this GSI.
         .filter((c) => c.phone_ref !== true && c.email_ref !== true)
         .filter((c) => c.type === type)
         .filter((c) => (opts.status === undefined ? true : c.status === opts.status))
         // Soft-delete: default excludes deleted; deleted:true shows ONLY deleted.
-        .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)))
-        .slice(0, opts.limit ?? 50);
-      return { items };
+        .filter((c) => (opts.deleted === true ? isDeleted(c) : !isDeleted(c)));
+      // MODELS `Limit` AS DYNAMODB APPLIES IT (fix wave 2, adversarial 6): the
+      // page is drawn FIRST and any FilterExpression is applied to what came
+      // back, so a filtered-out row still spends a page slot. A fake that
+      // filtered before slicing could never see the defect the Today fill loop
+      // exists to close.
+      const start = typeof opts.exclusiveStartKey?.['contactId'] === 'string'
+        ? partition.findIndex((c) => c.contactId === opts.exclusiveStartKey?.['contactId']) + 1
+        : 0;
+      const limit = opts.limit ?? 50;
+      const page = partition.slice(start, start + limit);
+      const filtered =
+        opts.excludeOrigin === undefined
+          ? page
+          : page.filter((c) => c.origin !== opts.excludeOrigin);
+      const last = page[page.length - 1];
+      const more = start + page.length < partition.length;
+      return {
+        items: filtered,
+        ...(more && last !== undefined && { lastEvaluatedKey: { contactId: last.contactId } }),
+      };
     },
     async listByHousingAuthority(housingAuthority, opts = {}) {
       // Mirror the byHousingAuthority GSI: tenant-sparse (only tenants carry the

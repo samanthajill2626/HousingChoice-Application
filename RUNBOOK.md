@@ -1219,15 +1219,44 @@ npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --
 Apply — **always dry-run first**; the write needs an explicit `--yes`:
 
 ```powershell
-npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
-npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
 Target is whatever `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` point at — there is no
 built-in prod mode, exactly like `db:seed`. Set them deliberately per stage.
 
+**Both group-identity vars are REQUIRED in the invoking shell**, on the real run
+and on the dry run alike. Before its first write, `import:apply` compares the
+export's `ownNumbers` against the runtime exclusion set (a group thread's id is
+derived from its roster minus our own numbers, so a mismatch writes 132 group
+threads under ids live detection will never produce, and group threads cannot be
+retracted). There is no dotenv here: the command reads those two values from the
+shell you type in. It REFUSES with a message naming this step when either is
+unset, because "not set" is not the same statement as "the org has no other
+numbers" - silently reading it as the latter is how the gate refuses every
+correct run. Set them to what the STAGE you are pointing at is deployed with;
+the value and its rationale are in the cutover checklist's rank-1 step below.
+
 **Things that will bite you:**
 
+- **An unset `GROUP_IDENTITY_EXCLUDED_NUMBERS` or `BUSINESS_PHONE_NUMBER` stops
+  the command dead**, and it is the one failure that reads like a data problem
+  when it is a shell problem. The refusal says `NOT a mismatch`; it means the
+  parity gate had nothing to compare against. Set both (see the invocation lines
+  above) and re-run. Setting them WRONG is the failure the gate cannot catch:
+  it compares against your shell, not against the deployed stack.
+- **A pool-number read failure is retried, then fatal.** The gate subtracts the
+  active pool numbers from both sides, so it will not proceed on a guess. Three
+  attempts, then a `PoolNumbersUnavailableError` naming the underlying error -
+  check `DYNAMODB_ENDPOINT` / `TABLE_PREFIX` and credentials, not the exclusion
+  list.
+- **A `drop` on someone who is on a group roster becomes permanent.** The
+  retract refuses for a group member, and once `import:convert-groups` has
+  re-minted them as a group-scoped stub (`origin: group_detection`) every later
+  run refuses too, saying so. "Drop" then means "dropped from 1:1 and history,
+  permanently retained as a group-scoped contact"; contact soft-delete in the
+  app is the remaining lever.
 - **PII.** The workbook holds real names and phone numbers, and this repo pushes
   to Azure DevOps. `import:plan` REFUSES to write inside the working tree; keep
   the workbook next to the exports. `.gitignore` is the second line of defence.
@@ -1423,8 +1452,11 @@ real thing must not also be the real thing. Run it without `--yes` against the
 same three export directories the real run will use:
 
 ```powershell
-npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir>
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value this stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<this stage's business number>"; npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir>
 ```
+
+Both group-identity vars are required here for the same reason they are required
+by `import:apply` - same gate, same shell, same refusal when they are undeclared.
 
 Without `--yes` the runner writes NOTHING: it prints the target endpoint, the
 table prefix, the expected group count and how many the workbook excluded, then
@@ -1433,12 +1465,24 @@ exits 1 by design. Check all four before proceeding - a wrong `TABLE_PREFIX` or
 here. Then the real run:
 
 ```powershell
-npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir> --yes
+$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value this stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<this stage's business number>"; npm run import:convert-groups -- --quo <dir> --airtable <dir> --review <dir> --yes
 ```
 
 Convergent and safe to re-run. Exit 0 ONLY when every expected group reached the
 full end state; exit 1 while anything is refused or rail-less. **Re-run until it
 prints COMPLETE.**
+
+Two report lines that are NOT transient failures:
+
+- `members RE-MINTED` non-zero holds COMPLETE back on purpose. A re-mint is
+  contact creation nobody asked for by hand (a workbook `drop` on a group
+  member), and it makes that drop permanently inoperative for that person. Read
+  the warning, then run again: the second pass re-mints nothing and completes.
+- `ADJUDICATION REQUIRED` non-zero is a HUMAN decision, not a re-run. The
+  roster is empty or above the rail cap, so no retry can rail it and nothing
+  re-enqueues it - the thread is permanently inbound-only. Fix the roster or
+  record it as a known inbound-only thread (the cutover gate allows exactly
+  that, explicitly adjudicated).
 
 CUTOVER GATE (hard): zero unresolved rail failures. Every retained imported group
 must be converted AND carry an ACTIVE rail with a VERIFIED participant map, or be

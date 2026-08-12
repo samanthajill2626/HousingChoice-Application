@@ -7,9 +7,14 @@
 // next one.
 import { describe, expect, it, vi } from 'vitest';
 import {
+  GROUP_IDENTITY_ENV_VARS,
+  GroupIdentityEnvUndeclaredError,
   GroupIdentityParityError,
+  PoolNumbersUnavailableError,
   RAIL_STEP_NOT_WIRED,
+  assertGroupIdentityEnvDeclared,
   checkGroupIdentityParity,
+  readPoolNumbersForParity,
   runConvertGroups,
   type ConvertGroupsOptions,
   type GroupRailEnsurer,
@@ -51,8 +56,12 @@ interface World {
   base: Omit<ConvertGroupsOptions, 'expected'>;
 }
 
-function world(rows: ConversationItem[], opts: { remintFails?: boolean } = {}): World {
+function world(
+  rows: ConversationItem[],
+  opts: { remintFails?: boolean; rosterWriteLost?: boolean } = {},
+): World {
   const remintFails = opts.remintFails === true;
+  const rosterWriteLost = opts.rosterWriteLost === true;
   const conversations = new Map(rows.map((r) => [r.conversationId, r]));
   const contacts = new Map<string, ContactItem>();
   for (const row of rows) {
@@ -82,6 +91,9 @@ function world(rows: ConversationItem[], opts: { remintFails?: boolean } = {}): 
     async backfillGroupTextRoster(id: string, members: ConversationParticipant[]) {
       const conv = conversations.get(id);
       if (!conv || conv.type !== 'group_text') return undefined;
+      // A LOST CONDITION writes nothing and returns undefined - the roster the
+      // caller derived never became durable (adversarial 23).
+      if (rosterWriteLost) return undefined;
       const next = { ...conv, participants: members };
       conversations.set(id, next);
       return next;
@@ -91,6 +103,10 @@ function world(rows: ConversationItem[], opts: { remintFails?: boolean } = {}): 
   const contactsRepo = {
     async getById(contactId: string) {
       return contacts.get(contactId);
+    },
+    // The pointer-aware lookup the re-mint must consult first (adversarial 4).
+    async findByPhone(phone: string) {
+      return [...contacts.values()].find((c) => c.phone === phone);
     },
     async stampGroupParticipation(contactId: string, at: string) {
       const contact = contacts.get(contactId);
@@ -192,6 +208,119 @@ describe('checkGroupIdentityParity', () => {
       configuredNumbers: [],
     });
     expect(parity.ok).toBe(true);
+  });
+});
+
+describe('assertGroupIdentityEnvDeclared', () => {
+  // BLOCKING (adversarial 1). The parity gate compares the export against the
+  // SHELL the command was invoked in, and there is no dotenv in this repo - so
+  // an unset var is not "the org has no other numbers", it is "we do not know",
+  // and comparing against it refuses every RUNBOOK-documented invocation
+  // including the mandatory dry run.
+  it('refuses when GROUP_IDENTITY_EXCLUDED_NUMBERS is absent, naming the RUNBOOK step', () => {
+    const err = (() => {
+      try {
+        assertGroupIdentityEnvDeclared({ BUSINESS_PHONE_NUMBER: '+15550100000' });
+        return undefined;
+      } catch (e) {
+        return e as GroupIdentityEnvUndeclaredError;
+      }
+    })();
+
+    expect(err).toBeInstanceOf(GroupIdentityEnvUndeclaredError);
+    expect(err!.missing).toEqual(['GROUP_IDENTITY_EXCLUDED_NUMBERS']);
+    expect(err!.message).toContain('GROUP_IDENTITY_EXCLUDED_NUMBERS');
+    expect(err!.message).toContain('RUNBOOK');
+    // The cause must be unambiguous: this is NOT a parity mismatch.
+    expect(err!.message).toContain('NOT a mismatch');
+  });
+
+  it('refuses when BUSINESS_PHONE_NUMBER is absent - the second false positive', () => {
+    // Without it the business number stays in `expected` and is absent from
+    // `configured`, so the refusal names the org's own main line.
+    const err = (() => {
+      try {
+        assertGroupIdentityEnvDeclared({ GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none' });
+        return undefined;
+      } catch (e) {
+        return e as GroupIdentityEnvUndeclaredError;
+      }
+    })();
+
+    expect(err).toBeInstanceOf(GroupIdentityEnvUndeclaredError);
+    expect(err!.missing).toEqual(['BUSINESS_PHONE_NUMBER']);
+  });
+
+  it('names BOTH when neither is set, and lists exactly the vars it requires', () => {
+    const err = (() => {
+      try {
+        assertGroupIdentityEnvDeclared({});
+        return undefined;
+      } catch (e) {
+        return e as GroupIdentityEnvUndeclaredError;
+      }
+    })();
+    expect(err!.missing).toEqual([...GROUP_IDENTITY_ENV_VARS]);
+  });
+
+  it('treats a blank or whitespace value as absent', () => {
+    expect(() =>
+      assertGroupIdentityEnvDeclared({
+        GROUP_IDENTITY_EXCLUDED_NUMBERS: '   ',
+        BUSINESS_PHONE_NUMBER: '+15550100000',
+      }),
+    ).toThrow(GroupIdentityEnvUndeclaredError);
+  });
+
+  it('passes when both are declared - the literal `none` counts as a declaration', () => {
+    expect(() =>
+      assertGroupIdentityEnvDeclared({
+        GROUP_IDENTITY_EXCLUDED_NUMBERS: 'none',
+        BUSINESS_PHONE_NUMBER: '+15550100000',
+      }),
+    ).not.toThrow();
+    expect(() =>
+      assertGroupIdentityEnvDeclared({
+        GROUP_IDENTITY_EXCLUDED_NUMBERS: '+15550100001,+15550100002',
+        BUSINESS_PHONE_NUMBER: '+15550100000',
+      }),
+    ).not.toThrow();
+  });
+});
+
+describe('readPoolNumbersForParity', () => {
+  // adversarial 22: a transient read failure used to degrade to `[]`, which
+  // turns any pool number in either list into a FALSE parity mismatch and
+  // refuses a legitimate cutover run.
+  it('retries a transient failure and returns the numbers', async () => {
+    let calls = 0;
+    const numbers = await readPoolNumbersForParity(
+      async () => {
+        calls += 1;
+        if (calls < 3) throw new Error('ProvisionedThroughputExceededException');
+        return [{ poolNumber: '+15550199999' }];
+      },
+      { sleep: async () => {} },
+    );
+
+    expect(calls).toBe(3);
+    expect(numbers).toEqual(['+15550199999']);
+  });
+
+  it('aborts LOUDLY with its own error rather than comparing without them', async () => {
+    let calls = 0;
+    const err = await readPoolNumbersForParity(
+      async () => {
+        calls += 1;
+        throw new Error('ProvisionedThroughputExceededException');
+      },
+      { sleep: async () => {} },
+    ).catch((e: unknown) => e as PoolNumbersUnavailableError);
+
+    expect(err).toBeInstanceOf(PoolNumbersUnavailableError);
+    expect(calls).toBe(3);
+    expect((err as Error).message).toContain('NOT a mismatch');
+    expect((err as Error).message).toContain('ProvisionedThroughputExceededException');
   });
 });
 
@@ -408,7 +537,112 @@ describe('runConvertGroups', () => {
     expect(w.contacts.get(droppedId)!.consent_method).toBeUndefined();
     // The operator is told: this is data creation they did not ask for by hand.
     expect(report.warnings.some((warning) => warning.includes('RE-MINTED'))).toBe(true);
-    expect(report.complete).toBe(true);
+    // ...and the consequence is stated where it OCCURS (adversarial 37): the
+    // stub carries origin group_detection, so every later import:apply refuses
+    // to re-apply the founder's drop to that person. The drop is now permanent
+    // for 1:1 purposes and permanently INOPERATIVE for this person.
+    expect(
+      report.warnings.some((warning) => warning.includes('PERMANENTLY INOPERATIVE')),
+    ).toBe(true);
+    // DELIBERATE CHANGE (adversarial 34): a re-mint is silent data creation the
+    // cutover gate must not sign off on unattended. It was `true` here before
+    // the fix wave. `membersReminted` is a `complete` term now, so the operator
+    // re-runs; the second pass re-mints nothing and reports COMPLETE.
+    expect(report.complete).toBe(false);
+
+    const second = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor(rows),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+    expect(second.totals.membersReminted).toBe(0);
+    expect(second.complete).toBe(true);
+  });
+
+  it('reports ZERO contactIds and names backfilled when the roster write was LOST', async () => {
+    // adversarial 23: `contactIdsBackfilled` was assigned unconditionally even
+    // when `updated === undefined` meant nothing was written, so the report that
+    // IS the cutover gate asserted a durable write that did not happen.
+    const rows = [importedRow(MEMBERS[0])];
+    const w = world(rows, { rosterWriteLost: true });
+    for (const phone of MEMBERS[0]) {
+      w.contacts.get(contactIdForPhone(phone))!.firstName = 'Ada';
+    }
+    // Model the already-converted convergence path, where the roster write is
+    // the only thing that could persist the backfill.
+    const stored = w.conversations.get(rows[0]!.conversationId)!;
+    w.conversations.set(rows[0]!.conversationId, {
+      ...stored,
+      type: 'group_text',
+      status: 'group_open',
+    });
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor(rows),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.rows[0]?.outcome).toBe('already_converted');
+    expect(report.rows[0]?.contactIdsBackfilled).toBe(0);
+    expect(report.rows[0]?.namesBackfilled).toBe(0);
+    expect(report.totals.contactIdsBackfilled).toBe(0);
+    expect(report.totals.namesBackfilled).toBe(0);
+    // The stored roster is untouched, which is what the report must reflect.
+    expect(w.conversations.get(rows[0]!.conversationId)?.participants).toEqual([
+      { contactId: '', phone: MEMBERS[0][0] },
+      { contactId: '', phone: MEMBERS[0][1] },
+    ]);
+  });
+
+  it('LISTS a structurally unrailable thread as ADJUDICATION-REQUIRED', async () => {
+    // adversarial 15: an empty or over-cap roster is never enqueued and never
+    // stamped `rail_failed` anywhere, so nothing reads it - the thread is
+    // permanently inbound-only while being indistinguishable from a healthy one.
+    // The convergence report is the reader, so it has to say so out loud.
+    const empty = importedRow([]);
+    const tooLarge = importedRow([
+      '+15550100201',
+      '+15550100202',
+      '+15550100203',
+      '+15550100204',
+      '+15550100205',
+      '+15550100206',
+      '+15550100207',
+      '+15550100208',
+      '+15550100209',
+      '+15550100210',
+    ]);
+    const w = world([empty, tooLarge]);
+    const rail = railStub(() => ({ status: 'failed', reason: 'structural' }));
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor([empty, tooLarge]),
+      rail,
+    });
+
+    expect(report.rows[0]?.railAdjudication).toBe('empty_roster');
+    expect(report.rows[1]?.railAdjudication).toBe('roster_too_large');
+    expect(report.totals.railAdjudicationRequired).toBe(2);
+    expect(
+      report.warnings.filter((warning) => warning.includes('ADJUDICATION REQUIRED')),
+    ).toHaveLength(2);
+    expect(report.complete).toBe(false);
+  });
+
+  it('leaves railAdjudication unset for an ordinary roster', async () => {
+    const rows = [importedRow(MEMBERS[0])];
+    const w = world(rows);
+
+    const report = await runConvertGroups({
+      ...w.base,
+      expected: expectedFor(rows),
+      rail: railStub(() => ({ status: 'created' })),
+    });
+
+    expect(report.rows[0]?.railAdjudication).toBeUndefined();
+    expect(report.totals.railAdjudicationRequired).toBe(0);
   });
 
   it('is INCOMPLETE when a member has no contact record and cannot be re-minted', async () => {

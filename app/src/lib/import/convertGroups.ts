@@ -36,6 +36,7 @@ import {
 } from '../../services/groupConvert.js';
 import type { GroupExclusionSet } from '../../services/groupIdentity.js';
 import {
+  MAX_RAIL_MEMBERS,
   RAIL_STEP_NOT_WIRED,
   type GroupRailEnsurer,
   type GroupRailRequest,
@@ -147,6 +148,113 @@ export function assertGroupIdentityParity(
   if (!parity.ok) throw new GroupIdentityParityError(parity);
 }
 
+/**
+ * The env vars the parity gate's RUNTIME side is built from. Both are required
+ * to be DECLARED in the invocation env of a cutover command.
+ */
+export const GROUP_IDENTITY_ENV_VARS = [
+  'GROUP_IDENTITY_EXCLUDED_NUMBERS',
+  'BUSINESS_PHONE_NUMBER',
+] as const;
+
+/** The cutover command refuses to GUESS its own runtime side. */
+export class GroupIdentityEnvUndeclaredError extends Error {
+  constructor(readonly missing: readonly string[]) {
+    super(
+      'REFUSED: the group-identity parity gate has nothing to compare the export against.\n' +
+        `  not set in this invocation: ${missing.join(', ')}\n\n` +
+        'This is NOT a mismatch - it is a MISSING DECLARATION. The command reads its runtime side ' +
+        'from the shell it is invoked in (there is no dotenv in this repo), so an unset ' +
+        'GROUP_IDENTITY_EXCLUDED_NUMBERS does not mean "the org has no other numbers", it means ' +
+        '"we were not told". Comparing against it would report EVERY org number in the export as ' +
+        'missing from the runtime, and an unset BUSINESS_PHONE_NUMBER would name the org\'s own ' +
+        'main line in the refusal.\n\n' +
+        'Set BOTH in the same shell, to the values the stage you are targeting is DEPLOYED with. ' +
+        'RUNBOOK -> "Native group texting: merge/cutover checklist" -> step 1 (RANK 1: push ' +
+        'GROUP_IDENTITY_EXCLUDED_NUMBERS) says what the value is and where it comes from; the ' +
+        'literal `none` is the way to assert the org has no other number.',
+    );
+    this.name = 'GroupIdentityEnvUndeclaredError';
+  }
+}
+
+/**
+ * THE PARITY GATE'S PRECONDITION (adversarial finding 1, BLOCKING).
+ *
+ * The gate compares the export's `ownNumbers` against `loadConfig()`, which
+ * reads ambient `process.env` and nothing else. A RUNBOOK-documented invocation
+ * sets `DYNAMODB_ENDPOINT` and `TABLE_PREFIX` and no more, so the gate compared
+ * the export against an EMPTY exclusion set and refused every run - including
+ * the mandatory `--dry-run` rehearsal, with no bypass flag. The instrument that
+ * runs once, on cutover day, against 132 real threads could not be run at all.
+ *
+ * "Unset" and "declared empty" are not the same statement, so the fix is to
+ * demand the declaration rather than to soften the comparison: an operator who
+ * has typed `GROUP_IDENTITY_EXCLUDED_NUMBERS=none` has asserted something the
+ * gate can check, and one who typed nothing has not. Note what the gate still
+ * does not prove: it compares against the INVOKING shell, not against what is
+ * deployed. Setting these to the deployed values is the operator's job and the
+ * RUNBOOK step says so.
+ */
+export function assertGroupIdentityEnvDeclared(env: NodeJS.ProcessEnv): void {
+  const missing = GROUP_IDENTITY_ENV_VARS.filter((name) => (env[name] ?? '').trim().length === 0);
+  if (missing.length > 0) throw new GroupIdentityEnvUndeclaredError(missing);
+}
+
+/** A pool-number read that could not be completed - never a parity verdict. */
+export class PoolNumbersUnavailableError extends Error {
+  constructor(readonly attempts: number, readonly lastError: unknown) {
+    const detail = lastError instanceof Error ? lastError.message : String(lastError);
+    super(
+      `REFUSED: could not read the active pool numbers after ${attempts} attempts - ${detail}\n\n` +
+        'This is NOT a mismatch and NOTHING was written. Pool numbers are subtracted from BOTH ' +
+        'sides of the group-identity comparison, so continuing without them would turn any pool ' +
+        'number present in either list into a FALSE parity refusal on cutover day. Check the ' +
+        'DYNAMODB_ENDPOINT / TABLE_PREFIX this command is pointed at and the credentials for it, ' +
+        'then re-run.',
+    );
+    this.name = 'PoolNumbersUnavailableError';
+  }
+}
+
+/**
+ * Read the active pool numbers for the parity comparison, with retries
+ * (adversarial finding 22).
+ *
+ * This used to swallow the failure and compare with `poolNumbers = []`, which
+ * is fail-safe in direction but is a new single point of REFUSAL on cutover day
+ * - one throttle and the run (and the rehearsal dry run) stops with a message
+ * about numbers that are perfectly fine. A transient failure is retried; a
+ * persistent one aborts under its own name so the operator is never sent to
+ * debug the exclusion list for a problem that is a table read.
+ */
+export async function readPoolNumbersForParity(
+  listActive: () => Promise<readonly { poolNumber: string }[]>,
+  opts: {
+    attempts?: number;
+    delaysMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
+    onRetry?: (attempt: number, err: unknown) => void;
+  } = {},
+): Promise<string[]> {
+  const attempts = opts.attempts ?? 3;
+  const delays = opts.delaysMs ?? [250, 750];
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  let lastError: unknown;
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return (await listActive()).map((p) => p.poolNumber);
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts) {
+        opts.onRetry?.(attempt, err);
+        await sleep(delays[attempt - 1] ?? delays[delays.length - 1] ?? 250);
+      }
+    }
+  }
+  throw new PoolNumbersUnavailableError(attempts, lastError);
+}
+
 // ---------------------------------------------------------------------------
 // The run
 // ---------------------------------------------------------------------------
@@ -193,6 +301,14 @@ export interface GroupConversionRow {
   rail: GroupRailResult['status'];
   railSid?: string;
   railReason?: string;
+  /**
+   * STRUCTURALLY UNRAILABLE, and therefore a HUMAN DECISION (adversarial
+   * finding 15). A roster that is empty or larger than a rail can hold cannot
+   * be railed by any retry, and the detection path deliberately stops
+   * re-enqueuing such a thread - so nothing anywhere writes a state that says
+   * "this thread is permanently inbound-only". This report is that reader.
+   */
+  railAdjudication?: 'empty_roster' | 'roster_too_large';
 }
 
 export interface GroupConversionReport {
@@ -224,6 +340,8 @@ export interface GroupConversionReport {
     railsExisting: number;
     railsFailed: number;
     railsUnavailable: number;
+    /** Rows a human must adjudicate: the roster can never carry a rail. */
+    railAdjudicationRequired: number;
   };
   warnings: string[];
   /**
@@ -295,6 +413,19 @@ export async function runConvertGroups(
       );
       row.railReason = 'not attempted - the thread was not converted';
     } else {
+      // STRUCTURAL UNRAILABILITY IS DECIDED FROM THE ROSTER, not from the rail
+      // step's reason string (adversarial finding 15). An empty or over-cap
+      // roster refuses forever: `ensureGroupRail` returns `failed` without
+      // spending a Twilio call, the webhook's re-enqueue deliberately skips it,
+      // and NOTHING stamps `rail_failed` for these two cases - so a thread that
+      // is permanently inbound-only is indistinguishable in stored state from a
+      // healthy one. The cutover gate (spec 14) allows such a thread only as an
+      // explicitly adjudicated inbound-only thread, so the report has to hand
+      // the operator the list rather than let it hide among transient failures.
+      const rosterSize = converted.members.length;
+      if (rosterSize === 0) row.railAdjudication = 'empty_roster';
+      else if (rosterSize > MAX_RAIL_MEMBERS) row.railAdjudication = 'roster_too_large';
+
       const outcome = await ensureRail(rail, {
         conversationId: group.conversationId,
         members: converted.members,
@@ -304,10 +435,22 @@ export async function runConvertGroups(
         row.railSid = outcome.twilioConversationSid;
       }
       if (outcome.reason !== undefined) row.railReason = outcome.reason;
-      if (outcome.status === 'failed') {
+      if (outcome.status === 'failed' && row.railAdjudication === undefined) {
         warnings.push(
           `${group.rowKey ?? group.conversationId}: converted, but its group text rail FAILED - ` +
             `${outcome.reason ?? 'no reason given'}. The thread cannot send until this is fixed.`,
+        );
+      }
+      if (row.railAdjudication !== undefined) {
+        warnings.push(
+          `${group.rowKey ?? group.conversationId}: ADJUDICATION REQUIRED - ` +
+            (row.railAdjudication === 'empty_roster'
+              ? 'the roster is EMPTY, so a rail would reach nobody'
+              : `the roster of ${rosterSize} members exceeds the ${MAX_RAIL_MEMBERS} a rail can ` +
+                'hold') +
+            '. No re-run can fix this and nothing re-enqueues it: the thread is permanently ' +
+            'INBOUND-ONLY until a human fixes the roster or records it as a known inbound-only ' +
+            'thread. It is counted here because no stored field says so.',
         );
       }
     }
@@ -323,7 +466,9 @@ export async function runConvertGroups(
         `${group.rowKey ?? group.conversationId}: ${converted.membersReminted} roster member(s) ` +
           `had NO contact record and were RE-MINTED as group-scoped stubs (origin ` +
           `group_detection, group_participation_at only - no SMS consent). A workbook \`drop\` on ` +
-          `a group member is the known producer; the drop still holds for their 1:1 records.`,
+          `a group member is the known producer; the drop still holds for their 1:1 records. ` +
+          `That drop is now PERMANENTLY INOPERATIVE for those people: the stub carries the ` +
+          `group_detection origin, which every later import:apply refuses to retract.`,
       );
     }
     if (converted.membersMissing.length > 0) {
@@ -359,6 +504,7 @@ export async function runConvertGroups(
     railsExisting: rows.filter((r) => r.rail === 'existing').length,
     railsFailed: rows.filter((r) => r.rail === 'failed').length,
     railsUnavailable: rows.filter((r) => r.rail === 'unavailable').length,
+    railAdjudicationRequired: rows.filter((r) => r.railAdjudication !== undefined).length,
   };
 
   // An EMPTY expected set is not a complete migration - it is a run that
@@ -374,10 +520,20 @@ export async function runConvertGroups(
   // now re-mints such a slot, so a residual `membersMissing` means the re-mint
   // ITSELF failed: a thread that can receive and can never reply is not a
   // migrated thread, and the cutover gate must say so.
+  //
+  // `membersReminted` IS ALSO A TERM (adversarial finding 34). A re-mint is
+  // CONTACT CREATION the operator did not ask for by hand, on the run that is
+  // the cutover gate, and it makes the founder's `drop` permanently inoperative
+  // for that person - a COMPLETE stamped over N of those is the report signing
+  // off on a decision nobody made. The run is convergent, so the operator reads
+  // the warnings and runs it again: the second pass re-mints nothing (the stubs
+  // exist) and reports COMPLETE. The cost of the term is one extra run; the
+  // cost of omitting it is a silent product decision.
   const complete =
     rows.length > 0 &&
     totals.refused === 0 &&
     totals.membersMissing === 0 &&
+    totals.membersReminted === 0 &&
     totals.railsFailed === 0 &&
     totals.railsUnavailable === 0;
   if (rows.length === 0) {

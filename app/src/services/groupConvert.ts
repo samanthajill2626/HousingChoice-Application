@@ -262,13 +262,51 @@ async function backfillRosterNames(
  * them would hand a group member proactive 1:1 sendability the drop was meant to
  * deny. The `drop` therefore still holds for every 1:1 and history purpose; only
  * the GROUP roster slot comes back.
+ *
+ * THE POINTER-AWARE LOOKUP COMES FIRST (adversarial finding 4). `stubFor` was
+ * copied from services/groupMembers.ts; the `findByPhone` that precedes it there
+ * was not, and that module is explicit about why: "a member may already exist
+ * under a hand-made id ... Minting the derived id anyway would duplicate a real
+ * person." `createIfAbsent` conditions on `attribute_not_exists(contactId)` and
+ * structurally cannot see a same-phone row under a different id, so without this
+ * the re-mint could create a SECOND row carrying the member's phone. That is not
+ * merely untidy: `groupSend` resolves each member BY PHONE and `findByPhone`
+ * returns whichever row the GSI yields first, so a duplicate can hand the send
+ * path the fresh stub instead of the staff-deleted real contact and silently
+ * bypass the soft-delete fence. NEVER MINT FOR A KNOWN PHONE - stamp the person
+ * who is already there (including a soft-deleted one: the deleted fence is
+ * groupSend's to enforce, and hiding the row from it is exactly the bug).
  */
 async function remintMemberStub(
   member: ConversationParticipant,
   at: string,
-  contactsRepo: Pick<ContactsRepo, 'createIfAbsent' | 'stampGroupParticipation'>,
+  contactsRepo: Pick<ContactsRepo, 'createIfAbsent' | 'stampGroupParticipation' | 'findByPhone'>,
   log: Logger,
 ): Promise<'reminted' | 'stamped' | 'already' | 'missing'> {
+  try {
+    const known = await contactsRepo.findByPhone(member.phone);
+    if (known !== undefined) {
+      // The roster slot's DERIVED id has no row, but this person does - under a
+      // hand-made id, or as an attached second number of somebody else. The
+      // thread is sendable through them, so all that is missing is the group
+      // consent basis. (The roster slot keeps its derived id: rewriting it is a
+      // roster overwrite this call has already performed, and the id is not what
+      // the send path resolves on.)
+      const stamped = await contactsRepo.stampGroupParticipation(known.contactId, at);
+      log.info(
+        { contactId: known.contactId, stamped },
+        'group text conversion: a roster slot with no record of its own resolved to an EXISTING contact by phone - stamped it instead of minting a duplicate',
+      );
+      return stamped;
+    }
+  } catch (err) {
+    log.error(
+      { err, contactId: member.contactId },
+      'group text conversion: the pointer-aware member lookup FAILED - refusing to mint a possible duplicate for this phone',
+    );
+    return 'missing';
+  }
+
   const stub: ContactItem = {
     contactId: member.contactId,
     type: 'unknown',
@@ -334,6 +372,7 @@ async function converge(
   }
   let roster = (item.participants ?? []) as ConversationParticipant[];
   let contactIdsBackfilled = 0;
+  let namesBackfilled = 0;
 
   // On the `converted` path the backfilled roster landed with the transition
   // itself. On the already-converted path it may still be pending - a thread
@@ -362,10 +401,34 @@ async function converge(
       named.members,
       roster,
     );
-    // A lost condition means the row stopped being a group thread under us (or
-    // another converge won the race); keep the roster we know about.
-    roster = (updated?.participants as ConversationParticipant[] | undefined) ?? named.members;
-    contactIdsBackfilled = filled.backfilled;
+    if (updated === undefined) {
+      // NOTHING WAS WRITTEN, SO NOTHING IS REPORTED AS WRITTEN (adversarial
+      // finding 23). The counters used to be assigned unconditionally, so a lost
+      // condition still fed the migration report - THE CUTOVER GATE - a durable
+      // roster write that did not happen. The member loop below also has to act
+      // on what is actually stored rather than on the roster we derived, or it
+      // can mint contact rows for contactIds no stored roster references.
+      log.warn(
+        { conversationId, outcome },
+        'group text convergence: the roster write LOST its precondition - nothing was persisted by this call, so the backfill counters stay zero and the member pass uses the STORED roster',
+      );
+      try {
+        const current = await conversationsRepo.getById(conversationId);
+        const persisted = current?.participants as ConversationParticipant[] | undefined;
+        if (persisted !== undefined) roster = persisted;
+      } catch (err) {
+        // A failed re-read is not a failed conversion: keep the roster we read
+        // at the top of this call, which is still a stored roster.
+        log.warn(
+          { err, conversationId },
+          'group text convergence: re-reading the roster after a lost write failed - using the roster this call read',
+        );
+      }
+    } else {
+      roster = (updated.participants as ConversationParticipant[] | undefined) ?? named.members;
+      contactIdsBackfilled = filled.backfilled;
+      namesBackfilled = named.backfilled;
+    }
   }
 
   let membersStamped = 0;
@@ -395,7 +458,7 @@ async function converge(
     outcome,
     importConnectRequested: item.import_connect_requested === true,
     contactIdsBackfilled,
-    namesBackfilled: named.backfilled,
+    namesBackfilled,
     membersStamped,
     membersAlreadyStamped,
     membersReminted,

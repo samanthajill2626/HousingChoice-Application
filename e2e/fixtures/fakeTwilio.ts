@@ -13,10 +13,12 @@ const FAKE_BASE = fakeUrl;
 // --- Direct inbound webhook (test-support only, for TwiML-reply assertions) ---
 //
 // The fake's `send-as-party` fires a signed inbound /sms webhook at the app but
-// DISCARDS the response body (it only checks the status). The A2P keyword replies
-// (STOP/HELP/opt-in) are returned by the webhook as TwiML `<Message>` in that
-// response body — NOT as an outbound thread message the fake records — so to
-// assert them we must POST the inbound webhook OURSELVES and read the TwiML back.
+// DISCARDS the response body (it only checks the status). Asserting what the app
+// answers an inbound with therefore means POSTing the inbound webhook OURSELVES and
+// reading the TwiML back. Since 2026-08-12 the app answers EVERY inbound - keywords
+// included - with the empty `<Response/>` ack (Twilio's Advanced Opt-Out owns the
+// STOP/HELP/opt-in replies), so this helper's job is now proving the ABSENCE of a
+// `<Message>` rather than its contents.
 //
 // This mirrors the fake's own signer (fake-twilio/src/engine/signer.ts) +
 // dispatcher exactly: HMAC-SHA1(authToken, signedUrl + sorted key/value params),
@@ -45,10 +47,9 @@ function signTwilio(url: string, params: Record<string, string>): string {
 
 /**
  * POST a signed inbound SMS webhook DIRECTLY to the app and return the raw TwiML
- * response body — the mechanism for asserting the A2P keyword replies (the webhook
- * answers a matched STOP/HELP/opt-in keyword with a TwiML `<Message>`, which the
- * fake's send-as-party would otherwise swallow). `messageSid` MUST be unique per
- * call (the inbound is deduped by SID). Returns `{ status, body }`.
+ * response body - the mechanism for asserting what the webhook answers an inbound
+ * with, which the fake's send-as-party would otherwise swallow. `messageSid` MUST be
+ * unique per call (the inbound is deduped by SID). Returns `{ status, body }`.
  */
 export async function postInboundSms(
   request: APIRequestContext,

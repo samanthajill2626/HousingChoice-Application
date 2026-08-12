@@ -1450,9 +1450,23 @@ reports a `LastEvaluatedKey`, re-run it until it does not.
    `EventType=onDeliveryUpdated` and confirm a 200 plus the handler's log line.
    Aim it at the exact string configured in the console, not at a URL retyped
    from memory - a trailing slash or a stale host is the whole failure mode.
-3. **Production-service keyword canary.** Send STOP from a test handset to the
-   business number and confirm the ordinary 1:1 keyword handling still applies
-   (group keyword handling is scoped to the sender, never the group thread).
+3. **Production-service keyword canary.** Requires step 3b ("Keyword
+   auto-replies (Advanced Opt-Out)") to have been done on the PROD messaging
+   service first. From a test handset, to the business number:
+   - `HELP` -> exactly ONE reply, and it is our `HELP_REPLY` copy. (Expect our
+     webhook NOT to be called at all: Twilio consumes HELP.)
+   - `STOP` -> exactly ONE reply, and it is our `STOP_CONFIRMATION` copy. Then
+     confirm the app recorded it: `sms_opt_out` set on the contact / the 1:1
+     conversation. ONE reply is the assertion - two means the app is still
+     replying somewhere.
+   - `START` -> exactly ONE reply, our `WELCOME_SMS` copy, and suppression
+     cleared. (This is the keyword that used to double.)
+   - **Sentence probe:** send `please stop sending tour reminders`. It must NOT
+     be treated as a keyword: no opt-out recorded, no auto-reply, and on a relay
+     pool number it still fans out to the group. This is what verifies that
+     Advanced Opt-Out stamps `OptOutType` on EXACT keyword messages only - the
+     one real risk of turning it on.
+   Group keyword handling stays scoped to the sender, never the group thread.
 
 ### 3. Twilio configuration, per env
 
@@ -1509,6 +1523,59 @@ What an operator should do on seeing that flood:
 4. The real fix is to restore the `syssid#` marker for Conversations legs so the
    status handler resolves them instead of erroring. That is a code change with
    its own review; file it rather than hand-patching prod.
+
+### 3b. Keyword auto-replies (Advanced Opt-Out)
+
+**Console-only, per Messaging Service. Dev now; prod at the preflight (step 2.3
+depends on it).** There is no Terraform or API step for this in the repo, which
+is exactly why it is written down here.
+
+**Why.** The app used to send the STOP/HELP/opt-in confirmations itself. A live
+test on 2026-08-12 proved Twilio's platform keyword handling answers them
+regardless: HELP never reached our webhook, our STOP confirmation was refused
+with error 21610 (Twilio had already blocked the number, so it had never once
+been delivered), and START produced a DOUBLE message. Cameron's ruling: Twilio
+owns the replies, configured with OUR copy; the app keeps every bit of the
+machinery (classification, suppression, consent, audit, relay annotations) and
+sends nothing. Background:
+`docs/issues/twilio-standard-optout-double-reply.md`.
+
+**Consequence if this step is skipped on a service:** nothing breaks and the
+compliance floor is still met - Twilio falls back to its DEFAULT, unbranded
+keyword copy. The only loss is that the replies are not ours.
+
+**Steps** (Twilio Console -> Messaging -> Services -> the service backing
+`TWILIO_MESSAGING_SERVICE_SID` for that env -> Opt-Out Management):
+
+1. Set opt-out management to **Advanced Opt-Out** (enabled).
+2. Leave the keyword LISTS at Twilio's defaults. Our lists are supersets
+   (opt-out adds OPTOUT + REVOKE; opt-in adds JOIN + HOME + YES + UNSTOP) and
+   the app honors the supersets itself - the console lists only control which
+   words Twilio answers and blocks.
+3. Paste the three confirmations VERBATIM from
+   `app/src/lib/smsCompliance.ts` (surfaced through
+   `app/src/messages/catalog.ts`, which is the source of truth):
+   - **Opt-out confirmation** = `STOP_CONFIRMATION` (`keyword.stop`)
+   - **Help message** = `HELP_REPLY` (`keyword.help`)
+   - **Opt-in confirmation** = `WELCOME_SMS` (`welcome.sms`)
+   Do not retype them. Copy from the constant so a character never drifts.
+4. Save, then run the keyword canary in step 2.3 against that service - ONE
+   branded reply per keyword, plus the sentence probe.
+
+**Changing the copy later** - three steps, in this order, always:
+
+1. Edit the constant in `app/src/lib/smsCompliance.ts` and ship it (it is the
+   reviewed, version-controlled source of truth; `keyword.stop` / `keyword.help`
+   are compliance-locked and not operator-editable).
+2. Update the corresponding console field on EVERY messaging service (dev and
+   prod are configured independently).
+3. Re-run the keyword canary. The console is the only thing that actually sends
+   these, so an un-mirrored constant edit changes nothing a recipient sees - and
+   nothing in the app will tell you.
+
+Note that an operator `welcomeText` override in Settings no longer affects the
+opt-in confirmation; it reaches the web-form/housing-fair welcome only. The
+keyword confirmation is a console edit.
 
 ### 4. The migration run
 

@@ -272,6 +272,14 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
     // WELCOME_SMS carries no {firstName} token; an operator OVERRIDE may still use
     // it (today's renderWelcome convention) — so firstName is a declared, default-
     // unused var (allowed because the entry is editable).
+    //
+    // TWO USES, ONE OF WHICH THE APP NO LONGER SENDS. As the housing-fair /
+    // web-form welcome it is sent by the app exactly as before. As the OPT-IN
+    // (START/JOIN/HOME/YES/UNSTOP) confirmation it is sent by Twilio Advanced
+    // Opt-Out, console-configured from this default - the app does not send it;
+    // see RUNBOOK "Keyword auto-replies (Advanced Opt-Out)". An operator
+    // `welcomeText` override therefore reaches the web-form path only; changing
+    // the keyword confirmation is a console edit.
     default: WELCOME_SMS,
     class: 'operational',
     editable: true,
@@ -290,6 +298,13 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   },
 
   // --- Compliance-locked (never freely editable; reference smsCompliance consts) ---
+  //
+  // BOTH ENTRIES ARE SENT BY TWILIO ADVANCED OPT-OUT (console-configured from
+  // these constants) - the app does not send either one; see RUNBOOK "Keyword
+  // auto-replies (Advanced Opt-Out)". They stay here because this catalog is
+  // still the SOURCE OF TRUTH the console is configured FROM: the copy is
+  // authored, reviewed and version-controlled here, and the RUNBOOK's
+  // copy-change procedure is edit-constant -> update-console -> canary.
   'keyword.stop': {
     id: 'keyword.stop',
     default: STOP_CONFIRMATION,

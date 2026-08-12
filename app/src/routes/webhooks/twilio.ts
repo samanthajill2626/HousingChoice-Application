@@ -31,7 +31,6 @@ import {
 import { summarizeError } from '../../lib/errors.js';
 import { logger as defaultLogger, type Logger } from '../../lib/logger.js';
 import { classifyInboundKeyword } from '../../lib/smsCompliance.js';
-import { resolveMessage, resolveWithSettings } from '../../messages/index.js';
 import { twilioSignatureMiddleware } from '../../middleware/twilioSignature.js';
 import type { PoolNumbersService } from '../../services/poolNumbers.js';
 import { createAuditRepo, type AuditRepo } from '../../repos/auditRepo.js';
@@ -100,29 +99,31 @@ import { RELAY_FANOUT_JOB } from '../../jobs/relayFanOut.js';
 /** Empty TwiML acknowledgment — "received, no reply instructions". */
 const EMPTY_TWIML = '<?xml version="1.0" encoding="UTF-8"?><Response/>';
 
-/**
- * TwiML wrapper for a single reply message — the idiomatic Twilio mechanism for
- * a webhook to answer inbound SMS. WE own the keyword replies now (spec §6):
- * Twilio Advanced Opt-Out auto-reply is OFF (operator step), so a matched
- * keyword's filed reply is returned HERE. Critically, the STOP confirmation goes
- * to a JUST-opted-out number, so it must ride the TwiML response — NOT the
- * opt-out-GATED sendMessage wrapper (which would refuse it). XML-escape the body
- * so filed copy can never break the TwiML.
- */
-function messageTwiml(body: string): string {
-  return `<?xml version="1.0" encoding="UTF-8"?><Response><Message>${escapeXml(body)}</Message></Response>`;
-}
-
-/** Minimal XML entity escaping for a TwiML text node (filed copy is trusted, but
- *  ampersands/angle brackets must still be escaped to stay well-formed). */
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&apos;');
-}
+// THERE IS NO KEYWORD-REPLY TwiML ANY MORE (2026-08-12, Cameron's ruling; issue
+// twilio-standard-optout-double-reply). This module used to carry a
+// `messageTwiml(body)` helper because "WE own the keyword replies (spec 6):
+// Twilio Advanced Opt-Out auto-reply is OFF (operator step)". A live dev test
+// on the real messaging service disproved every clause of that premise:
+//
+//   - HELP never reached this webhook at all. Twilio consumed it and answered.
+//   - Our STOP confirmation was refused with error 21610 (send to an opted-out
+//     number) because Twilio had ALREADY applied the block. It has never once
+//     been delivered - the "must ride the TwiML response, not the gated send
+//     wrapper" reasoning was correct about the gate and wrong about the outcome.
+//   - START drew Twilio's own confirmation ON TOP of our welcome: a double text.
+//
+// The resolution is the opposite configuration: Advanced Opt-Out is turned ON
+// and configured, in the console, with OUR filed copy (messages/catalog.ts stays
+// the source of truth; see RUNBOOK "Keyword auto-replies (Advanced Opt-Out)").
+// The app keeps ALL the keyword machinery - classification, suppression and
+// consent bookkeeping, the audit trail, the relay annotations - and emits NO
+// reply, so every inbound now acks with the empty TwiML below.
+//
+// ONE LIVE CONSEQUENCE TO KNOW ABOUT: with Advanced Opt-Out ON, Twilio stamps
+// `OptOutType` on the inbound, and `classifyInboundKeyword` already PREFERS it
+// over the body. That is now the LIVE classification path, not a hypothetical.
+// It matches on the exact keyword message, which the dev keyword canary verifies
+// with a sentence probe ("please stop sending tour reminders" must NOT classify).
 
 // Opt-out / opt-in keyword sets + the filed replies now live in the SINGLE
 // SOURCE OF TRUTH (lib/smsCompliance.ts) so they can never drift from the
@@ -219,9 +220,10 @@ export interface TwilioWebhookDeps {
   /** Share-broadcast results rollup (M1.8a); the real repo by default. */
   broadcastsRepo?: BroadcastsRepo;
   /**
-   * Org settings — read at the START/opt-in keyword reply so it honors the
-   * operator's `welcomeText` override (resolveWithSettings('welcome.sms')),
-   * matching the housing-fair path. Injectable in tests; the real repo otherwise.
+   * Org settings - the group cross-check / railed-inbound liveness high-water
+   * marks are written through it. (It used to also resolve the operator's
+   * `welcomeText` override for the opt-in keyword reply; that reply is Twilio's
+   * now.) Injectable in tests; the real repo otherwise.
    */
   settingsRepo?: SettingsRepo;
   /** SSE live-update bus (M1.2); the process singleton by default. */
@@ -442,7 +444,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     const { MessageSid, From, Body } = msg;
     mergeContext({ conversationId: relay.conversationId });
 
@@ -615,14 +617,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // itself stays on the relay thread (persisted above for the audit trail).
     // Gated on isCommand (NOT kind): an unsuppressed opt-in is content and was
     // already fanned out above, so it must skip keyword processing entirely.
-    let keywordReply: string | undefined;
     if (isCommand) {
       const effectiveContact = senderContact ?? (await contacts.findByPhone(From));
       const oneToOne = await conversations.createOrGetByParticipantPhone(
         From,
         conversationTypeFor(effectiveContact),
       );
-      keywordReply = await processInboundKeywords({
+      await processInboundKeywords({
         conversation: oneToOne,
         effectiveContact,
         From,
@@ -667,11 +668,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       },
       'twilio relay inbound message processed',
     );
-    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
-  // Keyword handling (STOP / HELP / opt-in) - spec sec 6, WE own the replies.
+  // Keyword handling (STOP / HELP / opt-in) - spec sec 6, TWILIO owns the replies.
   // Extracted from the /sms handler so the closed-group intercept can REUSE the
   // SAME logic path (relay-number-lifecycle AF-4: a closed-group member's STOP
   // to the pool number must suppress exactly like a STOP to the main number did
@@ -679,10 +679,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   // Suppression writes go through the SHARED number-scoped seam
   // (services/numberSuppression.ts): conversation flag always, CONTACT flag only
   // on the primary number (BE1 number-scope). This function keeps the consent
-  // stamps, the audit source tag, and the filed reply (STOP confirmation / HELP
-  // / welcome) that rides the TwiML response. Best-effort: a repo failure is
-  // logged and NEVER crashes the webhook (the message is already persisted).
-  // PII: SIDs/IDs only.
+  // stamps and the audit source tag. It composes NO reply - Twilio's Advanced
+  // Opt-Out answers STOP/HELP/START with the copy filed in messages/catalog.ts
+  // (module header). Best-effort: a repo failure is logged and NEVER crashes the
+  // webhook (the message is already persisted). PII: SIDs/IDs only.
   //
   // GROUP TEXTING (spec 4.4): the target conversation may be a LAZY THUNK. The
   // group path runs this seam on EVERY group inbound - the plain-inbound
@@ -701,13 +701,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     MessageSid: string;
     /** Extra audit detail (group provenance, spec 4.4). Absent on 1:1. */
     auditContext?: Record<string, unknown>;
-    /**
-     * Skip composing the filed reply. The group path sends NOTHING on group
-     * keywords in v1 (spec 4.4), and composing the opt-in welcome would do a
-     * pointless settings read on every group START.
-     */
-    suppressReply?: boolean;
-  }): Promise<string | undefined> {
+  }): Promise<void> {
     const {
       conversation,
       effectiveContact,
@@ -716,9 +710,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       OptOutType,
       MessageSid,
       auditContext,
-      suppressReply,
     } = input;
-    let keywordReply: string | undefined;
     try {
       const kind = classifyInboundKeyword(Body, OptOutType);
       const isHelp = kind === 'help';
@@ -747,13 +739,14 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         });
       }
 
-      if (isHelp) {
-        // HELP: no suppression change, and NO conversation is resolved - which is
-        // exactly why the lazy thunk sits below and not at the top of this
-        // function. Reply the filed HELP copy (declares no phone number -
-        // verified in lib/smsCompliance.ts + its test).
-        if (suppressReply !== true) keywordReply = resolveMessage('keyword.help');
-      } else if (optedOut || optedIn) {
+      // HELP has NO branch of its own any more. It never changed suppression and
+      // it no longer draws a reply (Twilio answers HELP - on the live service it
+      // usually consumes the message before this webhook sees it at all), so the
+      // only thing HELP still does here is EXCLUDE itself from the plain-inbound
+      // consent stamp above. That exclusion is why `isHelp` survives, and why no
+      // conversation is resolved on a HELP - which is exactly what the lazy thunk
+      // below exists for.
+      if (optedOut || optedIn) {
         const source =
           OptOutType === 'STOP' || OptOutType === 'START' ? 'OptOutType' : 'keyword';
         // The one number-scoped suppression writer (BE1): the CONVERSATION flag
@@ -786,21 +779,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             consent_at: new Date().toISOString(),
           });
         }
-        // The filed reply for the matched keyword (rides the TwiML response).
-        // STOP -> the compliance-locked confirmation; opt-in/START -> the welcome,
-        // resolved through settings so an operator `welcomeText` override is
-        // honored (sec 7 - matches the housing-fair path; today's raw-constant use
-        // ignored the override).
-        if (suppressReply !== true) {
-          keywordReply = optedOut
-            ? resolveMessage('keyword.stop')
-            : await resolveWithSettings('welcome.sms', undefined, { settingsRepo: settings });
-        }
+        // NO REPLY IS COMPOSED HERE. `keyword.stop` and `welcome.sms` remain the
+        // filed copy Twilio's Advanced Opt-Out is configured WITH; the app sends
+        // neither (see the module header).
       }
     } catch (err) {
       log.error({ err, providerSid: MessageSid }, 'opt-out recording failed - message persisted, flag NOT updated');
     }
-    return keywordReply;
   }
 
   // ---------------------------------------------------------------------
@@ -813,7 +798,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
   // strictly more useful and never pollutes group history). STOP/opt-out IS
   // processed here (AF-4) via the shared processInboundKeywords path so a
   // closed-group member's STOP suppresses exactly like a STOP to the main
-  // number - the filed reply is returned to the caller to ride the TwiML.
+  // number does. Neither path replies any more (module header).
   // ---------------------------------------------------------------------
   async function handleClosedGroupInbound(
     group: ConversationItem,
@@ -823,7 +808,7 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       Body: string | undefined;
       params: WebhookParams;
     },
-  ): Promise<string | undefined> {
+  ): Promise<void> {
     const { MessageSid, From, Body } = msg;
     const mediaUrls = parseInboundMediaUrls(msg.params);
 
@@ -944,27 +929,19 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // STOP must register the opt-out (conversation + primary-number contact
     // flags) so later 1:1/relay sends are gated - restoring the pre-feature
     // behavior (a closed group's cleared number fell through to the 1:1 STOP
-    // block). The message already landed above; the returned reply rides the
-    // TwiML the caller sends.
+    // block). The message already landed above.
     //
-    // WHY THE MARKER AND THE REPLY DISAGREE ON THIS PATH, since they look like
-    // they should move together (fix wave 4, item 10). Above, the extraction
-    // marker is set only when the inbound is envelope-bearing. Here, the keyword
-    // reply is sent unconditionally - no `suppressReply` - envelope or not. That
-    // is deliberate and the two are answering different questions:
-    //   - the MARKER asks "might this text be group content?", and the envelope
-    //     is the evidence. It is extraction HYGIENE, with exactly one consumer
-    //     (jobs/extraction.ts's transcript filter) and no effect on routing.
-    //   - the REPLY asks "what does this NUMBER get told when it texts STOP?",
-    //     and the answer is PRESERVED RELAY BEHAVIOR: before this feature a
-    //     closed group's cleared number fell through to the 1:1 keyword block and
-    //     got its confirmation. Invariant 13.6 keeps relay behavior
-    //     byte-identical, so suppressing it because an envelope happened to be
-    //     present would be this feature changing relay, which is the one thing it
-    //     may not do.
-    // Same principle as fix wave 4 item 9: suppression belongs to a GROUP FILING,
-    // and no group filing happens here.
-    return processInboundKeywords({
+    // THE MARKER/REPLY DISAGREEMENT THIS COMMENT USED TO EXPLAIN IS GONE (fix
+    // wave 4 item 10, retired 2026-08-12). The extraction MARKER is still set
+    // only for an envelope-bearing inbound - it asks "might this text be group
+    // content?", it is extraction hygiene, and it has exactly one consumer
+    // (jobs/extraction.ts's transcript filter). The keyword REPLY that used to
+    // ride this path unconditionally no longer exists on ANY path, so there is
+    // nothing left for the two to disagree about. That IS a relay-visible
+    // change - a closed-group member's STOP used to draw the app's confirmation
+    // here - and it is deliberate: Twilio now sends that confirmation itself,
+    // and keeping ours would double it (which invariant 13.6 never asked for).
+    await processInboundKeywords({
       conversation,
       effectiveContact: contact,
       From,
@@ -1194,16 +1171,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
    */
   interface GroupInboundOutcome {
     handled: boolean;
-    /**
-     * Only meaningful when `handled` is false. TRUE means the group branch
-     * declined because the envelope COLLAPSED to us-plus-one-person, which spec
-     * 13.1(c) rules "semantically IS 1:1" - so the 1:1 pipeline must give it
-     * FULL 1:1 keyword semantics, including the filed TwiML replies invariant
-     * 13.4 pins as byte-identical (fix wave 2, contest X2). Every other decline
-     * reason is a GROUP reason: the envelope is positive proof of carrier-group
-     * content, and spec 13.4's second half says the app sends no reply to that.
-     */
-    semantically1to1?: boolean;
+    // THIS OUTCOME USED TO CARRY A SECOND FIELD, `semantically1to1` (fix wave 2,
+    // contest X2), which told the 1:1 pipeline whether to withhold OUR filed
+    // keyword reply: a COLLAPSED roster is "semantically a 1:1" (spec 13.1(c))
+    // and kept its replies, while every other decline was a GROUP reason and did
+    // not. It had exactly one consumer and no other meaning, and since
+    // 2026-08-12 the app emits no keyword reply on ANY path (module header), so
+    // there is nothing left for the distinction to decide. The collapsed-roster
+    // ruling itself still stands - it is what the extraction marker and the
+    // filing target are argued from - it just no longer branches here.
   }
 
   async function handleGroupInbound(msg: {
@@ -1240,8 +1216,8 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // `createOrGetByParticipantPhone` unconditionally, MATERIALIZING an empty
       // needs-triage 1:1 for the group sender (the exact row numberSuppression
       // and the group path both go out of their way never to create), and it
-      // runs the keyword handler WITHOUT `suppressReply`, so a group `STOP`
-      // could draw a TwiML reply the group path never sends.
+      // ran the keyword handler on that phantom row. (It also drew a TwiML
+      // keyword reply the group path never sent; no path replies now.)
       //
       // The sid pointer already knows. If this message lives on a GROUP thread,
       // the first delivery's filing stands: ack and stop. Best effort - a failed
@@ -1266,9 +1242,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
             // and then die before recording anything, leaving THIS delivery as
             // the only pass that will ever see the keyword. Run the same shared
             // seam the group path runs (lazy 1:1 target, so a plain inbound or a
-            // HELP still mints nothing; `suppressReply` because this IS group
-            // content). Idempotent by construction, so re-running it after a
-            // delivery that already recorded is a no-op on the same flags.
+            // HELP still mints nothing). Idempotent by construction, so
+            // re-running it after a delivery that already recorded is a no-op
+            // on the same flags.
             //
             // ONE contact read, not two (fix wave 4, item 10). The sender was
             // being resolved twice - once for the lazy conversation factory and
@@ -1295,7 +1271,6 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
                 OptOutType: msg.OptOutType,
                 MessageSid,
                 auditContext: { groupConversationId: filed.conversationId, via: 'group_text' },
-                suppressReply: true,
               });
             } catch (keywordErr) {
               // SUMMARIZED, like every other catch that can see a vendor error on
@@ -1365,10 +1340,12 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         { event: 'group_roster_collapsed', providerSid: MessageSid, rosterSize: identity.roster.length },
         'group envelope collapsed to fewer than two outside members - filed to the sender 1:1 (semantically a 1:1)',
       );
-      // The ONE decline that is not group content: 13.1(c) says this IS a 1:1,
-      // so it keeps 1:1 keyword semantics (contest X2). The extraction marker
-      // still rides along - the body may name the other parties.
-      return { handled: false, semantically1to1: true };
+      // The ONE decline that is not group content: 13.1(c) says this IS a 1:1.
+      // It keeps full 1:1 keyword semantics, which since 2026-08-12 means the
+      // same "record everything, reply nothing" every other path gets. The
+      // extraction marker still rides along - the body may name the other
+      // parties.
+      return { handled: false };
     }
 
     // (ii.5) A REDELIVERY NEVER RE-CLASSIFIES. The cold-start refusal at (0) is
@@ -1700,9 +1677,9 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // the plain-inbound contact-level consent stamp for the SENDER lives there.
     // The target conversation is a THUNK - the sender's 1:1 is materialized ONLY
     // if an opt-out/opt-in actually needs a target, never for plain inbound and
-    // never for HELP. `suppressReply` because the app SENDS NOTHING on group
-    // keywords in v1; suppression is scoped to the sender (contact + their own
-    // 1:1), NEVER the group thread.
+    // never for HELP. Suppression is scoped to the sender (contact + their own
+    // 1:1), NEVER the group thread. The app SENDS NOTHING here - which is now
+    // true of every path, so it costs no parameter.
     await processInboundKeywords({
       conversation: async () =>
         conversations.createOrGetByParticipantPhone(From, conversationTypeFor(senderContact)),
@@ -1712,7 +1689,6 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       OptOutType: msg.OptOutType,
       MessageSid,
       auditContext: { groupConversationId: thread.conversationId, via: 'group_text' },
-      suppressReply: true,
     });
 
     // Cross-check liveness (spec 8.2): record that a RAILED group thread took
@@ -1832,13 +1808,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         }
         const openMatch = openMatches.sort(byNewestCreated)[0];
         if (openMatch) {
-          // Parity with the closed intercept: an open-path keyword (STOP/HELP/
-          // opt-in) returns its filed reply to ride the TwiML; a normal relay
-          // returns undefined -> empty ack.
-          const relayReply = await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(
-            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
-          );
+          // Empty ack, keyword or not: the open path processes STOP/HELP/opt-in
+          // and Twilio's Advanced Opt-Out sends the confirmation.
+          await handleRelayInbound(openMatch, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // (b) Else a CLOSED group whose roster contains the sender -> deliver
@@ -1849,17 +1822,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
           .filter((g) => g.status !== 'open' && (g.participants ?? []).some((m) => m.phone === From))
           .sort(byNewestCreated)[0];
         if (closedMatch) {
-          // AF-4: the intercept processes STOP/opt-out and returns the filed
-          // reply (STOP confirmation / HELP / welcome), which rides the TwiML.
-          const closedReply = await handleClosedGroupInbound(closedMatch, {
+          // AF-4: the intercept processes STOP/opt-out; the confirmation is
+          // Twilio's, so the ack is empty.
+          await handleClosedGroupInbound(closedMatch, {
             MessageSid,
             From,
             Body,
             params,
           });
-          res.type('text/xml').send(
-            closedReply !== undefined ? messageTwiml(closedReply) : EMPTY_TWIML,
-          );
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // (c) Unknown sender (on NO roster) texting a pool number.
@@ -1873,12 +1844,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         //     closed-roster member (that interception is branch (b) above).
         const openFallback = groups.filter((g) => g.status === 'open').sort(byNewestCreated)[0];
         if (openFallback) {
-          // Same reply-riding-TwiML contract as the open-roster match above (an
-          // unknown-sender STOP still gets its confirmation).
-          const relayReply = await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
-          res.type('text/xml').send(
-            relayReply !== undefined ? messageTwiml(relayReply) : EMPTY_TWIML,
-          );
+          // Same contract as the open-roster match above (an unknown-sender STOP
+          // is still recorded; Twilio still confirms it).
+          await handleRelayInbound(openFallback, { MessageSid, From, To, Body, params });
+          res.type('text/xml').send(EMPTY_TWIML);
           return;
         }
         // else: every group on this number is closed -> fall through to (2).
@@ -1905,15 +1874,6 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // thread. AI fact extraction excludes marked messages from every transcript
     // window it builds (spec 5.4).
     let groupAmbiguousOrigin = false;
-    // Whether the 1:1 pipeline below must withhold OUR filed keyword reply.
-    // Scoped to a decline for a GROUP reason (contest X2) - never to the
-    // collapsed roster, which spec 13.1(c) defines as a 1:1 and 13.4 pins as
-    // byte-identical, and never to the tripwire heuristic, which legitimately
-    // matches ordinary subject-only 1:1 MMS. Set on EXACTLY ONE branch below:
-    // suppression is a property of a GROUP FILING (spec 4.4 - the app sends
-    // nothing on one), so a path that files 1:1 and can derive no group
-    // semantics at all never sets it (fix wave 4, item 9).
-    let suppressKeywordReply = false;
     if (others.length > 0 && onBusinessNumber) {
       const outcome = await handleGroupInbound({
         MessageSid,
@@ -1925,16 +1885,15 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         others,
       });
       if (outcome.handled) {
-        // The app SENDS NOTHING on a group inbound in v1 (spec 4.4), including
-        // on keywords: Twilio's standard opt-out auto-reply answers the sender
-        // 1:1 (issue twilio-standard-optout-double-reply owns that coupling).
+        // The app SENDS NOTHING on a group inbound (spec 4.4), keywords
+        // included - which is now the whole stack's posture, not this branch's
+        // exception (issue twilio-standard-optout-double-reply, RESOLVED).
         res.type('text/xml').send(EMPTY_TWIML);
         return;
       }
       // Collapsed roster or corrupt shape: fall through to the 1:1 pipeline
       // below, MARKED. Nothing was persisted above, so no double-filing.
       groupAmbiguousOrigin = true;
-      suppressKeywordReply = outcome.semantically1to1 !== true;
     } else if (others.length > 0) {
       // EVERY OTHER ENVELOPE-BEARING INBOUND. We have POSITIVE proof this is
       // carrier-group content (the envelope is right here) but we are NOT
@@ -1951,18 +1910,13 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // because a misconfigured stack matches on every group inbound at once
       // and the flood would bury the signal.
       //
-      // THE KEYWORD REPLY IS NOT SUPPRESSED HERE (fix wave 4, item 9). It was,
-      // and that was the X2 principle applied one branch too far. Suppression
-      // exists because the app SENDS NOTHING on a group inbound (spec 4.4) - it
-      // is a property of a GROUP FILING, and no group filing happens on this
-      // branch. This message is filed as an ordinary 1:1, on a number where
-      // detection is structurally off (BUSINESS_PHONE_NUMBER unset) or does not
-      // apply (a pool or other org number - A6's deliberate fall-through). A
-      // person who texts STOP there gets the 1:1 keyword semantics 13.4 pins as
-      // byte-identical; withholding our confirmation left them with silence from
-      // us on the one message where silence is least acceptable - and did it
-      // WORST on the misconfiguration path, where it would silence every keyword
-      // reply on the whole stack.
+      // THE KEYWORD REPLY ARGUMENT THAT USED TO SIT HERE (fix wave 4, item 9)
+      // IS MOOT. It weighed whether this branch should withhold OUR filed
+      // confirmation; the app no longer has one to withhold, on any branch, and
+      // Twilio confirms every keyword itself. What survives from it is the part
+      // that was never about the reply: a person who texts STOP to a number
+      // where detection is off still has their opt-out RECORDED here, which the
+      // shared seam below does unconditionally.
       //
       // The MARKER is a separate decision and still applies: the envelope is
       // positive proof of group content, and filed unmarked it would reach AI
@@ -2118,46 +2072,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       }
     }
 
-    // (4) STOP / HELP / START keyword handling (spec §6 — WE own the replies).
-    // Twilio Advanced Opt-Out auto-reply is OFF (operator step) so no double
-    // confirmations; the filed reply is returned as TwiML at the ack below. The
-    // message itself stays on the timeline either way (persisted above).
-    //   - opt-out keyword → suppress + reply STOP_CONFIRMATION;
-    //   - HELP           → reply HELP_REPLY (no flag change);
-    //   - opt-in keyword → clear suppression, stamp inbound_text consent if the
-    //                      contact has none, reply WELCOME_SMS.
-    // `keywordReply` is captured here and emitted as the TwiML response at the
-    // end of the handler. The STOP confirmation MUST ride this TwiML response,
-    // NOT the opt-out-gated sendMessage wrapper (which would refuse a send to a
-    // just-opted-out number).
-    // Shared with the closed-group intercept (AF-4) so both inbound paths honor
-    // STOP identically. keywordReply rides the TwiML response at the ack below.
-    const keywordReply = await processInboundKeywords({
+    // (4) STOP / HELP / START keyword handling (spec 6 - TWILIO owns the
+    // replies since 2026-08-12; see the module header and RUNBOOK "Keyword
+    // auto-replies (Advanced Opt-Out)"). The message itself stays on the
+    // timeline either way (persisted above). What THIS still does:
+    //   - opt-out keyword -> suppress (conversation always, contact on primary);
+    //   - HELP            -> nothing (no flag change, no thread minted);
+    //   - opt-in keyword  -> clear suppression, stamp inbound_text consent if the
+    //                       contact has none.
+    // Shared with the closed-group intercept (AF-4) and the group path so every
+    // inbound path honors STOP identically. The handler emits no reply, so this
+    // returns nothing and the ack at the end of the handler is always empty.
+    await processInboundKeywords({
       conversation,
       effectiveContact,
       From,
       Body,
       OptOutType,
       MessageSid,
-      // THE APP SENDS NOTHING FOR GROUP-ORIGIN CONTENT (fix wave 5, adversarial
-      // 18), NARROWED IN FIX WAVE 2 (contest X2). An envelope is positive proof
-      // of carrier-group content, and for a message that only reaches the 1:1
-      // pipeline because a fail-open path declined to mint a thread, spec 4.4
-      // and the group branch's own ack both say the app never replies - Twilio's
-      // standard opt-out auto-reply answers the sender 1:1 (issue
-      // twilio-standard-optout-double-reply owns that coupling). The KEYWORD is
-      // still processed and the opt-out still recorded; only OUR reply is
-      // withheld.
-      //
-      // What wave 1 got wrong was the SCOPE: `others.length > 0` also matches
-      // the COLLAPSED ROSTER, which spec 13.1(c) rules "semantically IS 1:1",
-      // so an ordinary two-party conversation that happened to carry one org
-      // number in its envelope lost its STOP/START/HELP replies - the exact
-      // filed copy invariant 13.4 pins as byte-identical, HELP included (that
-      // copy is deliberately verified to declare no phone number). The flag is
-      // now set from the DECLINE REASON, and the collapsed roster never sets it.
-      // The tripwire heuristic never set it either, then or now.
-      ...(suppressKeywordReply && { suppressReply: true }),
     });
 
     // (5) MMS media — mirror each MediaUrl{i} into S3 (streams only). Runs before
@@ -2238,15 +2170,11 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
         direction: 'inbound',
         bodyLength: Body?.length ?? 0,
         mediaCount: mediaUrls.length,
-        keywordReply: keywordReply !== undefined,
       },
       'twilio inbound message processed',
     );
-    // A matched keyword (STOP/HELP/opt-in) returns its filed reply as a TwiML
-    // <Message>; every other inbound acks with empty TwiML. NO PII in the body
-    // (all filed copy). The STOP confirmation reaching a just-opted-out number
-    // is exactly why this rides the TwiML response, not the gated send wrapper.
-    res.type('text/xml').send(keywordReply !== undefined ? messageTwiml(keywordReply) : EMPTY_TWIML);
+    // EVERY inbound acks with the empty TwiML, keyword or not (module header).
+    res.type('text/xml').send(EMPTY_TWIML);
   });
 
   // ---------------------------------------------------------------------

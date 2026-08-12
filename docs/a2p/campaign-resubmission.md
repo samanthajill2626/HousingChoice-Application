@@ -5,7 +5,7 @@
 **Why:** We audited the app against the approved campaign and are updating the
 **submission to describe what the app actually does**. Since the June version of
 this doc, the app-side compliance hardening has **shipped** (consent checkbox,
-consent recording, JIT consent gate, self-managed STOP/HELP/START, keyword lists,
+consent recording, JIT consent gate, STOP/HELP/START handling, keyword lists,
 first-contact identity + opt-out), and the app gained features the submission
 must now cover: **MMS photo attachments**, **group relay texting**, and **staff
 cell-verification codes**. This doc lists every field to change, the new copy to
@@ -181,20 +181,44 @@ carrier-legitimate). No app change.
 
 ---
 
-## 7. Keywords — no campaign change (info)
+## 7. Keywords - no campaign change (info) - **updated 2026-08-12**
 
-Your declared keyword lists are unchanged and the app now honors them (shipped,
-self-managed — Twilio Advanced Opt-Out confirmed OFF and must stay off):
+Your declared keyword lists are unchanged and the app honors them on every
+inbound path:
 - **Opt-out:** OPTOUT, CANCEL, END, QUIT, UNSUBSCRIBE, REVOKE, STOP, STOPALL.
 - **Opt-in:** START, JOIN, HOME (+ we also accept YES and UNSTOP).
 
-The self-managed auto-replies use your filed copy:
+**How the replies are sent changed.** This doc previously said the auto-replies
+were **self-managed** by the app, with "Twilio Advanced Opt-Out confirmed OFF and
+must stay off". A live test on 2026-08-12 disproved that: Twilio's platform
+keyword handling was active regardless - it consumed HELP before the app ever
+saw it, blocked the app's own STOP confirmation (error 21610, so that
+confirmation had never once been delivered), and answered START on top of the
+app's welcome. Details in `docs/issues/twilio-standard-optout-double-reply.md`.
+
+Opt-out handling is therefore **Twilio-managed, using our copy**: Advanced
+Opt-Out is enabled on the Messaging Service and configured with the exact filed
+strings below. The app still records every opt-out/opt-in (suppression flags,
+consent, audit trail) and honors the full keyword lists; it just does not send
+the confirmations. Recipients get exactly one branded reply per keyword.
+
+The Twilio-managed auto-replies use your filed copy:
 - **Opt-out reply:** "You have successfully been unsubscribed. You will not receive
   any more messages from this number. Reply START to resubscribe."
 - **HELP reply:**
   > Tenant Place LLC: housing listing alerts for voucher holders. Msg frequency
   > varies. Msg & data rates may apply. Reply STOP to opt out. More info:
   > tenant.place.
+- **Opt-in reply:** the welcome copy in item 6's template list (WELCOME_SMS).
+
+> **Founder call - compliance wording.** The campaign description and the
+> "what the app already does" section below describe opt-out as *self-managed*.
+> That word is now inaccurate; the substance (all keywords honored, one branded
+> confirmation, opt-outs enforced on every send path) is unchanged and still
+> exceeds the requirement. Decide whether to re-word the submitted campaign
+> description to say "opt-out handled by the Messaging Service with our filed
+> copy" - this is a description touch-up, not a behavior change, and it may not
+> be worth triggering re-vetting on its own. Flagged, not decided.
 
 ---
 
@@ -221,8 +245,9 @@ it carries traffic.
 Tracked in `docs/issues/a2p-compliance-hardening.md`. In brief: required consent
 checkbox on the web form (server-enforced); Tenant Place LLC branding +
 STOP/HELP language on first-contact messages; the full keyword lists above
-honored on every inbound path (1:1, closed relay, open relay); self-managed
-STOP/HELP/START auto-replies using the filed copy; consent method + date + version
+honored on every inbound path (1:1, closed relay, open relay); STOP/HELP/START
+auto-replies using the filed copy (sent by the Messaging Service's Advanced
+Opt-Out, configured with that copy - see item 7); consent method + date + version
 recorded on every contact (web form, inbound text, inbound call, staff-entered);
 a just-in-time consent gate so staff can't proactively text a contact with no
 recorded consent; a broadcast fence that skips non-consented recipients; opt-out

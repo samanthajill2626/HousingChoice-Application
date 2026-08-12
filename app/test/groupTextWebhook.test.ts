@@ -325,15 +325,14 @@ describe('group detection: branch placement (T3.2)', () => {
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
 
-  // THE DEFECT THESE TWO PIN (fix wave 4, item 9). Suppression of OUR filed
-  // keyword reply is a property of a GROUP FILING - the app sends nothing on one
-  // (spec 4.4) - and it was being applied on a branch where NO group filing
-  // happens: the message is filed as an ordinary 1:1 on a number where detection
-  // is structurally off or does not apply. A person texting STOP there got
-  // silence from us on the one message where silence is least acceptable, and
-  // the misconfiguration case is the worse of the two: BUSINESS_PHONE_NUMBER
-  // unset silences every keyword reply on the whole stack.
-  it('STILL sends the 1:1 keyword reply for an envelope-bearing STOP on a NON-business number', async () => {
+  // WHAT THESE TWO PIN NOW (2026-08-12 ruling). Fix wave 4 item 9 was about the
+  // SCOPE of withholding OUR keyword reply on a 1:1-filed message. That whole
+  // distinction is dissolved: the app no longer emits a keyword reply on ANY
+  // path, because the live test proved Twilio's platform handling answers every
+  // keyword itself (and refused ours with 21610). What still has to hold on
+  // these branches - and is the part that ever mattered - is that the OPT-OUT IS
+  // RECORDED, on a number where group detection is off or does not apply.
+  it('records the opt-out for an envelope-bearing STOP on a NON-business number (no reply, from anyone here)', async () => {
     const world = createFakeWorld();
     const poolNumber = '+15559990001';
     world.conversations.set('relay-closed', {
@@ -355,14 +354,14 @@ describe('group detection: branch placement (T3.2)', () => {
     );
 
     expect(res.status).toBe(200);
-    // The opt-out is recorded either way; what regressed is the CONFIRMATION.
+    // The opt-out is recorded - the only thing this branch owes anybody.
     expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
-    expect(res.text).toContain('<Message>');
+    expect(res.text).not.toContain('<Message>');
     // ...and the extraction marker, a separate decision, still applies.
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
 
-  it('STILL sends the 1:1 keyword reply when BUSINESS_PHONE_NUMBER is unset', async () => {
+  it('records the opt-out when BUSINESS_PHONE_NUMBER is unset (no reply, from anyone here)', async () => {
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({
       world,
@@ -377,7 +376,7 @@ describe('group detection: branch placement (T3.2)', () => {
 
     expect(res.status).toBe(200);
     expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
-    expect(res.text).toContain('<Message>');
+    expect(res.text).not.toContain('<Message>');
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
 });
@@ -618,14 +617,15 @@ describe('group detection: filing (T3.3)', () => {
     expect(capture.atLevel(WARN).some((l) => l['event'] === 'group_roster_collapsed')).toBe(true);
   });
 
-  it('COLLAPSED ROSTER: STOP and HELP still draw the filed 1:1 replies (invariant 13.4, contest X2)', async () => {
+  it('COLLAPSED ROSTER: STOP and HELP are PROCESSED, and neither draws an app reply', async () => {
     // Spec 13.1(c) rules the collapsed roster IS a 1:1 - "us-plus-one-person IS
-    // a 1:1" - and invariant 13.4 pins 1:1 keyword handling (the TwiML filed
-    // replies) as BYTE-IDENTICAL. Suppressing our filed replies here would take
-    // the "rely on Twilio's own auto-reply instead of ours" side of a question
-    // spec 10 explicitly leaves to twilio-standard-optout-double-reply, on a
-    // path that is not group content at all. HELP is the sharpest edge: the
-    // filed copy is deliberately verified to declare no phone number.
+    // a 1:1" - and invariant 13.4 pins 1:1 keyword handling as byte-identical.
+    // That still holds; what CHANGED is the 1:1 baseline it is pinned against.
+    // The 2026-08-12 live test resolved twilio-standard-optout-double-reply the
+    // other way: Twilio's platform handling answers STOP/HELP/START itself (our
+    // STOP TwiML was refused 21610 and never once delivered), so 1:1 keyword
+    // handling is now "record everything, reply nothing" and this path matches
+    // it exactly.
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });
 
@@ -638,7 +638,10 @@ describe('group detection: filing (T3.3)', () => {
         Body: 'STOP',
       }),
     );
-    expect(stop.text).toContain(STOP_CONFIRMATION);
+    expect(stop.text).not.toContain(STOP_CONFIRMATION);
+    expect(stop.text).not.toContain('<Message>');
+    // PROCESSED, which is the half that never moved.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
 
     const help = await signedTwilioPost(
       app,
@@ -649,14 +652,14 @@ describe('group detection: filing (T3.3)', () => {
         Body: 'HELP',
       }),
     );
-    expect(help.text).toContain('<Message>');
+    expect(help.text).not.toContain('<Message>');
   });
 
-  it('CORRUPT ENVELOPE: a STOP filed 1:1 for a GROUP reason still draws no app reply', async () => {
-    // The negative control for the rule above: the group branch declined here
-    // because the envelope is unreadable, NOT because the message is a 1:1. The
-    // envelope is positive proof of carrier-group content, so spec 13.4's second
-    // half applies - consent bookkeeping runs, no app-sent reply.
+  it('CORRUPT ENVELOPE: a STOP filed 1:1 for a GROUP reason is processed and draws no app reply', async () => {
+    // Once the negative control for the rule above; now the same answer as every
+    // other path. Kept because the BOOKKEEPING assertion is the load-bearing one:
+    // the group branch declined here on an unreadable envelope, and the opt-out
+    // must still be recorded from a fail-open 1:1 filing.
     const world = createFakeWorld();
     const { app } = makeWebhookHarness({ world });
 
@@ -667,7 +670,7 @@ describe('group detection: filing (T3.3)', () => {
     );
 
     expect(res.text).not.toContain('<Message>');
-    // The keyword is still PROCESSED - only our reply is withheld.
+    // The keyword is still PROCESSED.
     expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
   });
 
@@ -1374,9 +1377,10 @@ describe('group detection: loud failures', () => {
 // `createOrGetByParticipantPhone` UNCONDITIONALLY and materialized an empty
 // needs-triage 1:1 for the group sender: the exact phantom row
 // services/numberSuppression.ts and the group path both go out of their way
-// never to create. The same fall-through also ran the keyword handler without
-// `suppressReply`, so a group STOP could draw a TwiML reply the group path
-// never sends.
+// never to create. (The fall-through also drew a TwiML keyword reply the group
+// path never sent; that half of the defect is gone by construction now - no
+// path emits a keyword reply at all - but the phantom row is not, and it is
+// what these pin.)
 describe('group detection: a REDELIVERY after a transient exclusion-set failure', () => {
   /** A pool read that always throws - a cold start with the pool table down. */
   function poolDown(world: FakeWorld): void {

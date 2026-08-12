@@ -122,13 +122,23 @@ export function consentMethodFromCaptureSource(
  */
 export const WELCOME_SMS = `Welcome to ${SMS_BRAND_NAME}! You're signed up for new properties that accept your voucher, plus tour reminders and updates. Msg frequency varies. Msg & data rates may apply. Reply STOP to unsubscribe, HELP for help.`;
 
-/** STOP confirmation (spec §6) — sent when a recipient opts out via a keyword. */
+/**
+ * STOP confirmation (spec 6) - the copy a recipient gets when they opt out via
+ * a keyword. SENT BY TWILIO ADVANCED OPT-OUT (console-configured from this
+ * constant); the app does not send it. See RUNBOOK "Keyword auto-replies
+ * (Advanced Opt-Out)" for the copy-change procedure.
+ */
 export const STOP_CONFIRMATION = `You have successfully been unsubscribed. You will not receive any more messages from this number. Reply START to resubscribe.`;
 
 /**
- * HELP reply (spec §6). The campaign declares phone-numbers = No, so this body
- * carries NO phone number — only the "More info: tenant.place" domain. The unit
- * test asserts this body contains no digit.
+ * HELP reply (spec 6). SENT BY TWILIO ADVANCED OPT-OUT (console-configured from
+ * this constant) - the app does not send it, and on the live service Twilio
+ * consumes HELP before the webhook sees it at all. See RUNBOOK "Keyword
+ * auto-replies (Advanced Opt-Out)".
+ *
+ * The campaign declares phone-numbers = No, so this body carries NO phone number
+ * - only the "More info: tenant.place" domain. The unit test asserts this body
+ * contains no digit.
  */
 export const HELP_REPLY = `${SMS_BRAND_NAME}: housing listing alerts for voucher holders. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out. More info: tenant.place.`;
 
@@ -201,17 +211,25 @@ export type InboundKeywordKind = 'help' | 'opt_out' | 'opt_in';
  * opt-out, then opt-in. A message that merely CONTAINS a keyword is NOT a
  * keyword (exact match on the trimmed uppercased body).
  *
- * OptOutType coupling (SF-2): `optOutType` is populated by Twilio ONLY when
- * Advanced Opt-Out is enabled on the messaging service. We run with it OFF
- * (A2P checklist), so classification is body-driven today. If it is ever
- * flipped ON, Twilio stamps OptOutType=STOP/START/HELP on a message regardless
- * of its body, so a full sentence like "stop the listings but keep the tour"
- * would classify as opt_out - and on the open relay path
- * (routes/webhooks/twilio.ts) that suppresses the fan-out, swallowing a human
- * sentence from the group. That is the compliance-correct direction (Twilio
- * also actions the opt-out itself), and the open-path opt-in narrowing already
- * guards the YES case - keep Advanced Opt-Out OFF so human sentences are never
- * reclassified.
+ * OptOutType coupling (SF-2), REWRITTEN 2026-08-12 - the premise flipped.
+ * `optOutType` is populated by Twilio only when Advanced Opt-Out is enabled on
+ * the messaging service, and this comment used to end "keep Advanced Opt-Out OFF
+ * so human sentences are never reclassified". Advanced Opt-Out is now ON, by
+ * ruling: the live test proved Twilio's platform keyword handling was answering
+ * STOP/HELP/START anyway (and blocking our own STOP confirmation with 21610), so
+ * the choice was never "our replies or Twilio's" - it was "Twilio's alone, or
+ * Twilio's plus a doubled one of ours". Twilio owns the replies, configured with
+ * the copy above; the app keeps all the bookkeeping and sends nothing.
+ *
+ * So the OptOutType branch below is the LIVE classification path, not a
+ * hypothetical, and the consequence that comment named is real: Twilio stamps
+ * OptOutType on a message regardless of its body. What bounds it is that Twilio
+ * matches the EXACT keyword message, the same rule this function applies to the
+ * body - a full sentence like "please stop sending tour reminders" is NOT
+ * stamped and NOT classified, so it still fans out on the open relay path. That
+ * is asserted here and verified live by the dev keyword canary's sentence probe
+ * (RUNBOOK "Keyword auto-replies (Advanced Opt-Out)"). The open-path opt-in
+ * narrowing continues to guard the bare-YES case.
  */
 export function classifyInboundKeyword(
   body: string | undefined,

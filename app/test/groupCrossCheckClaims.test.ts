@@ -57,6 +57,105 @@ function fakeDoc(script: Array<(input: Record<string, unknown>) => unknown>): {
   };
 }
 
+/**
+ * A doc client backed by a MODELLED pair-state item, so a discard can be walked
+ * against a balance that MOVES under it - which is the whole of the defect the
+ * scripted fake above cannot express. Condition expressions are evaluated for
+ * the two forms the repo issues, because "which reading is the write pinned to"
+ * is exactly what decides whether a fresh credit survives.
+ */
+function ledgerDoc(
+  state: { balance: number; since?: string },
+  hooks: { beforeSettle?: () => void } = {},
+): { doc: { send: (cmd: unknown) => Promise<unknown> }; sent: Sent[] } {
+  const sent: Sent[] = [];
+  const refused = new ConditionalCheckFailedException({ message: 'refused', $metadata: {} });
+  let sawTheAdd = false;
+  return {
+    sent,
+    doc: {
+      async send(cmd: unknown): Promise<unknown> {
+        const command = cmd as { constructor: { name: string }; input: Record<string, unknown> };
+        sent.push({ name: command.constructor.name, input: command.input });
+        const input = command.input;
+        const onState =
+          (input['Key'] as { tsMsgId?: string } | undefined)?.tsMsgId ===
+          GROUP_CROSSCHECK_STATE_SORT_KEY;
+        if (!onState) return {};
+        if (command.constructor.name === 'GetCommand') {
+          return {
+            Item: {
+              balance: state.balance,
+              ...(state.since !== undefined && { credit_since: state.since }),
+            },
+          };
+        }
+        if (command.constructor.name !== 'UpdateCommand') return {};
+        if (!sawTheAdd) {
+          // The conditional ADD: the pair is in credit and the oldest of those
+          // credits is stale, so DynamoDB refuses it and the discard begins.
+          sawTheAdd = true;
+          throw refused;
+        }
+        hooks.beforeSettle?.();
+        const values = input['ExpressionAttributeValues'] as Record<string, unknown>;
+        const condition = String(input['ConditionExpression'] ?? '');
+        const observed = Number(values[':observed']);
+        if (condition.includes('#b = :observed') && state.balance !== observed) throw refused;
+        if (condition.includes('#b <= :observed') && !(state.balance <= observed)) throw refused;
+        if (condition.includes('#cs = :since') && state.since !== values[':since']) throw refused;
+        state.balance += Number(values[':delta']);
+        if (String(input['UpdateExpression']).includes('REMOVE')) delete state.since;
+        return { Attributes: { balance: state.balance } };
+      },
+    },
+  };
+}
+
+/**
+ * A doc client that answers a Query the way DynamoDB does: `Limit` is applied to
+ * the rows READ, and a `FilterExpression` runs after that, so a filtered page
+ * can come back empty with a `LastEvaluatedKey` still pointing at more rows.
+ * The repo's only filter is `counted = true`, so that is what is modelled.
+ */
+function queryDoc(rows: Array<Record<string, unknown>>): {
+  doc: { send: (cmd: unknown) => Promise<unknown> };
+  sent: Sent[];
+} {
+  const sent: Sent[] = [];
+  return {
+    sent,
+    doc: {
+      async send(cmd: unknown): Promise<unknown> {
+        const command = cmd as { constructor: { name: string }; input: Record<string, unknown> };
+        sent.push({ name: command.constructor.name, input: command.input });
+        if (command.constructor.name !== 'QueryCommand') return {};
+        const input = command.input;
+        const startKey = input['ExclusiveStartKey'] as { tsMsgId?: string } | undefined;
+        const start =
+          startKey === undefined
+            ? 0
+            : rows.findIndex((row) => row['tsMsgId'] === startKey.tsMsgId) + 1;
+        const limit = Number(input['Limit'] ?? rows.length);
+        const page = rows.slice(start, start + limit);
+        const filtered =
+          input['FilterExpression'] === undefined
+            ? page
+            : page.filter((row) => row['counted'] === true);
+        const more = start + page.length < rows.length;
+        const last = page[page.length - 1];
+        return {
+          Items: filtered,
+          ...(more &&
+            last !== undefined && {
+              LastEvaluatedKey: { conversationId: PAIR, tsMsgId: last['tsMsgId'] },
+            }),
+        };
+      },
+    },
+  };
+}
+
 const env = { TABLE_PREFIX: 'hc-unit-' };
 
 describe('cross-check pair state is moved by ONE atomic counter', () => {
@@ -181,6 +280,54 @@ describe('cross-check pair state is moved by ONE atomic counter', () => {
     expect(String(sent[4]!.input['UpdateExpression'])).not.toContain('REMOVE');
   });
 
+  it('a credit banked CONCURRENTLY with the discard SURVIVES it', async () => {
+    // THE DEFECT (fix wave 3, adversarial 1). Discarding by `1 - observed` under
+    // a condition pinned to `#b = :observed` lands the balance on exactly 1 for
+    // EVERY reading, which is arithmetically the `SET balance = 1` it replaced:
+    // a concurrent credit makes the pinned write refuse, the retry re-reads the
+    // LOWER balance, and the fresh credit is discarded with the stale ones. Its
+    // own event then alarms `group_crosscheck_inbound_missing` for a message
+    // whose classic filing arrived. The discard must remove the credits it
+    // DECIDED were stale - no more.
+    const state = { balance: -5, since: '2026-08-11T10:00:00.000Z' };
+    let banked = false;
+    const { doc } = ledgerDoc(state, {
+      beforeSettle: () => {
+        if (banked) return;
+        banked = true;
+        // A classic filing for a message that really did arrive banks a FRESH
+        // credit between the discard's read and its write.
+        state.balance -= 1;
+      },
+    });
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    // Five stale credits go; the sixth is fresh and claimable, so this event
+    // MATCHES it instead of going pending and alarming.
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('credit');
+    expect(state.balance).toBe(0);
+  });
+
+  it('a discard that ran under it forces a re-read rather than double-discarding', async () => {
+    // Two events discard the same stale stack. The first REMOVEs the anchor, so
+    // the second's write refuses and it re-decides against the post-discard
+    // balance - it must not subtract the same five credits twice.
+    const state = { balance: -5, since: '2026-08-11T10:00:00.000Z' };
+    let discarded = false;
+    const { doc } = ledgerDoc(state, {
+      beforeSettle: () => {
+        if (discarded) return;
+        discarded = true;
+        state.balance = 1; // the other event's discard landed first
+        delete state.since;
+      },
+    });
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    expect(state.balance).toBe(2); // two pending events, not eight
+  });
+
   it('the classic half stamps the OLDEST credit only when it opens a credit run', async () => {
     const { doc, sent } = fakeDoc([() => ({ Attributes: { balance: -1 } })]);
     const repo = createMessagesRepo({ doc: doc as never, env });
@@ -282,12 +429,104 @@ describe('claiming a pending row is strongly consistent AND conditional', () => 
     expect(sent).toHaveLength(4);
   });
 
+  it('UNCOUNTED rows do not SHADOW a claimable one - the filter is not applied after the Limit', async () => {
+    // THE DEFECT (fix wave 3, adversarial 2). `Limit` is applied at the index
+    // and the `counted` filter ran in JS afterwards, so the three oldest rows
+    // were all the claim ever saw. Uncounted rows are by definition OLDER than
+    // the counted rows written after them, so on a pair carrying any of them the
+    // claim returned `undefined`, the filing logged
+    // `group_crosscheck_pending_row_missing`, and the counted row it should have
+    // consumed alarmed at its deadline. Re-issuing the identical Query cannot
+    // help: it returns the identical rows.
+    const { doc, sent } = queryDoc([
+      { tsMsgId: 'evt2#2026-08-11T12:01:00.000Z#IM1', message_sid: 'IM1', deadline_at: '2026-08-11T12:01:00.000Z' },
+      { tsMsgId: 'evt2#2026-08-11T12:02:00.000Z#IM2', message_sid: 'IM2', deadline_at: '2026-08-11T12:02:00.000Z' },
+      { tsMsgId: 'evt2#2026-08-11T12:03:00.000Z#IM3', message_sid: 'IM3', deadline_at: '2026-08-11T12:03:00.000Z' },
+      {
+        tsMsgId: 'evt2#2026-08-11T12:04:00.000Z#IM4',
+        message_sid: 'IM4',
+        deadline_at: '2026-08-11T12:04:00.000Z',
+        conversation_sid: 'CH1',
+        author: '+15551110001',
+        counted: true,
+      },
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect((await repo.claimOldestCrossCheckPending(PAIR))?.messageSid).toBe('IM4');
+    // The filter rides the QUERY, so DynamoDB - not the caller - decides which
+    // rows the page budget is spent on.
+    expect(sent[0]!.input['FilterExpression']).toBeDefined();
+  });
+
+  it('PAGES past a long run of uncounted rows rather than giving up on the first empty page', async () => {
+    const rows: Array<Record<string, unknown>> = [];
+    for (let i = 0; i < 30; i += 1) {
+      const at = `2026-08-11T12:${String(i).padStart(2, '0')}:00.000Z`;
+      rows.push({ tsMsgId: `evt2#${at}#IMu${i}`, message_sid: `IMu${i}`, deadline_at: at });
+    }
+    rows.push({
+      tsMsgId: 'evt2#2026-08-11T13:00:00.000Z#IMc',
+      message_sid: 'IMc',
+      deadline_at: '2026-08-11T13:00:00.000Z',
+      conversation_sid: 'CH1',
+      author: '+15551110001',
+      counted: true,
+    });
+    const { doc, sent } = queryDoc(rows);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect((await repo.claimOldestCrossCheckPending(PAIR))?.messageSid).toBe('IMc');
+    // A filtered page can come back EMPTY with more rows behind it, so the claim
+    // follows the LastEvaluatedKey instead of reading the emptiness as "nothing
+    // claimable".
+    const queries = sent.filter((s) => s.name === 'QueryCommand');
+    expect(queries.length).toBeGreaterThan(1);
+    expect(queries[1]!.input['ExclusiveStartKey']).toBeDefined();
+  });
+
   it('an empty pending range returns undefined without deleting anything', async () => {
     const { doc, sent } = fakeDoc([() => ({ Items: [] })]);
     const repo = createMessagesRepo({ doc: doc as never, env });
 
     expect(await repo.claimOldestCrossCheckPending(PAIR)).toBeUndefined();
     expect(sent).toHaveLength(1);
+  });
+});
+
+describe('resolving an alarmed pending row', () => {
+  const PAIR_SORT = 'evt2#2026-08-11T12:05:00.000Z#IM1';
+  const DUE_SORT = '2026-08-11T12:05:00.000Z#IM1';
+
+  it('reports the removal of an UNCOUNTED row too, so its stranded slot is freed', async () => {
+    // THE DEFECT (fix wave 3, conformance 1). A throw between the balance ADD
+    // and the `SET counted` leaves a +1 on the pair with an UNCOUNTED row under
+    // it. Reporting only counted removals stranded that +1 permanently: the next
+    // classic filing was absorbed by the phantom slot, banked no credit, and its
+    // OWN event then alarmed. The sweep's release is conditional on a positive
+    // balance, so reporting the removal is safe by construction - if the bump
+    // never landed there is no positive balance to take.
+    const { doc } = fakeDoc([
+      () => ({ Attributes: { conversationId: PAIR, tsMsgId: PAIR_SORT } }), // no `counted`
+      () => ({}), // the due row
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.resolveCrossCheckPending(PAIR, PAIR_SORT, DUE_SORT)).toBe(true);
+  });
+
+  it('reports NOTHING removed when a classic filing claimed the row first', async () => {
+    const ccfe = new ConditionalCheckFailedException({ message: 'claimed', $metadata: {} });
+    const { doc, sent } = fakeDoc([
+      () => {
+        throw ccfe;
+      },
+      () => ({}), // the due row goes either way - the alarm has fired
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.resolveCrossCheckPending(PAIR, PAIR_SORT, DUE_SORT)).toBe(false);
+    expect(sent).toHaveLength(2);
   });
 });
 

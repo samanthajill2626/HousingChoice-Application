@@ -1200,10 +1200,12 @@ export function createFakeWorld(): FakeWorld {
       const state = crossCheckBalances.get(event.pairKey) ?? { balance: 0 };
       const staleCredits =
         state.balance < 0 && state.since !== undefined && state.since < bounds.notBeforeIso;
-      // Stale credits are DISCARDED by a DELTA off the observed balance, never
-      // by an overwrite (fix wave 2, adversarial 8) - modelled here because the
-      // wiring suite is what proves the two halves agree.
-      const delta = staleCredits ? 1 - state.balance : 1;
+      // Stale credits are DISCARDED BY COUNT - the stack observed at the read,
+      // plus this event's own slot - never by an overwrite and never by a delta
+      // that pins the result at 1 (fix wave 2, adversarial 8; fix wave 3,
+      // adversarial 1). Modelled here because the wiring suite is what proves
+      // the two halves agree.
+      const delta = staleCredits ? -state.balance + 1 : 1;
       const balance = state.balance + delta;
       crossCheckBalances.set(event.pairKey, {
         balance,

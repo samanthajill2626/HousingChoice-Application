@@ -41,7 +41,7 @@
 // per-pair state item carrying a signed balance (positive = events awaiting
 // their filings, negative = filings banked as credits). Both halves move the
 // same counter, so neither can miss the other and neither can double-consume;
-// the `evt#` rows survive only as the alarm index, claimed with a
+// the `evt2#` rows survive only as the alarm index, claimed with a
 // ConsistentRead plus a CONDITIONAL delete whose result is checked.
 //
 // COVERAGE, HONESTLY (spec 8). The cross-check sees only threads that HAVE a
@@ -236,15 +236,25 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
       const notBefore = new Date(at.getTime() - creditWindowMs).toISOString();
       const deadlineAt = new Date(at.getTime() + graceMs).toISOString();
 
-      // ONE STEP, NOT TWO (fix wave 2, adversarial 11). Wave 1 wrote the pending
-      // ROW first and then bumped the BALANCE, so a throw between them left rows
-      // the balance did not account for: the sweep alarmed one of those rows and
-      // its pair-scoped release then took a DIFFERENT event's slot, which
-      // alarmed falsely and banked a spurious credit able to absorb a later real
-      // miss. The repo now moves the balance and writes both rows in ONE
-      // transaction - and, because it decides from a consistent read first, an
-      // event that lands on a banked credit writes no rows at all rather than
-      // writing and retracting them.
+      // THE ROWS CARRY THEIR OWN ACCOUNTING - THERE IS NO TRANSACTION (fix wave
+      // 2, adversarial 11; corrected in fix wave 3, conformance 2). An earlier
+      // version of this comment said the repo writes the balance and both rows
+      // in ONE transaction. It does not, and a reader who believed it would skip
+      // the check that matters. The repo issues FOUR sequential writes - pair
+      // row, due row, balance ADD, `SET counted` - and a row is claimable only
+      // once it is COUNTED, which is what stops a throw mid-sequence from
+      // cascading: wave 1's uncounted row was alarmed by the sweep, whose
+      // pair-scoped release then took a DIFFERENT event's slot, which alarmed
+      // falsely and banked a spurious credit able to absorb a later real miss.
+      //
+      // WHAT IS LEFT (priced in the `recordCrossCheckEvent` docstring, and in
+      // this branch's merge note). A throw before the mark costs one false
+      // `group_crosscheck_inbound_missing` at the sweep, AND lets that event's
+      // own classic filing bank a credit for a slot that no longer exists -
+      // which the next event consumes, so one genuine miss inside the credit
+      // window (GROUP_CROSSCHECK_CREDIT_MS) can go unalarmed. Every other
+      // consequence of a mid-sequence throw is an EXTRA alarm, never a missed
+      // one.
       const landed = await messages.recordCrossCheckEvent(
         {
           pairKey,
@@ -402,7 +412,7 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
         // base-table partition has no sparse-index trick: the rows must go. Both
         // keys come from the due row's own pointer, so a row written under an
         // older key convention is still resolved rather than left to re-alarm.
-        const claimedTheRow = await messages.resolveCrossCheckPending(
+        const removedTheRow = await messages.resolveCrossCheckPending(
           row.ref.conversationId,
           row.ref.tsMsgId,
           row.sortKey,
@@ -413,7 +423,13 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
         // but if a classic filing claimed the row first, that filing ALREADY
         // moved the balance, and a second decrement would take a different
         // event's slot and make IT alarm falsely.
-        if (claimedTheRow) await messages.releaseCrossCheckPending(row.ref.conversationId);
+        //
+        // COUNTED OR NOT (fix wave 3, conformance 1). The release is conditional
+        // on a POSITIVE balance, so a row whose bump never landed takes nothing;
+        // a row whose bump DID land but whose mark did not would otherwise
+        // strand its +1 on the pair until the 7-day TTL, absorbing the next
+        // classic filing and costing that filing's own event a false alarm.
+        if (removedTheRow) await messages.releaseCrossCheckPending(row.ref.conversationId);
         alarms.push(alarm);
       }
       return { scanned: due.length, alarms };

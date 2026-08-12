@@ -376,6 +376,28 @@ export const GROUP_CROSSCHECK_STATE_SORT_KEY = 'state';
 const CROSSCHECK_CLAIM_ATTEMPTS = 3;
 
 /**
+ * How the claim reads its window (fix wave 3, adversarial 2).
+ *
+ * `Limit` is applied by DynamoDB at the INDEX, before any filter - so filtering
+ * `counted` in the caller after a `Limit: 3` let three UNCOUNTED rows shadow
+ * every claimable row on the pair. Uncounted rows are by construction OLDER
+ * than the counted rows written after them, and the range reads
+ * oldest-deadline-first, so they sort ahead of the row that should be consumed:
+ * the claim returned nothing, the filing logged
+ * `group_crosscheck_pending_row_missing`, and the counted row alarmed at its
+ * deadline. Re-issuing the identical Query returns the identical rows.
+ *
+ * So the filter rides the QUERY and the claim PAGES: `Limit` becomes a page
+ * budget rather than the answer size, and a page that filters down to nothing
+ * with a `LastEvaluatedKey` behind it is followed rather than read as "nothing
+ * claimable". Bounded, because an unbounded walk of a pathological pair belongs
+ * to no single webhook: at these sizes the claim can look past 100 uncounted
+ * rows, and the sweep reaps those at their own deadlines.
+ */
+const CROSSCHECK_CLAIM_PAGE_SIZE = 25;
+const CROSSCHECK_CLAIM_PAGES = 4;
+
+/**
  * How many read-decide-write rounds the event half will take on one pair.
  *
  * Generous on purpose: the decision (matched-or-pending) depends on the balance
@@ -1213,27 +1235,45 @@ export interface MessagesRepo {
    * `notBeforeIso` is the credit freshness bound. `credit_since` tracks the
    * OLDEST outstanding credit, so a quiet period that banked credits long ago
    * can never mask a later genuine miss - those credits are discarded and this
-   * event goes pending instead. DISCARDING RECOMPUTES, IT DOES NOT OVERWRITE
-   * (fix wave 2, adversarial 8 / conformance F9): the balance is moved by a
-   * delta derived from the reading the decision was made on, and the write is
-   * conditioned on that reading, so a credit banked concurrently survives
-   * instead of being thrown away with the stale ones.
+   * event goes pending instead. DISCARDING REMOVES THE CREDITS IT DECIDED
+   * AGAINST (fix wave 3, adversarial 1; see `discardStaleCredits`): the stale
+   * stack counted at a consistent read, plus this event's own slot, so a credit
+   * banked concurrently survives as arithmetic rather than being destroyed with
+   * the stale ones.
    *
-   * ONE WRITE, NOT TWO (fix wave 2, adversarial 11). The pending ROW and the
-   * pending BALANCE used to be separate writes, so a throw between them (a
-   * throttle, a timeout) left rows with no balance behind them: the sweep later
-   * alarmed those rows and its bare pair-scoped release STOLE a different
-   * event's slot, which then alarmed falsely AND banked a spurious credit that
-   * could absorb a later real miss. The balance move and the rows now land in
-   * ONE `TransactWriteItems`, so a pending row cannot exist without the balance
-   * that accounts for it. The decision is made from a strongly-consistent read
-   * and the transaction is CONDITIONED on that exact reading, so a concurrent
-   * writer causes a retry rather than a wrong answer.
+   * FOUR SEQUENTIAL WRITES, NOT A TRANSACTION - AND `counted` IS WHY THAT IS
+   * SAFE (fix wave 2, adversarial 11; corrected in fix wave 3, adversarial 4 /
+   * conformance 2). There is NO `TransactWriteItems` here, and an earlier
+   * version of this comment claiming one was wrong: a transacted, condition-
+   * pinned version was built and thrown away because optimistic concurrency on
+   * one hot pair item thrashes (it failed the twenty-concurrent-pairs test).
+   * What ships is (1) the pair row, (2) the due row, (3) the balance `ADD`,
+   * (4) `SET counted` - in that order, because the classic half claims a pending
+   * ROW whenever the balance says one exists, so the row must be durable before
+   * the bump that says so. `counted` is the load-bearing part, not belt-and-
+   * braces: a row is written UNCOUNTED and marked only once the bump has landed,
+   * the claim consumes counted rows only, and an uncounted row is therefore a
+   * pending row the balance does not account for - which is a state that occurs
+   * by design, not an invariant violation.
    *
-   * A CREDIT WRITES NO ROWS AT ALL. Because the outcome is known before the
-   * write, the event that lands on a banked credit simply consumes it - where
-   * the previous ordering wrote a pending row and then retracted it, leaving a
-   * crash window that alarmed for a message that was matched.
+   * THE RESIDUAL, PRICED HONESTLY (fix wave 3, adversarial 3). A throw between
+   * the row writes and step (4) leaves rows uncounted. That costs one false
+   * `group_crosscheck_inbound_missing` when the sweep alarms them - and a second
+   * effect worth naming: that event's own classic filing then arrives to a
+   * square balance, banks a CREDIT for a slot that no longer exists, and the
+   * NEXT event on the pair consumes it and is reported matched. So if detection
+   * genuinely broke inside that credit window (GROUP_CROSSCHECK_CREDIT_MS), one
+   * real miss can go unalarmed. The cascade the `counted` marker closed is the
+   * STEAL-driven one (an unrelated event's slot taken, that event alarming
+   * falsely); this uncounted-row-driven instance remains by construction, and
+   * is the gap a transaction would have closed. Accepted for a heuristic monitor
+   * that has two other mechanisms beside it.
+   *
+   * A CREDIT WRITES ITS ROWS AND RETRACTS THEM. The outcome is only known after
+   * the `ADD`, so an event that lands on a banked credit deletes the two rows it
+   * just wrote. A throw between the `ADD` and those deletes leaves rows behind
+   * for an event the balance has already matched, and the sweep alarms them -
+   * the same class of extra-alarm residual as above, never a missed one.
    */
   recordCrossCheckEvent(
     event: PendingCrossCheckEvent,
@@ -1280,12 +1320,22 @@ export interface MessagesRepo {
    * adversarial 12): re-deriving them would miss a row written under an older
    * key convention and silently leave it to alarm forever.
    *
-   * Returns whether THIS call deleted a row the balance had COUNTED. The sweep
-   * gives a slot back only when it did (fix wave 2, adversarial 11): if a
-   * classic filing claimed the row first, that filing already moved the
-   * balance, and if the row was never counted (its bump did not land) there is
-   * no slot of its own to give back - either way a second decrement would take
-   * an unrelated event's slot and make THAT one alarm falsely.
+   * Returns whether THIS call removed the pair row. The sweep gives a slot back
+   * only when it did (fix wave 2, adversarial 11): a classic filing that claimed
+   * the row first already moved the balance, and a second decrement there would
+   * take an unrelated event's slot and make THAT one alarm falsely.
+   *
+   * AN UNCOUNTED ROW COUNTS AS A REMOVAL (fix wave 3, conformance 1). A throw
+   * between the balance `ADD` and the `SET counted` leaves a +1 on the pair with
+   * an uncounted row under it; reporting only COUNTED removals stranded that +1
+   * until the 7-day TTL, and while it stood the next classic filing was absorbed
+   * by the phantom slot, banked no credit, and its own event alarmed. Reporting
+   * the removal is safe by construction because the release is conditional on a
+   * POSITIVE balance: where the bump never landed there is no slot to take. The
+   * residual it accepts is the mirror of the one it closes - on a pair holding
+   * BOTH an uncounted row and a counted one, the uncounted row's alarm now
+   * releases the counted row's slot - and both cost extra alarms, never a
+   * missed one.
    */
   resolveCrossCheckPending(
     pairKey: string,
@@ -1406,15 +1456,30 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
    * AND the oldest of those credits predates the match window. Stale credits
    * must never mask a genuine miss, so they are discarded rather than consumed.
    *
-   * RECOMPUTED, NOT OVERWRITTEN (fix wave 2, adversarial 8 / conformance F9).
-   * The old code did `SET balance = 1`, which threw away the WHOLE credit stack
-   * - including a credit banked microseconds earlier by a classic filing that
-   * really did arrive, whose own event then alarmed for a message that was
-   * matched. The move is now a DELTA off the balance this decision was made on,
-   * conditioned on that exact reading, so a concurrent writer's contribution
-   * survives in the arithmetic (it simply makes the result one lower) and a
-   * writer that got there first causes a re-read rather than a wrong answer.
+   * IT DISCARDS THE CREDITS IT DECIDED AGAINST, AND NOTHING ELSE (fix wave 3,
+   * adversarial 1). Two earlier shapes destroyed a fresh credit: `SET balance =
+   * 1`, and then a delta of `1 - observed` written under `#b = :observed`, which
+   * is the SAME arithmetic - the condition forces the balance to equal
+   * `observed` at write time, so the result is exactly 1 for every reading, and
+   * a credit banked concurrently only caused a re-read that discarded it too.
+   * The stack is now moved by `(-observed) + 1`: the stale credits counted at
+   * the read, plus this event's own pending slot. A credit banked under the
+   * write survives as arithmetic - the balance simply lands lower, and at zero
+   * or below this event MATCHES it instead of alarming for a message whose
+   * classic filing arrived.
+   *
+   * PINNED WITHOUT BEING FROZEN. The write is conditioned on `#cs = :since` AND
+   * `#b <= :observed`. While the balance is negative and `credit_since` is set,
+   * the only moves possible are more credits (which make it lower - permitted,
+   * and the point) and another discard (which REMOVEs the anchor, so this one
+   * refuses and re-reads rather than subtracting the same stack twice).
    * Contention here is bounded and rare: the common path never reaches it.
+   *
+   * REMAINING BY DESIGN (conformance 5): credits banked before the read that are
+   * individually fresh still go with the stale ones, because the ledger tracks
+   * ONE `credit_since` - the oldest - rather than a timestamp per credit. Only
+   * reachable when recovering from a dead Conversations webhook, and it only
+   * ever produces extra alarms.
    */
   async function discardStaleCredits(
     pairKey: string,
@@ -1430,9 +1495,12 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       const observed = typeof state?.balance === 'number' ? state.balance : 0;
       const since = typeof state?.credit_since === 'string' ? state.credit_since : undefined;
       const stale = observed < 0 && since !== undefined && since < notBeforeIso;
-      // The pair moved out of the stale-credit shape between the refused ADD and
-      // this read: a plain bump is the truthful answer now.
-      const delta = stale ? 1 - observed : 1;
+      // The stale credits COUNTED AT THE READ, plus this event's own slot. Not
+      // `1 - observed`: that pins the result at 1 whatever else has landed.
+      // When `stale` is false the pair moved out of the stale-credit shape
+      // between the refused ADD and this read, so a plain bump is the truthful
+      // answer now.
+      const delta = stale ? -observed + 1 : 1;
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
@@ -1441,8 +1509,11 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             UpdateExpression: stale
               ? 'ADD #b :delta SET #e = :exp REMOVE #cs'
               : 'ADD #b :delta SET #e = :exp',
+            // `<=`, not `=`: a credit banked under this write is exactly what
+            // must SURVIVE it, and the anchor equality is what stops two
+            // discards subtracting one stack twice.
             ConditionExpression: stale
-              ? '#b = :observed AND #cs = :since'
+              ? '#b <= :observed AND #cs = :since'
               : 'attribute_not_exists(#b) OR #b = :observed',
             ExpressionAttributeNames: stale
               ? { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' }
@@ -2571,7 +2642,9 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       // these two steps from cascading - previously such a row was alarmed by
       // the sweep, whose bare pair-scoped release then took a DIFFERENT event's
       // slot, making that one alarm falsely and banking a spurious credit able
-      // to absorb a later real miss.
+      // to absorb a later real miss. It does NOT make the sequence atomic -
+      // there is no transaction here; the interface docstring above prices what
+      // an uncounted row still costs.
       await doc.send(
         new PutCommand({
           TableName: table,
@@ -2608,6 +2681,16 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
 
       // (2) THE BALANCE. One atomic ADD in the common case - no read, so a hot
       // pair with many events and filings in flight never has to retry.
+      //
+      // WHAT THE EVENT HALF COSTS (fix wave 3, adversarial 7). Four writes, not
+      // the two wave 1 issued: two Puts, this ADD, and the `counted` mark - plus
+      // two Deletes on the credit branch, and up to a further 24 round trips if
+      // `discardStaleCredits` engages on a contended pair. In production that is
+      // ~6 sequential round trips per railed group inbound on the Conversations
+      // webhook (the liveness stamp and the event claim included), comfortably
+      // inside Twilio's 5s budget at single-digit-ms latencies. It is loud in
+      // ONE place: DynamoDB Local's single SQLite write lock, which is why the
+      // heaviest seed suites needed a bigger budget in the same wave.
       let balance: number;
       try {
         const { Attributes } = await doc.send(
@@ -2667,8 +2750,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
         );
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
-        // A classic filing claimed the row in the same instant. It consumed the
-        // slot this bump created; nothing further to do.
+        // THE ROW IS GONE, AND NOT FOR THE REASON THIS CATCH USED TO CLAIM (fix
+        // wave 3, adversarial 5). It cannot have been claimed by a classic
+        // filing - the claim reads counted rows only, and this row is not
+        // counted yet - nor by the sweep, whose deadline is a whole grace window
+        // away. So if this branch is ever entered the row vanished for some
+        // other reason, and the +1 this bump just made is a phantom slot with no
+        // row under it. Self-correcting: the next classic filing for the pair
+        // reports 'matched', finds nothing claimable, and logs
+        // `group_crosscheck_pending_row_missing` - one extra WARN, never a
+        // missed alarm. Swallowed rather than thrown because the rows and the
+        // balance are already durable and the caller's answer is unchanged.
       }
       return 'pending';
     },
@@ -2736,35 +2828,52 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     },
 
     async claimOldestCrossCheckPending(pairKey) {
+      // COUNTED ROWS ONLY (fix wave 2, adversarial 11), FILTERED AT THE INDEX
+      // (fix wave 3, adversarial 2). A row whose balance bump has not landed is
+      // not one of the pending slots this balance is reporting, so consuming it
+      // would leave a counted row unmatched - and that one would then alarm
+      // falsely. An uncounted row is left alone; the sweep alarms and drops it
+      // at its deadline. Paging is what stops those rows from shadowing the
+      // claimable ones: see CROSSCHECK_CLAIM_PAGE_SIZE.
+      async function readClaimable(): Promise<Record<string, unknown>[]> {
+        const claimable: Record<string, unknown>[] = [];
+        let startKey: Record<string, unknown> | undefined;
+        for (let page = 0; page < CROSSCHECK_CLAIM_PAGES; page += 1) {
+          const { Items, LastEvaluatedKey } = await doc.send(
+            new QueryCommand({
+              TableName: table,
+              KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
+              FilterExpression: '#c = :counted',
+              ExpressionAttributeNames: { '#c': 'counted' },
+              ExpressionAttributeValues: {
+                ':p': pairKey,
+                ':lo': CROSSCHECK_EVENT_PREFIX,
+                ':hi': `${CROSSCHECK_EVENT_PREFIX}~`,
+                ':counted': true,
+              },
+              ScanIndexForward: true, // OLDEST pending event first
+              // STRONGLY CONSISTENT BY CONTRACT. The event half writes this row
+              // microseconds before the balance bump that sends a caller here,
+              // so an eventually-consistent read can miss a row that certainly
+              // exists - which is exactly how the old ledger produced false
+              // `group_crosscheck_inbound_missing` ERRORs on healthy traffic.
+              ConsistentRead: true,
+              Limit: CROSSCHECK_CLAIM_PAGE_SIZE,
+              ...(startKey !== undefined && { ExclusiveStartKey: startKey }),
+            }),
+          );
+          claimable.push(...((Items ?? []) as Record<string, unknown>[]));
+          // A few in hand is enough: if another claimant takes the oldest, the
+          // next-oldest is already here.
+          if (claimable.length >= CROSSCHECK_CLAIM_ATTEMPTS) break;
+          startKey = LastEvaluatedKey as Record<string, unknown> | undefined;
+          if (startKey === undefined) break;
+        }
+        return claimable.slice(0, CROSSCHECK_CLAIM_ATTEMPTS);
+      }
+
       for (let attempt = 0; attempt < CROSSCHECK_CLAIM_ATTEMPTS; attempt += 1) {
-        const { Items } = await doc.send(
-          new QueryCommand({
-            TableName: table,
-            KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
-            ExpressionAttributeValues: {
-              ':p': pairKey,
-              ':lo': CROSSCHECK_EVENT_PREFIX,
-              ':hi': `${CROSSCHECK_EVENT_PREFIX}~`,
-            },
-            ScanIndexForward: true, // OLDEST pending event first
-            // STRONGLY CONSISTENT BY CONTRACT. The event half writes this row
-            // microseconds before the balance bump that sends a caller here, so
-            // an eventually-consistent read can miss a row that certainly
-            // exists - which is exactly how the old ledger produced false
-            // `group_crosscheck_inbound_missing` ERRORs on healthy traffic.
-            ConsistentRead: true,
-            // Read a small window rather than one row: if another claimant takes
-            // the oldest, the next-oldest is already in hand.
-            Limit: CROSSCHECK_CLAIM_ATTEMPTS,
-          }),
-        );
-        const all = (Items ?? []) as Record<string, unknown>[];
-        // COUNTED ROWS ONLY (fix wave 2, adversarial 11). A row whose balance
-        // bump has not landed is not one of the pending slots this balance is
-        // reporting, so consuming it would leave a counted row unmatched - and
-        // that one would then alarm falsely. An uncounted row is left alone; the
-        // sweep alarms and drops it at its deadline without touching the balance.
-        const items = all.filter((item) => item['counted'] === true);
+        const items = await readClaimable();
         if (items.length === 0) return undefined;
         for (const item of items) {
           const sortKey = String(item['tsMsgId']);
@@ -2808,21 +2917,21 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
     async resolveCrossCheckPending(pairKey, pairSortKey, dueSortKey) {
       let deletedPairRow = false;
       try {
-        const { Attributes } = await doc.send(
+        await doc.send(
           new DeleteCommand({
             TableName: table,
             Key: { conversationId: pairKey, tsMsgId: pairSortKey },
             // Inspected, not assumed: a classic filing may have claimed this row
             // between the sweep's read and here, and it already paid the balance.
             ConditionExpression: 'attribute_exists(conversationId)',
-            ReturnValues: 'ALL_OLD',
           }),
         );
-        // ...and the caller may only give a slot back for a row the balance
-        // actually counted (fix wave 2, adversarial 11). An UNCOUNTED row is one
-        // whose bump never landed: releasing for it would take some OTHER
-        // event's slot and make that one alarm falsely.
-        deletedPairRow = (Attributes as { counted?: unknown } | undefined)?.counted === true;
+        // COUNTED OR NOT (fix wave 3, conformance 1). An uncounted row may still
+        // have a +1 standing behind it - the bump lands before the mark - and
+        // leaving that slot stranded costs a later filing AND an extra alarm.
+        // The release is balance-guarded, so where the bump never landed there
+        // is nothing to take.
+        deletedPairRow = true;
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
       }

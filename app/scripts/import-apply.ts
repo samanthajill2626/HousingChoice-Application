@@ -7,13 +7,24 @@
 // (spec §3.2). Only import-owned fields are written, so a re-run after cutover
 // does not revert work Sam has done in the app since (see apply.ts header).
 //
-// TARGETS WHATEVER DYNAMODB_ENDPOINT / TABLE_PREFIX POINT AT. There is no
-// built-in "prod" mode and no AWS credential handling here on purpose: the
-// operator points it at a stage deliberately, exactly as db:seed does.
+// STAGE TARGETING: `--env local|dev|prod` (required). No environment variables:
+//   local -> hc-local-* at DynamoDB Local (http://localhost:8000, fake creds)
+//   dev   -> hc-dev-*  on AWS via the pinned `housingchoice` profile
+//   prod  -> hc-prod-* on AWS via the pinned `housingchoice` profile
+// dev/prod run assertHousingChoiceAccount() FIRST (scripts/lib/hcAws.mjs) - the
+// default credential chain on this machine belongs to an UNRELATED account and
+// is never used.
 
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { getDocumentClient } from '../src/lib/dynamo.js';
+import { DynamoDBClient } from '@aws-sdk/client-dynamodb';
+import { DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import {
+  assertHousingChoiceAccount,
+  hcCredentials,
+  HC_PROFILE,
+  HC_REGION,
+} from '../../scripts/lib/hcAws.mjs';
 import { runApply } from '../src/lib/import/apply.js';
 import { runPlan } from '../src/lib/import/plan.js';
 import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
@@ -26,12 +37,17 @@ function arg(flag: string): string | undefined {
 const quoDir = arg('--quo');
 const airtableDir = arg('--airtable');
 const reviewDir = arg('--review');
+const targetEnv = arg('--env');
 const dryRun = process.argv.includes('--dry-run');
 const yes = process.argv.includes('--yes');
 
-if (!quoDir || !airtableDir || !reviewDir) {
+const TARGETS = ['local', 'dev', 'prod'] as const;
+type TargetEnv = (typeof TARGETS)[number];
+
+if (!quoDir || !airtableDir || !reviewDir || !TARGETS.includes(targetEnv as TargetEnv)) {
   console.error(
-    'Usage: npm run import:apply -- --quo <dir> --airtable <dir> --review <dir> [--dry-run] [--yes]\n\n' +
+    'Usage: npm run import:apply -- --env <local|dev|prod> --quo <dir> --airtable <dir> --review <dir> [--dry-run] [--yes]\n\n' +
+      '  --env       REQUIRED target stage: local (DynamoDB Local), dev, or prod\n' +
       '  --quo       directory holding the three unpacked Quo export jobs\n' +
       '  --airtable  directory holding the Airtable CSV exports\n' +
       '  --review    the REVIEWED workbook directory (contacts.csv, groups.csv, units.csv)\n' +
@@ -40,6 +56,7 @@ if (!quoDir || !airtableDir || !reviewDir) {
   );
   process.exit(2);
 }
+const target = targetEnv as TargetEnv;
 
 for (const [label, dir] of [
   ['--quo', quoDir],
@@ -109,9 +126,40 @@ if (phoneMismatches.length > 0) {
   process.exit(1);
 }
 
-const endpoint = process.env.DYNAMODB_ENDPOINT ?? '(AWS default)';
-const prefix = process.env.TABLE_PREFIX ?? 'hc-local-';
-console.log(`\ntarget endpoint : ${endpoint}`);
+// ---------------------------------------------------------------------------
+// Stage resolution — no environment variables. Local gets DynamoDB Local with
+// fake credentials; dev/prod get the pinned profile AND the account guard, so
+// the machine's default (wrong-account) credential chain can never be used.
+// ---------------------------------------------------------------------------
+const LOCAL_ENDPOINT = 'http://localhost:8000';
+const prefix = `hc-${target}-`;
+const endpoint = target === 'local' ? LOCAL_ENDPOINT : undefined;
+
+let doc: DynamoDBDocumentClient;
+if (target === 'local') {
+  doc = DynamoDBDocumentClient.from(
+    new DynamoDBClient({
+      region: HC_REGION,
+      endpoint: LOCAL_ENDPOINT,
+      credentials: { accessKeyId: 'local', secretAccessKey: 'local' },
+    }),
+    // Must match lib/dynamo.ts createDocumentClient: dropping undefineds is
+    // what keeps the sparse GSIs sparse.
+    { marshallOptions: { removeUndefinedValues: true } },
+  );
+} else {
+  const identity = await assertHousingChoiceAccount();
+  console.log(
+    `account guard OK: profile "${HC_PROFILE}" -> account ${identity.Account} (${identity.Arn})`,
+  );
+  doc = DynamoDBDocumentClient.from(
+    new DynamoDBClient({ region: HC_REGION, credentials: hcCredentials() }),
+    { marshallOptions: { removeUndefinedValues: true } },
+  );
+}
+
+console.log(`\ntarget stage    : ${target}${target === 'prod' ? '  *** PRODUCTION ***' : ''}`);
+console.log(`target endpoint : ${endpoint ?? `AWS ${HC_REGION} (profile ${HC_PROFILE})`}`);
 console.log(`table prefix    : ${prefix}`);
 console.log(`mode            : ${dryRun ? 'DRY RUN (no writes)' : 'WRITE'}`);
 
@@ -123,7 +171,6 @@ if (!dryRun && !yes) {
 }
 
 const importedAt = new Date().toISOString();
-const doc = getDocumentClient();
 
 let lastLabel = '';
 const report = await runApply({
@@ -132,6 +179,8 @@ const report = await runApply({
   review: { contacts: review.contacts, groups: review.groups, units: review.units },
   importedAt,
   dryRun,
+  // Physical table names come from the RESOLVED stage, never ambient env vars.
+  env: { ...process.env, TABLE_PREFIX: prefix },
   onProgress: (label, done, total) => {
     if (label !== lastLabel) {
       if (lastLabel) process.stdout.write('\n');

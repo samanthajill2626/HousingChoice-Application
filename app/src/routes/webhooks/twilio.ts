@@ -1866,7 +1866,10 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
     // Scoped to a decline for a GROUP reason (contest X2) - never to the
     // collapsed roster, which spec 13.1(c) defines as a 1:1 and 13.4 pins as
     // byte-identical, and never to the tripwire heuristic, which legitimately
-    // matches ordinary subject-only 1:1 MMS.
+    // matches ordinary subject-only 1:1 MMS. Set on EXACTLY ONE branch below:
+    // suppression is a property of a GROUP FILING (spec 4.4 - the app sends
+    // nothing on one), so a path that files 1:1 and can derive no group
+    // semantics at all never sets it (fix wave 4, item 9).
     let suppressKeywordReply = false;
     if (others.length > 0 && onBusinessNumber) {
       const outcome = await handleGroupInbound({
@@ -1904,8 +1907,24 @@ export function createTwilioWebhookRouter(deps: TwilioWebhookDeps = {}): Router 
       // bearing inbound filed 1:1 carries the marker AND alarms. Rate-limited
       // because a misconfigured stack matches on every group inbound at once
       // and the flood would bury the signal.
+      //
+      // THE KEYWORD REPLY IS NOT SUPPRESSED HERE (fix wave 4, item 9). It was,
+      // and that was the X2 principle applied one branch too far. Suppression
+      // exists because the app SENDS NOTHING on a group inbound (spec 4.4) - it
+      // is a property of a GROUP FILING, and no group filing happens on this
+      // branch. This message is filed as an ordinary 1:1, on a number where
+      // detection is structurally off (BUSINESS_PHONE_NUMBER unset) or does not
+      // apply (a pool or other org number - A6's deliberate fall-through). A
+      // person who texts STOP there gets the 1:1 keyword semantics 13.4 pins as
+      // byte-identical; withholding our confirmation left them with silence from
+      // us on the one message where silence is least acceptable - and did it
+      // WORST on the misconfiguration path, where it would silence every keyword
+      // reply on the whole stack.
+      //
+      // The MARKER is a separate decision and still applies: the envelope is
+      // positive proof of group content, and filed unmarked it would reach AI
+      // fact extraction as this one contact's own speech.
       groupAmbiguousOrigin = true;
-      suppressKeywordReply = true;
       if (config.businessPhoneNumber === undefined) {
         warnDetectionUnconfigured(
           { event: 'group_detection_unconfigured', providerSid: MessageSid },

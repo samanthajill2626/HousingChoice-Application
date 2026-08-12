@@ -324,6 +324,62 @@ describe('group detection: branch placement (T3.2)', () => {
     expect(world.messages).toHaveLength(1);
     expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
   });
+
+  // THE DEFECT THESE TWO PIN (fix wave 4, item 9). Suppression of OUR filed
+  // keyword reply is a property of a GROUP FILING - the app sends nothing on one
+  // (spec 4.4) - and it was being applied on a branch where NO group filing
+  // happens: the message is filed as an ordinary 1:1 on a number where detection
+  // is structurally off or does not apply. A person texting STOP there got
+  // silence from us on the one message where silence is least acceptable, and
+  // the misconfiguration case is the worse of the two: BUSINESS_PHONE_NUMBER
+  // unset silences every keyword reply on the whole stack.
+  it('STILL sends the 1:1 keyword reply for an envelope-bearing STOP on a NON-business number', async () => {
+    const world = createFakeWorld();
+    const poolNumber = '+15559990001';
+    world.conversations.set('relay-closed', {
+      conversationId: 'relay-closed',
+      type: 'relay_group',
+      status: 'closed',
+      pool_number: poolNumber,
+      participants: [{ contactId: 'c-x', phone: '+15550999999' }],
+      ai_mode: 'manual',
+      last_activity_at: '2026-08-01T00:00:00.000Z',
+      created_at: '2026-08-01T00:00:00.000Z',
+    } as ConversationItem);
+    const { app } = makeWebhookHarness({ world });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      groupParams({ To: poolNumber, Body: 'STOP', MessageSid: 'MMoffbiz-stop' }),
+    );
+
+    expect(res.status).toBe(200);
+    // The opt-out is recorded either way; what regressed is the CONFIRMATION.
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
+    expect(res.text).toContain('<Message>');
+    // ...and the extraction marker, a separate decision, still applies.
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+  });
+
+  it('STILL sends the 1:1 keyword reply when BUSINESS_PHONE_NUMBER is unset', async () => {
+    const world = createFakeWorld();
+    const { app } = makeWebhookHarness({
+      world,
+      env: { BUSINESS_PHONE_NUMBER: undefined },
+    });
+
+    const res = await signedTwilioPost(
+      app,
+      SMS_PATH,
+      groupParams({ Body: 'STOP', MessageSid: 'MMunconfigured-stop' }),
+    );
+
+    expect(res.status).toBe(200);
+    expect(world.optOutSets.map((o) => o.value)).toEqual([true]);
+    expect(res.text).toContain('<Message>');
+    expect(world.messages[0]?.group_ambiguous_origin).toBe(true);
+  });
 });
 
 // ---------------------------------------------------------------------------

@@ -163,14 +163,25 @@ describe('Inbox - group truncation affordance', () => {
   });
   const contactRow = mkRow({ contactId: 'c-other', name: 'Sam Sender' });
 
-  // A26 / adversarial 21. The count is the hook's `groupRowsShown` - captured
-  // from the PAGE THE SERVER RETURNED - and NOT a filter over the displayed
-  // `rows`, which the Unread filter narrows and the optimistic mark-read
-  // patches. The fixture makes the difference visible on purpose: `rows` here
-  // carries one group row, `groupRowsShown` says two, and two is the truth about
-  // what the server handed down.
+  // A26, CORRECTED by adversarial 30. The count is the hook's `groupRowsShown`,
+  // which now counts the RENDERED group rows rather than the server page: a
+  // notice that names a number the list does not contain is a claim the screen
+  // itself contradicts. The fixture is therefore consistent with `rows` on
+  // purpose - two group rows in the list, two in the notice.
   it('says what is shown and links to the full list when the server truncated', () => {
-    state = baseState({ rows: [contactRow, groupRow], groupsTruncated: true, groupRowsShown: 2 });
+    const groupRow2 = mkRow({
+      kind: 'group_text',
+      contactId: undefined,
+      channel: undefined,
+      direction: undefined,
+      name: 'With Bo & Dev',
+      conversationId: 'gt-2',
+    });
+    state = baseState({
+      rows: [contactRow, groupRow, groupRow2],
+      groupsTruncated: true,
+      groupRowsShown: 2,
+    });
     renderInbox();
     expect(screen.getByText(/Showing the latest 2 group texts\./)).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'See all group texts' })).toHaveAttribute(
@@ -207,11 +218,29 @@ describe('Inbox - group truncation affordance', () => {
   // is no server-side unread-groups filter, so the affordance is LABELLED for
   // where it actually goes rather than implying a view that does not exist.
   it('is honest on the Unread tab about what it counted and where the link goes', () => {
-    state = baseState({ rows: [groupRow], groupsTruncated: true, groupRowsShown: 4 });
+    state = baseState({ rows: [groupRow], groupsTruncated: true, groupRowsShown: 1 });
     renderInbox('/inbox?filter=unread');
-    expect(screen.getByText(/Showing the latest 4 unread group texts\./)).toBeInTheDocument();
+    expect(screen.getByText(/Showing the latest 1 unread group text\./)).toBeInTheDocument();
     const link = screen.getByRole('link', { name: /Browse all group texts/ });
     expect(link).toHaveAttribute('href', '/inbox?filter=groups');
     expect(link).toHaveTextContent(/read and unread/);
+  });
+
+  // Adversarial 30, the other end of the same drift. On Unread the operator can
+  // clear every group row on screen while the server's truncation flag stands,
+  // so the count reaches zero with the notice still rendering. "Showing the
+  // latest 0 group texts" is not a sentence - and the affordance it carries (the
+  // link to the full list) is exactly what the operator needs at that moment, so
+  // the notice stays and drops the count instead of disappearing.
+  it('makes no "showing the latest" claim when no group rows are on screen', () => {
+    state = baseState({ rows: [contactRow], groupsTruncated: true, groupRowsShown: 0 });
+    renderInbox('/inbox?filter=unread');
+    expect(screen.queryByText(/Showing the latest/)).toBeNull();
+    expect(screen.queryByText(/0 group texts/)).toBeNull();
+    expect(screen.getByText(/Not all group texts are shown here\./)).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: /Browse all group texts/ })).toHaveAttribute(
+      'href',
+      '/inbox?filter=groups',
+    );
   });
 });

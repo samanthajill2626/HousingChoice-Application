@@ -36,6 +36,7 @@ import { Card, CardAction, KV } from '../contact/Card.js';
 import { ContactSearchField, type ContactSearchValue } from '../contact/ContactSearchField.js';
 import { useContacts } from '../contacts/useContacts.js';
 import { normalizeToE164, formatPhoneDisplay } from '../../lib/phone.js';
+import { groupMemberLabel } from '../../lib/groupThread.js';
 import { useRelayThread } from './useRelayThread.js';
 import { GroupTextView } from './GroupTextView.js';
 import shell from '../../ui/twoPaneShell.module.css';
@@ -65,12 +66,12 @@ function ownerTarget(owner: RelayOwner | undefined): { to: string; label: string
   return { to: `/placements/${owner.id}`, label: 'Placement' };
 }
 
-/** A member's display: its resolved name, else the formatted phone. */
-function memberDisplayName(m: ConversationParticipant): string {
-  const name = m.name?.trim();
-  if (name && name.length > 0) return name;
-  return formatPhoneDisplay(m.phone) || m.phone;
-}
+/** A member's display: its resolved name, else the formatted phone. THE shared
+ *  rule (lib/groupThread.ts), not a private copy - this was one of three
+ *  byte-identical copies, and adversarial 17 is what drifting copies of a naming
+ *  rule do to a screen. Relay's rendering is unchanged (invariant 6): the
+ *  extracted helper is the same expression, plus the raw-passthrough guards. */
+const memberDisplayName = (m: ConversationParticipant): string => groupMemberLabel(m);
 
 export function ConversationDetail(): React.JSX.Element {
   const { conversationId = '' } = useParams<{ conversationId: string }>();
@@ -141,7 +142,14 @@ export function ConversationDetail(): React.JSX.Element {
   }
 
   if (header.type === 'group_text') {
-    return <GroupTextView conversationId={conversationId} header={header} />;
+    // `onHeader` is passed for the same reason the relay arm passes it, and
+    // adversarial 17 is what its absence cost: the group view learns fresher
+    // roster names from /group-members (which converges the stored snapshot in
+    // the same request) and had no way to hand them back, so the header effect -
+    // keyed on [conversationId], with no SSE event behind the backfill - kept
+    // rendering the pre-migration numbers while the panel beside it rendered the
+    // names, for the life of the mount.
+    return <GroupTextView conversationId={conversationId} header={header} onHeader={setHeader} />;
   }
 
   // 1:1 ONLY from here down. A plain 1:1 lives on the contact page - redirect

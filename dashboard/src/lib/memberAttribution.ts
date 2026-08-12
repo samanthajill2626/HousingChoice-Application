@@ -76,8 +76,13 @@ export function senderLabel(
     const matches =
       (contactId.length > 0 && contactId === senderKey) || phoneMemberKey(m) === senderKey;
     if (matches) {
-      const name = m.name?.trim();
-      if (name && name.length > 0) return name;
+      // GUARDED for the same reason, and against the same wire shape, as
+      // `contactId` above (adversarial 28): `name` is the field most likely to
+      // arrive off-shape from the raw passthrough, and `m.name?.trim()` throws
+      // on a non-string non-null value - blanking the whole conversation page,
+      // not one chip.
+      const name = typeof m.name === 'string' ? m.name.trim() : '';
+      if (name.length > 0) return name;
       if (kind !== 'group_text') return undefined;
       // The repo's ONE dashboard phone formatter (lib/phone.ts), never a
       // hand-rolled copy: the member panel, the thread header and this chip must

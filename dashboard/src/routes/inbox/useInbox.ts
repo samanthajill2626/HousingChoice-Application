@@ -39,17 +39,18 @@ export interface InboxState {
    *  renders the "showing the latest" affordance instead of implying the list is
    *  complete. There is no exact total by design. */
   groupsTruncated: boolean;
-  /** How many group-text rows the SERVER has actually handed down so far, across
-   *  the pages loaded for this filter.
+  /** How many group-text rows are actually ON SCREEN for this filter.
    *
-   *  A26. The truncation notice used to count `rows`, the DISPLAYED list - which
-   *  the Unread filter narrows and the optimistic mark-read patches - so marking
-   *  a group row read made "Showing the latest 4 group texts" tick to 3, then 2,
-   *  while the truncation claim stood. This count is captured when a page lands,
-   *  from the unfiltered, unpatched page the server returned, which is the set
-   *  the server's `groupsTruncated` flag is actually a statement about. It grows
-   *  with "Load more" and resets with the filter, and no client-side mutation
-   *  can move it. */
+   *  A26, CORRECTED by adversarial 30. A26 moved this count off the displayed
+   *  list and onto the server page, which fixed the wrong half of the drift: on
+   *  the Unread filter `rows` drops every row the operator marks read while the
+   *  server page does not, so the notice could claim "the latest 2 unread group
+   *  texts" with ZERO group rows on screen. The notice is a statement about the
+   *  rendered list, so it counts the rendered list. A26's own case survives
+   *  because it only ever bit on Unread: on All and Groups a marked-read row
+   *  stays in the list, so this number does not tick under a standing
+   *  truncation claim. `groupsTruncated` remains the server's separate,
+   *  untouched statement that MORE exist than were handed down. */
   groupRowsShown: number;
   hasMore: boolean;
   loadingMore: boolean;
@@ -76,8 +77,8 @@ export function rowKey(row: InboxRowData): string {
   return row.kind === 'contact' ? `c:${row.contactId ?? ''}` : `u:${row.phone ?? ''}`;
 }
 
-/** Group-text rows in a server-returned page (the basis for the truncation
- *  notice's count - see `InboxState.groupRowsShown`). */
+/** Group-text rows in a list (the basis for the truncation notice's count - see
+ *  `InboxState.groupRowsShown`). */
 function countGroupRows(rows: InboxRowData[]): number {
   return rows.filter((r) => r.kind === 'group_text').length;
 }
@@ -94,7 +95,6 @@ export function useInbox(filter: InboxFilter): InboxState {
   const [base, setBase] = useState<InboxRowData[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [groupsTruncated, setGroupsTruncated] = useState(false);
-  const [groupRowsShown, setGroupRowsShown] = useState(0);
   const [loadingMore, setLoadingMore] = useState(false);
   // In-flight optimistic patches keyed by rowKey; re-applied over refetches.
   const [pending, setPending] = useState<Map<string, Pending>>(new Map());
@@ -111,6 +111,15 @@ export function useInbox(filter: InboxFilter): InboxState {
   // so installing it would 400 the next Load more.
   const loadMoreAbortRef = useRef<AbortController | null>(null);
   const filterGenRef = useRef(0);
+  // The SSE-RECONCILE axis (adversarial 29). Bumped whenever a first-page read
+  // COMMITS - the initial load, a retry, or a debounced reconcile - so an
+  // in-flight `loadMore` can tell that the list it was a continuation of has
+  // been replaced underneath it. Without it, the page appends to a list it does
+  // not continue (duplicate rowKeys, silently skipped rows - `rows` is not
+  // deduped) and installs a cursor addressing a position the list no longer
+  // holds, which the next Load more 400s on. The filter axis already had this
+  // guard; this is the same guard on the other axis that can move `base`.
+  const firstPageGenRef = useRef(0);
 
   const fetchFirstPage = useCallback(async () => {
     abortRef.current?.abort();
@@ -120,10 +129,10 @@ export function useInbox(filter: InboxFilter): InboxState {
     try {
       const pageData = await getInbox({ filter, limit: PAGE_LIMIT }, controller.signal);
       if (controller.signal.aborted || gen !== genRef.current) return;
+      firstPageGenRef.current += 1;
       setBase(pageData.rows);
       setCursor(pageData.nextCursor);
       setGroupsTruncated(pageData.groupsTruncated === true);
-      setGroupRowsShown(countGroupRows(pageData.rows));
       setStatus('ready');
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
@@ -131,10 +140,10 @@ export function useInbox(filter: InboxFilter): InboxState {
       }
       if (err instanceof ApiError && err.status === 404) {
         // C8 backend slice isn't live yet → honest pending state (not an error).
+        firstPageGenRef.current += 1;
         setBase([]);
         setCursor(null);
         setGroupsTruncated(false);
-        setGroupRowsShown(0);
         setStatus('pending');
         return;
       }
@@ -157,7 +166,6 @@ export function useInbox(filter: InboxFilter): InboxState {
     setBase([]);
     setCursor(null);
     setGroupsTruncated(false);
-    setGroupRowsShown(0);
     setLoadingMore(false);
     setPending(new Map());
     void fetchFirstPage();
@@ -181,13 +189,20 @@ export function useInbox(filter: InboxFilter): InboxState {
     const controller = new AbortController();
     loadMoreAbortRef.current = controller;
     const gen = filterGenRef.current;
-    const stale = (): boolean => controller.signal.aborted || gen !== filterGenRef.current;
+    const firstPageGen = firstPageGenRef.current;
+    const filterStale = (): boolean => controller.signal.aborted || gen !== filterGenRef.current;
+    // The SECOND axis (adversarial 29): a first-page read committed while this
+    // page was on the wire, so `base` is no longer the list this page continues
+    // and `cursor` is no longer the position it was fetched from. Kept SEPARATE
+    // from `filterStale` because the two want different cleanup: a filter change
+    // has its own effect that already reset `loadingMore`, whereas nothing else
+    // clears it here - leaving it set would spin Load more forever.
+    const reconcileStale = (): boolean => firstPageGen !== firstPageGenRef.current;
     getInbox({ filter, limit: PAGE_LIMIT, cursor }, controller.signal)
       .then((pageData) => {
-        if (stale()) return;
+        if (filterStale() || reconcileStale()) return;
         setBase((prev) => [...prev, ...pageData.rows]);
         setCursor(pageData.nextCursor);
-        setGroupRowsShown((n) => n + countGroupRows(pageData.rows));
       })
       .catch(() => {
         /* keep the cursor so the user can retry "Load more" */
@@ -195,8 +210,9 @@ export function useInbox(filter: InboxFilter): InboxState {
       .finally(() => {
         // The filter-change effect already cleared the flag for the new filter;
         // clearing it again from a stale page would re-enable the button under a
-        // page that IS in flight.
-        if (!stale()) setLoadingMore(false);
+        // page that IS in flight. A reconcile-stale page DOES clear it: the
+        // reconcile installed a fresh cursor, so Load more is live again.
+        if (!filterStale()) setLoadingMore(false);
       });
   }, [filter, cursor, loadingMore]);
 
@@ -298,7 +314,8 @@ export function useInbox(filter: InboxFilter): InboxState {
     status,
     rows,
     groupsTruncated,
-    groupRowsShown,
+    // Counted off the RENDERED list (adversarial 30) - see `InboxState`.
+    groupRowsShown: countGroupRows(rows),
     hasMore: cursor !== null,
     loadingMore,
     loadMore,

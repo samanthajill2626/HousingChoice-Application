@@ -46,4 +46,14 @@ describe('groupThreadLabel (the dashboard mirror of app/src/lib/groupTitle.ts)',
       'With Ann',
     );
   });
+
+  // Adversarial 21, the INVERSE asymmetry: this copy guarded `phone` and left
+  // `name` as `m.name?.trim() ?? ''`, which throws on a non-string non-null
+  // name, while the app mirror (groupTitle.ts) guarded `name` properly and left
+  // `phone` open. Both copies now guard both fields, so they stay output-equal.
+  it('survives a NON-STRING name rather than throwing on trim', () => {
+    const odd = { name: 42, phone: '+16174707727' } as unknown as { name?: string; phone: string };
+    expect(() => groupThreadLabel([odd])).not.toThrow();
+    expect(groupThreadLabel([odd])).toBe('With (617) 470-7727');
+  });
 });

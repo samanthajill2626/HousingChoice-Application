@@ -1,7 +1,7 @@
 // GroupTextView - the NATIVE group-text thread view, exercised THROUGH
 // ConversationDetail so the type dispatch is covered by the same tests (the
 // dangerous failure this replaces was a silent redirect, not a crash).
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApiError } from '../../api/index.js';
@@ -100,7 +100,17 @@ beforeEach(() => {
   getConversation.mockResolvedValue(groupHeader());
   sse = {};
 });
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  // UNMOUNT BEFORE RESTORING (fix wave 2). The members effect now re-runs on the
+  // debounced SSE refetch signal, so a timer scheduled by one test can fire
+  // while a component is still mounted at teardown - and if the api mocks have
+  // already been restored, `getGroupMembers(...)` returns undefined and the
+  // effect crashes on `.then`, failing whichever test happens to be running.
+  // Explicit cleanup makes the ordering deterministic instead of dependent on
+  // which afterEach was registered first.
+  cleanup();
+  vi.restoreAllMocks();
+});
 
 describe('ConversationDetail dispatch - group_text', () => {
   it('renders the group text view and NEVER redirects to a roster member', async () => {
@@ -276,6 +286,151 @@ describe('GroupTextView - member panel', () => {
     expect(within(roster).getByRole('link', { name: 'Ann Tenant' })).toBeInTheDocument();
     expect(screen.getByText(/Opt-out state may be missing/)).toBeInTheDocument();
   });
+
+  // Adversarial 19 / conformance F8. A15 tied the panel to the SSE tick and set
+  // `loading` on every one of them - but there is no `loading` branch in the
+  // render, so each tick silently WITHDREW the alert for the duration of the
+  // in-flight request. With /group-members failing under steady org SSE
+  // traffic, once latency exceeded the inter-tick gap the alert never rendered
+  // at all, and the panel showed a stale roster with `suppressed:false` and no
+  // indication anything was wrong - the exact false negative A27 exists to
+  // prevent, reintroduced by A15 in the same commit.
+  it('keeps the member-state alert up while a later read is still in flight', async () => {
+    getGroupMembers.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    // The next tick's request hangs (the slow-and-failing case that made this
+    // alert disappear entirely).
+    getGroupMembers.mockImplementationOnce(() => new Promise<GroupMemberRow[]>(() => {}));
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:07:00.000Z#SM4',
+        direction: 'inbound',
+      } as never);
+    });
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 50));
+    expect(screen.getByRole('alert')).toBeInTheDocument();
+    expect(screen.getByText(/Opt-out state may be missing/)).toBeInTheDocument();
+  });
+
+  it('does not re-announce the alert on every refetch tick', async () => {
+    getGroupMembers.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    renderAt('gt-1');
+    const alert = await screen.findByRole('alert');
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:08:00.000Z#SM5',
+        direction: 'inbound',
+      } as never);
+    });
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(2));
+    await new Promise((r) => setTimeout(r, 50));
+    // The SAME node, never unmounted and remounted - an alert torn down and
+    // rebuilt is re-announced by a screen reader every cycle.
+    expect(screen.getByRole('alert')).toBe(alert);
+  });
+
+  it('keeps the last-good roster on screen when a later read fails, and says so', async () => {
+    getGroupMembers.mockResolvedValueOnce([
+      { ...ANN, suppressed: true, suppressionScope: 'primary' as const },
+      MARCUS,
+    ]);
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByText('Opted out')).toBeInTheDocument());
+
+    getGroupMembers.mockRejectedValue(new ApiError(500, 'http_500', 'boom'));
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:09:00.000Z#SM6',
+        direction: 'inbound',
+      } as never);
+    });
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+    // The last answer we actually got is still rendered - blanking it would
+    // trade a stale truth for no truth at all.
+    expect(screen.getByText('Opted out')).toBeInTheDocument();
+  });
+
+  it('clears the member-state alert only on a SUCCESSFUL read', async () => {
+    getGroupMembers.mockRejectedValueOnce(new ApiError(500, 'http_500', 'boom'));
+    renderAt('gt-1');
+    await waitFor(() => expect(screen.getByRole('alert')).toBeInTheDocument());
+
+    getGroupMembers.mockResolvedValue([ANN, MARCUS]);
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'gt-1',
+        tsMsgId: '2026-06-17T10:10:00.000Z#SM7',
+        direction: 'inbound',
+      } as never);
+    });
+    await waitFor(() => expect(screen.queryByRole('alert')).toBeNull());
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Adversarial 18 - one person, one fact
+// ---------------------------------------------------------------------------
+
+describe('GroupTextView - suppressed AND unknown is ONE member', () => {
+  // Reachable through a real server path: api.ts's `contacts.findByPhone` throws
+  // (-> suppressionUnknown), and the suppression read that follows still answers
+  // `suppressed: true` off the conversations GSI for someone who really did text
+  // STOP. The two header filters were not disjoint and applied no precedence,
+  // unlike the panel chip, so the screen stated two contradictory facts about
+  // one person and the chip corroborated neither.
+  const conflicted: GroupMemberRow = {
+    ...ANN,
+    suppressed: true,
+    suppressionScope: 'primary',
+    suppressionUnknown: true,
+  };
+
+  it('counts them ONCE on the header, as UNKNOWN (the panel chip precedence)', async () => {
+    getGroupMembers.mockResolvedValue([conflicted, MARCUS]);
+    renderAt('gt-1');
+    const header = (await screen.findByText('Group text')).closest('header');
+    await waitFor(() =>
+      expect(within(header!).getByText(/Opt-out state unknown for 1 member/)).toBeInTheDocument(),
+    );
+    expect(within(header!).queryByText(/member opted out/i)).toBeNull();
+  });
+
+  it('counts them ONCE in the left-pane banners too', async () => {
+    getGroupMembers.mockResolvedValue([conflicted, MARCUS]);
+    renderAt('gt-1');
+    await waitFor(() =>
+      expect(
+        screen.getAllByRole('status').some((el) => /could not be read for 1 member/i.test(el.textContent ?? '')),
+      ).toBe(true),
+    );
+    // (The unknown notice itself says "may or may not have opted out", so the
+    // matcher is anchored on the CLAIM: "<N> member(s) has/have opted out".)
+    expect(
+      screen
+        .getAllByRole('status')
+        .some((el) => /members? (has|have) opted out/.test(el.textContent ?? '')),
+    ).toBe(false);
+  });
+
+  it('still counts a genuinely-suppressed member beside an unknown one', async () => {
+    getGroupMembers.mockResolvedValue([
+      conflicted,
+      { ...MARCUS, suppressed: true, suppressionScope: 'primary' as const },
+    ]);
+    renderAt('gt-1');
+    const header = (await screen.findByText('Group text')).closest('header');
+    await waitFor(() =>
+      expect(within(header!).getByText(/Opt-out state unknown for 1 member/)).toBeInTheDocument(),
+    );
+    // One each, not two and one: every member is counted exactly once.
+    expect(within(header!).getByText('1 member opted out')).toBeInTheDocument();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -283,27 +438,46 @@ describe('GroupTextView - member panel', () => {
 // ---------------------------------------------------------------------------
 
 describe('GroupTextView - the header title', () => {
-  it('titles from the ROSTER SNAPSHOT only, so the members fetch never re-titles the header', async () => {
-    // The inbox row (app/src/routes/inbox.ts) and the contact card
-    // (routes/contacts.ts) both title from the IMMUTABLE participants snapshot
-    // through app/src/lib/groupTitle.ts. Titling the header from the
-    // /group-members resolve instead made the header disagree with both of them
-    // permanently, and visibly re-title itself a beat after open. The resolved
-    // roster still owns the member PANEL, which is where per-person detail
-    // belongs.
-    getGroupMembers.mockResolvedValue([
-      { ...ANN, name: 'Annabelle Renamed' },
-      { ...MARCUS, name: 'Marcus Landlord' },
-    ]);
+  // A13, CORRECTED by adversarial 17. A13 stopped the header titling itself
+  // from the /group-members resolve, which fixed the header-vs-INBOX
+  // disagreement and created a header-vs-PANEL one on the SAME screen: after
+  // the migration every imported roster is nameless, so the header read "With
+  // (404) 555-0111 & ..." while the panel two inches right read the real names,
+  // for the life of the mount. The route already converges the snapshot
+  // server-side (api.ts backfillGroupTextRoster), so the honest fix is for the
+  // header to adopt that same convergence rather than ignore it: ONE derivation
+  // (groupThreadLabel) over ONE roster (the snapshot, converged), which is
+  // exactly what the inbox row reads after the write-back.
+  it('converges the header title with the panel when the resolve finds fresher names', async () => {
+    getConversation.mockResolvedValue(
+      groupHeader({
+        participants: [
+          { contactId: ANN.contactId, phone: ANN.phone },
+          { contactId: MARCUS.contactId, phone: MARCUS.phone },
+        ],
+      }),
+    );
+    renderAt('gt-1');
+    // It opens on the snapshot it was handed - numbers, because the migrated
+    // roster is nameless.
+    await waitFor(() =>
+      expect(screen.getByText('With (404) 555-0111 & (404) 555-0112')).toBeInTheDocument(),
+    );
+    // The panel resolves the real names...
+    expect(await screen.findByRole('link', { name: 'Ann Tenant' })).toBeInTheDocument();
+    // ...and the header says the SAME thing, rather than contradicting the panel
+    // beside it for the life of the mount.
+    await waitFor(() => expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument());
+    expect(screen.queryByText(/With \(404\) 555-0111/)).toBeNull();
+  });
+
+  it('leaves the title alone when the resolve adds nothing the snapshot lacks', async () => {
+    // The convergence is not a re-title on every tick: a snapshot that already
+    // carries the current names must render byte-identically start to finish.
     renderAt('gt-1');
     await waitFor(() => expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument());
-    // The panel picks up the fresher contact name...
-    expect(
-      await screen.findByRole('link', { name: 'Annabelle Renamed' }),
-    ).toBeInTheDocument();
-    // ...and the header title is byte-identical to what it opened with.
+    await screen.findByRole('list', { name: 'Group members' });
     expect(screen.getByText('With Ann & Marcus')).toBeInTheDocument();
-    expect(screen.queryByText(/With Annabelle/)).toBeNull();
   });
 
   it('still titles a nameless snapshot by formatted numbers', async () => {
@@ -416,6 +590,38 @@ describe('GroupTextView - the transcript', () => {
       } as never);
     });
     await waitFor(() => expect(screen.getByText('Just landed')).toBeInTheDocument());
+  });
+
+  // Adversarial 20. `/api/events` is an ORG-WIDE firehose: every message to
+  // every thread in the org reaches every open browser. `scheduleRefetch`
+  // ignored the payload, so an unrelated 1:1 re-read this thread's transcript
+  // AND (since A15 tied the member panel to the same tick) fired the
+  // ~18-DynamoDB-read `/group-members` endpoint, which also carries a
+  // conditional roster write. Both events carry `conversationId`; nothing about
+  // another thread is news to this view.
+  it('ignores a live event for a DIFFERENT conversation', async () => {
+    renderAt('gt-1');
+    await waitFor(() => expect(getConversationMessages).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(getGroupMembers).toHaveBeenCalledTimes(1));
+
+    act(() => {
+      sse.onMessagePersisted?.({
+        conversationId: 'some-other-thread',
+        tsMsgId: '2026-06-17T10:05:00.000Z#SM9',
+        direction: 'inbound',
+      } as never);
+      sse.onConversationUpdated?.({
+        conversationId: 'another-thread-entirely',
+        last_activity_at: '2026-06-17T11:00:00.000Z',
+        unread_count: 1,
+        type: 'tenant_1to1',
+        participant_display_name: 'Someone Else',
+      } as never);
+    });
+    // Past the debounce window, with room to spare.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(getConversationMessages).toHaveBeenCalledTimes(1);
+    expect(getGroupMembers).toHaveBeenCalledTimes(1);
   });
 
   it('never asks for a scheduled bucket (group threads have no automated sends)', async () => {

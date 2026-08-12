@@ -21,7 +21,12 @@ export function groupThreadLabel(
 ): string {
   const parts: string[] = [];
   for (const m of members ?? []) {
-    const name = m.name?.trim() ?? '';
+    // GUARDED both fields (A25 + adversarial 21). `m.name?.trim()` throws on a
+    // non-string non-null name, which is the same raw-passthrough hazard the
+    // phone guard below exists for - and the app mirror (groupTitle.ts) already
+    // guarded THIS field while leaving the phone open. Both copies now guard
+    // both, so they remain output-equal.
+    const name = typeof m.name === 'string' ? m.name.trim() : '';
     // First name only - a group title is a glance, not a directory entry.
     const first = name.length > 0 ? (name.split(/\s+/)[0] ?? '') : '';
     // GUARDED (A25). `formatPhoneDisplay` returns '' for an absent number, and
@@ -38,4 +43,23 @@ export function groupThreadLabel(
   const shown = parts.slice(0, GROUP_TITLE_NAMES);
   const rest = parts.length - shown.length;
   return rest > 0 ? `With ${shown.join(' & ')} +${rest} more` : `With ${shown.join(' & ')}`;
+}
+
+/**
+ * ONE member's display label: their FULL name, else their formatted number.
+ * The member panel's rule, deliberately NOT the title's (a title spells first
+ * names only - a glance, not a directory entry).
+ *
+ * It lives here beside `groupThreadLabel` because it was three byte-identical
+ * private copies - the group member panel, the relay member panel, and the
+ * attribution chip's group fallback - and adversarial 17 is exactly what
+ * happens when copies of one naming rule drift: two surfaces on one screen
+ * spelling the same person differently. Guarded like everything else in this
+ * module: these rosters come off raw passthroughs.
+ */
+export function groupMemberLabel(member: { name?: string | undefined; phone: string }): string {
+  const name = typeof member.name === 'string' ? member.name.trim() : '';
+  if (name.length > 0) return name;
+  const phone = typeof member.phone === 'string' ? member.phone : '';
+  return formatPhoneDisplay(phone) || phone;
 }

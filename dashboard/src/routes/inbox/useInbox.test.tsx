@@ -53,6 +53,7 @@ function Probe({ filter }: { filter: InboxFilter }): React.JSX.Element {
       <span data-testid="hasMore">{String(s.hasMore)}</span>
       <span data-testid="groupsTruncated">{String(s.groupsTruncated)}</span>
       <span data-testid="groupRowsShown">{String(s.groupRowsShown)}</span>
+      <span data-testid="loadingMore">{String(s.loadingMore)}</span>
       <button onClick={() => s.loadMore()}>more</button>
       {s.rows.map((r) => (
         <span key={rowKey(r)}>
@@ -144,6 +145,61 @@ describe('useInbox', () => {
     // No contamination, and no cursor from a partition this filter cannot read.
     expect(screen.getByTestId('count')).toHaveTextContent('1');
     expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+  });
+
+  // Adversarial 29. `loadMore`'s `stale()` guard consulted the FILTER axis only,
+  // so an SSE reconcile racing an in-flight page still appended it - on top of a
+  // first page the reconcile had just replaced - and overwrote the fresh cursor
+  // with one addressing a position the list no longer holds. `rows` is not
+  // deduped, so that is duplicate rowKeys and silently skipped rows, and the
+  // dead cursor is the same class of failure the filter axis already guards.
+  it('drops an in-flight loadMore when an SSE reconcile lands under it', async () => {
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c1' })], 'CUR-PAGE-1'));
+    render(<Probe filter="all" />);
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('true'));
+
+    let releaseMore: () => void = () => {};
+    getInbox.mockImplementationOnce(
+      () =>
+        new Promise((res) => {
+          releaseMore = () =>
+            res(
+              pageOf(
+                [mkRow({ contactId: 'c-page-2', lastActivityAt: '2026-06-17T08:00:00.000Z' })],
+                'CUR-STALE-POSITION',
+              ),
+            );
+        }),
+    );
+    act(() => screen.getByRole('button', { name: 'more' }).click());
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('true');
+
+    // A message lands anywhere in the org: the debounced reconcile refetches the
+    // FIRST page and commits a brand-new list, with its own (here: exhausted)
+    // cursor.
+    getInbox.mockResolvedValueOnce(pageOf([mkRow({ contactId: 'c-fresh' })], null));
+    act(() => {
+      sse.onConversationUpdated?.({
+        conversationId: 'x',
+        last_activity_at: '2026-06-17T11:00:00.000Z',
+        unread_count: 1,
+        type: 'tenant_1to1',
+        participant_display_name: 'T',
+      });
+    });
+    await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(3));
+    await waitFor(() => expect(screen.getByTestId('hasMore')).toHaveTextContent('false'));
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+
+    // The page that was in flight the whole time finally lands.
+    act(() => releaseMore());
+    await new Promise((r) => setTimeout(r, 20));
+    // It neither appends to a list it was never a continuation of...
+    expect(screen.getByTestId('count')).toHaveTextContent('1');
+    // ...nor reinstalls a cursor addressing a position that list no longer holds.
+    expect(screen.getByTestId('hasMore')).toHaveTextContent('false');
+    // ...and Load more is not left permanently spinning.
+    expect(screen.getByTestId('loadingMore')).toHaveTextContent('false');
   });
 
   it('optimistically marks a row read and posts to the contact read endpoint', async () => {
@@ -286,13 +342,15 @@ describe('useInbox - native group text rows', () => {
     expect(markInboxRead).not.toHaveBeenCalled();
   });
 
-  // A26 / adversarial 21. The truncation notice used to count `inbox.rows`,
-  // which the Unread filter has already narrowed AND the optimistic mark-read
-  // has already patched - so the operator watched "Showing the latest 4 group
-  // texts" tick down to 3, then 2, while the truncation claim stood. The count
-  // belongs to the PAGE THE SERVER RETURNED, which is what was actually
-  // withheld against.
-  it('counts group rows from the server page, not the filtered/patched list', async () => {
+  // A26, CORRECTED by adversarial 30. A26 pinned this count to the PAGE THE
+  // SERVER RETURNED, which fixed the wrong half of the drift: on the Unread tab
+  // `rows` drops every row the operator marks read while the server page does
+  // not, so the notice could read "Showing the latest 2 unread group texts" with
+  // ZERO group rows on screen - a claim about the list that the list contradicts.
+  // The notice is a statement about what is RENDERED, so it counts what is
+  // rendered. A26's own case is still covered by the sibling test below: on All
+  // and Groups a marked-read row stays in the list, so nothing ticks there.
+  it('counts the group rows actually RENDERED, so the notice cannot outlive them', async () => {
     getInbox.mockResolvedValueOnce({
       rows: [
         groupRow({ conversationId: 'gt-1', unreadCount: 1 }),
@@ -305,9 +363,33 @@ describe('useInbox - native group text rows', () => {
     await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
 
     act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
-    // The row leaves the Unread list immediately...
+    // The row leaves the Unread list immediately, and the count leaves with it.
     await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('1'));
-    // ...and the truncation claim's count does NOT move.
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('1'));
+
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-2' }).click());
+    await waitFor(() => expect(screen.getByTestId('count')).toHaveTextContent('0'));
+    // The notice can no longer claim group texts that are not on screen.
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('0'));
+  });
+
+  // A26's actual protection, kept: on every filter that does NOT narrow by
+  // unread, marking a row read leaves it in the list, so the count is stable and
+  // the operator never watches it tick down under a standing truncation claim.
+  it('does NOT tick down when a marked-read group row stays in the list', async () => {
+    getInbox.mockResolvedValueOnce({
+      rows: [
+        groupRow({ conversationId: 'gt-1', unreadCount: 1 }),
+        groupRow({ conversationId: 'gt-2', unreadCount: 1 }),
+      ],
+      nextCursor: null,
+      groupsTruncated: true,
+    });
+    render(<Probe filter="groups" />);
+    await waitFor(() => expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2'));
+    act(() => screen.getByRole('button', { name: 'read:gt:gt-1' }).click());
+    await waitFor(() => expect(screen.getByTestId('unread')).toHaveTextContent('0,1'));
+    expect(screen.getByTestId('count')).toHaveTextContent('2');
     expect(screen.getByTestId('groupRowsShown')).toHaveTextContent('2');
   });
 

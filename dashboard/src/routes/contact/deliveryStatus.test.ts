@@ -152,4 +152,18 @@ describe('deliveryReason', () => {
     expect(reason).not.toMatch(/contact_opted_out/);
     expect(reason).not.toMatch(/error/i);
   });
+
+  // Adversarial 30. Both reason maps are bare object literals, so a code that
+  // happens to name an Object.prototype member resolves off the PROTOTYPE. The
+  // internal map's early return then hands the caller a FUNCTION where the type
+  // says string (the error map was accidentally safe only because its template
+  // wrap coerced whatever it found into "function Object() { [native code] }").
+  // An error_code is provider/wire data - it is never trusted as a key.
+  it('never resolves a delivery reason off Object.prototype', () => {
+    for (const code of ['constructor', 'toString', 'hasOwnProperty', '__proto__', 'valueOf']) {
+      const reason = deliveryReason(code);
+      expect(typeof reason).toBe('string');
+      expect(reason).toBe(`Delivery failed (error ${code})`);
+    }
+  });
 });

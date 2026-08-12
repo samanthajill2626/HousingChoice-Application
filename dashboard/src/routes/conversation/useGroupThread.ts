@@ -167,9 +167,27 @@ export function useGroupThread(conversationId: string): GroupThreadState {
     [],
   );
 
+  // FILTERED to THIS thread (adversarial 20). `/api/events` is one org-wide
+  // firehose - every message to every conversation in the org reaches every open
+  // browser - and `scheduleRefetch` used to ignore the payload entirely. That
+  // was already a wasted transcript read; once A15 tied the member panel to the
+  // same tick it also fired `GET /group-members`, which does a `findByPhone`
+  // plus a `readNumberSuppression` per member (~18 DynamoDB reads for a
+  // 9-member group) and may issue a conditional roster write. Both event shapes
+  // carry `conversationId` as a required field, and nothing about another
+  // thread is news to this view, so a non-matching (or unreadable) id is
+  // dropped rather than paid for.
+  const onThreadEvent = useCallback(
+    (event: { conversationId?: string }) => {
+      if (event.conversationId !== conversationId) return;
+      scheduleRefetch();
+    },
+    [conversationId, scheduleRefetch],
+  );
+
   useEventStream({
-    onMessagePersisted: scheduleRefetch,
-    onConversationUpdated: scheduleRefetch,
+    onMessagePersisted: onThreadEvent,
+    onConversationUpdated: onThreadEvent,
   });
 
   const refresh = useCallback(() => {

@@ -22,7 +22,7 @@ import {
 import { Timeline } from '../contact/Timeline.js';
 import { Card } from '../contact/Card.js';
 import { formatPhoneDisplay } from '../../lib/phone.js';
-import { groupThreadLabel } from '../../lib/groupThread.js';
+import { groupMemberLabel, groupThreadLabel } from '../../lib/groupThread.js';
 import { useGroupThread } from './useGroupThread.js';
 import shell from '../../ui/twoPaneShell.module.css';
 import styles from './ConversationDetail.module.css';
@@ -35,13 +35,6 @@ import styles from './ConversationDetail.module.css';
  */
 export const MAX_SENDABLE_MEMBERS = 9;
 
-/** A member's display: their resolved name, else the formatted phone. */
-function memberLabel(m: GroupMemberRow): string {
-  const name = m.name?.trim();
-  if (name && name.length > 0) return name;
-  return formatPhoneDisplay(m.phone) || m.phone;
-}
-
 /** The suppression chip's words. NEVER "opted out" flatly: the state is scoped
  *  to a NUMBER, and saying otherwise about a member who silenced a different
  *  number of theirs would be a lie staff would act on. */
@@ -52,9 +45,19 @@ function suppressionLabel(m: GroupMemberRow): string {
 export interface GroupTextViewProps {
   conversationId: string;
   header: ConversationHeader;
+  /** Apply a fresher header in place - the same seam the relay arm uses. Here it
+   *  carries the roster-name CONVERGENCE (adversarial 17): `/group-members`
+   *  resolves fresher contact names AND writes them back to the stored snapshot
+   *  server-side, so the header has to adopt them or it contradicts the panel
+   *  beside it (and, once the write-back lands, the inbox row too). */
+  onHeader: (h: ConversationHeader) => void;
 }
 
-export function GroupTextView({ conversationId, header }: GroupTextViewProps): React.JSX.Element {
+export function GroupTextView({
+  conversationId,
+  header,
+  onHeader,
+}: GroupTextViewProps): React.JSX.Element {
   const [pane, setPane] = useState<'conversation' | 'details'>('conversation');
   const thread = useGroupThread(conversationId);
 
@@ -74,7 +77,26 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
     [header.participants],
   );
   const [members, setMembers] = useState<GroupMemberRow[]>(headerRoster);
-  const [membersStatus, setMembersStatus] = useState<'loading' | 'ready' | 'error'>('loading');
+  // STICKY (adversarial 19 / conformance F8). A read FAILED and has not since
+  // succeeded - deliberately not a three-state status. There is no `loading`
+  // branch in the render, so the old per-tick `setMembersStatus('loading')` was
+  // indistinguishable from `ready`: every tick silently withdrew the alert for
+  // the duration of the request, and with /group-members failing under steady
+  // SSE traffic the alert stopped rendering at all once latency exceeded the
+  // inter-tick gap. That is the exact false negative A27 exists to prevent. It
+  // is raised by a failure and lowered only by a SUCCESS.
+  const [membersReadFailed, setMembersReadFailed] = useState(false);
+
+  // Latest-value boxes for the convergence write below. They must not be effect
+  // dependencies: the effect's beat is the SSE tick, and re-running it because a
+  // header object changed identity is precisely the extra read this wave is
+  // removing (adversarial 20).
+  const headerRef = useRef(header);
+  const onHeaderRef = useRef(onHeader);
+  useEffect(() => {
+    headerRef.current = header;
+    onHeaderRef.current = onHeader;
+  });
 
   // A15. The member panel is REFETCHED on the same debounced SSE tick that
   // refetches the transcript (`thread.refetchSignal`), because the two are one
@@ -93,27 +115,57 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
     membersGenRef.current += 1;
     const gen = membersGenRef.current;
     const controller = new AbortController();
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    setMembersStatus('loading');
     getGroupMembers(conversationId, controller.signal)
       .then((roster) => {
         if (gen !== membersGenRef.current) return;
         setMembers(roster);
-        setMembersStatus('ready');
+        setMembersReadFailed(false);
+        // CONVERGENCE (adversarial 17), applying client-side exactly the
+        // transform the route applies server-side: a resolved name replaces the
+        // snapshot's for that phone, everything else is left alone. The route
+        // writes that same roster back (backfillGroupTextRoster), so this is not
+        // the header inventing a title from a different input - it is the header
+        // reading the input it is about to be given. Silent otherwise, so a
+        // snapshot that is already current re-renders nothing.
+        const prior = headerRef.current.participants ?? [];
+        let changed = false;
+        const refreshed = prior.map((p) => {
+          const resolved = roster.find((r) => r.phone === p.phone);
+          const name = resolved?.name;
+          if (name === undefined || name.length === 0 || name === p.name) return p;
+          changed = true;
+          return { ...p, name };
+        });
+        if (changed) onHeaderRef.current({ ...headerRef.current, participants: refreshed });
       })
       .catch((err: unknown) => {
         if (gen !== membersGenRef.current || (err instanceof DOMException && err.name === 'AbortError')) {
           return;
         }
-        // The membership itself still renders from the header - only the STATE
-        // is missing, and the panel says so rather than implying "nobody is
-        // suppressed".
-        setMembersStatus('error');
+        // The membership itself still renders from the header, and the last
+        // roster we DID read stays on screen - blanking it would trade a stale
+        // truth for no truth. Only the STATE is missing, and the panel says so
+        // rather than implying "nobody is suppressed".
+        setMembersReadFailed(true);
       });
     return () => {
       controller.abort();
     };
   }, [conversationId, thread.refetchSignal]);
+
+  // A NEW thread starts with no verdict of its own: a failure carried over from
+  // the thread the operator just left would be a claim about people who are not
+  // in this one. (The route param can change under a live mount.)
+  const lastConversationIdRef = useRef(conversationId);
+  useEffect(() => {
+    if (lastConversationIdRef.current === conversationId) return;
+    lastConversationIdRef.current = conversationId;
+    setMembersReadFailed(false);
+    setMembers(headerRoster);
+    // headerRoster is intentionally read, not depended on: this resets ONLY when
+    // the thread changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversationId]);
 
   // Viewing the thread marks it read - the inbox unread badge clears once seen.
   useEffect(() => {
@@ -122,25 +174,35 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
     });
   }, [conversationId]);
 
-  // A13 (dashboard half). ONE naming rule, ONE input. The inbox row and the
-  // contact card both title from the IMMUTABLE participants SNAPSHOT (server
-  // side, through app/src/lib/groupTitle.ts); titling the header from the
-  // /group-members resolve instead made the header disagree with both of them
-  // permanently AND re-title itself a beat after open, from numbers to names.
-  // The resolved `members` still owns the member PANEL below, which is where
-  // per-person detail (name, suppression, deleted) belongs. Converging the
-  // snapshot's names is a SERVER concern (a roster write-back), not something
-  // the header can paper over.
+  // A13 (dashboard half), as corrected by adversarial 17. ONE naming rule
+  // (`groupThreadLabel`, mirrored server-side in app/src/lib/groupTitle.ts for
+  // the inbox row and the contact card) over ONE input: the participants
+  // SNAPSHOT, converged above with whatever fresher names the members read
+  // found. Titling the header from the resolved `members` DIRECTLY is what A13
+  // removed and must stay removed - the snapshot is the roster all three
+  // surfaces share - but ignoring the convergence made the header contradict the
+  // panel two inches away for the life of the mount. The resolved `members`
+  // still owns the member PANEL below, where per-person detail belongs.
   const title = groupThreadLabel(headerRoster);
   const overCap = members.length > MAX_SENDABLE_MEMBERS;
   const deletedMembers = members.filter((m) => m.deleted === true);
-  const suppressedMembers = members.filter((m) => m.suppressed === true);
   // A27(b). `suppressionUnknown` means the read behind that member FAILED, so
   // `suppressed:false` is the ABSENCE of an answer. Counting only
   // `suppressed === true` made those members invisible outside a chip in the
   // Details pane. They are surfaced separately, and never as "opted out" - we
   // do not know that, and staff would act on the claim.
   const unknownStateMembers = members.filter((m) => m.suppressionUnknown === true);
+  // PRECEDENCE, the panel chip's (adversarial 18): UNKNOWN outranks suppressed,
+  // so the two sets are DISJOINT and every member is counted exactly once. Both
+  // flags can be true for one person through a real server path - a
+  // `contacts.findByPhone` failure marks the member unknown while the
+  // conversations-GSI read behind it still answers `suppressed: true` - and
+  // without this the same screen said "1 member opted out" AND "Opt-out state
+  // unknown for 1 member" about that one person, with the chip corroborating
+  // neither. When we could not read the state we do not get to assert it.
+  const suppressedMembers = members.filter(
+    (m) => m.suppressed === true && m.suppressionUnknown !== true,
+  );
 
   // Composer (S5). Sending is OFF only when it is STRUCTURALLY impossible - an
   // over-cap roster is permanently unsendable, so its note replaces the composer
@@ -313,7 +375,7 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
         <div className={`${shell.right} ${pane === 'details' ? shell.paneActive : shell.paneHidden}`}>
           <div className={shell.rightInner}>
             <Card title="Members">
-              {membersStatus === 'error' ? (
+              {membersReadFailed ? (
                 <p role="alert" className={styles.error}>
                   We couldn&apos;t load member details. Opt-out state may be missing.
                 </p>
@@ -325,10 +387,10 @@ export function GroupTextView({ conversationId, header }: GroupTextViewProps): R
                      *  over-cap thread this list IS the reply affordance. */}
                     {m.contactId ? (
                       <Link to={`/contacts/${m.contactId}`} className={styles.memberLink}>
-                        {memberLabel(m)}
+                        {groupMemberLabel(m)}
                       </Link>
                     ) : (
-                      <span className={styles.memberName}>{memberLabel(m)}</span>
+                      <span className={styles.memberName}>{groupMemberLabel(m)}</span>
                     )}
                     {/* The number is a SECOND line of information only when the
                         member has a name; for a nameless member the label

@@ -34,7 +34,15 @@ export function groupThreadLabel(
     const name = typeof p.name === 'string' ? p.name.trim() : '';
     // First name only - a group title is a glance, not a directory entry.
     const first = name.length > 0 ? (name.split(/\s+/)[0] ?? '') : '';
-    const label = first.length > 0 ? first : (formatPhoneForDisplay(p.phone) ?? p.phone);
+    // GUARDED (A25 / adversarial 21). `formatPhoneForDisplay` returns undefined
+    // for an absent number and the `?? p.phone` fallback then hands back
+    // `undefined`, so `label.length` on the next line throws - inside
+    // `groupRowFor`, inside the inbox handler, which 500s GET /api/inbox for the
+    // WHOLE org. The type says `phone: string`; the wire shape is what is not
+    // guaranteed. A member we can say nothing about contributes no part. The
+    // dashboard mirror (dashboard/src/lib/groupThread.ts) guards identically.
+    const phone = typeof p.phone === 'string' ? p.phone : '';
+    const label = first.length > 0 ? first : (formatPhoneForDisplay(phone) ?? phone);
     if (label.length > 0) parts.push(label);
   }
   if (parts.length === 0) return 'Group text';

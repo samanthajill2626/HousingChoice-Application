@@ -82,8 +82,20 @@ export function Inbox(): React.JSX.Element {
         // the cheap correct option, and reachable only past ~2000 group threads
         // against a real-world 132.
         <p className={styles.notice}>
-          Showing the latest {groupRowCount} {filter === 'unread' ? 'unread ' : ''}
-          {groupNoun}.
+          {/* Adversarial 30. On Unread the operator can clear every group row on
+           *  screen while the server's truncation flag stands, so this count
+           *  reaches ZERO with the notice still rendering - and "Showing the
+           *  latest 0 group texts" is a claim about a list that has none. The
+           *  affordance is still exactly what is wanted at that moment, so the
+           *  notice keeps the link and drops the count. */}
+          {groupRowCount === 0 ? (
+            'Not all group texts are shown here.'
+          ) : (
+            <>
+              Showing the latest {groupRowCount} {filter === 'unread' ? 'unread ' : ''}
+              {groupNoun}.
+            </>
+          )}
           {filter !== 'groups' ? (
             <>
               {' '}

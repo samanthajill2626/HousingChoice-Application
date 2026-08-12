@@ -157,11 +157,21 @@ const INTERNAL_CODE_REASONS: Record<string, string> = {
  * (mapped or not), so an operator never has to leave the thread to learn WHY a
  * send failed. Absent code ⇒ undefined (caller shows just the "Failed" label).
  */
+/** OWN-PROPERTY lookup (adversarial 30). Both maps are plain object literals, so
+ *  a bare `map[code]` resolves inherited Object.prototype members - and an
+ *  `error_code` is provider/wire data, never a trusted key. `INTERNAL_CODE_REASONS`
+ *  is the sharp one: its early return would hand back a FUNCTION where the
+ *  signature promises a string (the error map only escaped because its template
+ *  wrap coerced whatever it found). */
+function ownReason(map: Record<string, string>, code: string): string | undefined {
+  return Object.prototype.hasOwnProperty.call(map, code) ? map[code] : undefined;
+}
+
 export function deliveryReason(errorCode: string | undefined): string | undefined {
   if (errorCode === undefined || errorCode.length === 0) return undefined;
-  const internal = INTERNAL_CODE_REASONS[errorCode];
+  const internal = ownReason(INTERNAL_CODE_REASONS, errorCode);
   if (internal !== undefined) return internal;
-  const mapped = ERROR_CODE_REASONS[errorCode];
+  const mapped = ownReason(ERROR_CODE_REASONS, errorCode);
   return mapped !== undefined
     ? `${mapped} (error ${errorCode})`
     : `Delivery failed (error ${errorCode})`;

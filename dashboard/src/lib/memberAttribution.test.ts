@@ -116,6 +116,19 @@ describe('senderLabel', () => {
     expect(senderLabel('c-nophone', [phoneless])).toBe('No Number');
     expect(() => senderLabel('phone#+15555550999', [phoneless])).not.toThrow();
   });
+
+  // Adversarial 28. The restored guard covered `contactId` and stopped there,
+  // leaving `m.name?.trim()` - and `name` is the field MOST likely to arrive
+  // off-shape from a raw passthrough. Same blast radius as the contactId case:
+  // it throws for the matched member and blanks the whole conversation page.
+  it('survives a roster member whose NAME is not a string', () => {
+    const odd = { contactId: 'c-odd', phone: '+15555550444', name: 7 } as unknown as ConversationParticipant;
+    expect(() => senderLabel('c-odd', [odd])).not.toThrow();
+    // Nothing usable to say on relay, and the formatted number on group_text -
+    // exactly what a nameless member yields, because that is what it is.
+    expect(senderLabel('c-odd', [odd])).toBeUndefined();
+    expect(senderLabel('c-odd', [odd], 'group_text')).toBe('(555) 555-0444');
+  });
 });
 
 // LIVE QA ROUND 2, L6. Every member a native carrier group detects is a bare

@@ -5,5 +5,5 @@
     "types": ["node"],
     "allowJs": true
   },
-  "include": ["playwright.config.ts", "*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "scenarios/**/*.ts", "support/**/*.ts", "support/**/*.mjs", "performance/**/*.ts"]
+  "include": ["playwright.config.ts", "*.ts", "fixtures/**/*.ts", "tests/**/*.ts", "scenarios/**/*.ts", "support/**/*.ts", "support/**/*.mjs", "performance/**/*.ts", "../scripts/lib/killTree.d.mts"]
 }

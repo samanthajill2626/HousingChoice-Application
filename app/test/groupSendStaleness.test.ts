@@ -345,24 +345,28 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     // A full sweep batch of cross-check rows, every one of them OLDER than the
     // send's deadline, so they would sort ahead of it in a shared partition.
     const backlog = 50;
-    await Promise.all(
-      Array.from({ length: backlog }, (_unused, i) =>
-        messages.recordCrossCheckEvent(
-          {
-            pairKey: `groupxc#CHstarve#phone#+1555000${String(i).padStart(4, '0')}`,
-            messageSid: `IMstarve${String(i).padStart(4, '0')}`,
-            conversationSid: 'CHstarve',
-            author: '+15550000001',
-            deadlineAt: new Date(Date.parse(SENT_AT) - (backlog - i) * 1000).toISOString(),
-          },
-          {
-            notBeforeIso: SENT_AT,
-            nowIso: SENT_AT,
-            expiresAt: Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
-          },
-        ),
-      ),
-    );
+    // SEQUENTIAL SETUP, deliberately. Each event is now four writes rather than
+    // two, and firing 200 of them at once at DynamoDB Local (single-threaded,
+    // and shared with every other integration suite on this machine) draws
+    // "timed out waiting for a lock" from the emulator - a harness limit, not a
+    // product one. Nothing about this test needs concurrency: the rows just have
+    // to exist before the sweep runs.
+    for (let i = 0; i < backlog; i += 1) {
+      await messages.recordCrossCheckEvent(
+        {
+          pairKey: `groupxc#CHstarve#phone#+1555000${String(i).padStart(4, '0')}`,
+          messageSid: `IMstarve${String(i).padStart(4, '0')}`,
+          conversationSid: 'CHstarve',
+          author: '+15550000001',
+          deadlineAt: new Date(Date.parse(SENT_AT) - (backlog - i) * 1000).toISOString(),
+        },
+        {
+          notBeforeIso: SENT_AT,
+          nowIso: SENT_AT,
+          expiresAt: Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
+        },
+      );
+    }
     const log = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() };
 
     const outcome = await service(log).sweepSendStaleness(PAST_DEADLINE);

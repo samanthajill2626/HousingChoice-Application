@@ -192,16 +192,18 @@ bytes, and quiet-window timing. They cannot satisfy a required endpoint contract
 Each run writes a gitignored directory at
 `e2e/.artifacts/performance/<timestamp>-<random>/` containing `report.md`,
 `summary.json`, and `requests.jsonl`. A valid baseline additionally produces
-`comparison.md` and `comparison.json`. The CLI prints only the safe run-directory
-name. A final byte scan runs before publication; a failure moves the files to a
-`-quarantined` directory, prints only filenames and closed reason categories, and
-returns nonzero.
+`comparison.md` and `comparison.json`. Normal hermetic output first prints safe
+resolved seed counts, then the safe run-directory name. A final byte scan runs before
+publication; on failure it deletes the scanned staging files, writes only a fixed
+allowlisted `quarantine.json` manifest in a `-quarantined` directory, prints only
+filenames and closed reason categories, and returns nonzero.
 
 Artifacts contain sanitized endpoint templates and allowlisted numeric/categorical
 evidence. They never contain response or request bodies, headers, cookies, auth
 material, query values, raw entity IDs, names, phone numbers, email addresses,
-screenshots, HAR files, or browser traces. Do not move a quarantined artifact or
-paste private source data into a handback.
+screenshots, HAR files, or browser traces. A quarantined artifact contains only the
+fixed manifest, never scanned report content. Do not paste private source data into a
+handback.
 
 Compare a controlled run with a prior `summary.json`:
 

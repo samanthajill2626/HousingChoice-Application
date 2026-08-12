@@ -441,7 +441,7 @@ async function cdpTimestamp(session: CDPSession): Promise<number> {
   return result.metrics?.find((metric) => metric.name === 'Timestamp')?.value ?? 0;
 }
 
-function createRealInstrumentation(input: {
+export function createRealInstrumentation(input: {
   route: RouteDefinition;
   mode: SampleMode;
   repeat: number;
@@ -459,18 +459,27 @@ function createRealInstrumentation(input: {
   let nodeOriginMs = 0;
   let destinationPath = '';
   let consoleListener: ((message: ConsoleMessage) => void) | null = null;
+  let adaptersActive = false;
 
   const finishAdapters = async (): Promise<void> => {
-    if (page !== null && consoleListener !== null) page.rawPage.off('console', consoleListener);
-    page?.contextState && (page.contextState.token = null);
-    if (cdp !== null) await cdp.detach().catch(() => undefined);
+    if (!adaptersActive) return;
+    adaptersActive = false;
+    const activePage = page;
+    const activeConsoleListener = consoleListener;
+    const activeCdp = cdp;
     cdp = null;
     consoleListener = null;
+    if (activePage !== null && activeConsoleListener !== null) {
+      try { activePage.rawPage.off('console', activeConsoleListener); } catch { /* closed cleanup */ }
+    }
+    if (activePage !== null) activePage.contextState.token = null;
+    if (activeCdp !== null) await activeCdp.detach().catch(() => undefined);
   };
 
   return {
     async beginSample(begin): Promise<void> {
       page = begin.page as RealPage;
+      adaptersActive = true;
       token = begin.token;
       destinationPath = begin.destinationPageUrl;
       nodeOriginMs = performance.now();
@@ -517,6 +526,9 @@ function createRealInstrumentation(input: {
           host.__hcPerformanceStore?.beginSample(sampleToken, performance.now());
         }, { sampleToken: token });
       }
+    },
+    async disposeSample(): Promise<void> {
+      await finishAdapters();
     },
     async collectSample(): Promise<SampleResult> {
       if (collector === null || page === null) throw new Error('unexpected_failure');

@@ -512,6 +512,8 @@ export interface SampleInstrumentation {
   // One call resets page/CDP/Node/firewall state under the same token and
   // captures each collector's native cutoff. The driver never flips a phase.
   beginSample(input: BeginProtocolSampleInput): Promise<void>;
+  // Idempotently releases a begun sample that will not reach collection.
+  disposeSample(): Promise<void>;
   collectSample(input: CollectProtocolSampleInput): Promise<SampleResult>;
 }
 
@@ -602,28 +604,36 @@ export async function collectWarmSample(input: CollectWarmSampleInput): Promise<
 
   const token = input.token ?? randomUUID();
   input.onResolvedBranch?.(resolved.branch);
-  await input.instrumentation.beginSample({
-    page: input.page,
-    token,
-    route: input.route,
-    branch: resolved.branch,
-    mode: 'warm',
-    repeat: input.repeat,
-    sourcePageUrl: input.route.source.path,
-    destinationPageUrl: resolved.warmHref,
-  });
-  if (!await input.page.clickExactHref(resolved.warmHref)) {
-    return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, 'fixture_not_navigable');
+  let collectionStarted = false;
+  try {
+    await input.instrumentation.beginSample({
+      page: input.page,
+      token,
+      route: input.route,
+      branch: resolved.branch,
+      mode: 'warm',
+      repeat: input.repeat,
+      sourcePageUrl: input.route.source.path,
+      destinationPageUrl: resolved.warmHref,
+    });
+    if (!await input.page.clickExactHref(resolved.warmHref)) {
+      return resolverSkipSampleResult(input.route.key, 'warm', input.repeat, 'fixture_not_navigable');
+    }
+    collectionStarted = true;
+    const result = await input.instrumentation.collectSample({
+      page: input.page,
+      token,
+      route: input.route,
+      branch: resolved.branch,
+      mode: 'warm',
+      repeat: input.repeat,
+    });
+    return normalizeBlockedWriteDependency(result);
+  } finally {
+    if (!collectionStarted) {
+      await input.instrumentation.disposeSample().catch(() => undefined);
+    }
   }
-  const result = await input.instrumentation.collectSample({
-    page: input.page,
-    token,
-    route: input.route,
-    branch: resolved.branch,
-    mode: 'warm',
-    repeat: input.repeat,
-  });
-  return normalizeBlockedWriteDependency(result);
 }
 
 function seededRandom(seed: number): () => number {

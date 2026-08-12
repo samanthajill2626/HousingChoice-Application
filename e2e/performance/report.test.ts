@@ -33,6 +33,15 @@ async function artifactRoot(): Promise<string> {
   return root;
 }
 
+async function filesBelow(root: string): Promise<string[]> {
+  const entries = await readdir(root, { withFileTypes: true });
+  const nested = await Promise.all(entries.map(async (entry) => {
+    const path = join(root, entry.name);
+    return entry.isDirectory() ? filesBelow(path) : [path];
+  }));
+  return nested.flat().sort();
+}
+
 function resourceCounts(api = 3, script = 2): Record<ResourceClass, number> {
   return {
     document: 1,
@@ -457,7 +466,8 @@ describe('writePerformanceReport', () => {
   it('quarantines sensitive final bytes and returns filenames plus reason categories only', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-33334444');
-    input.samples[0] = sample('/private.person@example.com', 'cold', 0);
+    const sensitiveValue = 'private.person@example.com';
+    input.samples[0] = sample(`/${sensitiveValue}`, 'cold', 0);
 
     const result = await writePerformanceReport(input);
 
@@ -471,8 +481,18 @@ describe('writePerformanceReport', () => {
       reasonCategories: ['email_address'],
     });
     await expect(readdir(join(outputRoot, input.runId))).rejects.toMatchObject({ code: 'ENOENT' });
-    expect((await readdir(join(outputRoot, `${input.runId}-quarantined`))).sort())
-      .toEqual(result.files);
+    const quarantineDirectory = join(outputRoot, `${input.runId}-quarantined`);
+    const retainedTexts = await Promise.all((await filesBelow(outputRoot)).map((path) => readFile(path, 'utf8')));
+    expect(retainedTexts.some((text) => text.includes(sensitiveValue))).toBe(false);
+    expect((await readdir(quarantineDirectory)).sort()).toEqual(['quarantine.json']);
+    const manifest = JSON.parse(await readFile(join(quarantineDirectory, 'quarantine.json'), 'utf8'));
+    expect(manifest).toEqual({
+      runId: input.runId,
+      status: 'privacy_failure',
+      reason: 'privacy_scan_failed',
+      files: result.files,
+      reasonCategories: ['email_address'],
+    });
     expect(JSON.stringify(result).includes('private.person')).toBe(false);
   });
 

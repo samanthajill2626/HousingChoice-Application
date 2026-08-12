@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import { access, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import { arch, platform } from 'node:os';
 import { join } from 'node:path';
 import type { PerformanceSeedManifest } from '../../app/src/lib/seed/performance.js';
@@ -911,8 +911,16 @@ export async function writePerformanceReport(
   })));
   const privacyFailures = scanArtifactFiles(stagedTexts);
   if (privacyFailures.length > 0) {
-    await rename(stagingDirectory, quarantineDirectory);
     const reasonCategories = [...new Set(privacyFailures.flatMap((failure) => failure.reasonCategories))].sort();
+    await rm(stagingDirectory, { recursive: true, force: false });
+    await mkdir(quarantineDirectory);
+    await writeFile(join(quarantineDirectory, 'quarantine.json'), json({
+      runId,
+      status: 'privacy_failure',
+      reason: 'privacy_scan_failed',
+      files,
+      reasonCategories,
+    }), 'utf8');
     return {
       status: 'privacy_failure',
       exitCode: 1,

@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 import { main, readPageStoreSnapshot, runProfiler, type CliRuntime } from './cli.js';
 import type { RunConfig } from './config.js';
+import { ROUTES } from './routes.js';
+import type { SampleInstrumentation } from './collect.js';
 
 function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRuntime {
   const phase = <T>(name: string, value: T) => vi.fn(async () => {
@@ -33,6 +35,85 @@ const configDeps = {
 };
 
 describe('top-level profiler sequencing', () => {
+  it('disposes real sample adapters once across cancellation and later collector cleanup', async () => {
+    const cliModule = await import('./cli.js') as typeof import('./cli.js') & {
+      createRealInstrumentation?: (input: unknown) => SampleInstrumentation;
+    };
+    expect(cliModule.createRealInstrumentation).toBeTypeOf('function');
+    if (cliModule.createRealInstrumentation === undefined) return;
+
+    const detach = vi.fn(async () => undefined);
+    const cdp = {
+      send: vi.fn(async (method: string) => method === 'Performance.getMetrics'
+        ? { metrics: [{ name: 'Timestamp', value: 1 }] }
+        : {}),
+      on: vi.fn(),
+      detach,
+    };
+    const on = vi.fn();
+    const off = vi.fn();
+    const contextState = { token: null as { evidence(): []; } | null };
+    const page = {
+      rawPage: {
+        context: () => ({ newCDPSession: vi.fn(async () => cdp) }),
+        on,
+        off,
+        evaluate: vi.fn(async () => undefined),
+      },
+      contextState,
+      baseUrl: 'http://127.0.0.1:9111',
+    };
+    class FakeNetworkCollector {
+      beginSample(): void {}
+    }
+    const instrumentation = cliModule.createRealInstrumentation({
+      route: ROUTES[0]!,
+      mode: 'warm',
+      repeat: 0,
+      baseUrl: 'http://127.0.0.1:9111',
+      readyTimeoutMs: 10,
+      settleMs: 1,
+      pollMs: 1,
+      modules: {
+        collect: { NetworkCollector: FakeNetworkCollector },
+        firewall: { createFirewallRecordingToken: () => ({ evidence: () => [] }) },
+        readiness: {
+          waitForMeaningfulReady: async () => { throw new Error('readiness_failed'); },
+        },
+        routes: { expectedGets: () => [] },
+      },
+      requests: [],
+    } as never);
+
+    await instrumentation.beginSample({
+      page: page as never,
+      token: 'real-warm',
+      route: ROUTES[0]!,
+      branch: { kind: 'none' },
+      mode: 'warm',
+      repeat: 0,
+      sourcePageUrl: '/',
+      destinationPageUrl: '/',
+    });
+    expect(on).toHaveBeenCalledOnce();
+    expect(contextState.token).not.toBeNull();
+
+    await instrumentation.disposeSample();
+    await instrumentation.disposeSample();
+    await expect(instrumentation.collectSample({
+      page: page as never,
+      token: 'real-warm',
+      route: ROUTES[0]!,
+      branch: { kind: 'none' },
+      mode: 'warm',
+      repeat: 0,
+    })).rejects.toThrowError('readiness_failed');
+
+    expect(contextState.token).toBeNull();
+    expect(off).toHaveBeenCalledOnce();
+    expect(detach).toHaveBeenCalledOnce();
+  });
+
   it('degrades an unavailable auxiliary page snapshot to null without exposing the browser error', async () => {
     const read = vi.fn(async () => {
       throw new Error('private.person@example.test browser target closed');

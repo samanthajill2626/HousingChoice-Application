@@ -351,11 +351,17 @@ function blankResult(routeKey: string, mode: 'cold' | 'warm', repeat: number): S
 class FakeSamplingPage implements SamplePage {
   readonly events: string[];
   readonly hrefs = new Set<string>();
+  readonly lifecycle?: { activeToken: string | null; listenerCount: number };
   sourceReady = true;
   relayLinks = 0;
+  clickFailure: Error | null = null;
 
-  constructor(events: string[]) {
+  constructor(
+    events: string[],
+    lifecycle?: { activeToken: string | null; listenerCount: number },
+  ) {
     this.events = events;
+    this.lifecycle = lifecycle;
   }
 
   async installNextDocumentBootstrap(token: string): Promise<void> {
@@ -368,6 +374,9 @@ class FakeSamplingPage implements SamplePage {
 
   async prepareWarmSource(route: RouteDefinition): Promise<void> {
     this.events.push(`prepare:${route.source.path}`);
+    if (this.lifecycle !== undefined) {
+      this.events.push(`prepare-lifecycle:${this.lifecycle.activeToken ?? 'none'}:${this.lifecycle.listenerCount}`);
+    }
   }
 
   async waitForSourceReady(_route: RouteDefinition, timeoutMs: number): Promise<boolean> {
@@ -376,6 +385,7 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async clickExactHref(href: string): Promise<boolean> {
+    if (this.clickFailure !== null) throw this.clickFailure;
     if (!this.hrefs.has(href)) return false;
     this.events.push(`click:${href}`);
     return true;
@@ -432,9 +442,15 @@ class FakeInstrumentation implements SampleInstrumentation {
   throwOnCollect = false;
   blockedTimeout = false;
   blockedReady = false;
+  readonly lifecycle?: { activeToken: string | null; listenerCount: number };
+  disposeCount = 0;
 
-  constructor(events: string[]) {
+  constructor(
+    events: string[],
+    lifecycle?: { activeToken: string | null; listenerCount: number },
+  ) {
     this.events = events;
+    this.lifecycle = lifecycle;
   }
 
   async beginSample(input: {
@@ -446,6 +462,19 @@ class FakeInstrumentation implements SampleInstrumentation {
   }): Promise<void> {
     this.branches.push({ ...input.branch });
     this.events.push(`begin:${input.mode}:${input.token}:${input.sourcePageUrl ?? '-'}:${input.destinationPageUrl}`);
+    if (this.lifecycle !== undefined) {
+      this.lifecycle.activeToken = input.token;
+      this.lifecycle.listenerCount += 1;
+    }
+  }
+
+  async disposeSample(): Promise<void> {
+    this.disposeCount += 1;
+    this.events.push('dispose');
+    if (this.lifecycle !== undefined) {
+      this.lifecycle.activeToken = null;
+      this.lifecycle.listenerCount = Math.max(0, this.lifecycle.listenerCount - 1);
+    }
   }
 
   async collectSample(input: { route: RouteDefinition; mode: 'cold' | 'warm'; repeat: number }): Promise<SampleResult> {
@@ -631,6 +660,66 @@ describe('cold and warm sampling protocol', () => {
       token: 'missing-link',
     });
     expect(missingLink.status).toBe('skipped_fixture_not_navigable');
+  });
+
+  it('disposes a begun warm sample before the shared page prepares the next route', async () => {
+    const events: string[] = [];
+    const lifecycle = { activeToken: null as string | null, listenerCount: 0 };
+    const page = new FakeSamplingPage(events, lifecycle);
+    const firstRoute = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
+    const secondRoute = ROUTES.find((candidate) => candidate.key === '/tours/:tourId')!;
+    const firstInstrumentation = new FakeInstrumentation(events, lifecycle);
+
+    const first = await collectWarmSample({
+      page,
+      route: firstRoute,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private'),
+      instrumentation: firstInstrumentation,
+      token: 'route-a',
+    });
+
+    expect(first.status).toBe('skipped_fixture_not_navigable');
+    expect(firstInstrumentation.disposeCount).toBe(1);
+    expect(lifecycle).toEqual({ activeToken: null, listenerCount: 0 });
+
+    const second = await collectWarmSample({
+      page,
+      route: secondRoute,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => ({ kind: 'skip', reason: 'fixture_absent' }),
+      instrumentation: new FakeInstrumentation(events, lifecycle),
+      token: 'route-b',
+    });
+
+    expect(second.status).toBe('skipped_no_fixture');
+    expect(events).toContain('prepare-lifecycle:none:0');
+    expect(events.indexOf('dispose')).toBeLessThan(events.lastIndexOf('prepare-lifecycle:none:0'));
+  });
+
+  it('disposes a begun warm sample without masking an exact-link click failure', async () => {
+    const events: string[] = [];
+    const lifecycle = { activeToken: null as string | null, listenerCount: 0 };
+    const page = new FakeSamplingPage(events, lifecycle);
+    const route = ROUTES.find((candidate) => candidate.key === '/contacts/:contactId')!;
+    const instrumentation = new FakeInstrumentation(events, lifecycle);
+    page.hrefs.add('/contacts/private');
+    page.clickFailure = new Error('click_failed');
+
+    await expect(collectWarmSample({
+      page,
+      route,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/contacts/private'),
+      instrumentation,
+      token: 'route-throw',
+    })).rejects.toThrowError('click_failed');
+
+    expect(instrumentation.disposeCount).toBe(1);
+    expect(lifecycle).toEqual({ activeToken: null, listenerCount: 0 });
   });
 });
 

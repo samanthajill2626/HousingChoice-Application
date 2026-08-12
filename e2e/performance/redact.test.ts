@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import {
   allEndpointTemplates,
+  assertEndpointTemplate,
+  isEndpointTemplate,
   sanitizeRequestUrl,
 } from './templates.js';
 import {
@@ -147,6 +149,14 @@ describe('request URL sanitization', () => {
 
   it('serializes every checked-in template without tripping the final scan', () => {
     expect(scanArtifactText(JSON.stringify(allEndpointTemplates()))).toEqual([]);
+  });
+
+  it('closes the checked-in endpoint registry to declared templates', () => {
+    expect(isEndpointTemplate('/api/contacts/:contactId/timeline')).toBe(true);
+    expect(isEndpointTemplate('/api/synthetic/private')).toBe(false);
+    expect(() => assertEndpointTemplate('/api/synthetic/private')).toThrowError(
+      'undeclared_endpoint_template',
+    );
   });
 });
 

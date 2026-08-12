@@ -161,6 +161,16 @@ const ENDPOINT_TEMPLATES = Object.freeze([
 
 export type EndpointTemplate = (typeof ENDPOINT_TEMPLATES)[number];
 
+const ENDPOINT_TEMPLATE_SET: ReadonlySet<string> = new Set(ENDPOINT_TEMPLATES);
+
+export function isEndpointTemplate(value: string): value is EndpointTemplate {
+  return ENDPOINT_TEMPLATE_SET.has(value);
+}
+
+export function assertEndpointTemplate(value: string): asserts value is EndpointTemplate {
+  if (!isEndpointTemplate(value)) throw new Error('undeclared_endpoint_template');
+}
+
 interface CompiledTemplate {
   template: EndpointTemplate;
   segments: readonly string[];

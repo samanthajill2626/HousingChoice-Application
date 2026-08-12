@@ -21,6 +21,7 @@ import { createGroupCrossCheck } from '../src/services/groupCrossCheck.js';
 import { createGroupSendService } from '../src/services/groupSend.js';
 import { createGroupRailService } from '../src/services/groupRail.js';
 import { GROUP_CROSSCHECK_LAST_EVENT_AT_ID } from '../src/repos/settingsRepo.js';
+import { GROUP_CROSSCHECK_GRACE_MS } from '../src/repos/messagesRepo.js';
 import { loadConfig } from '../src/lib/config.js';
 
 const SMS_PATH = '/webhooks/twilio/sms';
@@ -54,6 +55,23 @@ function messageAddedParams(over: Record<string, string> = {}): Record<string, s
     ...over,
   };
 }
+
+// ONE CLOCK FOR THE WHOLE CROSS-CHECK SCENARIO.
+//
+// The ledger rows these tests sweep over are written by the WEBHOOKS, and the
+// deadline on each one is `now + grace` read from the cross-check's clock. This
+// suite used to leave that clock as the wall clock and then sweep at a calendar
+// literal, so whether the row was overdue depended on what time of day the
+// suite ran - it proved the alarm early in the day and quietly proved nothing
+// after it. Both sides now come off `LEDGER_NOW`, and the sweep instant is
+// DERIVED from the real grace constant rather than eyeballed, so the scenario is
+// identical at every wall-clock time and stays correct if the grace changes.
+const LEDGER_NOW = new Date('2026-08-11T12:00:00.000Z');
+const ledgerClock = (): Date => LEDGER_NOW;
+/** One second past the grace deadline every event in this suite carries. */
+const PAST_GRACE = new Date(
+  LEDGER_NOW.getTime() + GROUP_CROSSCHECK_GRACE_MS + 1_000,
+).toISOString();
 
 async function railedGroup(world: FakeWorld, app: Parameters<typeof signedTwilioPost>[0]) {
   await signedTwilioPost(app, SMS_PATH, groupParams());
@@ -91,7 +109,7 @@ describe('T6.6(a) - detection enqueues the real groupRail.ensure job', () => {
 describe('T6.6(d) - a filed group inbound is the cross-check MATCH', () => {
   it('an event then its classic filing leaves NOTHING to alarm about', async () => {
     const world = createFakeWorld();
-    const { app } = makeWebhookHarness({ world });
+    const { app, capture } = makeWebhookHarness({ world, groupCrossCheckNow: ledgerClock });
     await railedGroup(world, app);
 
     // The Conversations webhook sees the next carrier message...
@@ -104,13 +122,22 @@ describe('T6.6(d) - a filed group inbound is the cross-check MATCH', () => {
       settingsRepo: world.settingsRepo,
       businessNumber: '+15550000000',
       logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn() } as never,
-    }).sweepCrossCheckDeadlines('2026-08-11T23:00:00.000Z');
+    }).sweepCrossCheckDeadlines(PAST_GRACE);
     expect(sweep.alarms).toEqual([]);
+    // AND NOT because the ledger was empty. A silent-quiet ledger produces the
+    // same empty sweep as a healthy matched one, so the quiet has to be earned:
+    // the filing must have CONSUMED the pending event this test created.
+    expect(
+      capture.lines.filter(
+        (l) => l['event'] === 'group_crosscheck_event_matched' && l['reason'] === 'filed',
+      ),
+    ).toHaveLength(1);
+    expect(sweep.scanned).toBe(0);
   });
 
   it('WITHOUT the filing, the same event alarms - which is what the wiring prevents', async () => {
     const world = createFakeWorld();
-    const { app } = makeWebhookHarness({ world });
+    const { app } = makeWebhookHarness({ world, groupCrossCheckNow: ledgerClock });
     await railedGroup(world, app);
 
     await signedTwilioPost(app, CONVERSATIONS_PATH, messageAddedParams());
@@ -121,7 +148,7 @@ describe('T6.6(d) - a filed group inbound is the cross-check MATCH', () => {
       settingsRepo: world.settingsRepo,
       businessNumber: '+15550000000',
       logger: log as never,
-    }).sweepCrossCheckDeadlines('2026-08-11T23:00:00.000Z');
+    }).sweepCrossCheckDeadlines(PAST_GRACE);
 
     expect(sweep.alarms).toHaveLength(1);
     expect(log.error).toHaveBeenCalledWith(

@@ -3259,6 +3259,15 @@ export interface HarnessOptions {
   groupCrossCheck?: ConversationsCrossCheck;
   /** Mark the injected cross-check as a deliberate GAP (the not-wired counter). */
   groupCrossCheckWired?: boolean;
+  /**
+   * Injected clock for the WORLD's cross-check (T6.2). The ledger stamps its
+   * grace deadlines and credit timestamps from this clock, so a test that later
+   * sweeps at a fixed instant must inject one here too - otherwise the rows are
+   * written from the wall clock, the sweep instant is a calendar literal, and
+   * whether a row is overdue depends on what time of day the suite happens to
+   * run. Omit to use the wall clock.
+   */
+  groupCrossCheckNow?: () => Date;
   /** SSE heartbeat override for /api/events tests (default 25s). */
   sseHeartbeatMs?: number;
   /** Injected pool-numbers service for the M1.7 relay API tests. */
@@ -3370,6 +3379,10 @@ export function makeWebhookHarness(opts: HarnessOptions = {}): Harness {
     settingsRepo: world.settingsRepo,
     businessNumber: OUR_NUMBER,
     logger: createLogger({ destination: capture.stream }),
+    // One clock for the whole scenario when a test asks for it: the ledger
+    // deadlines the webhooks write and the instant a test sweeps at have to come
+    // from the SAME timeline, or the assertion is wall-clock dependent.
+    ...(opts.groupCrossCheckNow !== undefined && { now: opts.groupCrossCheckNow }),
   });
   const app = buildApp({
     config,

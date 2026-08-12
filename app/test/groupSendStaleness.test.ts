@@ -347,7 +347,7 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
     const backlog = 50;
     await Promise.all(
       Array.from({ length: backlog }, (_unused, i) =>
-        messages.putCrossCheckPending(
+        messages.recordCrossCheckEvent(
           {
             pairKey: `groupxc#CHstarve#phone#+1555000${String(i).padStart(4, '0')}`,
             messageSid: `IMstarve${String(i).padStart(4, '0')}`,
@@ -355,7 +355,11 @@ describe.skipIf(!reachable)('group send staleness against DynamoDB Local', () =>
             author: '+15550000001',
             deadlineAt: new Date(Date.parse(SENT_AT) - (backlog - i) * 1000).toISOString(),
           },
-          Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
+          {
+            notBeforeIso: SENT_AT,
+            nowIso: SENT_AT,
+            expiresAt: Math.floor(Date.parse(PAST_DEADLINE) / 1000) + 86_400,
+          },
         ),
       ),
     );

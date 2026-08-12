@@ -375,6 +375,38 @@ export const GROUP_CROSSCHECK_STATE_SORT_KEY = 'state';
 /** How many oldest-first pending rows one claim will try before giving up. */
 const CROSSCHECK_CLAIM_ATTEMPTS = 3;
 
+/**
+ * How many read-decide-write rounds the event half will take on one pair.
+ *
+ * Generous on purpose: the decision (matched-or-pending) depends on the balance
+ * it was made against, so a concurrent writer must cause a RETRY rather than a
+ * wrong answer - and a busy rail can put many events and filings on one pair
+ * item at once. Each round is one consistent read plus one conditional write,
+ * with a short randomized backoff so concurrent losers do not re-collide.
+ */
+const CROSSCHECK_LEDGER_ATTEMPTS = 12;
+/** Max randomized backoff between contended ledger rounds. */
+const CROSSCHECK_LEDGER_BACKOFF_MS = 40;
+
+/**
+ * The pending-event row prefix.
+ *
+ * `evt2#`, NOT `evt#` (fix wave 2, adversarial 12). Pre-deploy `evt#` rows sit
+ * INSIDE the claim path's `BETWEEN 'evt#' AND 'evt#~'` range and the claim reads
+ * oldest-deadline first - so at deploy every stale pre-wave row would be claimed
+ * IN PREFERENCE to a fresh one, costing a false `group_crosscheck_inbound_missing`
+ * on a healthy message while silently absorbing the alarm the stale row had
+ * earned. Bumping the prefix puts the old rows outside the range, where they
+ * reap on the existing 7-day TTL and are genuinely never read again. Any
+ * pre-deploy DUE row still alarms once, which is the cost already priced.
+ */
+const CROSSCHECK_EVENT_PREFIX = 'evt2#';
+
+/** Sort key for a pending cross-check event row. */
+function crossCheckEventSortKey(deadlineIso: string, messageSid: string): string {
+  return `${CROSSCHECK_EVENT_PREFIX}${deadlineIso}#${messageSid}`;
+}
+
 /** Deadline-prefixed due sort key for an unmatched cross-check event. */
 export function groupCrossCheckDueSortKey(deadlineIso: string, messageSid: string): string {
   return `${deadlineIso}#${GROUP_CROSSCHECK_DUE_KIND}#${messageSid}`;
@@ -1181,13 +1213,31 @@ export interface MessagesRepo {
    * `notBeforeIso` is the credit freshness bound. `credit_since` tracks the
    * OLDEST outstanding credit, so a quiet period that banked credits long ago
    * can never mask a later genuine miss - those credits are discarded and this
-   * event goes pending instead.
+   * event goes pending instead. DISCARDING RECOMPUTES, IT DOES NOT OVERWRITE
+   * (fix wave 2, adversarial 8 / conformance F9): the balance is moved by a
+   * delta derived from the reading the decision was made on, and the write is
+   * conditioned on that reading, so a credit banked concurrently survives
+   * instead of being thrown away with the stale ones.
+   *
+   * ONE WRITE, NOT TWO (fix wave 2, adversarial 11). The pending ROW and the
+   * pending BALANCE used to be separate writes, so a throw between them (a
+   * throttle, a timeout) left rows with no balance behind them: the sweep later
+   * alarmed those rows and its bare pair-scoped release STOLE a different
+   * event's slot, which then alarmed falsely AND banked a spurious credit that
+   * could absorb a later real miss. The balance move and the rows now land in
+   * ONE `TransactWriteItems`, so a pending row cannot exist without the balance
+   * that accounts for it. The decision is made from a strongly-consistent read
+   * and the transaction is CONDITIONED on that exact reading, so a concurrent
+   * writer causes a retry rather than a wrong answer.
+   *
+   * A CREDIT WRITES NO ROWS AT ALL. Because the outcome is known before the
+   * write, the event that lands on a banked credit simply consumes it - where
+   * the previous ordering wrote a pending row and then retracted it, leaving a
+   * crash window that alarmed for a message that was matched.
    */
-  bumpCrossCheckEvent(
-    pairKey: string,
-    notBeforeIso: string,
-    nowIso: string,
-    expiresAt: number,
+  recordCrossCheckEvent(
+    event: PendingCrossCheckEvent,
+    bounds: { notBeforeIso: string; nowIso: string; expiresAt: number },
   ): Promise<'credit' | 'pending'>;
   /**
    * THE CLASSIC HALF'S ONE ATOMIC LEDGER STEP. The mirror of
@@ -1209,8 +1259,6 @@ export interface MessagesRepo {
    * Conditional on a positive balance, and never throws for a race.
    */
   releaseCrossCheckPending(pairKey: string): Promise<void>;
-  /** Record an event awaiting its classic filing: pair row + due row, together. */
-  putCrossCheckPending(event: PendingCrossCheckEvent, expiresAt: number): Promise<void>;
   /**
    * CLAIM the OLDEST pending event for this pair (deleting both its pair row and
    * its due row), or `undefined` when nothing is claimable. Oldest-first is what
@@ -1227,8 +1275,23 @@ export interface MessagesRepo {
    * Resolve an ALARMED pending event: delete the due row and its pair row so the
    * alarm fires exactly once. There is no sparse-index trick on a base-table
    * partition - the rows must actually go, or they alarm forever.
+   *
+   * Both keys are passed VERBATIM from the due row's own pointer (fix wave 2,
+   * adversarial 12): re-deriving them would miss a row written under an older
+   * key convention and silently leave it to alarm forever.
+   *
+   * Returns whether THIS call deleted a row the balance had COUNTED. The sweep
+   * gives a slot back only when it did (fix wave 2, adversarial 11): if a
+   * classic filing claimed the row first, that filing already moved the
+   * balance, and if the row was never counted (its bump did not land) there is
+   * no slot of its own to give back - either way a second decrement would take
+   * an unrelated event's slot and make THAT one alarm falsely.
    */
-  resolveCrossCheckPending(pairKey: string, messageSid: string, deadlineAt: string): Promise<void>;
+  resolveCrossCheckPending(
+    pairKey: string,
+    pairSortKey: string,
+    dueSortKey: string,
+  ): Promise<boolean>;
 }
 
 const DEFAULT_PAGE_LIMIT = 50;
@@ -1334,6 +1397,84 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }),
     );
     return Item as MessageItem | undefined;
+  }
+
+  /**
+   * DISCARD STALE CREDITS AND TAKE A PENDING SLOT, returning the new balance.
+   *
+   * Reached only when the conditional ADD refused, i.e. the pair is in credit
+   * AND the oldest of those credits predates the match window. Stale credits
+   * must never mask a genuine miss, so they are discarded rather than consumed.
+   *
+   * RECOMPUTED, NOT OVERWRITTEN (fix wave 2, adversarial 8 / conformance F9).
+   * The old code did `SET balance = 1`, which threw away the WHOLE credit stack
+   * - including a credit banked microseconds earlier by a classic filing that
+   * really did arrive, whose own event then alarmed for a message that was
+   * matched. The move is now a DELTA off the balance this decision was made on,
+   * conditioned on that exact reading, so a concurrent writer's contribution
+   * survives in the arithmetic (it simply makes the result one lower) and a
+   * writer that got there first causes a re-read rather than a wrong answer.
+   * Contention here is bounded and rare: the common path never reaches it.
+   */
+  async function discardStaleCredits(
+    pairKey: string,
+    notBeforeIso: string,
+    expiresAt: number,
+  ): Promise<number> {
+    const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
+    for (let attempt = 0; attempt < CROSSCHECK_LEDGER_ATTEMPTS; attempt += 1) {
+      const { Item } = await doc.send(
+        new GetCommand({ TableName: table, Key: key, ConsistentRead: true }),
+      );
+      const state = Item as { balance?: unknown; credit_since?: unknown } | undefined;
+      const observed = typeof state?.balance === 'number' ? state.balance : 0;
+      const since = typeof state?.credit_since === 'string' ? state.credit_since : undefined;
+      const stale = observed < 0 && since !== undefined && since < notBeforeIso;
+      // The pair moved out of the stale-credit shape between the refused ADD and
+      // this read: a plain bump is the truthful answer now.
+      const delta = stale ? 1 - observed : 1;
+      try {
+        const { Attributes } = await doc.send(
+          new UpdateCommand({
+            TableName: table,
+            Key: key,
+            UpdateExpression: stale
+              ? 'ADD #b :delta SET #e = :exp REMOVE #cs'
+              : 'ADD #b :delta SET #e = :exp',
+            ConditionExpression: stale
+              ? '#b = :observed AND #cs = :since'
+              : 'attribute_not_exists(#b) OR #b = :observed',
+            ExpressionAttributeNames: stale
+              ? { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' }
+              : { '#b': 'balance', '#e': 'expires_at' },
+            ExpressionAttributeValues: {
+              ':delta': delta,
+              ':exp': expiresAt,
+              ':observed': observed,
+              ...(stale && since !== undefined && { ':since': since }),
+            },
+            ReturnValues: 'UPDATED_NEW',
+          }),
+        );
+        if (stale) {
+          log.info(
+            { pairKey, notBeforeIso, discarded: -observed },
+            'cross-check: stale credits discarded - the event takes a pending slot',
+          );
+        }
+        return Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        await new Promise((resolve) =>
+          setTimeout(resolve, Math.floor(Math.random() * CROSSCHECK_LEDGER_BACKOFF_MS)),
+        );
+      }
+    }
+    // Never silently swallowed: the caller's rows exist and are UNCOUNTED, which
+    // both consumers already treat as "not accounted for in the balance".
+    throw new Error(
+      `cross-check ledger: could not settle stale credits after ${CROSSCHECK_LEDGER_ATTEMPTS} attempts`,
+    );
   }
 
   return {
@@ -2415,8 +2556,59 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
     },
 
-    async bumpCrossCheckEvent(pairKey, notBeforeIso, nowIso, expiresAt) {
+    async recordCrossCheckEvent(event, bounds) {
+      const { notBeforeIso, expiresAt } = bounds;
+      const pairKey = event.pairKey;
       const key = { conversationId: pairKey, tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY };
+      const pairSortKey = crossCheckEventSortKey(event.deadlineAt, event.messageSid);
+      const dueSortKey = groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid);
+
+      // (1) THE ROWS FIRST, UNCOUNTED. The classic half claims a pending ROW
+      // whenever the balance says one exists, so the row has to be durable
+      // before the bump that says so. What is new (fix wave 2, adversarial 11)
+      // is `counted`: until the bump lands, this row is NOT accounted for in the
+      // balance, and both consumers know it. That is what stops a throw between
+      // these two steps from cascading - previously such a row was alarmed by
+      // the sweep, whose bare pair-scoped release then took a DIFFERENT event's
+      // slot, making that one alarm falsely and banking a spurious credit able
+      // to absorb a later real miss.
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: pairKey,
+            tsMsgId: pairSortKey,
+            message_sid: event.messageSid,
+            conversation_sid: event.conversationSid,
+            author: event.author,
+            deadline_at: event.deadlineAt,
+            expires_at: expiresAt,
+          },
+        }),
+      );
+      await doc.send(
+        new PutCommand({
+          TableName: table,
+          Item: {
+            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
+            tsMsgId: dueSortKey,
+            due_kind: GROUP_CROSSCHECK_DUE_KIND,
+            deadline_at: event.deadlineAt,
+            // `ref` points back at the pair row, so resolving an alarm can drop
+            // both without re-deriving anything.
+            ref_conversationId: pairKey,
+            ref_tsMsgId: pairSortKey,
+            provider_sid: event.messageSid,
+            conversation_sid: event.conversationSid,
+            author: event.author,
+            expires_at: expiresAt,
+          },
+        }),
+      );
+
+      // (2) THE BALANCE. One atomic ADD in the common case - no read, so a hot
+      // pair with many events and filings in flight never has to retry.
+      let balance: number;
       try {
         const { Attributes } = await doc.send(
           new UpdateCommand({
@@ -2438,56 +2630,47 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             ReturnValues: 'UPDATED_NEW',
           }),
         );
-        const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
-        // <= 0 means the ADD landed on a banked credit rather than creating a
-        // new pending slot: this event is matched.
-        return balance <= 0 ? 'credit' : 'pending';
+        balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        balance = await discardStaleCredits(pairKey, notBeforeIso, expiresAt);
       }
-      // STALE CREDITS. They must never mask a genuine miss, so they are
-      // DISCARDED here rather than consumed, and this event takes the pair's
-      // only pending slot. Conditional so a concurrent writer that already moved
-      // the balance is not clobbered; if it lost the race the plain bump below
-      // still accounts for this event.
+
+      if (balance <= 0) {
+        // The ADD landed on a banked credit: this event is matched, so its rows
+        // are retracted. (Order is what makes the retract safe: nothing can
+        // claim a row for an event the balance says is not pending.)
+        await doc.send(
+          new DeleteCommand({ TableName: table, Key: { conversationId: pairKey, tsMsgId: pairSortKey } }),
+        );
+        await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { conversationId: GROUP_CROSSCHECK_DUE_PARTITION, tsMsgId: dueSortKey },
+          }),
+        );
+        return 'credit';
+      }
+
+      // (3) COUNTED. The balance now accounts for this row, so say so on the row
+      // itself: the claim path consumes only counted rows, and the sweep gives a
+      // slot back only for a counted row it alarmed.
       try {
         await doc.send(
           new UpdateCommand({
             TableName: table,
-            Key: key,
-            UpdateExpression: 'SET #b = :one, #e = :exp REMOVE #cs',
-            ConditionExpression: '#b < :zero AND #cs < :notBefore',
-            ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at', '#cs': 'credit_since' },
-            ExpressionAttributeValues: {
-              ':one': 1,
-              ':zero': 0,
-              ':exp': expiresAt,
-              ':notBefore': notBeforeIso,
-            },
+            Key: { conversationId: pairKey, tsMsgId: pairSortKey },
+            UpdateExpression: 'SET counted = :yes',
+            ConditionExpression: 'attribute_exists(conversationId)',
+            ExpressionAttributeValues: { ':yes': true },
           }),
         );
-        log.info(
-          { pairKey, notBeforeIso },
-          'cross-check: stale credits discarded - the event takes a pending slot',
-        );
-        return 'pending';
       } catch (err) {
         if (!(err instanceof ConditionalCheckFailedException)) throw err;
+        // A classic filing claimed the row in the same instant. It consumed the
+        // slot this bump created; nothing further to do.
       }
-      // The pair moved under us between the two writes. Re-run the ordinary
-      // bump; whatever it lands on now is the truthful answer.
-      const { Attributes } = await doc.send(
-        new UpdateCommand({
-          TableName: table,
-          Key: key,
-          UpdateExpression: 'ADD #b :one SET #e = :exp',
-          ExpressionAttributeNames: { '#b': 'balance', '#e': 'expires_at' },
-          ExpressionAttributeValues: { ':one': 1, ':exp': expiresAt },
-          ReturnValues: 'UPDATED_NEW',
-        }),
-      );
-      const balance = Number((Attributes as { balance?: number } | undefined)?.balance ?? 1);
-      return balance <= 0 ? 'credit' : 'pending';
+      return 'pending';
     },
 
     async bumpCrossCheckClassic(pairKey, nowIso, expiresAt) {
@@ -2552,52 +2735,17 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       }
     },
 
-    async putCrossCheckPending(event, expiresAt) {
-      // The pair row (matching) and the due row (alarming) are written
-      // separately on purpose: a lost due row would only cost an alarm, while a
-      // transaction here would make an ordinary redelivery a hard failure.
-      await doc.send(
-        new PutCommand({
-          TableName: table,
-          Item: {
-            conversationId: event.pairKey,
-            tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}`,
-            message_sid: event.messageSid,
-            conversation_sid: event.conversationSid,
-            author: event.author,
-            deadline_at: event.deadlineAt,
-            expires_at: expiresAt,
-          },
-        }),
-      );
-      await doc.send(
-        new PutCommand({
-          TableName: table,
-          Item: {
-            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
-            tsMsgId: groupCrossCheckDueSortKey(event.deadlineAt, event.messageSid),
-            due_kind: GROUP_CROSSCHECK_DUE_KIND,
-            deadline_at: event.deadlineAt,
-            // `ref` points back at the pair row, so resolving an alarm can drop
-            // both without re-deriving anything.
-            ref_conversationId: event.pairKey,
-            ref_tsMsgId: `evt#${event.deadlineAt}#${event.messageSid}`,
-            provider_sid: event.messageSid,
-            conversation_sid: event.conversationSid,
-            author: event.author,
-            expires_at: expiresAt,
-          },
-        }),
-      );
-    },
-
     async claimOldestCrossCheckPending(pairKey) {
       for (let attempt = 0; attempt < CROSSCHECK_CLAIM_ATTEMPTS; attempt += 1) {
         const { Items } = await doc.send(
           new QueryCommand({
             TableName: table,
             KeyConditionExpression: 'conversationId = :p AND tsMsgId BETWEEN :lo AND :hi',
-            ExpressionAttributeValues: { ':p': pairKey, ':lo': 'evt#', ':hi': 'evt#~' },
+            ExpressionAttributeValues: {
+              ':p': pairKey,
+              ':lo': CROSSCHECK_EVENT_PREFIX,
+              ':hi': `${CROSSCHECK_EVENT_PREFIX}~`,
+            },
             ScanIndexForward: true, // OLDEST pending event first
             // STRONGLY CONSISTENT BY CONTRACT. The event half writes this row
             // microseconds before the balance bump that sends a caller here, so
@@ -2610,7 +2758,13 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
             Limit: CROSSCHECK_CLAIM_ATTEMPTS,
           }),
         );
-        const items = (Items ?? []) as Record<string, unknown>[];
+        const all = (Items ?? []) as Record<string, unknown>[];
+        // COUNTED ROWS ONLY (fix wave 2, adversarial 11). A row whose balance
+        // bump has not landed is not one of the pending slots this balance is
+        // reporting, so consuming it would leave a counted row unmatched - and
+        // that one would then alarm falsely. An uncounted row is left alone; the
+        // sweep alarms and drops it at its deadline without touching the balance.
+        const items = all.filter((item) => item['counted'] === true);
         if (items.length === 0) return undefined;
         for (const item of items) {
           const sortKey = String(item['tsMsgId']);
@@ -2651,22 +2805,34 @@ export function createMessagesRepo(deps: RepoDeps = {}): MessagesRepo {
       return undefined;
     },
 
-    async resolveCrossCheckPending(pairKey, messageSid, deadlineAt) {
+    async resolveCrossCheckPending(pairKey, pairSortKey, dueSortKey) {
+      let deletedPairRow = false;
+      try {
+        const { Attributes } = await doc.send(
+          new DeleteCommand({
+            TableName: table,
+            Key: { conversationId: pairKey, tsMsgId: pairSortKey },
+            // Inspected, not assumed: a classic filing may have claimed this row
+            // between the sweep's read and here, and it already paid the balance.
+            ConditionExpression: 'attribute_exists(conversationId)',
+            ReturnValues: 'ALL_OLD',
+          }),
+        );
+        // ...and the caller may only give a slot back for a row the balance
+        // actually counted (fix wave 2, adversarial 11). An UNCOUNTED row is one
+        // whose bump never landed: releasing for it would take some OTHER
+        // event's slot and make that one alarm falsely.
+        deletedPairRow = (Attributes as { counted?: unknown } | undefined)?.counted === true;
+      } catch (err) {
+        if (!(err instanceof ConditionalCheckFailedException)) throw err;
+      }
       await doc.send(
         new DeleteCommand({
           TableName: table,
-          Key: { conversationId: pairKey, tsMsgId: `evt#${deadlineAt}#${messageSid}` },
+          Key: { conversationId: GROUP_CROSSCHECK_DUE_PARTITION, tsMsgId: dueSortKey },
         }),
       );
-      await doc.send(
-        new DeleteCommand({
-          TableName: table,
-          Key: {
-            conversationId: GROUP_CROSSCHECK_DUE_PARTITION,
-            tsMsgId: groupCrossCheckDueSortKey(deadlineAt, messageSid),
-          },
-        }),
-      );
+      return deletedPairRow;
     },
 
     async parkGroupReceipt(receipt, opts) {

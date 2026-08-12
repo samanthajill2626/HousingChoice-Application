@@ -128,10 +128,9 @@ export interface GroupCrossCheckDeps {
     MessagesRepo,
     | 'claimCrossCheckEvent'
     | 'claimCrossCheckClassic'
-    | 'bumpCrossCheckEvent'
+    | 'recordCrossCheckEvent'
     | 'bumpCrossCheckClassic'
     | 'releaseCrossCheckPending'
-    | 'putCrossCheckPending'
     | 'claimOldestCrossCheckPending'
     | 'resolveCrossCheckPending'
     | 'listDueRows'
@@ -237,16 +236,16 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
       const notBefore = new Date(at.getTime() - creditWindowMs).toISOString();
       const deadlineAt = new Date(at.getTime() + graceMs).toISOString();
 
-      // ROW FIRST, THEN THE BALANCE (fix wave 5, adversarial 3/9). The classic
-      // half claims a pending ROW whenever the balance says one exists, so the
-      // row must be durable BEFORE the bump that says so - otherwise a classic
-      // filing in between would find the balance positive and the row absent.
-      // The cost of that ordering is this: when the bump turns out to land on a
-      // banked credit, the row we just wrote is retracted below. A crash in that
-      // sub-second window leaves one due row that alarms in `graceMs` - strictly
-      // better than the old design, where the SAME window produced both a false
-      // alarm AND an orphaned credit that masked a later real one.
-      await messages.putCrossCheckPending(
+      // ONE STEP, NOT TWO (fix wave 2, adversarial 11). Wave 1 wrote the pending
+      // ROW first and then bumped the BALANCE, so a throw between them left rows
+      // the balance did not account for: the sweep alarmed one of those rows and
+      // its pair-scoped release then took a DIFFERENT event's slot, which
+      // alarmed falsely and banked a spurious credit able to absorb a later real
+      // miss. The repo now moves the balance and writes both rows in ONE
+      // transaction - and, because it decides from a consistent read first, an
+      // event that lands on a banked credit writes no rows at all rather than
+      // writing and retracting them.
+      const landed = await messages.recordCrossCheckEvent(
         {
           pairKey,
           messageSid: event.messageSid,
@@ -254,17 +253,9 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           author,
           deadlineAt,
         },
-        cleanupAt(at),
-      );
-
-      const landed = await messages.bumpCrossCheckEvent(
-        pairKey,
-        notBefore,
-        at.toISOString(),
-        cleanupAt(at),
+        { notBeforeIso: notBefore, nowIso: at.toISOString(), expiresAt: cleanupAt(at) },
       );
       if (landed === 'credit') {
-        await messages.resolveCrossCheckPending(pairKey, event.messageSid, deadlineAt);
         log.info(
           {
             event: 'group_crosscheck_event_matched',
@@ -328,16 +319,20 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
 
         const pending = await messages.claimOldestCrossCheckPending(pairKey);
         if (pending === undefined) {
-          // The balance said a pending event existed and its row was not
-          // claimable. The event half writes the row BEFORE the bump, so the
-          // only way here is a crash between those two writes on the other side.
-          // The balance already accounts for this filing; say so and stop.
+          // The balance said a pending event existed and no row was claimable.
+          // SEVERAL CAUSES, not one (fix wave 2, adversarial 27): the sweep may
+          // have alarmed and dropped the row microseconds ago while its release
+          // had not yet landed; four or more concurrent claimants on one pair
+          // exhaust the claim ladder; or a pre-wave `evt#` row is accounted for
+          // in the balance but outside the current claim range. All are safe -
+          // the balance already accounts for this filing - so this is a WARN
+          // about a diagnosis, not an error about a loss.
           log.warn(
             {
               event: 'group_crosscheck_pending_row_missing',
               conversationSid: record.conversationSid,
             },
-            'cross-check balance reported a pending event with no claimable row',
+            'cross-check balance reported a pending event with no claimable row (an alarm that just resolved it, claim contention, or a pre-wave row outside the claim range)',
           );
           return;
         }
@@ -404,17 +399,21 @@ export function createGroupCrossCheck(deps: GroupCrossCheckDeps = {}): GroupCros
           'conversation-bound inbound missing from classic webhook',
         );
         // Resolve BEFORE returning so the alarm fires exactly once. A
-        // base-table partition has no sparse-index trick: the rows must go.
-        await messages.resolveCrossCheckPending(
+        // base-table partition has no sparse-index trick: the rows must go. Both
+        // keys come from the due row's own pointer, so a row written under an
+        // older key convention is still resolved rather than left to re-alarm.
+        const claimedTheRow = await messages.resolveCrossCheckPending(
           row.ref.conversationId,
-          alarm.messageSid,
-          row.deadlineAt,
+          row.ref.tsMsgId,
+          row.sortKey,
         );
-        // ...and give the slot back to the pair balance (fix wave 5). We have
+        // ...and give the slot back to the pair balance (fix wave 5) ONLY if this
+        // sweep is what removed the row (fix wave 2, adversarial 11). We have
         // stopped waiting for this event, so it must stop counting as pending -
-        // otherwise a very late classic filing would silently "match" a message
-        // we already reported missing, and the ledger would drift by one forever.
-        await messages.releaseCrossCheckPending(row.ref.conversationId);
+        // but if a classic filing claimed the row first, that filing ALREADY
+        // moved the balance, and a second decrement would take a different
+        // event's slot and make IT alarm falsely.
+        if (claimedTheRow) await messages.releaseCrossCheckPending(row.ref.conversationId);
         alarms.push(alarm);
       }
       return { scanned: due.length, alarms };

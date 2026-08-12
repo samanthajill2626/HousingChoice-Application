@@ -60,46 +60,125 @@ function fakeDoc(script: Array<(input: Record<string, unknown>) => unknown>): {
 const env = { TABLE_PREFIX: 'hc-unit-' };
 
 describe('cross-check pair state is moved by ONE atomic counter', () => {
+  const EVENT = {
+    pairKey: PAIR,
+    messageSid: 'IMevent0001',
+    conversationSid: 'CH00000000000000000000000000000001',
+    author: '+15551110001',
+    deadlineAt: '2026-08-11T12:05:00.000Z',
+  };
+  const BOUNDS = { notBeforeIso: NOT_BEFORE, nowIso: NOW, expiresAt: EXPIRES };
+
   it('the event half issues a single conditional ADD, never a read-then-write', async () => {
-    const { doc, sent } = fakeDoc([() => ({ Attributes: { balance: 0 } })]);
-    const repo = createMessagesRepo({ doc: doc as never, env });
-
-    const landed = await repo.bumpCrossCheckEvent(PAIR, NOT_BEFORE, NOW, EXPIRES);
-
-    expect(landed).toBe('credit'); // balance <= 0 means it landed on a credit
-    expect(sent).toHaveLength(1);
-    expect(sent[0]!.name).toBe('UpdateCommand');
-    expect(sent[0]!.input['Key']).toEqual({
-      conversationId: PAIR,
-      tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY,
-    });
-    expect(String(sent[0]!.input['UpdateExpression'])).toContain('ADD');
-    // The freshness bound is IN the condition, so a stale credit can never be
-    // consumed by a racing writer between a read and a write.
-    expect(String(sent[0]!.input['ConditionExpression'])).toContain(':notBefore');
-    expect(sent[0]!.input['ReturnValues']).toBe('UPDATED_NEW');
-  });
-
-  it('a positive new balance means PENDING, not matched', async () => {
-    const { doc } = fakeDoc([() => ({ Attributes: { balance: 1 } })]);
-    const repo = createMessagesRepo({ doc: doc as never, env });
-    expect(await repo.bumpCrossCheckEvent(PAIR, NOT_BEFORE, NOW, EXPIRES)).toBe('pending');
-  });
-
-  it('STALE credits are discarded, not consumed - the event goes pending', async () => {
-    const ccfe = new ConditionalCheckFailedException({ message: 'stale', $metadata: {} });
     const { doc, sent } = fakeDoc([
-      () => {
-        throw ccfe;
-      },
+      () => ({}), // pair row
+      () => ({}), // due row
+      () => ({ Attributes: { balance: 0 } }), // the ADD
+      () => ({}), // rows retracted (this one matched a credit)
       () => ({}),
     ]);
     const repo = createMessagesRepo({ doc: doc as never, env });
 
-    expect(await repo.bumpCrossCheckEvent(PAIR, NOT_BEFORE, NOW, EXPIRES)).toBe('pending');
-    expect(sent).toHaveLength(2);
+    const landed = await repo.recordCrossCheckEvent(EVENT, BOUNDS);
+
+    expect(landed).toBe('credit'); // balance <= 0 means it landed on a credit
+    const add = sent[2]!;
+    expect(add.name).toBe('UpdateCommand');
+    expect(add.input['Key']).toEqual({
+      conversationId: PAIR,
+      tsMsgId: GROUP_CROSSCHECK_STATE_SORT_KEY,
+    });
+    expect(String(add.input['UpdateExpression'])).toContain('ADD');
+    // The freshness bound is IN the condition, so a stale credit can never be
+    // consumed by a racing writer between a read and a write - and the common
+    // path takes no read at all, so a hot pair never has to retry.
+    expect(String(add.input['ConditionExpression'])).toContain(':notBefore');
+    expect(add.input['ReturnValues']).toBe('UPDATED_NEW');
+  });
+
+  it('a PENDING event marks its row COUNTED, and a row is never counted before its bump lands', async () => {
+    // THE DEFECT (fix wave 2, adversarial 11): the row and the balance are two
+    // writes, so a throw between them left rows the balance did not account for
+    // - and the sweep's bare pair-scoped release then took a DIFFERENT event's
+    // slot, making THAT one alarm falsely and banking a spurious credit able to
+    // absorb a later real miss. The row now carries its own accounting: written
+    // uncounted, marked counted only once the bump has landed, and both
+    // consumers (the claim and the sweep's release) skip an uncounted row.
+    const { doc, sent } = fakeDoc([
+      () => ({}), // pair row
+      () => ({}), // due row
+      () => ({ Attributes: { balance: 1 } }), // the ADD
+      () => ({}), // the counted mark
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    expect(sent.map((s) => s.name)).toEqual([
+      'PutCommand',
+      'PutCommand',
+      'UpdateCommand',
+      'UpdateCommand',
+    ]);
+    // The row goes down WITHOUT `counted`...
+    expect(sent[0]!.input['Item']).not.toHaveProperty('counted');
+    // ...and is marked only after the balance accounts for it.
+    expect(String(sent[3]!.input['UpdateExpression'])).toContain('counted');
+    expect(sent[3]!.input['Key']).toMatchObject({ conversationId: PAIR });
+  });
+
+  it('STALE credits are discarded by a DELTA, so a concurrently banked credit survives', async () => {
+    // THE DEFECT (fix wave 2, adversarial 8 / conformance F9): the stale path was
+    // `SET balance = 1`, which destroyed the WHOLE credit stack - including a
+    // fresh credit banked microseconds earlier by a classic filing that really
+    // did arrive. That filing's own event then alarmed for a message that was
+    // matched. Recomputing by delta keeps the concurrent writer's contribution
+    // in the arithmetic, and the condition makes the read-decide-write safe.
+    const ccfe = new ConditionalCheckFailedException({ message: 'stale', $metadata: {} });
+    const { doc, sent } = fakeDoc([
+      () => ({}), // pair row
+      () => ({}), // due row
+      () => {
+        throw ccfe; // the ADD refuses: in credit, and the oldest is stale
+      },
+      () => ({ Item: { balance: -5, credit_since: '2026-08-11T10:00:00.000Z' } }),
+      () => ({ Attributes: { balance: 1 } }),
+      () => ({}), // the counted mark
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    // The decision is made on a STRONGLY CONSISTENT read...
+    expect(sent[3]!.name).toBe('GetCommand');
+    expect(sent[3]!.input['ConsistentRead']).toBe(true);
+    const settle = sent[4]!;
+    expect(String(settle.input['UpdateExpression'])).toContain('ADD');
+    // ...and moved by a DELTA off that reading, never by an overwrite.
+    expect((settle.input['ExpressionAttributeValues'] as Record<string, unknown>)[':delta']).toBe(6);
     // The reset REMOVEs the oldest-credit stamp so the next filing re-stamps it.
-    expect(String(sent[1]!.input['UpdateExpression'])).toContain('REMOVE');
+    expect(String(settle.input['UpdateExpression'])).toContain('REMOVE');
+    // Pinned to exactly the reading it was computed from.
+    expect(String(settle.input['ConditionExpression'])).toContain('#cs = :since');
+  });
+
+  it('re-reads and re-decides when the pair moved out of the stale shape under it', async () => {
+    const ccfe = new ConditionalCheckFailedException({ message: 'moved', $metadata: {} });
+    const { doc, sent } = fakeDoc([
+      () => ({}), // pair row
+      () => ({}), // due row
+      () => {
+        throw ccfe; // the ADD refuses
+      },
+      // ...but by the time we look, the credits are gone: a plain bump is the
+      // truthful answer now, and it must NOT remove a credit anchor it did not
+      // decide against.
+      () => ({ Item: { balance: 0 } }),
+      () => ({ Attributes: { balance: 1 } }),
+      () => ({}),
+    ]);
+    const repo = createMessagesRepo({ doc: doc as never, env });
+
+    expect(await repo.recordCrossCheckEvent(EVENT, BOUNDS)).toBe('pending');
+    expect(String(sent[4]!.input['UpdateExpression'])).not.toContain('REMOVE');
   });
 
   it('the classic half stamps the OLDEST credit only when it opens a credit run', async () => {
@@ -139,11 +218,13 @@ describe('claiming a pending row is strongly consistent AND conditional', () => 
       () => ({
         Items: [
           {
-            tsMsgId: 'evt#2026-08-11T12:05:00.000Z#IM1',
+            tsMsgId: 'evt2#2026-08-11T12:05:00.000Z#IM1',
             message_sid: 'IM1',
             deadline_at: '2026-08-11T12:05:00.000Z',
             conversation_sid: 'CH1',
             author: '+15551110001',
+            // COUNTED: the balance accounts for this row, so it is claimable.
+            counted: true,
           },
         ],
       }),
@@ -169,18 +250,21 @@ describe('claiming a pending row is strongly consistent AND conditional', () => 
       () => ({
         Items: [
           {
-            tsMsgId: 'evt#2026-08-11T12:05:00.000Z#IM1',
+            tsMsgId: 'evt2#2026-08-11T12:05:00.000Z#IM1',
             message_sid: 'IM1',
             deadline_at: '2026-08-11T12:05:00.000Z',
             conversation_sid: 'CH1',
             author: '+15551110001',
+            // COUNTED: the balance accounts for this row, so it is claimable.
+            counted: true,
           },
           {
-            tsMsgId: 'evt#2026-08-11T12:06:00.000Z#IM2',
+            tsMsgId: 'evt2#2026-08-11T12:06:00.000Z#IM2',
             message_sid: 'IM2',
             deadline_at: '2026-08-11T12:06:00.000Z',
             conversation_sid: 'CH1',
             author: '+15551110001',
+            counted: true,
           },
         ],
       }),

@@ -26,9 +26,12 @@ import {
 describe('today action-queue API (BE6/C7)', () => {
   let app: Express;
   let world: FakeWorld;
+  /** The harness's log capture - the truncation WARNs are asserted through it. */
+  let harness: ReturnType<typeof makeWebhookHarness>;
 
   beforeEach(() => {
     const h = makeWebhookHarness();
+    harness = h;
     app = h.app;
     world = h.world;
   });
@@ -987,6 +990,61 @@ describe('today action-queue API (BE6/C7)', () => {
     );
 
     expect(rows.map((r) => r.refId)).toContain('c-realunknown-behind');
+  });
+
+  // THE TWO DEFECTS THESE PIN (fix wave 4, item 7). The fill loop that closed
+  // adversarial 6 introduced both of them at its own edges.
+  it('never emits MORE than the page cap - the fill loop could return 199 rows', async () => {
+    // The loop breaks on `collected.length >= GROUP_FETCH_LIMIT`, so one
+    // excluded row in the first page (99 real) followed by a full second page
+    // (100 real) put 199 rows in a block every other group on this route caps at
+    // 100 - and this block is a human worklist, not a report.
+    world.contacts.push({
+      contactId: 'c-stub-lead',
+      type: 'unknown',
+      status: 'needs_review',
+      phone: '+15552990000',
+      origin: 'group_detection',
+    } as ContactItem);
+    for (let i = 0; i < 199; i += 1) {
+      world.contacts.push({
+        contactId: `c-real-${String(i).padStart(3, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555300${String(i).padStart(4, '0')}`,
+      } as ContactItem);
+    }
+
+    const rows = (await getItems()).filter(
+      (i) => i.refType === 'contact' && i.why === 'New unknown contact',
+    );
+
+    expect(rows.length).toBe(100);
+  });
+
+  it('WARNS when the page budget runs out with rows still behind it, instead of a silent short block', async () => {
+    // Every other truncation on this route is announced. This one was not: a
+    // partition holding more excluded rows than the walk's whole budget
+    // exhausts it with a short block, and a short block reads as "nothing needs
+    // triage" - the loud-problem-turned-silent the fill loop exists to prevent,
+    // one layer further out.
+    for (let i = 0; i < 1005; i += 1) {
+      world.contacts.push({
+        contactId: `c-manystub-${String(i).padStart(4, '0')}`,
+        type: 'unknown',
+        status: 'needs_review',
+        phone: `+1555400${String(i).padStart(4, '0')}`,
+        origin: 'group_detection',
+      } as ContactItem);
+    }
+
+    await getItems();
+
+    const warned = harness.capture
+      .atLevel(40)
+      .filter((l) => String(l['msg'] ?? '').includes('ran out of pages before filling the block'));
+    expect(warned).toHaveLength(1);
+    expect(warned[0]).toMatchObject({ group: 'contacts:triage', found: 0 });
   });
 
   it('the envelope is { items, relayCloseNags, generatedAt } with an ISO generatedAt when items exist', async () => {

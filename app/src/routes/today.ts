@@ -652,9 +652,17 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
       // The exclusion is pushed into the Query (saves work, not page slots) AND
       // the read pages until it has a real page or runs out, bounded so a
       // partition made entirely of stubs cannot spin.
-      const triaged: ContactItem[] = [];
+      //
+      // WHAT THIS COSTS (fix wave 4, item 7): up to TRIAGE_MAX_PAGES (10)
+      // SEQUENTIAL Queries of GROUP_FETCH_LIMIT (100) rows each on one Today
+      // request - a bounded but real read amplification, paid only while the
+      // partition ahead of the real unknowns is thick with excluded rows. It
+      // stops the moment a page fills the block.
+      const collected: ContactItem[] = [];
       let cursor: Record<string, unknown> | undefined;
+      let pagesWalked = 0;
       for (let page = 0; page < TRIAGE_MAX_PAGES; page += 1) {
+        pagesWalked = page + 1;
         const read = await contacts.listByType('unknown', {
           status: 'needs_review',
           limit: GROUP_FETCH_LIMIT,
@@ -663,10 +671,28 @@ export function createTodayRouter(deps: TodayRouterDeps = {}): Router {
           excludeOrigin: GROUP_DETECTION_ORIGIN,
           ...(cursor !== undefined && { exclusiveStartKey: cursor }),
         });
-        triaged.push(...read.items);
+        collected.push(...read.items);
         cursor = read.lastEvaluatedKey;
-        if (cursor === undefined || triaged.length >= GROUP_FETCH_LIMIT) break;
+        if (cursor === undefined || collected.length >= GROUP_FETCH_LIMIT) break;
       }
+      // THE PAGE BUDGET RAN OUT WITH ROWS STILL BEHIND IT (fix wave 4, item 7).
+      // Every other truncation on this route is announced by `warnIfCapped`, and
+      // this one was not: a partition holding more than ~1000 excluded rows
+      // ahead of the real unknowns exhausts the walk with a short block, and the
+      // block reads as "nothing needs triage" - which is exactly the loud
+      // problem turned silent that the fill loop was added to prevent, one layer
+      // further out.
+      if (cursor !== undefined && collected.length < GROUP_FETCH_LIMIT) {
+        log.warn(
+          { group: 'contacts:triage', pages: pagesWalked, found: collected.length },
+          'today: the untriaged-contacts walk ran out of pages before filling the block - some untriaged contacts are NOT shown',
+        );
+      }
+      // HARD CAP THE RESULT, NOT JUST THE READ. The loop breaks on `>=`, so a
+      // last page could take the total to 199 - twice the bound every other
+      // group on this route respects, and a block a human is meant to work
+      // through.
+      const triaged = collected.slice(0, GROUP_FETCH_LIMIT);
       warnIfCapped('contacts:triage', triaged.length);
       for (const contact of triaged) {
         if (!UNTRIAGED_CONTACT_STATUSES.has(contact.status ?? '')) continue;

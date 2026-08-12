@@ -86,3 +86,145 @@ export interface TargetMetadata {
   targetAppCommit: string | null;
   targetVersionStatus: 'verified' | 'unverified';
 }
+
+export interface NumericSummary {
+  median: number | null;
+  min: number | null;
+  max: number | null;
+  p95: number | null;
+}
+
+export type SampleStatusCounts = Record<SampleStatus, number>;
+
+export interface RouteScaleMetadata {
+  key: string;
+  surfaceScaleBearing: boolean;
+  sourceLoadScaleBearing: boolean;
+}
+
+export interface AggregateMetrics {
+  readyMs: NumericSummary;
+  apiRequestCount: NumericSummary;
+  apiTransferBytes: NumericSummary;
+  longTaskTotalMs: NumericSummary;
+  domElements: NumericSummary;
+  resourceCountsByClass: Record<ResourceClass, NumericSummary>;
+}
+
+export interface AggregateNoise {
+  backgroundRequestCount: NumericSummary;
+  backgroundTransferBytes: NumericSummary;
+}
+
+export interface RouteModeAggregate {
+  routeKey: string;
+  mode: SampleMode;
+  sampleCount: number;
+  successCount: number;
+  statusCounts: SampleStatusCounts;
+  lowSampleCount: boolean;
+  warnings: Array<'low_sample_count'>;
+  surfaceScaleBearing: boolean;
+  loadScaleBearing: boolean;
+  clientTruncated: boolean;
+  metrics: AggregateMetrics;
+  noise: AggregateNoise;
+}
+
+export interface ModeRankings {
+  readyMs: RouteModeAggregate[];
+  apiTransferBytes: RouteModeAggregate[];
+  apiRequestCount: RouteModeAggregate[];
+  longTaskTotalMs: RouteModeAggregate[];
+  domElements: RouteModeAggregate[];
+  resourceCountsByClass: Record<ResourceClass, RouteModeAggregate[]>;
+}
+
+export type AggregateRankings = Record<SampleMode, ModeRankings>;
+
+export interface ComparisonEnvironment {
+  target: TargetKind;
+  scaleManifest: object | null;
+  routeSet: string[];
+  browserMajor: number;
+  browserChannel: string;
+  viewport: { width: number; height: number };
+  coldRepeats: number;
+  warmRepeats: number;
+  routeOrderSeed: number;
+  interceptionScopeVersion: number;
+  settleMs: number;
+  pollMs: number;
+}
+
+export interface RevisionPairInput {
+  profilerCommit: string | null;
+  targetAppCommit: string | null;
+}
+
+export interface RevisionPair {
+  profilerCommit: string | null;
+  targetAppCommit: string | null;
+}
+
+export interface ComparisonRun {
+  schemaVersion: number;
+  environment: ComparisonEnvironment;
+  revisions: RevisionPairInput;
+  aggregates: RouteModeAggregate[];
+}
+
+export type EnvironmentMismatchField =
+  | 'target'
+  | 'scale_manifest'
+  | 'route_set'
+  | 'browser_major'
+  | 'browser_channel'
+  | 'viewport'
+  | 'cold_repeats'
+  | 'warm_repeats'
+  | 'route_order_seed'
+  | 'interception_scope_version'
+  | 'settle_ms'
+  | 'poll_ms';
+
+export interface MetricDelta {
+  absolute: number | null;
+  percent: number | null;
+}
+
+export interface ComparisonEntryRef {
+  routeKey: string;
+  mode: SampleMode;
+}
+
+export interface ComparisonMetricDeltas {
+  readyMs: MetricDelta;
+  apiRequestCount: MetricDelta;
+  apiTransferBytes: MetricDelta;
+  longTaskTotalMs: MetricDelta;
+  domElements: MetricDelta;
+  resourceCountsByClass: Record<ResourceClass, MetricDelta>;
+}
+
+export interface MatchedComparison extends ComparisonEntryRef {
+  metrics: ComparisonMetricDeltas;
+}
+
+export interface ComparisonResult {
+  control: 'controlled' | 'uncontrolled';
+  mismatches: EnvironmentMismatchField[];
+  warnings: Array<'target_version_unverified'>;
+  revisions: {
+    baseline: RevisionPair;
+    current: RevisionPair;
+    targetAppCommitChanged: boolean;
+  };
+  matched: MatchedComparison[];
+  added: ComparisonEntryRef[];
+  removed: ComparisonEntryRef[];
+  skipped: ComparisonEntryRef[];
+  timedOut: ComparisonEntryRef[];
+  failed: ComparisonEntryRef[];
+  performanceExitCode: 0;
+}

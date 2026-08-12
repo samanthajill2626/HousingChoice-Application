@@ -258,8 +258,7 @@ describe('dev gating — /auth/dev-login', () => {
     } as unknown as UsersRepo;
   };
 
-  const buildDevApp = () => {
-    const usersRepo = makeUsersRepo();
+  const buildDevApp = (usersRepo = makeUsersRepo()) => {
     const config = loadConfig({ NODE_ENV: 'test', DEV_AUTH_ENABLED: '1', CF_ORIGIN_SECRET: SECRET });
     return buildApp({ config, devRouter: createDevRouter({ config, usersRepo }), auth: { usersRepo } });
   };
@@ -312,6 +311,63 @@ describe('dev gating — /auth/dev-login', () => {
     const res = await request(app).post('/auth/dev-login').send({ email: 'founder@example.com' });
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ email: 'founder@example.com', role: 'admin' });
+  });
+
+  it('refuses a missing existing-only identity without inviting it', async () => {
+    const usersRepo = makeUsersRepo();
+    const invite = vi.spyOn(usersRepo, 'invite');
+    const app = buildDevApp(usersRepo);
+
+    const res = await request(app)
+      .post('/auth/dev-login')
+      .send({ email: 'missing@example.com', requireExisting: true });
+
+    expect(res.status).toBe(404);
+    expect(res.body).toEqual({ error: 'dev_user_not_found' });
+    expect(invite).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, false])('preserves auto-provisioning when requireExisting is %s', async (requireExisting) => {
+    const usersRepo = makeUsersRepo();
+    const invite = vi.spyOn(usersRepo, 'invite');
+    const app = buildDevApp(usersRepo);
+    const body = requireExisting === undefined
+      ? { email: 'new-user@example.com' }
+      : { email: 'new-user@example.com', requireExisting };
+
+    const res = await request(app).post('/auth/dev-login').send(body);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ email: 'new-user@example.com', role: 'admin' });
+    expect(invite).toHaveBeenCalledOnce();
+  });
+
+  it('accepts requireExisting for a seeded identity', async () => {
+    const usersRepo = makeUsersRepo();
+    const invite = vi.spyOn(usersRepo, 'invite');
+    const app = buildDevApp(usersRepo);
+
+    const res = await request(app)
+      .post('/auth/dev-login')
+      .send({ email: VA, requireExisting: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ email: VA, role: 'va' });
+    expect(invite).not.toHaveBeenCalled();
+  });
+
+  it.each(['true', 1, null, [], {}])('rejects non-boolean requireExisting value %j', async (requireExisting) => {
+    const usersRepo = makeUsersRepo();
+    const invite = vi.spyOn(usersRepo, 'invite');
+    const app = buildDevApp(usersRepo);
+
+    const res = await request(app)
+      .post('/auth/dev-login')
+      .send({ email: 'missing@example.com', requireExisting });
+
+    expect(res.status).toBe(400);
+    expect(res.body).toEqual({ error: 'invalid_require_existing' });
+    expect(invite).not.toHaveBeenCalled();
   });
 
   it('does not expose /auth/dev-login when the dev router is absent', async () => {

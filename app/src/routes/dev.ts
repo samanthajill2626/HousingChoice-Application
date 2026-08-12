@@ -181,10 +181,18 @@ export function createDevRouter(deps: DevRouterDeps = {}): Router {
   // flag is ever set in production). The real OAuth callback is untouched and
   // stays invite-first.
   router.post('/auth/dev-login', json(), async (req, res) => {
-    const body = (req.body ?? {}) as { email?: unknown };
+    const body = (req.body ?? {}) as { email?: unknown; requireExisting?: unknown };
+    if (body.requireExisting !== undefined && typeof body.requireExisting !== 'boolean') {
+      res.status(400).json({ error: 'invalid_require_existing' });
+      return;
+    }
     const email = typeof body.email === 'string' && body.email.trim() ? body.email : 'va@example.com';
     let user = await users.findByEmail(email);
     if (!user) {
+      if (body.requireExisting === true) {
+        res.status(404).json({ error: 'dev_user_not_found' });
+        return;
+      }
       // Known seed personas keep their roles (va@example.com → va, the default
       // dev-login identity); any other deliberately-typed email defaults to
       // admin for full dashboard visibility.

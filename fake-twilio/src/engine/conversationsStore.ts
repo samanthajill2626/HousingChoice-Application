@@ -102,6 +102,23 @@ export class ConversationsStore {
     return sid === undefined ? undefined : this.bySid.get(sid);
   }
 
+  /**
+   * THE CLOSED-STATE SEAM (fix wave 4, H1). Twilio closes a Conversation on its
+   * own - an account/service auto-close timer, or an operator in the console -
+   * and a closed rail keeps its UniqueName while refusing every post. That is
+   * the exact state the app's closed-rail heal has to survive, and there was no
+   * way to manufacture it here at all: `create` hard-codes `active` and nothing
+   * ever moved it. Without this seam the heal can only be tested against
+   * hand-stubbed ensurers, which is how the defect stayed invisible for three
+   * waves - the tests asserted the outcome the service could not produce.
+   */
+  setState(sidOrUniqueName: string, state: string): ConversationRecord | undefined {
+    const record = this.resolve(sidOrUniqueName);
+    if (!record) return undefined;
+    record.state = state;
+    return record;
+  }
+
   remove(sidOrUniqueName: string): boolean {
     const record = this.resolve(sidOrUniqueName);
     if (!record) return false;

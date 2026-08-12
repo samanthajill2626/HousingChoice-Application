@@ -20,6 +20,7 @@ import {
 } from '../src/repos/messagesRepo.js';
 import {
   GroupConversationsUnavailableError,
+  type GroupConversationRef,
   type GroupConversationsPort,
 } from '../src/adapters/groupConversations.js';
 import { SmsSendingDisabledError as AdapterSmsSendingDisabledError } from '../src/adapters/messaging.js';
@@ -41,7 +42,11 @@ import {
   MAX_SENDABLE_GROUP_MEMBERS,
   type GroupSendServiceDeps,
 } from '../src/services/groupSend.js';
-import type { GroupRailEnsurer } from '../src/services/groupRail.js';
+import {
+  createGroupRailService,
+  type GroupRailEnsurer,
+  type GroupRailServiceDeps,
+} from '../src/services/groupRail.js';
 import { TokenBucket } from '../src/lib/tokenBucket.js';
 
 const NOW = new Date('2026-08-11T13:00:00.000Z');
@@ -166,6 +171,9 @@ function makeFakes(
     fetchParticipants: async () => [],
     addParticipants: async () => {
       throw new Error('groupSend must never repair a rail directly - that is ensureGroupRail');
+    },
+    removeConversation: async () => {
+      throw new Error('groupSend must never delete a rail directly - that is ensureGroupRail');
     },
     postGroupMessage: async (input) => {
       fakes.posted.push(input);
@@ -811,6 +819,11 @@ describe('groupSend - the A2P meter', () => {
     // 4). On the closed-rail heal path the retry emits a SECOND full fan-out of
     // N carrier messages, so a single request was the one place that could
     // outrun the tier the meter exists to hold.
+    //
+    // The ensurer is stubbed here ON PURPOSE and the scope is the METER: what is
+    // asserted is that a second post is preceded by a second draw. That the heal
+    // itself works is proven separately against the REAL ensureGroupRail (see
+    // 'a CLOSED rail is DELETED and rebuilt through the REAL ensureGroupRail').
     const metered = meteredBucket({ capacity: 4, refillPerSec: 4 });
     let attempts = 0;
     const f = makeFakes({
@@ -871,31 +884,121 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
     expect((err as SendRefusedError).code).toBe('group_send_failed');
   });
 
-  it('a CLOSED rail is dropped and REBUILT through ensureGroupRail, then the post retried', async () => {
-    // The promised recovery was fictional: `ensureGroupRail` returns the STORED
-    // rail whenever the sid is stamped, and nothing cleared the sid - so a rail
-    // that closed after creation failed every send forever, unhealable.
-    let attempts = 0;
+  // THESE TWO TESTS DRIVE THE REAL `ensureGroupRail` (fix wave 4, H1), and that
+  // is the point of them.
+  //
+  // They used to hand `rail:` a stub. The first returned `{status:'created'}`
+  // for a closed rail - an outcome the real service COULD NOT PRODUCE: it
+  // adopted the same closed Conversation by UniqueName and recorded
+  // `rail_failed`. The second went further and froze the defect as its fixture,
+  // asserting the refusal for the literal reason `Conversation CHrail1 is
+  // closed`. Between them the "closed rails are healed" claim passed for three
+  // waves while every real closed rail was permanently inbound-only. A stub can
+  // only ever prove the call site; the recovery is a property of the two
+  // together, so the two are wired together here.
+  //
+  // `port` is shared by the send service and the rail service, exactly as the
+  // process shares one adapter. The default fake's "groupSend must never create
+  // a rail directly" guard is deliberately overridden below, because the create
+  // now happens INSIDE ensureGroupRail - which is what that guard is protecting.
+
+  /** The thread row as it stands after `healRail`'s clear: rail-less. */
+  function railLessThread(): ConversationItem {
+    return {
+      conversationId: 'group-1',
+      type: 'group_text',
+      status: 'group_open',
+      created_at: '2026-08-01T00:00:00.000Z',
+      last_activity_at: '2026-08-10T00:00:00.000Z',
+      participants: [ANN, MARCUS],
+    } as ConversationItem;
+  }
+
+  /** The REAL ensureGroupRail over a port fake and an in-memory thread row. */
+  function realRailOver(port: GroupConversationsPort, thread: ConversationItem): GroupRailEnsurer {
+    let row: ConversationItem = thread;
+    const repo = {
+      async getById(id: string) {
+        return id === row.conversationId ? { ...row } : undefined;
+      },
+      async claimRailCreation(_id: string, claim: { token: string; at: string }) {
+        row = { ...row, rail_creating: { ...claim } };
+        return { claimed: true, item: { ...row } };
+      },
+      async setTwilioConversation(
+        _id: string,
+        sid: string,
+        map: Record<string, string>,
+        token: string,
+      ) {
+        if (row.rail_creating?.token !== token) return undefined;
+        const next = { ...row, twilio_conversation_sid: sid, twilio_participant_map: map };
+        delete next.rail_creating;
+        row = next;
+        return { ...next };
+      },
+      async recordRailFailure(_id: string, reason: string, at: string) {
+        const next = { ...row, rail_failed: { at, reason } };
+        delete next.rail_creating;
+        row = next;
+      },
+    };
+    return createGroupRailService({
+      conversationsRepo: repo as unknown as GroupRailServiceDeps['conversationsRepo'],
+      groupConversations: port,
+      businessNumber: '+14045550000',
+      logger: createLogger({ level: 'silent' }),
+    });
+  }
+
+  it('a CLOSED rail is DELETED and rebuilt through the REAL ensureGroupRail, then the post retried', async () => {
+    // A closed Conversation KEEPS its UniqueName, and our UniqueName is the
+    // conversationId - so the adopt half found the same dead resource on every
+    // retry. Reclaiming the name by deleting it is the whole heal.
+    let live: GroupConversationRef | undefined = {
+      conversationSid: 'CHrail1',
+      uniqueName: 'group-1',
+      state: 'closed',
+    };
+    const removed: string[] = [];
     const postedTo: string[] = [];
     const cleared: { conversationId: string; sid: string }[] = [];
+
+    const port: GroupConversationsPort = {
+      fetchByUniqueName: async () => live,
+      removeConversation: async (sid) => {
+        removed.push(sid);
+        live = undefined;
+        return true;
+      },
+      createConversationWithParticipants: async (input) => ({
+        conversation: { conversationSid: 'CHrail2', uniqueName: input.uniqueName, state: 'active' },
+        participants: [
+          { participantSid: 'MBbiz2', projectedAddress: '+14045550000' },
+          { participantSid: 'MBann2', address: ANN.phone },
+          { participantSid: 'MBmarcus2', address: MARCUS.phone },
+        ],
+        failures: [],
+      }),
+      fetchParticipants: async () => {
+        throw new Error('the create already read the participants back');
+      },
+      addParticipants: async () => {
+        throw new Error('a freshly created rail is not short of anyone');
+      },
+      postGroupMessage: async (input) => {
+        postedTo.push(input.conversationSid);
+        // The refusal Twilio really returns for a post into a closed rail.
+        if (input.conversationSid === 'CHrail1') {
+          throw new GroupConversationsUnavailableError('the rail is closed or gone');
+        }
+        return { messageSid: 'IMhealed1', dateCreated: '2026-08-11T13:00:01.000Z' };
+      },
+    };
+
     const f = makeFakes({
-      port: {
-        postGroupMessage: async (input) => {
-          attempts += 1;
-          postedTo.push(input.conversationSid);
-          if (attempts === 1) {
-            throw new GroupConversationsUnavailableError('the rail is closed or gone');
-          }
-          return { messageSid: 'IMhealed1', dateCreated: '2026-08-11T13:00:01.000Z' };
-        },
-      },
-      rail: {
-        ensureGroupRail: async () => ({
-          status: 'created',
-          twilioConversationSid: 'CHrail2',
-          participantMap: { MBann2: 'phone#+16175550111', MBmarcus2: 'phone#+16175550222' },
-        }),
-      },
+      port,
+      rail: realRailOver(port, railLessThread()),
       clearGroupRail: async (conversationId, sid) => {
         cleared.push({ conversationId, sid });
         return true;
@@ -905,23 +1008,46 @@ describe('groupSend - a failed post says WHICH kind of failure it was', () => {
     const out = await f.send({ conversationId: 'group-1', body: 'hi' });
 
     expect(cleared).toEqual([{ conversationId: 'group-1', sid: 'CHrail1' }]);
-    expect(attempts).toBe(2);
+    // The dead Conversation was deleted rather than re-adopted. Without this the
+    // whole send refuses, which is what it did in production.
+    expect(removed).toEqual(['CHrail1']);
     // The retry posted into the NEW rail, and the snapshot records that one.
     expect(postedTo).toEqual(['CHrail1', 'CHrail2']);
     expect(f.appended[0]?.groupRailSnapshot?.conversationSid).toBe('CHrail2');
+    expect(f.appended[0]?.groupRailSnapshot?.participantMap).toEqual({
+      MBann2: 'phone#+16175550111',
+      MBmarcus2: 'phone#+16175550222',
+    });
     expect(out.providerSid).toBe('IMhealed1');
   });
 
   it('a CLOSED rail that cannot be rebuilt refuses as rail-unavailable, loudly', async () => {
+    // The refusal is now driven by a cause that is really permanent - Twilio
+    // refusing the create - rather than by a stub asserting the very bug ("the
+    // adopted Conversation is closed") as though it were correct behavior.
+    const port: GroupConversationsPort = {
+      fetchByUniqueName: async () => ({
+        conversationSid: 'CHrail1',
+        uniqueName: 'group-1',
+        state: 'closed',
+      }),
+      removeConversation: async () => true,
+      createConversationWithParticipants: async () => {
+        throw Object.assign(new Error('Invalid messaging binding address'), {
+          code: 50407,
+          status: 400,
+        });
+      },
+      fetchParticipants: async () => [],
+      addParticipants: async () => [],
+      postGroupMessage: async () => {
+        throw new GroupConversationsUnavailableError('the rail is closed or gone');
+      },
+    };
+
     const f = makeFakes({
-      port: {
-        postGroupMessage: async () => {
-          throw new GroupConversationsUnavailableError('the rail is closed or gone');
-        },
-      },
-      rail: {
-        ensureGroupRail: async () => ({ status: 'failed', reason: 'Conversation CHrail1 is closed' }),
-      },
+      port,
+      rail: realRailOver(port, railLessThread()),
       clearGroupRail: async () => true,
     });
 

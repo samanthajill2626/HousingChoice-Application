@@ -124,6 +124,29 @@ export interface GroupConversationsPort {
     conversationSid: string,
     addresses: string[],
   ): Promise<GroupParticipantFailure[]>;
+  /**
+   * DELETE A CONVERSATION OUTRIGHT - the closed-rail heal (fix wave 4, H1).
+   *
+   * A Conversation that CLOSES (Twilio's own auto-close timer, or an operator in
+   * the console) keeps its UniqueName, and our UniqueName is the conversationId.
+   * So `ensureGroupRail`'s adopt half kept re-adopting the SAME dead resource on
+   * every retry, saw `state: 'closed'`, and recorded `rail_failed` again -
+   * permanently inbound-only, with no in-app remedy. Only a 20404 (someone
+   * deleted it by hand in the console) ever healed.
+   *
+   * Deleting it is safe BECAUSE it is closed: a closed Conversation can carry no
+   * further traffic, and none of the message history lives there - every group
+   * message, receipt and roster fact is in our own DynamoDB, keyed by our
+   * conversationId. What the resource holds that we still want is exactly one
+   * thing, its UniqueName, and the delete is what frees that name so the create
+   * below can re-mint the rail under the SAME deterministic name.
+   *
+   * `true` when this call removed it; `false` when it was already gone. A 404 is
+   * SUCCESS for a delete - the end state is the one that was asked for - and
+   * anything else throws, because a delete that failed for an unknown reason
+   * must not be followed by a create that will collide on the UniqueName.
+   */
+  removeConversation(conversationSid: string): Promise<boolean>;
 }
 
 /**
@@ -180,6 +203,7 @@ interface ConversationMessageInstanceLike {
 
 interface ConversationContextLike {
   fetch(): Promise<ConversationInstanceLike>;
+  remove(): Promise<boolean>;
   messages: {
     create(params: { author?: string; body?: string }): Promise<ConversationMessageInstanceLike>;
   };
@@ -468,6 +492,24 @@ export class TwilioGroupConversationsDriver implements GroupConversationsPort {
     }
   }
 
+  async removeConversation(conversationSid: string): Promise<boolean> {
+    try {
+      await this.client.conversations.v1.conversations(conversationSid).remove();
+      this.log.warn(
+        { event: 'group_rail_conversation_deleted', conversationSid },
+        'deleted a dead Conversations rail so its UniqueName can be rebuilt',
+      );
+      return true;
+    } catch (err) {
+      // ALREADY GONE IS THE ASKED-FOR END STATE. Every other failure rethrows:
+      // the caller is about to CREATE under this UniqueName, and a create after
+      // a delete that silently did not happen is a guaranteed 50353 collision
+      // reported as a participant problem.
+      if (twilioStatus(err) === 404 || twilioErrorCode(err) === '20404') return false;
+      throw err;
+    }
+  }
+
   /**
    * "No timers (account default null) - ASSERT, DO NOT SET" (spec 6.1). We
    * never send timers; nothing verified they were absent (fix wave 5,
@@ -644,6 +686,15 @@ export class ConsoleGroupConversationsDriver implements GroupConversationsPort {
     _addresses: string[],
   ): Promise<GroupParticipantFailure[]> {
     throw this.unavailable('group rail participant add');
+  }
+
+  async removeConversation(_conversationSid: string): Promise<boolean> {
+    // Unreachable in practice - `fetchByUniqueName` refuses first, so nothing
+    // ever adopts a rail here to find it dead - but it refuses rather than
+    // returning `false`, because a silent "already gone" would send the caller
+    // into a create that this driver also refuses, one round trip later and
+    // under a reason that names creation instead of the real cause.
+    throw this.unavailable('group rail deletion');
   }
 }
 

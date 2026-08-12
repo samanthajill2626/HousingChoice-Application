@@ -203,6 +203,25 @@ export class ConversationsEngine {
     return removed;
   }
 
+  /**
+   * Move a rail to a non-`active` state - the control seam behind the
+   * closed-rail heal (fix wave 4, H1). See `ConversationsStore.setState`.
+   */
+  setState(sidOrUniqueName: string, state: string): ConversationRecord | undefined {
+    const record = this.store.setState(sidOrUniqueName, state);
+    if (record !== undefined) this.emitUpdated(record);
+    return record;
+  }
+
+  /**
+   * Can this rail carry a post? Real Conversations refuses one into a `closed`
+   * conversation, and that refusal - not a fetch - is how a live send discovers
+   * the rail died under it.
+   */
+  isPostable(record: ConversationRecord): boolean {
+    return record.state !== 'closed' && record.state !== 'failed';
+  }
+
   addParticipant(
     record: ConversationRecord,
     binding: { address?: string; projectedAddress?: string },

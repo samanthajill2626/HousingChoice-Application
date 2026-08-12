@@ -233,6 +233,22 @@ export async function injectConversationEvent(
 }
 
 /**
+ * CLOSE A RAIL the way Twilio does - its own auto-close timer, or an operator in
+ * the console. A closed Conversation KEEPS its UniqueName and refuses every
+ * post, which is exactly the state the app's closed-rail heal has to survive:
+ * our UniqueName is the conversationId, so a naive retry re-adopts the same dead
+ * resource forever (fix wave 4, H1). There is no other way to manufacture it.
+ */
+export async function setConversationState(
+  request: APIRequestContext,
+  input: { conversationSid?: string; uniqueName?: string; state?: 'closed' | 'active' | 'failed' },
+): Promise<{ conversationSid: string; state: string }> {
+  const res = await request.post(`${FAKE_BASE}/control/conversations/set-state`, { data: input });
+  if (!res.ok()) throw new Error(`set-state failed: ${res.status()} ${await res.text()}`);
+  return (await res.json()) as { conversationSid: string; state: string };
+}
+
+/**
  * Arm the NEXT message to one handset with a delivery outcome. ONE control API
  * serves both a 1:1 send and a carrier-group leg, so this is also how a
  * per-member 21610 (a STOPped handset) is simulated on a group send.

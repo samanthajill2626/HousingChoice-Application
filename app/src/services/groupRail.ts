@@ -230,6 +230,17 @@ function railFailureReason(err: unknown): string {
   return parts.join(', ');
 }
 
+/**
+ * A Conversation state that can carry no further traffic. `closed` is Twilio's
+ * terminal state (its auto-close timer, or an operator in the console);
+ * `failed` is the create that never came up. Anything else - including
+ * `initializing` and `inactive` - is a rail that still works or is about to.
+ */
+function isDeadRailState(state: string | undefined): boolean {
+  const value = state ?? 'active';
+  return value === 'closed' || value === 'failed';
+}
+
 function missingFromMap(members: ConversationParticipant[], map: Record<string, string>): string[] {
   const covered = new Set(Object.values(map));
   return members.filter((m) => !covered.has(groupMemberKey(m.phone))).map((m) => m.phone);
@@ -348,7 +359,49 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
         // ADOPT-OR-CREATE. The adopt half runs FIRST: a 404 here is `undefined`
         // while an auth failure or a 5xx re-throws (adapter contract), so an
         // outage can never read as "no rail exists" and start a duplicate storm.
-        const adopted = await port.fetchByUniqueName(conversationId);
+        let adopted = await port.fetchByUniqueName(conversationId);
+
+        // A DEAD ADOPTEE IS DELETED, NOT ADOPTED (fix wave 4, H1). This is the
+        // heal the whole closed-rail recovery rests on, and without it the
+        // recovery was a loop: a Conversation that CLOSES keeps its UniqueName,
+        // our UniqueName is the conversationId, so `groupSend`'s healRail
+        // cleared the stored sid, called back in here, adopted the very same
+        // closed Conversation, fell into the state check below and recorded
+        // `rail_failed` - every time, forever. The thread was permanently
+        // inbound-only and the ONLY escape was a 20404, i.e. an operator
+        // deleting the Conversation by hand in the Twilio console.
+        //
+        // WHY DELETE-AND-RECREATE rather than a generation-suffixed UniqueName
+        // (`<conversationId>#2`): the UniqueName being DETERMINISTIC is what
+        // heals a crash between the Twilio create and the local persist - the
+        // retry adopts the conversation the dead attempt made instead of minting
+        // a second one (protocol note 4 above). A generation suffix needs a
+        // durable counter to stay deterministic, and a counter written outside
+        // the claim re-opens exactly the duplicate-rail window the UniqueName
+        // closes. Deleting is safe precisely because the resource is CLOSED: it
+        // can carry no further traffic, and it holds no history we need - every
+        // message, receipt and roster fact lives in our own table under our own
+        // conversationId. We are reclaiming a name, not discarding data.
+        //
+        // It runs UNDER THE CLAIM, so no concurrent ensure can delete a rail
+        // another claimant is mid-create on, and a delete that fails for any
+        // reason other than "already gone" throws into the catch below and is
+        // recorded as a rail failure rather than being followed by a create that
+        // would collide on the UniqueName.
+        if (adopted !== undefined && isDeadRailState(adopted.state)) {
+          log.warn(
+            {
+              event: 'group_rail_dead_adoptee_deleted',
+              conversationId,
+              conversationSid: adopted.conversationSid,
+              state: adopted.state,
+            },
+            'the Conversation holding this rail UniqueName is closed - deleting it so a fresh rail can take the name',
+          );
+          await port.removeConversation(adopted.conversationSid);
+          adopted = undefined;
+        }
+
         if (adopted !== undefined) {
           ref = adopted;
         } else {
@@ -372,8 +425,14 @@ export function createGroupRailService(deps: GroupRailServiceDeps = {}): GroupRa
 
       // A conversation that failed or closed during attach is rail-FAILED, not a
       // rail. Posting into a closed conversation is a silent no-delivery.
+      //
+      // Only a FRESHLY CREATED conversation can reach this now: a dead ADOPTEE
+      // was deleted and recreated above. A create that comes back closed is
+      // pathological (a service-level timer set to zero, say), so it stays a
+      // recorded failure - deleting and re-creating that in a loop would just
+      // spend Twilio calls on a condition no retry can fix.
       const state = ref.state ?? 'active';
-      if (state === 'closed' || state === 'failed') {
+      if (isDeadRailState(state)) {
         const reason = `Conversation ${ref.conversationSid} is ${state}`;
         log.warn({ event: 'group_rail_ensure_failed', conversationId, state }, reason);
         await conversations.recordRailFailure(conversationId, reason, now().toISOString(), token);

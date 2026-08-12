@@ -148,6 +148,41 @@ export function createConversationsControlRouter(deps: {
     }
   });
 
+  /**
+   * POST /control/conversations/set-state
+   *
+   * CLOSE A RAIL the way Twilio does - an account/service auto-close timer, or
+   * an operator in the console. A closed Conversation KEEPS its UniqueName and
+   * refuses every post, which is the whole shape of the closed-rail heal (fix
+   * wave 4, H1): the app's UniqueName is its conversationId, so a naive retry
+   * re-adopts the same dead resource forever. There is no other way to
+   * manufacture this state, and without it the heal could only be tested
+   * against hand-stubbed ensurers.
+   *
+   * Body: { conversationSid | uniqueName, state? } - `state` defaults to
+   * `closed` and also accepts `active` (reopen) and `failed`.
+   */
+  router.post('/control/conversations/set-state', (req, res) => {
+    const body = (req.body ?? {}) as {
+      conversationSid?: unknown;
+      uniqueName?: unknown;
+      state?: unknown;
+    };
+    const key =
+      typeof body.conversationSid === 'string' && body.conversationSid.length > 0
+        ? body.conversationSid
+        : typeof body.uniqueName === 'string'
+          ? body.uniqueName
+          : '';
+    const state = typeof body.state === 'string' && body.state.length > 0 ? body.state : 'closed';
+    const record = key.length > 0 ? conversations.setState(key, state) : undefined;
+    if (!record) {
+      res.status(400).json({ error: `set-state: no conversation for ${key || '(missing id)'}` });
+      return;
+    }
+    res.status(200).json({ ok: true, conversationSid: record.sid, state: record.state });
+  });
+
   /** GET /control/conversations/dispatch-errors - the Conversations engine's own
    *  ring buffer, so a signature/mount regression on the new route is observable
    *  rather than swallowed (mirrors GET /control/dispatch-errors). */

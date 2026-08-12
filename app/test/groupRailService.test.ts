@@ -129,6 +129,13 @@ function makePort(over: Partial<GroupConversationsPort> = {}) {
     async addParticipants() {
       throw new Error('addParticipants: override it in the test that needs it');
     },
+    // THROWS BY DEFAULT ON PURPOSE - this is the negative control for the
+    // closed-rail heal. Deleting a rail is destructive, so every test that does
+    // NOT expect one fails loudly if the service ever reaches for it (an ACTIVE
+    // adoptee, in particular, must never be deleted).
+    async removeConversation() {
+      throw new Error('removeConversation: override it in the test that needs it');
+    },
     ...over,
   };
   return { port, created };
@@ -232,6 +239,91 @@ describe('ensureGroupRail', () => {
     const late = await repo.setTwilioConversation(CONV, 'CHorphan', {}, 'dead-claimant');
     expect(late).toBeUndefined();
     expect(row.current?.twilio_conversation_sid).toBe('CH1');
+  });
+
+  // THE DEFECT THIS PINS (fix wave 4, H1) - the reason the closed-rail recovery
+  // shipped in wave 2 could not actually recover anything.
+  //
+  // A Twilio Conversation that CLOSES (its own auto-close timer, or an operator
+  // in the console) keeps its UniqueName. Our UniqueName IS the conversationId.
+  // So `groupSend`'s healRail cleared the stored sid, called back in here, the
+  // adopt half found that same closed Conversation, the state check recorded
+  // `rail_failed` - and the next send did all of it again. The thread was
+  // permanently inbound-only, and the ONLY escape was a 20404, i.e. a human
+  // deleting the Conversation in the Twilio console by hand.
+  it('CLOSED ADOPTEE: the dead conversation is DELETED and a fresh rail takes the same UniqueName', async () => {
+    const { repo, row, calls } = makeRepo();
+    const removed: string[] = [];
+    let live: GroupConversationRef | undefined = {
+      conversationSid: 'CHclosed',
+      uniqueName: CONV,
+      state: 'closed',
+    };
+    const { port, created } = makePort({
+      async fetchByUniqueName() {
+        return live;
+      },
+      async removeConversation(sid) {
+        removed.push(sid);
+        live = undefined;
+        return true;
+      },
+    });
+
+    const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+    // The dead resource was deleted, and exactly one fresh rail was created
+    // under the SAME deterministic UniqueName.
+    expect(removed).toEqual(['CHclosed']);
+    expect(created).toHaveLength(1);
+    expect(created[0]?.uniqueName).toBe(CONV);
+    expect(result.status).toBe('created');
+    expect(result.twilioConversationSid).toBe('CH1');
+    expect(row.current?.twilio_conversation_sid).toBe('CH1');
+    // Nothing is rail-failed: this thread can send again.
+    expect(calls.failures).toBe(0);
+    expect(row.current?.rail_failed).toBeUndefined();
+    expect(row.current?.rail_creating).toBeUndefined();
+  });
+
+  it('an ACTIVE adoptee is NEVER deleted - the heal is scoped to a dead rail', async () => {
+    // `makePort`'s default `removeConversation` throws, so an unwanted delete
+    // surfaces as a rail failure rather than passing quietly.
+    const { repo, row } = makeRepo();
+    const { port, created } = makePort({
+      async fetchByUniqueName(uniqueName) {
+        return { conversationSid: 'CHalive', uniqueName, state: 'active' };
+      },
+    });
+
+    const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+    expect(result.status).toBe('created');
+    expect(result.twilioConversationSid).toBe('CHalive');
+    expect(created).toEqual([]);
+    expect(row.current?.rail_failed).toBeUndefined();
+  });
+
+  it('a DELETE that fails for an unknown reason is a rail failure, not a create that will collide', async () => {
+    // Swallowing it would be followed by a create under a UniqueName that is
+    // still taken - a 50353 reported as a participant problem, on a retry that
+    // can never succeed. Reporting the delete failure is retryable and true.
+    const { repo, row } = makeRepo();
+    const { port, created } = makePort({
+      async fetchByUniqueName(uniqueName) {
+        return { conversationSid: 'CHclosed', uniqueName, state: 'closed' };
+      },
+      async removeConversation() {
+        throw Object.assign(new Error('service unavailable'), { status: 503 });
+      },
+    });
+
+    const result = await svc(repo, port).ensureGroupRail({ conversationId: CONV, members: MEMBERS });
+
+    expect(result.status).toBe('failed');
+    expect(created).toEqual([]);
+    expect(row.current?.rail_failed?.reason).toContain('503');
+    expect(row.current?.twilio_conversation_sid).toBeUndefined();
   });
 
   it('CLOSED RAIL: a closed/failed conversation is recorded rail-failed, never finalized', async () => {

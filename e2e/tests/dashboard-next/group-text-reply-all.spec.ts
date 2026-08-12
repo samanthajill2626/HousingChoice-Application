@@ -4,6 +4,7 @@ import {
   sendGroupAsParty,
   listThreads,
   listConversations,
+  setConversationState,
 } from '../../fixtures/fakeTwilio.js';
 import { clearLogTail, readLogTail } from '../../fixtures/groupText.js';
 import { conversationIdForGroup } from '../../../app/src/lib/import/ids.js';
@@ -139,4 +140,86 @@ test('a dashboard reply reaches every handset once, with per-member delivery and
   expect(
     errors.filter((l) => (l.msg ?? '').includes('status callback for unknown provider SID')),
   ).toHaveLength(0);
+});
+
+// THE DEFECT THIS COVERS END TO END (fix wave 4, H1). A Conversation that closes
+// - Twilio's own auto-close timer, or an operator in the console - keeps its
+// UniqueName, and our UniqueName is the conversationId. So the "closed rails are
+// healed" path shipped in wave 2 could not heal anything: it cleared the stored
+// sid, called ensureGroupRail, adopted THE SAME closed Conversation by
+// UniqueName, and recorded rail_failed. Every send to that thread failed,
+// forever, with no in-app remedy. The heal now DELETES the dead resource to
+// reclaim the name and builds a fresh rail under it.
+//
+// Nothing in this spec is stubbed: the rail is real, the close is the state
+// Twilio really puts it in, the refusal is the 50353 it really returns, and the
+// proof is that a member's handset receives the reply.
+test('a rail that CLOSED under a live thread is deleted, rebuilt and the reply still arrives', async ({
+  page,
+  request,
+}) => {
+  test.slow();
+  const stamp = `${Date.now()}`.slice(-6);
+  const DEE = `+1555082${stamp.slice(-4)}`;
+  const ELI = `+1555083${stamp.slice(-4)}`;
+  const conversationId = conversationIdForGroup([DEE, ELI]);
+  const reply = `Rebuilt and still talking ${stamp}`;
+
+  await registerParty(request, { label: `Dee ${stamp}`, role: 'tenant', number: DEE });
+  await sendGroupAsParty(request, {
+    from: DEE,
+    otherRecipients: [ELI],
+    body: `Both of us are in ${stamp}`,
+  });
+
+  await expect
+    .poll(
+      async () => (await listConversations(request)).some((c) => c.uniqueName === conversationId),
+      { timeout: 20_000, message: 'the group rail was never created' },
+    )
+    .toBe(true);
+  const original = (await listConversations(request)).find((c) => c.uniqueName === conversationId)!;
+
+  // Twilio closes it. The UniqueName stays bound to this dead resource, which is
+  // the whole trap.
+  await setConversationState(request, { uniqueName: conversationId, state: 'closed' });
+
+  await devLogin(page);
+  await page.goto(`${NEXT}/conversations/${conversationId}`);
+  const composer = page.getByRole('textbox', { name: 'Reply message' });
+  await expect(composer).toBeEnabled({ timeout: 15_000 });
+  await composer.fill(reply);
+  await page.getByRole('button', { name: 'Send', exact: true }).click();
+
+  // The send SUCCEEDS. Before the heal it refused with "no usable Conversations
+  // rail" and the message never appeared at all.
+  await expect(page.getByText(reply)).toBeVisible({ timeout: 20_000 });
+
+  // A DIFFERENT Conversation now holds the same UniqueName: the closed one was
+  // deleted and the name reclaimed, rather than a second rail being minted
+  // beside it under a suffixed name.
+  await expect
+    .poll(
+      async () => {
+        const rails = (await listConversations(request)).filter(
+          (c) => c.uniqueName === conversationId,
+        );
+        return rails.length === 1 && rails[0]!.sid !== original.sid ? rails[0]!.sid : undefined;
+      },
+      { timeout: 20_000, message: 'the closed rail was never replaced under its own UniqueName' },
+    )
+    .not.toBeUndefined();
+
+  // And the proof that matters: the handset really received it.
+  await expect
+    .poll(
+      async () => {
+        const thread = (await listThreads(request)).find((t) => t.partyNumber === ELI);
+        return (thread?.messages ?? []).filter(
+          (m) => m.direction === 'outbound' && m.body === reply && m.from === BUSINESS,
+        ).length;
+      },
+      { timeout: 20_000, message: 'the rebuilt rail never delivered the reply' },
+    )
+    .toBe(1);
 });

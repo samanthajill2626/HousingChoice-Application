@@ -39,6 +39,7 @@ function fakeConversationsClient(
     conversationCreate?: ReturnType<typeof vi.fn>;
     fetch?: ReturnType<typeof vi.fn>;
     messageCreate?: ReturnType<typeof vi.fn>;
+    remove?: ReturnType<typeof vi.fn>;
   } = {},
 ) {
   const bulkCreate =
@@ -65,12 +66,19 @@ function fakeConversationsClient(
       .fn()
       .mockResolvedValue({ sid: 'IMposted', index: 3, dateCreated: new Date('2026-08-11T13:06:45.433Z') });
 
+  const remove = overrides.remove ?? vi.fn().mockResolvedValue(true);
+
+  const addressed: string[] = [];
   const conversations = Object.assign(
-    (_sidOrUniqueName: string) => ({
-      fetch,
-      messages: { create: messageCreate },
-      participants: { create: participantCreate, list: participantList },
-    }),
+    (sidOrUniqueName: string) => {
+      addressed.push(sidOrUniqueName);
+      return {
+        fetch,
+        remove,
+        messages: { create: messageCreate },
+        participants: { create: participantCreate, list: participantList },
+      };
+    },
     { create: conversationCreate },
   );
   return {
@@ -88,6 +96,8 @@ function fakeConversationsClient(
     participantList,
     fetch,
     messageCreate,
+    remove,
+    addressed,
   };
 }
 
@@ -379,6 +389,55 @@ describe('TwilioGroupConversationsDriver.fetchByUniqueName', () => {
       logger: silentLogger,
     });
     await expect(driver.fetchByUniqueName('conv-1')).rejects.toThrow('boom');
+  });
+});
+
+// THE DEFECT THIS OPERATION EXISTS FOR (fix wave 4, H1). A Conversation that
+// closes keeps its UniqueName, and our UniqueName is the conversationId - so
+// `ensureGroupRail`'s adopt half re-adopted the same dead resource on every
+// retry and recorded `rail_failed` forever. Reclaiming the NAME is the fix, and
+// this is the operation that reclaims it.
+describe('TwilioGroupConversationsDriver.removeConversation', () => {
+  it('deletes the conversation by SID and reports that it did', async () => {
+    const f = fakeConversationsClient();
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    expect(await driver.removeConversation('CHdead')).toBe(true);
+    expect(f.remove).toHaveBeenCalledTimes(1);
+    expect(f.addressed).toContain('CHdead');
+  });
+
+  it('treats an ALREADY GONE conversation as success - a delete asks for an end state', async () => {
+    const f = fakeConversationsClient({
+      remove: vi.fn().mockRejectedValue(Object.assign(new Error('gone'), { code: 20404 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    expect(await driver.removeConversation('CHdead')).toBe(false);
+  });
+
+  it('RE-THROWS anything else, so a create never follows a delete that did not happen', async () => {
+    // A swallowed 500 here would be followed immediately by a create under the
+    // same UniqueName, which collides (50353) and reports as a rail failure
+    // naming creation - the wrong cause, and one that no retry resolves.
+    const f = fakeConversationsClient({
+      remove: vi.fn().mockRejectedValue(Object.assign(new Error('boom'), { status: 500 })),
+    });
+    const driver = new TwilioGroupConversationsDriver({
+      ...BASE_DEPS,
+      client: f.client as never,
+      logger: silentLogger,
+    });
+
+    await expect(driver.removeConversation('CHdead')).rejects.toThrow('boom');
   });
 });
 

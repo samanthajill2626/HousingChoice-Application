@@ -249,6 +249,19 @@ export function createConversationsRestRouter(engine: ConversationsEngine): Rout
       notFound(res, `/Conversations/${req.params.sid}`);
       return;
     }
+    // A CLOSED RAIL REFUSES THE POST (fix wave 4, H1). This is how a live send
+    // learns its rail died: not from a fetch, but from Twilio refusing the
+    // message. 409/50353 is the family the adapter translates into
+    // `GroupConversationsUnavailableError`, which is what starts the heal.
+    if (!engine.isPostable(record)) {
+      res.status(409).json({
+        code: 50353,
+        message: `Conversation ${record.sid} is not in the active state`,
+        more_info: 'https://www.twilio.com/docs/errors/50353',
+        status: 409,
+      });
+      return;
+    }
     const body = (req.body ?? {}) as Record<string, unknown>;
     // Real contract: only a caller that sets X-Twilio-Webhook-Enabled gets its
     // own post echoed back as onMessageAdded. The adapter deliberately does not.

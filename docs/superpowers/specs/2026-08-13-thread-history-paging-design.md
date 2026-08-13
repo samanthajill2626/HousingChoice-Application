@@ -187,10 +187,21 @@ change a hot route for a cosmetic signal, the client infers it:
 **Accepted trade-off, to be recorded as a code comment at the computation:** on
 a thread whose length is an exact multiple of the page size, the button shows
 once when nothing older exists. Clicking it fetches an empty page and the button
-disappears. The label can therefore be momentarily wrong; it is never wrong in
-the dangerous direction, because a full page always means more may exist and a
-short page always means the end has been reached. No history is ever unreachable
-as a result.
+disappears. The label can therefore be momentarily wrong; it is not wrong in the
+dangerous direction, because a full page always means more may exist and a short
+page means the end has been reached.
+
+**One caveat on "a short page means the end", carried in the code comments
+beside the computation** (`useRelayThread.ts`, `useGroupThread.ts`): that half is
+a property of `messagesRepo.listByConversation`, which passes `Limit` to a
+DynamoDB Query and DISCARDS `LastEvaluatedKey`. A Query that hits DynamoDB's 1MB
+read cap returns fewer items than `Limit`, so a capped page would also read as
+end-of-history - the control retires and the pages behind it become unreachable
+without a reload. At `limit=50` and a realistic 1-3KB per message row the cap is
+roughly an order of magnitude away, so this is not called live; it is why the
+rule is a heuristic rather than an invariant, and it is a second reason to prefer
+the alternative below. Outside that cap, no history is unreachable as a result of
+the heuristic.
 
 The honest alternative - fetch `limit + 1` server-side, trim, and return
 `hasMore` - is deferred, not rejected. It is roughly six lines plus a route

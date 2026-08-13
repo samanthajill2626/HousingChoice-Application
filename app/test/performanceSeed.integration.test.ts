@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { BatchWriteCommand, GetCommand, PutCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
+import { BatchWriteCommand, DeleteCommand, GetCommand, PutCommand, QueryCommand, ScanCommand, type DynamoDBDocumentClient } from '@aws-sdk/lib-dynamodb';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 import { loadConfig, tableName } from '../src/lib/config.js';
 import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
@@ -12,6 +12,8 @@ import {
   writePerformanceSeed,
 } from '../src/lib/performanceSeed.js';
 import { generatePerformanceSeed, resolvePerformanceSeedConfig } from '../src/lib/seed/performance.js';
+import { SEED } from '../src/lib/seed/lean.js';
+import { aggregateInbox } from '../src/routes/inbox.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
 const reachable = await (async () => {
@@ -59,7 +61,7 @@ describe('performance seed destructive boundary', () => {
     const doc = { send: vi.fn().mockResolvedValue({}) } as unknown as DynamoDBDocumentClient;
     await resetPerformanceData({
       config,
-      input: { contacts: 0, units: 0, placements: 0, tours: 0, conversations: 0, broadcasts: 0 },
+      input: { contacts: 0, units: 0, placements: 0, tours: 0, conversations: 0, nativeGroups: 0, broadcasts: 0 },
       anchor,
       reset,
       doc,
@@ -117,6 +119,59 @@ describe('performance seed destructive boundary', () => {
       config: undefined as never,
     })).toThrow();
   });
+
+  it('queries paginated lean messages and addresses only the injected lane during cleanup', async () => {
+    const config = loadConfig({
+      NODE_ENV: 'test',
+      CF_ORIGIN_SECRET: 'test-origin-secret',
+      DYNAMODB_ENDPOINT: 'http://localhost:8000',
+      TABLE_PREFIX: 'hc-local-99993-',
+    });
+    const namespace = createTableNamespace(config);
+    const leanNativeConversation = SEED.conversations.find((conversation) => conversation.type === 'group_text');
+    if (!leanNativeConversation) throw new Error('lean_native_group_missing');
+    let queryCount = 0;
+    const send = vi.fn(async (command: QueryCommand | BatchWriteCommand | DeleteCommand) => {
+      if (command instanceof QueryCommand) {
+        queryCount += 1;
+        expect(command.input.TableName).toBe(namespace.tableNameFor('messages'));
+        expect(command.input.ExpressionAttributeValues).toEqual({ ':conversationId': leanNativeConversation.conversationId });
+        return queryCount === 1
+          ? { Items: [{ tsMsgId: 'first' }], LastEvaluatedKey: { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' } }
+          : { Items: [{ tsMsgId: 'second' }] };
+      }
+      if (command instanceof DeleteCommand) {
+        expect(command.input).toEqual({
+          TableName: namespace.tableNameFor('conversations'),
+          Key: { conversationId: leanNativeConversation.conversationId },
+        });
+      }
+      return {};
+    });
+
+    await resetPerformanceData({
+      config,
+      input: { contacts: 0, units: 0, placements: 0, tours: 0, conversations: 0, nativeGroups: 0, broadcasts: 0 },
+      anchor,
+      reset: vi.fn().mockResolvedValue(undefined),
+      doc: { send } as unknown as DynamoDBDocumentClient,
+    });
+
+    expect(queryCount).toBe(2);
+    const addressedTables = send.mock.calls.flatMap(([command]) => {
+      const input = (command as QueryCommand | BatchWriteCommand | DeleteCommand).input as {
+        TableName?: string;
+        RequestItems?: Record<string, unknown>;
+      };
+      return [
+        ...(input.TableName === undefined ? [] : [input.TableName]),
+        ...Object.keys(input.RequestItems ?? {}),
+      ];
+    });
+    expect(addressedTables).not.toContain('conversations');
+    expect(addressedTables).not.toContain('messages');
+    expect(addressedTables.every((table) => table.startsWith(config.tablePrefix))).toBe(true);
+  });
 });
 
 describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
@@ -127,6 +182,7 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
   const configA = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: 'test-origin-secret', DYNAMODB_ENDPOINT: endpoint, TABLE_PREFIX: prefixA });
   const configB = loadConfig({ NODE_ENV: 'test', CF_ORIGIN_SECRET: 'test-origin-secret', DYNAMODB_ENDPOINT: endpoint, TABLE_PREFIX: prefixB });
   const nsA = createTableNamespace(configA);
+  const nsB = createTableNamespace(configB);
   const doc = createDocumentClient({ config: configB });
   const client = createDynamoClient({ config: configB });
   const readers = (() => {
@@ -141,11 +197,14 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
   })();
   const anchor = '2026-08-11T12:00:00.000Z';
   const input = { contacts: 22, units: 3, placements: 4, tours: 4, conversations: 5, messagesPerConversation: 2, broadcasts: 2, recipientsPerBroadcast: 3 };
+  const leanNativeConversation = SEED.conversations.find((conversation) => conversation.type === 'group_text');
+  const leanNativeConversationId = leanNativeConversation?.conversationId;
+  if (typeof leanNativeConversationId !== 'string') throw new Error('lean_native_group_missing');
 
   beforeAll(async () => {
     for (const spec of TABLES) {
       await ensureTable(client, spec, tableName(spec.baseName, nsA.env));
-      await ensureTable(client, spec, tableName(spec.baseName, createTableNamespace(configB).env));
+      await ensureTable(client, spec, tableName(spec.baseName, nsB.env));
     }
     await doc.send(new PutCommand({
       TableName: nsA.tableNameFor('contacts'),
@@ -179,13 +238,14 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     );
     expect(await readers.contacts.getById('perf-contact-00001')).toBeDefined();
     expect((await readers.contacts.listByType('landlord', { limit: 20 })).items.length).toBeGreaterThan(0);
-    expect((await readers.contacts.listByType('unknown', { limit: 20 })).items.length).toBeGreaterThan(0);
+    expect((await readers.contacts.listByType('unknown', { limit: 20 })).items).toEqual([]);
     expect((await readers.contacts.listByType('tenant', { deleted: true, limit: 20 })).items.length).toBeGreaterThan(0);
 
     expect(await readers.units.getById('perf-unit-00000')).toBeDefined();
     expect((await readers.units.list({ limit: 20 })).items.some((item) => item.unitId === 'perf-unit-00001')).toBe(true);
     expect((await readers.units.list({ deleted: true, limit: 20 })).items.length).toBeGreaterThan(0);
-    expect((await readers.units.listByLandlord('perf-contact-00006')).items.length).toBeGreaterThan(0);
+    const landlords = await readers.contacts.listByType('landlord', { limit: 20 });
+    expect((await readers.units.listByLandlord(landlords.items[0]!.contactId)).items.length).toBeGreaterThan(0);
     expect((await readers.units.listByStatus('available')).items.length).toBeGreaterThan(0);
 
     expect(await readers.placements.getById('perf-placement-00000')).toBeDefined();
@@ -254,6 +314,7 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
       placements: 0,
       tours: 0,
       conversations: 5_000,
+      nativeGroups: 0,
       messagesPerConversation: 0,
       broadcasts: 0,
       recipientsPerBroadcast: 0,
@@ -278,5 +339,70 @@ describe.skipIf(!reachable)('performance seed against DynamoDB Local', () => {
     expect(generated(connecting.items)).toHaveLength(500);
     expect(open.items.every((item) => item.relay_status === 'relay_group#open')).toBe(true);
     expect(connecting.items.every((item) => item.relay_status === 'relay_group#connecting')).toBe(true);
+  }, 300_000);
+
+  it('replaces the lean native group with the exact generated group workload in its own lane', async () => {
+    const defaultManifest = await resetPerformanceData({ config: configB, input: {}, anchor });
+    const defaultGroups = await readers.conversations.listGroupTexts({ limit: 100 });
+    expect(defaultManifest.nativeGroups).toBe(21);
+    expect(defaultGroups.items).toHaveLength(defaultManifest.nativeGroups);
+    expect(defaultGroups.items.map((item) => item.conversationId)).not.toContain(leanNativeConversationId);
+    expect(defaultGroups.items.every((item) => item.status === 'group_open' && item.type === 'group_text')).toBe(true);
+    expect(defaultGroups.items.map((item) => item.last_activity_at)).toEqual(
+      [...defaultGroups.items].map((item) => item.last_activity_at).sort().reverse(),
+    );
+
+    const defaultInboxDeps = {
+      conversationsRepo: readers.conversations,
+      contactsRepo: readers.contacts,
+      messagesRepo: readers.messages,
+      placementsRepo: readers.placements,
+    };
+    const all = await aggregateInbox({ filter: 'all', limit: 100 }, defaultInboxDeps);
+    const unread = await aggregateInbox({ filter: 'unread', limit: 100 }, defaultInboxDeps);
+    const unknown = await aggregateInbox({ filter: 'unknown', limit: 100 }, defaultInboxDeps);
+    const groups = await aggregateInbox({ filter: 'groups', limit: 100 }, defaultInboxDeps);
+    expect(all.rows.length).toBeGreaterThan(0);
+    expect(unread.rows.length).toBeGreaterThan(0);
+    expect(unknown.rows.length).toBeGreaterThan(0);
+    expect(groups.rows).toHaveLength(defaultManifest.nativeGroups);
+    expect(groups.rows.every((row) => row.kind === 'group_text')).toBe(true);
+
+    const nonDefaultInput = {
+      contacts: 10,
+      units: 1,
+      placements: 1,
+      tours: 1,
+      conversations: 5,
+      nativeGroups: 4,
+      messagesPerConversation: 2,
+      longConversationMessages: 7,
+      broadcasts: 2,
+      recipientsPerBroadcast: 2,
+      largeBroadcastRecipients: 5,
+    };
+    const nonDefaultManifest = await resetPerformanceData({ config: configB, input: nonDefaultInput, anchor });
+    const nonDefaultGroups = await readers.conversations.listGroupTexts({ limit: 100 });
+    expect(nonDefaultGroups.items).toHaveLength(nonDefaultManifest.nativeGroups);
+    expect(await readers.messages.listByConversation('perf-conversation-00000', { limit: 20 }))
+      .toHaveLength(nonDefaultManifest.resolvedLongConversationMessages);
+    const largeBroadcast = await readers.broadcasts.getById('perf-broadcast-00000');
+    expect(Object.keys(largeBroadcast?.recipients ?? {})).toHaveLength(
+      nonDefaultManifest.resolvedLargeBroadcastRecipients,
+    );
+
+    const zeroManifest = await resetPerformanceData({
+      config: configB,
+      input: { contacts: 0, units: 0, placements: 0, tours: 0, conversations: 0, nativeGroups: 0, broadcasts: 0 },
+      anchor,
+    });
+    expect(zeroManifest.nativeGroups).toBe(0);
+    expect((await readers.conversations.listGroupTexts({ limit: 100 })).items).toEqual([]);
+    expect(await readers.messages.listByConversation(leanNativeConversationId, { limit: 100 })).toEqual([]);
+    const leanConversation = await doc.send(new GetCommand({
+      TableName: nsB.tableNameFor('conversations'),
+      Key: { conversationId: leanNativeConversationId },
+    }));
+    expect(leanConversation.Item).toBeUndefined();
   }, 300_000);
 });

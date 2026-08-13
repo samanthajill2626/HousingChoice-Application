@@ -97,6 +97,42 @@ test('staff can reach relay-group messages older than the newest page', async ({
 
   const loadOlder = page.getByRole('button', { name: 'Load older messages' });
   await expect(loadOlder).toBeVisible();
+
+  // --- The reader must not move when older history lands (design 4.5) --------
+  // This is the feature's headline promise and the ONLY check of it in an engine
+  // that performs layout: every unit test of the anchor arithmetic runs in jsdom,
+  // which does no layout, and all of them sit at scroll offset 0.
+  //
+  // MID-THREAD ON PURPOSE. Offset 0 is exactly where Chromium suppresses its own
+  // CSS scroll anchoring, so it is the one position at which a double
+  // compensation - the browser adjusting scrollTop for the prepend AND
+  // Timeline.tsx's layout effect adding its own delta on top - would hide.
+  // `.stream` carries `overflow-anchor: none` to make the manual correction the
+  // only correction; this assertion is what keeps that true.
+  //
+  // Reached by CSS-module class, unavoidably: the scroll container is a plain
+  // <div> with no accessible role of its own. Vite scopes CSS-module locals as
+  // `_<local>_<hash>_<line>`, so `_stream_` (note the trailing underscore) matches
+  // `.stream` and NOT `.streamWrap`, its non-scrolling flex parent.
+  const stream = page.locator('[class*="_stream_"]');
+  await expect(stream).toHaveCount(1);
+  await stream.evaluate((el) => {
+    el.scrollTop = Math.round((el.scrollHeight - el.clientHeight) / 2);
+  });
+  // The scroll event Chromium fires for that assignment is also what tells
+  // <Timeline> the operator is no longer pinned to the bottom; polling until the
+  // offset sticks waits for it without a bare timeout.
+  await expect
+    .poll(async () => stream.evaluate((el) => el.scrollTop), { timeout: 10_000 })
+    .toBeGreaterThan(0);
+  const before = await stream.evaluate((el) => ({
+    top: el.scrollTop,
+    height: el.scrollHeight,
+    client: el.clientHeight,
+  }));
+  const distanceFromBottom = before.height - before.client - before.top;
+  expect(distanceFromBottom, 'parked mid-thread, not at the bottom').toBeGreaterThan(0);
+
   await loadOlder.click();
 
   // The oldest message is now reachable and the control has retired for good -
@@ -104,6 +140,27 @@ test('staff can reach relay-group messages older than the newest page', async ({
   await expect(page.getByText('history probe 0')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Load older messages' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Loading...' })).toHaveCount(0);
+
+  // The prepend grew the stream; the reader's position must have moved by EXACTLY
+  // that growth, which is what "the bubble you were reading did not move" means in
+  // arithmetic. Under-compensating (no correction at all) leaves the delta at ~0;
+  // double-compensating leaves it at roughly twice the growth. Tolerance is 2 CSS
+  // px: `scrollHeight` is integer-rounded while the real content height is
+  // fractional, and Chromium can hold a fractional `scrollTop` - so the exact
+  // arithmetic can be off by about a pixel. Both failure modes are hundreds of
+  // pixels away (six restored messages), so 2px cannot mask either.
+  await expect
+    .poll(async () => stream.evaluate((el) => el.scrollHeight), { timeout: 10_000 })
+    .toBeGreaterThan(before.height);
+  const after = await stream.evaluate((el) => ({
+    top: el.scrollTop,
+    height: el.scrollHeight,
+  }));
+  const growth = after.height - before.height;
+  expect(
+    Math.abs(after.top - (before.top + growth)),
+    `reader moved: scrollTop ${before.top} -> ${after.top} while scrollHeight grew by ${growth}`,
+  ).toBeLessThanOrEqual(2);
 
   // DRAIN OUR OWN BACKLOG BEFORE LEAVING. Each of the 55 inbounds above enqueues a
   // relay fan-out leg to the other member, and every SMS job - relay fan-out,

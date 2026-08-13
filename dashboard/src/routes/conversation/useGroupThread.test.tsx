@@ -222,6 +222,40 @@ describe('useGroupThread paging', () => {
     expect(screen.getByTestId('ids')).toHaveTextContent('m8,m9,m10');
   });
 
+  // The OVER-guard, pinned here as well as in the relay suite: the two hooks hold
+  // byte-identical copies of this block, and a guard that is only tested in one
+  // copy is untested in the other (adversarial re-review R-3 - moving the bound
+  // and setHasOlder INSIDE `if (olderItems.length > 0)` survived the whole group
+  // suite). A full RAW page that maps to zero rows must still advance the bound
+  // and keep hasOlder true, or a run of fully-dropped pages strands the operator
+  // on a control that can never reach the history behind it.
+  it('leaves olderPagesLoaded untouched when a full older page maps to no rows', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10)); // m10..m59
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    // 50 rows the relay mapper drops entirely.
+    const calls = page(50, 60).map((m) => ({ ...m, tsMsgId: `call${m.tsMsgId}`, type: 'call' }));
+    getConversationMessages.mockResolvedValueOnce(calls);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+    expect(screen.getByTestId('pages')).toHaveTextContent('0');
+    // ...but the operator can keep paging: the bound advanced to the raw page's
+    // oldest row and the full page kept the control alive.
+    expect(screen.getByTestId('hasOlder')).toHaveTextContent('true');
+    getConversationMessages.mockResolvedValueOnce([]);
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenLastCalledWith(
+      'g1',
+      { limit: 50, before: `callm60` },
+      expect.anything(),
+    );
+  });
+
   // The isFirstLoad baseline guard, tested here too rather than assumed from the
   // copy. Without it, one inbound message after the operator has paged the thread
   // back to its beginning resurrects the control permanently.

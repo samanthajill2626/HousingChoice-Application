@@ -20,6 +20,7 @@ import {
   type TimelineMessage,
   type TimelineScheduled,
 } from '../../api/index.js';
+import { mergeTimelineItems, THREAD_PAGE_SIZE } from '../shared/threadPaging.js';
 
 export type RelayThreadStatus = 'loading' | 'ready' | 'error';
 
@@ -97,6 +98,34 @@ export interface RelayThreadState {
    *  reads a time that contradicts the body beside it. Undefined when the bucket
    *  is empty or the fetch failed; the card then falls back to the browser zone. */
   upcomingTimezone: string | undefined;
+  /** Older history exists beyond the oldest entry currently held.
+   *
+   *  HEURISTIC, not an authoritative flag. GET /api/conversations/:id/messages
+   *  returns a bare array with no `hasMore`, so a FULL page is read as "there is
+   *  probably more". On a thread whose length is an exact multiple of the page
+   *  size this shows the control once when nothing older exists; clicking it
+   *  fetches an empty page and the control disappears. The label can therefore be
+   *  briefly wrong, but only in the harmless direction - a full page always means
+   *  more MAY exist and a short page always means the end was reached, so no
+   *  history is ever unreachable. The honest fix (server returns hasMore from a
+   *  limit+1 read) is deferred, not rejected: spec section 4.4.
+   *
+   *  This holds ONLY because the bound below is derived from the same RAW page
+   *  this count comes from - see oldestFetchedIdRef. */
+  hasOlder: boolean;
+  /** An older page is in flight - the control is disabled. */
+  loadingOlder: boolean;
+  /** Fetch and merge one older page. No-op while one is already in flight. */
+  loadOlder: () => Promise<void>;
+  /** Incremented ONLY when an older page has merged into `items`.
+   *
+   *  This is the renderer's only reliable signal that a PREPEND happened, and
+   *  <Timeline> uses it to decide when to restore the scroll anchor. Nothing
+   *  observable from the item list can replace it: an SSE append grows the list
+   *  without a prepend, and the "Comms only" toggle changes the FIRST rendered
+   *  item without one either (Timeline renders the filtered `visible`, not
+   *  `items`). Spec section 4.5. */
+  olderPagesLoaded: number;
   /** Optimistic send: show an outbound bubble ("Sending…") immediately; returns a
    *  temp id to reconcile with. */
   addOptimistic: (
@@ -123,6 +152,27 @@ export function useRelayThread(conversationId: string): RelayThreadState {
   const [pending, setPending] = useState<PendingSend[]>([]);
   const tempIdRef = useRef(0);
   const abortRef = useRef<AbortController | null>(null);
+
+  const [hasOlder, setHasOlder] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped ONLY on a successful older-page merge - <Timeline>'s prepend signal.
+  const [olderPagesLoaded, setOlderPagesLoaded] = useState(0);
+  // [R4] The in-flight guard is a REF, not render state: two clicks in one tick
+  // share a single render closure, so a state-based guard would let the second
+  // through - firing a duplicate read that aborts the first and can strand the
+  // button in a disabled state.
+  const loadingOlderRef = useRef(false);
+  // [R3] The `before` bound, taken from the RAW newest-first page (its LAST
+  // element is its oldest). Never derived from the mapped items: buildRelayItems
+  // drops calls and email, so a page can map to fewer rows - or none - and a
+  // mapped-derived bound would leave a live button with nothing to page from.
+  const oldestFetchedIdRef = useRef<string | null>(null);
+  // Older-page fetches get their OWN controller: an SSE refetch aborts abortRef,
+  // and must not cancel an in-flight "Load older" the operator just asked for.
+  const olderAbortRef = useRef<AbortController | null>(null);
+  // Which conversation the held items belong to, so the FIRST load of a thread
+  // replaces state while every later load merges into it.
+  const loadedIdRef = useRef<string | null>(null);
 
   const addOptimistic = useCallback(
     (convId: string, body: string, toPhone?: string, attachmentKeys?: string[]): string => {
@@ -180,10 +230,22 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     setPending((p) => p.filter((x) => x.tempId !== tempId));
   }, []);
 
-  // A new conversation resets any leftover optimistic bubbles.
+  // A new conversation resets any leftover optimistic bubbles, and every piece
+  // of paging state that describes the OLD thread.
+  //
+  // olderPagesLoaded is deliberately NOT reset. It is a monotonic change signal,
+  // not a count of what is on screen: dropping it back to 0 would itself read as
+  // a change to <Timeline> and consume a scroll anchor that no prepend produced.
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setPending([]);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHasOlder(false);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLoadingOlder(false);
+    loadingOlderRef.current = false;
+    oldestFetchedIdRef.current = null;
+    olderAbortRef.current?.abort();
   }, [conversationId]);
 
   const fetchNow = useCallback(async () => {
@@ -194,13 +256,37 @@ export function useRelayThread(conversationId: string): RelayThreadState {
       // The scheduled bucket rides along BEST-EFFORT: a failure there must
       // never blank a working thread (it just leaves Upcoming empty).
       const [messages, scheduled] = await Promise.all([
-        getConversationMessages(conversationId, {}, controller.signal),
+        getConversationMessages(conversationId, { limit: THREAD_PAGE_SIZE }, controller.signal),
         getConversationScheduled(conversationId, controller.signal).catch(
           (): ConversationScheduledPage => ({ scheduled: [] }),
         ),
       ]);
       if (controller.signal.aborted) return;
-      setServerItems(buildRelayItems(messages));
+      const fresh = buildRelayItems(messages);
+      const isFirstLoad = loadedIdRef.current !== conversationId;
+      loadedIdRef.current = conversationId;
+      // A4: the first load REPLACES (nothing is held), but it still goes through
+      // mergeTimelineItems so ordering is identical before and after any merge.
+      // buildRelayItems returns 0 for equal `at` and JS sort is stable, so a raw
+      // page keeps NEWEST-FIRST order within a tie while the merge breaks the tie
+      // by ascending id - assigning `fresh` directly would reshuffle same-instant
+      // messages on the first SSE refetch, with no user action.
+      setServerItems((prev) =>
+        isFirstLoad ? mergeTimelineItems([], fresh) : mergeTimelineItems(prev, fresh),
+      );
+      if (isFirstLoad) {
+        // Only the FIRST load decides these: hasOlder describes the far end of
+        // the thread, which a refetch of the newest page says nothing about, and
+        // re-baselining the bound would discard pages already walked.
+        //
+        // [R3] Both come from the RAW page, never the mapped items.
+        oldestFetchedIdRef.current = messages[messages.length - 1]?.tsMsgId ?? null;
+        // Spec 4.4 heuristic: the route carries no hasMore, so a FULL page means
+        // "probably more". Wrong only in the harmless direction - an exact
+        // multiple of the page size shows the control once and one empty fetch
+        // retires it; no history is ever unreachable.
+        setHasOlder(messages.length >= THREAD_PAGE_SIZE);
+      }
       setUpcoming(scheduled.scheduled);
       setUpcomingTimezone(scheduled.timezone);
       setStatus('ready');
@@ -212,11 +298,50 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     }
   }, [conversationId]);
 
+  const loadOlder = useCallback(async (): Promise<void> => {
+    if (loadingOlderRef.current) return;
+    const before = oldestFetchedIdRef.current;
+    if (before === null) return;
+    loadingOlderRef.current = true;
+    olderAbortRef.current?.abort();
+    const controller = new AbortController();
+    olderAbortRef.current = controller;
+    setLoadingOlder(true);
+    try {
+      const older = await getConversationMessages(
+        conversationId,
+        { limit: THREAD_PAGE_SIZE, before },
+        controller.signal,
+      );
+      if (controller.signal.aborted) return;
+      setServerItems((prev) => mergeTimelineItems(prev, buildRelayItems(older)));
+      const oldest = older[older.length - 1]?.tsMsgId;
+      if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
+      // Spec 4.4 heuristic again, on the same RAW page the bound above came from.
+      setHasOlder(older.length >= THREAD_PAGE_SIZE);
+      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+      setOlderPagesLoaded((n) => n + 1);
+    } catch (err) {
+      if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
+        return;
+      }
+      // A failed older-page read leaves hasOlder alone so the control stays and
+      // the operator can retry. It must never error the whole thread: the
+      // history they already have is still correct.
+    } finally {
+      loadingOlderRef.current = false;
+      if (!controller.signal.aborted) setLoadingOlder(false);
+    }
+  }, [conversationId]);
+
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void fetchNow();
     return () => abortRef.current?.abort();
   }, [fetchNow]);
+
+  // Mirrors the abortRef cleanup above for the independent older-page controller.
+  useEffect(() => () => olderAbortRef.current?.abort(), []);
 
   // Debounced SSE-driven refetch (message.persisted / conversation.updated).
   const debounceRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
@@ -259,6 +384,10 @@ export function useRelayThread(conversationId: string): RelayThreadState {
     items,
     upcoming,
     upcomingTimezone,
+    hasOlder,
+    loadingOlder,
+    loadOlder,
+    olderPagesLoaded,
     addOptimistic,
     resolveOptimistic,
     failOptimistic,

@@ -16,7 +16,11 @@ import { createDocumentClient, createDynamoClient } from '../src/lib/dynamo.js';
 import { deleteTableIfExists, ensureTable } from '../src/lib/dynamoAdmin.js';
 import { getTableSpec } from '../src/lib/tables.js';
 import { createLogger } from '../src/lib/logger.js';
-import { createContactsRepo, PrimaryPhoneRemovalError } from '../src/repos/contactsRepo.js';
+import {
+  createContactsRepo,
+  EmptyIndexKeyError,
+  PrimaryPhoneRemovalError,
+} from '../src/repos/contactsRepo.js';
 import { createLogCapture } from './helpers/logCapture.js';
 
 const endpoint = process.env.DYNAMODB_ENDPOINT ?? 'http://localhost:8000';
@@ -208,5 +212,46 @@ describe.skipIf(!reachable)('contactsRepo multi-phone against DynamoDB Local (th
     read = await contacts.getById(created.contactId);
     expect(read?.voice_opt_out).toBe(false);
     expect(read?.sms_opt_out).toBe(true);
+  });
+
+  // Clearing a GSI KEY attribute. Real DynamoDB is the only place these two
+  // assertions mean anything: the fake repos accept '' happily, so the
+  // ValidationException only ever showed up in a live request.
+  it('update with null REMOVEs housingAuthority and drops the contact out of the byHousingAuthority index', async () => {
+    const authority = `test_authority_${randomUUID().slice(0, 8)}`;
+    const created = await contacts.create({ type: 'tenant', phone: nextPhone(), housingAuthority: authority });
+
+    const indexedBefore = await contacts.listByHousingAuthority(authority);
+    expect(indexedBefore.items.map((c) => c.contactId)).toContain(created.contactId);
+
+    const cleared = await contacts.update(created.contactId, { housingAuthority: null });
+
+    expect(cleared.housingAuthority).toBeUndefined();
+    const read = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(read?.housingAuthority).toBeUndefined();
+    // Sparse index: with the key attribute gone the item leaves the partition.
+    const indexedAfter = await contacts.listByHousingAuthority(authority);
+    expect(indexedAfter.items.map((c) => c.contactId)).not.toContain(created.contactId);
+  });
+
+  it('update REFUSES an empty string on a GSI key attribute instead of letting DynamoDB reject it', async () => {
+    // Layer-2 backstop for the edit-form bug: '' on an index key attribute is
+    // a ValidationException from DynamoDB with a stack that points at the SDK,
+    // not at the caller that meant "clear this". Fail at the seam, named, so
+    // the next field that joins an index cannot repeat it silently.
+    const created = await contacts.create({ type: 'tenant', phone: nextPhone(), housingAuthority: 'atlanta_housing' });
+
+    await expect(
+      contacts.update(created.contactId, { housingAuthority: '' }),
+    ).rejects.toBeInstanceOf(EmptyIndexKeyError);
+
+    // The refusal is total — nothing in the patch landed.
+    const read = await contacts.getById(created.contactId, { consistentRead: true });
+    expect(read?.housingAuthority).toBe('atlanta_housing');
+
+    // A non-key attribute keeps the '' clears-it convention (DynamoDB has
+    // allowed empty strings on non-key attributes since 2020).
+    const ok = await contacts.update(created.contactId, { notes: '' });
+    expect(ok.notes).toBe('');
   });
 });

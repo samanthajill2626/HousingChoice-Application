@@ -25,6 +25,8 @@ import { createLogger } from '../../src/lib/logger.js';
 import type { AuditRepo } from '../../src/repos/auditRepo.js';
 import {
   emailRefId,
+  EmptyIndexKeyError,
+  INDEX_KEY_ATTRIBUTES,
   isDeleted,
   phoneRefId,
   PrimaryEmailRemovalError,
@@ -1518,6 +1520,12 @@ export function createFakeWorld(): FakeWorld {
       }
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
+        // Mirror the real repo's GSI-key guard (F6). A fake that happily stores
+        // '' on an index key attribute is how the edit form's housingAuthority
+        // clear passed every unit test and 500'd in a live request.
+        if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new EmptyIndexKeyError(key);
+        }
         if (value === null) delete contact[key]; // null → REMOVE the attribute
         else contact[key] = value;
       }

@@ -427,6 +427,44 @@ describe('PATCH /api/contacts/:contactId — triage', () => {
     );
   });
 
+  it('clearing housingAuthority REMOVEs the attribute instead of storing an empty string', async () => {
+    // The edit form sends '' when the authority input is emptied. '' is the
+    // clears-it convention for plain text fields (notes/company/agency), but
+    // housingAuthority is the byHousingAuthority GSI HASH KEY, and DynamoDB
+    // rejects an empty string on an index key attribute:
+    //   "The AttributeValue for a key attribute cannot contain an empty string"
+    // So the route must translate '' -> null, which the repo turns into a
+    // REMOVE (which also drops the contact out of the sparse index). Sending
+    // the '' straight through returns a 500 ValidationException in real Dynamo.
+    const { app, world } = makeWebhookHarness();
+    world.contacts.push({
+      contactId: 'contact-t2b',
+      type: 'tenant',
+      status: 'active',
+      phone: '+15550100223',
+      housingAuthority: 'atlanta_housing',
+      created_at: '2026-06-12T10:00:00.000Z',
+    });
+    const res = await request(app)
+      .patch('/api/contacts/contact-t2b')
+      .set('x-origin-verify', SECRET)
+      .set('cookie', TEST_SESSION_COOKIE)
+      .send({ housingAuthority: '' });
+
+    expect(res.status).toBe(200);
+    const stored = world.contacts.find((c) => c.contactId === 'contact-t2b');
+    expect(stored).toBeDefined();
+    // REMOVEd, not blanked — an '' here is the bug this test exists for.
+    expect(stored && 'housingAuthority' in stored).toBe(false);
+    expect(res.body.contact.housingAuthority).toBeUndefined();
+    // Still an explicit edit: provenance/suggestion handling keys off field
+    // PRESENCE in the body, so the audit must record the field as changed.
+    const audit = world.auditEvents.find(
+      (e) => e.event_type === 'contact_updated' && e.entityKey === 'contacts#contact-t2b',
+    );
+    expect(audit?.payload?.['fields']).toEqual(['housingAuthority']);
+  });
+
   it('edits a structured address, storing only the non-empty parts', async () => {
     const { app, world } = makeWebhookHarness();
     world.contacts.push({

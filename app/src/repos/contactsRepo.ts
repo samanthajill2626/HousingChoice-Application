@@ -15,6 +15,7 @@ import {
 import { tableName } from '../lib/config.js';
 import { getDocumentClient } from '../lib/dynamo.js';
 import { logger as defaultLogger } from '../lib/logger.js';
+import { getTableSpec } from '../lib/tables.js';
 import type { ConsentMethod } from '../lib/smsCompliance.js';
 import type { TransitionSource } from '../lib/statusModel.js';
 import type { RepoDeps } from './conversationsRepo.js';
@@ -391,6 +392,42 @@ export class PrimaryEmailRemovalError extends Error {
   constructor(message = 'cannot remove the primary email; promote another address first') {
     super(message);
     this.name = 'PrimaryEmailRemovalError';
+  }
+}
+
+/**
+ * Every GSI key attribute on the contacts table, derived from the ONE table
+ * spec so a GSI added later is covered without touching this file.
+ * Currently: phone, email, type, status, housingAuthority.
+ *
+ * Exported so the in-memory test double can enforce the same rule — a fake that
+ * accepts what real DynamoDB refuses is worse than no fake.
+ */
+export const INDEX_KEY_ATTRIBUTES: ReadonlySet<string> = new Set(
+  getTableSpec('contacts').gsis.flatMap((gsi) =>
+    gsi.rangeKey ? [gsi.hashKey.name, gsi.rangeKey.name] : [gsi.hashKey.name],
+  ),
+);
+
+/**
+ * Thrown by update() when a patch would SET '' on a GSI key attribute.
+ *
+ * DynamoDB rejects that with a ValidationException ("The AttributeValue for a
+ * key attribute cannot contain an empty string") whose stack points into the
+ * SDK, not at the caller that meant "clear this field" — which is exactly how
+ * the contact edit form's housingAuthority clear reached production as an
+ * unhandled 500. Callers clear an indexed attribute with null (→ REMOVE), which
+ * also correctly drops the item out of the sparse index. Non-key attributes are
+ * unaffected: DynamoDB has allowed empty strings there since 2020, and the
+ * plain text fields (notes/company/agency/...) rely on that.
+ */
+export class EmptyIndexKeyError extends Error {
+  constructor(public readonly attribute: string) {
+    super(
+      `cannot set the indexed attribute '${attribute}' to an empty string; ` +
+        'pass null to REMOVE it instead',
+    );
+    this.name = 'EmptyIndexKeyError';
   }
 }
 
@@ -975,6 +1012,14 @@ export function createContactsRepo(deps: RepoDeps = {}): ContactsRepo {
       let i = 0;
       for (const [key, value] of Object.entries(patch)) {
         if (value === undefined) continue;
+        // Fail at the seam, before the round trip: '' on an index key attribute
+        // is a caller bug (they meant null → REMOVE), and DynamoDB's own error
+        // for it names neither the field nor the caller. Throwing here aborts
+        // before the single UpdateCommand is built, so one bad field refuses
+        // the patch outright rather than half-applying the good ones.
+        if (value === '' && INDEX_KEY_ATTRIBUTES.has(key)) {
+          throw new EmptyIndexKeyError(key);
+        }
         const nameKey = `#k${i}`;
         names[nameKey] = key;
         if (value === null) {

@@ -124,8 +124,10 @@ instead of merging on the first fetch for a new id.
 ### 4.2 API client
 
 `getConversationMessages` gains paging and moves to the `(id, opts, signal)`
-shape already used elsewhere in `endpoints.ts` (`getTourActivity` at :2291,
-`getContacts` at :292):
+shape already used elsewhere in `endpoints.ts` (`getTourActivity` and
+`getPlacementHistory`; located by name, because line numbers drift - an earlier
+revision of this spec cited `getContacts`, which actually takes `(params, signal)`
+with no leading id and is NOT the precedent):
 
 ```ts
 export async function getConversationMessages(
@@ -167,7 +169,8 @@ transcript into a fresh one.
 `useContactTimeline` keeps `page.nextCursor` in state and passes it back with
 the current `kinds` filter. `upcoming` and `timezone` remain first-page-only:
 the server deliberately gathers the scheduled bucket only when `cursor` is
-absent (`app/src/routes/contactTimeline.ts:955-959`), so an older page must not
+absent (`app/src/routes/contactTimeline.ts:964`, a three-part condition - :955-959
+is only the comment above it), so an older page must not
 clobber them. `source` is unchanged by paging.
 
 The 404-assembled fallback path reports `hasOlder: false`.

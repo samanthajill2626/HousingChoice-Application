@@ -19,9 +19,9 @@ The pattern is identical in all three hooks:
 
 ```ts
 const fetchNow = useCallback(async () => {
-  const messages = await getConversationMessages(conversationId, signal);
-  setServerItems(buildRelayItems(messages));      // whole page replaced
-}, [conversationId]);
+  const messages = await getConversationMessages(conversationId, opts, signal);
+  setServerItems((prev) => mergeTimelineItems(prev, buildRelayItems(messages)));
+}, [conversationId]);                             // whole page still re-READ
 // ...
 useEventStream({ onMessagePersisted: scheduleRefetch, ... });
 ```
@@ -44,10 +44,13 @@ inbound message can trigger several full-page re-reads across one operator's
 screen. The 300ms debounce coalesces bursts but does not reduce the per-refetch
 payload.
 
-This also fights the "Load older" paging work: because a refetch replaces thread
-state wholesale, older pages the operator has loaded have to be held in a
-SEPARATE state slice purely to survive the next event. A delta-applying hook
-would not need that split.
+UPDATE 2026-08-13 (feat/thread-history-paging): the wholesale REPLACE is gone.
+Every fetch now merges by id through `dashboard/src/routes/shared/threadPaging.ts`,
+so a refetch can no longer discard older pages the operator has loaded. What
+remains - and what this issue is still about - is that each event re-READS the
+whole page to deliver one bubble. The merge was written so a delta-applying hook
+can replace the refetch without reworking the paging: keep the same single state
+slice, just feed it a one-item delta instead of a 50-item page.
 
 Related but distinct: [`contact-timeline-sse-refetch-unfiltered`](contact-timeline-sse-refetch-unfiltered.md)
 covers WHICH events trigger a refetch (any org-wide message event refetches every
@@ -65,5 +68,6 @@ If the event payload proves too thin to build a bubble from, the cheaper interim
 is a bounded incremental read: refetch with a small `limit` (or an `after`
 bound - not currently supported by
 `GET /api/conversations/:id/messages`, which only pages backwards via `before`)
-and merge by id rather than replacing the page. Adding an `after` bound to that
-route would make the incremental read exact.
+and merge by id - `mergeTimelineItems` already exists and is already wired into
+all three hooks, so only the READ size would need to change. Adding an `after`
+bound to that route would make the incremental read exact.

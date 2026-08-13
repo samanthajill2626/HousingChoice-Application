@@ -264,7 +264,7 @@ EOF
 - Consumes: nothing from earlier tasks.
 - Produces: `getConversationMessages(conversationId: string, opts?: { limit?: number; before?: string }, signal?: AbortSignal): Promise<Message[]>`
 
-The signature moves to the `(id, opts, signal)` shape already used by `getTourActivity` (endpoints.ts:2291) and `getContacts` (endpoints.ts:292). Exactly three non-test call sites; `tsc` rejects any missed one because `AbortSignal` is not assignable to the opts type.
+The signature moves to the `(id, opts, signal)` shape already used by `getTourActivity` and `getPlacementHistory` in the same file (located by name - an earlier revision cited `getContacts`, which takes `(params, signal)` with no leading id and is not the precedent). Exactly three non-test call sites; `tsc` rejects any missed one because `AbortSignal` is not assignable to the opts type. NOTE: `tsc` does NOT catch a test that pins the old call arity through a bare `vi.fn()` mock - there are four such files, and the full unit suite is what finds them.
 
 - [ ] **Step 1: Rewrite the endpoint function**
 
@@ -1514,7 +1514,7 @@ messages-only re-assembly into a `source: 'server'` timeline.
 Extend the contact-reset effect and add the unmount abort. Two details this hook
 gets wrong if it is written from the conversation hooks by analogy:
 
-- It must clear `hasOlder` and `cursorRef` too. `ContactDetail.tsx:115-117`
+- It must clear `hasOlder` and `cursorRef` too. `ContactDetail.tsx:115-118`
   states outright that a `contactId` change re-renders the SAME component
   instance with no remount, so anything not reset by hand LEAKS across contacts.
   A click landing in that window would merge a page fetched on contact A's
@@ -2223,7 +2223,8 @@ than touching the byte-stable lean seed world, and never calls
 other spec in the run.
 
 **It must target a RELAY GROUP, not a 1:1.** `/conversations/:id` REDIRECTS a
-plain 1:1 to its owning contact page (`ConversationDetail.tsx:5-8`), which runs
+plain 1:1 to its owning contact page (the `<Navigate>` fall-through at
+`ConversationDetail.tsx:155-159`; :5-8 is only the file-header comment), which runs
 `useContactTimeline` - the authoritative-cursor path. Proving paging there would
 leave `before` paging and the section 4.4 heuristic, the riskier half of the
 change, with no end-to-end coverage at all. A relay group renders `useRelayThread`

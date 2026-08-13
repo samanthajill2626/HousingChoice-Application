@@ -48,7 +48,7 @@ import type { ContactType } from '../../repos/contactsRepo.js';
 import { GROUP_TEXT_STATUS } from '../../repos/conversationsRepo.js';
 import { groupMemberKey } from '../../services/groupMembers.js';
 import { conversationIdFor1to1, tsMsgId, unitIdForAddress } from './ids.js';
-import { normalizeAddress } from './addresses.js';
+import { normalizeAddress, parseUnitAddress } from './addresses.js';
 import type { CsvRow } from './csv.js';
 import type { MergedPerson } from './merge.js';
 import type { PlanResult } from './plan.js';
@@ -1274,7 +1274,14 @@ async function upsertUnit(
   plan: PlanResult,
 ): Promise<void> {
   const address = (row.address ?? '').trim();
+  // IDENTITY STAYS ON THE RAW STRING. The unitId is seeded from the normalized
+  // cell, never from the parsed parts - re-deriving it from the parse would
+  // re-mint every unitId and duplicate the entire book on the next run.
   const unitId = unitIdForAddress(normalizeAddress(address));
+  // ...but what we STORE is the structured Address the app's contract expects
+  // (parseUnitAddress; a plain string reaches the flyer as no address at all and
+  // the reminder composer as a verbatim postal blob).
+  const parsedAddress = parseUnitAddress(address);
 
   const sets: string[] = [
     'address = :address',
@@ -1285,7 +1292,7 @@ async function upsertUnit(
   ];
   const names: Record<string, string> = { '#status': 'status' };
   const values: Record<string, unknown> = {
-    ':address': address,
+    ':address': parsedAddress,
     ':status': mapUnitStatus(row.status ?? ''),
     ':createdAt': importedAt,
     ':importSource': IMPORT_SOURCE,

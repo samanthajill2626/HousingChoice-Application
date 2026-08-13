@@ -613,6 +613,21 @@ describe('writePerformanceReport', () => {
     expect(summary.manifest.nativeGroupRosterSizes).toEqual([]);
   });
 
+  it('retains the closed required-action skip status and reason in report aggregates', async () => {
+    const outputRoot = await artifactRoot();
+    const input = reportInput(outputRoot, '20260812T123456789Z-a1a1a1a1');
+    input.samples = [sample('inbox-unread', 'warm', 0, {
+      status: 'skipped_required_action_missing', reason: 'required_action_missing', readyMs: null, terminalState: 'unknown',
+    })];
+
+    await expect(writePerformanceReport(input)).resolves.toMatchObject({ status: 'written' });
+
+    const summary = JSON.parse(await readFile(join(outputRoot, input.runId, 'summary.json'), 'utf8'));
+    expect(summary.aggregates).toEqual(expect.arrayContaining([
+      expect.objectContaining({ statusCounts: expect.objectContaining({ skipped_required_action_missing: 1 }) }),
+    ]));
+  });
+
   it('preserves out-of-sample evidence at run scope and emits its own checkpoint mismatch', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-eeee4444');

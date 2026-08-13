@@ -12,6 +12,7 @@ export type SampleStatus =
   | 'blocked_write_dependency'
   | 'skipped_no_fixture'
   | 'skipped_fixture_not_navigable'
+  | 'skipped_required_action_missing'
   | 'skipped_source_not_ready'
   | 'skipped_unresolved_branch';
 export type FailureReasonCode =
@@ -22,6 +23,7 @@ export type FailureReasonCode =
   | 'blocked_write_prevented_ready'
   | 'fixture_absent'
   | 'fixture_not_navigable'
+  | 'required_action_missing'
   | 'source_not_ready'
   | 'unresolved_branch'
   | 'cleanup_failed'
@@ -118,7 +120,7 @@ export interface SampleResult {
   blockedWrites: BlockedWrite[];
   consoleCategories: Record<string, number>;
   clientTruncated: boolean;
-  terminalState: 'populated' | 'empty' | 'error' | 'unknown';
+  terminalState: 'populated' | 'empty' | 'error' | 'contradictory_terminal' | 'unknown';
   surfaceEvidence: SurfaceEvidence;
   reason: FailureReasonCode | null;
 }

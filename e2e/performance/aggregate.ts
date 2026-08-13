@@ -28,6 +28,7 @@ const SAMPLE_STATUSES: readonly SampleStatus[] = [
   'blocked_write_dependency',
   'skipped_no_fixture',
   'skipped_fixture_not_navigable',
+  'skipped_required_action_missing',
   'skipped_source_not_ready',
   'skipped_unresolved_branch',
 ];

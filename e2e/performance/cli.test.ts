@@ -3,12 +3,14 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   captureCdpClockAlignment,
   classifyEscapedWriteFailure,
+  exactTargetMatches,
   installProfilerProcessHandlers,
   main,
   performanceArtifactRoot,
   readPageStoreSnapshot,
   runDirectMain,
   runProfiler,
+  targetPath,
   type CliRuntime,
 } from './cli.js';
 import { FirewallEscapedWriteError } from './firewall.js';
@@ -38,6 +40,24 @@ function runtime(events: string[], overrides: Partial<CliRuntime> = {}): CliRunt
     ...overrides,
   };
 }
+
+describe('exact browser targets', () => {
+  it('accepts only normalized query-equivalent targets and rejects extra source state', () => {
+    expect(targetPath({ path: '/inbox' })).toBe('/inbox');
+    expect(targetPath({ path: '/inbox', query: { filter: 'unread', limit: '30' } })).toBe('/inbox?filter=unread&limit=30');
+    expect(exactTargetMatches('http://dashboard.test/inbox', { path: '/inbox' })).toBe(true);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread&limit=30', {
+      path: '/inbox', query: { limit: '30', filter: 'unread' },
+    })).toBe(true);
+    expect(exactTargetMatches('http://dashboard.test/inbox?limit=30&filter=unread', {
+      path: '/inbox', query: { filter: 'unread', limit: '30' },
+    })).toBe(true);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread', { path: '/inbox' })).toBe(false);
+    expect(exactTargetMatches('http://dashboard.test/inbox?filter=unread&extra=1', {
+      path: '/inbox', query: { filter: 'unread' },
+    })).toBe(false);
+  });
+});
 
 const configDeps = {
   cwd: 'W:\\tmp\\page-performance-profiler',

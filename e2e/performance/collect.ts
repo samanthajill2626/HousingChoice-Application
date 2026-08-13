@@ -581,7 +581,7 @@ export interface SamplePage {
   // navigation and keep this page/context alive.
   prepareWarmSource(route: RouteDefinition): Promise<void>;
   waitForSourceReady(route: RouteDefinition, timeoutMs: number): Promise<boolean>;
-  clickExactHref(href: string): Promise<boolean>;
+  activateWarmAction(route: RouteDefinition, href: string): Promise<boolean>;
   countRelayConversationLinks(): Promise<number>;
 }
 
@@ -728,12 +728,17 @@ export async function collectWarmSample(input: CollectWarmSampleInput): Promise<
       branch: resolved.branch,
       mode: 'warm',
       repeat: input.repeat,
-      sourcePageUrl: input.route.source.path,
+      sourcePageUrl: input.route.source.target.path,
       destinationPageUrl: resolved.warmHref,
       onOutOfSampleWrites: input.onOutOfSampleWrites ?? (() => undefined),
     });
-    if (!await input.page.clickExactHref(resolved.warmHref)) {
-      return resolverSkipSampleResult(input.route.surfaceId, 'warm', input.repeat, 'fixture_not_navigable');
+    if (!await input.page.activateWarmAction(input.route, resolved.warmHref)) {
+      return resolverSkipSampleResult(
+        input.route.surfaceId,
+        'warm',
+        input.repeat,
+        input.route.source.click.role === 'tab' ? 'required_action_missing' : 'fixture_not_navigable',
+      );
     }
     collectionStarted = true;
     const result = await input.instrumentation.collectSample({

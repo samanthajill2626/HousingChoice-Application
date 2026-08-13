@@ -395,11 +395,29 @@ describe('route registry completeness', () => {
 
   it('waits for the selected settings source data branch before timing the tab click', () => {
     const templates = ROUTES.find((route) => route.surfaceId === '/settings/templates')!;
-    expect(templates.source.path).toBe('/settings/team');
+    expect(templates.source.target).toEqual({ path: '/settings/team' });
     expect(templates.source.ready).toMatchObject({ role: 'table', exactness: 'role_only' });
     const system = ROUTES.find((route) => route.surfaceId === '/settings/system')!;
-    expect(system.source.path).toBe('/settings/templates');
+    expect(system.source.target).toEqual({ path: '/settings/templates' });
     expect(system.source.ready).toMatchObject({ role: 'textbox', exactness: 'regex' });
+  });
+
+  it('requires an exact bare Inbox All source before every Inbox activation', () => {
+    const inbox = ROUTES.filter((route) => route.surfaceId.startsWith('inbox-'));
+    const conversation = ROUTES.find((route) => route.surfaceId === '/conversations/:conversationId')!;
+
+    expect([...inbox, conversation].map((route) => route.source.target)).toEqual([
+      { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' }, { path: '/inbox' },
+    ]);
+    expect([...inbox, conversation].every((route) => route.source.ready === inbox[0]!.source.ready)).toBe(true);
+    expect([...inbox, conversation].every((route) => route.source.sourceTerminal !== undefined)).toBe(true);
+    expect([...inbox, conversation].map((route) => route.source.sourceSelected)).toEqual([
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+      { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+    ]);
   });
 });
 
@@ -533,6 +551,7 @@ describe('representative resolvers', () => {
     expect(JSON.stringify(branches)).not.toMatch(/private|contactId|unitId|conversationId/);
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_absent').status).toBe('skipped_no_fixture');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_not_navigable').status).toBe('skipped_fixture_not_navigable');
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'required_action_missing').status).toBe('skipped_required_action_missing');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'source_not_ready').status).toBe('skipped_source_not_ready');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'unresolved_branch').status).toBe('skipped_unresolved_branch');
   });

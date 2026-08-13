@@ -468,7 +468,7 @@ class FakeSamplingPage implements SamplePage {
   }
 
   async prepareWarmSource(route: RouteDefinition): Promise<void> {
-    this.events.push(`prepare:${route.source.path}`);
+    this.events.push(`prepare:${route.source.target.path}`);
     if (this.lifecycle !== undefined) {
       this.events.push(`prepare-lifecycle:${this.lifecycle.activeToken ?? 'none'}:${this.lifecycle.listenerCount}`);
     }
@@ -479,7 +479,7 @@ class FakeSamplingPage implements SamplePage {
     return this.sourceReady;
   }
 
-  async clickExactHref(href: string): Promise<boolean> {
+  async activateWarmAction(_route: RouteDefinition, href: string): Promise<boolean> {
     if (this.clickFailure !== null) throw this.clickFailure;
     if (!this.hrefs.has(href)) return false;
     this.events.push(`click:${href}`);
@@ -785,6 +785,19 @@ describe('cold and warm sampling protocol', () => {
       token: 'missing-link',
     });
     expect(missingLink.status).toBe('skipped_fixture_not_navigable');
+
+    const missingTab = await collectWarmSample({
+      page: new FakeSamplingPage([]),
+      route: ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!,
+      repeat: 0,
+      sourceTimeoutMs: 10,
+      resolve: async () => resolved('/inbox'),
+      instrumentation: new FakeInstrumentation([]),
+      token: 'missing-tab',
+    });
+    expect(missingTab).toMatchObject({
+      status: 'skipped_required_action_missing', reason: 'required_action_missing',
+    });
   });
 
   it('disposes a begun warm sample before the shared page prepares the next route', async () => {

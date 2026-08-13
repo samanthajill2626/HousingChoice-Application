@@ -27,10 +27,12 @@ import type {
 import type { FirewallController, FirewallRecordingToken } from './firewall.js';
 import type {
   LocatorContract,
+  ExactBrowserTarget,
   ResolverApi,
   ResolverDom,
   ResolverResult,
   RouteDefinition,
+  TerminalContract,
 } from './routes.js';
 import type { BlockedWrite, RequestEvidence, SampleMode, SampleResult, TargetMetadata } from './types.js';
 import { terminalAlternativeVisible } from './readiness.js';
@@ -442,6 +444,7 @@ function locatorFor(page: Page, contract: LocatorContract): Locator {
   return root.getByRole(contract.role as never, {
     ...(matcher !== undefined && { name: matcher }),
     ...(contract.exactness === 'exact' && { exact: true }),
+    ...(contract.selected !== undefined && { selected: contract.selected }),
   });
 }
 
@@ -464,17 +467,32 @@ async function groupVisible(
   return combine === 'all' ? values.every(Boolean) : values.some(Boolean);
 }
 
-async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
-  if (await groupVisible(page, route.terminal.error, 'any')) return 'error';
-  if (await terminalAlternativeVisible(
-    route.terminal.populatedAlternatives,
+async function terminalStateFor(
+  page: Page,
+  terminal: TerminalContract,
+  selected?: LocatorContract,
+): Promise<SampleResult['terminalState']> {
+  if (await groupVisible(page, terminal.error, 'any')) return 'error';
+  const [populated, empty, selectionSatisfied] = await Promise.all([
+    terminalAlternativeVisible(
+    terminal.populatedAlternatives,
     (contract) => visible(page, contract),
-  )) return 'populated';
-  if (await terminalAlternativeVisible(
-    route.terminal.emptyAlternatives,
+    ),
+    terminalAlternativeVisible(
+    terminal.emptyAlternatives,
     (contract) => visible(page, contract),
-  )) return 'empty';
+    ),
+    selected === undefined ? Promise.resolve(true) : visible(page, selected),
+  ]);
+  if (!selectionSatisfied) return 'unknown';
+  if (populated && empty) return 'contradictory_terminal';
+  if (populated) return 'populated';
+  if (empty) return 'empty';
   return 'unknown';
+}
+
+async function terminalState(page: Page, route: RouteDefinition): Promise<SampleResult['terminalState']> {
+  return terminalStateFor(page, route.terminal, route.source.click.selected === true ? route.source.click : undefined);
 }
 
 export async function readPageStoreSnapshot(
@@ -498,6 +516,29 @@ function absoluteUrl(baseUrl: string, path: string): string {
   return new URL(path, `${baseUrl}/`).href;
 }
 
+export function targetPath(target: ExactBrowserTarget): string {
+  const query = target.query === undefined
+    ? ''
+    : `?${new URLSearchParams(Object.entries(target.query).sort(([left], [right]) => left.localeCompare(right))).toString()}`;
+  return `${target.path}${query}`;
+}
+
+export function exactTargetMatches(url: string, target: ExactBrowserTarget): boolean {
+  try {
+    const current = new URL(url);
+    const expected = new URL(targetPath(target), 'http://target.invalid');
+    const currentEntries = [...current.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    const expectedEntries = [...expected.searchParams.entries()].sort(([leftKey, leftValue], [rightKey, rightValue]) =>
+      leftKey.localeCompare(rightKey) || leftValue.localeCompare(rightValue));
+    return current.pathname === expected.pathname
+      && currentEntries.length === expectedEntries.length
+      && currentEntries.every(([key, value], index) => key === expectedEntries[index]?.[0] && value === expectedEntries[index]?.[1]);
+  } catch {
+    return false;
+  }
+}
+
 function createRealSamplePage(input: {
   page: Page;
   context: BrowserContext;
@@ -507,9 +548,7 @@ function createRealSamplePage(input: {
   pageStoreInstaller: typeof import('./readiness.js')['pageStoreInstaller'];
 }): RealPage {
   let firstSource = true;
-  const pathNow = (): string => {
-    try { return new URL(input.page.url()).pathname; } catch { return ''; }
-  };
+  const targetNow = (target: ExactBrowserTarget): boolean => exactTargetMatches(input.page.url(), target);
   return {
     rawPage: input.page,
     contextState: input.contextState,
@@ -524,13 +563,14 @@ function createRealSamplePage(input: {
       await input.page.goto(absoluteUrl(input.baseUrl, path));
     },
     async prepareWarmSource(route): Promise<void> {
-      if (firstSource || pathNow() === '') {
+      const sourcePath = targetPath(route.source.target);
+      if (firstSource || input.page.url() === '') {
         firstSource = false;
-        await input.page.goto(absoluteUrl(input.baseUrl, route.source.path));
+        await input.page.goto(absoluteUrl(input.baseUrl, sourcePath));
         return;
       }
-      if (pathNow() === route.source.path) return;
-      const exactLink = input.page.locator(`a[href="${route.source.path}"]`).first();
+      if (targetNow(route.source.target)) return;
+      const exactLink = input.page.locator(`a[href="${sourcePath}"]`).first();
       if (await exactLink.count() > 0 && await exactLink.isVisible()) {
         await exactLink.click();
         return;
@@ -538,17 +578,27 @@ function createRealSamplePage(input: {
       // Source preparation is outside the measured token. A direct source load
       // is the bounded fallback when the current route exposes no path to the
       // declared source; the destination click remains an in-app exact-href click.
-      await input.page.goto(absoluteUrl(input.baseUrl, route.source.path));
+      await input.page.goto(absoluteUrl(input.baseUrl, sourcePath));
     },
     async waitForSourceReady(route, timeoutMs): Promise<boolean> {
       const deadline = Date.now() + timeoutMs;
       while (Date.now() <= deadline) {
-        if (pathNow() === route.source.path && await visible(input.page, route.source.ready)) return true;
+        const sourceTerminal = route.source.sourceTerminal === undefined
+          ? 'populated'
+          : await terminalStateFor(input.page, route.source.sourceTerminal, route.source.sourceSelected);
+        if (targetNow(route.source.target) && await visible(input.page, route.source.ready)
+          && (sourceTerminal === 'populated' || sourceTerminal === 'empty')) return true;
         await new Promise<void>((resolveSleep) => setTimeout(resolveSleep, 100));
       }
       return false;
     },
-    async clickExactHref(href): Promise<boolean> {
+    async activateWarmAction(route, href): Promise<boolean> {
+      if (route.source.click.role === 'tab') {
+        const tab = input.page.getByRole('tab', { name: route.source.click.name, exact: true });
+        if (await tab.count() === 0 || !await tab.first().isVisible()) return false;
+        await tab.first().click();
+        return true;
+      }
       const link = input.page.locator(`a[href="${href}"]`).first();
       if (await link.count() === 0 || !await link.isVisible()) return false;
       await link.click();

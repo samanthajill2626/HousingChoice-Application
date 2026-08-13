@@ -97,9 +97,15 @@ export async function waitForMeaningfulReady(input: WaitForMeaningfulReadyInput)
     const [urlMatches, structureVisible, observedTerminal] = await Promise.all([
       input.ui.urlMatches(), input.ui.structureVisible(), input.ui.terminalState(),
     ]);
+    const readyTerminal = observedTerminal === 'populated' || observedTerminal === 'empty';
     if (urlMatches && structureVisible && observedTerminal !== 'unknown') {
-      if (observedTerminal !== terminalState || terminalOffsetMs === null) terminalOffsetMs = nowOffsetMs;
-      terminalState = observedTerminal;
+      if (readyTerminal) {
+        if (observedTerminal !== terminalState || terminalOffsetMs === null) terminalOffsetMs = nowOffsetMs;
+        terminalState = observedTerminal;
+      } else {
+        terminalState = observedTerminal;
+        terminalOffsetMs = null;
+      }
     } else if (terminalState !== 'unknown') {
       terminalState = 'unknown';
       terminalOffsetMs = null;

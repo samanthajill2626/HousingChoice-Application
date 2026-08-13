@@ -49,6 +49,7 @@ const SAMPLE_STATUSES: readonly SampleStatus[] = [
   'blocked_write_dependency',
   'skipped_no_fixture',
   'skipped_fixture_not_navigable',
+  'skipped_required_action_missing',
   'skipped_source_not_ready',
   'skipped_unresolved_branch',
 ];
@@ -60,6 +61,7 @@ const FAILURE_REASONS: readonly FailureReasonCode[] = [
   'blocked_write_prevented_ready',
   'fixture_absent',
   'fixture_not_navigable',
+  'required_action_missing',
   'source_not_ready',
   'unresolved_branch',
   'cleanup_failed',
@@ -608,7 +610,7 @@ function cloneSample(sample: SampleResult): SampleResult {
       }),
     },
     clientTruncated: sample.clientTruncated === true,
-    terminalState: ['populated', 'empty', 'error', 'unknown'].includes(sample.terminalState)
+    terminalState: ['populated', 'empty', 'error', 'contradictory_terminal', 'unknown'].includes(sample.terminalState)
       ? sample.terminalState
       : 'unknown',
     surfaceEvidence: cloneSurfaceEvidence(sample.surfaceEvidence),

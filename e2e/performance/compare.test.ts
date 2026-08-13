@@ -191,17 +191,21 @@ describe('compareRuns', () => {
     const current = run([
       sample('/shared', 'cold', 0),
       sample('/skip', 'cold', 0, { status: 'skipped_no_fixture', reason: 'fixture_absent' }),
+      sample('/missing-action', 'warm', 0, { status: 'skipped_required_action_missing', reason: 'required_action_missing' }),
       sample('/timeout', 'warm', 0, { status: 'timeout', reason: 'ready_timeout' }),
       sample('/failed', 'cold', 0, { status: 'failed', reason: 'browser_failure' }),
       sample('/blocked', 'warm', 0, {
         status: 'blocked_write_dependency',
         reason: 'blocked_write_prevented_ready',
       }),
-    ], { environment: { ...ENVIRONMENT, routeSet: ['/shared', '/skip', '/timeout', '/failed', '/blocked'] } });
+    ], { environment: { ...ENVIRONMENT, routeSet: ['/shared', '/skip', '/missing-action', '/timeout', '/failed', '/blocked'] } });
 
     const comparison = compareRuns(baseline, current);
 
-    expect(comparison.skipped).toEqual([{ surfaceId: '/skip', mode: 'cold' }]);
+    expect(comparison.skipped).toEqual([
+      { surfaceId: '/skip', mode: 'cold' },
+      { surfaceId: '/missing-action', mode: 'warm' },
+    ]);
     expect(comparison.timedOut).toEqual([{ surfaceId: '/timeout', mode: 'warm' }]);
     expect(comparison.failed).toEqual([
       { surfaceId: '/failed', mode: 'cold' },

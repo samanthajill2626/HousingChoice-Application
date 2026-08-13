@@ -143,7 +143,15 @@ describe('aggregateSamples', () => {
 
     expect(row?.lowSampleCount).toBe(true);
     expect(row?.warnings).toEqual(['low_sample_count']);
-    expect(row?.statusCounts).toMatchObject({ ok: 1, timeout: 1, failed: 0 });
+    expect(row?.statusCounts).toMatchObject({ ok: 1, timeout: 1, failed: 0, skipped_required_action_missing: 0 });
+  });
+
+  it('counts a missing required action without treating it as a successful sample', () => {
+    const [row] = aggregateSamples([
+      sample('/inbox', 'warm', 0, { status: 'skipped_required_action_missing', reason: 'required_action_missing' }),
+    ]);
+
+    expect(row).toMatchObject({ successCount: 0, statusCounts: { skipped_required_action_missing: 1 } });
   });
 
   it('keeps resource classes and background noise separate from primary API metrics', () => {

@@ -48,9 +48,16 @@ export interface TerminalContract {
   emptyAlternatives: readonly (readonly LocatorContract[])[];
 }
 
-export interface WarmSourceContract {
+export interface ExactBrowserTarget {
   path: string;
+  query?: Readonly<Record<string, string>>;
+}
+
+export interface WarmSourceContract {
+  target: ExactBrowserTarget;
   ready: LocatorContract;
+  sourceTerminal?: TerminalContract;
+  sourceSelected?: LocatorContract;
   click: LocatorContract;
   href: string;
   exactHref: true;
@@ -438,10 +445,14 @@ function source(
   href: string,
   gets: readonly EndpointContract[],
   selected?: true,
+  sourceTerminal?: TerminalContract,
+  sourceSelected?: LocatorContract,
 ): WarmSourceContract {
   return Object.freeze({
-    path,
+    target: Object.freeze({ path }),
     ready,
+    ...(sourceTerminal !== undefined && { sourceTerminal }),
+    ...(sourceSelected !== undefined && { sourceSelected }),
     click: locator(clickRole, clickName, 'exact', undefined, selected),
     href,
     exactHref: true as const,
@@ -503,8 +514,12 @@ const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templa
     target,
     gets,
   );
+const INBOX_ALL_SOURCE_TERMINAL = inboxTerminal('No conversations yet');
+const INBOX_ALL_SOURCE_SELECTED = locator('tab', 'All', 'exact', undefined, true);
 const INBOX_SOURCE = (label: string, gets: readonly EndpointContract[]) =>
-  source('/inbox', L.inbox, 'tab', label, '/inbox', gets, true);
+  source('/inbox', L.inbox, 'tab', label, '/inbox', gets, true, INBOX_ALL_SOURCE_TERMINAL, INBOX_ALL_SOURCE_SELECTED);
+const INBOX_DETAIL_SOURCE = (gets: readonly EndpointContract[]) =>
+  source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', gets, undefined, INBOX_ALL_SOURCE_TERMINAL, INBOX_ALL_SOURCE_SELECTED);
 
 export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -536,7 +551,7 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, 'link', 'resolved_exact_href', ':warmHref', UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, 'link', 'resolved_exact_href', ':warmHref', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
   row({ surfaceId: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, 'link', 'resolved_exact_href', ':warmHref', PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', inboxGets('inbox_page_all')), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
+  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: INBOX_DETAIL_SOURCE(inboxGets('inbox_page_all')), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
   row({ surfaceId: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
 ]);
 
@@ -828,7 +843,7 @@ export interface ResolverDom {
 
 export type ResolverResult =
   | { kind: 'resolved'; coldPath: string; warmHref: string; branch: RouteContractBranch }
-  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' | 'unresolved_branch' };
+  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'required_action_missing' | 'source_not_ready' | 'unresolved_branch' };
 
 export function resolverSkipSampleResult(
   surfaceId: string,
@@ -840,6 +855,8 @@ export function resolverSkipSampleResult(
     ? 'skipped_no_fixture'
     : reason === 'fixture_not_navigable'
       ? 'skipped_fixture_not_navigable'
+      : reason === 'required_action_missing'
+        ? 'skipped_required_action_missing'
       : reason === 'source_not_ready'
         ? 'skipped_source_not_ready'
         : 'skipped_unresolved_branch';

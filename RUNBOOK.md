@@ -1219,20 +1219,32 @@ npm run import:plan -- --quo "<new export dir>" --airtable "<new export dir>" --
 Apply — **always dry-run first**; the write needs an explicit `--yes`. The stage
 is a required flag, NOT environment variables.
 
-TWO ENV VARS ARE STILL REQUIRED, and they are NOT stage targeting — that is the
-distinction to hold onto. `--env` (or the `:local`/`:dev`/`:prod` scripts)
-resolves WHERE the run writes: table prefix, credentials, account guard. The two
-vars below are the inputs to the GROUP-IDENTITY PARITY GATE, which compares the
-export's `ownNumbers` against the exclusion list the target stage is deployed
-with. `assertGroupIdentityEnvDeclared` REFUSES the run — dry runs included — if
-either is undeclared, because an unset list silently means "compare against
-nothing". They come from THIS shell, so set them to the values the stage named
-in the flag is actually deployed with:
+**Each stage loads its operator env file automatically (2026-08-13):** `.env`
+for local (optional), `.env.dev` / `.env.prod` for the AWS stages (required —
+the run refuses without them). That file is where the parity-gate identity vars
+(`BUSINESS_PHONE_NUMBER`, `GROUP_IDENTITY_EXCLUDED_NUMBERS`) and phase 2's
+`TWILIO_*` credentials come from — the same values `secrets:push` mirrors to
+Parameter Store, so the gate compares against what the stage is actually
+deployed with. Shell env vars still win over the file, which is how a local run
+(whose `.env` may not carry the identity vars) or a deliberate override works.
+dev/prod also default `MESSAGING_DRIVER=twilio` (like the dev loop's live mode),
+so phase 2 builds real rails instead of silently using the console driver.
 
 ```powershell
-$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
-$env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --dry-run
+npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
+
+For a LOCAL run the two identity vars usually still ride the shell (local `.env`
+files rarely declare them):
+
+```powershell
+$env:BUSINESS_PHONE_NUMBER = "+15550009999"; $env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "+16782842537"; npm run import:apply:local -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
+```
+
+**Worktree note:** the env files are gitignored, so a feature worktree does not
+have them. Running `import:apply:dev` from a worktree needs `.env.dev` copied in
+first: `copy "W:\AI Projects\Housing Choice\HC Application\.env.dev" W:\tmp\<name>\.env.dev`.
 
 **Apply is ONE command (2026-08-13):** after its writes it CHAINS the group
 conversion (phase 2 - the same machinery as `import:convert-groups`, including
@@ -1256,26 +1268,29 @@ come from the invoking shell.
 
 No `DYNAMODB_ENDPOINT`, no `TABLE_PREFIX`, no `AWS_PROFILE` exports needed.
 
-**Both group-identity vars are REQUIRED in the invoking shell**, on the real run
-and on the dry run alike. Before its first write, `import:apply` compares the
-export's `ownNumbers` against the runtime exclusion set (a group thread's id is
-derived from its roster minus our own numbers, so a mismatch writes 132 group
-threads under ids live detection will never produce, and group threads cannot be
-retracted). There is no dotenv here: the command reads those two values from the
-shell you type in. It REFUSES with a message naming this step when either is
-unset, because "not set" is not the same statement as "the org has no other
-numbers" - silently reading it as the latter is how the gate refuses every
-correct run. Set them to what the STAGE you are pointing at is deployed with;
-the value and its rationale are in the cutover checklist's rank-1 step below.
+**Both group-identity vars are REQUIRED**, on the real run and on the dry run
+alike. Before its first write, `import:apply` compares the export's `ownNumbers`
+against the runtime exclusion set (a group thread's id is derived from its
+roster minus our own numbers, so a mismatch writes 132 group threads under ids
+live detection will never produce, and group threads cannot be retracted). On
+dev/prod they normally arrive via the stage env file (`.env.dev` / `.env.prod`);
+on local, via the shell or `.env`. The command REFUSES with a message naming
+this step when either is unset, because "not set" is not the same statement as
+"the org has no other numbers" - silently reading it as the latter is how the
+gate refuses every correct run. The values must match what the STAGE you are
+pointing at is deployed with; the rationale is in the cutover checklist's rank-1
+step below.
 
 **Things that will bite you:**
 
 - **An unset `GROUP_IDENTITY_EXCLUDED_NUMBERS` or `BUSINESS_PHONE_NUMBER` stops
   the command dead**, and it is the one failure that reads like a data problem
-  when it is a shell problem. The refusal says `NOT a mismatch`; it means the
-  parity gate had nothing to compare against. Set both (see the invocation lines
-  above) and re-run. Setting them WRONG is the failure the gate cannot catch:
-  it compares against your shell, not against the deployed stack.
+  when it is a config problem. The refusal says `NOT a mismatch`; it means the
+  parity gate had nothing to compare against. On dev/prod, put them in the stage
+  env file; on local, set them in the shell. Setting them WRONG is the failure
+  the gate cannot catch: it compares against your config, not against the
+  deployed stack - keeping `.env.dev`/`.env.prod` in sync with what is pushed to
+  Parameter Store is what makes the comparison honest.
 - **A pool-number read failure is retried, then fatal.** The gate subtracts the
   active pool numbers from both sides, so it will not proceed on a guess. Three
   attempts, then a `PoolNumbersUnavailableError` naming the underlying error -

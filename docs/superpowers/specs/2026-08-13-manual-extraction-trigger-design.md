@@ -213,7 +213,11 @@ Lifecycle:
 - **The park branch REMOVEs `manualRequested`.** A parked row is inert until
   something re-arms it; leaving the flag set would waive both gates on whatever
   automatic run schedules it next, months later.
-- `complete` does not touch it - `claim` already cleared it.
+- **Both `fail` branches, and the fallback, also REMOVE `claimedAt`**, which
+  `complete` already does and `fail` never did. See 4.4a-i: this is what makes
+  `claimedAt` mean "a run holds this row" rather than "was claimed at some
+  point", and the in-flight guard depends on it.
+- `complete` does not touch `manualRequested` - `claim` already cleared it.
 
 ### 4.2 Two gate changes in the job, both scoped to `manual`
 
@@ -360,29 +364,53 @@ the builder does not think this design introduced it. See section 9.
 
 ### 4.4a-i The in-flight guard
 
-Before scheduling a thread, the endpoint reads its due row and SKIPS that thread
-when a run is currently executing on it. The predicate is:
+**First, `claimedAt` is made to mean what its name says.** Today `claim` sets it
+and only `complete` clears it (`app/src/repos/extractionRepo.ts:261,293`);
+neither branch of `fail` does. So a row that failed hours ago still carries a
+`claimedAt`, and the attribute means "was claimed at some point", not "is being
+run". **Both branches of `fail`, and its scheduling-free fallback, now REMOVE
+`claimedAt`** exactly as `complete` does. Verified safe: nothing in the codebase
+reads this attribute for logic - the only readers are repo tests asserting the
+clear behavior - so this narrows its meaning without changing any consumer.
+
+With that, `claimedAt` present means precisely "a run holds this row", and the
+guard is one clause plus a staleness escape:
 
 ```
-claimedAt is present AND _duePartition is absent AND claimedAt is recent
+attribute_not_exists(claimedAt) OR claimedAt < :staleBefore
 ```
 
-**All three clauses are load-bearing.**
+where `staleBefore = now - MANUAL_CLAIM_STALE_MS` (a named constant; five
+minutes, comfortably longer than any plausible run, which is a model call of
+seconds).
 
-- `claimedAt` present alone is NOT "running". Neither branch of `fail` clears
-  `claimedAt` (`app/src/repos/extractionRepo.ts:307-352`) - only `complete`
-  does - so a row that failed hours ago still carries one. Testing `claimedAt`
-  alone would refuse presses forever after any failure, which is the opposite of
-  what an operator needs at that moment.
-- `_duePartition` absent is what distinguishes "claimed and running" from
-  "claimed earlier, then re-armed". A re-armed row is scheduled again and is not
-  in flight.
-- Recency is the escape hatch for a process that died mid-run. Without it, the
-  stranded-claim hazard (4.4a) would become permanently un-pressable, turning a
-  rare pre-existing bug into an unrecoverable one. A press past the staleness
-  window proceeds normally, which also gives the operator a manual recovery path
-  that does not exist today. The window is a named constant, comfortably longer
-  than any plausible run.
+**The guard lives in `requestManualExtraction`'s `ConditionExpression`, not in a
+read before it.** A read-then-act check has a window: two presses can both read
+"idle", and the second can schedule after the first has already claimed, so both
+run. Putting the predicate in the conditional write closes that window - the
+scheduling upsert itself fails when a run holds the row. A
+`ConditionalCheckFailedException` for a thread means "already running"; anything
+else propagates.
+
+Why each piece is right, in the states that previously broke it:
+
+- **A run in flight with an inbound arriving mid-run.** The inbound re-arms the
+  row, so `_duePartition` comes back while the run continues. An earlier draft
+  of this guard tested `_duePartition` absent as a proxy for "running" and read
+  this state as idle, admitting a second concurrent run - the exact failure the
+  guard exists to prevent. `claimedAt` is unaffected by the re-arm and reads
+  correctly.
+- **A parked row.** Park removes `_duePartition` and now also clears
+  `claimedAt`, so a press proceeds. This is what makes section 8's "a second
+  press is the recovery" true rather than aspirational.
+- **A row that has never been scheduled** - every never-extracted imported
+  conversation, the primary case for this feature. There is no item at all, so
+  `attribute_not_exists(claimedAt)` holds and the upsert creates the row. No
+  special-casing needed.
+- **A process that died mid-run.** `claimedAt` is never cleared, so the
+  staleness clause is the only way back; past the window a press proceeds. This
+  also gives the operator a manual recovery from the stranded-claim hazard
+  (4.4a) that does not exist today.
 
 A skipped thread is reported honestly rather than silently: the response
 distinguishes threads scheduled from threads already running, and 4.6 tells the
@@ -477,10 +505,12 @@ On success:
    triage hooks do not filter, because they react to an event on one specific
    thread rather than fanning out across a contact's threads; fanning out is
    what makes the filter mandatory here.
-4. **Apply the in-flight guard (4.4a-i)** to each surviving thread, partitioning
-   them into threads to schedule and threads already running.
-5. `requestManualExtraction(conversationId, nowIso)` for each thread to
-   schedule, with no debounce - `dueAt = now`, as the voice and triage paths do.
+4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
+   with no debounce - `dueAt = now`, as the voice and triage paths do. The
+   in-flight guard (4.4a-i) is inside this call, so the partition into scheduled
+   and already-running threads is the set of calls that succeeded versus the set
+   that raised `ConditionalCheckFailedException`. There is no separate
+   pre-read.
 6. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
 7. Respond `200 { scheduled: string[], alreadyRunning: string[] }` - both as
    `conversationId` arrays. The client waits for one completion event per entry
@@ -569,8 +599,15 @@ its states are specified rather than left to the builder:
 
 1. **Pressed** - the menu item enters a running state and is disabled against a
    second press. The status region reads "Running AI extraction..." (or
-   "...on 2 threads" when the response named more than one).
-2. **Resolved** - one `ai_run.completed` per `conversationId` from the response.
+   "...on 2 threads" when `scheduled` named more than one).
+1a. **Already running** - `scheduled` is empty and `alreadyRunning` is not. This
+   is a SUCCESS response, not a refusal: the region says a run is already in
+   progress and the indicator does NOT start, because the events for those runs
+   belong to whoever started them and may already have fired. Starting an
+   indicator here would hang until the timeout. A mixed response (some
+   scheduled, some already running) starts the indicator for the scheduled
+   threads only and mentions the rest.
+2. **Resolved** - one `ai_run.completed` per `conversationId` in `scheduled`.
    The region renders the aggregate outcome in the operator's terms, not the
    job's enum: applied ("Updated 2 fields, 1 suggestion"), no-op or skipped
    ("Ran - nothing new to extract"), failed ("Extraction failed - see Settings >
@@ -679,14 +716,17 @@ degraded, not broken.
   and it is what keeps 4.4a from producing concurrent runs on one conversation.
   The flag lifecycle in 4.1 still matters for the paths the guard does not
   cover: an inbound re-arm during a run, and a failed run's retry.
-- **A press while a run is failing** is preserved by the conditional `fail`
-  (4.1): the re-armed `dueAt` and fresh flag survive, and `fail` records only
-  the error and the attempt count. Without that condition the press would be
-  pushed out by the backoff, or - on the fifth failure - deleted with the row's
-  index keys.
+- **An inbound message arriving during a run** re-arms the row while the run
+  continues. The conditional `fail` (4.1) is what protects it: the re-armed
+  `dueAt` survives, and `fail` records only the error and the attempt count.
+  Without that condition the re-arm would be pushed out by the backoff, or - on
+  the fifth failure - deleted with the row's index keys. This is now the
+  scenario that motivates the conditional `fail`, since the guard makes a PRESS
+  during a run impossible.
 - **An inbound message between press and claim** slides `dueAt` and may
   overwrite `channel`, but cannot clear `manualRequested`, so the run stays
-  manual.
+  manual. It can also slide `dueAt` into the future, in which case the app-side
+  claim fails its `dueAt <= now` condition and the poll runs it later (4.4b).
 - **Sustained inbound traffic** slides `dueAt` forward by a full debounce each
   time, so on an actively texting thread a manual run can be delayed well past
   "shortly". The run stays manual whenever it fires; the delay is the existing
@@ -713,12 +753,14 @@ Unit:
 - `windowParams.maxTranscriptAgeDays` is `null` on a manual run, `30` otherwise.
 - `requestManualExtraction` sets the flag and leaves `channel` untouched;
   `scheduleExtraction` never sets the flag; `claim` removes it.
-- **The two press-survival regression tests, one per write path.** A press
-  landing during a claimed run survives that run's `complete`; and a press
-  landing during a claimed run survives that run's `fail` on BOTH branches -
-  re-arm (its `dueAt` is not pushed to `now + backoff`) and park (its `dueAt`
-  and `_duePartition` are not removed). Assert the error and attempt count are
-  still recorded in the re-armed case.
+- **The two re-arm-survival regression tests, one per write path.** Drive these
+  with an INBOUND re-arm, not a press: the guard (4.4a-i) makes a press during a
+  claimed run impossible, so a press-driven version of this test would be
+  asserting on an unreachable state. A re-arm landing during a claimed run
+  survives that run's `complete`; and it survives that run's `fail` on BOTH
+  branches - re-arm (its `dueAt` is not pushed to `now + backoff`) and park (its
+  `dueAt` and `_duePartition` are not removed). Assert the error and attempt
+  count are still recorded in the re-armed case.
 - `fail` re-arms with the flag for a manual run and without it for an automatic
   one; `fail` parking REMOVEs the flag.
 - `newRunDraft` records `manual` from the flag, and records a defined trigger
@@ -751,19 +793,30 @@ In-process runner and event:
 - The payload carries ids and counts only. A guard test asserts no message body,
   phone number, or field value can reach it.
 
-The in-flight guard (4.4a-i), one test per clause, because each clause exists to
-stop a specific wrong behavior:
+`claimedAt` narrowing and the in-flight guard (4.4a-i). Each case below is a
+state that broke some earlier draft of this guard:
 
-- A thread whose row is claimed-and-not-re-armed is reported `alreadyRunning`
-  and is NOT re-scheduled.
-- A thread whose row carries a `claimedAt` from an OLD FAILED run - `fail`
-  leaves it set - IS scheduled normally. This is the regression test for the
-  "refuses forever after any failure" trap.
-- A thread whose row is claimed but re-armed IS scheduled.
-- A thread whose `claimedAt` is older than the staleness window IS scheduled,
+- **Both `fail` branches and the fallback clear `claimedAt`**, as `complete`
+  does. Assert on all three; a missed branch silently re-creates the
+  "refuses forever after a failure" trap.
+- A thread whose row is claimed (run in flight) is reported `alreadyRunning` and
+  is NOT re-scheduled - the `dueAt` is not slid and `manualRequested` is not
+  re-set.
+- **A claimed row that an INBOUND has re-armed is still reported
+  `alreadyRunning`.** The regression test for the inverted predicate: an earlier
+  draft read `_duePartition` as a proxy for "running" and admitted a second
+  concurrent run here.
+- A row left by an old FAILED run is scheduled normally.
+- A PARKED row is scheduled normally - this is section 8's recovery path.
+- A row that does not exist at all is created and scheduled - the imported
+  conversation case, and the most common one in practice.
+- A row whose `claimedAt` predates `MANUAL_CLAIM_STALE_MS` is scheduled,
   recovering a run stranded by a dead process.
 - A press covering two threads, one running and one idle, schedules exactly one
   and reports the other as already running.
+- The guard is enforced by the conditional write, not a pre-read: a test drives
+  two concurrent `requestManualExtraction` calls against one claimed row and
+  asserts exactly zero succeed.
 
 Dashboard:
 

@@ -79,7 +79,7 @@ const ENDPOINT_TEMPLATES: ReadonlySet<string> = new Set([
   'third_party',
   'invalid_url',
 ]);
-const SAFE_SURFACE_ID = /^\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*$/u;
+const SAFE_SURFACE_ID = /^(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*)(?:\/(?:[a-z0-9-]+|:[A-Za-z][A-Za-z0-9]*))*|inbox-[a-z][a-z0-9-]*)$/u;
 const SURFACE_IDS: ReadonlySet<string> = new Set(ROUTES.map((route) => route.surfaceId));
 const SAFE_QUERY_KEY = /^[A-Za-z][A-Za-z0-9_-]{0,63}$/u;
 const SAFE_BROWSER_VERSION = /^\d+(?:\.\d+){0,4}$/u;
@@ -312,6 +312,7 @@ export function evaluateContractCheckpoint(
         .map((request) => ({
           endpointTemplate: endpointTemplate(request.endpointTemplate) as never,
           queryKeys: [...request.queryKeys],
+          ...(request.inboxRequestClass !== undefined && { inboxRequestClass: request.inboxRequestClass }),
           requirement: 'required' as const,
           outcome: request.outcome,
           status: request.status,

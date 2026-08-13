@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   BACKGROUND_REFRESH_GETS,
   NetworkCollector,
+  classifyInboxRequest,
   classifyConsoleMessage,
   collectColdSample,
   collectRunSamples,
@@ -194,6 +195,50 @@ describe('CDP request collection', () => {
 });
 
 describe('checked-in background policy', () => {
+  it('classifies closed Inbox page and badge tuples before evidence redaction', () => {
+    const firstPartyOrigin = 'http://127.0.0.1:9111';
+    const unreadPage = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30';
+    const badge = 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=100';
+    expect(classifyInboxRequest(unreadPage, {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_page_unread');
+    expect(classifyInboxRequest(badge, {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_badge');
+    expect(classifyInboxRequest('http://127.0.0.1:9111/api/inbox?filter=unread&filter=all&limit=30', {
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], originClass: 'first_party', resourceClass: 'api', unmatchedApi: false,
+    })).toBe('inbox_endpoint_contract_failure');
+
+    const expected: EndpointContract[] = [
+      { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_unread' },
+      { endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_badge' },
+    ];
+    const cold = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'cold', repeat: 0, expectedGets: expected });
+    cold.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(cold, 'badge', 10.1, badge);
+    cold.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    start(cold, 'page', 10.3, unreadPage);
+    cold.loadingFinished('sample-1', { requestId: 'page', timestamp: 10.4, encodedDataLength: 30 });
+    start(cold, 'bad', 10.5, 'http://127.0.0.1:9111/api/inbox?filter=unread&limit=30&cursor=private-cursor');
+    cold.loadingFinished('sample-1', { requestId: 'bad', timestamp: 10.6, encodedDataLength: 40 });
+    const ended = cold.endSample('sample-1');
+    expect(ended.requests.map((request) => [request.inboxRequestClass, request.requestRole, request.unmatchedApi])).toEqual([
+      ['inbox_badge', 'required', false],
+      ['inbox_page_unread', 'required', false],
+      ['inbox_endpoint_contract_failure', 'required', true],
+    ]);
+    expect([ended.apiRequestCount, ended.apiTransferBytes]).toEqual([3, 90]);
+    expect(JSON.stringify(ended)).not.toContain('private-cursor');
+
+    const warm = new NetworkCollector({ firstPartyOrigin, surfaceId: 'inbox-unread', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: expected });
+    warm.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
+    start(warm, 'badge', 10.1, badge);
+    warm.loadingFinished('sample-1', { requestId: 'badge', timestamp: 10.2, encodedDataLength: 20 });
+    start(warm, 'page', 10.3, unreadPage);
+    warm.loadingFinished('sample-1', { requestId: 'page', timestamp: 10.4, encodedDataLength: 30 });
+    expect(warm.endSample('sample-1').requests.map((request) => request.requestRole)).toEqual(['background_shell', 'required']);
+  });
+
   it('rejects undeclared background shapes without reclassifying them', () => {
     expect(validateObservedRequestRoles([{
       ...requestEvidence('/api/settings', 'background_refresh'),
@@ -272,9 +317,11 @@ describe('checked-in background policy', () => {
   });
 
   it('keeps the inbox destination load required and labels its later SSE repeat background_refresh', () => {
-    const gets: EndpointContract[] = [{ endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required' }];
+    const gets: EndpointContract[] = [{
+      endpointTemplate: '/api/inbox', queryKeys: ['filter', 'limit'], requirement: 'required', inboxRequestClass: 'inbox_page_all',
+    }];
     const value = new NetworkCollector({
-      firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId: '/inbox', mode: 'warm', repeat: 0, expectedGets: gets,
+      firstPartyOrigin: 'http://127.0.0.1:9111', surfaceId: 'inbox-all', behaviorFamily: 'inbox', mode: 'warm', repeat: 0, expectedGets: gets,
     });
     value.beginSample({ token: 'sample-1', cdpOriginSeconds: 10, nodeOriginMs: 1_000 });
     const url = 'http://127.0.0.1:9111/api/inbox?filter=all&limit=30';
@@ -945,7 +992,7 @@ describe('run ordering and warmup policy', () => {
 
   it('reuses one warm context and records only relay counts plus a shortfall boolean in hermetic mode', async () => {
     const browser = new FakeSamplingBrowser();
-    const inbox = ROUTES.find((route) => route.surfaceId === '/inbox')!;
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
     const result = await collectRunSamples({
       browser,
       storageState: STORAGE_STATE,
@@ -956,7 +1003,7 @@ describe('run ordering and warmup policy', () => {
       routeOrderSeed: 7,
       sourceTimeoutMs: 100,
       expectedRelayLinkCount: 4,
-      resolveCold: async () => resolved('/inbox'),
+      resolveCold: async () => resolved('inbox-all'),
       resolveWarm: async (route, page) => {
         const fake = page as FakeSamplingPage;
         fake.hrefs.add(route.source.href);

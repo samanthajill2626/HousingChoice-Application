@@ -7,7 +7,16 @@ export interface EndpointContract {
   endpointTemplate: EndpointTemplate;
   queryKeys: readonly string[];
   requirement: EndpointRequirement;
+  inboxRequestClass?: InboxRequestClass;
 }
+
+export type InboxRequestClass =
+  | 'inbox_page_all'
+  | 'inbox_page_unread'
+  | 'inbox_page_unknown'
+  | 'inbox_page_groups'
+  | 'inbox_badge'
+  | 'inbox_endpoint_contract_failure';
 
 export type RouteContractBranch =
   | { kind: 'none' }
@@ -26,6 +35,7 @@ export interface LocatorContract {
   exactness: LocatorExactness;
   name?: string;
   scope?: string;
+  selected?: true;
 }
 
 export interface TerminalContract {
@@ -113,17 +123,23 @@ function endpoint(
   endpointTemplate: EndpointTemplate,
   queryKeys: readonly string[] = [],
   requirement: EndpointRequirement = 'required',
+  inboxRequestClass?: Exclude<InboxRequestClass, 'inbox_endpoint_contract_failure'>,
 ): EndpointContract {
   assertEndpointTemplate(endpointTemplate);
   return Object.freeze({
     endpointTemplate,
     queryKeys: Object.freeze([...queryKeys].sort()),
     requirement,
+    ...(inboxRequestClass !== undefined && { inboxRequestClass }),
   });
 }
 
-function required(path: EndpointTemplate, queryKeys: readonly string[] = []): EndpointContract {
-  return endpoint(path, queryKeys, 'required');
+function required(
+  path: EndpointTemplate,
+  queryKeys: readonly string[] = [],
+  inboxRequestClass?: Exclude<InboxRequestClass, 'inbox_endpoint_contract_failure'>,
+): EndpointContract {
+  return endpoint(path, queryKeys, 'required', inboxRequestClass);
 }
 
 function conditional(path: EndpointTemplate, queryKeys: readonly string[] = []): EndpointContract {
@@ -135,8 +151,12 @@ function locator(
   name?: string,
   exactness: LocatorExactness = 'exact',
   scope?: string,
+  selected?: true,
 ): LocatorContract {
-  return Object.freeze({ role, exactness, ...(name !== undefined && { name }), ...(scope !== undefined && { scope }) });
+  return Object.freeze({
+    role, exactness, ...(name !== undefined && { name }), ...(scope !== undefined && { scope }),
+    ...(selected !== undefined && { selected }),
+  });
 }
 
 function terminal(
@@ -198,7 +218,7 @@ function crossProduct(
 
 const COLD_SHELL_GETS = Object.freeze([
   required('/auth/me'),
-  required('/api/inbox', ['filter', 'limit']),
+  required('/api/inbox', ['filter', 'limit'], 'inbox_badge'),
   required('/api/unmatched-email', ['filter']),
 ]);
 
@@ -249,7 +269,9 @@ const PLACEMENT_LIST_GETS = Object.freeze([
   ...UNIT_LIVE_WALK,
   ...UNIT_DELETED_WALK,
 ]);
-const INBOX_GETS = Object.freeze([required('/api/inbox', ['filter', 'limit'])]);
+function inboxGets(requestClass: Extract<InboxRequestClass, `inbox_page_${string}`>): readonly EndpointContract[] {
+  return Object.freeze([required('/api/inbox', ['filter', 'limit'], requestClass)]);
+}
 const EMAIL_GETS = Object.freeze([required('/api/unmatched-email', ['filter']), ...CONTACT_LIVE_WALK]);
 const BROADCAST_LIST_GETS = Object.freeze([required('/api/broadcasts', ['limit'])]);
 
@@ -341,10 +363,9 @@ const PLACEMENT_TERMINAL = terminal(
   [locator('list', undefined, 'role_only')], [locator('text', 'No active placements.')],
   [locator('alert', "We couldn't load placements. Please try again.")], [locator('searchbox', 'Search placements')],
 );
-const INBOX_TERMINAL = terminal(
-  [locator('list', 'Conversations')],
-  [locator('text', 'No conversations yet'), locator('text', 'The inbox turns on with its backend')], [L.alert],
-);
+function inboxTerminal(emptyTitle: string): TerminalContract {
+  return terminal([locator('list', 'Conversations')], [locator('text', emptyTitle)], [L.alert]);
+}
 function emailTerminal(quarantine: boolean): TerminalContract {
   return terminal(
     [locator('list', quarantine ? 'Quarantined email' : 'Unmatched email')],
@@ -416,11 +437,12 @@ function source(
   clickName: string,
   href: string,
   gets: readonly EndpointContract[],
+  selected?: true,
 ): WarmSourceContract {
   return Object.freeze({
     path,
     ready,
-    click: locator(clickRole, clickName),
+    click: locator(clickRole, clickName, 'exact', undefined, selected),
     href,
     exactHref: true as const,
     viewportDependency: 'desktop_chrome' as const,
@@ -453,7 +475,7 @@ function row(input: RowInput): RouteDefinition {
     coldTarget: input.coldTarget ?? (input.resolver === undefined || input.resolver === 'static'
       ? Object.freeze({ kind: 'static' as const, path: input.surfaceId })
       : Object.freeze({ kind: 'resolved' as const })),
-    behaviorFamily: input.behaviorFamily ?? (input.surfaceId === '/inbox' ? 'inbox' as const : 'standard' as const),
+    behaviorFamily: input.behaviorFamily ?? 'standard',
     requiredRole: input.requiredRole ?? 'staff',
     viewportDependency: 'desktop_chrome' as const,
     resolver: input.resolver ?? 'static',
@@ -481,6 +503,8 @@ const SETTINGS_SOURCE = (target: string, label: string, from = '/settings/templa
     target,
     gets,
   );
+const INBOX_SOURCE = (label: string, gets: readonly EndpointContract[]) =>
+  source('/inbox', L.inbox, 'tab', label, '/inbox', gets, true);
 
 export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/', label: 'Today', source: source('/contacts', L.contacts, 'link', 'Today', '/', CONTACT_LIVE_WALK), terminal: TODAY_TERMINAL, gets: TODAY_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -494,7 +518,10 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/tours', label: 'Tours', source: NAV_TODAY('/tours', 'Tours', TODAY_GETS), terminal: TOUR_ACTIVE_TERMINAL, gets: TOUR_LIST_ACTIVE_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/tours/closed', label: 'Closed tours', source: source('/tours', L.tours, 'link', 'Closed', '/tours/closed', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_CLOSED_TERMINAL, gets: TOUR_LIST_CLOSED_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/placements', label: 'Placements', source: NAV_TODAY('/placements', 'Placements', TODAY_GETS), terminal: PLACEMENT_TERMINAL, gets: PLACEMENT_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
-  row({ surfaceId: '/inbox', label: 'Inbox', source: NAV_TODAY('/inbox', 'Inbox', TODAY_GETS), terminal: INBOX_TERMINAL, gets: INBOX_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-all', label: 'Inbox: All', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('All', inboxGets('inbox_page_all')), terminal: inboxTerminal('No conversations yet'), gets: inboxGets('inbox_page_all'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unread', label: 'Inbox: Unread', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unread' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unread', inboxGets('inbox_page_unread')), terminal: inboxTerminal("You're all caught up"), gets: inboxGets('inbox_page_unread'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-unknown', label: 'Inbox: Unknown', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=unknown' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Unknown', inboxGets('inbox_page_unknown')), terminal: inboxTerminal('No unknown numbers'), gets: inboxGets('inbox_page_unknown'), surfaceScaleBearing: true, loadScaleBearing: true }),
+  row({ surfaceId: 'inbox-groups', label: 'Inbox: Groups', pathTemplate: '/inbox', coldTarget: Object.freeze({ kind: 'static' as const, path: '/inbox?filter=groups' }), behaviorFamily: 'inbox', source: INBOX_SOURCE('Groups', inboxGets('inbox_page_groups')), terminal: inboxTerminal('No group texts yet'), gets: inboxGets('inbox_page_groups'), surfaceScaleBearing: true, loadScaleBearing: true }),
   row({ surfaceId: '/email', label: 'Email', source: NAV_TODAY('/email', 'Email', TODAY_GETS), terminal: emailTerminal(false), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/email/quarantine', label: 'Quarantined email', source: source('/email', L.email, 'link', 'Quarantine', '/email/quarantine', EMAIL_GETS), terminal: emailTerminal(true), gets: EMAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/broadcasts', label: 'Matching', source: NAV_TODAY('/broadcasts', 'Matching', TODAY_GETS), terminal: BROADCAST_TERMINAL, gets: BROADCAST_LIST_GETS, surfaceScaleBearing: true, loadScaleBearing: true }),
@@ -509,7 +536,7 @@ export const ROUTES: readonly RouteDefinition[] = Object.freeze([
   row({ surfaceId: '/listings/:unitId', label: 'Property detail', resolver: 'unit', source: source('/listings', L.properties, 'link', 'resolved_exact_href', ':warmHref', UNIT_LIVE_WALK), terminal: UNIT_DETAIL_TERMINAL, gets: UNIT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: true }),
   row({ surfaceId: '/tours/:tourId', label: 'Tour detail', resolver: 'tour', source: source('/tours', L.tours, 'link', 'resolved_exact_href', ':warmHref', TOUR_LIST_ACTIVE_GETS), terminal: TOUR_DETAIL_TERMINAL, gets: TOUR_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
   row({ surfaceId: '/placements/:placementId', label: 'Placement detail', resolver: 'placement', source: source('/placements', L.placements, 'link', 'resolved_exact_href', ':warmHref', PLACEMENT_LIST_GETS), terminal: PLACEMENT_DETAIL_TERMINAL, gets: PLACEMENT_DETAIL_BASE_GETS, surfaceScaleBearing: false, loadScaleBearing: false, blockedSurface: 'thread_detail' }),
-  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', INBOX_GETS), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
+  row({ surfaceId: '/conversations/:conversationId', label: 'Relay conversation detail', resolver: 'conversation', source: source('/inbox', L.inbox, 'link', 'resolved_exact_href', ':warmHref', inboxGets('inbox_page_all')), terminal: CONVERSATION_DETAIL_TERMINAL, gets: CONVERSATION_DETAIL_GETS, surfaceScaleBearing: false, loadScaleBearing: true, blockedSurface: 'conversation_detail' }),
   row({ surfaceId: '/broadcasts/:broadcastId', label: 'Broadcast results', resolver: 'broadcast', source: source('/broadcasts', L.matching, 'link', 'resolved_exact_href', ':warmHref', BROADCAST_LIST_GETS), terminal: BROADCAST_DETAIL_TERMINAL, gets: BROADCAST_DETAIL_GETS, surfaceScaleBearing: true, loadScaleBearing: false }),
 ]);
 
@@ -523,6 +550,9 @@ export function assertRouteRegistry(routes: readonly RouteDefinition[]): void {
     }
     if (route.resolver !== 'static' && route.coldTarget.kind !== 'resolved') {
       throw new Error('resolved_cold_target_required');
+    }
+    if (route.source.click.selected !== undefined && route.source.click.role !== 'tab') {
+      throw new Error('selected_tab_role_required');
     }
   }
 }
@@ -542,7 +572,10 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/tours': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
     '/tours/closed': { base: 'dashboard/src/routes/tours/useTours.ts:37-123; dashboard/src/routes/tours/ToursPage.tsx:181-185' },
     '/placements': { base: 'dashboard/src/routes/placements/usePlacements.ts:50-128,214-225' },
-    '/inbox': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-all': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-unread': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-unknown': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
+    'inbox-groups': { base: 'dashboard/src/routes/inbox/useInbox.ts:46-65,139-155' },
     '/email': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
     '/email/quarantine': { base: 'dashboard/src/routes/email/EmailTriage.tsx:237-238; dashboard/src/routes/email/useUnmatchedEmail.ts:69-158' },
     '/broadcasts': { base: 'dashboard/src/routes/broadcasts/useBroadcastsList.ts:29-52,85-108' },
@@ -593,7 +626,10 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     '/tours': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
     '/tours/closed': 'dashboard/src/routes/tours/ToursPage.tsx:250-346',
     '/placements': 'dashboard/src/routes/placements/PlacementsPage.tsx:128-176',
-    '/inbox': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-all': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-unread': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-unknown': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
+    'inbox-groups': 'dashboard/src/routes/inbox/Inbox.tsx:53-75',
     '/email': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
     '/email/quarantine': 'dashboard/src/routes/email/EmailTriage.tsx:276-348',
     '/broadcasts': 'dashboard/src/routes/broadcasts/BroadcastsList.tsx:130-140',
@@ -648,7 +684,7 @@ export const CONTACT_INBOX_PROBE: ProbeDefinition = Object.freeze({ key: 'contac
 export const UNMATCHED_EMAIL_PROBE: ProbeDefinition = Object.freeze({ key: 'unmatched_email_probe', blockedSurface: 'unmatched_email_probe' });
 
 function contractKey(contract: EndpointContract): string {
-  return `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}`;
+  return `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}#${contract.inboxRequestClass ?? ''}`;
 }
 
 function freezeContracts(contracts: readonly EndpointContract[]): readonly EndpointContract[] {
@@ -709,16 +745,18 @@ export function assertObservedGets(
   declared: readonly EndpointContract[],
   observed: readonly ObservedEndpointContract[],
 ): { missingRequired: EndpointContract[]; undeclared: EndpointContract[] } {
-  const declarationShapes = new Set(declared.map((contract) => `${contract.endpointTemplate}?${contract.queryKeys.join('&')}`));
+  const endpointShape = (contract: Pick<EndpointContract, 'endpointTemplate' | 'queryKeys' | 'inboxRequestClass'>): string =>
+    `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}#${contract.inboxRequestClass ?? ''}`;
+  const declarationShapes = new Set(declared.map(endpointShape));
   const observedShapes = new Set(observed
     .filter((contract) =>
       (contract.outcome === undefined || contract.outcome === 'finished')
       && (contract.status === undefined || contract.status === null
         || (contract.status >= 200 && contract.status < 300)))
-    .map((contract) => `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`));
+    .map(endpointShape));
   return {
-    missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(`${contract.endpointTemplate}?${contract.queryKeys.join('&')}`)),
-    undeclared: observed.filter((contract) => !declarationShapes.has(`${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`)),
+    missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(endpointShape(contract))),
+    undeclared: observed.filter((contract) => !declarationShapes.has(endpointShape(contract))),
   };
 }
 

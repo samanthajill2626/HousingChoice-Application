@@ -28,7 +28,8 @@ import {
 const EXPECTED_KEYS = [
   '/', '/contacts', '/contacts/tenants', '/contacts/landlords', '/contacts/unknown',
   '/contacts/deleted', '/listings', '/listings/deleted', '/tours', '/tours/closed',
-  '/placements', '/inbox', '/email', '/email/quarantine', '/broadcasts',
+  '/placements', 'inbox-all', 'inbox-unread', 'inbox-unknown', 'inbox-groups',
+  '/email', '/email/quarantine', '/broadcasts',
   '/settings/team', '/settings/templates', '/settings/notifications', '/settings/voice',
   '/settings/system', '/settings/ai-runs', '/settings/numbers', '/contacts/:contactId',
   '/listings/:unitId', '/tours/:tourId', '/placements/:placementId',
@@ -43,7 +44,7 @@ const THREADS: RouteContractBranch[] = [
 
 const SHELL_SHAPES = [
   '/auth/me?#required',
-  '/api/inbox?filter&limit#required',
+  '/api/inbox?filter&limit#required#inbox_badge',
   '/api/unmatched-email?filter#required',
 ] as const;
 const CONTACT_SHAPES = [
@@ -86,7 +87,10 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
     '/api/contacts?deleted&type#required', '/api/contacts?cursor&deleted&type#conditional',
     ...UNIT_SHAPES, ...UNIT_DELETED_SHAPES,
   ],
-  '/inbox': ['/api/inbox?filter&limit#required'],
+  'inbox-all': ['/api/inbox?filter&limit#required#inbox_page_all'],
+  'inbox-unread': ['/api/inbox?filter&limit#required#inbox_page_unread'],
+  'inbox-unknown': ['/api/inbox?filter&limit#required#inbox_page_unknown'],
+  'inbox-groups': ['/api/inbox?filter&limit#required#inbox_page_groups'],
   '/email': ['/api/unmatched-email?filter#required', ...CONTACT_SHAPES],
   '/email/quarantine': [
     '/api/unmatched-email?filter#required',
@@ -143,7 +147,7 @@ const EXPECTED_WARM: Record<(typeof EXPECTED_KEYS)[number], readonly string[]> =
 
 function shape(contracts: readonly EndpointContract[]): string[] {
   return contracts.map((contract) =>
-    `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}`,
+    `${contract.endpointTemplate}?${contract.queryKeys.join('&')}#${contract.requirement}${contract.inboxRequestClass === undefined ? '' : `#${contract.inboxRequestClass}`}`,
   );
 }
 
@@ -192,7 +196,7 @@ class FakeDom implements ResolverDom {
 describe('route registry completeness', () => {
   it('uses stable surface IDs separate from diagnostic path templates', () => {
     expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
-    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(28);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(31);
     expect(ROUTES.filter((route) => route.resolver === 'static').every((route) => route.coldTarget.kind === 'static')).toBe(true);
     expect(ROUTES.filter((route) => route.resolver !== 'static').every((route) => route.coldTarget.kind === 'resolved')).toBe(true);
     expect(() => assertRouteRegistry([
@@ -202,11 +206,11 @@ describe('route registry completeness', () => {
   });
 
   it('accepts separate surface identities that share the inbox path template', () => {
-    const inbox = ROUTES.find((route) => route.surfaceId === '/inbox')!;
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
     expect(() => assertRouteRegistry([
       ...ROUTES,
-      { ...inbox, surfaceId: '/inbox-all' },
-      { ...inbox, surfaceId: '/inbox-unread' },
+      { ...inbox, surfaceId: 'inbox-extra-all' },
+      { ...inbox, surfaceId: 'inbox-extra-unread' },
     ])).not.toThrow();
   });
 
@@ -218,10 +222,10 @@ describe('route registry completeness', () => {
     expect(sources).not.toMatch(/\bsourceLoadScaleBearing\b/u);
   });
 
-  it('has exactly 28 unique template-only bindings and no excluded surface', () => {
+  it('has exactly 31 unique template-only bindings and no excluded surface', () => {
     expect(ROUTES.map((route) => route.surfaceId)).toEqual(EXPECTED_KEYS);
-    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(28);
-    expect(ROUTES).toHaveLength(28);
+    expect(new Set(ROUTES.map((route) => route.surfaceId)).size).toBe(31);
+    expect(ROUTES).toHaveLength(31);
     expect(APP_ROUTE_EXCLUSIONS).toEqual([
       { route: '/p/:unitId', reason: 'public' },
       { route: '/join', reason: 'public' },
@@ -231,7 +235,38 @@ describe('route registry completeness', () => {
       { route: '*', reason: 'catch_all' },
     ]);
     expect(ROUTES.every((route) => !/[0-9a-f]{8}-[0-9a-f-]{27,}/i.test(route.pathTemplate))).toBe(true);
-    expect(ROUTES.every((route) => route.pathTemplate === route.surfaceId)).toBe(true);
+    expect(ROUTES.filter((route) => route.behaviorFamily !== 'inbox').every((route) => route.pathTemplate === route.surfaceId)).toBe(true);
+  });
+
+  it('registers each Inbox filter as an exact independently-ranked surface', () => {
+    expect(ROUTES.filter((route) => route.behaviorFamily === 'inbox').map((route) => ({
+      surfaceId: route.surfaceId,
+      pathTemplate: route.pathTemplate,
+      coldTarget: route.coldTarget,
+      click: route.source.click,
+      terminal: route.terminal.empty.map((locator) => locator.name),
+    }))).toEqual([
+      {
+        surfaceId: 'inbox-all', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox' },
+        click: { role: 'tab', name: 'All', exactness: 'exact', selected: true },
+        terminal: ['No conversations yet'],
+      },
+      {
+        surfaceId: 'inbox-unread', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unread' },
+        click: { role: 'tab', name: 'Unread', exactness: 'exact', selected: true },
+        terminal: ["You're all caught up"],
+      },
+      {
+        surfaceId: 'inbox-unknown', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=unknown' },
+        click: { role: 'tab', name: 'Unknown', exactness: 'exact', selected: true },
+        terminal: ['No unknown numbers'],
+      },
+      {
+        surfaceId: 'inbox-groups', pathTemplate: '/inbox', coldTarget: { kind: 'static', path: '/inbox?filter=groups' },
+        click: { role: 'tab', name: 'Groups', exactness: 'exact', selected: true },
+        terminal: ['No group texts yet'],
+      },
+    ]);
   });
 
   it('mechanically matches App route elements and proves generated placeholders are empty', () => {
@@ -260,7 +295,7 @@ describe('route registry completeness', () => {
     const rawPaths = [...relative.filter((path) => !settingsChildren.some((child) => child.endsWith(path))), ...settingsChildren, ...indexPath];
     const excluded = new Set(['/p/:unitId', '/join', '/broadcasts/new', '/settings', '*']);
     expect([...new Set(rawPaths)].filter((path) => !excluded.has(path)).sort())
-      .toEqual([...EXPECTED_KEYS].sort());
+      .toEqual([...EXPECTED_KEYS.filter((key) => !key.startsWith('inbox-')), '/inbox'].sort());
     expect(appSource).toContain('{allNavTargets()');
     expect(appSource).toContain('.filter(({ to }) => !IMPLEMENTED.has(to))');
     expect(appSource).toContain('path={to.slice(1)}');
@@ -419,6 +454,12 @@ describe('endpoint and write contracts', () => {
     });
     expect(assertObservedGets([required], [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }]))
       .toEqual({ missingRequired: [required], undeclared: [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }] });
+
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
+    const page = expectedGets(inbox, 'warm', NONE)[0]!;
+    const badge: EndpointContract = { ...page, inboxRequestClass: 'inbox_badge' };
+    expect(assertObservedGets([page], [badge])).toEqual({ missingRequired: [page], undeclared: [badge] });
+    expect(assertObservedGets([page], [page])).toEqual({ missingRequired: [], undeclared: [] });
   });
 
   it('preserves exact write surfaces and legitimate two-phase multiplicity', () => {
@@ -452,7 +493,7 @@ describe('endpoint and write contracts', () => {
     const frozen = expectedBlockedWrites(conversation, 'warm', NONE);
     expect(Object.isFrozen(frozen)).toBe(true);
     expect((frozen as unknown as { add?: unknown }).add).toBeUndefined();
-    expect(ROUTES).toHaveLength(28);
+    expect(ROUTES).toHaveLength(31);
   });
 
   it('matches the current contact detail heading including its accessible edit action', () => {

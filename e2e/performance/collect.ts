@@ -7,6 +7,7 @@ import {
   CONTRACT_SOURCE_LEDGER,
   resolverSkipSampleResult,
   type EndpointContract,
+  type InboxRequestClass,
   type ResolverResult,
   type RouteContractBranch,
   type RouteDefinition,
@@ -110,18 +111,47 @@ function contractShape(contract: { endpointTemplate: string; queryKeys: readonly
   return `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`;
 }
 
-function isShellRequest(rawUrl: string, sanitized: SanitizedRequestUrl, surfaceId: string): boolean {
-  const key = contractShape(sanitized);
-  if (key === '/api/inbox?filter&limit') {
-    try {
-      return surfaceId !== '/inbox' || new URL(rawUrl).searchParams.get('filter') === 'unread';
-    } catch {
-      return false;
-    }
+function contractIdentity(
+  contract: { endpointTemplate: string; queryKeys: readonly string[]; inboxRequestClass?: InboxRequestClass },
+  inboxRequestClass: InboxRequestClass | null | undefined = undefined,
+): string {
+  return `${contractShape(contract)}#${inboxRequestClass ?? contract.inboxRequestClass ?? ''}`;
+}
+
+export function classifyInboxRequest(rawUrl: string, sanitized: SanitizedRequestUrl): InboxRequestClass | null {
+  if (sanitized.endpointTemplate !== '/api/inbox') return null;
+  try {
+    const params = new URL(rawUrl).searchParams;
+    const entries = [...params.entries()];
+    if (
+      entries.length !== 2
+      || entries.filter(([key]) => key === 'filter').length !== 1
+      || entries.filter(([key]) => key === 'limit').length !== 1
+    ) return 'inbox_endpoint_contract_failure';
+    const filter = params.get('filter');
+    const limit = params.get('limit');
+    if (filter === 'all' && limit === '30') return 'inbox_page_all';
+    if (filter === 'unread' && limit === '30') return 'inbox_page_unread';
+    if (filter === 'unknown' && limit === '30') return 'inbox_page_unknown';
+    if (filter === 'groups' && limit === '30') return 'inbox_page_groups';
+    if (filter === 'unread' && limit === '100') return 'inbox_badge';
+  } catch {
+    // The endpoint template is already safe; retain only the closed failure code.
   }
-  if (key === '/api/unmatched-email?filter') {
+  return 'inbox_endpoint_contract_failure';
+}
+
+function isShellRequest(
+  inboxRequestClass: InboxRequestClass | null,
+  behaviorFamily: RouteDefinition['behaviorFamily'],
+  sanitized: SanitizedRequestUrl,
+  surfaceId: string,
+): boolean {
+  if (behaviorFamily === 'inbox') return inboxRequestClass === 'inbox_badge';
+  if (contractShape(sanitized) === '/api/unmatched-email?filter') {
     return surfaceId !== '/email' && surfaceId !== '/email/quarantine';
   }
+  if (inboxRequestClass === 'inbox_badge') return true;
   return false;
 }
 
@@ -188,6 +218,7 @@ interface InFlightRequest {
   rawUrl: string;
   sanitized: SanitizedRequestUrl;
   resourceClass: ResourceClass;
+  inboxRequestClass: InboxRequestClass | null;
   startSeconds: number;
   startOffsetMs: number;
   role: RequestEvidence['requestRole'];
@@ -202,6 +233,7 @@ export interface NetworkCollectorInput {
   surfaceId: string;
   mode: SampleMode;
   repeat: number;
+  behaviorFamily?: RouteDefinition['behaviorFamily'];
   expectedGets: readonly EndpointContract[];
 }
 
@@ -255,7 +287,7 @@ export class NetworkCollector {
 
   constructor(input: NetworkCollectorInput) {
     this.#input = input;
-    this.#expectedShapes = new Set(input.expectedGets.map(contractShape));
+    this.#expectedShapes = new Set(input.expectedGets.map((contract) => contractIdentity(contract)));
   }
 
   beginSample(input: BeginNetworkSampleInput): void {
@@ -284,18 +316,33 @@ export class NetworkCollector {
     return normalizeCdpOffset(timestamp, this.#cdpOriginSeconds);
   }
 
-  #roleFor(rawUrl: string, sanitized: SanitizedRequestUrl): { role: RequestEvidence['requestRole']; forceUnmatched: boolean } {
-    const key = contractShape(sanitized);
+  #roleFor(
+    rawUrl: string,
+    sanitized: SanitizedRequestUrl,
+    inboxRequestClass: InboxRequestClass | null,
+  ): { role: RequestEvidence['requestRole']; forceUnmatched: boolean } {
+    const inboxSurface = (this.#input.behaviorFamily ?? 'standard') === 'inbox';
+    const key = inboxSurface
+      ? contractIdentity(sanitized, inboxRequestClass)
+      : contractIdentity(sanitized);
+    const shape = contractShape(sanitized);
     const expected = this.#expectedShapes.has(key);
     const completed = this.#completedFullUrls.has(rawUrl);
-    if (isShellRequest(rawUrl, sanitized, this.#input.surfaceId)) {
+    if (inboxSurface && inboxRequestClass === 'inbox_badge' && this.#input.mode === 'warm') {
+      return { role: 'background_shell', forceUnmatched: false };
+    }
+    if (isShellRequest(inboxRequestClass, this.#input.behaviorFamily ?? 'standard', sanitized, this.#input.surfaceId)) {
       if (expected && !this.#satisfiedRequired.has(key)) return { role: 'required', forceUnmatched: false };
       if (this.#input.mode === 'warm' || completed) return { role: 'background_shell', forceUnmatched: false };
     }
-    if (completed && this.#terminalVisible && this.#satisfiedRequired.has(key) && BACKGROUND_SHAPES.has(key)) {
+    if (completed && this.#terminalVisible && this.#satisfiedRequired.has(key) && BACKGROUND_SHAPES.has(shape)) {
       return { role: 'background_refresh', forceUnmatched: false };
     }
-    return { role: 'required', forceUnmatched: sanitized.resourceClass === 'api' && !expected };
+    return {
+      role: 'required',
+      forceUnmatched: sanitized.resourceClass === 'api'
+        && (!expected || (inboxSurface && inboxRequestClass === 'inbox_endpoint_contract_failure')),
+    };
   }
 
   requestWillBeSent(token: string, event: RequestStartEvent): void {
@@ -322,7 +369,8 @@ export class NetworkCollector {
       resourceType: event.type,
     });
     const resourceClass = resourceClassFor(event.type, sanitized);
-    const { role, forceUnmatched } = this.#roleFor(event.request.url, sanitized);
+    const inboxRequestClass = classifyInboxRequest(event.request.url, sanitized);
+    const { role, forceUnmatched } = this.#roleFor(event.request.url, sanitized, inboxRequestClass);
     const firstParty = sanitized.originClass === 'first_party';
     const trackedPending = firstParty && role === 'required';
     this.#resourceCounts[resourceClass] += 1;
@@ -334,7 +382,7 @@ export class NetworkCollector {
       this.#backgroundRequestCount += 1;
     }
     this.#inFlight.set(event.requestId, {
-      rawUrl: event.request.url, sanitized, resourceClass, startSeconds: event.timestamp,
+      rawUrl: event.request.url, sanitized, resourceClass, inboxRequestClass, startSeconds: event.timestamp,
       startOffsetMs, role, trackedPending, forceUnmatched, responseSeconds: null, status: null,
     });
   }
@@ -370,10 +418,17 @@ export class NetworkCollector {
     const bytes = encodedDataLength !== null && Number.isFinite(encodedDataLength)
       ? Math.max(0, encodedDataLength)
       : null;
-    const key = contractShape(pending.sanitized);
+    const key = (this.#input.behaviorFamily ?? 'standard') === 'inbox'
+      ? contractIdentity(pending.sanitized, pending.inboxRequestClass)
+      : contractIdentity(pending.sanitized);
     if (outcome === 'finished') {
       this.#completedFullUrls.add(pending.rawUrl);
-      if (this.#expectedShapes.has(key)) this.#satisfiedRequired.add(key);
+      const expectedIdentity = (this.#input.behaviorFamily ?? 'standard') === 'inbox'
+        ? contractIdentity(pending.sanitized, pending.inboxRequestClass)
+        : contractIdentity(pending.sanitized);
+      if (this.#expectedShapes.has(expectedIdentity)) {
+        this.#satisfiedRequired.add(key);
+      }
     }
     if (pending.trackedPending) this.#lastQualifyingOffsetMs = finishOffset;
     if (bytes !== null) {
@@ -393,6 +448,7 @@ export class NetworkCollector {
       originClass: pending.sanitized.originClass,
       endpointTemplate: pending.sanitized.endpointTemplate,
       queryKeys: [...pending.sanitized.queryKeys],
+      ...(pending.inboxRequestClass !== null && { inboxRequestClass: pending.inboxRequestClass }),
       startOffsetMs: pending.startOffsetMs,
       durationMs: Math.max(0, Math.round((timestamp - pending.startSeconds) * 1_000 * 1_000) / 1_000),
       ttfbMs: pending.responseSeconds === null
@@ -458,6 +514,7 @@ export class NetworkCollector {
         originClass: pending.sanitized.originClass,
         endpointTemplate: pending.sanitized.endpointTemplate,
         queryKeys: [...pending.sanitized.queryKeys],
+        ...(pending.inboxRequestClass !== null && { inboxRequestClass: pending.inboxRequestClass }),
         startOffsetMs: pending.startOffsetMs,
         durationMs: null,
         ttfbMs: pending.responseSeconds === null
@@ -481,7 +538,9 @@ export class NetworkCollector {
       apiTransferBytes: this.#apiTransferBytes,
       backgroundRequestCount: this.#backgroundRequestCount,
       backgroundTransferBytes: this.#backgroundTransferBytes,
-      satisfiedRequired: [...this.#satisfiedRequired].sort(),
+      satisfiedRequired: [...this.#satisfiedRequired]
+        .map((identity) => identity.endsWith('#') ? identity.slice(0, -1) : identity)
+        .sort(),
       consoleCategories: { ...this.#consoleCategories },
       blockedWrites: this.#blockedWrites.map((write) => ({ ...write })),
     };
@@ -906,7 +965,8 @@ export async function collectRunSamples(input: CollectRunSamplesInput): Promise<
           if (
             input.target === 'hermetic' &&
             input.expectedRelayLinkCount !== undefined &&
-            route.surfaceId === '/inbox' &&
+            route.behaviorFamily === 'inbox' &&
+            route.surfaceId === 'inbox-all' &&
             result.status === 'ok' &&
             relayDomCheck === null
           ) {

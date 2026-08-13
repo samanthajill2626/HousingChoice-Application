@@ -189,11 +189,14 @@ describe('top-level profiler sequencing', () => {
       },
       baseUrl: 'http://127.0.0.1:9111',
     };
+    const collectorInputs: unknown[] = [];
     class FakeNetworkCollector {
+      constructor(input: unknown) { collectorInputs.push(input); }
       beginSample(): void {}
     }
+    const inboxRoute = ROUTES.find((route) => route.surfaceId === 'inbox-unread')!;
     const instrumentation = cliModule.createRealInstrumentation({
-      route: ROUTES[0]!,
+      route: inboxRoute,
       mode: 'warm',
       repeat: 0,
       baseUrl: 'http://127.0.0.1:9111',
@@ -214,7 +217,7 @@ describe('top-level profiler sequencing', () => {
     await instrumentation.beginSample({
       page: page as never,
       token: 'real-warm',
-      route: ROUTES[0]!,
+      route: inboxRoute,
       branch: { kind: 'none' },
       mode: 'warm',
       repeat: 0,
@@ -222,6 +225,7 @@ describe('top-level profiler sequencing', () => {
       destinationPageUrl: '/',
     });
     expect(on).toHaveBeenCalledOnce();
+    expect(collectorInputs[0]).toMatchObject({ behaviorFamily: 'inbox' });
     expect(contextState.token).not.toBeNull();
 
     await instrumentation.disposeSample();
@@ -229,7 +233,7 @@ describe('top-level profiler sequencing', () => {
     await expect(instrumentation.collectSample({
       page: page as never,
       token: 'real-warm',
-      route: ROUTES[0]!,
+      route: inboxRoute,
       branch: { kind: 'none' },
       mode: 'warm',
       repeat: 0,

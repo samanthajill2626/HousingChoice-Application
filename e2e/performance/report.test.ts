@@ -100,13 +100,13 @@ vi.mock('node:fs/promises', async (importOriginal) => {
 
 vi.mock('./routes.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('./routes.js')>();
-  const inbox = actual.ROUTES.find((route) => route.surfaceId === '/inbox')!;
+  const inbox = actual.ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
   return {
     ...actual,
     ROUTES: Object.freeze([
       ...actual.ROUTES,
-      { ...inbox, surfaceId: '/inbox-all' },
-      { ...inbox, surfaceId: '/inbox-unread' },
+      { ...inbox, surfaceId: 'inbox-extra-all' },
+      { ...inbox, surfaceId: 'inbox-extra-unread' },
     ]),
   };
 });
@@ -238,7 +238,7 @@ function request(surfaceId: string, mode: 'cold' | 'warm', repeat: number): Requ
 function reportInput(outputRoot: string, runId: string) {
   const samples = [
     sample('/contacts', 'cold', 0),
-    sample('/inbox', 'cold', 0, {
+    sample('inbox-all', 'cold', 0, {
       readyMs: 100,
       clientTruncated: false,
       surfaceEvidence: {
@@ -249,7 +249,7 @@ function reportInput(outputRoot: string, runId: string) {
       readyMs: 400,
       surfaceEvidence: { kind: 'conversation_detail', initialRenderedMessageCount: null },
     }),
-    sample('/inbox', 'warm', 0, { readyMs: 50, clientTruncated: false }),
+    sample('inbox-all', 'warm', 0, { readyMs: 50, clientTruncated: false }),
     sample('/settings/notifications', 'warm', 0, {
       status: 'skipped_no_fixture',
       reason: 'fixture_absent',
@@ -265,8 +265,8 @@ function reportInput(outputRoot: string, runId: string) {
     samples,
     requests: [request('/contacts', 'cold', 0), request('/contacts', 'warm', 1)],
     routeOrders: [
-      { mode: 'cold' as const, repeat: 0, surfaceIds: ['/contacts', '/inbox'] },
-      { mode: 'warm' as const, repeat: 0, surfaceIds: ['/inbox', '/contacts', '/settings/notifications'] },
+      { mode: 'cold' as const, repeat: 0, surfaceIds: ['/contacts', 'inbox-all'] },
+      { mode: 'warm' as const, repeat: 0, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
     ],
     browser: { version: '140.0.7339.12', viewport: { width: 1280, height: 720 } },
     warmup: { performed: true, surfaceId: '/' },
@@ -340,6 +340,29 @@ describe('writePerformanceReport', () => {
     expect(JSON.stringify(ROUTES)).toBe(before);
   });
 
+  it('does not let the unread badge satisfy the unread Inbox page checkpoint', () => {
+    const route = ROUTES.find((candidate) => candidate.surfaceId === 'inbox-unread')!;
+    const branch = { kind: 'none' } as const;
+    const declared = expectedGets(route, 'cold', branch);
+    const requests = declared.map((contract) => ({
+      ...request(route.surfaceId, 'cold', 0),
+      endpointTemplate: contract.endpointTemplate,
+      queryKeys: [...contract.queryKeys],
+      ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      requestRole: 'required' as const,
+    }));
+    const pageIndex = requests.findIndex((entry) => entry.inboxRequestClass === 'inbox_page_unread');
+    expect(pageIndex).toBeGreaterThanOrEqual(0);
+    const evaluate = (observed: RequestEvidence[]) => evaluateContractCheckpoint({
+      routes: [route],
+      samples: [sample(route.surfaceId, 'cold', 0, { blockedWrites: [], terminalState: 'populated' })],
+      requests: observed,
+      branches: [{ surfaceId: route.surfaceId, mode: 'cold', repeat: 0, branch }],
+    });
+    expect(evaluate(requests.filter((_, index) => index !== pageIndex)).mismatchCodes).toContain('missing_required_endpoint');
+    expect(evaluate(requests).mismatchCodes).toEqual([]);
+  });
+
   it('requires the exact guarded automatic-write set and rejects tuples outside it', () => {
     const route = ROUTES.find((candidate) => candidate.surfaceId === '/conversations/:conversationId')!;
     const branch = { kind: 'none' } as const;
@@ -402,8 +425,8 @@ describe('writePerformanceReport', () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-abcd1234');
     const sharedPathSurfaces = [
-      { surfaceId: '/inbox-all', pathTemplate: '/inbox' },
-      { surfaceId: '/inbox-unread', pathTemplate: '/inbox' },
+      { surfaceId: 'inbox-unread', pathTemplate: '/inbox' },
+      { surfaceId: 'inbox-unknown', pathTemplate: '/inbox' },
     ] as const;
     const secret = 'private.person@example.com';
     Object.assign(input.config as object, { baseUrl: `https://${secret}`, loginEmail: secret });
@@ -477,8 +500,8 @@ describe('writePerformanceReport', () => {
     expect(summary.aggregates[0].metrics.resourceCountsByClass.api).toBeDefined();
     expect(summary.aggregates[0].noise.backgroundRequestCount).toBeDefined();
     expect(summary.routeOrders).toEqual([
-      { mode: 'cold', repeat: 0, surfaceIds: ['/contacts', '/inbox'] },
-      { mode: 'warm', repeat: 0, surfaceIds: ['/inbox', '/contacts', '/settings/notifications'] },
+      { mode: 'cold', repeat: 0, surfaceIds: ['/contacts', 'inbox-all'] },
+      { mode: 'warm', repeat: 0, surfaceIds: ['inbox-all', '/contacts', '/settings/notifications'] },
     ]);
     expect(summary.manifest.contacts).toBe(100);
 
@@ -496,7 +519,7 @@ describe('writePerformanceReport', () => {
     expect(requestLines[0].rawUrl).toBeUndefined();
 
     expect(report).toContain('## Cold worst offenders');
-    expect(report.indexOf('| /contacts | 900')).toBeLessThan(report.indexOf('| /inbox | 100'));
+    expect(report.indexOf('| /contacts | 900')).toBeLessThan(report.indexOf('| inbox-all | 100'));
     expect(report).toContain('## Warm worst offenders');
     expect(report).toContain('## Secondary rankings');
     expect(report).toContain('client_truncated');

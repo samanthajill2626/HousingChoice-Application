@@ -96,7 +96,7 @@ export interface SelfQaResult {
 const NARROW_KEYS = Object.freeze([
   '/contacts/tenants',
   '/contacts/:contactId',
-  '/inbox',
+  'inbox-all',
   '/conversations/:conversationId',
 ] as const);
 
@@ -292,10 +292,13 @@ function endpointSubset(input: EvaluateSelfQaInput): boolean {
       .map((request) => ({
         endpointTemplate: request.endpointTemplate as never,
         queryKeys: request.queryKeys,
+        ...(request.inboxRequestClass !== undefined && { inboxRequestClass: request.inboxRequestClass }),
         requirement: 'required' as const,
         outcome: request.outcome,
       }));
-    if (assertObservedGets(expectedGets(route, sample.mode, branch.branch), observed).undeclared.length > 0) return false;
+    const endpointResult = assertObservedGets(expectedGets(route, sample.mode, branch.branch), observed);
+    if (endpointResult.undeclared.length > 0) return false;
+    if (route.behaviorFamily === 'inbox' && endpointResult.missingRequired.length > 0) return false;
   }
   return true;
 }
@@ -335,7 +338,7 @@ export function evaluateSelfQa(input: EvaluateSelfQaInput): SelfQaResult {
   const writeTuplesMatch = expected.size === actual.size && [...expected].every((key) => actual.has(key));
   const coldOk = input.samples.filter((sample) => sample.mode === 'cold' && sample.status === 'ok').length;
   const warmOk = input.samples.filter((sample) => sample.mode === 'warm' && sample.status === 'ok').length;
-  const expectedRoutes = input.mode === 'full' ? 28 : 4;
+  const expectedRoutes = input.mode === 'full' ? 31 : 4;
   const sampleCardinalityMatches = input.routes.length === expectedRoutes
     && input.samples.length === expectedRoutes * 2
     && coldOk === expectedRoutes

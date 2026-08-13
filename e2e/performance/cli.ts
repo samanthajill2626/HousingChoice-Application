@@ -680,6 +680,7 @@ export function createRealInstrumentation(input: {
       collector = new input.modules.collect.NetworkCollector({
         firstPartyOrigin: input.baseUrl,
         surfaceId: input.route.surfaceId,
+        behaviorFamily: input.route.behaviorFamily,
         mode: input.mode,
         repeat: input.repeat,
         expectedGets: input.modules.routes.expectedGets(input.route, input.mode, begin.branch),

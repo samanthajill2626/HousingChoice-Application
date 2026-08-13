@@ -185,29 +185,34 @@ describe('self-QA fixture and state guardian', () => {
 });
 
 describe('self-QA closed proof evaluator', () => {
-  it('selects the exact narrow subset and the full 28-route registry', () => {
+  it('selects the exact narrow subset and the full 31-route registry', () => {
     expect(routesForSelfQa('narrow', ROUTES).map((route) => route.surfaceId)).toEqual([
-      '/contacts/tenants', '/contacts/:contactId', '/inbox', '/conversations/:conversationId',
+      '/contacts/tenants', '/contacts/:contactId', 'inbox-all', '/conversations/:conversationId',
     ]);
-    expect(routesForSelfQa('full', ROUTES)).toHaveLength(28);
+    expect(routesForSelfQa('full', ROUTES)).toHaveLength(31);
   });
 
   it('accepts exact tuple sets, including both legitimate warm conversation phases and duplicates', () => {
     const attempts = [...expectedAttempts('full'), expectedAttempts('full')[4]!];
     const samples = ROUTES.flatMap((route) => ['cold', 'warm'].map((mode) => sample(route.surfaceId, mode as 'cold' | 'warm')));
+    const requests = ROUTES.filter((route) => route.behaviorFamily === 'inbox').flatMap((route) =>
+      (['cold', 'warm'] as const).flatMap((mode) => expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
+        ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
+      }))));
     const result = evaluateSelfQa({
-      mode: 'full', routes: ROUTES, samples, requests: [], branches,
+      mode: 'full', routes: ROUTES, samples, requests, branches,
       attempts, stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
       relayDomCheck: { expectedCount: 20, renderedCount: 20, shortfall: false },
       supplementalSampleCount: 0, reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
     });
     expect(result.status).toBe('pass');
     expect(result.writeTuplesMatch).toBe(true);
-    expect(result.sampleCount).toBe(56);
+    expect(result.sampleCount).toBe(62);
   });
 
   it('keeps shared-path self-QA samples and requests joined by surface identity', () => {
-    const inbox = ROUTES.find((route) => route.surfaceId === '/inbox')!;
+    const inbox = ROUTES.find((route) => route.surfaceId === 'inbox-all')!;
     const routes = ['/inbox-all', '/inbox-unread', '/inbox-recent', '/inbox-assigned'].map((surfaceId) => ({ ...inbox, surfaceId }));
     const samples = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => sample(route.surfaceId, mode)));
     const branches = routes.flatMap((route) => (['cold', 'warm'] as const).map((mode) => ({
@@ -216,6 +221,7 @@ describe('self-QA closed proof evaluator', () => {
     const requests = routes.flatMap((route) => (['cold', 'warm'] as const).flatMap((mode) =>
       expectedGets(route, mode, { kind: 'none' }).map((contract) => ({
         ...request(route.surfaceId, mode, contract.endpointTemplate), queryKeys: [...contract.queryKeys],
+        ...(contract.inboxRequestClass !== undefined && { inboxRequestClass: contract.inboxRequestClass }),
       }))));
     const result = evaluateSelfQa({
       mode: 'narrow', routes, samples, requests, branches, attempts: expectedAttempts('narrow'),
@@ -225,6 +231,15 @@ describe('self-QA closed proof evaluator', () => {
     });
 
     expect(result).toMatchObject({ endpointSubset: true, sampleCardinalityMatches: true, status: 'pass' });
+    const missingPage = evaluateSelfQa({
+      mode: 'narrow', routes, samples,
+      requests: requests.filter((entry) => entry.inboxRequestClass !== 'inbox_page_all'),
+      branches, attempts: expectedAttempts('narrow'),
+      stateChecks: ['contact_detail', 'conversation_detail', 'inbox_row', 'unmatched_email', 'tour_group', 'placement_group', 'outbox'].map((surface) => ({ surface, unchanged: true })) as never,
+      relayDomCheck: null, supplementalSampleCount: 0,
+      reportProof: { privacyScanRequired: true, countManifest: true, coldRanking: true, warmRanking: true },
+    });
+    expect(missingPage.endpointSubset).toBe(false);
   });
 
   it('preserves observed warm phases instead of manufacturing a source-click attempt', () => {

@@ -83,6 +83,7 @@ export interface RequestEvidence {
   originClass: 'first_party' | 'third_party';
   endpointTemplate: string;
   queryKeys: string[];
+  inboxRequestClass?: import('./routes.js').InboxRequestClass;
   startOffsetMs: number;
   durationMs: number | null;
   ttfbMs: number | null;

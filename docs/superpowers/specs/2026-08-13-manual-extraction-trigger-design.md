@@ -142,8 +142,15 @@ Lifecycle:
   That is the same bug class as the `complete` case above, on the sibling write
   path.
 
-  Both branches gain, and `fail` takes `listedDueAt` (the value `listDue`
-  returned, which `processRow` already holds and passes to `claim`):
+  Both branches gain the condition below, and `fail` takes `listedDueAt` - the
+  value `listDue` returned for this row. Note where that comes from: the only
+  production `fail` call site is in `runDueExtractions`
+  (`app/src/jobs/extraction.ts:664`), NOT in `processRow`, and there the value
+  is `row.dueAt`, which is optional on `DueExtractionItem`. `processRow` guards
+  its own use of it (`app/src/jobs/extraction.ts:363-364`) but that guard does
+  not reach the caller. The builder must handle the `undefined` case explicitly
+  at the call site rather than assert it away; an absent `dueAt` there means the
+  row was malformed, and the honest behavior is today's unconditional write.
 
   ```
   ConditionExpression: attribute_not_exists(_duePartition) OR dueAt = :listedDueAt
@@ -184,6 +191,15 @@ Lifecycle:
 - **The re-arm branch re-sets `manualRequested`** when the run that failed was
   manual, so backoff retries stay manual. `fail` takes the manual-ness of the
   run from the job, which knows it.
+
+  One consequence to accept knowingly: the `complete` error kind
+  (`app/src/jobs/extraction.ts:354-361`) fires AFTER `applyExtraction` has
+  already committed. Re-arming that run as manual means the retry re-sends the
+  full un-aged window and re-bills it, where an automatic retry might have
+  skipped as `no_new_client`. That is the correct trade - a manual run whose
+  cursor write failed genuinely has not finished - but it is a real duplicate
+  cost on a rare path, and it is why section 6's per-press cost is a floor
+  rather than a fixed price.
 - **The park branch REMOVEs `manualRequested`.** A parked row is inert until
   something re-arms it; leaving the flag set would waive both gates on whatever
   automatic run schedules it next, months later.
@@ -255,12 +271,21 @@ trigger: row.manualRequested === true ? 'manual' : (row.channel ?? 'manual')
 
 The `?? 'manual'` arm is a **totality device, not a second labelling rule**. The
 guarantee above is therefore stated precisely: a `manual` label originates from
-the flag on every reachable path. A row with no `channel` can only have been
-created by `requestManualExtraction`, which always sets the flag; the only way
-to strip the flag from such a row is the park branch of `fail` (4.1), and a
-parked row carries no `_duePartition`, so `listDue` never returns it and no
-draft is ever built from it. The second arm is consequently unreachable, and it
-exists so the expression is total and no `undefined` can reach a stored record.
+the flag on every reachable path. The proof runs through the due index, not
+through the flag's writers:
+
+- `newRunDraft` only ever sees rows returned by `listDue`, and `listDue` returns
+  only ARMED rows (`_duePartition` present).
+- The only writer that arms a row without setting `channel` is
+  `requestManualExtraction`, and it always sets the flag.
+- Both flag-stripping sites - `claim` and the park branch of `fail` - also
+  remove `_duePartition` in the same update, so a stripped row is simultaneously
+  de-armed and cannot be listed again until something re-arms it. Whichever
+  writer re-arms it either sets `channel` or sets the flag.
+
+So every channel-less row that reaches a draft carries the flag, the second arm
+is unreachable, and it exists so the expression is total and no `undefined` can
+reach a stored record.
 
 The test asserts exactly that - that the expression is total and yields a valid
 `RunTrigger` for a channel-less row - and does NOT assert that a flagless
@@ -410,7 +435,8 @@ degraded, not broken.
 - `app/src/repos/extractionRepo.ts` - `DueExtractionItem` (`manualRequested`,
   `channel` optional, and its now-stale channel doc comment), the
   `ExtractionRepo` interface, `requestManualExtraction`, `claim`, `fail`
-  (signature gains the manual flag; both branches gain the condition).
+  (signature gains BOTH the manual flag and `listedDueAt`; both branches gain
+  the condition and the scheduling-free fallback).
 - **Every full `ExtractionRepo` literal** must gain `requestManualExtraction`,
   and every `fail` caller and fake must match the new signature. Consumers
   taking a `Pick<ExtractionRepo, ...>` view are unaffected, which is most of
@@ -487,9 +513,14 @@ Unit:
   `landlord_1to1`; each of the FIVE refusals in 4.5 returns its status and
   reason, including `no_conversations` and `no_eligible_conversations` being
   distinguishable; a repo failure is a 500; the audit entry is appended.
-- `fail` after a THROWN claim (row still armed, `dueAt` unchanged) still backs
-  off and still parks at the threshold - the unbounded-retry regression test for
-  the disjunct in 4.1.
+- **All four quadrants of the disjunct in 4.1**, since three of them have each
+  been wrong in some revision of this spec:
+  1. Claim succeeded, nobody re-armed - backs off normally.
+  2. Claim succeeded, a press re-armed - press survives, error recorded.
+  3. Claim THREW, nobody re-armed (`dueAt` unchanged) - backs off and parks at
+     the threshold. This is the unbounded-retry regression test.
+  4. Claim THREW, a press re-armed (`dueAt` changed) - press survives, error
+     recorded, and the row does NOT park underneath it.
 
 Dashboard:
 

@@ -677,14 +677,19 @@ describe('generatePerformanceSeed', () => {
   ] as const)('visits and materializes no extra native roster combinations at %s', (_name, config) => {
     let visited = 0;
     let materialized = 0;
+    const materializedRosterSizes: number[] = [];
 
     generatePerformanceSeed(config, {
       onNativeRosterVisited: () => { visited += 1; },
-      onNativeRosterMaterialized: () => { materialized += 1; },
+      onNativeRosterMaterialized: (roster?: readonly unknown[]) => {
+        materialized += 1;
+        materializedRosterSizes.push(roster?.length ?? -1);
+      },
     });
 
     expect(visited).toBe(config.nativeGroups);
     expect(materialized).toBe(config.nativeGroups);
+    expect(materializedRosterSizes).toEqual(config.nativeGroupRosterSizes);
   });
 
   it('reconciles every generated table and embedded recipient map to manifest totals', () => {

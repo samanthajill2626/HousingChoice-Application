@@ -698,13 +698,14 @@ interface LexicographicCombinationIterator<T> {
 
 interface NativeRosterSelectionObserver {
   onNativeRosterVisited?(): void;
-  onNativeRosterMaterialized?(): void;
+  onNativeRosterMaterialized?(roster: readonly NativeContactReference[]): void;
 }
 
-function lexicographicCombinationIterator<T>(
-  values: readonly T[],
+function lexicographicCombinationIterator(
+  values: readonly NativeContactReference[],
   size: number,
-): LexicographicCombinationIterator<T> {
+  observer?: NativeRosterSelectionObserver,
+): LexicographicCombinationIterator<NativeContactReference> {
   let indices: number[] | undefined = values.length >= size
     ? Array.from({ length: size }, (_, index) => index)
     : undefined;
@@ -715,6 +716,8 @@ function lexicographicCombinationIterator<T>(
     next() {
       if (!indices) return undefined;
       const selected = indices.map((index) => values[index]!);
+      observer?.onNativeRosterVisited?.();
+      observer?.onNativeRosterMaterialized?.(selected);
       let cursor = indices.length - 1;
       while (cursor >= 0 && indices[cursor] === values.length - size + cursor) cursor -= 1;
       if (cursor < 0) {
@@ -736,7 +739,7 @@ function selectNativeRosters(
   observer?: NativeRosterSelectionObserver,
 ): readonly (readonly NativeContactReference[])[] {
   const rotation = ([2, 3, 4] as const)
-    .map((size) => ({ size, iterator: lexicographicCombinationIterator(contacts, size) }))
+    .map((size) => ({ size, iterator: lexicographicCombinationIterator(contacts, size, observer) }))
     .filter((entry) => !entry.iterator.exhausted);
   const rosters: (readonly NativeContactReference[])[] = [];
   let cursor = 0;
@@ -744,9 +747,7 @@ function selectNativeRosters(
     const entry = rotation[cursor]!;
     const roster = entry.iterator.next();
     if (!roster) throw new Error('native roster iterator exhausted before selection completed');
-    observer?.onNativeRosterVisited?.();
     rosters.push(roster);
-    observer?.onNativeRosterMaterialized?.();
     if (entry.iterator.exhausted) {
       rotation.splice(cursor, 1);
       if (rotation.length > 0) cursor %= rotation.length;

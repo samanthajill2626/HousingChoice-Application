@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 import { createGroupOpen } from '../../fixtures/relayConnect.js';
-import { postInboundSms } from '../../fixtures/fakeTwilio.js';
+import { postInboundSms, listThreads } from '../../fixtures/fakeTwilio.js';
 import { dashboardUrl } from '../../support/urls.js';
 
 // Thread history paging (design section 5.2; plan Task 8). Proves an operator can
@@ -62,8 +62,10 @@ const TOTAL = 55;
 test('staff can reach relay-group messages older than the newest page', async ({ page }) => {
   // The default per-test budget is 30s with retries: 0, and createGroupOpen's FRESH
   // path alone polls up to 30s for a warming pool number and then up to 60s for the
-  // group to open - before this spec sends its 55 inbounds.
-  test.setTimeout(180_000);
+  // group to open - before this spec sends its 55 inbounds. The closing drain-wait
+  // then costs up to another ~55s at the 1/sec A2P rate, so the budget covers the
+  // fresh path AND a full drain rather than only the reuse path.
+  test.setTimeout(300_000);
   await devLogin(page);
 
   // TWO members: every existing createGroupOpen caller passes two or three, and the
@@ -102,4 +104,33 @@ test('staff can reach relay-group messages older than the newest page', async ({
   await expect(page.getByText('history probe 0')).toBeVisible();
   await expect(page.getByRole('button', { name: 'Load older messages' })).toHaveCount(0);
   await expect(page.getByRole('button', { name: 'Loading...' })).toHaveCount(0);
+
+  // DRAIN OUR OWN BACKLOG BEFORE LEAVING. Each of the 55 inbounds above enqueues a
+  // relay fan-out leg to the other member, and every SMS job - relay fan-out,
+  // broadcast send, missed-call auto-text - acquires from ONE shared A2P token
+  // bucket (app/src/jobs/registerHandlers.ts: "SMS handlers share tokenBucket so
+  // the COMBINED outbound rate stays under the limit") refilling at
+  // A2P_RATE_LIMIT_PER_SEC, default 1.0/sec. The inbound POSTs return as soon as the
+  // row is persisted and the job is enqueued, so without this wait the test reports
+  // "ok" in ~4s while ~55s of paced sending is still queued behind it.
+  //
+  // That is not theoretical: it made voice-transcription.spec.ts:151 fail in the
+  // full suite. Its missed-call auto-text queued behind our legs and blew its own
+  // 20s budget, while the same spec passed 4/4 in isolation. Draining here bounds
+  // the interference to this test's own runtime instead of leaking it into whichever
+  // spec runs next.
+  await expect
+    .poll(
+      async () => {
+        const threads = await listThreads(page.request);
+        const toLandlord = threads.find((t) => t.partyNumber === landlord);
+        return (toLandlord?.messages ?? []).filter((m) => m.direction === 'outbound').length;
+      },
+      {
+        timeout: 120_000,
+        intervals: [1000],
+        message: 'relay fan-out legs did not drain - later specs would inherit the token backlog',
+      },
+    )
+    .toBeGreaterThanOrEqual(TOTAL);
 });

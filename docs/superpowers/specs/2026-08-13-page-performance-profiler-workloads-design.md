@@ -139,6 +139,7 @@ then-current branch rather than treating this table as a substitute for source:
 | Lean-first additive performance reset | `app/src/lib/performanceSeed.ts:170-190` |
 | Live native-group inbound/outbound sender attribution | `app/src/services/groupSend.ts:578-607`; `app/src/routes/webhooks/twilio.ts:1540-1556,1570-1579`; `dashboard/src/lib/memberAttribution.ts:39-68` |
 | App-shell unread badge request and current shell classifier | `dashboard/src/app/UnreadContext.tsx:19-38`; `e2e/performance/collect.ts:109-125` |
+| Current pathname-only warm-source preparation/readiness | `e2e/performance/cli.ts:524-564` |
 | Current route-key sample, report, and comparison joins | `e2e/performance/types.ts:64-84,148-177`; `e2e/performance/report.ts:264-294`; `e2e/performance/compare.ts:24-30,56-81` |
 
 ## 6. Hermetic workload model
@@ -315,10 +316,14 @@ Every native group fixture must satisfy the current production data contract:
   attribution after refetch.
 
 The native-group member pool contains active generated performance contacts
-only; the lean contacts are not group-capacity fallbacks. Roster size cycles
-deterministically among the feasible sizes from two through
-`min(4, activeGeneratedContacts)`, and every selected roster combination is
-unique. The maximum exact native-group population is therefore:
+only; the lean contacts are not group-capacity fallbacks. For every feasible
+roster size from two through `min(4, activeGeneratedContacts)`, enumerate the
+unique contact combinations in lexicographic generated-contact-ID order. Select
+one combination from each non-empty size queue in round-robin size order. When
+a size queue is exhausted, remove it from the rotation; continue among the
+remaining queues. This preserves a deterministic size mix without reusing the
+smaller number of large rosters. Every selected roster combination is unique.
+The maximum exact native-group population is therefore:
 
 ```text
 C(activeGeneratedContacts, 2)
@@ -332,6 +337,10 @@ capacity, configuration fails before lifecycle work; it is never clipped and
 never reuses a roster. In particular, a positive native-group count with fewer
 than two active generated contacts is invalid. This guarantees canonical ID
 uniqueness and exact manifest/storage counts.
+
+The generator computes `nativeGroupMemberSlotCount` as the sum of the selected
+roster lengths. It is a logical-workload count even though the participant
+objects are embedded in conversation items.
 
 Some group rows are unread and some are read so the All, Unread, and Groups
 branches have coverage at the default scale. The native-group messages use the
@@ -354,8 +363,11 @@ from the performance workload first.
 
 The existing `totalItems.max = 250000` guard remains. It is recalculated from
 the fully resolved model, including native-group conversation rows, their
-messages, the tail-message replacement, embedded ordinary recipients, and the
-large-broadcast replacement. No cap is weakened to make a large request pass.
+embedded `nativeGroupMemberSlotCount`, their messages, the tail-message
+replacement, embedded ordinary recipients, and the large-broadcast replacement.
+The manifest separates physical DynamoDB item count, logical native-group member
+slots, logical broadcast recipients, and their combined `totalItemCount`. No cap
+is weakened to make a large request pass.
 
 All numeric parsing, parent-child resolution, clipping, fixture-presence
 resolution, and total-work validation complete before lifecycle discovery,
@@ -449,17 +461,20 @@ configuration. Hermetic output includes at least:
 - every resolved breadth count;
 - contact type counts and active/deleted counts;
 - `nativeGroups` and `totalConversations`;
+- `nativeGroupMemberSlotCount`;
 - ordinary and tail message counts;
 - ordinary and large-broadcast requested/resolved/clipped recipient counts;
-- physical item count, logical recipient count, and total item count;
+- physical item count, logical native-group member-slot count, logical
+  broadcast-recipient count, and total item count;
 - fixture-presence states and fallback use;
 - deterministic anchor.
 
 Requested overrides are invocation provenance only. Baseline compatibility uses
 a closed `comparisonWorkload` projection containing resolved workload model
-version, resolved breadth/density/tail counts, resolved pool sizes, and resolved
-fallback states. It excludes the anchor, the presence or spelling of requested
-overrides, and requested values that clip to the same stored workload. Therefore
+version, resolved breadth/density/tail counts, native-group member-slot count,
+resolved pool sizes, and resolved fallback states. It excludes the anchor, the
+presence or spelling of requested overrides, and requested values that clip to
+the same stored workload. Therefore
 an omitted default and the same explicitly supplied default are compatible, and
 two requests that resolve to byte-equivalent clipped workloads are compatible.
 The full requested/resolved manifest remains available for diagnosis but is not
@@ -574,9 +589,27 @@ accessible action:
 
 - `inbox-all` keeps the existing exact Inbox navigation link from its declared
   ready source;
-- each filtered surface first loads `/inbox`, waits for the All terminal, then
+- each filtered surface first loads canonical bare `/inbox`, waits for the All
+  terminal, then
   clears all sample instrumentation and firewall phase buffers immediately
   before clicking the exact `tab` named Unread, Unknown, or Groups.
+
+Warm-source identity is an exact normalized target, not a pathname-only test.
+`WarmSourceContract.path` becomes `target: { path, query }`, where `query` is a
+closed exact state: `absent` or a fixed allowlisted key/value map. Normalization
+sorts fixed keys but distinguishes absent query from every non-empty query. All
+consumers whose source is the Inbox - the three filtered Inbox samples and the
+retained conversation-detail warm sample - declare
+`{ path: '/inbox', query: 'absent' }` and use the full `inbox-all` terminal as
+source readiness, including All selected plus populated/empty XOR. A generic
+Inbox heading is insufficient.
+
+The real-page adapter compares the current normalized pathname and query state
+to that exact source target. From `/inbox?filter=groups`, Unread, or Unknown it
+must navigate back to bare `/inbox`; it cannot return early because the pathname
+matches. Source navigation and source-ready checks use the same normalization.
+This rule applies regardless of shuffled route order and before the destination
+measurement token begins.
 
 The destination sample begins immediately before the activation action. Source
 preparation, the All request, and source settling are not charged to the
@@ -703,7 +736,8 @@ are fixed:
 - the profiler CLI owns help and early exits but not seed arithmetic;
 - `e2e/performance/routes.ts` owns stable surface contracts, exact Inbox
   terminals, exact safe request classes, endpoint expectations, and typed warm
-  actions plus the static/resolved cold-target union;
+  actions plus the static/resolved cold-target union and exact warm-source
+  target/query contract;
 - `e2e/performance/types.ts` carries `surfaceId`, `pathTemplate`, and closed
   behavior/request classes through samples and request evidence without
   duplicating raw URL values;
@@ -713,6 +747,9 @@ are fixed:
 - readiness/CLI terminal evaluation enforces the Inbox XOR and the fixed-action
   failure contract, and static route resolution navigates to `coldTarget.path`
   rather than deriving a concrete URL from `pathTemplate`;
+- the real-page adapter in `e2e/performance/cli.ts` prepares and verifies warm
+  sources with exact normalized pathname-plus-query identity; every Inbox source
+  consumer requires canonical bare `/inbox` and the full All terminal;
 - aggregation, report assembly/sanitization, ranking, comparison, baseline
   parsing, self-QA, contract checkpoints, and their tests migrate every map,
   set, join, allowlist, and compatibility key from route identity to
@@ -735,7 +772,13 @@ Add or update tests for:
   inbound reviewed-type/unknown author mapping, outbound `team` sender keys,
   and deterministic messages;
 - native-roster capacity at 0, 1, 2, 3, 4, and default active-contact counts,
-  including pre-lifecycle rejection above capacity;
+  including every requested count from zero through the complete small-pool
+  capacities and pre-lifecycle rejection above capacity;
+- non-exhausted-size round-robin generation: when the only 3-member or 4-member
+  combination is consumed, that size leaves the rotation and remaining unique
+  combinations continue without a canonical-ID collision;
+- `nativeGroupMemberSlotCount` equals the sum of generated roster lengths and
+  participates in manifest, comparison, and total-work cap arithmetic;
 - removal of the lean native-group conversation and all of its messages before
   exact performance group generation, including `nativeGroups=0`;
 - ordinary and tail message formulas, parent-zero behavior, bounds, and total
@@ -764,6 +807,10 @@ Add or update tests for:
 - selected-tab plus populated/empty terminal alternatives for every filter;
 - terminal XOR rejection when populated and empty branches coexist;
 - warm buffer reset immediately before exact tab activation;
+- exact warm-source normalization across every permutation where a filtered
+  Inbox surface precedes another filtered surface or the conversation-detail
+  surface; bare `/inbox` plus the full All terminal is re-established before
+  activation/resolution;
 - no Load more or row activation in the four Inbox-filter action contracts,
   while the separate conversation-detail exact-row activation remains;
 - `required_action_missing` for a missing fixed tab, never a fixture skip;
@@ -843,22 +890,25 @@ The feature is acceptable when:
    ranked cold/warm surfaces.
 7. Filtered warm timing begins immediately before the exact tab click after all
    source evidence has been discarded.
-8. The badge unread/100 request retains required cold-shell readiness and
+8. Every Inbox warm-source consumer re-establishes canonical bare `/inbox` and
+   the full All terminal regardless of the prior shuffled surface.
+9. The badge unread/100 request retains required cold-shell readiness and
    primary metrics but can never satisfy or inflate the Inbox page-specific
    filter/30 contract or page-only metrics.
-9. Missing fixed tabs and contradictory populated/empty branches fail closed.
-10. No Inbox or conversation-history Load more control is exercised.
-11. Seeded conversation depth and observed initial rows are reported as distinct
+10. Missing fixed tabs and contradictory populated/empty branches fail closed.
+11. No Inbox or conversation-history Load more control is exercised.
+12. Seeded conversation depth and observed initial rows are reported as distinct
    concepts, with no equality assertion.
-12. Local and hosted-dev reject seed controls and retain their existing-data-only
+13. Local and hosted-dev reject seed controls and retain their existing-data-only
    guarantee.
-13. Old baselines cannot be silently compared with the new workload or surface
+14. Old baselines cannot be silently compared with the new workload or surface
     set.
-14. Equivalent resolved workloads compare as controlled regardless of whether a
+15. Equivalent resolved workloads compare as controlled regardless of whether a
     default was omitted or explicitly supplied.
-15. All original profiler privacy, firewall, watchdog, ownership, and cleanup
+16. Native-group member slots are included in the advertised total-work bound.
+17. All original profiler privacy, firewall, watchdog, ownership, and cleanup
     invariants remain true.
-16. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
+18. Required unit, integration, self-QA, typecheck, test, and e2e gates pass with
     real exit code 0.
 
 ## 15. Design gate

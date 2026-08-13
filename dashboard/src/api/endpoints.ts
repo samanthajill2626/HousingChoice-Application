@@ -1182,13 +1182,18 @@ export async function getContact(contactId: string, signal?: AbortSignal): Promi
  *  (e.g. 'message,call' for the "Comms only" toggle). */
 export function getContactTimeline(
   contactId: string,
-  opts: { kinds?: string } = {},
+  opts: { kinds?: string; cursor?: string } = {},
   signal?: AbortSignal,
 ): Promise<ContactTimelinePage> {
   return request<ContactTimelinePage>(
     `/api/contacts/${encodeURIComponent(contactId)}/timeline`,
     {
-      query: { kinds: opts.kinds },
+      // `cursor` is the opaque token from a previous page's nextCursor; sending
+      // it asks for the page OLDER than that boundary. request() drops undefined
+      // query values, so an absent cursor emits no key at all - the newest page.
+      // Server-side the cursor also suppresses the first-page-only `upcoming` /
+      // `timezone` gather, so an older page carries neither.
+      query: { kinds: opts.kinds, cursor: opts.cursor },
       ...(signal !== undefined && { signal }),
     },
   );

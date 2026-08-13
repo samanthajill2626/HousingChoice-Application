@@ -59,8 +59,9 @@ culprit.
 
 A staff user can open a contact, press one action, and have the extraction layer
 run over that contact's stored conversation history **without an age floor**,
-with the result recorded in the AI run log and any suggestions appearing on the
-page without a reload.
+**watch it run to completion on that page**, and see its outcome - including an
+outcome that changed nothing. Suggestions appear without a reload and the run is
+recorded in the AI run log.
 
 "Without an age floor" is the precise claim. It is not "all history": the
 newest-50 message page (`MAX_TRANSCRIPT_MESSAGES`) and the 60k-char window
@@ -80,13 +81,22 @@ Settled in brainstorming; not open in review:
    re-bill ancient history on every inbound text.
 3. **Keep `no_contact`, `ineligible_type`, and `empty_window`.** These mean
    there is genuinely nothing to send or nowhere to write it.
-4. **Arm the existing poll; do not run synchronously.** The endpoint schedules
-   and returns. No model call happens inside an HTTP request.
-5. **Single contact per press. No bulk backfill.** Separate work; see section 9.
-6. **Permanent dismissal tombstones still apply.** A manual re-run will not
+4. **The endpoint schedules, responds, THEN runs the work in-process.** No model
+   call happens inside an HTTP request - the response is sent first. The worker
+   poll remains the backstop and either process may win the claim.
+5. **The operator watches the run.** The action shows a running state until the
+   run reports back, then renders its outcome - including outcomes that change
+   nothing. This is a change from the original "fire and forget" design and it
+   subsumes what was previously deferred as a run-status surface.
+6. **Single contact per press. No bulk backfill.** Separate work; see section 9.
+7. **Permanent dismissal tombstones still apply.** A manual re-run will not
    re-suggest a dismissed value; it records `dismissed_before` instead.
-7. **No new role.** Any authenticated staff user may press it, the same bar as
+8. **No new role.** Any authenticated staff user may press it, the same bar as
    accepting a suggestion or triaging a contact.
+9. **The conditional `fail` fix ships with this feature** rather than being
+   filed. It is required for correctness of the manual path (4.1) and
+   incidentally repairs the same hazard for inbound messages. Boundary in
+   section 9.
 
 ## 4. Design
 
@@ -297,6 +307,71 @@ is needed:** `AiRunList.tsx:55` and `AiRunDetail.tsx:50` render `trigger` as
 free text and there is no trigger filter UI to extend. Together with 4.3, the
 dashboard type file is the only run-log-side edit.
 
+### 4.4a The in-process immediate run
+
+Waiting for the 60s worker poll (`app/src/worker.ts:398`) would mean a running
+indicator on screen for 5 to 70 seconds. Instead the endpoint kicks the work off
+itself, in the app process, AFTER the response is sent.
+
+This is safe in this deployment specifically: app and worker are long-lived
+Docker containers on one EC2 host (`infra/modules/ec2/main.tf:1`), not Lambda,
+so there is no freeze-after-response semantics to lose the work to. The model
+call is I/O-bound - a held socket, not CPU - so a human-frequency press does not
+meaningfully load the shared t4g.small.
+
+`app/src/jobs/extraction.ts` grows one export:
+
+```
+runExtractionForConversations(conversationIds: string[], nowIso: string, deps: ExtractionJobDeps)
+```
+
+`runDueExtractions`'s per-row body is extracted into a shared helper so both
+entry points run the SAME code - the draft allocation, the backstop, the failure
+routing, `recordRun`, and `stampSuperseded`. The only difference is row
+selection: `listDue` for the poll, `repo.getDue(id)` per id here. Reimplementing
+the loop instead of sharing it would fork the machinery that took four review
+rounds to get right.
+
+**The claim is what makes this safe against the poll.** Both processes claim
+before doing any work, conditionally on `dueAt` still equalling the value they
+read (`app/src/repos/extractionRepo.ts:250-285`). Whichever gets there first
+runs; the other's claim returns false and it does nothing. No new locking, no
+new race - this is the existing guarantee, exercised by a second caller.
+
+The call is fire-and-forget with respect to the response, but NOT unobserved: it
+is wrapped so a rejection is logged at `error` with the conversation id and can
+never become an unhandled rejection. The HTTP response has already been sent and
+its status does not depend on the run's outcome.
+
+**Known pre-existing hazard, unchanged and out of scope.** If the process
+running an extraction dies mid-run, the row stays claimed and out of the due
+index with nothing to re-arm it - there is no stale-claim reaper. That is true
+of the worker today; routing some runs through the app does not create it, and
+a container restart during a 10-second window is the exposure. Recorded here so
+the builder does not think this design introduced it. See section 9.
+
+### 4.4b `ai_run.completed` - the event that resolves the indicator
+
+`AppEventMap` gains an eighth event (`app/src/lib/events.ts:271-298`). The
+`ALL_APP_EVENTS` record is exhaustive by construction, so adding the name there
+is a compile error until it is registered - which is exactly what guarantees it
+crosses the worker-to-app bridge rather than silently missing it.
+
+Payload: `{ contactId?, conversationId, runId, outcome, skipReason?, errorKind?,
+wrote, suggested, notedLines }` - ids and counts only, never field values or
+message content, matching the PII rule the job already follows.
+
+Emitted once per run from the job, immediately after `recordRun`, for **every**
+run rather than only manual ones. A uniform rule is easier to reason about than
+a conditional emit, the volume is low, and it makes the run log live for free.
+Consumers filter by `contactId`.
+
+Emitting from the job rather than the endpoint is what makes the indicator
+correct in the case where the app-side attempt LOSES the claim: the worker runs
+it, emits the event, and the bridge carries it to the waiting page. The
+indicator resolves either way, and the page never needs to know which process
+did the work.
+
 ### 4.5 `POST /api/contacts/:contactId/extraction-run`
 
 Mounted in `app/src/routes/contacts.ts` alongside the other per-contact actions.
@@ -320,7 +395,11 @@ On success:
 4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
    with no debounce - `dueAt = now`, as the voice and triage paths do.
 5. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
-6. Respond `200 { scheduled: number, conversationIds: string[] }`.
+6. Respond `200 { scheduled: number, conversationIds: string[] }`. The client
+   needs `conversationIds` to know how many completion events to wait for.
+7. **After responding**, call `runExtractionForConversations` on those ids
+   (4.4a). Failures here are logged, never surfaced through the already-sent
+   response.
 
 **This is not the same fan-out as the triage re-extraction hook.** That hook
 (`app/src/routes/contacts.ts:1557,1569-1574`) resolves threads from the contact's
@@ -381,9 +460,9 @@ There is **no toast primitive in this dashboard**, so the outcome renders in
 `ContactDetail`, following the existing `styles.deletedBanner` pattern
 (`ContactDetail.tsx:483`). Success uses `role="status"`; a refusal or error uses
 `role="alert"`, matching the file's own idiom for errors rather than announcing
-a failure politely. This is small new UI
-and it is load-bearing: after the deferral in section 9, it is the operator's
-only feedback that the press did anything at all. It is not optional dressing.
+a failure politely. This region is where the running indicator and its
+resolution live, so it is load-bearing rather than optional dressing: it is the
+operator's only feedback that the press did anything at all.
 
 Label: "Run AI extraction". **The server is the only gate.** The action is
 always enabled; on a 4xx the UI renders the returned reason in that same
@@ -394,8 +473,33 @@ at `app/src/routes/api.ts:740` and is exposed to clients only by
 precondition would mean fetching a new flag and maintaining a second copy of a
 rule the server already enforces.
 
-On success: a transient confirmation naming the count when more than one thread
-was queued ("Extraction queued for 2 threads").
+**The running indicator.** This is the point of the feature's feedback path, so
+its states are specified rather than left to the builder:
+
+1. **Pressed** - the menu item enters a running state and is disabled against a
+   second press. The status region reads "Running AI extraction..." (or
+   "...on 2 threads" when the response named more than one).
+2. **Resolved** - one `ai_run.completed` per `conversationId` from the response.
+   The region renders the aggregate outcome in the operator's terms, not the
+   job's enum: applied ("Updated 2 fields, 1 suggestion"), no-op or skipped
+   ("Ran - nothing new to extract"), failed ("Extraction failed - see Settings >
+   AI runs").
+3. **Timed out** - if the events do not all arrive within a bounded wait, the
+   region stops claiming to know and says so: "Still running - check Settings >
+   AI runs". The indicator must never spin forever, because the event can be
+   legitimately lost (see below).
+
+Pending state is **session-local and does not survive a reload**. Recovering it
+would mean querying the run log by contact since the press timestamp - the
+`byEntity` index supports it (`app/src/repos/aiRunsRepo.ts:299-314`) - but for a
+wait measured in seconds that is machinery bought for a rare case. A reloaded
+page simply shows the current facts, which by then are usually the result.
+
+**The event can be lost, and the timeout is the honest answer.** If
+`EVENT_BRIDGE_URL` is unset the worker's emit never reaches app SSE, and if the
+app-side run wins the claim the emit is in-process and arrives normally. So the
+indicator resolves promptly on the expected path and degrades to the timeout
+message otherwise. It never asserts an outcome it did not observe.
 
 **What the operator will and will not see.** Suggestions and auto-applied writes
 appear with no reload over the existing SSE path, proven end to end:
@@ -406,16 +510,17 @@ to the app, `api.ts:2098` writes it to the stream,
 names this contact. `e2e/tests/flows/event-bridge.spec.ts:193` asserts a chip
 appearing with no reload and no tick.
 
-But that emit fires **only when something changed**. A run that ends `no_op`,
-`skipped`, or `failed` produces no page-level signal whatsoever, and the page
-will look identical to one where nothing ran. The confirmation copy therefore
-points at Settings > AI runs as the place the outcome is recorded, and promises
-only that the run was queued. A per-contact run-status surface would close this
-properly and is deferred (section 9).
+But that emit fires **only when something changed**, which is why it cannot be
+the indicator's resolution signal. A run ending `no_op`, `skipped`, or `failed`
+produces no `suggestion.updated` at all. `ai_run.completed` (4.4b) fires on
+every outcome and is what resolves the indicator; `suggestion.updated` remains
+what refreshes the chips. Two events, two jobs - conflating them would leave the
+indicator spinning on exactly the runs the operator most needs explained.
 
-This also depends on `EVENT_BRIDGE_URL` being set, since the run executes in the
-worker while SSE clients are on the app. It is set in all deployed environments
-and the local runners; unset, suggestions appear on the next fetch instead -
+`suggestion.updated` from a WORKER-side run also depends on `EVENT_BRIDGE_URL`,
+since the run executes in the worker while SSE clients are on the app. It is set
+in all deployed environments and the local runners; unset, suggestions appear on
+the next fetch instead -
 degraded, not broken.
 
 ### 4.7 What does not change
@@ -451,8 +556,19 @@ degraded, not broken.
 - `app/src/services/extraction/runWindow.ts` and `runTypes.ts` - the nullable
   age param.
 - `app/src/repos/aiRunsRepo.ts` - `RunTrigger`.
-- `app/src/routes/contacts.ts` - the endpoint.
-- `dashboard/src/api/types.ts` - `AiRunTrigger`, `windowParams`.
+- `app/src/routes/contacts.ts` - the endpoint, including the post-response call.
+- `app/src/lib/events.ts` - `AppEventMap` + `ALL_APP_EVENTS` (compile-enforced
+  pair) and the payload type.
+- `app/src/routes/api.ts` - the SSE writer for the new event, beside
+  `suggestion.updated` at `:2098`.
+- `dashboard/src/api/EventStreamProvider.tsx` - dispatch the new event beside
+  `:208`.
+- `dashboard/src/api/types.ts` - `AiRunTrigger`, `windowParams`, the new event
+  payload.
+- The app-side extraction deps must now be constructible in the APP process, not
+  only the worker and the dev tick. `app/src/routes/dev.ts:602-640` already
+  builds exactly these deps lazily; the endpoint needs the same, and the two
+  should share one builder rather than becoming a third copy that drifts.
 - `dashboard/src/routes/contact/ContactActionsMenu.tsx` and its API client.
 - `app/test/helpers/twilioWebhookHarness.ts:2886` - the extraction repo fake
   must implement the new method or the harness stops type-checking.
@@ -522,11 +638,30 @@ Unit:
   4. Claim THREW, a press re-armed (`dueAt` changed) - press survives, error
      recorded, and the row does NOT park underneath it.
 
+In-process runner and event:
+
+- `runExtractionForConversations` runs the SAME per-row path as the poll: assert
+  a shared helper, not two parallel implementations.
+- It processes only the named conversations and leaves other due rows alone.
+- A conversation whose claim is LOST (the poll got there first) does nothing and
+  records no run - the existing `record: false` path.
+- `ai_run.completed` is emitted once per run, after `recordRun`, for applied,
+  no_op, skipped AND failed outcomes - the skip and failure cases are the whole
+  point of the indicator and are the easiest to forget.
+- The payload carries ids and counts only. A guard test asserts no message body,
+  phone number, or field value can reach it.
+
 Dashboard:
 
-- The menu action calls the endpoint and renders its confirmation in the status
-  region; the menu item is disabled while the request is in flight.
-- Each refusal reason from 4.5 renders its own copy in that region.
+- The menu item enters its running state on press and is disabled against a
+  second press.
+- Each of the three resolutions renders: applied, nothing-new, failed.
+- **The multi-thread case resolves only when every named `conversationId` has
+  reported**, not on the first event.
+- **The timeout renders the "still running" copy** and the indicator stops. A
+  test drives this by never delivering an event.
+- An event for a DIFFERENT contact does not resolve this contact's indicator.
+- Each refusal reason from 4.5 renders its own copy in the status region.
 
 E2E (`e2e/`, accessibility-first selectors):
 
@@ -560,12 +695,12 @@ E2E (`e2e/`, accessibility-first selectors):
 - **A manual run can park silently, and possibly on its first failure.**
   `attempts` lives on the row, not on the run, so a press inherits whatever
   counter the thread's earlier failures left behind: a press on a row already at
-  four attempts parks on its first failure, not its fifth. The operator gets no
-  signal either way - parking is a worker-side event and 4.6's feedback covers
-  queueing, not eventual outcome. The run log records each failure; nothing on
-  the contact page does. This is the invisibility gap of 4.6 at its worst, and
-  the strongest reason the deferred run-status surface should not stay deferred
-  forever. Resetting `attempts` on a manual press is NOT specified here: it
+  four attempts parks on its first failure, not its fifth. The indicator does
+  report that failure - `ai_run.completed` carries `outcome: failed` - so the
+  operator learns the run failed. What they are NOT told is that the row is now
+  PARKED and no automatic retry is coming; a second press is the only recovery,
+  and it works. Surfacing parked-ness itself is out of scope.
+  Resetting `attempts` on a manual press is NOT specified here: it
   would change automatic backoff semantics for a manual reason, and the honest
   fix is visibility, not a counter reset.
 
@@ -582,9 +717,11 @@ E2E (`e2e/`, accessibility-first selectors):
   firing hundreds of real model calls. Section 8's truncation limit means a
   backfill needs its own windowing design, not a loop over this endpoint. File
   in `docs/issues/` when this lands.
-- **A per-contact "last AI run" status surface.** Would close the `no_op` /
-  `skipped` / `failed` invisibility in 4.6. New UI beyond the approved scope;
-  file alongside the backfill.
+- **Persisting the pending indicator across a page reload.** 4.6 keeps it
+  session-local; the `byEntity` query that would recover it is real but is
+  machinery for a wait measured in seconds.
+- **A stale-claim reaper.** A process dying mid-run strands its row (4.4a).
+  Pre-existing, true of the worker today, and not created by this change.
 - **Rendering `windowParams` in the run detail.** Nothing renders it today
   (4.3); making the stored record truthful does not require building a viewer.
 - **Backward pagination of the transcript window.**

@@ -133,9 +133,32 @@ Lifecycle:
   writes a fresh flag for the next one. Clearing at `complete` instead would let
   a finishing run wipe a flag it does not own, silently downgrading the run the
   operator just asked for.
-- **`fail` re-sets it** when re-arming a run that was manual, so backoff retries
-  stay manual. This requires `fail` to take the manual-ness of the run that just
-  failed; the job knows it.
+- **`fail` becomes conditional on nobody having re-armed the row.** Today `fail`
+  writes `dueAt` unconditionally: the re-arm branch SETs it to
+  `now + backoff` (up to an hour) and the park branch REMOVEs it along with
+  `_duePartition` (`app/src/repos/extractionRepo.ts:307-352`). Either one
+  destroys a press that landed during the failing run - the park branch
+  permanently, since the row leaves the due index with nobody left to re-arm it.
+  That is the same bug class as the `complete` case above, on the sibling write
+  path.
+
+  Both branches gain `ConditionExpression: attribute_not_exists(_duePartition)`.
+  After a claim, that attribute is absent; if a press or an inbound message
+  re-armed the row during the run, it is present and the condition fails. On
+  failure, `fail` performs a second, scheduling-free update that records
+  `lastError` and increments `attempts` only, leaving the fresh `dueAt` and
+  `manualRequested` untouched. The re-armed run happens on its own schedule.
+
+  This also fixes the pre-existing case where an ordinary inbound message
+  arriving during a failing run had its `dueAt` overwritten or removed. That bug
+  ships today; this feature makes it operator-visible, which is why it is fixed
+  here rather than deferred. See section 9 for the boundary.
+- **The re-arm branch re-sets `manualRequested`** when the run that failed was
+  manual, so backoff retries stay manual. `fail` takes the manual-ness of the
+  run from the job, which knows it.
+- **The park branch REMOVEs `manualRequested`.** A parked row is inert until
+  something re-arms it; leaving the flag set would waive both gates on whatever
+  automatic run schedules it next, months later.
 - `complete` does not touch it - `claim` already cleared it.
 
 ### 4.2 Two gate changes in the job, both scoped to `manual`
@@ -150,9 +173,16 @@ everything off that, never off `channel`. In `app/src/jobs/extraction.ts`:
    already bypass this gate because their signal is content the cursor cannot
    see.
 
-Because the age waiver alone would leave the freshness gate reading a now
-non-empty `fresh`, either change alone would still skip most target
-conversations. They ship together.
+The two waivers serve different cases and both are needed, but not for the same
+conversation:
+
+- On a **never-extracted imported** conversation (`cursor = ''`), the age waiver
+  alone is sufficient: once the aged messages survive into `fresh`, any inbound
+  among them satisfies `tsMsgId > ''` and `hasNewClient` passes on its own.
+- On an **already-extracted** conversation, the freshness waiver is the one that
+  matters: the cursor has advanced past every message, so `hasNewClient` is
+  false no matter how wide the window is. This is the "press it again to see
+  what the model does" case.
 
 Nothing else about window assembly changes: the per-message tier caps, the 60k
 budget, the newest-first fill, and the `group_ambiguous_origin` filter behave
@@ -185,11 +215,21 @@ claimed, so it reads `row.manualRequested` from the `listDue` row and records
 `manual ? 'manual' : row.channel`. Since `channel` is never written as
 `'manual'` (4.1), a manual label can only come from the flag.
 
-`channel` being optional means the draft needs a defined fallback for a
-manual-only row: when the flag is absent and `channel` is too, the row was not
-scheduled by any known path, and the trigger falls back to the row's channel
-being absent - the builder must pick one explicit behavior here and test it
-rather than let `undefined` reach the record.
+**`channel` becoming optional breaks `newRunDraft` at the type level.** It
+currently assigns `trigger: row.channel` into a required `RunTrigger`
+(`app/src/jobs/extraction.ts:298`); once `channel` is `string | undefined` that
+does not compile. This is not a judgement call left to the builder - the spec
+decides it:
+
+```
+trigger: row.manualRequested === true ? 'manual' : (row.channel ?? 'manual')
+```
+
+The `?? 'manual'` arm is defined rather than defensive. A row with no `channel`
+can only have been created by `requestManualExtraction`, and the flag is read
+before the claim clears it, so in practice the first arm always wins. The
+fallback exists so the type is total and no `undefined` can reach a stored
+record; it is asserted by a test, not left to inference.
 
 The dashboard's `AiRunTrigger` union gains `'manual'`. **No other run-log change
 is needed:** `AiRunList.tsx:55` and `AiRunDetail.tsx:50` render `trigger` as
@@ -209,7 +249,10 @@ On success:
 3. **Filter to `tenant_1to1` and `unknown_1to1`.** `conversationsForContact`
    returns the raw union and its own header warns that a phone query can return
    `relay_group` threads, which front a pool number. Every other caller filters;
-   so does this one. The kept types match what the automatic sites schedule.
+   so does this one. Note this is a filter the automatic sites do NOT have - the
+   voice and triage hooks schedule whatever thread they are handed, because they
+   are reacting to an event on a specific thread rather than fanning out across
+   a contact's threads. Fanning out is what makes the filter necessary here.
 4. `requestManualExtraction(conversationId, nowIso)` for each surviving thread,
    with no debounce - `dueAt = now`, as the voice and triage paths do.
 5. `audit.append('contacts#<contactId>', 'extraction_run_requested', { actor })`.
@@ -227,16 +270,29 @@ itself:
 
 | Condition | Status | Reason |
 | --- | --- | --- |
+| Unknown contact, or a phone-pointer id | 404 | `contact_not_found` |
 | `config.aiExtractionEnabled` is false | 409 | `extraction_disabled` |
 | Contact type is `landlord`, `partner`, or `team_member` | 409 | `ineligible_contact_type` |
-| `contactId` starts with `PHONE_REF_PREFIX` | 409 | `not_a_contact` |
-| No conversations survive the type filter | 409 | `no_conversations` |
+| Contact has no threads at all | 409 | `no_conversations` |
+| Threads exist but none survive the type filter | 409 | `no_eligible_conversations` |
+
+The phone-pointer case is a **404 `contact_not_found`**, reusing the branch the
+sibling contact endpoints already have rather than inventing a status: those
+routes 404 an unknown contact and a phone-pointer id identically and say so in
+their comments (`app/src/routes/contacts.ts:1078-1086,1123-1130,1258-1267`). A
+new 409 here would make this the only per-contact route that answers a
+phone-pointer id differently from its neighbours.
 
 The type refusal mirrors the job's eligibility rule
-(`app/src/jobs/extraction.ts:401-406`); the phone-ref refusal mirrors its
-`no_contact` branch (`app/src/jobs/extraction.ts:392`). Queuing a row guaranteed
-to skip would burn a poll cycle and write a misleading `skipped` record.
-Eligible types are `tenant` and `unknown`.
+(`app/src/jobs/extraction.ts:401-406`). Queuing a row guaranteed to skip would
+burn a poll cycle and write a misleading `skipped` record. Eligible types are
+`tenant` and `unknown`.
+
+The last two rows are deliberately distinct reasons. A contact whose only thread
+is mis-typed - a real, documented state, since triage flips `unknown_1to1` and
+can leave a thread resolved to another identity - would otherwise be told
+"no conversations", which is false and sends the operator looking for missing
+data instead of at the thread's type.
 
 Unlike the triage hook, a scheduling failure here is **not** best-effort:
 scheduling is the entire point of the request, so a repo error is a 500 and the
@@ -249,8 +305,19 @@ The action goes in the contact header's `ContactActionsMenu`
 per-contact actions. There is no "AI suggestions area" to sit beside -
 `SuggestionChip` renders inline per field.
 
+**Where the result renders.** `ContactActionsMenu` is purely presentational: it
+takes `on*` callbacks plus `*Busy` flags and the parent owns every request
+(`ContactActionsMenu.tsx:11-33`). This action follows that contract exactly -
+`onRunExtraction` + `extractionBusy` - and `ContactDetail` performs the call.
+There is **no toast primitive in this dashboard**, so the outcome renders in a
+`role="status"` region in `ContactDetail`, following the existing
+`styles.deletedBanner` pattern (`ContactDetail.tsx:483`). This is small new UI
+and it is load-bearing: after the deferral in section 9, it is the operator's
+only feedback that the press did anything at all. It is not optional dressing.
+
 Label: "Run AI extraction". **The server is the only gate.** The action is
-always enabled; on a 409 the UI renders the returned reason inline. The contact
+always enabled; on a 4xx the UI renders the returned reason in that same
+region. The contact
 page does not hold `aiExtractionEnabled` - it is a server-side router dependency
 at `app/src/routes/api.ts:740` and is exposed to clients only by
 `GET /api/system/flags` (`app/src/routes/system.ts:47`) - so a client-side
@@ -283,7 +350,9 @@ degraded, not broken.
 
 ### 4.7 What does not change
 
-- Claim, backoff, `MAX_EXTRACTION_ATTEMPTS` parking, per-row failure routing.
+- The backoff schedule and the `MAX_EXTRACTION_ATTEMPTS` park threshold. (The
+  `claim` and `fail` WRITES do change - see 4.1 - but what they decide does not:
+  same backoff curve, same park point, same per-row isolation.)
 - `applyExtraction` and every guard in it, including dismissal tombstones and
   the `wrong_contact_type` drops.
 - The run recorder's best-effort contract.
@@ -295,7 +364,16 @@ degraded, not broken.
 
 - `app/src/repos/extractionRepo.ts` - `DueExtractionItem` (`manualRequested`,
   `channel` optional, and its now-stale channel doc comment), the
-  `ExtractionRepo` interface, `requestManualExtraction`, `claim`, `fail`.
+  `ExtractionRepo` interface, `requestManualExtraction`, `claim`, `fail`
+  (signature gains the manual flag; both branches gain the condition).
+- **Every full `ExtractionRepo` literal** must gain `requestManualExtraction`,
+  and every `fail` caller and fake must match the new signature. Consumers
+  taking a `Pick<ExtractionRepo, ...>` view are unaffected, which is most of
+  them. Known literals and fakes: `app/test/helpers/twilioWebhookHarness.ts:2886`,
+  `app/test/extractionJob.test.ts:164`, `app/test/extractionJobDraftGuard.test.ts:108`.
+  **`npm run typecheck` is the enumerator of record here** - the builder runs it
+  before assuming this list is complete, because a missed literal is a compile
+  error and a missed `Pick` view is not.
 - `app/src/jobs/extraction.ts` - `manual` derivation, both gates, `newRunDraft`,
   the effective age value passed to the window builder.
 - `app/src/services/extraction/runWindow.ts` and `runTypes.ts` - the nullable
@@ -315,6 +393,11 @@ degraded, not broken.
   `manualRequested` on the row the poll already claimed. Because `claim` cleared
   the flag rather than `complete`, the finishing run cannot wipe it: a second,
   still-manual run follows.
+- **A press while a run is failing** is preserved by the conditional `fail`
+  (4.1): the re-armed `dueAt` and fresh flag survive, and `fail` records only
+  the error and the attempt count. Without that condition the press would be
+  pushed out by the backoff, or - on the fifth failure - deleted with the row's
+  index keys.
 - **An inbound message between press and claim** slides `dueAt` and may
   overwrite `channel`, but cannot clear `manualRequested`, so the run stays
   manual.
@@ -341,28 +424,37 @@ Unit:
   whose messages all predate the cutoff reaches the driver. The same fixture
   without the flag skips **`no_new_client`** (not `empty_window` - see 1.2).
 - The job waives `no_new_client` when the flag is set and does not when absent.
-- `trigger` is recorded as `manual` from the flag, and an automatic run over a
-  row whose `channel` is absent records a defined trigger (4.4).
 - `windowParams.maxTranscriptAgeDays` is `null` on a manual run, `30` otherwise.
 - `requestManualExtraction` sets the flag and leaves `channel` untouched;
-  `scheduleExtraction` never sets the flag; `claim` removes it; `fail` re-sets
-  it for a manual run and does not for an automatic one; a press during a
-  claimed run survives that run's `complete` (the F1 regression test).
+  `scheduleExtraction` never sets the flag; `claim` removes it.
+- **The two press-survival regression tests, one per write path.** A press
+  landing during a claimed run survives that run's `complete`; and a press
+  landing during a claimed run survives that run's `fail` on BOTH branches -
+  re-arm (its `dueAt` is not pushed to `now + backoff`) and park (its `dueAt`
+  and `_duePartition` are not removed). Assert the error and attempt count are
+  still recorded in the re-armed case.
+- `fail` re-arms with the flag for a manual run and without it for an automatic
+  one; `fail` parking REMOVEs the flag.
+- `newRunDraft` records `manual` from the flag, and records a defined trigger
+  for a row with no `channel` (the `?? 'manual'` arm).
 - Route: fan-out covers phone and email threads and EXCLUDES `relay_group` and
   `landlord_1to1`; each of the four refusals returns its status and reason; a
   repo failure is a 500; the audit entry is appended.
 
 Dashboard:
 
-- The menu action calls the endpoint and shows its confirmation.
-- A 409 renders the returned reason.
+- The menu action calls the endpoint and renders its confirmation in the status
+  region; the menu item is disabled while the request is in flight.
+- Each refusal reason from 4.5 renders its own copy in that region.
 
 E2E (`e2e/`, accessibility-first selectors):
 
-- **Use the existing lean fixture.** `app/src/lib/seed/lean.ts:17-29` already
-  seeds messages at fixed `2026-06-01` timestamps, which are more than 30 days
-  old against the current clock - the aged-history case exists without adding
-  seed rows, which also protects lean's byte stability.
+- **Use the existing lean fixture.** `app/src/lib/seed/lean.ts:17-19` seeds the
+  1:1 thread's messages at fixed `2026-06-01` timestamps, more than 30 days old
+  against the current clock - the aged-history case exists without adding seed
+  rows, which also protects lean's byte stability. (The neighbouring constants
+  at `:26-29` belong to the group and relay threads, which the type filter in
+  4.5 excludes; the test must target the `tenant_1to1` thread.)
 - Press the action, drive `POST /__dev/extraction/tick`, and assert a
   `trigger: manual` row in Settings > AI runs whose outcome is not `skipped`.
 - Assert a suggestion chip appears on the contact page without a reload.
@@ -384,14 +476,21 @@ E2E (`e2e/`, accessibility-first selectors):
 - **A manual run writes to a real contact record.** It uses the same apply
   guards as every automatic run, so the blast radius is identical to what the
   system already does unprompted.
-- **A stale flag on a parked row.** After five consecutive failures the row
-  parks. Because `claim` clears the flag and `fail` re-sets it only for manual
-  runs, a parked manual row carries the flag into whatever schedules it next -
-  one run with two gates waived. Not a data-integrity problem, and clearing it
-  on park would silently downgrade the retry the operator asked for.
+- **A manual run can fail five times and park silently.** The operator gets no
+  signal - parking is a worker-side event and section 4.6's feedback covers
+  queueing, not eventual outcome. The run log records each failure; nothing on
+  the contact page does. This is the invisibility gap of section 4.6 at its
+  worst, and it is the strongest reason the deferred run-status surface should
+  not stay deferred forever.
 
 ## 9. Out of scope
 
+- **Any broader repair of the failure path.** Section 4.1 makes `fail`'s
+  scheduling writes conditional, which incidentally fixes the pre-existing case
+  of an inbound message being swallowed by a concurrent failing run. That is the
+  boundary: the condition and its tests, nothing more. The backoff curve, the
+  park threshold, the attempts accounting, and the parked-row recovery story are
+  all untouched, and a parked row still needs something to re-schedule it.
 - **Bulk backfill over the imported population.** Deferred by the human: run the
   action on a handful of imported conversations and judge the output before
   firing hundreds of real model calls. Section 8's truncation limit means a

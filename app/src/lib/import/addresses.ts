@@ -17,6 +17,7 @@
 // precision-oriented one. A false positive costs her one keystroke; a missed
 // property costs a listing she has to retype.
 
+import type { Address } from '../address.js';
 import type { QuoMessage } from './quoSource.js';
 
 /**
@@ -31,6 +32,19 @@ const STREET_TYPES = [
   'path', 'pt', 'point', 'sq', 'square', 'xing', 'crossing', 'cv', 'cove',
 ];
 
+/**
+ * Metro-Atlanta municipalities the founder actually writes. ONE list, used by
+ * the mining regex below AND by `parseUnitAddress` - a city this list misses is
+ * simply left in the street line, never guessed at.
+ */
+const METRO_CITIES = [
+  'Atlanta', 'Decatur', 'Marietta', 'College Park', 'East Point', 'Jonesboro',
+  'Riverdale', 'Union City', 'Forest Park', 'Smyrna', 'Austell', 'Mableton',
+  'Lithonia', 'Stone Mountain', 'Conyers', 'Douglasville', 'Fairburn',
+  'Hapeville', 'Morrow', 'Stockbridge', 'Ellenwood', 'Rex', 'Tucker',
+  'Clarkston', 'Norcross', 'Duluth', 'Lawrenceville',
+];
+
 const ADDRESS_RE = new RegExp(
   String.raw`\b(\d{1,6})\s+` + // house number
     String.raw`((?:[A-Za-z0-9'.-]+\s+){0,4}?` + // up to 4 name words (lazy)
@@ -38,7 +52,7 @@ const ADDRESS_RE = new RegExp(
     String.raw`(\s*(?:N|S|E|W|NE|NW|SE|SW)\b\.?)?` + // optional quadrant
     String.raw`([^\n,]{0,40}?)?` + // optional unit/suffix on the same line
     String.raw`(?:\s*,?\s*(?:Apt|Unit|Ste|Suite)\.?\s*([A-Za-z0-9-]+))?` +
-    String.raw`(?:\s*,?\s*(Atlanta|Decatur|Marietta|College Park|East Point|Jonesboro|Riverdale|Union City|Forest Park|Smyrna|Austell|Mableton|Lithonia|Stone Mountain|Conyers|Douglasville|Fairburn|Hapeville|Morrow|Stockbridge|Ellenwood|Rex|Tucker|Clarkston|Norcross|Duluth|Lawrenceville)\b)?` +
+    `(?:\\s*,?\\s*(${METRO_CITIES.join('|')})\\b)?` +
     String.raw`(?:\s*,?\s*(?:GA|Georgia)\b)?` +
     String.raw`(?:\s*(\d{5})(?:-\d{4})?\b)?`,
   'gi',
@@ -213,4 +227,111 @@ function tidyDisplay(raw: string): string {
     .replace(/\s*,\s*/g, ', ')
     .replace(/[,\s]+$/, '')
     .trim();
+}
+
+/** Strip dangling separators left behind when a span is cut out of the middle. */
+function tidyRemainder(text: string): string {
+  return text
+    .replace(/\s+/g, ' ')
+    .replace(/(?:\s*,)+\s*,/g, ',')
+    .replace(/^[,\s]+/, '')
+    .replace(/[,\s]+$/, '')
+    .trim();
+}
+
+/** Remove `[start, start+length)` from `text` and tidy what closes over the gap. */
+function cut(text: string, start: number, length: number): string {
+  return tidyRemainder(text.slice(0, start) + ' ' + text.slice(start + length));
+}
+
+/**
+ * `Apt 4` / `Unit 104` / `Suite 2295` / `#5` - the second address line.
+ *
+ * The `\b` AFTER the keyword is load-bearing: without it "Overlook Apartments"
+ * parses as line1 "Overlook" + line2 "Apartments", because `apartment` matches
+ * inside the plural and swallows the "s" as its designator token. Two of the
+ * founder's properties are named "<Something> Apartments".
+ */
+const UNIT_DESIGNATOR_RE =
+  /\b(?:apt|apartment|unit|ste|suite|bldg|building)\b\.?\s*[A-Za-z0-9-]+\b|#\s*[A-Za-z0-9-]+\b/i;
+
+const STATE_TAIL_RE = /[,\s]+(?:GA|Georgia)\.?$/i;
+
+const CITY_TAIL_RE = new RegExp(String.raw`[,\s]+(${METRO_CITIES.join('|')})\.?$`, 'i');
+
+/**
+ * Parse ONE reviewed workbook address cell into the app's structured `Address`
+ * (lib/address.ts) - the shape every consumer already expects.
+ *
+ * WHY THIS EXISTS. The workbook gives the founder a single free-text address
+ * column (that is the review format she signed off on), but a plain string
+ * stored in `unit.address` is not the contract: `toUnitFlyer` re-validates
+ * through `validateAddress` and substitutes `{}`, so a public flyer shows NO
+ * address at all, and `formatStreet` prints a legacy string VERBATIM, so tour
+ * reminder SMS copy carries the postal tail instead of just the street.
+ *
+ * WHAT IT WILL NOT DO. It never invents a field. A cell with no ZIP gets no
+ * ZIP; a city outside METRO_CITIES stays in the street line; the state is set
+ * only where she actually wrote GA/Georgia. Anything it cannot classify -
+ * including the handful of cells that still carry chat text around the address -
+ * is left VERBATIM in `line1` rather than silently trimmed away, because a
+ * wrong-but-tidy address is worse than an honest messy one.
+ *
+ * Extraction runs tail-first (ZIP, then state, then city, then the unit
+ * designator) and each part must sit where a postal tail sits: the city is only
+ * taken when it TRAILS the remaining text, so "1234 College Park Dr" keeps its
+ * street name while "404 Corvair Dr Atlanta" yields city Atlanta.
+ *
+ * NOTE the caller keeps seeding `unitId` from the raw normalized string
+ * (`unitIdForAddress(normalizeAddress(raw))`). Deriving identity from the parsed
+ * parts instead would re-mint every unitId and duplicate the whole book.
+ */
+export function parseUnitAddress(raw: string): Address {
+  let rest = tidyDisplay(raw);
+  if (rest === '') return {};
+  const out: Address = {};
+
+  // ZIP: a standalone 5-digit token that is NOT the leading house number
+  // ("30318" in "672 Cameron Alexander Blvd NW, 30318 Unit A"; never the "0058"
+  // that opens a street line). The LAST such token wins - the postal tail sits
+  // at the end even when a unit designator follows it.
+  const zips = [...rest.matchAll(/\b\d{5}(?:-\d{4})?\b/g)].filter((m) => (m.index ?? 0) > 0);
+  const zip = zips[zips.length - 1];
+  if (zip !== undefined) {
+    out.zip = zip[0].slice(0, 5);
+    rest = cut(rest, zip.index ?? 0, zip[0].length);
+  }
+
+  // STATE: trailing GA/Georgia only, normalized to the 2-letter code.
+  const state = rest.match(STATE_TAIL_RE);
+  if (state !== undefined && state !== null) {
+    out.state = 'GA';
+    rest = tidyRemainder(rest.slice(0, state.index));
+  }
+
+  // CITY: trailing known municipality only (see the doc comment).
+  const city = rest.match(CITY_TAIL_RE);
+  if (city !== null && city.index !== undefined) {
+    const remainder = tidyRemainder(rest.slice(0, city.index));
+    // A cell that is ONLY a city name keeps it as the street line instead:
+    // dropping it would leave a unit with no line1 at all.
+    if (remainder !== '') {
+      out.city = city[1]!;
+      rest = remainder;
+    }
+  }
+
+  // LINE2: the unit/apt designator, kept verbatim ("Unit 104", not "104").
+  const designator = rest.match(UNIT_DESIGNATOR_RE);
+  if (designator !== null && designator.index !== undefined) {
+    const remainder = cut(rest, designator.index, designator[0].length);
+    // Same guard: "Unit 2" alone is all the street line we have.
+    if (remainder !== '') {
+      out.line2 = designator[0].replace(/\s+/g, ' ').trim();
+      rest = remainder;
+    }
+  }
+
+  if (rest !== '') out.line1 = rest;
+  return out;
 }

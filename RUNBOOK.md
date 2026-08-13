@@ -1557,12 +1557,9 @@ keyword copy. The only loss is that the replies are not ours.
    `app/src/messages/catalog.ts`, which is the source of truth):
    - **Opt-out confirmation** = `STOP_CONFIRMATION` (`keyword.stop`)
    - **Help message** = `HELP_REPLY` (`keyword.help`)
-   - **Opt-in confirmation** = `WELCOME_SMS` (`welcome.sms`)
+   - **Opt-in confirmation** = `OPT_IN_CONFIRMATION` (`keyword.optin`)
    Do not retype them. Copy from the constant so a character never drifts.
-   OPT-IN CAVEAT: `welcome.sms` alone IS operator-editable (Settings ->
-   Templates -> "Welcome text"). If that override is set for the env, paste
-   the EFFECTIVE text (the override), not the constant - and see the coupling
-   rule below.
+   All three are compliance-locked constants; none is operator-editable.
 4. Save, then run the keyword canary in step 2.3 against that service - ONE
    branded reply per keyword, plus the sentence probe.
 
@@ -1577,13 +1574,11 @@ keyword copy. The only loss is that the replies are not ours.
    these, so an un-mirrored constant edit changes nothing a recipient sees - and
    nothing in the app will tell you.
 
-Note that an operator `welcomeText` override in Settings no longer affects the
-opt-in confirmation; it reaches the web-form/housing-fair welcome only. The
-keyword confirmation is a console edit. COUPLING RULE: if the two are meant to
-read the same (they were configured identically at setup), an admin editing
-"Welcome text" in Settings must be followed by the same three-step mirror above
-for the opt-in confirmation - otherwise the app's welcome and Twilio's START
-confirmation silently diverge, and nothing in the app will surface it.
+The Settings -> Templates "Welcome text" field is INDEPENDENT of all of this
+by design (2026-08-12 split): it edits only the app-sent web-form/housing-fair
+welcome (`welcome.sms`). The console's opt-in confirmation mirrors the LOCKED
+`OPT_IN_CONFIRMATION` constant instead, so a Settings edit can never make the
+two silently diverge - there is nothing to keep in sync.
 
 ### 4. The migration run
 

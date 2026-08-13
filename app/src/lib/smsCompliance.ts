@@ -143,6 +143,21 @@ export const STOP_CONFIRMATION = `You have successfully been unsubscribed. You w
 export const HELP_REPLY = `${SMS_BRAND_NAME}: housing listing alerts for voucher holders. Msg frequency varies. Msg & data rates may apply. Reply STOP to opt out. More info: tenant.place.`;
 
 /**
+ * Opt-in (START/JOIN/YES/UNSTOP) confirmation. SENT BY TWILIO ADVANCED
+ * OPT-OUT (console-configured from this constant); the app does not send it.
+ *
+ * DELIBERATELY A SEPARATE CONSTANT from WELCOME_SMS (2026-08-12, Cameron's
+ * split ruling): welcome.sms stays operator-editable in Settings and reaches
+ * the app-sent web-form/housing-fair welcome ONLY; this constant is
+ * compliance-locked like its STOP/HELP siblings so the console mirror can
+ * never silently diverge behind a Settings edit. The initial text is
+ * byte-identical to WELCOME_SMS's default on purpose - the console needed no
+ * re-paste at the split. See RUNBOOK "Keyword auto-replies (Advanced
+ * Opt-Out)".
+ */
+export const OPT_IN_CONFIRMATION = `Welcome to ${SMS_BRAND_NAME}! You're signed up for new properties that accept your voucher, plus tour reminders and updates. Msg frequency varies. Msg & data rates may apply. Reply STOP to unsubscribe, HELP for help.`;
+
+/**
  * The public web-form consent checkbox label (spec §3.1, Full CTIA). The words
  * "Privacy Policy" and "Terms" link to PRIVACY_POLICY_URL / TERMS_URL. This is
  * the disclosure whose version is CONSENT_VERSION.

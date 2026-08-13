@@ -14,6 +14,7 @@
 import {
   DEFAULT_MISSED_CALL_AUTOTEXT,
   HELP_REPLY,
+  OPT_IN_CONFIRMATION,
   RELAY_INTRO_IDENTITY,
   SMS_BRAND_NAME,
   STOP_CONFIRMATION,
@@ -56,6 +57,7 @@ export type MessageId =
   // Compliance-locked (never freely editable)
   | 'keyword.stop'
   | 'keyword.help'
+  | 'keyword.optin'
   | 'consent.web_form'
   | 'relay.identity'
   // Voice <Say> (routes/webhooks/voice.ts)
@@ -309,6 +311,15 @@ export const MESSAGE_CATALOG: Record<MessageId, MessageDef> = {
   'keyword.stop': {
     id: 'keyword.stop',
     default: STOP_CONFIRMATION,
+    class: 'compliance-locked',
+    editable: false,
+    channel: 'sms',
+    vars: [],
+  },
+  // runtime-orphaned by design - the string is the source of truth for the Twilio Advanced Opt-Out console (RUNBOOK 3b); do not prune.
+  'keyword.optin': {
+    id: 'keyword.optin',
+    default: OPT_IN_CONFIRMATION,
     class: 'compliance-locked',
     editable: false,
     channel: 'sms',

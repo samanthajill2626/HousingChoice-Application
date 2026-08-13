@@ -11,6 +11,7 @@ import {
   WEB_FORM_CONSENT_COPY,
   WELCOME_SMS,
   templateHasOptOutLanguage,
+  OPT_IN_CONFIRMATION,
 } from '../../src/lib/smsCompliance.js';
 
 const entries = Object.entries(MESSAGE_CATALOG) as Array<[MessageId, MessageDef]>;
@@ -74,6 +75,7 @@ describe('MESSAGE_CATALOG', () => {
     expect(MESSAGE_CATALOG['missed_call.autotext'].default).toBe(DEFAULT_MISSED_CALL_AUTOTEXT);
     expect(MESSAGE_CATALOG['keyword.stop'].default).toBe(STOP_CONFIRMATION);
     expect(MESSAGE_CATALOG['keyword.help'].default).toBe(HELP_REPLY);
+    expect(MESSAGE_CATALOG['keyword.optin'].default).toBe(OPT_IN_CONFIRMATION);
     expect(MESSAGE_CATALOG['consent.web_form'].default).toBe(WEB_FORM_CONSENT_COPY);
     expect(MESSAGE_CATALOG['relay.identity'].default).toBe(RELAY_INTRO_IDENTITY);
     // The relay announcements lead with the brand and TRAIL the opt-out

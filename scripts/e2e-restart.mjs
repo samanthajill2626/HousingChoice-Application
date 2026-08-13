@@ -8,6 +8,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { inspectSessionLiveness } from './lib/sessionState.mjs';
 
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const artifactsDir = path.join(repoRoot, 'e2e', '.artifacts');
@@ -22,14 +23,31 @@ if (!existsSync(laneFile)) {
   process.exit(0);
 }
 
-let lane = '?';
+let laneJson;
 try {
-  const laneJson = JSON.parse(readFileSync(laneFile, 'utf8'));
-  lane = laneJson?.lane ?? '?';
+  laneJson = JSON.parse(readFileSync(laneFile, 'utf8'));
 } catch {
-  /* malformed lane.json — still write the sentinel; the session watches it */
+  process.stderr.write('[e2e-restart] stale lane state: lane.json is malformed; restart was not signaled\n');
+  process.exit(1);
+}
+
+const pidFile = path.join(artifactsDir, 'session.pid');
+let pidText = null;
+try {
+  pidText = readFileSync(pidFile, 'utf8');
+} catch {
+  // Liveness can still be confirmed by the app owner probe.
+}
+const liveness = await inspectSessionLiveness({ laneState: laneJson, pidText });
+if (!liveness.live) {
+  process.stderr.write('[e2e-restart] stale lane state: no live session owner was confirmed; restart was not signaled\n');
+  process.exit(1);
+}
+if (!liveness.launcherAlive) {
+  process.stderr.write('[e2e-restart] stale lane state: app is live but its launcher is not; restart was not signaled\n');
+  process.exit(1);
 }
 
 mkdirSync(artifactsDir, { recursive: true });
 writeFileSync(sentinel, String(Date.now()));
-process.stdout.write(`[e2e-restart] signaled app+worker restart (lane ${lane})\n`);
+process.stdout.write(`[e2e-restart] signaled app+worker restart (lane ${laneJson.lane ?? '?'})\n`);

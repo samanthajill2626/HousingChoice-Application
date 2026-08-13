@@ -549,10 +549,10 @@ export const CONTRACT_SOURCE_LEDGER = Object.freeze({
     contact_detail_other: 'dashboard/src/routes/contact/useContactFile.ts:101-165',
     unit_detail_with_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
     unit_detail_without_landlord: 'dashboard/src/routes/listing/useListing.ts:110-185',
-    tour_group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:164-289',
-    tour_person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:164-289',
-    placement_group_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:165-299',
-    placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:165-299',
+    tour_group_thread: 'dashboard/src/routes/tours/useTourChannels.ts:106-152,181-205,252-289',
+    tour_person_thread: 'dashboard/src/routes/tours/useTourChannels.ts:106-152,181-205,252-289',
+    placement_group_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:107-153,182-206,262-299',
+    placement_person_thread: 'dashboard/src/routes/placements/usePlacementChannels.ts:107-153,182-206,262-299',
   } as const),
   terminals: Object.freeze({
     '/': 'dashboard/src/routes/today/Today.tsx:27-31,172-188',
@@ -684,7 +684,10 @@ export function assertObservedGets(
 ): { missingRequired: EndpointContract[]; undeclared: EndpointContract[] } {
   const declarationShapes = new Set(declared.map((contract) => `${contract.endpointTemplate}?${contract.queryKeys.join('&')}`));
   const observedShapes = new Set(observed
-    .filter((contract) => contract.outcome === undefined || contract.outcome === 'finished')
+    .filter((contract) =>
+      (contract.outcome === undefined || contract.outcome === 'finished')
+      && (contract.status === undefined || contract.status === null
+        || (contract.status >= 200 && contract.status < 300)))
     .map((contract) => `${contract.endpointTemplate}?${[...contract.queryKeys].sort().join('&')}`));
   return {
     missingRequired: declared.filter((contract) => contract.requirement === 'required' && !observedShapes.has(`${contract.endpointTemplate}?${contract.queryKeys.join('&')}`)),
@@ -694,6 +697,7 @@ export function assertObservedGets(
 
 export interface ObservedEndpointContract extends EndpointContract {
   readonly outcome?: 'finished' | 'failed' | 'aborted';
+  readonly status?: number | null;
 }
 
 function tuple(surface: BlockedWriteSurface, path: EndpointTemplate, phase: 'source_click' | 'destination_mount'): BlockedWriteTuple {
@@ -759,7 +763,7 @@ export interface ResolverDom {
 
 export type ResolverResult =
   | { kind: 'resolved'; coldPath: string; warmHref: string; branch: RouteContractBranch }
-  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' };
+  | { kind: 'skip'; reason: 'fixture_absent' | 'fixture_not_navigable' | 'source_not_ready' | 'unresolved_branch' };
 
 export function resolverSkipSampleResult(
   routeKey: string,
@@ -771,7 +775,9 @@ export function resolverSkipSampleResult(
     ? 'skipped_no_fixture'
     : reason === 'fixture_not_navigable'
       ? 'skipped_fixture_not_navigable'
-      : 'skipped_source_not_ready';
+      : reason === 'source_not_ready'
+        ? 'skipped_source_not_ready'
+        : 'skipped_unresolved_branch';
   return {
     routeKey,
     mode,
@@ -901,6 +907,7 @@ function positiveUnread(row: Record<string, unknown>): boolean {
 
 function conversationInvolves(row: Record<string, unknown>, contactId: string): boolean {
   return Array.isArray(row.participants) && row.participants.some((participant) => {
+    if (typeof participant === 'string') return participant === contactId;
     const value = object(participant);
     return value.contactId === contactId;
   });
@@ -910,10 +917,16 @@ async function threadDetailBranch(
   api: ResolverApi,
   row: Record<string, unknown>,
   groupField: 'groupThreadId' | 'group_thread',
-): Promise<RouteContractBranch> {
+): Promise<RouteContractBranch | Extract<ResolverResult, { kind: 'skip' }>> {
   const groupId = stringField(row, groupField);
   const tenantId = stringField(row, 'tenantId');
-  const page = object(await api.get('/api/conversations', {}));
+  let page: Record<string, unknown>;
+  try {
+    page = object(await api.get('/api/conversations', {}));
+  } catch {
+    return { kind: 'skip', reason: 'unresolved_branch' };
+  }
+  if (!Array.isArray(page.conversations)) return { kind: 'skip', reason: 'unresolved_branch' };
   const conversations = rowsFrom(page, 'conversations');
   if (groupId !== undefined) {
     return {
@@ -940,10 +953,12 @@ export async function resolveTourDetail(api: ResolverApi, dom: ResolverDom): Pro
     .filter((row) => row.status === 'scheduled' && stringField(row, 'tourId') !== undefined)
     .sort((left, right) => (stringField(left, 'scheduledAt') ?? '').localeCompare(stringField(right, 'scheduledAt') ?? ''))[0];
   if (match === undefined) return { kind: 'skip', reason: 'fixture_absent' };
+  const branch = await threadDetailBranch(api, match, 'groupThreadId');
+  if (branch.kind === 'skip') return branch;
   return bindResolved(
     dom,
     `/tours/${stringField(match, 'tourId')!}`,
-    await threadDetailBranch(api, match, 'groupThreadId'),
+    branch,
   );
 }
 
@@ -956,10 +971,12 @@ export async function resolvePlacementDetail(api: ResolverApi, dom: ResolverDom)
       return stringField(row, 'placementId') !== undefined && stage !== 'moved_in' && stage !== 'lost';
     });
     if (match !== undefined) {
+      const branch = await threadDetailBranch(api, match, 'group_thread');
+      if (branch.kind === 'skip') return branch;
       return bindResolved(
         dom,
         `/placements/${stringField(match, 'placementId')!}`,
-        await threadDetailBranch(api, match, 'group_thread'),
+        branch,
       );
     }
     cursor = typeof page.nextCursor === 'string' && page.nextCursor.length > 0 ? page.nextCursor : undefined;

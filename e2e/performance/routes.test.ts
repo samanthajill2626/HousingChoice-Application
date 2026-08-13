@@ -384,6 +384,10 @@ describe('endpoint and write contracts', () => {
     const conditional: EndpointContract = { endpointTemplate: '/api/contacts', queryKeys: ['cursor', 'limit', 'type'], requirement: 'conditional' };
     expect(assertObservedGets([required, conditional], [required])).toEqual({ missingRequired: [], undeclared: [] });
     expect(assertObservedGets([required, conditional], [conditional])).toEqual({ missingRequired: [required], undeclared: [] });
+    expect(assertObservedGets([required], [{ ...required, status: 500 }])).toEqual({
+      missingRequired: [required],
+      undeclared: [],
+    });
     expect(assertObservedGets([required], [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }]))
       .toEqual({ missingRequired: [required], undeclared: [{ ...required, queryKeys: ['deleted', 'limit', 'type'] }] });
   });
@@ -460,6 +464,7 @@ describe('representative resolvers', () => {
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_absent').status).toBe('skipped_no_fixture');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'fixture_not_navigable').status).toBe('skipped_fixture_not_navigable');
     expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'source_not_ready').status).toBe('skipped_source_not_ready');
+    expect(resolverSkipSampleResult('/fixture', 'warm', 2, 'unresolved_branch').status).toBe('skipped_unresolved_branch');
   });
 
   it('returns explicit skips for missing fixtures and exact-link misses without row substitution', async () => {
@@ -542,7 +547,7 @@ describe('representative resolvers', () => {
     }], nextCursor: null }]);
     api.pages.set('/api/conversations?', [{ conversations: [{
       conversationId: 'person-private', type: 'tenant_1to1', unread_count: 3,
-      participants: [{ contactId: 'tenant-private' }],
+      participants: ['tenant-private'],
     }] }]);
 
     await expect(resolvePlacementDetail(
@@ -552,5 +557,19 @@ describe('representative resolvers', () => {
       kind: 'resolved',
       branch: { kind: 'thread_detail', thread: 'person_thread', expectsMountWrite: true },
     });
+  });
+
+  it('skips with unresolved_branch when the thread branch API fails', async () => {
+    const api = new FakeApi();
+    const now = new Date('2026-08-12T17:00:00.000Z');
+    const range = computeTourWindow(now);
+    api.pages.set(`/api/tours?from=${range.from}&to=${range.to}`, [{ tours: [{
+      tourId: 'tour-private', status: 'scheduled', scheduledAt: range.to, groupThreadId: 'conv-private',
+    }] }]);
+
+    await expect(resolveTourDetail(
+      api,
+      new FakeDom(new Set(['/tours/tour-private']), now),
+    )).resolves.toEqual({ kind: 'skip', reason: 'unresolved_branch' });
   });
 });

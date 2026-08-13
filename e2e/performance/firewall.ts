@@ -37,7 +37,7 @@ export interface FirewallPage {
 }
 
 export interface FirewallController {
-  assertHealthy(): Promise<void>;
+  assertHealthy(options?: { settle?: boolean }): Promise<void>;
   drainOutOfSampleEvidence(): BlockedWrite[];
   dispose(): Promise<void>;
 }
@@ -261,6 +261,11 @@ function isInvalidatedPausedRequest(error: unknown): boolean {
   return error instanceof Error && error.message.includes('Invalid InterceptionId');
 }
 
+function isClosedSessionError(error: unknown): boolean {
+  return error instanceof Error
+    && /(?:target|session|connection).*(?:closed|detached)|not attached/iu.test(error.message);
+}
+
 function requestReferrer(headers: Record<string, string> | undefined): string | null {
   if (headers === undefined) return null;
   for (const [name, value] of Object.entries(headers)) {
@@ -293,21 +298,28 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   const drainPending = async (): Promise<void> => {
     while (pending.size > 0) await Promise.allSettled([...pending]);
   };
-  const protocolBarrier = async (): Promise<void> => {
+  const protocolBarrier = async (allowClosedSession: boolean): Promise<boolean> => {
     try {
       await session.send('Page.getFrameTree');
-    } catch {
+    } catch (error) {
+      if (allowClosedSession && isClosedSessionError(error)) {
+        await drainPending();
+        return false;
+      }
       latch(new FirewallHandlerError());
+      await drainPending();
+      return false;
     }
     await drainPending();
+    return true;
   };
-  const settleProtocolEvents = async (): Promise<void> => {
+  const settleProtocolEvents = async (allowClosedSession = false): Promise<void> => {
     await drainPending();
     if (watchdogCandidates.size === 0) return;
-    await protocolBarrier();
+    if (!await protocolBarrier(allowClosedSession)) return;
     if (watchdogCandidates.size === 0) return;
     await new Promise<void>((resolve) => setTimeout(resolve, 25));
-    await protocolBarrier();
+    if (!await protocolBarrier(allowClosedSession)) return;
     const escaped = watchdogCandidates.values().next().value;
     if (escaped !== undefined) latch(new FirewallEscapedWriteError(escaped));
   };
@@ -320,9 +332,6 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   };
 
   const handle = async (event: FirewallPausedRequest): Promise<void> => {
-    if (event.networkId !== undefined) {
-      if (!watchdogCandidates.delete(event.networkId)) pausedNetworkIds.add(event.networkId);
-    }
     const method = event.request.method.toUpperCase();
     if (!isFirewallScopedUrl(event.request.url, firstPartyOrigin)) {
       await continuePausedRequest(event.requestId);
@@ -336,6 +345,9 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
     if (!WRITE_METHODS.has(method as WriteMethod)) {
       latch(new UnknownFirewallMethodError());
       return;
+    }
+    if (event.networkId !== undefined) {
+      if (!watchdogCandidates.delete(event.networkId)) pausedNetworkIds.add(event.networkId);
     }
     const sanitized = sanitize({
       rawUrl: event.request.url,
@@ -399,6 +411,16 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
       endpointTemplate: sanitized.endpointTemplate,
     });
   });
+  session.on('Network.loadingFinished', (value) => {
+    const requestId = (value as unknown as { requestId?: string }).requestId;
+    if (typeof requestId === 'string') pausedNetworkIds.delete(requestId);
+  });
+  session.on('Network.loadingFailed', (value) => {
+    const event = value as unknown as { requestId?: string; canceled?: boolean };
+    if (typeof event.requestId !== 'string') return;
+    pausedNetworkIds.delete(event.requestId);
+    if (event.canceled === true) watchdogCandidates.delete(event.requestId);
+  });
   session.on('Page.frameNavigated', (value) => {
     const event = value as unknown as { frame?: { id?: string; url?: string } };
     if (typeof event.frame?.id === 'string' && typeof event.frame.url === 'string') {
@@ -429,8 +451,8 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
   });
 
   return Object.freeze({
-    async assertHealthy(): Promise<void> {
-      await settleProtocolEvents();
+    async assertHealthy(options?: { settle?: boolean }): Promise<void> {
+      if (options?.settle !== false) await settleProtocolEvents();
       if (failure !== null) {
         failureObserved = true;
         throw failure;
@@ -441,11 +463,11 @@ export async function installRequestFirewall(input: InstallRequestFirewallInput)
     },
     async dispose(): Promise<void> {
       if (disposed) return;
-      await settleProtocolEvents();
+      await settleProtocolEvents(true);
       await session.send('Fetch.disable').catch(() => undefined);
       await session.send('Network.disable').catch(() => undefined);
       await session.send('Page.disable').catch(() => undefined);
-      await settleProtocolEvents();
+      await drainPending();
       const unobservedFailure = failureObserved ? null : failure;
       disposed = true;
       await session.detach().catch(() => undefined);

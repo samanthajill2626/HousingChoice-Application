@@ -121,15 +121,20 @@ export function installProfilerProcessHandlers(
     }
     if (!controller.signal.aborted) controller.abort({ reason: 'interrupted' });
   };
-  const handleCrash = (): void => {
+  const handleUncaughtException = (): void => {
     if (!controller.signal.aborted) controller.abort({ reason: 'crashed' });
     options.onForceExitRequested?.();
   };
+  const handleUnhandledRejection = (): void => {
+    if (!controller.signal.aborted) controller.abort({ reason: 'crashed' });
+  };
   for (const event of ['SIGINT', 'SIGTERM'] as const) source.on(event, handleSignal);
-  for (const event of ['uncaughtException', 'unhandledRejection'] as const) source.on(event, handleCrash);
+  source.on('uncaughtException', handleUncaughtException);
+  source.on('unhandledRejection', handleUnhandledRejection);
   return () => {
     for (const event of ['SIGINT', 'SIGTERM'] as const) source.off(event, handleSignal);
-    for (const event of ['uncaughtException', 'unhandledRejection'] as const) source.off(event, handleCrash);
+    source.off('uncaughtException', handleUncaughtException);
+    source.off('unhandledRejection', handleUnhandledRejection);
   };
 }
 
@@ -757,7 +762,7 @@ export function createRealInstrumentation(input: {
           network: collector,
           ui: {
             async urlMatches(): Promise<boolean> {
-              await page!.firewall.assertHealthy();
+              await page!.firewall.assertHealthy({ settle: false });
               try {
                 return new URL(page!.rawPage.url()).pathname === new URL(
                   absoluteUrl(input.baseUrl, destinationPath),

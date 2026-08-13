@@ -48,11 +48,14 @@ Driving the live UI through an MCP server has a browser-channel wrinkle on Windo
 | **Session** (agent inner loop) | `npm run e2e:session` | Long-lived non-watch stack you leave running and drive via the Playwright MCP. DynamoDB + seed come up once. |
 
 Helpers (session mode):
-- `npm run e2e:reseed` — reset local data to a clean seeded slate (fast; no restart).
-- `npm run e2e:restart` — restart **app+worker only** to pick up backend code changes (Vite, DB, and the browser keep their place).
-- `npm run e2e:stop` — reliably stop the session stack (kills the launcher + children, removes `lane.json`).
-- `npm run e2e -- --grep "<name>"` — run a subset against the live session.
-- `npm run e2e:report` — open the last HTML report.
+- `npm run e2e:reseed` - reset local data only after the lane identity ping matches.
+- `npm run e2e:restart` - restart **app+worker only** after proving the launcher is live.
+- `npm run e2e:stop` - stop a live launcher or confirmed orphan lane and remove its state.
+- `npm run e2e -- --grep "<name>"` - run a subset against the live session.
+- `npm run e2e:report` - open the last HTML report.
+
+On Windows, profiler lifecycle ownership checks invoke `powershell.exe`; it must
+be available on `PATH` for hermetic profiler startup and cleanup.
 
 ## Page performance profiler (on demand)
 
@@ -193,10 +196,14 @@ its sanitized method and endpoint template, fails with
 The watchdog waits for a CDP protocol barrier plus a bounded grace re-check before
 confirming an escape. A confirmed escape produces a partial sanitized report with
 the method/template evidence before returning nonzero.
+That safety report intentionally discards all collected samples and rankings from
+the escaped run rather than publishing measurements from an untrusted lane.
 
 Writes observed without an active sample token are stored once in the run-level
 `outOfSampleWrites` list. They are never charged to the next or previous route;
 contract-checkpoint and self-QA modes fail them under a dedicated proof.
+Plain reports surface `WARNING: out_of_sample_write`, and their compact evidence
+table is deduplicated and sorted deterministically.
 
 This is a navigation-only guarantee, not a blanket network sandbox. Public paths
 under `/public/**`, media reads under `/unit-media/**`, and direct storage origins
@@ -393,12 +400,15 @@ starting children:
 }
 ```
 
-The helper scripts (`e2e:reseed`, `e2e:restart`, `e2e:stop`) read this file to
-target the running lane. It is gitignored. `e2e:stop` removes it on teardown so a
-stale file cannot mislead the next run. Ordinary launcher shutdown deliberately
-retains it after removing the matching `session.pid`, because `e2e:stop` needs the
-lane ports to reap orphaned app and public-base listeners. Profiler cleanup removes
-it only after its exact `launcherPid` is dead and the lane number still matches.
+The helper scripts (`e2e:reseed`, `e2e:restart`, `e2e:stop`) treat this gitignored
+file as a routing record, not proof of liveness. Ordinary launcher shutdown retains
+it after removing the matching `session.pid`, because `e2e:stop` needs the lane
+ports to reap reparented Windows orphans. Reseed requires an exact lane and table
+prefix identity ping before any write. Restart requires the recorded launcher to
+be live. Stop proceeds only for a live launcher or a matching app identity, reports
+when it is reaping from a stale launcher record, and compare-deletes unchanged
+state. Profiler cleanup removes the record only after its exact `launcherPid` is
+dead and the lane number still matches.
 
 ### 127.0.0.1 convention
 

@@ -96,11 +96,27 @@ describe('dev gating — router', () => {
       emailDriver: config.emailDriver,
       emailSendingEnabled: config.emailSendingEnabled,
       tablePrefix: config.tablePrefix,
+      lane: null,
       // The preflight's stale-stack freshness guard reads this (launch commit,
       // stamped by scripts/e2e-session.mjs); null when unstamped, as in this test.
       appCommit: process.env['E2E_APP_COMMIT'] ?? null,
       profilerOwnerToken: process.env['E2E_PROFILER_OWNER_TOKEN'] ?? null,
     });
+  });
+
+  it('echoes the hermetic lane as a numeric identity field', async () => {
+    const previousLane = process.env['E2E_LANE'];
+    process.env['E2E_LANE'] = '7';
+    try {
+      const config = enabled();
+      const app = buildApp({ config, devRouter: await maybeLoadDevRouter(config) });
+      const res = await request(app).get('/__dev/ping');
+      expect(res.status).toBe(200);
+      expect(res.body.lane).toBe(7);
+    } finally {
+      if (previousLane === undefined) delete process.env['E2E_LANE'];
+      else process.env['E2E_LANE'] = previousLane;
+    }
   });
 
   it('does NOT expose /__dev/ping when the dev router is absent', async () => {

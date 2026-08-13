@@ -29,6 +29,7 @@ const SAMPLE_STATUSES: readonly SampleStatus[] = [
   'skipped_no_fixture',
   'skipped_fixture_not_navigable',
   'skipped_source_not_ready',
+  'skipped_unresolved_branch',
 ];
 
 function statusCounts(samples: readonly SampleResult[]): SampleStatusCounts {

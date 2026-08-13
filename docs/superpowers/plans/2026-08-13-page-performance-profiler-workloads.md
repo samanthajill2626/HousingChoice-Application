@@ -479,6 +479,7 @@ export interface RouteDefinition {
 ```
 
 - [ ] Migrate every identity consumer in one compile-safe slice: `RequestEvidence`, `SampleResult`, `RouteScaleMetadata`, `RouteModeAggregate`, `ComparisonEntryRef`, branch observations, route-order rows, warmup metadata, sample tokens, browser failure samples, checkpoint rows, report maps, aggregate group keys, comparison keys, self-QA lookup, and serializers.
+- [ ] Introduce the closed `SurfaceEvidence` union and required `SampleResult.surfaceEvidence` in this compile-wide task. Initialize it to null in every production constructor (`routes.ts` skip results, `collect.ts` success/failure paths, and `cli.ts` assembled results), every typed test fixture in aggregate/compare/report/self-QA/collect/routes/cli tests, and every serializer clone. Add basic serializer tests for null and both closed union members so later tasks can replace null without reopening compile-wide ownership; Task 9 still adds the adversarial privacy matrix.
 - [ ] Existing surfaces retain their former key string as `surfaceId` and current path as `pathTemplate`. Static routes receive their current literal path as `coldTarget.path`; resolved details use `{ kind: 'resolved' }`. Assign `behaviorFamily='standard'` except Inbox surfaces.
 - [ ] Change static resolver/navigation to consume `coldTarget.path`; do not reconstruct a cold URL from `pathTemplate`.
 - [ ] Keep `INTERCEPTION_SCOPE_VERSION = 3`; this task changes attribution, not what browser requests are intercepted. Bump report schema, registry, and workload versions as specified.
@@ -602,7 +603,6 @@ npm run typecheck
 
 **Files:**
 
-- Modify: `e2e/performance/types.ts`
 - Modify: `e2e/performance/collect.ts`
 - Modify: `e2e/performance/collect.test.ts`
 - Modify: `e2e/performance/cli.ts`
@@ -637,7 +637,7 @@ return relayRows.count();
 
 Use a page-scoped or row-scoped locator construction that Playwright supports; retain the exact-label and descendant-link semantics.
 
-- [ ] Add required `SampleResult.surfaceEvidence: SurfaceEvidence` and initialize it on every success, timeout, skip, blocked dependency, and browser-failure path. Attach `InboxSampleEvidence` only for `behaviorFamily='inbox'`, attach `{ kind: 'conversation_detail', initialRenderedMessageCount: null }` for conversation detail on the current dashboard, and use null elsewhere. Do not compare it with stored tail depth; keep the field nullable for a future source-proven selector.
+- [ ] Replace the Task 5 null evidence only after a successful sample: attach `InboxSampleEvidence` only for `behaviorFamily='inbox'` and attach `{ kind: 'conversation_detail', initialRenderedMessageCount: null }` for conversation detail on the current dashboard. All failed/skipped/other surfaces retain null. Do not compare the nullable count with stored tail depth.
 - [ ] Dispatch the relay proof only when `surfaceId === 'inbox-all'`, `status === 'ok'`, and the one-run proof has not yet executed. Keep exact equality to `relayGroupCount` and the existing no-truncation/query-budget guard.
 - [ ] Run focused tests and typecheck:
 
@@ -646,7 +646,7 @@ npm run test -w @housingchoice/e2e -- performance/collect.test.ts performance/cl
 npm run typecheck
 ```
 
-- [ ] Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add` for the five task files, and then a separate commit with subject `feat(perf): capture passive inbox evidence`. Its `Co-Authored-By` trailer must name the model that actually authored the commit.
+- [ ] Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add` for the four Task 8 files, and then a separate commit with subject `feat(perf): capture passive inbox evidence`. Its `Co-Authored-By` trailer must name the model that actually authored the commit.
 
 ---
 
@@ -749,6 +749,7 @@ if ($LASTEXITCODE -ne 0) { throw "default_baseline_failed exit=$LASTEXITCODE" }
 - [ ] In the next standalone PowerShell call, parse exactly one safe `performance_report=<directoryName>` line, validate the value against the CLI's existing `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` grammar, construct its exact summary beneath the known repo-root artifact directory, enforce containment/existence, remove the exact temporary capture, and run the explicit-default half. Do not choose an artifact by modification time and do not make the CLI print an absolute path:
 
 ```powershell
+$baselineOutput = Join-Path (Resolve-Path '.superpowers/design-review') 'workload-baseline.stdout.txt'
 $reportLines = @(Get-Content -LiteralPath $baselineOutput | Where-Object { $_ -match '^performance_report=[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' })
 if ($reportLines.Count -ne 1) { throw 'baseline_report_token_invalid' }
 $baselineDirectory = $reportLines[0].Substring('performance_report='.Length)

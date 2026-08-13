@@ -1234,6 +1234,16 @@ $env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed 
 $env:GROUP_IDENTITY_EXCLUDED_NUMBERS = "<the value the TARGET stage is deployed with, or none>"; $env:BUSINESS_PHONE_NUMBER = "<the target stage's business number>"; npm run import:apply:dev -- --quo "<quo dir>" --airtable "<airtable dir>" --review "<reviewed workbook dir>" --yes
 ```
 
+**Apply is ONE command (2026-08-13):** after its writes it CHAINS the group
+conversion (phase 2 - the same machinery as `import:convert-groups`, including
+rails), so a single invocation lands contacts, threads, messages, units AND
+native group texts. `--skip-convert` opts out; dry runs never convert (rails are
+real provider resources). If conversion ends incomplete the command exits 1 -
+re-run the same command, or `import:convert-groups`, until COMPLETE; both are
+convergent over the same worklist. The gates (`GROUP_IDENTITY_EXCLUDED_NUMBERS`
++ `BUSINESS_PHONE_NUMBER` declared; parity vs the export) still apply and still
+come from the invoking shell.
+
 `import:apply:local` / `import:apply:dev` / `import:apply:prod` (or the generic
 `import:apply -- --env <stage> ...`) resolve everything themselves:
 

@@ -29,7 +29,10 @@ import {
 // gate below reads config. `getDocumentClient` is NOT retained - main's --env
 // stage resolution builds the client with the account guard instead.
 import { loadConfig } from '../src/lib/config.js';
-import { runApply } from '../src/lib/import/apply.js';
+import { groupReviewRowsByConversationId, runApply } from '../src/lib/import/apply.js';
+import { createContactsRepo } from '../src/repos/contactsRepo.js';
+import { createConversationsRepo } from '../src/repos/conversationsRepo.js';
+import { createGroupRailService } from '../src/services/groupRail.js';
 import {
   assertGroupIdentityEnvDeclared,
   assertGroupIdentityParity,
@@ -37,9 +40,17 @@ import {
   GroupIdentityParityError,
   PoolNumbersUnavailableError,
   readPoolNumbersForParity,
+  runConvertGroups,
+  type ExpectedGroup,
 } from '../src/lib/import/convertGroups.js';
 import { runPlan } from '../src/lib/import/plan.js';
-import { parseWorkbook, CONTACTS_FILE, GROUPS_FILE, UNITS_FILE } from '../src/lib/import/workbook.js';
+import {
+  CONTACTS_FILE,
+  GROUPS_FILE,
+  UNITS_FILE,
+  isDropped,
+  parseWorkbook,
+} from '../src/lib/import/workbook.js';
 import { createPoolNumbersRepo } from '../src/repos/poolNumbersRepo.js';
 
 function arg(flag: string): string | undefined {
@@ -53,6 +64,10 @@ const reviewDir = arg('--review');
 const targetEnv = arg('--env');
 const dryRun = process.argv.includes('--dry-run');
 const yes = process.argv.includes('--yes');
+// One-command posture (Cameron, 2026-08-13): apply CHAINS the group conversion
+// unless told not to. The standalone import:convert-groups remains for the
+// convergent re-run tail.
+const skipConvert = process.argv.includes('--skip-convert');
 
 const TARGETS = ['local', 'dev', 'prod'] as const;
 type TargetEnv = (typeof TARGETS)[number];
@@ -322,3 +337,103 @@ if (report.conversations.connectedDayOne > 0) {
 }
 
 if (dryRun) console.log('\nDRY RUN - nothing was written.');
+
+// ---------------------------------------------------------------------------
+// Phase 2: group conversion, CHAINED (Cameron 2026-08-13 - "one command that
+// imports everything properly"). Same machinery as import:convert-groups, same
+// gates (asserted at the top of this script), same stage resolution as the
+// writes above. Skipped on dry runs (rails are real provider resources) and
+// with --skip-convert. The standalone command remains the convergent re-run
+// tail: a partial conversion here exits 1, and either command continues it.
+// ---------------------------------------------------------------------------
+if (!dryRun && !skipConvert) {
+  console.log('\nphase 2: converting group threads to native group texts');
+
+  const stageEnv = { ...process.env, TABLE_PREFIX: prefix };
+  const conversationsRepo = createConversationsRepo({ doc, env: stageEnv });
+  const contactsRepo = createContactsRepo({ doc, env: stageEnv });
+
+  const droppedPhones = new Set<string>();
+  for (const person of plan.merge.people) {
+    const contactRow = review.contacts.get(person.rowKey);
+    if (contactRow && isDropped(contactRow)) droppedPhones.add(person.phone);
+  }
+  const groupRows = groupReviewRowsByConversationId(plan, review.groups);
+  const expected: ExpectedGroup[] = [];
+  plan.threads.threads
+    .filter((t) => t.isGroup)
+    .forEach((thread, idx) => {
+      const rowKey = `GRP-${String(idx + 1).padStart(4, '0')}`;
+      const groupRow = groupRows.get(thread.conversationId);
+      const everyoneDropped = thread.participants.every((p) => droppedPhones.has(p));
+      if ((groupRow !== undefined && isDropped(groupRow)) || everyoneDropped) return;
+      expected.push({ conversationId: thread.conversationId, rowKey });
+    });
+
+  const config = loadConfig();
+  let poolNumbers: string[] = [];
+  try {
+    poolNumbers = await readPoolNumbersForParity(
+      () => createPoolNumbersRepo({ doc, env: stageEnv }).listActive(),
+      {
+        onRetry: (attempt, err) =>
+          console.warn(
+            `  ! pool-number read failed (attempt ${attempt}): ` +
+              `${err instanceof Error ? err.message : String(err)} - retrying`,
+          ),
+      },
+    );
+  } catch (err) {
+    if (!(err instanceof PoolNumbersUnavailableError)) throw err;
+    console.error(`\n${err.message}`);
+    console.error('\nApply SUCCEEDED; conversion did not run. Re-run this command or');
+    console.error('import:convert-groups once the pool-number read is healthy.');
+    process.exit(1);
+  }
+
+  const convertReport = await runConvertGroups({
+    conversationsRepo,
+    contactsRepo,
+    expected,
+    rail: createGroupRailService({ config }),
+    ownNumbers: plan.quo.ownNumbers,
+    exclusions: {
+      businessPhoneNumber: config.businessPhoneNumber,
+      poolNumbers,
+      configuredNumbers: config.groupIdentityExcludedNumbers,
+    },
+    at: new Date().toISOString(),
+    onProgress: (done, total) => {
+      if (done % 10 === 0 || done === total) {
+        process.stdout.write(`\r  converging: ${done}/${total}   `);
+      }
+    },
+  });
+  process.stdout.write('\n');
+
+  const t = convertReport.totals;
+  console.log(`  converted              : ${t.converted}`);
+  console.log(`  already converted      : ${t.alreadyConverted}`);
+  console.log(`  refused                : ${t.refused}`);
+  console.log(`  rails created          : ${t.railsCreated}`);
+  console.log(`  rails already present  : ${t.railsExisting}`);
+  console.log(`  rails FAILED           : ${t.railsFailed}`);
+  if (t.railAdjudicationRequired > 0) {
+    console.log(`  ADJUDICATION REQUIRED  : ${t.railAdjudicationRequired}`);
+  }
+
+  if (!convertReport.complete) {
+    console.error(
+      '\nCONVERSION INCOMPLETE - apply succeeded, but some group rows are refused or ' +
+        'rail-less. CONVERGENT: re-run this same command (or import:convert-groups) until ' +
+        'it reports complete.',
+    );
+    process.exit(1);
+  }
+  console.log('\ngroup conversion COMPLETE - all group threads are native group texts.');
+} else if (dryRun && !skipConvert) {
+  console.log(
+    '\nNOTE: group conversion does not run on a dry run (rails are real provider ' +
+      'resources). The real run converts automatically.',
+  );
+}

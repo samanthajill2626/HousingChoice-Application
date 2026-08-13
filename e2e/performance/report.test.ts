@@ -98,6 +98,19 @@ vi.mock('node:fs/promises', async (importOriginal) => {
   };
 });
 
+vi.mock('./routes.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('./routes.js')>();
+  const inbox = actual.ROUTES.find((route) => route.surfaceId === '/inbox')!;
+  return {
+    ...actual,
+    ROUTES: Object.freeze([
+      ...actual.ROUTES,
+      { ...inbox, surfaceId: '/inbox-all' },
+      { ...inbox, surfaceId: '/inbox-unread' },
+    ]),
+  };
+});
+
 const createdRoots: string[] = [];
 
 afterEach(async () => {
@@ -388,6 +401,10 @@ describe('writePerformanceReport', () => {
   it('writes only the exact current-run artifacts with allowlisted schema and ranked Markdown', async () => {
     const outputRoot = await artifactRoot();
     const input = reportInput(outputRoot, '20260812T123456789Z-abcd1234');
+    const sharedPathSurfaces = [
+      { surfaceId: '/inbox-all', pathTemplate: '/inbox' },
+      { surfaceId: '/inbox-unread', pathTemplate: '/inbox' },
+    ] as const;
     const secret = 'private.person@example.com';
     Object.assign(input.config as object, { baseUrl: `https://${secret}`, loginEmail: secret });
     Object.assign(input.target as object, { rawHost: secret });
@@ -397,11 +414,13 @@ describe('writePerformanceReport', () => {
     Object.assign(input.routeOrders[0] as object, { rawRouteIds: [secret] });
     Object.assign(input.warmup as object, { rawUrl: secret });
     Object.assign(input.relayDomCheck as object, { rawRows: [secret] });
-    input.samples.push(
-      sample('/tours', 'cold', 0, { readyMs: 110, clientTruncated: false }),
-      sample('/tours/closed', 'cold', 0, { readyMs: 120, clientTruncated: false }),
-    );
-    input.requests.push(request('/tours', 'cold', 0), request('/tours/closed', 'cold', 0));
+    expect(ROUTES.filter((route) => sharedPathSurfaces.some((surface) => surface.surfaceId === route.surfaceId))
+      .map((route) => ({ surfaceId: route.surfaceId, pathTemplate: route.pathTemplate })))
+      .toEqual(sharedPathSurfaces);
+    input.samples.push(...sharedPathSurfaces.map((surface, index) => (
+      sample(surface.surfaceId, 'cold', 0, { readyMs: 110 + (index * 10), clientTruncated: false })
+    )));
+    input.requests.push(...sharedPathSurfaces.map((surface) => request(surface.surfaceId, 'cold', 0)));
 
     const result = await writePerformanceReport(input);
 
@@ -446,8 +465,9 @@ describe('writePerformanceReport', () => {
       kind: 'inbox', filter: 'all', renderedRowCount: 10, groupsTruncated: false, initialInboxPageRequestCount: 1,
     });
     expect(summary.samples[2].surfaceEvidence).toEqual({ kind: 'conversation_detail', initialRenderedMessageCount: null });
-    expect(summary.samples.filter((sample: { surfaceId: string }) => sample.surfaceId.startsWith('/tours')).map((sample: { surfaceId: string }) => sample.surfaceId))
-      .toEqual(['/tours', '/tours/closed']);
+    expect(summary.samples.filter((sample: { surfaceId: string }) => sharedPathSurfaces.some((surface) => surface.surfaceId === sample.surfaceId))
+      .map((sample: { surfaceId: string }) => sample.surfaceId))
+      .toEqual(sharedPathSurfaces.map((surface) => surface.surfaceId));
     expect(summary.samples[0].blockedWrites).toEqual([{
       method: 'POST',
       endpointTemplate: '/api/inbox/:contactId/read',
@@ -471,7 +491,8 @@ describe('writePerformanceReport', () => {
     ].sort());
     expect(requestLines[0]).toMatchObject({ outcome: 'finished', requestRole: 'required' });
     expect(requestLines[1]).toMatchObject({ outcome: 'finished', requestRole: 'background_refresh' });
-    expect(requestLines.slice(2).map((line: { surfaceId: string }) => line.surfaceId)).toEqual(['/tours', '/tours/closed']);
+    expect(requestLines.slice(2).map((line: { surfaceId: string }) => line.surfaceId))
+      .toEqual(sharedPathSurfaces.map((surface) => surface.surfaceId));
     expect(requestLines[0].rawUrl).toBeUndefined();
 
     expect(report).toContain('## Cold worst offenders');

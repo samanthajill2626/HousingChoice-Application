@@ -130,14 +130,18 @@ describe('performance seed destructive boundary', () => {
     const namespace = createTableNamespace(config);
     const leanNativeConversation = SEED.conversations.find((conversation) => conversation.type === 'group_text');
     if (!leanNativeConversation) throw new Error('lean_native_group_missing');
+    const firstPageKey = { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' };
     let queryCount = 0;
     const send = vi.fn(async (command: QueryCommand | BatchWriteCommand | DeleteCommand) => {
       if (command instanceof QueryCommand) {
         queryCount += 1;
         expect(command.input.TableName).toBe(namespace.tableNameFor('messages'));
         expect(command.input.ExpressionAttributeValues).toEqual({ ':conversationId': leanNativeConversation.conversationId });
+        if (queryCount === 2) {
+          expect(command.input.ExclusiveStartKey).toEqual(firstPageKey);
+        }
         return queryCount === 1
-          ? { Items: [{ tsMsgId: 'first' }], LastEvaluatedKey: { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' } }
+          ? { Items: [{ tsMsgId: 'first' }], LastEvaluatedKey: firstPageKey }
           : { Items: [{ tsMsgId: 'second' }] };
       }
       if (command instanceof DeleteCommand) {
@@ -158,6 +162,18 @@ describe('performance seed destructive boundary', () => {
     });
 
     expect(queryCount).toBe(2);
+    const batchDeleteKeys = send.mock.calls.flatMap(([command]) => {
+      if (!(command instanceof BatchWriteCommand)) return [];
+      const requestItems = command.input.RequestItems ?? {};
+      const messageDeletes = requestItems[namespace.tableNameFor('messages')] ?? [];
+      if (messageDeletes.length === 0) return [];
+      expect(Object.keys(requestItems)).toEqual([namespace.tableNameFor('messages')]);
+      return messageDeletes;
+    }).map((request) => request.DeleteRequest?.Key);
+    expect(batchDeleteKeys).toEqual([
+      { conversationId: leanNativeConversation.conversationId, tsMsgId: 'first' },
+      { conversationId: leanNativeConversation.conversationId, tsMsgId: 'second' },
+    ]);
     const addressedTables = send.mock.calls.flatMap(([command]) => {
       const input = (command as QueryCommand | BatchWriteCommand | DeleteCommand).input as {
         TableName?: string;

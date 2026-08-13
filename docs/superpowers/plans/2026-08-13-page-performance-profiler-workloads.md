@@ -148,6 +148,22 @@ export interface InboxSampleEvidence {
   initialInboxPageRequestCount: number;
 }
 
+export interface ConversationDetailSampleEvidence {
+  kind: 'conversation_detail';
+  initialRenderedMessageCount: number | null;
+}
+
+export type SurfaceEvidence =
+  | InboxSampleEvidence
+  | ConversationDetailSampleEvidence
+  | null;
+
+// Add this required field to SampleResult and initialize it on every return path.
+// Non-Inbox/non-conversation surfaces use null.
+export interface SampleResultEvidenceContract {
+  surfaceEvidence: SurfaceEvidence;
+}
+
 // Optional only on exact role locators. Route construction rejects selected on
 // any role other than tab, and the browser adapter maps it to ARIA state.
 export interface LocatorContract {
@@ -290,7 +306,7 @@ Run standalone `git status`, the `MERGE_HEAD` check, explicit-path `git add -- a
 - [ ] Add failing generation tests for exact 95/4/1 types at 100 contacts, exact native-group count, unique canonical IDs, roster sizes 2 through 4, no roster reuse, and no lean contact in a native roster.
 - [ ] Add a small-pool exhaustive matrix: requested counts from zero through exact capacity for active pools of 0 through 5. Assert infeasible requests reject before generation and every feasible request returns exactly the requested number.
 - [ ] Add a non-exhausted iterator test where the size-3 and size-4 iterators exhaust before size-2. Assert they leave rotation and size-2 continues without collision.
-- [ ] Add scale-1, scale-7, and `nativeGroups=20000` instrumentation tests proving only requested combinations are visited/yielded and no complete combinatorial pool is allocated.
+- [ ] Add scale-1, scale-7, and cap-valid `nativeGroups=20000` instrumentation tests proving only requested combinations are visited/yielded and no complete combinatorial pool is allocated. The 20000 case must explicitly set `messagesPerConversation=0` and `longConversationMessages=0` while retaining enough active contacts for roster capacity; assert resolution succeeds before inspecting iterator instrumentation. In a separate test, assert the same 20000 groups at ordinary density is rejected by the unchanged total-work cap.
 - [ ] Add row-shape tests for `type='group_text'`, `status='group_open'`, `ai_mode='manual'`, typed `participants`, absent relay-only fields, deterministic activity/provider/message keys, mixed read/unread rows, and exact sender attribution. Inbound rows use `phone#<E164>` and the roster member's reviewed type; outbound rows use imported `TEAM_SENDER_KEY`.
 - [ ] Add long-conversation tests at zero, ordinary default, the seven-day boundary on both sides, and 20000. Assert the designated conversation is the detail resolver fixture, the oldest message does not predate `created_at`, and total messages match the replacement formula.
 - [ ] Add large-broadcast tests for eligible generated tenants only, exclusion of landlord/unknown/deleted contacts, unique recipients, lean fallback, clipping, and terminal-broadcast fixture selection.
@@ -621,7 +637,7 @@ return relayRows.count();
 
 Use a page-scoped or row-scoped locator construction that Playwright supports; retain the exact-label and descendant-link semantics.
 
-- [ ] Attach `InboxSampleEvidence` only for `behaviorFamily='inbox'`. Attach `initialRenderedMessageCount: null` for conversation detail on the current dashboard. Do not compare it with stored tail depth; keep the field nullable for a future source-proven selector.
+- [ ] Add required `SampleResult.surfaceEvidence: SurfaceEvidence` and initialize it on every success, timeout, skip, blocked dependency, and browser-failure path. Attach `InboxSampleEvidence` only for `behaviorFamily='inbox'`, attach `{ kind: 'conversation_detail', initialRenderedMessageCount: null }` for conversation detail on the current dashboard, and use null elsewhere. Do not compare it with stored tail depth; keep the field nullable for a future source-proven selector.
 - [ ] Dispatch the relay proof only when `surfaceId === 'inbox-all'`, `status === 'ok'`, and the one-run proof has not yet executed. Keep exact equality to `relayGroupCount` and the existing no-truncation/query-budget guard.
 - [ ] Run focused tests and typecheck:
 
@@ -653,7 +669,7 @@ npm run typecheck
 - Produces: schema 2 artifacts, registry/workload compatibility, resolved comparison projection, 31 independent rankings, 31/62 full self-QA, and privacy-safe new fields.
 - Consumes: Tasks 1, 5, 6, and 8 contracts; existing report preflight/defense scan and comparison mismatch machinery.
 
-- [ ] Add schema tests that assert the exact property allowlist for every new/changed object: seed manifest, comparison workload, request evidence, sample evidence, route order, branch observation, aggregate, ranking entry, comparison entry, and self-QA result.
+- [ ] Add schema tests that assert the exact property allowlist for every new/changed object: seed manifest, comparison workload, request evidence, `SampleResult.surfaceEvidence`, both discriminated surface-evidence members, route order, branch observation, aggregate, ranking entry, comparison entry, and self-QA result. Prove the conversation-detail serialized sample retains the exact null value instead of dropping the field.
 - [ ] Add the inverse privacy test: mutate each new field with an arbitrary string, raw ID-like value, phone, email, URL/query, or extra property and assert sanitization rejects/replaces it through the existing closed path. Numeric fields must require non-negative safe integers; enums must use explicit allowlists.
 - [ ] Add comparison tests for each incompatibility field: schema version, registry version, workload version, surface set, target data-source class, and resolved comparison workload. Assert old 28-surface baselines are incompatible and `/inbox` is never silently aligned to `inbox-all`.
 - [ ] Add compatibility tests for omitted versus explicit equal defaults and distinct requested/clipped values that produce the same resolved workload.
@@ -722,22 +738,31 @@ npm run perf:pages -- hermetic --scale=1 --cold-repeats=1 --warm-repeats=1 --sel
 
 Require exit 0, 31 resolved surfaces, 62 successful samples, all four Inbox surfaces in both rankings, exact page/badge contracts, relay-only DOM equality, fixture reachability, zero unexpected write tuples, healthy watchdog, and all privacy/state/cleanup assertions.
 
-- [ ] Run a separate non-self-QA baseline with omitted seed defaults and a fixed order. This is distinct from the 31/62 self-QA because diagnostic mode intentionally rejects explicit seed overrides:
+- [ ] Run a separate non-self-QA baseline with omitted seed defaults and a fixed order. This is distinct from the 31/62 self-QA because diagnostic mode intentionally rejects explicit seed overrides. Capture only stdout to one exact gitignored temporary file so the safe directory token can be parsed without piping the profiler command:
 
 ```powershell
-npm run perf:pages -- hermetic --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242
+$baselineOutput = Join-Path (Resolve-Path '.superpowers/design-review') 'workload-baseline.stdout.txt'
+npm run perf:pages -- hermetic --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242 1> $baselineOutput
+if ($LASTEXITCODE -ne 0) { throw "default_baseline_failed exit=$LASTEXITCODE" }
 ```
 
-- [ ] Require exit 0. In the next PowerShell call, resolve the just-created newest complete `summary.json`, verify it exists, and run the explicit-default half with the same repeats and route-order seed:
+- [ ] In the next standalone PowerShell call, parse exactly one safe `performance_report=<directoryName>` line, validate the value against the CLI's existing `^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$` grammar, construct its exact summary beneath the known repo-root artifact directory, enforce containment/existence, remove the exact temporary capture, and run the explicit-default half. Do not choose an artifact by modification time and do not make the CLI print an absolute path:
 
 ```powershell
-$baselineSummary = Get-ChildItem -LiteralPath 'e2e/.artifacts/performance' -Filter 'summary.json' -File -Recurse | Sort-Object LastWriteTimeUtc -Descending | Select-Object -First 1 -ExpandProperty FullName
-if (-not $baselineSummary -or -not [IO.Path]::IsPathFullyQualified($baselineSummary)) { throw 'baseline_summary_missing' }
+$reportLines = @(Get-Content -LiteralPath $baselineOutput | Where-Object { $_ -match '^performance_report=[A-Za-z0-9][A-Za-z0-9_-]{0,127}$' })
+if ($reportLines.Count -ne 1) { throw 'baseline_report_token_invalid' }
+$baselineDirectory = $reportLines[0].Substring('performance_report='.Length)
+$artifactRoot = [IO.Path]::GetFullPath((Join-Path (Get-Location) 'e2e/.artifacts/performance'))
+$baselineSummary = [IO.Path]::GetFullPath((Join-Path $artifactRoot (Join-Path $baselineDirectory 'summary.json')))
+if ($baselineDirectory -notmatch '^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') { throw 'baseline_directory_invalid' }
+if (-not $baselineSummary.StartsWith($artifactRoot + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase)) { throw 'baseline_summary_outside_root' }
+if (-not (Test-Path -LiteralPath $baselineSummary -PathType Leaf)) { throw 'baseline_summary_missing' }
+Remove-Item -LiteralPath $baselineOutput
 npm run perf:pages -- hermetic --scale=1 --contacts=100 --units=16 --placements=50 --tours=50 --conversations=100 --native-groups=21 --messages-per-conversation=10 --long-conversation-messages=10 --broadcasts=10 --recipients-per-broadcast=25 --large-broadcast-recipients=25 --cold-repeats=1 --warm-repeats=1 --route-order-seed=424242 "--baseline=$baselineSummary"
 if ($LASTEXITCODE -ne 0) { throw "explicit_default_comparison_failed exit=$LASTEXITCODE" }
 ```
 
-Confirm `$baselineSummary` equals the safe absolute summary path printed by the immediately preceding run. Require an explicitly controlled comparison with no workload, route-order, schema, registry, or surface-set mismatch.
+Require an explicitly controlled comparison with no workload, route-order, schema, registry, or surface-set mismatch. If parsing or comparison fails, remove only the exact `$baselineOutput` file after inspecting it; never use a glob or recursive removal.
 - [ ] Run targeted suites once more after any integration fixes:
 
 ```powershell

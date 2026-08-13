@@ -140,11 +140,14 @@ Three non-test call sites update. TypeScript rejects a missed site, because an
 
 ### 4.3 Hooks
 
-All three gain the same three members on their returned state:
+All three gain the same four members on their returned state:
 
 - `hasOlder: boolean` - whether a "Load older" control should render.
 - `loadingOlder: boolean` - a fetch is in flight; the control is disabled.
 - `loadOlder: () => Promise<void>` - fetch and merge one older page.
+- `olderPagesLoaded: number` - incremented only when an older page has merged.
+  This is the renderer's ONLY reliable signal that a prepend happened; see
+  section 4.5 for why nothing observable from the item list can replace it.
 
 `useRelayThread` and `useGroupThread` page with `limit = 50` and
 `before = <oldest RAW fetched tsMsgId>`, tracked in a ref from the last element
@@ -200,7 +203,15 @@ every caller not in scope here.
 
 The control renders above the stream with the accessible name
 "Load older messages", per the accessibility-first selector rule in
-`e2e/support/selectors.md`.
+`e2e/support/selectors.md`. Because it sits outside the scroll container it is
+always visible while older history exists, rather than something the operator
+must scroll up to find. Clicking it while pinned at the bottom is legitimate and
+its only feedback is the label change to "Loading..." and, at the end of
+history, the control retiring - the transcript deliberately does not move.
+
+It stays visible when the stream renders empty. That is not a cosmetic slip: if
+the "Comms only" filter hides every entry on the current page, the control is
+the only way to reach the pages behind it.
 
 It sits OUTSIDE the scroll container (in `.streamWrap`, above `.stream`), not
 inside it. Inside, the control would contribute to `el.scrollHeight` and then
@@ -209,36 +220,48 @@ flips false - so the restored offset would under-shoot by the control's own
 height on the last "Load older" of every thread. Outside, only prepended content
 changes the height, and the delta math is exact.
 
-The subtle part is scroll. To reach the button the operator must scroll UP, so
-`atBottomRef.current` is false. The existing layout effect at
+The subtle part is scroll. The existing layout effect at
 `Timeline.tsx:1132-1153` reacts to a grown item count by setting `hasNewBelow`,
 which would fire a spurious "new messages" pill for a PREPEND - content that
-landed above them, not below.
+landed above the operator, not below.
 
 The prepend path therefore:
 
-1. records `{ height: el.scrollHeight, firstItemId }` immediately before invoking
-   `onLoadOlder`, where `firstItemId` is the id of the first RENDERED item;
-2. consumes that anchor only on a layout pass where the first rendered item id
-   has CHANGED - i.e. the prepend actually landed - setting
-   `el.scrollTop += el.scrollHeight - height` so the bubble the operator was
-   reading stays exactly where it was;
-3. suppresses the `hasNewBelow` pill for that pass.
+1. records `el.scrollHeight` immediately before invoking `onLoadOlder`;
+2. consumes that anchor on the layout pass where the hook reports that an older
+   page actually merged, setting `el.scrollTop += el.scrollHeight - height` so
+   the bubble the operator was reading stays exactly where it was;
+3. suppresses the `hasNewBelow` pill for that pass;
+4. on every intervening pass, RE-BASELINES `height` to the current
+   `el.scrollHeight`, so anything that lands between the request and the prepend
+   is excluded from the restore delta.
 
-Keying on the first item id, rather than on "the next pass where the count
-grew", is load-bearing. The hooks refetch on a 300ms SSE debounce, so an inbound
-message can easily land WHILE the older page is in flight. A count-keyed anchor
-would be consumed by that append: the reader would be scrolled by the height of
-a message that arrived below them, the pill for it would be swallowed, and the
-real prepend - arriving with the anchor already spent - would then raise the
-spurious pill this section exists to prevent. An id-keyed anchor is untouched by
-an append.
+**Consumption is driven by a fact, not a heuristic.** Each hook exposes
+`olderPagesLoaded`, a counter incremented only when an older page has merged
+into state, and `Timeline` consumes the anchor on the render where that counter
+changes. Two weaker rules were tried and both are wrong:
 
-The same keying handles the two degenerate cases: an older page that returns
-nothing, and one whose entries are all filtered out by the "Comms only" toggle
-or retry-collapse (`clusters` derives from the FILTERED `visible`, not from
-`items`). In both, the first rendered id is unchanged, the anchor is not
-consumed, and a settle effect clears it so it cannot mis-handle a later append.
+- Keyed on "the next pass where the count grew": the hooks refetch on a 300ms
+  SSE debounce, so an inbound message easily lands WHILE the older page is in
+  flight. It would steal the anchor - scrolling the reader by the height of a
+  message that arrived below them, swallowing that message's pill, and leaving
+  the real prepend to raise the spurious one this section exists to prevent.
+- Keyed on "the first rendered item id changed": `clusters` derives from the
+  FILTERED `visible`, not from `items`, so the "Comms only" toggle and
+  retry-collapse both change the first rendered item with no prepend at all.
+
+A counter from the hook is immune to all of it: appends, filter toggles, retry
+collapses, and empty older pages leave it untouched.
+
+Accepted residual: if an append and the older page land in the SAME batched
+render, the restore delta includes the append's height and the reader is
+mis-positioned by roughly one message. It cannot lose or duplicate content, and
+closing it would require anchoring to a measured element position, which jsdom
+cannot exercise.
+
+A settle effect clears a stale anchor once `loadingOlder` goes false, covering
+an older page that returns nothing at all. Callers therefore pass all four
+paging props together or none - `loadingOlder` is what disarms the anchor.
 
 The existing bottom-pinning, conversation-switch reset, and "new below" pill
 behavior for appends are untouched.
@@ -272,14 +295,20 @@ an unshipped control on the operator's two most-open pages. Only
 - `Timeline`: the control renders only when `hasOlder`; a prepend holds the
   scroll anchor; a prepend raises no "new below" pill; an append still does; an
   append arriving while an older page is in flight does NOT consume the prepend
-  anchor (section 4.5).
+  anchor, and neither does a "Comms only" toggle that changes the first rendered
+  item (section 4.5).
 
 ### 5.2 End to end
 
 One spec that builds its own long thread rather than touching a seed fixture.
 It targets a RELAY GROUP: `createGroupOpen` provisions an open group with a pool
-number, then roughly 55 inbound messages from one member through the fake-phone
-webhook seam push it past the ceiling. It asserts the newest page is present and
+number - given TWO members, matching every existing caller and the fixture's own
+"a fresh pair" contract - then roughly 55 inbound messages from one member
+through the fake-phone webhook seam push it past the ceiling.
+
+The spec must raise its own timeout. `createGroupOpen`'s fresh path polls up to
+30s for a warming number and then up to 60s for the group to open, against a 30s
+per-test default with `retries: 0`. It asserts the newest page is present and
 the oldest message is not, clicks "Load older messages", then asserts the oldest
 message is reachable and no control remains under either label.
 

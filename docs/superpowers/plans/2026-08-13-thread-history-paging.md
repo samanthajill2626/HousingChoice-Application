@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-08-13-thread-history-paging-design.md`
 
-**Revision:** v2, after adversarial review round 1 (two reviewers, 37 findings, all accepted). Adjudications: `.superpowers/design-review/adjudications.md`. The five root fixes carried into this revision are marked **[R1]**..**[R5]** where they appear.
+**Revision:** v3, after adversarial review rounds 1 and 2 (round 1: two reviewers, 37 findings, all accepted; round 2: 11 findings, 10 accepted, 1 rejected). Adjudications: `.superpowers/design-review/adjudications.md`. The root fixes are marked **[R1]**..**[R5]** where they appear. Round 2's headline correction is inside R1: the prepend anchor is now consumed on an explicit `olderPagesLoaded` counter from the hook, because BOTH earlier rules - "the count grew" and "the first rendered item changed" - were shown to fire without a prepend.
 
 ## Global Constraints
 
@@ -373,10 +373,11 @@ EOF
 
 **Interfaces:**
 - Consumes: `THREAD_PAGE_SIZE`, `mergeTimelineItems` from `../shared/threadPaging.js`; `getConversationMessages(id, opts, signal)` from Task 2.
-- Produces: three new members on `RelayThreadState`, the same three every other hook exposes:
+- Produces: four new members on `RelayThreadState`, the same four every other hook exposes:
   - `hasOlder: boolean`
   - `loadingOlder: boolean`
   - `loadOlder: () => Promise<void>`
+  - `olderPagesLoaded: number`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -587,6 +588,15 @@ In `dashboard/src/routes/conversation/useRelayThread.ts`, add to `RelayThreadSta
   loadingOlder: boolean;
   /** Fetch and merge one older page. No-op while one is already in flight. */
   loadOlder: () => Promise<void>;
+  /** Incremented ONLY when an older page has merged into `items`.
+   *
+   *  This is the renderer's only reliable signal that a PREPEND happened, and
+   *  <Timeline> uses it to decide when to restore the scroll anchor. Nothing
+   *  observable from the item list can replace it: an SSE append grows the list
+   *  without a prepend, and the "Comms only" toggle changes the FIRST rendered
+   *  item without one either (Timeline renders the filtered `visible`, not
+   *  `items`). Spec section 4.5. */
+  olderPagesLoaded: number;
 ```
 
 - [ ] **Step 4: Implement the paging**
@@ -602,6 +612,8 @@ Add state and refs beside the existing ones (after `abortRef`):
 ```ts
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped ONLY on a successful older-page merge - <Timeline>'s prepend signal.
+  const [olderPagesLoaded, setOlderPagesLoaded] = useState(0);
   // [R4] The in-flight guard is a REF, not render state: two clicks in one tick
   // share a single render closure, so a state-based guard would let the second
   // through - firing a duplicate read that aborts the first and can strand the
@@ -663,6 +675,8 @@ Add `loadOlder` after `fetchNow`:
       const oldest = older[older.length - 1]?.tsMsgId;
       if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
       setHasOlder(older.length >= THREAD_PAGE_SIZE);
+      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+      setOlderPagesLoaded((n) => n + 1);
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -705,6 +719,7 @@ Add the three members to the returned object:
     hasOlder,
     loadingOlder,
     loadOlder,
+    olderPagesLoaded,
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
@@ -894,6 +909,31 @@ describe('useGroupThread paging', () => {
     expect(getConversationMessages).toHaveBeenCalledTimes(1);
   });
 
+  // [R4] Same ref guard as the relay hook - tested here too, because the guard
+  // was copied and a copied guard is an untested guard.
+  it('fires one older request for a double click', async () => {
+    getConversationMessages.mockResolvedValueOnce(page(50, 10));
+    let release: (v: Message[]) => void = () => {};
+    getConversationMessages.mockReturnValueOnce(
+      new Promise<Message[]>((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<Probe />);
+    await waitFor(() => expect(screen.getByTestId('status')).toHaveTextContent('ready'));
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getConversationMessages).toHaveBeenCalledTimes(2); // first page + ONE older
+
+    await act(async () => {
+      release([]);
+    });
+    await waitFor(() => expect(screen.getByTestId('loadingOlder')).toHaveTextContent('false'));
+  });
+
   it('replaces rather than merges when the conversation changes', async () => {
     getConversationMessages.mockResolvedValueOnce(page(3, 100));
     const { rerender } = render(<Probe conversationId="g1" />);
@@ -929,6 +969,11 @@ In `dashboard/src/routes/conversation/useGroupThread.ts`, add to `GroupThreadSta
   loadingOlder: boolean;
   /** Fetch and merge one older page. No-op while one is already in flight. */
   loadOlder: () => Promise<void>;
+  /** Incremented ONLY when an older page has merged - <Timeline>'s prepend
+   *  signal. Nothing observable from the item list can replace it: an append
+   *  grows the list without a prepend, and the "Comms only" toggle changes the
+   *  first RENDERED item without one. Spec section 4.5. */
+  olderPagesLoaded: number;
 ```
 
 - [ ] **Step 4: Implement the paging**
@@ -944,6 +989,8 @@ Add state and refs after `abortRef`:
 ```ts
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped ONLY on a successful older-page merge - <Timeline>'s prepend signal.
+  const [olderPagesLoaded, setOlderPagesLoaded] = useState(0);
   // [R4] Ref, not state: two clicks in one tick share one render closure.
   const loadingOlderRef = useRef(false);
   // [R3] The bound comes from the RAW newest-first page, never from mapped items.
@@ -996,6 +1043,8 @@ Add `loadOlder` after `fetchNow`:
       const oldest = older[older.length - 1]?.tsMsgId;
       if (oldest !== undefined) oldestFetchedIdRef.current = oldest;
       setHasOlder(older.length >= THREAD_PAGE_SIZE);
+      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+      setOlderPagesLoaded((n) => n + 1);
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -1044,12 +1093,13 @@ Add to the returned object:
     hasOlder,
     loadingOlder,
     loadOlder,
+    olderPagesLoaded,
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `npm test -w @housingchoice/dashboard -- src/routes/conversation/useGroupThread.test.tsx`
-Expected: PASS, all six cases.
+Expected: PASS, all seven cases.
 
 - [ ] **Step 6: Run typecheck**
 
@@ -1216,6 +1266,34 @@ describe('useContactTimeline paging', () => {
     expect(screen.getByTestId('p-hasOlder')).toHaveTextContent('false');
   });
 
+  // [R4] The ref guard, tested here too rather than assumed from the copy.
+  it('fires one older request for a double click', async () => {
+    getContactTimeline.mockResolvedValueOnce({
+      items: [timelineItem('b', '2026-08-13T10:00:00.000Z')],
+      nextCursor: 'CURSOR1',
+      upcoming: [],
+    });
+    let release: (v: unknown) => void = () => {};
+    getContactTimeline.mockReturnValueOnce(
+      new Promise((resolve) => {
+        release = resolve;
+      }),
+    );
+    render(<PagingProbe contactId="p1" />);
+    await waitFor(() => expect(screen.getByTestId('p-status')).toHaveTextContent('ready'));
+
+    await act(async () => {
+      screen.getByRole('button', { name: 'load older' }).click();
+      screen.getByRole('button', { name: 'load older' }).click();
+    });
+    expect(getContactTimeline).toHaveBeenCalledTimes(2); // first page + ONE older
+
+    await act(async () => {
+      release({ items: [], nextCursor: null });
+    });
+    await waitFor(() => expect(screen.getByTestId('p-loadingOlder')).toHaveTextContent('false'));
+  });
+
   it('replaces rather than merges when the kinds filter changes', async () => {
     getContactTimeline.mockResolvedValueOnce({
       items: [timelineItem('a', '2026-08-13T09:00:00.000Z')],
@@ -1298,6 +1376,8 @@ Add beside the existing state:
 ```ts
   const [hasOlder, setHasOlder] = useState(false);
   const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped ONLY on a successful older-page merge - <Timeline>'s prepend signal.
+  const [olderPagesLoaded, setOlderPagesLoaded] = useState(0);
   // [R4] Ref guard, as in the conversation hooks.
   const loadingOlderRef = useRef(false);
   // [R5] The cursor is NOT part of TimelineData: ContactTimelineState extends it,
@@ -1368,6 +1448,8 @@ messages-only re-assembly into a `source: 'server'` timeline.
         // blanking the pinned section.
         items: mergeTimelineItems(prev.items, normalizeServerItems(page.items)),
       }));
+      // Bump LAST and only here: this is what tells <Timeline> a prepend landed.
+      setOlderPagesLoaded((n) => n + 1);
     } catch (err) {
       if (controller.signal.aborted || (err instanceof DOMException && err.name === 'AbortError')) {
         return;
@@ -1380,7 +1462,18 @@ messages-only re-assembly into a `source: 'server'` timeline.
   }, [contactId, kinds]);
 ```
 
-Extend the contact-reset effect and add the unmount abort:
+Extend the contact-reset effect and add the unmount abort. Two details this hook
+gets wrong if it is written from the conversation hooks by analogy:
+
+- It must clear `hasOlder` and `cursorRef` too. `ContactDetail.tsx:115-117`
+  states outright that a `contactId` change re-renders the SAME component
+  instance with no remount, so anything not reset by hand LEAKS across contacts.
+  A click landing in that window would merge a page fetched on contact A's
+  cursor boundary into contact B and leave B holding A's cursor.
+- It must key on `kinds` as well. `fetchNow` depends on `[contactId, kinds]`, so
+  a filter change is a new feed; keying the reset on `contactId` alone would
+  leave an in-flight older page un-aborted and the guard un-cleared, re-siting
+  the same defect inside `loadOlder`.
 
 ```ts
   useEffect(() => {
@@ -1388,12 +1481,19 @@ Extend the contact-reset effect and add the unmount abort:
     setPending([]);
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setLoadingOlder(false);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setHasOlder(false);
     loadingOlderRef.current = false;
+    cursorRef.current = null;
     olderAbortRef.current?.abort();
-  }, [contactId]);
+  }, [contactId, kinds]);
 
   useEffect(() => () => olderAbortRef.current?.abort(), []);
 ```
+
+Note `setPending([])` now also runs on a `kinds` change. That is correct: an
+optimistic bubble belongs to the feed it was sent from, and `fetchNow` is
+re-running anyway.
 
 Add to `ContactTimelineState` and to the returned object:
 
@@ -1404,12 +1504,16 @@ Add to `ContactTimelineState` and to the returned object:
   hasOlder: boolean;
   loadingOlder: boolean;
   loadOlder: () => Promise<void>;
+  /** Incremented ONLY when an older page has merged - <Timeline>'s prepend
+   *  signal. Spec section 4.5. */
+  olderPagesLoaded: number;
 ```
 
 ```ts
     hasOlder,
     loadingOlder,
     loadOlder,
+    olderPagesLoaded,
 ```
 
 - [ ] **Step 6: Run the tests to verify they pass**
@@ -1546,7 +1650,12 @@ describe('Timeline load-older control', () => {
   });
 
   it('holds the scroll anchor when older items prepend', () => {
-    const { rerender } = renderTimeline({ hasOlder: true, onLoadOlder: vi.fn() });
+    const { rerender } = renderTimeline({
+      hasOlder: true,
+      loadingOlder: false,
+      olderPagesLoaded: 0,
+      onLoadOlder: vi.fn(),
+    });
     const el = streamEl();
     stubScroll(el, 500, 100);
     el.scrollTop = 0;
@@ -1565,6 +1674,8 @@ describe('Timeline load-older control', () => {
           source="server"
           canSend={false}
           hasOlder={false}
+          loadingOlder={false}
+          olderPagesLoaded={1}
           onLoadOlder={vi.fn()}
         />
       </MemoryRouter>,
@@ -1574,7 +1685,12 @@ describe('Timeline load-older control', () => {
   });
 
   it('raises no "new messages" pill for a prepend', () => {
-    const { rerender } = renderTimeline({ hasOlder: true, onLoadOlder: vi.fn() });
+    const { rerender } = renderTimeline({
+      hasOlder: true,
+      loadingOlder: false,
+      olderPagesLoaded: 0,
+      onLoadOlder: vi.fn(),
+    });
     const el = streamEl();
     stubScroll(el, 500, 100);
     el.scrollTop = 0;
@@ -1590,6 +1706,8 @@ describe('Timeline load-older control', () => {
           source="server"
           canSend={false}
           hasOlder={false}
+          loadingOlder={false}
+          olderPagesLoaded={1}
           onLoadOlder={vi.fn()}
         />
       </MemoryRouter>,
@@ -1615,10 +1733,19 @@ describe('Timeline load-older control', () => {
     expect(screen.getByRole('button', { name: 'Jump to the newest messages' })).toBeVisible();
   });
 
-  // [R1] The anchor is keyed to the PREPEND, not to "the next growth". An SSE
-  // append landing while the older page is in flight must not consume it.
+  // [R1] The anchor is consumed only when the HOOK reports a merged older page.
+  // An SSE append landing while the older page is in flight must not steal it.
+  //
+  // NOTE the initial render passes loadingOlder={false}: the control is only
+  // named "Load older messages" while it is NOT loading, so a test that renders
+  // with loadingOlder={true} cannot find or click it.
   it('does not consume the anchor when an append lands mid-flight', () => {
-    const { rerender } = renderTimeline({ hasOlder: true, loadingOlder: true, onLoadOlder: vi.fn() });
+    const { rerender } = renderTimeline({
+      hasOlder: true,
+      loadingOlder: false,
+      olderPagesLoaded: 0,
+      onLoadOlder: vi.fn(),
+    });
     const el = streamEl();
     stubScroll(el, 500, 100);
     el.scrollTop = 0;
@@ -1627,6 +1754,7 @@ describe('Timeline load-older control', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
 
     // An inbound message appends BELOW while the older page is still in flight.
+    // The counter has NOT moved, so the anchor must survive.
     setNum(el, 'scrollHeight', 600);
     rerender(
       <MemoryRouter>
@@ -1637,6 +1765,7 @@ describe('Timeline load-older control', () => {
           canSend={false}
           hasOlder
           loadingOlder
+          olderPagesLoaded={0}
           onLoadOlder={vi.fn()}
         />
       </MemoryRouter>,
@@ -1646,8 +1775,8 @@ describe('Timeline load-older control', () => {
     expect(el.scrollTop).toBe(0);
     expect(screen.getByRole('button', { name: 'Jump to the newest messages' })).toBeVisible();
 
-    // NOW the older page lands. The anchor is still armed and re-baselined to the
-    // post-append height, so only the prepended 200px moves the reader.
+    // NOW the older page lands: the counter moves. The anchor was re-baselined to
+    // the post-append height, so only the prepended 200px moves the reader.
     setNum(el, 'scrollHeight', 800);
     rerender(
       <MemoryRouter>
@@ -1657,11 +1786,57 @@ describe('Timeline load-older control', () => {
           source="server"
           canSend={false}
           hasOlder={false}
+          loadingOlder={false}
+          olderPagesLoaded={1}
           onLoadOlder={vi.fn()}
         />
       </MemoryRouter>,
     );
     expect(el.scrollTop).toBe(200);
+  });
+
+  // The "Comms only" toggle changes the FIRST rendered item with no prepend at
+  // all, because Timeline renders the filtered `visible`, not `items`. It must
+  // not be mistaken for one.
+  it('does not consume the anchor when a filter change alters the first item', () => {
+    const milestone = {
+      kind: 'milestone',
+      id: 'ms1',
+      at: '2026-08-13T08:00:00.000Z',
+      label: 'Contact created',
+    } as unknown as TimelineItem;
+    const { rerender } = renderTimeline({
+      items: [milestone, MID],
+      hasOlder: true,
+      loadingOlder: false,
+      olderPagesLoaded: 0,
+      onLoadOlder: vi.fn(),
+    });
+    const el = streamEl();
+    stubScroll(el, 500, 100);
+    el.scrollTop = 0;
+    fireEvent.scroll(el);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load older messages' }));
+
+    // Hiding the milestone drops the first RENDERED item, with no page merged.
+    fireEvent.click(screen.getByRole('button', { name: 'Comms only' }));
+    setNum(el, 'scrollHeight', 400);
+    rerender(
+      <MemoryRouter>
+        <Timeline
+          status="ready"
+          items={[milestone, MID]}
+          source="server"
+          canSend={false}
+          hasOlder
+          loadingOlder
+          olderPagesLoaded={0}
+          onLoadOlder={vi.fn()}
+        />
+      </MemoryRouter>,
+    );
+    expect(el.scrollTop).toBe(0); // untouched: no prepend happened
   });
 });
 ```
@@ -1683,30 +1858,37 @@ In `dashboard/src/routes/contact/Timeline.tsx`, add to `TimelineProps` (after `r
   /** Fetch one older page. The control records the scroll anchor before calling
    *  this, so the prepend does not move the reader. */
   onLoadOlder?: () => void | Promise<void>;
-  /** An older page is in flight - the control is disabled and relabeled. */
+  /** An older page is in flight - the control is disabled and relabeled. Also
+   *  what DISARMS a stale prepend anchor, so a caller that passes `onLoadOlder`
+   *  must pass this too. */
   loadingOlder?: boolean;
+  /** The hook's count of older pages MERGED so far. The only reliable signal
+   *  that a prepend landed: an append grows `items` without one, and the
+   *  "Comms only" toggle changes the first RENDERED item without one. */
+  olderPagesLoaded?: number;
 ```
 
-Destructure them in the component body beside the other props.
+All four paging props are passed together or not at all. Destructure them in the
+component body beside the other props.
 
 - [ ] **Step 4: Add the anchor ref and click handler**
 
 Beside the existing scroll refs (around :1100):
 
 ```ts
-  // [R1] Armed immediately BEFORE an older page is requested. `firstItemId` is
-  // what makes this a PREPEND anchor rather than a "next growth" anchor: only a
-  // pass where the first rendered item CHANGED can consume it. An SSE append
-  // arriving mid-flight leaves the first item alone, so it cannot steal the
-  // anchor (and its own "new below" pill still fires normally).
-  const prependAnchorRef = useRef<{ height: number; firstItemId: string | undefined } | null>(null);
+  // [R1] Armed immediately BEFORE an older page is requested, and consumed only
+  // when the HOOK reports a merged older page (olderPagesLoaded changed). The
+  // signal has to come from the hook: an SSE append grows the list without a
+  // prepend, and the "Comms only" toggle changes the first RENDERED item without
+  // one, so neither the item count nor the first item id can stand in for it.
+  const prependAnchorRef = useRef<number | null>(null);
+  const seenOlderPagesRef = useRef(olderPagesLoaded ?? 0);
 
   const handleLoadOlder = (): void => {
     const el = streamRef.current;
-    prependAnchorRef.current = {
-      height: el ? el.scrollHeight : 0,
-      firstItemId: clusters[0]?.items[0]?.id,
-    };
+    // With no scroll container there is nothing to anchor TO. Arming with 0
+    // would later scroll by the entire content height.
+    prependAnchorRef.current = el ? el.scrollHeight : null;
     void onLoadOlder?.();
   };
 ```
@@ -1720,7 +1902,9 @@ Rewrite the `useLayoutEffect` at :1132 as:
     const el = streamRef.current;
     if (!el) return;
     const count = clusters.reduce((n, c) => n + c.items.length, 0);
-    const firstItemId = clusters[0]?.items[0]?.id;
+    const merged = olderPagesLoaded ?? 0;
+    const prepended = merged !== seenOlderPagesRef.current;
+    seenOlderPagesRef.current = merged;
     if (prevKeyRef.current !== resetScrollKey) {
       // Switched conversations -> open on the newest item, no carried-over pill.
       prevKeyRef.current = resetScrollKey;
@@ -1732,21 +1916,21 @@ Rewrite the `useLayoutEffect` at :1132 as:
       return;
     }
     const anchor = prependAnchorRef.current;
-    if (anchor !== null && firstItemId !== anchor.firstItemId) {
+    if (anchor !== null && prepended) {
       // The prepend landed: restore the offset so the bubble the operator was
       // reading does not move, and never treat it as "new below".
       prependAnchorRef.current = null;
       prevCountRef.current = count;
-      el.scrollTop += el.scrollHeight - anchor.height;
+      el.scrollTop += el.scrollHeight - anchor;
       return;
     }
     const grew = count > prevCountRef.current;
     prevCountRef.current = count;
     if (anchor !== null) {
-      // An append (or a filtered no-op) landed while the older page is still in
-      // flight. Re-baseline the anchor to the height AFTER it, so when the real
-      // prepend arrives the delta counts only the prepended content.
-      prependAnchorRef.current = { ...anchor, height: el.scrollHeight };
+      // Something ELSE changed the height while the older page is in flight - an
+      // append, a filter toggle, a retry collapse. Re-baseline so the eventual
+      // restore delta counts only the prepended content.
+      prependAnchorRef.current = el.scrollHeight;
     }
     if (atBottomRef.current) {
       el.scrollTop = el.scrollHeight;
@@ -1754,8 +1938,12 @@ Rewrite the `useLayoutEffect` at :1132 as:
     } else if (grew) {
       setHasNewBelow(true);
     }
-  }, [clusters, resetScrollKey]);
+  }, [clusters, resetScrollKey, olderPagesLoaded]);
 ```
+
+`olderPagesLoaded` MUST be in the dep array: the merge and the counter bump land
+in the same commit, but a render where only the counter changed must still be
+able to consume the anchor.
 
 Then add a settle effect below it, so an older page that returns NOTHING (or whose
 entries are all filtered out by "Comms only" / retry-collapse, which means the
@@ -1883,6 +2071,7 @@ In `ConversationDetail.tsx`, add to the `<Timeline>` element (the hook is alread
 ```tsx
             hasOlder={thread.hasOlder}
             loadingOlder={thread.loadingOlder}
+            olderPagesLoaded={thread.olderPagesLoaded}
             onLoadOlder={thread.loadOlder}
 ```
 
@@ -1893,6 +2082,7 @@ In `GroupTextView.tsx`, on its `<Timeline>` element, using that file's hook bind
 ```tsx
             hasOlder={thread.hasOlder}
             loadingOlder={thread.loadingOlder}
+            olderPagesLoaded={thread.olderPagesLoaded}
             onLoadOlder={thread.loadOlder}
 ```
 
@@ -1905,6 +2095,7 @@ from, using the prop name that file actually binds - do not rename it:
 ```tsx
         hasOlder={timeline.hasOlder}
         loadingOlder={timeline.loadingOlder}
+        olderPagesLoaded={timeline.olderPagesLoaded}
         onLoadOlder={timeline.loadOlder}
 ```
 
@@ -2006,10 +2197,20 @@ async function devLogin(page: Page): Promise<void> {
 const TOTAL = 55; // > the 50-entry page, so exactly one older page exists
 
 test('staff can reach relay-group messages older than the newest page', async ({ page }) => {
+  // The default per-test budget is 30s with retries: 0, and createGroupOpen's
+  // FRESH path alone polls up to 30s for a warming pool number and then up to
+  // 60s for the group to open - before this spec sends 55 inbounds.
+  test.setTimeout(180_000);
   await devLogin(page);
 
+  // TWO members: every existing createGroupOpen caller passes two or three, and
+  // the fixture describes the fresh path as "a fresh pair".
   const member = uniquePhone();
-  const group = await createGroupOpen(page, [{ phone: member, name: 'History Probe' }]);
+  const landlord = uniquePhone();
+  const group = await createGroupOpen(page, [
+    { phone: member, name: 'History Probe' },
+    { phone: landlord, name: 'History Landlord' },
+  ]);
 
   // Build the long thread. Sequential: each inbound needs a unique SID and the
   // ORDER is what the assertions depend on.
